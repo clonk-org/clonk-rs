@@ -73,6 +73,9 @@ pub struct HostConfig {
     pub resource_directory: Option<PathBuf>,
     /// Local standalones and logical non-loadables in C++ publication order.
     pub resource_files: Vec<HostedResourceFile>,
+    /// Original local player source paths and the cores published for them.
+    /// C++ searches these before allocating another NRT_Player.
+    pub player_resource_sources: Vec<(PathBuf, lc_engine::NetworkResourceCore)>,
     /// C++ resource search roots retained for later authoritative PlayerInfo
     /// resources announced after JoinData.
     pub local_resource_roots: Vec<PathBuf>,
@@ -124,6 +127,7 @@ impl Default for HostConfig {
             resource_registrations: Vec::new(),
             resource_directory: None,
             resource_files: Vec::new(),
+            player_resource_sources: Vec::new(),
             local_resource_roots: Vec::new(),
         }
     }
@@ -352,6 +356,10 @@ pub enum HostCommand {
         control_tick: Tick,
     },
     PublishJoinSnapshot(Box<HostJoinSnapshot>),
+    PublishPlayerResource {
+        request: crate::ClientPlayerResourceRequest,
+        completion: oneshot::Sender<Result<lc_engine::NetworkResourceCore, String>>,
+    },
     SetJoinAllowed {
         allowed: bool,
         completion: oneshot::Sender<()>,
@@ -432,6 +440,24 @@ impl HostHandle {
             .send(HostCommand::PublishJoinSnapshot(Box::new(snapshot)))
             .await
             .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn publish_player_resource(
+        &self,
+        request: crate::ClientPlayerResourceRequest,
+    ) -> Result<lc_engine::NetworkResourceCore, HostError> {
+        let (completion, published) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::PublishPlayerResource {
+                request,
+                completion,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        published
+            .await
+            .map_err(|_| HostError::HostLoopGone)?
+            .map_err(HostError::Resource)
     }
 
     pub async fn set_join_allowed(&self, allowed: bool) -> Result<(), HostError> {
@@ -1430,11 +1456,87 @@ struct HostState {
     join_snapshot: Option<HostJoinSnapshot>,
     resource_catalog: crate::ResourceCatalog,
     resource_backend: Option<crate::ResourceTransferBackend>,
+    published_player_sources: BTreeMap<PathBuf, lc_engine::NetworkResourceCore>,
     resource_resolver: crate::client_bootstrap::ClientBootstrapResolver,
     resource_epoch: Instant,
     next_connection_id: u32,
     pending_admissions: BTreeMap<u32, i32>,
     event_tx: mpsc::Sender<HostEvent>,
+}
+
+fn publish_host_player_resource(
+    request: crate::ClientPlayerResourceRequest,
+    state: &mut HostState,
+) -> Result<lc_engine::NetworkResourceCore, String> {
+    // C4PlayerInfo::LoadFromLocalFile asks getRefRes(source, local-only)
+    // before AddByFile, so selecting the same local file reuses its core.
+    if let Some(core) = state.published_player_sources.get(&request.source_path) {
+        return Ok(core.clone());
+    }
+    let source_path = request.source_path.clone();
+    let network_directory = state
+        .config
+        .resource_directory
+        .clone()
+        .ok_or_else(|| "host has no network resource directory".to_string())?;
+    if state.resource_backend.is_none() {
+        return Err("host has no filesystem resource backend".to_string());
+    }
+
+    // The host session retains the protocol catalog alongside the filesystem
+    // backend's catalog. Allocate from their union: HostConfig permits a file
+    // to be present in resource_files even when it is absent from the explicit
+    // resource_registrations list.
+    let resource_id = loop {
+        let candidate = state.resource_catalog.allocate_resource_id();
+        let occupied_by_backend = state
+            .resource_backend
+            .as_ref()
+            .is_some_and(|backend| backend.catalog().contains_resource(candidate));
+        if !occupied_by_backend {
+            break candidate;
+        }
+    };
+    let publication = crate::publish_client_player_resource(
+        crate::ClientPlayerResourcePublicationSpec {
+            resource_id,
+            source_path: request.source_path,
+            wire_name: request.wire_name,
+            network_directory,
+            group_maker: request.group_maker,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let crate::ClientPlayerResourcePublication {
+        core,
+        registration,
+        resource_file,
+    } = publication;
+    let backend = state
+        .resource_backend
+        .as_mut()
+        .ok_or_else(|| "host filesystem resource backend disappeared".to_string())?;
+    if let Err(error) = backend.register_hosted_resource(
+        resource_file.core,
+        &resource_file.path,
+        resource_file.ownership,
+        resource_file.binary_compatible,
+    ) {
+        if resource_file.ownership == crate::ResourceFileOwnership::Temporary {
+            let _ = std::fs::remove_file(resource_file.path);
+        }
+        return Err(error.to_string());
+    }
+    if !state.resource_catalog.register(registration) {
+        backend.remove_resource(resource_id);
+        return Err(format!(
+            "resource ID {resource_id} became occupied during host player publication"
+        ));
+    }
+    state
+        .published_player_sources
+        .insert(source_path, core.clone());
+    Ok(core)
 }
 
 async fn run_host(
@@ -1495,6 +1597,11 @@ async fn run_host(
             .clone()
             .unwrap_or_else(|| PathBuf::from("Network")),
     );
+    let published_player_sources = config
+        .player_resource_sources
+        .iter()
+        .cloned()
+        .collect();
     let mut state = HostState {
         coordinator,
         backlog: ControlBacklog::new(backlog_limit),
@@ -1509,6 +1616,7 @@ async fn run_host(
         join_snapshot: config.initial_join_snapshot.clone(),
         resource_catalog,
         resource_backend,
+        published_player_sources,
         resource_resolver,
         resource_epoch: Instant::now(),
         next_connection_id: 0,
@@ -1594,6 +1702,13 @@ async fn run_host(
                     HostCommand::PublishJoinSnapshot(snapshot) => {
                         state.join_snapshot = Some(*snapshot);
                         publish_pending_join_data(&mut state).await;
+                    }
+                    HostCommand::PublishPlayerResource {
+                        request,
+                        completion,
+                    } => {
+                        let result = publish_host_player_resource(request, &mut state);
+                        let _ = completion.send(result);
                     }
                     HostCommand::SetJoinAllowed {
                         allowed,
@@ -4218,6 +4333,160 @@ mod tests {
         }
 
         handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_handle_reuses_initial_and_serves_runtime_player_resources() {
+        // LoadFromLocalFile searches the entire local resource list by source
+        // path before AddByFile, including players published during InitHost.
+        // A miss registers the new NRT_Player so an already-connected peer can
+        // discover its complete chunks and ask for their bytes (pristine
+        // 9ffa0a5d src/C4PlayerInfo.cpp:91-104; src/C4Network2Res.cpp:831-865,
+        // 1168-1205,1431-1471,1557-1615).
+        let directories = SessionResourceDirectories::new();
+        let initial_player = directories.root.join("HostInitial.c4p");
+        let mut initial_group = MutableGroup::new("HostInitial.c4p");
+        initial_group
+            .add_file_with_metadata("Player.txt", b"host initial player".to_vec(), 1, false)
+            .unwrap();
+        fs::write(&initial_player, initial_group.pack().unwrap()).unwrap();
+        let initial_wire =
+            lc_engine::LegacyCString::from_bytes(b"HostInitial.c4p".to_vec()).unwrap();
+        let maker = lc_engine::LegacyCString::from_bytes(b"Host".to_vec()).unwrap();
+        let initial_request = crate::ClientPlayerResourceRequest {
+            source_path: initial_player.clone(),
+            wire_name: initial_wire.clone(),
+            group_maker: maker.clone(),
+        };
+        let initial_publication = crate::publish_client_player_resource(
+            crate::ClientPlayerResourcePublicationSpec {
+                resource_id: 0,
+                source_path: initial_player.clone(),
+                wire_name: initial_wire,
+                network_directory: directories.host.clone(),
+                group_maker: maker.clone(),
+            },
+        )
+        .unwrap();
+        let initial_core = initial_publication.core.clone();
+
+        let player = directories.root.join("HostRuntime.c4p");
+        let mut group = MutableGroup::new("HostRuntime.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"host runtime player".to_vec(), 1, false)
+            .unwrap();
+        let original = group.pack().unwrap();
+        fs::write(&player, &original).unwrap();
+        let publication = crate::ClientPlayerResourceRequest {
+            source_path: player.clone(),
+            wire_name: lc_engine::LegacyCString::from_bytes(b"HostRuntime.c4p".to_vec())
+                .unwrap(),
+            group_maker: maker,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(
+            listener,
+            HostConfig {
+                resource_registrations: vec![initial_publication.registration],
+                resource_directory: Some(directories.host.clone()),
+                resource_files: vec![initial_publication.resource_file],
+                player_resource_sources: vec![(initial_player, initial_core.clone())],
+                ..HostConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut peer = crate::ControlTransport::new(stream);
+        let peer_name = lc_engine::LegacyCString::from_bytes(b"Peer".to_vec()).unwrap();
+        run_client_connection_handshake(
+            &mut peer,
+            crate::ConnectionRequest {
+                core: lc_engine::ClientCoreControlData {
+                    client_id: -1,
+                    name: peer_name.clone(),
+                    nick: peer_name,
+                    ..Default::default()
+                },
+                build: CURRENT_GAME_BUILD,
+                password: lc_engine::LegacyCString::default(),
+                connection_id: 0,
+            },
+        )
+        .await
+        .expect("peer joins before runtime publication");
+
+        assert_eq!(
+            host.publish_player_resource(initial_request).await.unwrap(),
+            initial_core,
+            "an InitHost player source reuses its existing core"
+        );
+        let core = host
+            .publish_player_resource(publication.clone())
+            .await
+            .unwrap();
+        let reused = host.publish_player_resource(publication).await.unwrap();
+        assert_eq!(reused, core, "the same source path reuses one resource");
+        assert_eq!(core.id, 1);
+        assert_eq!(core.resource_type, crate::HostResourceType::Player as u8);
+        assert_eq!(fs::read(&player).unwrap(), original);
+
+        peer.send_message(ControlMessage::Resource(ResourcePacket::Discover(
+            crate::ResourceDiscoverPacket {
+                resource_ids: vec![core.id],
+            },
+        )))
+        .await
+        .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, peer.read_message())
+                .await
+                .expect("host runtime resource discovery stalled")
+                .unwrap()
+            {
+                ControlMessage::Resource(ResourcePacket::Status(status))
+                    if status.resource_id == core.id =>
+                {
+                    assert_eq!(status.chunks.ranges[0].start, 0);
+                    break;
+                }
+                ControlMessage::Ping(ping) => {
+                    peer.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                }
+                _ => {}
+            }
+        }
+        peer.send_message(ControlMessage::Resource(ResourcePacket::Request(
+            crate::ResourceRequestPacket {
+                resource_id: core.id,
+                chunk: 0,
+            },
+        )))
+        .await
+        .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, peer.read_message())
+                .await
+                .expect("host runtime resource chunk stalled")
+                .unwrap()
+            {
+                ControlMessage::Resource(ResourcePacket::Data(data))
+                    if data.resource_id == core.id =>
+                {
+                    assert_eq!(data.chunk, 0);
+                    assert!(!data.data.is_empty());
+                    break;
+                }
+                ControlMessage::Ping(ping) => {
+                    peer.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                }
+                _ => {}
+            }
+        }
+
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]

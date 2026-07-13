@@ -186,6 +186,10 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
     assert_eq!(host.resource_directory.as_deref(), Some(network.as_path()));
     assert_eq!(host.resource_files.len(), 8);
     assert_eq!(host.initial_join_snapshot.as_ref().unwrap().dynamic.id, 6);
+    assert_eq!(
+        host.player_resource_sources,
+        vec![(player, host.resource_files[7].core.clone())]
+    );
 }
 
 #[test]

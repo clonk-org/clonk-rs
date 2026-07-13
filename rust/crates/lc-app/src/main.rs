@@ -10707,7 +10707,7 @@ impl GameApp {
                 self.close_ingame_menu();
             }
             MenuAction::JoinPlayer(file) => {
-                match self.submit_runtime_client_player(&file) {
+                match self.submit_runtime_network_player(&file) {
                     Ok(()) => {
                         self.status_text = format!("Joining player {file}");
                     }
@@ -11436,10 +11436,12 @@ impl GameApp {
         }
     }
 
-    fn submit_runtime_client_player(&self, file: &str) -> Result<(), String> {
-        if !matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))) {
-            return Err("runtime joining is currently available only to network clients".to_string());
-        }
+    fn submit_runtime_network_player(&mut self, file: &str) -> Result<(), String> {
+        let host = match self.network_mode.as_ref() {
+            Some(NetworkMode::Host(_)) => true,
+            Some(NetworkMode::Client(_)) => false,
+            None => return Err("runtime joining requires a network session".to_string()),
+        };
         let network = self
             .network
             .as_ref()
@@ -11464,20 +11466,47 @@ impl GameApp {
         );
 
         // LoadFromLocalFile publishes/reuses NRT_Player before JoinLocalPlayer
-        // sends its CIF_AddPlayers request (src/C4PlayerInfo.cpp:70-104;
+        // handles its CIF_AddPlayers request. Hosts process that request
+        // directly; clients send it to the host (src/C4PlayerInfo.cpp:70-104;
         // src/C4Network2Players.cpp:78-137).
-        let resource = network
-            .publish_client_player_resource(lc_network::ClientPlayerResourceRequest {
-                source_path,
-                wire_name,
-                group_maker,
-            })
-            .map_err(|error| error.to_string())?;
+        let publication = lc_network::ClientPlayerResourceRequest {
+            source_path: source_path.clone(),
+            wire_name,
+            group_maker,
+        };
+        let resource = if host {
+            network.publish_host_player_resource(publication)
+        } else {
+            network.publish_client_player_resource(publication)
+        }
+        .map_err(|error| error.to_string())?;
         let request = selected
             .runtime_add_player_info_update(client_id, resource)
             .map_err(|error| error.to_string())?;
+        if !host {
+            return network
+                .submit_player_info_update(request)
+                .map_err(|error| error.to_string());
+        }
+
+        // A locally published resource keeps its original file for the host's
+        // JoinPlayer while the backend serves the optimized standalone
+        // (src/C4Network2Res.cpp:409-424,1168-1189;
+        // src/C4Network2Players.cpp:353-382).
+        let resource_id = request
+            .players
+            .first()
+            .and_then(|player| player.resource.as_ref())
+            .map(|resource| resource.id)
+            .ok_or_else(|| "runtime player request has no resource".to_string())?;
+        self.admission_resources
+            .mark_complete(resource_id, source_path);
+        let info = self
+            .control_player_infos
+            .admit_request(request, self.network_max_players)
+            .ok_or_else(|| "host rejected the runtime player request".to_string())?;
         network
-            .submit_player_info_update(request)
+            .broadcast_player_info(info)
             .map_err(|error| error.to_string())
     }
 
@@ -32206,6 +32235,101 @@ mod tests {
         assert_eq!(player.original_color, 0x65_43_21);
         assert_eq!(player.resource, Some(expected_resource));
         assert!(acknowledgements.is_empty());
+    }
+
+    #[test]
+    fn active_network_host_runtime_join_publishes_admits_and_queues_join() {
+        // JoinLocalPlayer(file, true) first lets LoadFromLocalFile publish an
+        // NRT_Player. A host handles CIF_AddPlayers directly, assigns the next
+        // player ID, broadcasts authoritative PlayerInfo with CDT_Direct, and
+        // the running-host handler then queues JoinPlayer with the resource
+        // file (pristine 9ffa0a5d src/C4PlayerInfo.cpp:70-104;
+        // src/C4Network2Players.cpp:78-137,160-239,245-270,353-388).
+        let directory = tempdir().expect("create runtime player directory");
+        let player_path = directory.path().join("HostRuntime.c4p");
+        let mut player_group = lc_resources::MutableGroup::new("HostRuntime.c4p");
+        player_group
+            .add_file_with_metadata(
+                "Player.txt",
+                b"[Player]\nName=Host Runtime\n[Preferences]\nColorDw=1193046\n".to_vec(),
+                1,
+                false,
+            )
+            .expect("add runtime player core");
+        fs::write(
+            &player_path,
+            player_group.pack().expect("pack runtime player"),
+        )
+        .expect("write runtime player");
+
+        let mut app = new_running_sandbox_app();
+        app.player_name = "Exact host maker".to_string();
+        app.control_clients.register(0, true, false);
+        app.control_player_infos.replace_snapshot(40, []);
+        let tick = app.local_control_submission_tick();
+        let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+
+        let wire_name = lc_engine::LegacyCString::from_bytes(
+            player_path.as_os_str().as_encoded_bytes().to_vec(),
+        )
+        .expect("fixture player path is NUL-free");
+        let resource = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 17,
+            loadable: true,
+            filename: wire_name.clone(),
+            ..Default::default()
+        };
+        let expected_resource = resource.clone();
+        let (direct_ready, direct_wait) = std::sync::mpsc::channel();
+        let command_observer = thread::spawn(move || {
+            commands.complete_runtime_host_join(resource, event_tx, direct_ready)
+        });
+
+        app.apply_ingame_menu_action(MenuAction::JoinPlayer(
+            player_path.to_string_lossy().into_owned(),
+        ))
+        .expect("runtime host player menu action");
+        direct_wait
+            .recv_timeout(Duration::from_secs(1))
+            .expect("authoritative PlayerInfo broadcast");
+        app.process_network_events()
+            .expect("execute authoritative PlayerInfo");
+        drop(app.network.take());
+
+        let (order, publications, player_infos, joins) =
+            command_observer.join().expect("command observer");
+        assert_eq!(order, vec!["publish", "player-info", "join-player"]);
+        assert_eq!(publications.len(), 1);
+        assert_eq!(publications[0].source_path, player_path);
+        assert_eq!(publications[0].wire_name, wire_name.clone());
+        assert_eq!(publications[0].group_maker.as_bytes(), b"Exact host maker");
+        let [info] = player_infos.as_slice() else {
+            panic!("expected one authoritative PlayerInfo");
+        };
+        assert_eq!((info.client_id, info.by_client), (0, 0));
+        assert_eq!(info.flags, lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS);
+        let [player] = info.players.as_slice() else {
+            panic!("expected one admitted player");
+        };
+        assert_eq!(player.id, 41);
+        assert_eq!(player.name.as_bytes(), b"Host Runtime");
+        assert_eq!(player.resource.as_ref(), Some(&expected_resource));
+        assert_eq!(joins.len(), 1);
+        assert_eq!(joins[0].0, tick);
+        assert_eq!(joins[0].1.at_client, 0);
+        assert_eq!(joins[0].1.info_id, 41);
+        assert_eq!(joins[0].1.filename.as_bytes(), player_path.as_os_str().as_encoded_bytes());
+        assert_eq!(
+            joins[0].1.source,
+            lc_engine::JoinPlayerSource::Resource(expected_resource)
+        );
     }
 
     #[test]

@@ -264,6 +264,56 @@ pub(crate) struct TestNetworkCommands {
 
 #[cfg(test)]
 impl TestNetworkCommands {
+    pub(crate) fn complete_runtime_host_join(
+        mut self,
+        published_core: lc_engine::NetworkResourceCore,
+        event_tx: Sender<NetworkEvent>,
+        direct_ready: Sender<()>,
+    ) -> (
+        Vec<&'static str>,
+        Vec<ClientPlayerResourceRequest>,
+        Vec<PlayerInfoControlData>,
+        Vec<(Tick, JoinPlayerControlData)>,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut order = Vec::new();
+        let mut publications = Vec::new();
+        let mut player_infos = Vec::new();
+        let mut joins = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match self.command_rx.try_recv() {
+                Ok(NetworkCommand::PublishPlayerResource {
+                    request,
+                    completion,
+                }) => {
+                    order.push("publish");
+                    publications.push(request);
+                    let _ = completion.send(Ok(published_core.clone()));
+                }
+                Ok(NetworkCommand::BroadcastPlayerInfo(info)) => {
+                    order.push("player-info");
+                    player_infos.push(info.clone());
+                    let _ = event_tx.send(NetworkEvent::DirectControl(
+                        NetworkControl::PlayerInfo(info),
+                    ));
+                    let _ = direct_ready.send(());
+                }
+                Ok(NetworkCommand::SubmitJoinPlayer { tick, join }) => {
+                    order.push("join-player");
+                    joins.push((tick, join));
+                    break;
+                }
+                Ok(NetworkCommand::Shutdown) => break,
+                Ok(command) => panic!("unexpected runtime-host command: {command:?}"),
+                Err(tokio_mpsc::error::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(tokio_mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        (order, publications, player_infos, joins)
+    }
+
     pub(crate) fn complete_initial_client_join(
         mut self,
         published_cores: Vec<lc_engine::NetworkResourceCore>,
@@ -734,6 +784,28 @@ impl NetworkManager {
             .map_err(|message| anyhow!(message))
     }
 
+    pub fn publish_host_player_resource(
+        &self,
+        request: ClientPlayerResourceRequest,
+    ) -> Result<lc_engine::NetworkResourceCore> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!(
+                "only a network host may publish a host player resource"
+            ));
+        }
+        let (completion, published) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::PublishPlayerResource {
+                request,
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting player resources"))?;
+        published
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before publishing the player resource"))?
+            .map_err(|message| anyhow!(message))
+    }
+
     pub fn remove_client_resource(&self, resource_id: i32) -> Result<()> {
         if self.role != NetworkRole::Client {
             return Err(anyhow!("only a network client may remove a network resource"));
@@ -1145,10 +1217,15 @@ async fn run_host_worker(
             }
             Some(command) = command_rx.recv() => {
                 match command {
-                    NetworkCommand::PublishPlayerResource { completion, .. } => {
-                        let _ = completion.send(Err(
-                            "host attempted to publish a client-owned player resource".to_string(),
-                        ));
+                    NetworkCommand::PublishPlayerResource {
+                        request,
+                        completion,
+                    } => {
+                        let result = host
+                            .publish_player_resource(request)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
                     }
                     NetworkCommand::RemoveResource { completion, .. } => {
                         let _ = completion.send(Err(
