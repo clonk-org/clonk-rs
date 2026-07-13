@@ -1145,6 +1145,14 @@ impl Scenario {
         &self,
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
+        self.apply_before_players_with_final_synchronize(engine, true)
+    }
+
+    fn apply_before_players_with_final_synchronize(
+        &self,
+        engine: &mut Engine,
+        final_synchronize: bool,
+    ) -> Result<Vec<ObjectId>, ScenarioError> {
         engine.clear_scenario_script();
         // C4GraphicsSystem::Default initializes all nine controls before a
         // fresh scenario-apply boundary, after which scenario Initialize may
@@ -1558,7 +1566,9 @@ impl Scenario {
         // position to itofix(x,y,r) and re-fix the synced RNG. A no-op
         // for synthetic scenarios (created spawns already satisfy both).
         engine.inherit_include_clonk_names();
-        engine.game_start_synchronize();
+        if final_synchronize {
+            engine.game_start_synchronize();
+        }
         Ok(created)
     }
 
