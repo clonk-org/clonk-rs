@@ -39,7 +39,7 @@ Status meanings:
 | Main six-button screen | `C4StartupMainDlg` | **Parity/strong** | Keep pixel/input snapshots current. |
 | Dialog switch/fade/back stack | `C4Startup::SwitchDialog`, `C4StartupDlg::OnClosed` | **Partial** | Match fade timing, previous-dialog ownership and every Escape/back transition; Rust currently switches a flat `StartupView`. |
 | Common startup cursor/focus/hotkeys/tooltips | `C4GUI::Screen`, `Dialog`, `Control` | **Partial** | Centralize the classic cursor, 500 ms tooltip delay, Tab/Shift-Tab traversal and Alt hotkeys instead of per-screen approximations. |
-| Participants Add/Remove context and player submenu | `C4StartupMainDlg::OnPlayerSelContext*` | **Missing** | Context popup, nested player items, activation changes. |
+| Participants Add/Remove context and player submenu | `C4StartupMainDlg::OnPlayerSelContext*` | **Parity/strong** | Exact autosized markup label target and tooltip, recursive lazy Add/Remove tree (including empty 40x7 children), raw filesystem/config ordering, raw Remove indices, player icons/tooltips, activation/validation/deduplication, focus suppression and fail-fast resources are covered. |
 | First-run new-player properties modal | `C4StartupMainDlg::OnShown` | **Missing** | Depends on player-properties dialog. |
 | Automatic/manual/incoming update flow | `C4StartupMainDlg::OnShown`, `C4UpdateDlg` | **Missing** | See update subtree. |
 | F6 editor launch from startup | `C4StartupMainDlg::SwitchToEditor` | **Missing** | Bind and validate the legacy editor launch. |
@@ -236,9 +236,9 @@ autoscroll and the other call sites remain.
   geometry/assets, recursive submenus, deepest-first pointer routing,
   keyboard/hotkeys, touch and low/high gamepad input, flip placement,
   selection/tooltips/sounds, focus suppression, outside-down pass-through and
-  fail-fast resources are implemented; the startup player-row
-  Properties/Delete popup is the first caller. Remaining consumers include
-  startup Participants Add/Remove, edit actions, combo boxes, crew rows, lobby
+  fail-fast resources are implemented; startup player-row Properties/Delete
+  and the recursively lazy startup Participants Add/Remove tree are callers.
+  Remaining consumers include edit actions, combo boxes, crew rows, lobby
   right tabs, and runtime player/client takeover trees);
 - combo-box dropdowns (**Missing**: `C4GUI::ComboBox::DoDropdown` is a context
   menu consumer and must use the same chassis);
