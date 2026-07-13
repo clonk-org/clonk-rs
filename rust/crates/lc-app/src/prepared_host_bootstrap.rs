@@ -292,7 +292,7 @@ impl PreparedHostBootstrap {
             game: "LegacyClonk".to_string(),
             version: CURRENT_GAME_VERSION,
             build: CURRENT_GAME_BUILD,
-            addresses: Vec::new(),
+            addresses: addresses.to_vec(),
             source_address: std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
                 std::net::Ipv6Addr::UNSPECIFIED,
                 0,

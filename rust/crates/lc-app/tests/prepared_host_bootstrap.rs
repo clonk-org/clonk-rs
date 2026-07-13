@@ -90,6 +90,10 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     assert!(reference.summary().join_allowed);
     assert!(!reference.summary().password_needed);
     assert_eq!(reference.summary().max_players, 1);
+    // InitLocal copies every local net-client address into the reference's
+    // canonical Addrs container (pristine 9ffa0a5d
+    // src/C4Network2Reference.cpp:81-85).
+    assert_eq!(reference.summary().addresses, vec![tcp_address]);
     assert_eq!(
         reference.summary().tcp_addresses,
         vec![tcp_address.endpoint]
