@@ -6265,6 +6265,9 @@ enum ClassicParityBoundary {
         view: StartupView,
         status: String,
     },
+    StartupGameOver {
+        view: StartupView,
+    },
     StartupScreen {
         view: StartupView,
     },
@@ -6357,6 +6360,10 @@ impl fmt::Display for ClassicParityBoundary {
             Self::StartupStatusOverlay { view, status } => write!(
                 f,
                 "classic startup status presentation is unavailable in {view:?}: {status}; refusing generic Rust status overlay"
+            ),
+            Self::StartupGameOver { view } => write!(
+                f,
+                "classic game-over evaluation dialog is running-mode only, but stale state reached startup view {view:?}; refusing a startup overlay or silent omission"
             ),
             Self::StartupScreen { view } => write!(
                 f,
@@ -11330,7 +11337,6 @@ impl GameApp {
     fn can_defer_native_main_menu_text(&self, scale: f32) -> bool {
         self.mode == AppMode::Menu
             && self.startup_view == StartupView::MainMenu
-            && self.game_over_dialog.is_none()
             && self.message_dialogs.is_empty()
             && self.context_menu.is_none()
             && !self.main_menu_state.participants_tooltip_pending()
@@ -21806,8 +21812,7 @@ impl GameApp {
                     && self.game_option_input_dialog.is_none()
                     && self.definition_selector.is_none()
                     && self.message_dialogs.is_empty()
-                    && !participants_tooltip_pending
-                    && self.game_over_dialog.is_none();
+                    && !participants_tooltip_pending;
                 if cache_eligible {
                     if let Some(cache) = self.menu_frame_cache.as_ref() {
                         if cache.view == self.startup_view
@@ -21826,7 +21831,6 @@ impl GameApp {
                 let definition_selector_open = self.definition_selector.is_some();
                 let game_option_input_open = self.game_option_input_dialog.is_some();
                 let network_lobby = self.network_lobby.as_mut();
-                let game_over_dialog = self.game_over_dialog.as_ref();
                 render_startup_frame(
                     &mut self.graphics,
                     self.assets.as_ref(),
@@ -21847,7 +21851,6 @@ impl GameApp {
                     self.startup_about_dialog.as_ref(),
                     self.startup_view,
                     network_lobby,
-                    game_over_dialog,
                     self.startup_view_flags,
                     &mut self.menu_backdrop_cache,
                     defer_native_main_text,
@@ -21944,15 +21947,12 @@ impl GameApp {
     }
 
     fn preflight_startup_presentation(&self) -> Result<()> {
-        // A menu-mode game-over dialog owns its own stronger refusal first;
-        // preserving that overlay boundary avoids replacing a precise missing
-        // game-over resource report with the startup bundle report. If those
-        // resources are complete, the still-visible startup base must also
-        // pass the eager C4Startup bootstrap below.
         if self.game_over_dialog.is_some() {
-            self.assets
-                .require_classic_game_over_resources()
-                .map_err(report_classic_parity_boundary)?;
+            return Err(anyhow::Error::new(report_classic_parity_boundary(
+                ClassicParityBoundary::StartupGameOver {
+                    view: self.startup_view,
+                },
+            )));
         }
         self.reject_classic_startup_bootstrap()?;
         self.reject_generic_startup_view()?;
@@ -21968,7 +21968,7 @@ impl GameApp {
             .as_ref()
             .map(|config| (*config).application_scale())
             .filter(|scale| *scale > 1);
-        if self.startup_view == StartupView::MainMenu && self.game_over_dialog.is_none() {
+        if self.startup_view == StartupView::MainMenu {
             if let Some(scale) = integer_scale {
                 match self.native_startup_fonts.as_deref() {
                     None => issues.push(ClassicStartupBootstrapIssue::missing(
@@ -24672,17 +24672,11 @@ fn render_startup_frame(
     about_dialog: Option<&lc_frontend::startup_about_dlg::AboutDlgState>,
     view: StartupView,
     network_lobby: Option<&mut NetworkLobbyState>,
-    game_over: Option<&GameOverState>,
     flags: StartupViewFlags,
     backdrop: &mut StartupBackdropCache,
     defer_native_main_text: bool,
     frame: &mut [u8],
 ) -> Result<()> {
-    if game_over.is_some() {
-        assets
-            .require_classic_game_over_resources()
-            .map_err(report_classic_parity_boundary)?;
-    }
     if view == StartupView::MainMenu {
         assets
             .require_classic_startup_main_resources()
@@ -24962,14 +24956,6 @@ fn render_startup_frame(
                 lobby.render_overlay(surface, assets);
             }
         }
-        if let Some(dialog) = game_over {
-            let font = assets.font_arc();
-            let classic = assets
-                .game_over_classic_resources()
-                .expect("game-over resources were preflighted before rendering");
-            dialog.render(surface, font.as_ref(), Some(classic));
-        }
-
         if view == StartupView::MainMenu && context_menu.is_none() {
             if let Some(pointer) = main_menu.participants_tooltip_pointer() {
                 let tooltip_font = &assets
@@ -53436,6 +53422,15 @@ mod tests {
         );
     }
 
+    fn assert_startup_game_over_boundary(error: &anyhow::Error, view: StartupView) {
+        let expected = ClassicParityBoundary::StartupGameOver { view };
+        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert!(
+            error.to_string().contains("running-mode only"),
+            "boundary must identify the invalid lifecycle state: {error:#}"
+        );
+    }
+
     #[test]
     fn game_over_missing_resources_fail_typed_before_touching_output_frame() {
         let mut app = new_game_over_keyboard_app();
@@ -53525,7 +53520,102 @@ mod tests {
     }
 
     #[test]
-    fn stale_menu_mode_game_over_bypasses_cache_and_preflights_before_pixels() {
+    fn stale_menu_game_over_fails_typed_on_all_startup_roots_before_lower_boundaries() {
+        let mut app = new_classic_menu_app(640, 480);
+
+        // Retain three recursive child states so their own typed boundaries
+        // are also known to be lower priority than the invalid lifecycle.
+        for subscreen in [
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
+            ),
+            ClassicStartupSubscreen::AboutLicenses,
+            ClassicStartupSubscreen::NetworkGameChat,
+        ] {
+            enter_unported_startup_subscreen(&mut app, subscreen);
+            app.show_main_menu();
+        }
+        app.open_player_selection_dialog();
+        app.show_main_menu();
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .expect("retained Options model")
+                .active_sheet(),
+            lc_frontend::startup_options_dlg::OptionsSheet::Graphics
+        );
+        assert_eq!(
+            app.startup_about_dialog
+                .as_ref()
+                .expect("retained About model")
+                .current_page(),
+            lc_frontend::startup_about_dlg::AboutPage::Licenses
+        );
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("retained Network model")
+                .mode(),
+            lc_frontend::startup_netdlg::NetDlgMode::Chat
+        );
+        assert!(app.startup_player_dialog.is_some());
+        app.handle_game_over().expect("forge stale menu evaluation state");
+        app.assets
+            .require_classic_game_over_resources()
+            .expect("fixture has the complete running evaluation bundle");
+
+        for (index, view) in StartupView::ALL.into_iter().enumerate() {
+            // Exhaustive arms force future startup roots into this lifecycle
+            // invariant instead of silently omitting the evaluation dialog.
+            match view {
+                StartupView::MainMenu => app.startup_view = StartupView::MainMenu,
+                StartupView::ScenarioBrowser => {
+                    app.startup_view = StartupView::ScenarioBrowser;
+                }
+                StartupView::NetworkLobby => {
+                    app.startup_view = StartupView::NetworkLobby;
+                    app.classic_host_lobby = None;
+                }
+                StartupView::NetworkGame => app.startup_view = StartupView::NetworkGame,
+                StartupView::Options => app.startup_view = StartupView::Options,
+                StartupView::About => app.startup_view = StartupView::About,
+                StartupView::PlayerSelection => {
+                    app.startup_view = StartupView::PlayerSelection;
+                }
+            }
+            app.status_text = format!("lower-priority status for {view:?}");
+            let cached = vec![0x20 + index as u8; 640 * 480 * 4];
+            app.menu_frame_cache = Some(MenuFrameCache {
+                view,
+                version: app.menu_render_version,
+                width: 640,
+                height: 480,
+                native_text_deferred: false,
+                frame: cached.clone(),
+            });
+
+            let mut frame = vec![0xc3; 640 * 480 * 4];
+            let error = app
+                .render(&mut frame)
+                .expect_err("stale evaluation must precede startup cache or pixels");
+            assert_startup_game_over_boundary(&error, view);
+            assert!(frame.iter().all(|byte| *byte == 0xc3));
+            assert_eq!(
+                app.menu_frame_cache.as_ref().expect("cache retained").frame,
+                cached
+            );
+
+            let mut native = vec![0x6d; 1280 * 960 * 4];
+            let error = app
+                .render_native_main_menu_text(&mut native, 1280, 960)
+                .expect_err("native pass must enforce the same lifecycle boundary");
+            assert_startup_game_over_boundary(&error, view);
+            assert!(native.iter().all(|byte| *byte == 0x6d));
+        }
+    }
+
+    #[test]
+    fn stale_menu_game_over_lifecycle_boundary_precedes_missing_resources() {
         let mut app = new_classic_menu_app(320, 200);
         let mut cached = vec![0_u8; 320 * 200 * 4];
         app.render(&mut cached).expect("populate startup frame cache");
@@ -53538,22 +53628,20 @@ mod tests {
 
         let error = app
             .render(&mut frame)
-            .expect_err("stale game-over state must not replay or render a fallback");
-
-        assert_game_over_resource_boundary(
-            &error,
-            vec![
-                "CStdFont/Endeavour.ttf",
-                "GUICaption.png",
-                "GUIButton.png",
-                "GUIButtonDown.png",
-                "GUIButtonHighlight.png",
-                "GUIIcons.png",
-                "Player.png",
-                "Score.png",
-            ],
-        );
+            .expect_err("invalid lifecycle must win without resource lookup");
+        assert_startup_game_over_boundary(&error, StartupView::MainMenu);
         assert_eq!(frame, sentinel, "startup preflight must precede every pixel");
+        assert_eq!(
+            app.menu_frame_cache.as_ref().expect("cache retained").frame,
+            cached
+        );
+
+        let mut native = vec![0x47; 640 * 400 * 4];
+        let error = app
+            .render_native_main_menu_text(&mut native, 640, 400)
+            .expect_err("native pass must reject stale evaluation before resources");
+        assert_startup_game_over_boundary(&error, StartupView::MainMenu);
+        assert!(native.iter().all(|byte| *byte == 0x47));
     }
 
     fn expect_game_over_key_boundary(
