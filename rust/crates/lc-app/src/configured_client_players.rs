@@ -3,6 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use lc_engine::{player_file::PlayerFile, LegacyCString};
+use lc_network::HostInitialResourceSource;
 use lc_platform::AppPaths;
 use lc_resources::Group;
 use thiserror::Error;
@@ -43,6 +44,16 @@ impl ConfiguredClientPlayers {
 
     pub fn group_maker(&self) -> &LegacyCString {
         &self.group_maker
+    }
+
+    pub fn host_initial_resource_sources(&self) -> Vec<HostInitialResourceSource> {
+        self.players
+            .iter()
+            .map(|player| HostInitialResourceSource {
+                path: player.source_path().to_path_buf(),
+                wire_name: player.resource_wire_name().clone(),
+            })
+            .collect()
     }
 }
 
@@ -626,6 +637,45 @@ mod tests {
                 b"Bravo".as_slice(),
                 b"Alpha".as_slice(),
                 b"Bravo".as_slice()
+            ]
+        );
+    }
+
+    #[test]
+    fn host_resource_sources_keep_cpp_participant_order_and_resource_names() {
+        // C4Game copies Config.General.Participants verbatim before
+        // C4ClientPlayerInfos walks the modules in that order. Each loaded
+        // player publishes AtExeRelativePath(module) as its NRT_Player name;
+        // startup file-browser sorting is not involved (pristine 9ffa0a5d
+        // src/C4Game.cpp:361-364; src/C4PlayerInfo.cpp:70-104,357-395;
+        // src/C4Config.cpp:759-763).
+        let install = tempdir().expect("install root");
+        let bravo = install.path().join("Players/Bravo.c4p");
+        let alpha = install.path().join("Players/Alpha.c4p");
+        write_player(&bravo, b"Bravo");
+        write_player(&alpha, b"Alpha");
+        let config = install.path().join("LegacyClonk.conf");
+        fs::write(
+            &config,
+            b"[General]\nParticipants=\"Players/Bravo.c4p;Players/Alpha.c4p\"\n",
+        )
+        .expect("write config");
+        let loaded = super::load_configured_client_players_from_roots(
+            &config,
+            &[install.path().to_path_buf()],
+        )
+        .expect("load configured players");
+
+        let sources = loaded.host_initial_resource_sources();
+
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| (source.path.as_path(), source.wire_name.as_bytes()))
+                .collect::<Vec<_>>(),
+            vec![
+                (bravo.as_path(), b"Players/Bravo.c4p".as_slice()),
+                (alpha.as_path(), b"Players/Alpha.c4p".as_slice()),
             ]
         );
     }
