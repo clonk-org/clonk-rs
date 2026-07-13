@@ -499,6 +499,33 @@ pub trait LegacyDefinitionResolver {
     ) -> Result<Vec<Group>, ScenarioError>;
 }
 
+struct AuthoritativeNetworkResourceResolver<'a> {
+    definition_modules: &'a [String],
+    definition_groups: &'a [Group],
+    material_groups: &'a [Group],
+}
+
+impl LegacyDefinitionResolver for AuthoritativeNetworkResourceResolver<'_> {
+    fn resolve_definition_groups(
+        &self,
+        _scenario: &Group,
+        identifier: &str,
+    ) -> Result<Vec<Group>, ScenarioError> {
+        if identifier.eq_ignore_ascii_case("Material.c4g") {
+            return Ok(self.material_groups.to_vec());
+        }
+        self.definition_modules
+            .iter()
+            .position(|module| module == identifier)
+            .and_then(|index| self.definition_groups.get(index))
+            .cloned()
+            .map(|group| vec![group])
+            .ok_or_else(|| ScenarioError::LegacyDefinitionNotFound {
+                path: identifier.to_string(),
+            })
+    }
+}
+
 impl Scenario {
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, ScenarioError> {
         let group = Group::open(path)?;
@@ -679,6 +706,42 @@ impl Scenario {
         Self::load_from_group_with_languages_and_seed(&group, resolver, languages, random_seed)
     }
 
+    /// Loads a network client's combined scenario from the exact resolved
+    /// `C4GameRes` groups. Definitions use the synchronized list rather than
+    /// the scenario preset or local folder scan; materials retain C++'s
+    /// scenario-local-first, then synchronized-list order
+    /// (C4GameParameters.cpp:73-79,255-271; C4Game.cpp:80-101,876-952).
+    pub fn load_network_from_path_with_languages_and_seed<S>(
+        path: impl AsRef<Path>,
+        definition_groups: &[Group],
+        material_groups: &[Group],
+        languages: &[S],
+        random_seed: u64,
+    ) -> Result<Self, ScenarioError>
+    where
+        S: AsRef<str>,
+    {
+        let group = Group::open(path)?;
+        let definition_modules = (0..definition_groups.len())
+            .map(|index| format!("__NetworkDefinition{index}.c4d"))
+            .collect::<Vec<_>>();
+        let resolver = AuthoritativeNetworkResourceResolver {
+            definition_modules: &definition_modules,
+            definition_groups,
+            material_groups,
+        };
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
+            &group,
+            &resolver,
+            languages,
+            random_seed,
+            &[],
+            Some(&definition_modules),
+            None,
+            false,
+        )
+    }
+
     pub fn load_from_group_with<R: LegacyDefinitionResolver>(
         group: &Group,
         resolver: &R,
@@ -740,6 +803,33 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
     {
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
+            group,
+            resolver,
+            languages,
+            random_seed,
+            initial_definition_modules,
+            definition_modules,
+            selector_definition_root,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_from_group_with_languages_and_seed_and_definition_modules_inner<R, S>(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        initial_definition_modules: &[String],
+        definition_modules: Option<&[String]>,
+        selector_definition_root: Option<&Path>,
+        discover_folder_definitions: bool,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
         match Self::load_from_group(group) {
             Ok(scenario) => Ok(scenario),
             Err(ScenarioError::ManifestMissing) => Self::load_legacy_from_group(
@@ -750,6 +840,7 @@ impl Scenario {
                 initial_definition_modules,
                 definition_modules,
                 selector_definition_root,
+                discover_folder_definitions,
             ),
             Err(err) => Err(err),
         }
@@ -865,6 +956,7 @@ impl Scenario {
         initial_definition_modules: &[String],
         definition_modules: Option<&[String]>,
         selector_definition_root: Option<&Path>,
+        discover_folder_definitions: bool,
     ) -> Result<Self, ScenarioError>
     where
         R: LegacyDefinitionResolver,
@@ -936,15 +1028,17 @@ impl Scenario {
             }
         }
 
-        for folder_group in folder_local_definition_groups(group)? {
-            definition_resource_paths.push(folder_group.root().to_path_buf());
-            collect_definitions_from_group(
-                &folder_group,
-                true,
-                &skip_ids,
-                languages,
-                &mut load_items,
-            )?;
+        if discover_folder_definitions {
+            for folder_group in folder_local_definition_groups(group)? {
+                definition_resource_paths.push(folder_group.root().to_path_buf());
+                collect_definitions_from_group(
+                    &folder_group,
+                    true,
+                    &skip_ids,
+                    languages,
+                    &mut load_items,
+                )?;
+            }
         }
 
         // InitDefs' scenario pass disables System.c4g discovery because the
@@ -13742,6 +13836,124 @@ public func ActualizePhase(pClonk)
                 .map(|definition| definition.id.as_str())
                 .collect::<Vec<_>>(),
             ["SCND", "FIRS"]
+        );
+    }
+
+    #[test]
+    fn network_game_resources_replace_local_definition_and_material_discovery() {
+        // A client binds every synchronized C4GameRes to its resolved local
+        // file, retrieves the complete list, then loads NRT_Definitions in
+        // list order and scenario-local + NRT_Material groups in list order
+        // (pristine 9ffa0a5d C4GameParameters.cpp:73-79,255-271;
+        // C4Game.cpp:80-101,876-952). Folder definitions were already added
+        // to that list by the host and must not be rediscovered on the client
+        // (C4Game.cpp:209-212).
+        let dir = tempdir().expect("tempdir");
+        let package = dir.path().join("Installed.c4f");
+        let scenario_dir = package.join("Combined7.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Authoritative resources\nNetworkGame=true\n\n\
+             [Definitions]\nDefinition1=MissingInstalled.c4d\n\n\
+             [Landscape]\nMapZoom=10\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[&[0x83]]),
+        )
+        .expect("write landscape");
+
+        let local_definition = package.join("Local.c4d");
+        std::fs::create_dir_all(&local_definition).expect("local definition");
+        std::fs::write(
+            local_definition.join("DefCore.txt"),
+            "[DefCore]\nid=LOCL\nName=Local\nCategory=0\n",
+        )
+        .expect("write local definition");
+        let local_materials = package.join("Material.c4g");
+        std::fs::create_dir_all(&local_materials).expect("local materials");
+        std::fs::write(local_materials.join("TexMap.txt"), "3=Rock-Smooth\n")
+            .expect("write local texmap");
+        std::fs::write(
+            local_materials.join("Rock.c4m"),
+            "[Material]\nName=Rock\nDensity=100\n",
+        )
+        .expect("write local material");
+
+        let network = dir.path().join("Network");
+        let host_definitions = network.join("Objects.c4d");
+        let host_definition = host_definitions.join("Host.c4d");
+        std::fs::create_dir_all(&host_definition).expect("host definition");
+        std::fs::write(
+            host_definition.join("DefCore.txt"),
+            "[DefCore]\nid=HOST\nName=Host\nCategory=0\n",
+        )
+        .expect("write host definition");
+        let folder_definitions = network.join("Tutorial.c4f");
+        let folder_definition = folder_definitions.join("Folder.c4d");
+        std::fs::create_dir_all(&folder_definition).expect("folder definition");
+        std::fs::write(
+            folder_definition.join("DefCore.txt"),
+            "[DefCore]\nid=FOLD\nName=Folder\nCategory=0\n",
+        )
+        .expect("write folder definition");
+
+        let map_materials = network.join("PackageMaterial.c4g");
+        std::fs::create_dir_all(&map_materials).expect("map materials");
+        std::fs::write(
+            map_materials.join("TexMap.txt"),
+            "OverloadMaterials\n3=Water-Liquid\n",
+        )
+        .expect("write authoritative texmap");
+        std::fs::write(
+            map_materials.join("PackStone.c4m"),
+            "[Material]\nName=PackStone\nDensity=100\n",
+        )
+        .expect("write package material");
+        let global_materials = network.join("Material.c4g");
+        std::fs::create_dir_all(&global_materials).expect("global materials");
+        std::fs::write(global_materials.join("TexMap.txt"), "# global\n")
+            .expect("write global texmap");
+        std::fs::write(
+            global_materials.join("Water.c4m"),
+            "[Material]\nName=Water\nDensity=25\n",
+        )
+        .expect("write water material");
+
+        let definition_groups = [
+            Group::open(&host_definitions).expect("open host definitions"),
+            Group::open(&folder_definitions).expect("open folder definitions"),
+        ];
+        let material_groups = [
+            Group::open(&map_materials).expect("open map materials"),
+            Group::open(&global_materials).expect("open global materials"),
+        ];
+        let scenario = Scenario::load_network_from_path_with_languages_and_seed(
+            &scenario_dir,
+            &definition_groups,
+            &material_groups,
+            &["US"],
+            0,
+        )
+        .expect("network scenario loads from authoritative resources");
+
+        assert_eq!(
+            scenario.definition_resource_paths(),
+            [host_definitions, folder_definitions]
+        );
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        assert!(engine.definition_ids().any(|id| id == "HOST"));
+        assert!(engine.definition_ids().any(|id| id == "FOLD"));
+        assert!(!engine.definition_ids().any(|id| id == "LOCL"));
+        assert!(
+            engine
+                .landscape()
+                .expect("landscape loaded")
+                .is_liquid_at(5, 5),
+            "the first authoritative TexMap admits Water from the second resource"
         );
     }
 
