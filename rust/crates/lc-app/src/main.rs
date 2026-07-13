@@ -3864,6 +3864,9 @@ struct GameApp {
     network: Option<NetworkManager>,
     network_mode: Option<NetworkMode>,
     network_lobby: Option<NetworkLobbyState>,
+    /// Host-owned `C4Network2::pLobbyCountdown` analogue. Packet-derived
+    /// `NetworkLobbyState::countdown` is presentation only and never arms GO.
+    host_lobby_countdown: Option<HostLobbyCountdown>,
     startup_network_connection: Option<StartupNetworkConnection>,
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
@@ -4796,6 +4799,26 @@ struct NetworkLobbyState {
 enum LobbyAction {
     ToggleReady,
     StartGame,
+}
+
+const DEFAULT_LOBBY_COUNTDOWN_SECONDS: i32 = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HostLobbyCountdown {
+    remaining: i32,
+}
+
+impl HostLobbyCountdown {
+    fn new() -> Self {
+        Self {
+            remaining: DEFAULT_LOBBY_COUNTDOWN_SECONDS,
+        }
+    }
+
+    fn advance(&mut self) -> i32 {
+        self.remaining = (self.remaining - 1).max(0);
+        self.remaining
+    }
 }
 
 impl NetworkLobbyState {
@@ -8361,6 +8384,7 @@ impl GameApp {
             network,
             network_mode,
             network_lobby,
+            host_lobby_countdown: None,
             startup_network_connection: None,
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
@@ -14793,6 +14817,7 @@ impl GameApp {
                 self.network_control_clock = network_control_clock;
                 self.control_clients = control_clients;
                 self.network_lobby = Some(lobby);
+                self.host_lobby_countdown = None;
                 self.open_network_lobby();
             }
             Err(error) => {
@@ -15584,6 +15609,73 @@ impl GameApp {
         Ok(())
     }
 
+    fn network_game_start_guard_passes(&mut self) -> bool {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            self.status_text = "Only the host can start the game".to_string();
+            return false;
+        }
+        if self.network_mode.as_ref().is_some_and(|mode| match mode {
+            NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            }) => prepared.host_config().initial_join_snapshot.is_none(),
+            NetworkMode::Host(_) | NetworkMode::Client(_) => false,
+        }) {
+            self.status_text =
+                "Unable to start prepared host: initial JoinData is missing".to_string();
+            return false;
+        }
+        let Some(lobby) = self.network_lobby.as_ref() else {
+            return false;
+        };
+        let Some(identifier) = lobby.selected_identifier() else {
+            self.status_text = "Select a scenario before starting".to_string();
+            return false;
+        };
+        if !self.scenario_catalog.contains_key(identifier) {
+            self.status_text = format!("Scenario `{identifier}` is not available in the catalog");
+            return false;
+        }
+        true
+    }
+
+    fn start_network_lobby_countdown(&mut self) -> Result<(), EngineError> {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            self.network_game_start_guard_passes();
+            return Ok(());
+        }
+        if self.host_lobby_countdown.take().is_some() {
+            let packet =
+                lc_network::LobbyCountdownPacket::new(lc_network::LobbyCountdownPacket::ABORT);
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_lobby_countdown(packet))
+            {
+                tracing::error!(%error, "failed to abort host lobby countdown");
+            }
+            if let Some(lobby) = self.network_lobby.as_mut() {
+                lobby.apply_lobby_countdown(packet);
+            }
+            return Ok(());
+        }
+        if !self.network_game_start_guard_passes() {
+            return Ok(());
+        }
+        let Some(network) = self.network.as_ref() else {
+            return self.start_network_game_now();
+        };
+        self.host_lobby_countdown = Some(HostLobbyCountdown::new());
+        let packet = lc_network::LobbyCountdownPacket::new(DEFAULT_LOBBY_COUNTDOWN_SECONDS);
+        if let Err(error) = network.submit_lobby_countdown(packet) {
+            tracing::error!(%error, "failed to submit host lobby countdown");
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.apply_lobby_countdown(packet);
+        }
+        Ok(())
+    }
+
     fn process_lobby_action(&mut self, action: LobbyAction) -> Result<(), EngineError> {
         match action {
             LobbyAction::ToggleReady => {
@@ -15611,7 +15703,7 @@ impl GameApp {
                     };
                 }
             }
-            LobbyAction::StartGame => self.start_network_game_now()?,
+            LobbyAction::StartGame => self.start_network_lobby_countdown()?,
         }
         Ok(())
     }
@@ -15925,6 +16017,7 @@ impl GameApp {
         self.advertised_game_reference = None;
         if self.startup_view == StartupView::NetworkLobby {
             self.network_lobby = None;
+            self.host_lobby_countdown = None;
             self.network = None;
             self.network_mode = None;
             self.network_control_clock = None;
@@ -16064,6 +16157,7 @@ impl GameApp {
         self.network = None;
         self.network_mode = None;
         self.network_lobby = None;
+        self.host_lobby_countdown = None;
         self.network_control_clock = None;
         self.network_max_players = DEFAULT_SCENARIO_MAX_PLAYERS;
         self.network_is_league = false;
@@ -16388,6 +16482,7 @@ impl GameApp {
     /// stay deterministic because only the window loop drives this method;
     /// tests and other hosts may pulse it explicitly.
     fn sec1_timer(&mut self) -> bool {
+        let lobby_countdown_changed = self.tick_network_lobby_countdown();
         let before = self.engine.game_time();
         self.engine.sec1_timer();
         let after = self.engine.game_time();
@@ -16395,7 +16490,41 @@ impl GameApp {
         if after != before {
             self.snapshot.game_time = after;
         }
-        after != before
+        lobby_countdown_changed || after != before
+    }
+
+    fn tick_network_lobby_countdown(&mut self) -> bool {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return false;
+        }
+        let Some(next) = self
+            .host_lobby_countdown
+            .as_mut()
+            .map(HostLobbyCountdown::advance)
+        else {
+            return false;
+        };
+        if next == 0 {
+            self.host_lobby_countdown = None;
+        }
+        let packet = lc_network::LobbyCountdownPacket::new(next);
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_lobby_countdown(packet))
+        {
+            tracing::error!(%error, "failed to advance host lobby countdown");
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.apply_lobby_countdown(packet);
+        }
+        if next == 0 {
+            if let Err(error) = self.start_network_game_now() {
+                tracing::error!(%error, "failed to start network game after lobby countdown");
+                self.status_text = format!("Unable to start network game: {error}");
+            }
+        }
+        true
     }
 
     fn handle_menu_requests(&mut self) {
@@ -18350,6 +18479,7 @@ impl GameApp {
 
     fn return_to_menu(&mut self) {
         self.close_context_menu_silently();
+        self.host_lobby_countdown = None;
         self.finish_recording();
         self.message_dialogs.clear();
         self.message_dialog_consumed_keys.clear();
@@ -31326,8 +31456,39 @@ mod tests {
         let (manager, events, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.process_lobby_action(LobbyAction::StartGame)
-            .expect("prepared host starts the C++ Go barrier");
-        assert_eq!(commands.take_status_changes(), vec![expected_go]);
+            .expect("prepared host starts the C++ countdown");
+        for _ in 0..DEFAULT_LOBBY_COUNTDOWN_SECONDS {
+            assert!(app.sec1_timer(), "global second timer advances countdown");
+        }
+        // Countdown::OnSec1Timer broadcasts/applies zero before calling
+        // Network.Start, which is what submits the GS_Go status barrier
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:1140-1173).
+        let countdown_command = |countdown| {
+            network::TestLobbyStartCommand::Countdown(lc_network::LobbyCountdownPacket::new(
+                countdown,
+            ))
+        };
+        assert_eq!(
+            commands.take_lobby_start_commands(),
+            vec![
+                countdown_command(5),
+                countdown_command(4),
+                countdown_command(3),
+                countdown_command(2),
+                countdown_command(1),
+                countdown_command(0),
+                network::TestLobbyStartCommand::Status(expected_go),
+            ]
+        );
+        assert!(
+            app.host_lobby_countdown.is_none(),
+            "natural zero releases C4Network2::pLobbyCountdown ownership before GO"
+        );
+        app.sec1_timer();
+        assert!(
+            commands.take_lobby_start_commands().is_empty(),
+            "later second pulses cannot repeat zero or GO"
+        );
         assert!(matches!(app.mode, AppMode::Loading));
         assert!(app.loading_state.is_some());
         // C4GameParameters chooses the host seed before InitNetworkHost and
@@ -33817,6 +33978,10 @@ mod tests {
         let mut app = new_menu_app(320, 200);
         let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
         app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
         app.network_lobby = Some(NetworkLobbyState::new(
             7,
             "Local client".to_string(),
@@ -33834,7 +33999,212 @@ mod tests {
                 app.network_lobby.as_ref().unwrap().countdown,
                 expected
             );
+            assert!(matches!(app.mode, AppMode::Menu));
+            assert!(app.host_lobby_countdown.is_none());
+            assert!(
+                !app.sec1_timer(),
+                "client packet state never installs a one-second callback"
+            );
+            assert_eq!(
+                app.network_lobby.as_ref().unwrap().countdown,
+                expected
+            );
         }
+    }
+
+    #[test]
+    fn host_start_begins_default_cpp_lobby_countdown_without_leaving_lobby() {
+        // MainDlg::OnRunBtn starts Config.Lobby.CountdownTime, whose stock
+        // value is five; Countdown broadcasts and locally applies that initial
+        // value before installing its one-second callback
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:442-472,1111-1131;
+        // src/C4Config.cpp:276).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("begin host countdown");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, Some(5));
+        assert_eq!(
+            app.host_lobby_countdown,
+            Some(HostLobbyCountdown {
+                remaining: DEFAULT_LOBBY_COUNTDOWN_SECONDS,
+            })
+        );
+        assert!(matches!(app.mode, AppMode::Menu));
+    }
+
+    #[test]
+    fn host_start_preserves_scenario_selection_guards_before_arming_countdown() {
+        // C++ opens the selected scenario before InitNetworkHost and therefore
+        // cannot enter its lobby without that concrete source. The Rust manual
+        // Start guard preserves the same prerequisite before creating the
+        // host-owned countdown
+        // (pristine 9ffa0a5d src/C4StartupNetDlg.cpp:1111-1114;
+        // src/C4StartupScenSelDlg.cpp:1635-1666; src/C4Game.cpp:421-438).
+        let mut app = new_menu_app(320, 200);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), true));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("reject missing scenario selection");
+        assert_eq!(app.status_text, "Select a scenario before starting");
+        assert!(app.host_lobby_countdown.is_none());
+        assert!(commands.take_lobby_start_commands().is_empty());
+
+        app.network_lobby
+            .as_mut()
+            .unwrap()
+            .select_scenario("missing.c4s", "Missing");
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("reject unavailable selected scenario");
+        assert_eq!(
+            app.status_text,
+            "Scenario `missing.c4s` is not available in the catalog"
+        );
+        assert!(app.host_lobby_countdown.is_none());
+        assert!(commands.take_lobby_start_commands().is_empty());
+        assert!(matches!(app.mode, AppMode::Menu));
+    }
+
+    #[test]
+    fn host_start_cancels_an_active_cpp_lobby_countdown() {
+        // OnRunBtn checks the active countdown before attempting another
+        // start. Abort broadcasts -1, locally applies it, and deletes the
+        // timer without entering Network.Start
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:442-450,1176-1193;
+        // src/C4Network2.cpp:3046-3051).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("begin host countdown");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("cancel host countdown");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(-1)]
+        );
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, None);
+        assert!(app.host_lobby_countdown.is_none());
+        assert!(matches!(app.mode, AppMode::Menu));
+        assert!(!app.sec1_timer(), "abort releases the one-second callback");
+        assert!(commands.take_lobby_start_commands().is_empty());
+    }
+
+    #[test]
+    fn host_sec1_timer_counts_cpp_lobby_down_through_one() {
+        // Countdown::OnSec1Timer decrements first and broadcasts every value
+        // in the final ten seconds. The callback is driven by the process-wide
+        // second timer, not by a private interval
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:1140-1160;
+        // src/C4Application.cpp:495-506; src/StdAppUnix.cpp:261-291).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("begin host countdown");
+        commands.take_submitted_lobby_countdowns();
+
+        let mut observed = Vec::new();
+        for expected in (1..DEFAULT_LOBBY_COUNTDOWN_SECONDS).rev() {
+            assert!(app.sec1_timer(), "countdown changes visible lobby state");
+            observed.extend(commands.take_submitted_lobby_countdowns());
+            assert_eq!(
+                app.network_lobby.as_ref().unwrap().countdown,
+                Some(expected)
+            );
+            assert!(matches!(app.mode, AppMode::Menu));
+        }
+
+        assert_eq!(
+            observed,
+            [4, 3, 2, 1]
+                .map(lc_network::LobbyCountdownPacket::new)
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn inbound_countdown_packet_cannot_arm_the_host_owned_timer() {
+        // C4Network2::pLobbyCountdown is created only by the host's
+        // StartLobbyCountdown. MainDlg::OnCountdownPacket updates presentation
+        // state only, so a received or late packet cannot install a callback
+        // that eventually enters Network.Start
+        // (pristine 9ffa0a5d src/C4Network2.cpp:3038-3051;
+        // src/C4GameLobby.cpp:392-418,1111-1131).
+        let mut app = new_menu_app(320, 200);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), true));
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::LobbyCountdown(
+                lc_network::LobbyCountdownPacket::new(2),
+            ))
+            .expect("queue a packet-derived countdown");
+        app.process_network_events()
+            .expect("apply countdown presentation");
+
+        assert!(!app.sec1_timer(), "no host timer callback was installed");
+        assert!(commands.take_lobby_start_commands().is_empty());
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, Some(2));
+        assert!(matches!(app.mode, AppMode::Menu));
     }
 
     #[test]

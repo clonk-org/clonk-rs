@@ -269,6 +269,13 @@ pub(crate) struct TestNetworkCommands {
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestLobbyStartCommand {
+    Countdown(lc_network::LobbyCountdownPacket),
+    Status(NetworkStatus),
+}
+
+#[cfg(test)]
 type RuntimeHostJoinResult = (
     Vec<&'static str>,
     Vec<ClientPlayerResourceRequest>,
@@ -278,6 +285,22 @@ type RuntimeHostJoinResult = (
 
 #[cfg(test)]
 impl TestNetworkCommands {
+    pub(crate) fn take_lobby_start_commands(&mut self) -> Vec<TestLobbyStartCommand> {
+        let mut observed = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            match command {
+                NetworkCommand::SubmitLobbyCountdown(packet) => {
+                    observed.push(TestLobbyStartCommand::Countdown(packet));
+                }
+                NetworkCommand::ChangeStatus(status) => {
+                    observed.push(TestLobbyStartCommand::Status(status));
+                }
+                command => panic!("unexpected lobby-start command: {command:?}"),
+            }
+        }
+        observed
+    }
+
     pub(crate) fn complete_runtime_host_join(
         mut self,
         published_core: lc_engine::NetworkResourceCore,
