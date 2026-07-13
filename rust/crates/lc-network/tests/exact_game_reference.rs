@@ -258,6 +258,22 @@ fn exact_reference_rejects_a_display_tcp_projection_that_differs_from_metadata()
     assert_eq!(error, HostGameReferenceError::TcpAddressProjectionMismatch);
 }
 
+#[test]
+fn exact_reference_rejects_a_canonical_address_set_that_differs_from_metadata() {
+    // C++ stores and serializes one complete Addrs container; Rust's host-only
+    // metadata and public summary projections must therefore describe the same
+    // ordered protocol+endpoint set (pristine 9ffa0a5d
+    // src/C4Network2Reference.h:68-73;
+    // src/C4Network2Reference.cpp:81-85, 88-105).
+    let mut summary = fixture_summary();
+    summary.addresses.remove(0);
+
+    let error =
+        HostGameReference::new(summary, fixture_metadata(), complete_parameters()).unwrap_err();
+
+    assert_eq!(error, HostGameReferenceError::AddressSetMismatch);
+}
+
 fn fixture_summary() -> NetworkGameReference {
     NetworkGameReference {
         title: "Fixture".into(),

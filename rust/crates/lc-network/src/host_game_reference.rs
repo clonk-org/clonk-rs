@@ -97,6 +97,8 @@ pub enum HostGameReferenceError {
     HostNameMismatch,
     #[error("reference host Nick differs from the parameters host client")]
     HostNickMismatch,
+    #[error("reference canonical addresses differ from the metadata address set")]
+    AddressSetMismatch,
     #[error("reference TCP display addresses differ from the metadata TCP projection")]
     TcpAddressProjectionMismatch,
     #[error("reference address protocol byte {0} has no C++ text representation")]
@@ -237,6 +239,9 @@ fn validate_summary(
     }
     if legacy_charset_bytes(&summary.host_nick) != host.nick.as_bytes() {
         return Err(HostGameReferenceError::HostNickMismatch);
+    }
+    if summary.addresses != metadata.addresses {
+        return Err(HostGameReferenceError::AddressSetMismatch);
     }
     let tcp_projection = metadata
         .addresses
