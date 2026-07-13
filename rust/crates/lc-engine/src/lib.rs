@@ -13757,6 +13757,20 @@ impl Engine {
         Ok(joined)
     }
 
+    /// Registers a teamless user while runtime team choice is active, then
+    /// stops before `ScenarioInit` until a synchronized team-selection
+    /// control resumes the join (`C4Player.cpp:299-320, 344-349`).
+    pub fn join_player_for_team_selection(
+        &mut self,
+        config: JoinPlayerConfig,
+    ) -> Result<i32, EngineError> {
+        let number = self.register_joining_player(&config);
+        self.player_mut(number)?
+            .set_status(PlayerStatus::TeamSelection);
+        self.preinitialize_joining_player(number)?;
+        Ok(number)
+    }
+
     fn register_joining_player(&mut self, config: &JoinPlayerConfig) -> i32 {
         // C4PlayerList::GetFreeNumber: lowest unused player number.
         let number = (0..)

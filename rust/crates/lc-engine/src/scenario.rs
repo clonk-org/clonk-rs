@@ -12682,6 +12682,65 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn team_choice_join_stops_after_preinitialize_like_cpp() {
+        // C4Player::Init postpones ScenarioInit while a teamless user is in
+        // PS_TeamSelection: it registers the player, runs
+        // PreInitializePlayer exactly once, and does not consume the
+        // ScenarioInit RNG ledger, place ready crew, or call
+        // InitializePlayer (C4Player.cpp:299-320, 344-349).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static preinit_count, init_count;\n\
+             global func Initialize() { preinit_count = 0; init_count = 0; }\n\
+             global func PreInitializePlayer(plr) { preinit_count = preinit_count + 1; }\n\
+             global func InitializePlayer(plr) { init_count = init_count + 1; }\n",
+        );
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let rng_before = engine.rng.clone();
+        let objects_before = engine.snapshot().objects;
+
+        let number = engine
+            .join_player_for_team_selection(crate::JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("team-choice join succeeds");
+
+        assert_eq!(number, 0);
+        assert_eq!(
+            engine.player(number).map(crate::Player::status),
+            Some(crate::PlayerStatus::TeamSelection)
+        );
+        assert_eq!(engine.rng, rng_before, "ScenarioInit consumed no RNG");
+        assert_eq!(
+            engine.snapshot().objects,
+            objects_before,
+            "ScenarioInit placed no ready objects"
+        );
+        let global = |name: &str| {
+            engine
+                .script_globals
+                .borrow()
+                .get(name)
+                .map(|cell| cell.borrow().clone())
+        };
+        assert_eq!(global("preinit_count"), Some(lc_script::Value::Int(1)));
+        assert_eq!(global("init_count"), Some(lc_script::Value::Int(0)));
+    }
+
+    #[test]
     fn definition_pack_system_groups_load_into_the_global_engine() {
         // C4DefList::Load opens C4CFN_System inside every definition
         // group and registers its scripts with Game.ScriptEngine
