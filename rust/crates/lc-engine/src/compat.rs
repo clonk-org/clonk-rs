@@ -29648,6 +29648,39 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    if let Some(target) = target_id {
+        if Some(target) != active {
+            let target_status = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.get_world_object(target))
+                    .map(|object| object.status)
+            });
+            match target_status {
+                None | Some(ObjectStatus::Deleted) => return Ok(Value::Bool(false)),
+                Some(current) if current == status => return Ok(Value::Bool(true)),
+                Some(_) => {}
+            }
+            return match call_world_object_function(
+                target,
+                "SetObjectStatus",
+                &[
+                    Value::Int(status.to_script_value()),
+                    Value::Nil,
+                    Value::Bool(clear_pointers),
+                ],
+            ) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+
     let (success, clear_target) = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow.as_mut().ok_or_else(|| {
@@ -29675,6 +29708,9 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
         }
         if let Some(object) = context.object_scope_mut(object_id) {
             object.set_status(status);
+        }
+        if status == ObjectStatus::Inactive && clear_pointers {
+            context.clear_object_action_and_command_pointers(object_id);
         }
         Ok((
             true,
@@ -31471,6 +31507,36 @@ impl EffectHostContext {
         removed
     }
 
+    /// C4Game::ClearObjectPtrs -> C4Object::ClearPointers for the pointer
+    /// kinds modeled by ObjectScopeContext. Unlike object removal, status
+    /// deactivation must leave ordinary script values that reference the
+    /// inactive object intact.
+    fn clear_object_action_and_command_pointers(&mut self, target: ObjectId) {
+        let mut object_ids = self.world.object_ids().to_vec();
+        for id in self.pending_order.iter().copied() {
+            if !object_ids.contains(&id) {
+                object_ids.push(id);
+            }
+        }
+        for id in object_ids {
+            let references_target = self
+                .object_scope(id)
+                .is_some_and(|scope| scope.references_object_pointer(target))
+                || self.get_world_object(id).is_some_and(|object| {
+                    object.action_target(0) == Some(target)
+                        || object.action_target(1) == Some(target)
+                        || object.commands.iter().any(|command| {
+                            command.target == Some(target) || command.target2 == Some(target)
+                        })
+                });
+            if references_target && self.ensure_object_scope(id) {
+                if let Some(scope) = self.object_scope_mut(id) {
+                    scope.clear_object_pointer(target);
+                }
+            }
+        }
+    }
+
     fn clear_non_player_script_object_references(&mut self, target: ObjectId) {
         self.removed_object_references.insert(target);
         let removed = &self.removed_object_references;
@@ -31489,26 +31555,7 @@ impl EffectHostContext {
         for cell in self.foreign_local_cells.values() {
             clear_removed_object_references(&mut cell.borrow_mut(), removed);
         }
-        let mut object_ids = self.world.object_ids().to_vec();
-        for id in self.pending_order.iter().copied() {
-            if !object_ids.contains(&id) {
-                object_ids.push(id);
-            }
-        }
-        for id in object_ids.into_iter().filter(|id| *id != target) {
-            let references_target = self.get_world_object(id).is_some_and(|object| {
-                object.action_target(0) == Some(target)
-                    || object.action_target(1) == Some(target)
-                    || object.commands.iter().any(|command| {
-                        command.target == Some(target) || command.target2 == Some(target)
-                    })
-            });
-            if references_target && self.ensure_object_scope(id) {
-                if let Some(scope) = self.object_scope_mut(id) {
-                    scope.clear_object_pointer(target);
-                }
-            }
-        }
+        self.clear_object_action_and_command_pointers(target);
     }
 
     fn unlink_content_for_removal(&mut self, parent: ObjectId, child: ObjectId) {
@@ -34240,6 +34287,14 @@ impl ObjectScopeContext {
             }
             _ => {}
         }
+    }
+
+    fn references_object_pointer(&self, target: ObjectId) -> bool {
+        self.current_action_target == Some(target)
+            || self.current_action_target2 == Some(target)
+            || self.live_commands.command_views().iter().any(|command| {
+                command.target == Some(target) || command.target2 == Some(target)
+            })
     }
 
     fn clear_object_pointer(&mut self, target: ObjectId) {
@@ -46164,6 +46219,92 @@ func Probe(state) {
         assert_eq!(action.target2, None, "nil target2 must not stage a clear");
     }
 
+    fn set_object_status_target_world(
+        target_status: ObjectStatus,
+    ) -> (ObjectId, ObjectId, HostWorldContext) {
+        let target_id = ObjectId::new(2);
+        let holder_id = ObjectId::new(3);
+        let mut target_state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        target_state.status = target_status;
+        target_state.action.target = Some(target_id);
+        let target = HostWorldObject::new(
+            target_id,
+            "TARG",
+            target_status,
+            "Idle",
+            Some(target_id),
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(target_state));
+
+        let mut holder_state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        holder_state.action.target = Some(target_id);
+        let mut holder_commands = CommandStack::new();
+        holder_commands
+            .push_back(CommandRequest::new(CommandId::Follow).with_target(Some(target_id)))
+            .expect("holder command is valid");
+        let holder = HostWorldObject::new(
+            holder_id,
+            "HOLD",
+            ObjectStatus::Normal,
+            "Idle",
+            Some(target_id),
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(holder_state))
+        .with_commands(holder_commands.command_views())
+        .with_command_stack(holder_commands.snapshot());
+
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        let world = HostWorldContext::from_objects([target, holder])
+            .with_definition_metadata(Rc::new(HashMap::from([
+                (DefinitionId::from("TARG"), DefinitionMetadata::default()),
+                (DefinitionId::from("HOLD"), DefinitionMetadata::default()),
+            ])))
+            .with_definition_scripts(HashMap::from([(
+                DefinitionId::from("TARG"),
+                Arc::new(script),
+            )]));
+        (target_id, holder_id, world)
+    }
+
     #[test]
     fn set_object_status_records_update() {
         let args = vec![Value::Int(ObjectStatus::Inactive.to_script_value())];
@@ -46172,6 +46313,170 @@ func Probe(state) {
         assert_eq!(value, Value::Bool(true));
         let update = outcome.object_update.expect("status update present");
         assert_eq!(update.status, Some(ObjectStatus::Inactive));
+    }
+
+    #[test]
+    fn set_object_status_deactivates_a_foreign_target_without_clearing_pointers() {
+        let (target_id, holder_id, world) =
+            set_object_status_target_world(ObjectStatus::Normal);
+        let target = object_reference_value(target_id);
+        let holder = object_reference_value(holder_id);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            Ok(Value::Array(vec![
+                set_object_status(&[
+                    Value::Int(ObjectStatus::Inactive.to_script_value()),
+                    target.clone(),
+                ])?,
+                get_object_status(std::slice::from_ref(&target))?,
+                get_action_target(&[Value::Int(0), holder.clone()])?,
+                get_command(&[holder, Value::Int(1)])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("foreign SetObjectStatus succeeds"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(ObjectStatus::Inactive.to_script_value()),
+                object_reference_value(target_id),
+                object_reference_value(target_id),
+            ])
+        );
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+        let update = outcome
+            .other_objects
+            .iter()
+            .find(|object| object.object_id == target_id)
+            .and_then(|object| object.update.as_ref())
+            .expect("foreign status update recorded");
+        assert_eq!(update.status, Some(ObjectStatus::Inactive));
+        assert!(
+            outcome
+                .other_objects
+                .iter()
+                .all(|object| object.object_id != holder_id),
+            "clear=false leaves inter-object pointers untouched"
+        );
+    }
+
+    #[test]
+    fn set_object_status_clear_pointers_clears_foreign_action_and_command_targets() {
+        let (target_id, holder_id, world) =
+            set_object_status_target_world(ObjectStatus::Normal);
+        let target = object_reference_value(target_id);
+        let holder = object_reference_value(holder_id);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            Ok(Value::Array(vec![
+                get_action_target(&[Value::Int(0), holder.clone()])?,
+                get_command(&[holder.clone(), Value::Int(1)])?,
+                set_object_status(&[
+                    Value::Int(ObjectStatus::Inactive.to_script_value()),
+                    target.clone(),
+                    Value::Bool(true),
+                ])?,
+                get_action_target(&[Value::Int(0), holder.clone()])?,
+                get_command(&[holder, Value::Int(1)])?,
+                get_object_status(&[target])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("foreign SetObjectStatus succeeds"),
+            Value::Array(vec![
+                object_reference_value(target_id),
+                object_reference_value(target_id),
+                Value::Bool(true),
+                Value::Nil,
+                Value::Nil,
+                Value::Int(ObjectStatus::Inactive.to_script_value()),
+            ])
+        );
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+        let target_outcome = outcome
+            .other_objects
+            .iter()
+            .find(|object| object.object_id == target_id)
+            .expect("foreign target outcome recorded");
+        let target_update = target_outcome
+            .update
+            .as_ref()
+            .expect("foreign target update recorded");
+        assert_eq!(target_update.status, Some(ObjectStatus::Inactive));
+        assert_eq!(
+            target_update
+                .action
+                .as_ref()
+                .expect("self action pointer clear recorded")
+                .target,
+            Some(None)
+        );
+        let holder_outcome = outcome
+            .other_objects
+            .iter()
+            .find(|object| object.object_id == holder_id)
+            .expect("holder pointer clears recorded");
+        let holder_update = holder_outcome
+            .update
+            .as_ref()
+            .and_then(|update| update.action.as_ref())
+            .expect("holder action target clear recorded");
+        assert_eq!(holder_update.target, Some(None));
+        match holder_outcome.command_operations.as_slice() {
+            [CommandOperation::Restore(snapshot)] => assert_eq!(
+                snapshot
+                    .command_views()
+                    .first()
+                    .expect("restored holder command")
+                    .target,
+                None
+            ),
+            other => panic!("expected cleared holder command restore, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_object_status_same_status_is_a_side_effect_free_success() {
+        let (target_id, holder_id, world) =
+            set_object_status_target_world(ObjectStatus::Inactive);
+        let target = object_reference_value(target_id);
+        let holder = object_reference_value(holder_id);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            Ok(Value::Array(vec![
+                set_object_status(&[
+                    Value::Int(ObjectStatus::Inactive.to_script_value()),
+                    target,
+                    Value::Bool(true),
+                ])?,
+                get_action_target(&[Value::Int(0), holder.clone()])?,
+                get_command(&[holder, Value::Int(1)])?,
+            ]))
+        });
+        assert_eq!(
+            result.expect("same-status call succeeds"),
+            Value::Array(vec![
+                Value::Bool(true),
+                object_reference_value(target_id),
+                object_reference_value(target_id),
+            ])
+        );
+        assert!(outcome.object_update.is_none());
+        assert!(outcome.other_objects.is_empty());
+        assert!(outcome.player_commands.is_empty());
+    }
+
+    #[test]
+    fn set_object_status_rejects_a_deleted_target() {
+        let (target_id, _, world) = set_object_status_target_world(ObjectStatus::Deleted);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            set_object_status(&[
+                Value::Int(ObjectStatus::Inactive.to_script_value()),
+                object_reference_value(target_id),
+            ])
+        });
+        assert_eq!(result.expect("dead target is rejected"), Value::Bool(false));
+        assert!(outcome.object_update.is_none());
+        assert!(outcome.other_objects.is_empty());
+        assert!(outcome.player_commands.is_empty());
     }
 
     #[test]
