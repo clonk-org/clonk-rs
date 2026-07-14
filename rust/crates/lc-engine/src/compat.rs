@@ -9680,6 +9680,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Format", format_string);
     script.register_host_function("GetType", get_type);
     script.register_host_function("CreateArray", create_array);
+    script.register_host_reference_function("SetLength", [0], set_length);
     script.register_host_function("GetLength", get_length);
     script.register_host_function("GetIndexOf", get_index_of);
     script.register_host_function("GetKeys", get_keys);
@@ -10715,6 +10716,41 @@ fn create_array(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let values = vec![Value::Nil; size as usize];
     Ok(Value::Array(values))
+}
+
+fn set_length(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
+    let target = args.first().ok_or_else(|| {
+        RuntimeError::new(
+            "call to \"SetLength\" parameter 1: got \"nil\", but expected \"&\"!",
+        )
+    })?;
+    if !target.is_reference() {
+        return Err(RuntimeError::new(format!(
+            "call to \"SetLength\" parameter 1: got \"{}\", but expected \"&\"!",
+            target.read()?.type_name()
+        )));
+    }
+
+    let size_value = args
+        .get(1)
+        .map(HostCallArg::read)
+        .transpose()?
+        .unwrap_or(Value::Nil);
+    let size = value_to_i32(&size_value, "SetLength", "size")?;
+    if !(0..=LEGACY_MAX_ARRAY_SIZE).contains(&size) {
+        return Err(RuntimeError::new(format!(
+            "SetLength: invalid array size ({size})"
+        )));
+    }
+
+    let Value::Array(mut values) = target.read()? else {
+        return Err(RuntimeError::new("SetLength: array expected"));
+    };
+    values.resize(size as usize, Value::Nil);
+    if !target.write(Value::Array(values))? {
+        return Err(RuntimeError::new("SetLength: array reference expected"));
+    }
+    Ok(Value::Nil)
 }
 
 fn get_length(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -34756,6 +34792,7 @@ mod tests {
         "SetGravity",
         "SetHostility",
         "SetKiller",
+        "SetLength",
         "SetMass",
         "SetMenuDecoration",
         "SetMenuSize",
@@ -36994,6 +37031,95 @@ public func RejectConstruction(x, y, builder)
         assert!(error
             .message()
             .starts_with("CreateArray: invalid array size"));
+    }
+
+    #[test]
+    fn set_length_resizes_the_callers_array_reference() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"
+                func Grow() {
+                    var values = CreateArray(2);
+                    values[0] = 10;
+                    values[1] = 20;
+                    var result = SetLength(values, 5);
+                    return [GetLength(values), values[0], values[1], values[2], values[4], result];
+                }
+                func Truncate() {
+                    var values = [10, 20, 30];
+                    SetLength(values, 1);
+                    return [GetLength(values), values[0], values[1]];
+                }
+                func Negative() {
+                    var values = [];
+                    SetLength(values, -1);
+                }
+                func TooLarge() {
+                    var values = [];
+                    SetLength(values, 1000001);
+                }
+                func Nested() {
+                    var outer = [[1, 2, 3]];
+                    SetLength(outer[0], 1);
+                    return [GetLength(outer[0]), outer[0][0], outer[0][1]];
+                }
+                func Alias() {
+                    var values = [4, 5];
+                    var alias = values;
+                    SetLength(values, 1);
+                    return [GetLength(values), GetLength(alias), alias[1]];
+                }
+                func RValue() { SetLength([1, 2], 1); }
+                "#,
+            )
+            .expect("SetLength fixture compiles");
+
+        assert_eq!(
+            script.call("Grow", &[]).expect("array grows"),
+            Value::Array(vec![
+                Value::Int(5),
+                Value::Int(10),
+                Value::Int(20),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+            ])
+        );
+        assert_eq!(
+            script.call("Truncate", &[]).expect("array truncates"),
+            Value::Array(vec![Value::Int(1), Value::Int(10), Value::Nil])
+        );
+        let error = script
+            .call("Negative", &[])
+            .expect_err("negative array lengths must fail");
+        assert_eq!(
+            error.to_string(),
+            "runtime error: SetLength: invalid array size (-1)"
+        );
+        let error = script
+            .call("TooLarge", &[])
+            .expect_err("oversized arrays must fail");
+        assert_eq!(
+            error.to_string(),
+            "runtime error: SetLength: invalid array size (1000001)"
+        );
+        assert_eq!(
+            script.call("Nested", &[]).expect("indexed array resizes"),
+            Value::Array(vec![Value::Int(1), Value::Int(1), Value::Nil])
+        );
+        assert_eq!(
+            script.call("Alias", &[]).expect("array copy-on-write resizes"),
+            Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(5)])
+        );
+        let error = script
+            .call("RValue", &[])
+            .expect_err("SetLength requires an array lvalue");
+        assert_eq!(
+            error.to_string(),
+            "runtime error: call to \"SetLength\" parameter 1: got \"array\", but expected \"&\"!"
+        );
     }
 
     #[test]
