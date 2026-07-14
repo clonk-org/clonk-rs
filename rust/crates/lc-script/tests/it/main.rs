@@ -49,6 +49,7 @@ mod test_parse_recovery;
 mod test_reference_parameters;
 mod test_reference_return_functions;
 mod test_return_with_space;
+mod test_safe_navigation;
 mod test_script_constants;
 mod test_setlocal_cross_object;
 mod test_statics;

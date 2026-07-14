@@ -316,6 +316,14 @@ pub enum Expr {
     Proplist(Vec<(String, Expr)>),
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
+    /// Strict-3 `receiver?->Call()`, `receiver?[index]`, and
+    /// `receiver?.property`. The first step and every step preceded by a
+    /// later `?` guards the complete remaining suffix on nil; the node is
+    /// always an rvalue (C4AulParse.cpp:3105-3129).
+    SafeNavigation {
+        receiver: Box<Expr>,
+        steps: Vec<SafeNavigationStep>,
+    },
     // Increment/Decrement (require lvalue)
     PreIncrement(Box<Expr>),
     PreDecrement(Box<Expr>),
@@ -325,6 +333,24 @@ pub enum Expr {
     Assignment(AssignmentTarget, Box<Expr>),
     // Comma operator - sequence of expressions, evaluates all and returns last (lowest precedence)
     Comma(Vec<Expr>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SafeNavigationStep {
+    pub nil_guard: bool,
+    pub operation: NavigationOperation,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum NavigationOperation {
+    Index(Box<Expr>),
+    Property(String),
+    MethodCall {
+        name: String,
+        args: Vec<Expr>,
+        is_optional: bool,
+        forward_rest: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

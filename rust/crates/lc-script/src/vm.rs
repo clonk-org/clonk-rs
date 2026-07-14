@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use crate::ast::{
-    AccessLevel, AssignmentTarget, BinaryOp, Expr, ForInit, Function, Parameter, Stmt, UnaryOp,
-    VarDecl,
+    AccessLevel, AssignmentTarget, BinaryOp, Expr, ForInit, Function, NavigationOperation,
+    Parameter, SafeNavigationStep, Stmt, UnaryOp, VarDecl,
 };
 use crate::debugger::DebuggerHooks;
 use crate::engine::{HostFunction, HostReferenceFunction};
@@ -1336,7 +1336,9 @@ impl<'a> Vm<'a> {
         strict_level: Option<u8>,
     ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
         let object_state = ObjectState::from_local_vars(local_vars);
-        let Ok(expr) = crate::parser::Parser::new(source).parse_direct_exec_expression() else {
+        let Ok(expr) = crate::parser::Parser::with_strict_level(source, strict_level)
+            .parse_direct_exec_expression()
+        else {
             return Ok((Value::Nil, object_state.to_local_vars(self.var_decls)));
         };
         let mut env = Environment::new_with_params(&[], &[], strict_level, object_state.clone())?;
@@ -1357,7 +1359,9 @@ impl<'a> Vm<'a> {
         cells: &LocalCells,
         strict_level: Option<u8>,
     ) -> Result<Value, RuntimeError> {
-        let Ok(expr) = crate::parser::Parser::new(source).parse_direct_exec_expression() else {
+        let Ok(expr) = crate::parser::Parser::with_strict_level(source, strict_level)
+            .parse_direct_exec_expression()
+        else {
             return Ok(Value::Nil);
         };
         let mut env =
@@ -2140,8 +2144,9 @@ impl<'a> Vm<'a> {
                                 // 1693-1699).
                                 _ => return Ok(Value::Nil),
                             };
-                            let Ok(expr) = crate::parser::Parser::new(&code)
-                                .parse_direct_exec_expression()
+                            let Ok(expr) =
+                                crate::parser::Parser::with_strict_level(&code, env.strict_level)
+                                    .parse_direct_exec_expression()
                             else {
                                 // Parse errors log and yield C4VNull
                                 // (DirectExec's catch, C4AulExec.cpp:1693).
@@ -2407,6 +2412,9 @@ impl<'a> Vm<'a> {
                 let proplist = self.evaluate(target, env, depth)?;
                 self.eval_property(proplist, name)
             }
+            Expr::SafeNavigation { receiver, steps } => self
+                .evaluate_safe_navigation_tracked(receiver, steps, env, depth)
+                .map(|tracked| tracked.value),
             Expr::Assignment(target, value_expr) => {
                 self.evaluate_assignment(target, value_expr, env, depth)
             }
@@ -2500,6 +2508,9 @@ impl<'a> Vm<'a> {
                 let identity = collection.identity_at(&PathSegment::Property(name.clone()));
                 let value = self.eval_property(collection.value, name)?;
                 Ok(TrackedValue { value, identity })
+            }
+            Expr::SafeNavigation { receiver, steps } => {
+                self.evaluate_safe_navigation_tracked(receiver, steps, env, depth)
             }
             Expr::Binary(left, BinaryOp::Concat, right) => {
                 let left = self.evaluate_tracked(left, env, depth)?;
@@ -2708,6 +2719,58 @@ impl<'a> Vm<'a> {
             }
             _ => self.evaluate(expr, env, depth).map(TrackedValue::runtime),
         }
+    }
+
+    /// Evaluate strict-3 `?` navigation. A guard applies only at its own
+    /// question-mark boundary: once a non-nil value crosses that boundary,
+    /// the remaining contiguous `->`/`[]`/`.` suffix executes normally until
+    /// another guarded boundary is reached. The returned value deliberately
+    /// carries no assignable path, mirroring the final C++ `AB_DEREF`.
+    fn evaluate_safe_navigation_tracked(
+        &self,
+        receiver: &Expr,
+        steps: &[SafeNavigationStep],
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<TrackedValue, RuntimeError> {
+        let mut current = self.evaluate_tracked(receiver, env, depth)?;
+
+        for step in steps {
+            if step.nil_guard && matches!(current.value, Value::Nil) {
+                return Ok(TrackedValue::runtime(Value::Nil));
+            }
+
+            current = match &step.operation {
+                NavigationOperation::Index(index_expr) => {
+                    let index = self.evaluate(index_expr, env, depth)?;
+                    let segment = PathSegment::Index(index.clone());
+                    let identity = current.identity_at(&segment);
+                    let value = self.eval_index(current.value, index)?;
+                    TrackedValue { value, identity }
+                }
+                NavigationOperation::Property(name) => {
+                    let identity = current.identity_at(&PathSegment::Property(name.clone()));
+                    let value = self.eval_property(current.value, name)?;
+                    TrackedValue { value, identity }
+                }
+                NavigationOperation::MethodCall {
+                    name,
+                    args,
+                    is_optional,
+                    forward_rest,
+                } => TrackedValue::runtime(self.invoke_property_call_with_target(
+                    current.value,
+                    name,
+                    args,
+                    *is_optional,
+                    *forward_rest,
+                    env,
+                    depth,
+                )?),
+            };
+        }
+
+        Ok(current)
     }
 
     /// Resolve an increment/decrement operand to its C4Value reference once,

@@ -131,9 +131,10 @@ pub enum Symbol {
     Slash,
     Percent,
     Dot,
-    Ellipsis,    // ... (varargs forwarder)
-    Concat,      // .. (string/array/map concatenation, C4Script AB_Concat)
-    ConcatEqual, // ..= (concat assignment, AB_ConcatIt)
+    Ellipsis,              // ... (varargs forwarder)
+    Concat,                // .. (string/array/map concatenation, C4Script AB_Concat)
+    ConcatEqual,           // ..= (concat assignment, AB_ConcatIt)
+    Question,              // ? (strict-3 safe navigation)
     QuestionQuestion,      // ?? (nil coalescing, AB_NilCoalescing)
     QuestionQuestionEqual, // ??= (nil-coalescing assignment, AB_NilCoalescingIt)
     Equal,

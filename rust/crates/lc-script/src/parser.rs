@@ -1,6 +1,6 @@
 use crate::ast::{
-    AccessLevel, AppendTo, AssignmentTarget, BinaryOp, Expr, Function, Parameter, Script, Stmt,
-    TypeAnnotation, UnaryOp, VarDecl, VarDeclKind,
+    AccessLevel, AppendTo, AssignmentTarget, BinaryOp, Expr, Function, NavigationOperation,
+    Parameter, SafeNavigationStep, Script, Stmt, TypeAnnotation, UnaryOp, VarDecl, VarDeclKind,
 };
 use crate::error::ParseError;
 use crate::lexer::Lexer;
@@ -38,6 +38,12 @@ impl<'a> Parser<'a> {
             brace_depth: 0,
             consumed_tokens: 0,
         }
+    }
+
+    pub(crate) fn with_strict_level(source: &'a str, strict_level: Option<u8>) -> Self {
+        let mut parser = Self::new(source);
+        parser.strict_level = strict_level.unwrap_or(0);
+        parser
     }
 
     /// DirectExec parsing (C4AulScript::ParseFn fExprOnly,
@@ -1803,51 +1809,14 @@ impl<'a> Parser<'a> {
                     is_optional: false,
                     forward_rest,
                 };
-            } else if self.consume_if_symbol(Symbol::LBracket)?.is_some() {
-                let index = self.parse_expression()?;
-                self.expect_symbol(Symbol::RBracket, "expected ']' after index expression")?;
-                expr = Expr::Index(Box::new(expr), Box::new(index));
-            } else if self.consume_if_symbol(Symbol::Dot)?.is_some() {
-                let (name, _) = self.expect_identifier("expected property name after '.'")?;
-                expr = Expr::Property(Box::new(expr), name);
-            } else if self.consume_if_symbol(Symbol::Arrow)?.is_some() {
-                // Check for optional method call: ->~MethodName()
-                let is_optional = self.consume_if_symbol(Symbol::Tilde)?.is_some();
-                let (mut name, token) =
-                    self.expect_identifier_or_c4id("expected property/method name after '->'")?;
-
-                // Check for scope resolution: ->DefID::Method
-                if self.consume_if_symbol(Symbol::ColonColon)?.is_some() {
-                    let (method_name, _) =
-                        self.expect_identifier_or_c4id("expected method name after '::'")?;
-                    // Combine as "DefID::Method"
-                    name = format!("{}::{}", name, method_name);
-                }
-
-                let prop = Expr::Property(Box::new(expr), name);
-
-                // If optional call or next token is '(', parse call immediately
-                if self.check_symbol(Symbol::LParen)? {
-                    self.consume()?; // consume '('
-                    let (args, forward_rest) = self.parse_argument_list()?;
-                    self.expect_symbol(Symbol::RParen, "expected ')' after arguments")?;
-                    expr = Expr::Call {
-                        callee: Box::new(prop),
-                        args,
-                        is_optional,
-                        forward_rest,
-                    };
-                } else {
-                    if is_optional {
-                        return Err(ParseError::new(
-                            "'~' requires a method call: expected '(' after method name"
-                                .to_string(),
-                            token.line,
-                            token.column,
-                        ));
-                    }
-                    expr = prop;
-                }
+            } else if let Some(question) = self.consume_if_symbol(Symbol::Question)? {
+                let steps = self.parse_safe_navigation_steps(&question)?;
+                expr = Expr::SafeNavigation {
+                    receiver: Box::new(expr),
+                    steps,
+                };
+            } else if let Some(operation) = self.parse_navigation_operation()? {
+                expr = Self::apply_navigation_operation(expr, operation);
             } else if let Some(token) = self.consume_if_symbol(Symbol::PlusPlus)? {
                 self.validate_lvalue(&expr, &token)?;
                 expr = Expr::PostIncrement(Box::new(expr));
@@ -1859,6 +1828,101 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(expr)
+    }
+
+    fn parse_safe_navigation_steps(
+        &mut self,
+        question: &Token,
+    ) -> Result<Vec<SafeNavigationStep>, ParseError> {
+        if self.strict_level < 3 {
+            return Err(ParseError::new(
+                "unexpected '?'".to_string(),
+                question.line,
+                question.column,
+            ));
+        }
+
+        let mut steps = Vec::new();
+        let mut nil_guard = true;
+        loop {
+            let Some(operation) = self.parse_navigation_operation()? else {
+                if steps.is_empty() || nil_guard {
+                    let token = self.peek()?;
+                    return Err(ParseError::new(
+                        "navigation operator (->, [], .) expected".to_string(),
+                        token.line,
+                        token.column,
+                    ));
+                }
+                break;
+            };
+            steps.push(SafeNavigationStep {
+                nil_guard,
+                operation,
+            });
+            nil_guard = self.consume_if_symbol(Symbol::Question)?.is_some();
+        }
+        Ok(steps)
+    }
+
+    fn parse_navigation_operation(&mut self) -> Result<Option<NavigationOperation>, ParseError> {
+        if self.consume_if_symbol(Symbol::LBracket)?.is_some() {
+            let index = self.parse_expression()?;
+            self.expect_symbol(Symbol::RBracket, "expected ']' after index expression")?;
+            return Ok(Some(NavigationOperation::Index(Box::new(index))));
+        }
+        if self.consume_if_symbol(Symbol::Dot)?.is_some() {
+            let (name, _) = self.expect_identifier("expected property name after '.'")?;
+            return Ok(Some(NavigationOperation::Property(name)));
+        }
+        if self.consume_if_symbol(Symbol::Arrow)?.is_some() {
+            let is_optional = self.consume_if_symbol(Symbol::Tilde)?.is_some();
+            let (mut name, token) =
+                self.expect_identifier_or_c4id("expected property/method name after '->'")?;
+            if self.consume_if_symbol(Symbol::ColonColon)?.is_some() {
+                let (method_name, _) =
+                    self.expect_identifier_or_c4id("expected method name after '::'")?;
+                name = format!("{}::{}", name, method_name);
+            }
+            if self.check_symbol(Symbol::LParen)? {
+                self.consume()?;
+                let (args, forward_rest) = self.parse_argument_list()?;
+                self.expect_symbol(Symbol::RParen, "expected ')' after arguments")?;
+                return Ok(Some(NavigationOperation::MethodCall {
+                    name,
+                    args,
+                    is_optional,
+                    forward_rest,
+                }));
+            }
+            if is_optional {
+                return Err(ParseError::new(
+                    "'~' requires a method call: expected '(' after method name".to_string(),
+                    token.line,
+                    token.column,
+                ));
+            }
+            return Ok(Some(NavigationOperation::Property(name)));
+        }
+        Ok(None)
+    }
+
+    fn apply_navigation_operation(expr: Expr, operation: NavigationOperation) -> Expr {
+        match operation {
+            NavigationOperation::Index(index) => Expr::Index(Box::new(expr), index),
+            NavigationOperation::Property(name) => Expr::Property(Box::new(expr), name),
+            NavigationOperation::MethodCall {
+                name,
+                args,
+                is_optional,
+                forward_rest,
+            } => Expr::Call {
+                callee: Box::new(Expr::Property(Box::new(expr), name)),
+                args,
+                is_optional,
+                forward_rest,
+            },
+        }
     }
 
     fn parse_argument_list(&mut self) -> Result<(Vec<Expr>, bool), ParseError> {
