@@ -751,6 +751,31 @@ fn array_index(index: &Value) -> Result<usize, RuntimeError> {
         })
 }
 
+/// AB_ARRAYA_R/V's string branch (C4AulExec.cpp:923-947). Classic strings
+/// are byte buffers. Rust's public string value is UTF-8, so project the
+/// selected byte onto the same-valued Latin-1 scalar to keep the one-character
+/// result representable without switching the entire value model to bytes.
+fn string_index(text: &str, index: &Value) -> Result<Value, RuntimeError> {
+    let index = index.as_c4_int().ok_or_else(|| {
+        RuntimeError::new(format!(
+            "indexed string access: index of type {}, int expected!",
+            index.type_name()
+        ))
+    })?;
+    let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
+    let mut index = i64::from(index);
+    if index < 0 {
+        index += len;
+    }
+    let Some(byte) = usize::try_from(index)
+        .ok()
+        .and_then(|index| text.as_bytes().get(index))
+    else {
+        return Ok(Value::Nil);
+    };
+    Ok(Value::String(char::from(*byte).to_string()))
+}
+
 fn read_path(value: &Value, segments: &[PathSegment]) -> Result<Value, RuntimeError> {
     let mut current = value.clone();
     for segment in segments {
@@ -768,6 +793,7 @@ fn read_path(value: &Value, segments: &[PathSegment]) -> Result<Value, RuntimeEr
                 .get(array_index(index)?)
                 .cloned()
                 .unwrap_or(Value::Nil),
+            (PathSegment::Index(index), Value::String(text)) => string_index(&text, index)?,
             (PathSegment::Index(Value::String(key)), Value::Proplist(entries)) => {
                 entries.get(key).cloned().unwrap_or(Value::Nil)
             }
@@ -2499,8 +2525,14 @@ impl<'a> Vm<'a> {
                     collection = reference.read_tracked()?;
                 }
                 let segment = PathSegment::Index(index.clone());
-                let identity = collection.identity_at(&segment);
+                let string_result = matches!(&collection.value, Value::String(_));
+                let inherited_identity = collection.identity_at(&segment);
                 let value = self.eval_index(collection.value, index)?;
+                let identity = if string_result {
+                    RawIdentity::runtime(&value)
+                } else {
+                    inherited_identity
+                };
                 Ok(TrackedValue { value, identity })
             }
             Expr::Property(target, name) => {
@@ -2744,8 +2776,14 @@ impl<'a> Vm<'a> {
                 NavigationOperation::Index(index_expr) => {
                     let index = self.evaluate(index_expr, env, depth)?;
                     let segment = PathSegment::Index(index.clone());
-                    let identity = current.identity_at(&segment);
+                    let string_result = matches!(&current.value, Value::String(_));
+                    let inherited_identity = current.identity_at(&segment);
                     let value = self.eval_index(current.value, index)?;
+                    let identity = if string_result {
+                        RawIdentity::runtime(&value)
+                    } else {
+                        inherited_identity
+                    };
                     TrackedValue { value, identity }
                 }
                 NavigationOperation::Property(name) => {
@@ -3222,6 +3260,7 @@ impl<'a> Vm<'a> {
                 .get(array_index(&index)?)
                 .cloned()
                 .unwrap_or(Value::Nil)),
+            (Value::String(text), index) => string_index(text, &index),
             (Value::Proplist(entries), Value::String(key)) => {
                 Ok(entries.get(&key).cloned().unwrap_or(Value::Nil))
             }
@@ -4797,6 +4836,71 @@ mod tests {
             Ok(_) => panic!("index at array cap unexpectedly succeeded"),
             Err(error) => assert_eq!(error.message(), "out of memory"),
         }
+    }
+
+    #[test]
+    fn vm_string_indices_follow_cpp_offsets_bounds_and_coercion() {
+        let source = r#"#strict 2
+            func Test() {
+                var nested = [["abc"]];
+                return [
+                    "abc"[0],
+                    "abc"[-1],
+                    "abc"[5],
+                    "abc"[-5],
+                    "abc"[nil],
+                    "abc"[false],
+                    "abc"[true],
+                    nested[0][0][1][0]
+                ];
+            }
+        "#;
+
+        assert_eq!(
+            execute_script(source, "Test", &[]).expect("string accesses succeed"),
+            Value::Array(vec![
+                Value::String("a".into()),
+                Value::String("c".into()),
+                Value::Nil,
+                Value::Nil,
+                Value::String("a".into()),
+                Value::String("a".into()),
+                Value::String("b".into()),
+                Value::String("b".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn vm_string_index_reports_cpp_type_error() {
+        let source = r#"#strict 2
+            func Test() {
+                var index = "x";
+                return "abc"[index];
+            }
+        "#;
+        let error = execute_script(source, "Test", &[]).expect_err("string index must fail");
+
+        assert_eq!(
+            error.message(),
+            "indexed string access: index of type string, int expected!"
+        );
+    }
+
+    #[test]
+    fn vm_string_index_result_has_fresh_cpp_string_identity() {
+        let source = r#"#strict 1
+            func Test() {
+                var source = "abc";
+                var indexed = source[0];
+                return [indexed == indexed, source[0] == source[0]];
+            }
+        "#;
+
+        assert_eq!(
+            execute_script(source, "Test", &[]).expect("string identity checks succeed"),
+            Value::Array(vec![Value::Bool(true), Value::Bool(false)])
+        );
     }
 
     #[test]
