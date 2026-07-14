@@ -9640,6 +9640,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetRDir", set_r_dir);
     script.register_host_function("AdjustWalkRotation", adjust_walk_rotation);
     script.register_host_function("GetRDir", get_r_dir);
+    script.register_host_function("FightWith", fight_with);
     script.register_host_function("FindBase", find_base);
     script.register_host_function("FindObject", find_object);
     script.register_host_function("FindObjectOwner", find_object_owner);
@@ -20327,10 +20328,92 @@ fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnFightWith (C4Script.cpp:5117-5132): require both cached
+/// OCF_FightReady flags, run target/clonk RejectFight in that order, then
+/// start the native Fight action on both objects with mutual targets.
+fn fight_with(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "FightWith",
+        "target",
+    )?;
+    let clonk = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "FightWith",
+        "clonk",
+    )?;
+    let Some(target) = target else {
+        return Ok(Value::Bool(false));
+    };
+    let clonk = clonk.or_else(|| {
+        HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.script_object_context)
+        })
+    });
+    let Some(clonk) = clonk else {
+        return Ok(Value::Bool(false));
+    };
+
+    let both_ready = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        [target, clonk].into_iter().all(|object| {
+            context
+                .get_world_object(object)
+                .is_some_and(|object| object.ocf() & ocf::FIGHT_READY != 0)
+        })
+    });
+    if !both_ready {
+        return Ok(Value::Bool(false));
+    }
+
+    // C4Object::Call silently skips an object that was deleted by the
+    // preceding callback, but fPassErrors=true propagates callback errors.
+    for object in [target, clonk] {
+        let present = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|context| context.object_status_present(object))
+        });
+        if !present {
+            continue;
+        }
+        let rejected = match call_world_object_own_function(
+            object,
+            "RejectFight",
+            &[object_reference_value(object)],
+        ) {
+            Some(result) => result?.as_bool(),
+            None => false,
+        };
+        if rejected {
+            return Ok(Value::Bool(false));
+        }
+    }
+
+    // ObjectActionFight calls SetActionByName directly. Its return value is
+    // deliberately ignored by FnFightWith, which still returns true.
+    let _ = native_set_action_by_name_with_target(clonk, "Fight", Some(target))?;
+    let _ = native_set_action_by_name_with_target(target, "Fight", Some(clonk))?;
+    Ok(Value::Bool(true))
+}
+
 /// Native `C4Object::SetActionByName` staging for engine helpers such as
 /// `C4Object::Fling`. This deliberately bypasses script-level function
 /// resolution: C++ calls the object method directly.
 fn native_set_action_by_name(target: ObjectId, name: &str) -> Result<bool, RuntimeError> {
+    native_set_action_by_name_with_target(target, name, None)
+}
+
+fn native_set_action_by_name_with_target(
+    target: ObjectId,
+    name: &str,
+    action_target: Option<ObjectId>,
+) -> Result<bool, RuntimeError> {
     let callbacks = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
@@ -20385,6 +20468,9 @@ fn native_set_action_by_name(target: ObjectId, name: &str) -> Result<bool, Runti
         object.set_action_phase(0);
         if object.update_effective_action(actual_name) {
             object.reset_action_data();
+        }
+        if let Some(action_target) = action_target {
+            object.set_action_target(0, Some(action_target));
         }
         object.current_fixed_position =
             FixedVec2::from_ints(object.current_position.x, object.current_position.y);
@@ -35485,6 +35571,7 @@ mod tests {
         "Extinguish",
         "ExtractLiquid",
         "ExtractMaterialAmount",
+        "FightWith",
         "FindBase",
         "FindConstructionSite",
         "FindContents",
@@ -47857,6 +47944,269 @@ func Probe(state) {
         let action = update.action.expect("action update exists");
         assert_eq!(action.target, None, "nil target1 must not stage a clear");
         assert_eq!(action.target2, None, "nil target2 must not stage a clear");
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn call_fight_with_fixture(
+        caller_ready: bool,
+        target_ready: bool,
+        caller_reject_body: Option<&str>,
+        target_reject_body: Option<&str>,
+        args: Vec<Value>,
+    ) -> (Result<Value, RuntimeError>, EffectContextOutcome) {
+        let caller_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+        let library = ActionLibrary::new(
+            Some("Walk".to_string()),
+            HashMap::from([
+                ("Walk".to_string(), ActionSpec::default()),
+                ("Fight".to_string(), ActionSpec::default()),
+                ("Checked".to_string(), ActionSpec::default()),
+            ]),
+        );
+        let caller_ocf = ocf::NORMAL
+            | if caller_ready {
+                ocf::FIGHT_READY
+            } else {
+                0
+            };
+        let target_ocf = ocf::NORMAL
+            | if target_ready {
+                ocf::FIGHT_READY
+            } else {
+                0
+            };
+
+        let world_object = |id, definition: &str, cached_ocf| {
+            let mut state = crate::preview_spawn_state(
+                Vector2::ZERO,
+                OWNER_NONE,
+                OWNER_NONE,
+                DEFAULT_CATEGORY,
+                crate::FULL_CON,
+                crate::CONTACT_DENSITY_SOLID,
+                Vec::new(),
+            );
+            state.action = crate::ActionState::new("Walk");
+            state.ocf = cached_ocf;
+            HostWorldObject::new(
+                id,
+                definition,
+                ObjectStatus::Normal,
+                "Walk",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                crate::FULL_CON,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            )
+            .with_ocf(cached_ocf)
+            .with_full_state(Rc::new(state))
+        };
+
+        let build_script = |probe: bool, reject_body: Option<&str>| {
+            let mut script = ScriptEngine::new();
+            register_host_functions(&mut script);
+            let mut source = String::from("#strict 2\n");
+            if probe {
+                source.push_str(
+                    "func Probe(target, clonk) { return FightWith(target, clonk); }\n",
+                );
+            }
+            if let Some(body) = reject_body {
+                source.push_str("func RejectFight(who) { ");
+                source.push_str(body);
+                source.push_str(" }\n");
+            }
+            script
+                .load_script(&source)
+                .expect("FightWith fixture script compiles");
+            Arc::new(script)
+        };
+
+        let world = HostWorldContext::from_objects([
+            world_object(caller_id, "CLNK", caller_ocf),
+            world_object(target_id, "TARG", target_ocf),
+        ])
+        .with_definition_metadata(Rc::new(HashMap::from([
+            (
+                DefinitionId::from("CLNK"),
+                DefinitionMetadata {
+                    action_library: library.clone(),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+            (
+                DefinitionId::from("TARG"),
+                DefinitionMetadata {
+                    action_library: library.clone(),
+                    ..DefinitionMetadata::default()
+                },
+            ),
+        ])))
+        .with_definition_scripts(HashMap::from([
+            (
+                DefinitionId::from("CLNK"),
+                build_script(true, caller_reject_body),
+            ),
+            (
+                DefinitionId::from("TARG"),
+                build_script(false, target_reject_body),
+            ),
+        ]));
+        let caller = HostObjectContext::new(
+            caller_id,
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Walk",
+            0,
+            0,
+            library,
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        )
+        .with_definition_id("CLNK")
+        .with_ocf(caller_ocf);
+
+        with_effect_context(Some(caller), &[], world, 3, || {
+            call_world_object_own_function(caller_id, "Probe", &args)
+                .unwrap_or_else(|| Err(RuntimeError::new("FightWith fixture Probe is missing")))
+        })
+    }
+
+    fn fight_with_action(
+        outcome: &EffectContextOutcome,
+        object: ObjectId,
+    ) -> Option<&ActionUpdate> {
+        if object == ObjectId::new(1) {
+            outcome.object_update.as_ref()?.action.as_ref()
+        } else {
+            outcome
+                .other_objects
+                .iter()
+                .find(|entry| entry.object_id == object)?
+                .update
+                .as_ref()?
+                .action
+                .as_ref()
+        }
+    }
+
+    #[test]
+    fn fight_with_sets_mutual_fight_actions_and_defaults_nil_clonk_to_caller() {
+        let caller_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+        let (result, outcome) = call_fight_with_fixture(
+            true,
+            true,
+            Some("return(who != this());"),
+            Some("return(who != this());"),
+            vec![object_reference_value(target_id), Value::Nil],
+        );
+
+        assert_eq!(result.expect("FightWith succeeds"), Value::Bool(true));
+        let caller_action =
+            fight_with_action(&outcome, caller_id).expect("caller Fight action recorded");
+        assert_eq!(caller_action.name.as_deref(), Some("Fight"));
+        assert_eq!(caller_action.target, Some(Some(target_id)));
+        let target_action =
+            fight_with_action(&outcome, target_id).expect("target Fight action recorded");
+        assert_eq!(target_action.name.as_deref(), Some("Fight"));
+        assert_eq!(target_action.target, Some(Some(caller_id)));
+    }
+
+    #[test]
+    fn fight_with_requires_fight_ready_on_both_objects_without_side_effects() {
+        for (caller_ready, target_ready) in [(false, true), (true, false)] {
+            let (result, outcome) = call_fight_with_fixture(
+                caller_ready,
+                target_ready,
+                Some("SetAction(\"Checked\"); return(false);"),
+                Some("SetAction(\"Checked\"); return(false);"),
+                vec![object_reference_value(ObjectId::new(2)), Value::Nil],
+            );
+
+            assert_eq!(result.expect("FightWith returns false"), Value::Bool(false));
+            assert!(outcome.object_update.is_none(), "caller remains unchanged");
+            assert!(
+                outcome.other_objects.is_empty(),
+                "OCF failure runs no callbacks or actions"
+            );
+        }
+    }
+
+    #[test]
+    fn fight_with_target_rejection_runs_first_and_skips_clonk_callback() {
+        let (result, outcome) = call_fight_with_fixture(
+            true,
+            true,
+            Some("SetAction(\"Checked\"); return(false);"),
+            Some("SetAction(\"Checked\"); return(true);"),
+            vec![object_reference_value(ObjectId::new(2)), Value::Nil],
+        );
+
+        assert_eq!(result.expect("target veto returns false"), Value::Bool(false));
+        assert!(
+            fight_with_action(&outcome, ObjectId::new(1)).is_none(),
+            "clonk callback and Fight action are both skipped"
+        );
+        let target_action = fight_with_action(&outcome, ObjectId::new(2))
+            .expect("target veto callback side effect is preserved");
+        assert_eq!(target_action.name.as_deref(), Some("Checked"));
+    }
+
+    #[test]
+    fn fight_with_clonk_rejection_runs_after_target_and_before_actions() {
+        let (result, outcome) = call_fight_with_fixture(
+            true,
+            true,
+            Some("SetAction(\"Checked\"); return(true);"),
+            Some("SetAction(\"Checked\"); return(false);"),
+            vec![object_reference_value(ObjectId::new(2)), Value::Nil],
+        );
+
+        assert_eq!(result.expect("clonk veto returns false"), Value::Bool(false));
+        let caller_action = fight_with_action(&outcome, ObjectId::new(1))
+            .expect("clonk veto callback side effect is preserved");
+        assert_eq!(caller_action.name.as_deref(), Some("Checked"));
+        let target_action = fight_with_action(&outcome, ObjectId::new(2))
+            .expect("target callback ran before clonk veto");
+        assert_eq!(target_action.name.as_deref(), Some("Checked"));
+    }
+
+    #[test]
+    fn fight_with_nil_target_returns_false_without_callbacks_or_actions() {
+        let (result, outcome) = call_fight_with_fixture(
+            true,
+            true,
+            Some("SetAction(\"Checked\"); return(false);"),
+            Some("SetAction(\"Checked\"); return(false);"),
+            vec![Value::Nil, object_reference_value(ObjectId::new(1))],
+        );
+
+        assert_eq!(result.expect("nil target returns false"), Value::Bool(false));
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+        assert!(
+            outcome.other_objects.is_empty(),
+            "nil target runs no callbacks or actions"
+        );
     }
 
     fn set_object_status_target_world(
