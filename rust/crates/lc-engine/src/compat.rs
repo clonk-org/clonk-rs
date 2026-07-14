@@ -18241,16 +18241,15 @@ fn set_action_targets(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow.as_mut().ok_or_else(|| {
             RuntimeError::new("SetActionTargets requires an active engine context")
         })?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        let Some(target) = object_id.or(context.script_object_context) else {
+            return Ok(Value::Bool(false));
         };
-
-        if let Some(target) = object_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
 
         object.set_action_target(0, target1);
         object.set_action_target(1, target2);
@@ -45707,6 +45706,109 @@ func Probe(state) {
         let action = update.action.expect("action update exists");
         assert_eq!(action.target, Some(Some(ObjectId::new(5))));
         assert_eq!(action.target2, Some(Some(ObjectId::new(6))));
+    }
+
+    fn set_action_targets_foreign_world(
+        target1: Option<ObjectId>,
+        target2: Option<ObjectId>,
+    ) -> (ObjectId, HostWorldContext) {
+        let target_id = ObjectId::new(2);
+        let mut state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        state.action.target = target1;
+        state.action.target2 = target2;
+        let target = HostWorldObject::new(
+            target_id,
+            "TARG",
+            ObjectStatus::Normal,
+            "Idle",
+            target1,
+            target2,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(state));
+        (target_id, HostWorldContext::from_objects([target]))
+    }
+
+    #[test]
+    fn set_action_targets_clears_both_slots_on_a_foreign_object() {
+        // FnSetActionTargets assigns both fields on an explicit pObj even
+        // when it differs from cthr->Obj (C4Script.cpp:1109-1117).
+        let (target_id, world) = set_action_targets_foreign_world(
+            Some(ObjectId::new(41)),
+            Some(ObjectId::new(42)),
+        );
+        let target = object_reference_value(target_id);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            Ok(Value::Array(vec![
+                set_action_targets(&[Value::Int(0), Value::Int(0), target.clone()])?,
+                get_action_target(&[Value::Int(0), target.clone()])?,
+                get_action_target(&[Value::Int(1), target])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("foreign SetActionTargets succeeds"),
+            Value::Array(vec![Value::Bool(true), Value::Nil, Value::Nil])
+        );
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+        let action = outcome
+            .other_objects
+            .iter()
+            .find(|object| object.object_id == target_id)
+            .and_then(|object| object.update.as_ref())
+            .and_then(|update| update.action.as_ref())
+            .expect("foreign action-target update recorded");
+        assert_eq!(action.target, Some(None));
+        assert_eq!(action.target2, Some(None));
+    }
+
+    #[test]
+    fn set_action_targets_sets_both_slots_on_a_foreign_object() {
+        let (target_id, world) = set_action_targets_foreign_world(None, None);
+        let first_id = ObjectId::new(31);
+        let second_id = ObjectId::new(32);
+        let target = object_reference_value(target_id);
+        let first = object_reference_value(first_id);
+        let second = object_reference_value(second_id);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            Ok(Value::Array(vec![
+                set_action_targets(&[first.clone(), second.clone(), target.clone()])?,
+                get_action_target(&[Value::Int(0), target.clone()])?,
+                get_action_target(&[Value::Int(1), target])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("foreign SetActionTargets succeeds"),
+            Value::Array(vec![Value::Bool(true), first, second])
+        );
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+        let action = outcome
+            .other_objects
+            .iter()
+            .find(|object| object.object_id == target_id)
+            .and_then(|object| object.update.as_ref())
+            .and_then(|update| update.action.as_ref())
+            .expect("foreign action-target update recorded");
+        assert_eq!(action.target, Some(Some(first_id)));
+        assert_eq!(action.target2, Some(Some(second_id)));
     }
 
     #[test]
