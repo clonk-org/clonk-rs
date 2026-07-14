@@ -357,7 +357,7 @@ impl Engine {
                 // Child overrides parent, but the parent's function stays
                 // reachable as the child's `inherited` target (C++ include
                 // linking sets OwnerOverloaded).
-                Some(own) => own.push_overload(function.clone()),
+                Some(own) => own.append_include_overload(function.clone()),
                 None => {
                     self.functions.insert(name.clone(), function.clone());
                 }

@@ -7569,17 +7569,6 @@ impl DefinitionPictureImage {
     pub fn color_mask(&self) -> Option<Arc<[u8]>> {
         self.color_mask.as_ref().map(Arc::clone)
     }
-
-    fn shares_storage_with(&self, other: &Self) -> bool {
-        self.width == other.width
-            && self.height == other.height
-            && Arc::ptr_eq(&self.pixels, &other.pixels)
-            && match (&self.color_mask, &other.color_mask) {
-                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-                (None, None) => true,
-                _ => false,
-            }
-    }
 }
 
 #[derive(Clone)]
@@ -7678,6 +7667,10 @@ pub struct Definition {
     /// (C4AulParse.cpp:301-380).
     script_source: String,
     includes: Vec<String>,
+    /// Mirrors C4AulScript::IncludesResolved: definitions already linked in a
+    /// prior resolve pass must not copy the same parent functions again when
+    /// a later definition is registered.
+    includes_resolved: bool,
     /// `#appendto` targets of this definition's script
     /// (C4AulScript::Appends; resolved by Engine::resolve_appends).
     appends: Vec<lc_script::AppendTo>,
@@ -7934,6 +7927,7 @@ impl Definition {
             script: Arc::new(script),
             script_source: source.to_string(),
             includes,
+            includes_resolved: false,
             appends,
             has_construction,
             has_initialize,
@@ -18882,80 +18876,68 @@ impl Engine {
     pub fn resolve_includes(&mut self) -> Result<(), EngineError> {
         self.definition_metadata_cache.borrow_mut().take();
         self.solid_mask_metadata_cache.borrow_mut().take();
-        // Iteratively merge includes until no more changes occur
-        // This ensures transitive dependencies are fully resolved
-        // (e.g., TRE2 -> TRE1 -> TREE means TRE2 gets functions from TREE)
-        let mut changed = true;
-
-        while changed {
-            changed = false;
-
-            // Collect all definitions that have includes
-            let ids_with_includes: Vec<String> = self
+        fn resolve_definition(
+            engine: &mut Engine,
+            child_id: &str,
+            resolving: &mut HashSet<String>,
+            resolved: &mut HashSet<String>,
+        ) -> Result<bool, EngineError> {
+            if engine
                 .definitions
-                .iter()
-                .filter(|(_, def)| !def.includes().is_empty())
-                .map(|(id, _)| id.clone())
-                .collect();
+                .get(child_id)
+                .is_some_and(|definition| definition.includes_resolved)
+            {
+                resolved.insert(child_id.to_string());
+                return Ok(true);
+            }
+            if resolved.contains(child_id) {
+                return Ok(true);
+            }
+            // C4AulScript::ResolveIncludes marks the recursive edge failed
+            // and lets its caller skip that include (C4AulLink.cpp:72-97).
+            if !resolving.insert(child_id.to_string()) {
+                return Ok(false);
+            }
+            let includes = engine
+                .definitions
+                .get(child_id)
+                .map(|definition| definition.includes().to_vec())
+                .unwrap_or_default();
 
-            // For each definition with includes, merge parent functions
-            for child_id in ids_with_includes {
-                let includes = self
-                    .definitions
-                    .get(&child_id)
-                    .map(|def| def.includes().to_vec())
-                    .unwrap_or_default();
-                let (before_rank_image, before_rank_count) = self
-                    .definitions
-                    .get(&child_id)
-                    .map(|definition| {
-                        (
-                            definition.rank_symbols_image.clone(),
-                            definition.rank_symbol_count,
-                        )
-                    })
-                    .unwrap_or((None, None));
-
-                for parent_id in &includes {
-                    // Check if parent exists
-                    if !self.definitions.contains_key(parent_id) {
-                        return Err(EngineError::UnknownDefinition(parent_id.clone()));
-                    }
-
-                    // Clone the parent to avoid borrow checker issues
-                    let parent = self.definitions.get(parent_id).unwrap().clone();
-
-                    // Count functions before merge to detect changes
-                    let before_count = self
-                        .definitions
-                        .get(&child_id)
-                        .map(|def| def.function_count())
-                        .unwrap_or(0);
-                    // Merge parent into child
-                    if let Some(child) = self.definitions.get_mut(&child_id) {
-                        child.merge_from(&parent);
-
-                        // Check if we added any functions
-                        let after_count = child.function_count();
-                        if after_count > before_count {
-                            changed = true;
-                        }
-                    }
+            // C4AulParseState::Parse_Script pushes each declaration to the
+            // FRONT, so ResolveIncludes sees sibling includes last-declared
+            // first (C4AulParse.cpp:1456; C4AulLink.cpp:86-96).
+            for parent_id in includes.iter().rev() {
+                if !engine.definitions.contains_key(parent_id) {
+                    return Err(EngineError::UnknownDefinition(parent_id.clone()));
                 }
-                if let Some(child) = self.definitions.get(&child_id) {
-                    let same_rank_image = match (
-                        before_rank_image.as_ref(),
-                        child.rank_symbols_image.as_ref(),
-                    ) {
-                        (Some(before), Some(after)) => before.shares_storage_with(after),
-                        (None, None) => true,
-                        _ => false,
-                    };
-                    if !same_rank_image || before_rank_count != child.rank_symbol_count {
-                        changed = true;
-                    }
+                if !resolve_definition(engine, parent_id, resolving, resolved)? {
+                    continue;
+                }
+                let parent = engine
+                    .definitions
+                    .get(parent_id)
+                    .expect("checked include exists")
+                    .clone();
+                if let Some(child) = engine.definitions.get_mut(child_id) {
+                    child.merge_from(&parent);
                 }
             }
+            resolving.remove(child_id);
+            if let Some(definition) = engine.definitions.get_mut(child_id) {
+                definition.includes_resolved = true;
+            }
+            resolved.insert(child_id.to_string());
+            Ok(true)
+        }
+
+        // C4AulScriptEngine resolves child scripts in registration order;
+        // this also makes the skipped edge deterministic for include cycles.
+        let definition_ids = self.definition_load_order.clone();
+        let mut resolving = HashSet::new();
+        let mut resolved = HashSet::new();
+        for definition_id in definition_ids {
+            let _ = resolve_definition(self, &definition_id, &mut resolving, &mut resolved)?;
         }
 
         Ok(())

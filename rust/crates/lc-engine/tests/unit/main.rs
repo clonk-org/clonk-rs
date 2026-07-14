@@ -24925,6 +24925,232 @@ func Probe() {
     // CLNK::ControlDownDouble when TRPR includes COWB includes CLNK
     // (Trapper.c4d/Cowboy.c4d/Clonk.c4d) — the GoldRush dismount chain.
     #[test]
+    fn sibling_includes_give_the_last_declaration_priority() {
+        // C4AulParse pushes includes to the front and ResolveIncludes walks
+        // that reversed list (C4AulParse.cpp:1456; C4AulLink.cpp:66-111).
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("INCA", "A", "public func Foo() { return(1); }")
+                    .expect("A compiles"),
+            )
+            .expect("A registers");
+        engine
+            .register_definition(
+                Definition::from_script("INCB", "B", "public func Foo() { return(2); }")
+                    .expect("B compiles"),
+            )
+            .expect("B registers");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "CHLD",
+                    "Child",
+                    "#include INCA\n#include INCB\n",
+                )
+                .expect("child compiles"),
+            )
+            .expect("child registers");
+        engine.resolve_includes().expect("includes resolve");
+        engine.resolve_includes().expect("repeat resolve is stable");
+        let id = engine
+            .spawn_object(SpawnConfig::new("CHLD").with_category(CATEGORY_OBJECT))
+            .expect("child spawns");
+        let index = engine.find_object_index(id).expect("child exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Foo", Vec::new())
+                .expect("Foo runs"),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn last_sibling_include_inherits_to_the_first() {
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("INCA", "A", "public func Foo() { return(1); }")
+                    .expect("A compiles"),
+            )
+            .expect("A registers");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "INCB",
+                    "B",
+                    "public func Foo() { return(_inherited()+10); }",
+                )
+                .expect("B compiles"),
+            )
+            .expect("B registers");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "CHLD",
+                    "Child",
+                    "#include INCA\n#include INCB\n",
+                )
+                .expect("child compiles"),
+            )
+            .expect("child registers");
+        engine.resolve_includes().expect("includes resolve");
+        let id = engine
+            .spawn_object(SpawnConfig::new("CHLD").with_category(CATEGORY_OBJECT))
+            .expect("child spawns");
+        let index = engine.find_object_index(id).expect("child exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Foo", Vec::new())
+                .expect("Foo runs"),
+            Value::Int(11)
+        );
+    }
+
+    #[test]
+    fn own_function_inherits_through_siblings_in_cpp_order() {
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "INCA",
+                    "A",
+                    "local order; public func Foo() { order=order*10+1; return(order); }",
+                )
+                .expect("A compiles"),
+            )
+            .expect("A registers");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "INCB",
+                    "B",
+                    "public func Foo() { order=order*10+2; return(_inherited()); }",
+                )
+                .expect("B compiles"),
+            )
+            .expect("B registers");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "CHLD",
+                    "Child",
+                    "#include INCA\n#include INCB\npublic func Foo() { order=order*10+3; return(inherited()); }",
+                )
+                .expect("child compiles"),
+            )
+            .expect("child registers");
+        engine.resolve_includes().expect("includes resolve");
+        engine.resolve_includes().expect("repeat resolve is stable");
+        let id = engine
+            .spawn_object(SpawnConfig::new("CHLD").with_category(CATEGORY_OBJECT))
+            .expect("child spawns");
+        let index = engine.find_object_index(id).expect("child exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Foo", Vec::new())
+                .expect("Foo runs"),
+            Value::Int(321),
+            "own -> last include B -> first include A"
+        );
+    }
+
+    #[test]
+    fn byte_identical_sibling_functions_remain_distinct_in_inherited_chain() {
+        // C++ copies one C4AulScriptFunc per include owner even when their
+        // bodies are byte-identical; structural equality must not collapse
+        // the two declarations.
+        let identical =
+            "public func Foo() { hits=hits+1; _inherited(); return(hits); }";
+        let mut engine = Engine::with_seed(0);
+        for (id, name) in [("INCA", "A"), ("INCB", "B")] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, name, identical).expect("include compiles"),
+                )
+                .expect("include registers");
+        }
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "CHLD",
+                    "Child",
+                    "#include INCA\n#include INCB\nlocal hits; public func Foo() { return(_inherited()); } public func Hits() { return(hits); }",
+                )
+                .expect("child compiles"),
+            )
+            .expect("child registers");
+        engine.resolve_includes().expect("includes resolve");
+        let id = engine
+            .spawn_object(SpawnConfig::new("CHLD").with_category(CATEGORY_OBJECT))
+            .expect("child spawns");
+        let index = engine.find_object_index(id).expect("child exists");
+        engine
+            .call_object_function(index, "Foo", Vec::new())
+            .expect("identical include chain runs");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Hits", Vec::new())
+                .expect("Hits runs"),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn magic_workshop_uses_bas8_basement_functions() {
+        // Shipped MagicWorkshop declares WTWR, WRKS, BAS8 in that order;
+        // C++ resolves the last sibling's BasementID/BasementWidth copies.
+        let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../content");
+        let scripts = [
+            ("BAS7", "Objects.c4d/Structures.c4d/Basements.c4d/Basement72.c4d/Script.c"),
+            ("BAS2", "Objects.c4d/Structures.c4d/Basements.c4d/Basement42.c4d/Script.c"),
+            ("BAS8", "Objects.c4d/Structures.c4d/Basements.c4d/Basement80.c4d/Script.c"),
+            ("WTWR", "Objects.c4d/Structures.c4d/WizardTower.c4d/Script.c"),
+            ("WRKS", "Objects.c4d/Structures.c4d/Workshop.c4d/Script.c"),
+            ("MWKS", "Fantasy.c4d/Structures.c4d/MagicWorkshop.c4d/Script.c"),
+        ];
+        let mut engine = Engine::with_seed(0);
+        for id in ["DOOR", "CXEC"] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, id, "#strict\n").expect("stub compiles"),
+                )
+                .expect("stub registers");
+        }
+        for (id, relative) in scripts {
+            let source = std::fs::read(content.join(relative)).expect("shipped script reads");
+            let source = String::from_utf8_lossy(&source);
+            engine
+                .register_definition(
+                    Definition::from_script(id, id, &source).expect("shipped script compiles"),
+                )
+                .expect("shipped definition registers");
+        }
+        engine.resolve_includes().expect("shipped includes resolve");
+        let id = engine
+            .spawn_object(SpawnConfig::new("MWKS").with_category(CATEGORY_OBJECT))
+            .expect("MagicWorkshop spawns");
+        let index = engine.find_object_index(id).expect("workshop exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "BasementID", Vec::new())
+                .expect("BasementID runs"),
+            Value::C4Id("BAS8".to_string())
+        );
+        assert_eq!(
+            engine
+                .call_object_function(index, "BasementWidth", Vec::new())
+                .expect("BasementWidth runs"),
+            Value::Int(80)
+        );
+    }
+
+    #[test]
     fn underscore_inherited_chains_through_a_two_level_include() {
         let base = r#"#strict
 local hits;

@@ -172,9 +172,8 @@ pub struct Function {
 
 impl Function {
     /// Hang `parent` at the tail of this function's overload chain (C++
-    /// `Fn->OwnerOverloaded`). Idempotent: include resolution re-merges to a
-    /// fixpoint, so a parent already on the chain is replaced (it may have
-    /// gained its own chain since) rather than appended twice.
+    /// `Fn->OwnerOverloaded`). Idempotent for repeat-link callers: a parent
+    /// already on the chain is replaced when it has gained its own chain.
     pub fn push_overload(&mut self, parent: Function) {
         fn same_definition(a: &Function, b: &Function) -> bool {
             a.name == b.name
@@ -204,6 +203,17 @@ impl Function {
                 }
             }
         }
+    }
+
+    /// Append an include copy without structural deduplication. C++ creates a
+    /// distinct C4AulScriptFunc for every include edge, including identical
+    /// bodies and diamond paths (C4AulLink.cpp:113-141).
+    pub fn append_include_overload(&mut self, parent: Function) {
+        let mut tail = &mut self.overloaded;
+        while let Some(next) = tail {
+            tail = &mut std::sync::Arc::make_mut(next).overloaded;
+        }
+        *tail = Some(std::sync::Arc::new(parent));
     }
 }
 
