@@ -92,9 +92,16 @@ fn increment_not_affected() {
     // ++x = y should still be invalid (pre-increment doesn't return lvalue in this context)
     // This ensures our fix doesn't break increment/decrement behavior
     let source = r#"func Test() { var x; ++x = 42; }"#;
-    let result = lc_script::Script::compile(source);
-    // This should fail with "invalid assignment target"
-    assert!(result.is_err());
+    let script = lc_script::Script::compile(source)
+        .expect("the invalid function body is quarantined instead of aborting the script");
+    assert!(!script.parse_diagnostics().is_empty());
+
+    let mut engine = lc_script::Engine::new();
+    engine.add_script(script);
+    let error = engine
+        .call("Test", &[])
+        .expect_err("calling the quarantined function must surface its parse error");
+    assert!(error.to_string().contains("parse error"));
 }
 
 #[test]

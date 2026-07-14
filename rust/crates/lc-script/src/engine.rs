@@ -139,16 +139,17 @@ pub struct Script {
     appends: Vec<crate::ast::AppendTo>,
     strict_level: Option<u8>,
     var_decls: Vec<VarDecl>, // Script-level variable declarations
+    parse_diagnostics: Vec<ParseError>,
 }
 
 impl Script {
     pub fn compile(source: &str) -> Result<Self, ParseError> {
         let mut parser = Parser::new(source);
-        let ast = parser.parse_script()?;
-        Ok(Self::from_ast(ast))
+        let (ast, diagnostics) = parser.parse_script_recovering();
+        Ok(Self::from_ast(ast, diagnostics))
     }
 
-    fn from_ast(ast: AstScript) -> Self {
+    fn from_ast(ast: AstScript, parse_diagnostics: Vec<ParseError>) -> Self {
         let mut functions: HashMap<String, Function> = HashMap::new();
         for mut function in ast.functions {
             // Each function carries its owning script's #strict level so the VM
@@ -169,6 +170,7 @@ impl Script {
             appends: ast.appends,
             strict_level: ast.strict_level,
             var_decls: ast.var_decls,
+            parse_diagnostics,
         }
     }
 
@@ -196,6 +198,13 @@ impl Script {
 
     pub fn var_decls(&self) -> &[crate::ast::VarDecl] {
         &self.var_decls
+    }
+
+    /// Errors quarantined during C4Aul-style declaration/function recovery.
+    /// The partial script is still executable; broken functions contain an
+    /// AB_ERR analogue and raise if execution reaches the bad suffix.
+    pub fn parse_diagnostics(&self) -> &[ParseError] {
+        &self.parse_diagnostics
     }
 
     /// Returns the script body used by C4AulScript::AppendTo after global

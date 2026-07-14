@@ -7943,6 +7943,13 @@ impl Definition {
                 source: parse_error.into(),
                 recovery: None,
             })?;
+        for diagnostic in compiled_script.parse_diagnostics() {
+            tracing::warn!(
+                definition = %id,
+                %diagnostic,
+                "definition script parse error quarantined; continuing like C++"
+            );
+        }
 
         let includes = compiled_script.includes().to_vec();
         let appends = compiled_script.appends().to_vec();
@@ -11587,6 +11594,13 @@ impl ScenarioScript {
                 source: ScriptError::from(source),
                 recovery: None,
             })?;
+        for diagnostic in compiled.parse_diagnostics() {
+            tracing::warn!(
+                script = %name,
+                %diagnostic,
+                "scenario script parse error quarantined; continuing like C++"
+            );
+        }
         let append_script = (!compiled.appends().is_empty())
             .then(|| compiled.clone().without_static_declarations());
         script.add_script(compiled);
@@ -18869,6 +18883,13 @@ impl Engine {
         for (name, source) in sources {
             match lc_script::Script::compile(source) {
                 Ok(script) => {
+                    for diagnostic in script.parse_diagnostics() {
+                        tracing::warn!(
+                            script = %name,
+                            %diagnostic,
+                            "global script parse error quarantined; continuing like C++"
+                        );
+                    }
                     // System/scenario System.c4g declarations participate in
                     // the same engine-global GlobalNamed/GlobalConsts tables
                     // as definition scripts (C4Aul preparser and

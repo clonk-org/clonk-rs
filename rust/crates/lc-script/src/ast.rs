@@ -219,6 +219,14 @@ impl Function {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
+    /// C4Aul's AB_ERR bytecode sentinel: a function body parse failure does
+    /// not remove the function symbol, but raises when execution reaches the
+    /// broken suffix (C4AulParse.cpp:3549-3577).
+    ParseError {
+        message: String,
+        line: usize,
+        column: usize,
+    },
     VarDecl {
         name: String,
         init: Option<Expr>,

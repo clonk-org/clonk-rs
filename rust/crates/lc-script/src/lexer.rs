@@ -784,11 +784,17 @@ impl<'a> Lexer<'a> {
                             '"' => value.push('"'),
                             '\\' => value.push('\\'),
                             other => {
-                                return Err(ParseError::new(
+                                let error = ParseError::new(
                                     format!("unknown escape sequence \\{other}"),
                                     line,
                                     column,
-                                ));
+                                );
+                                // Recovery must resume after this string's
+                                // closing quote. Returning immediately would
+                                // make that quote look like a new string and
+                                // could swallow every later declaration.
+                                self.skip_string_remainder();
+                                return Err(error);
                             }
                         }
                     } else {
@@ -799,6 +805,19 @@ impl<'a> Lexer<'a> {
             }
         }
         Err(ParseError::new("unterminated string literal", line, column))
+    }
+
+    fn skip_string_remainder(&mut self) {
+        while let Some((_, ch, _, _)) = self.bump_char() {
+            match ch {
+                '"' => break,
+                '\\' => {
+                    // An escaped quote does not end the original string.
+                    self.bump_char();
+                }
+                _ => {}
+            }
+        }
     }
 
     fn lex_locale_key(

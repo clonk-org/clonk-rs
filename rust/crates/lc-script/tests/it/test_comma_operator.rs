@@ -230,11 +230,18 @@ fn comma_in_var_decl_without_parens_is_rejected_like_cpp() {
     // `Parse_Expression()` — which stops at the comma — and then expects another
     // variable NAME. `var x = 1, 2;` therefore fails in C++ ("variable name"
     // expected, finding the int `2`). The Rust port must reject it identically.
-    let rejected = lc_script::Script::compile(r#"func Test() { var x = 1, 2; }"#);
+    let rejected = lc_script::Script::compile(r#"func Test() { var x = 1, 2; }"#)
+        .expect("the invalid function body is quarantined instead of aborting the script");
     assert!(
-        rejected.is_err(),
-        "unparenthesized comma in a var declaration must be rejected (C4Script has no comma operator)"
+        !rejected.parse_diagnostics().is_empty(),
+        "unparenthesized comma in a var declaration must produce a parse diagnostic"
     );
+    let mut engine = Engine::new();
+    engine.add_script(rejected);
+    let error = engine
+        .call("Test", &[])
+        .expect_err("calling the quarantined function must surface its parse error");
+    assert!(error.to_string().contains("parse error"));
 
     // The standard multi-declarator form must keep compiling: here the comma is
     // a declarator separator (`var a = 1` then `b = 2`), which C++ Parse_Var

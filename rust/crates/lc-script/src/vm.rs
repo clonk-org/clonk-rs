@@ -1197,6 +1197,13 @@ impl<'a> Vm<'a> {
         returns_reference: bool,
     ) -> Result<ControlFlow, RuntimeError> {
         match statement {
+            Stmt::ParseError {
+                message,
+                line,
+                column,
+            } => Err(RuntimeError::new(format!(
+                "parse error at {line}:{column}: {message}"
+            ))),
             Stmt::VarDecl { name, init } => {
                 let value = match init {
                     Some(expr) => self.evaluate(expr, env, depth)?,

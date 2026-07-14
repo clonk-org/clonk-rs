@@ -32,7 +32,7 @@ impl RuntimeError {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 #[error("parse error at {line}:{column}: {message}")]
 pub struct ParseError {
     message: String,

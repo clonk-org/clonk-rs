@@ -9720,6 +9720,46 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn global_script_parse_recovery_keeps_later_good_functions() {
+        let mut engine = Engine::with_seed(7);
+        let loaded = engine.install_global_scripts(&[(
+            "System.c4g/Recover.c".to_string(),
+            "global func BrokenGlobal() { , }\n\
+             global func HealthyGlobal() { return 42; }\n"
+                .to_string(),
+        )]);
+        assert_eq!(
+            loaded, 1,
+            "one bad function does not skip its System.c4g script"
+        );
+
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "TSTD",
+                    "Test",
+                    "func ReadHealthy() { return HealthyGlobal(); }\n\
+                     func CallBroken() { return BrokenGlobal(); }",
+                )
+                .expect("definition compiles"),
+            )
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("TSTD"))
+            .expect("object spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "ReadHealthy", Vec::new())
+                .expect("the healthy global function runs"),
+            Value::Int(42)
+        );
+        engine
+            .call_object_function(idx, "CallBroken", Vec::new())
+            .expect_err("the broken global function remains an erroring symbol");
+    }
+
+    #[test]
     fn global_numbered_slots_are_live_references_like_cpp() {
         // FnGlobal returns C4ValueList::operator[](index).GetRef()
         // (C4Script.cpp:3404-3407); the mutable list clamps negative indices

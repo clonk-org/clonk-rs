@@ -45,6 +45,7 @@ mod test_multi_var_decl;
 mod test_nil_coalescing;
 mod test_old_style_functions;
 mod test_param_type_annotation;
+mod test_parse_recovery;
 mod test_reference_parameters;
 mod test_reference_return_functions;
 mod test_return_with_space;

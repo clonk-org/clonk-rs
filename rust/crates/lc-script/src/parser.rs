@@ -17,6 +17,14 @@ pub struct Parser<'a> {
     // C4Aul's current per-script strictness. Legacy `Name:` declarations are
     // legal only below STRICT2 (C4AulParse.cpp:1715-1717).
     strict_level: u8,
+    /// Logical brace depth of consumed tokens. Recovery uses this to skip a
+    /// broken function's remaining body without swallowing the next
+    /// top-level declaration.
+    brace_depth: usize,
+    /// Logical stream progress, excluding speculative tokens that were put
+    /// back. C4Aul advances past an offending top-level token only when the
+    /// failed parse attempt itself made no progress.
+    consumed_tokens: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -27,6 +35,8 @@ impl<'a> Parser<'a> {
             lookahead_buffer: Vec::new(),
             speculative_tokens: None,
             strict_level: 0,
+            brace_depth: 0,
+            consumed_tokens: 0,
         }
     }
 
@@ -37,6 +47,7 @@ impl<'a> Parser<'a> {
         self.parse_expression()
     }
 
+    #[allow(dead_code)]
     pub fn parse_script(&mut self) -> Result<Script, ParseError> {
         // Parse directives, variable declarations, and functions
         // Directives and variable declarations can be interspersed
@@ -137,6 +148,156 @@ impl<'a> Parser<'a> {
         ))
     }
 
+    /// C4Aul preparses each top-level declaration independently and later
+    /// compiles each function independently (C4AulParse.cpp:1434-1561,
+    /// 3549-3577). Return the partial script plus diagnostics instead of
+    /// dropping everything after the first error.
+    pub fn parse_script_recovering(&mut self) -> (Script, Vec<ParseError>) {
+        let mut includes = Vec::new();
+        let mut appends = Vec::new();
+        let mut strict_level = None;
+        let mut var_decls = Vec::new();
+        let mut functions = Vec::new();
+        let mut diagnostics = Vec::new();
+        let mut top_level_ok = true;
+
+        loop {
+            match self.is_eof() {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(error) => {
+                    if top_level_ok {
+                        diagnostics.push(error);
+                    }
+                    top_level_ok = false;
+                    // Lexer errors consume their offending bytes. Retry at
+                    // the next token rather than discarding another one.
+                    continue;
+                }
+            }
+
+            let declaration_start = self.consumed_tokens;
+            let declaration_token = match self.peek() {
+                Ok(token) => token.clone(),
+                Err(error) => {
+                    if top_level_ok {
+                        diagnostics.push(error);
+                    }
+                    top_level_ok = false;
+                    continue;
+                }
+            };
+
+            let attempt = (|| -> Result<(), ParseError> {
+                if let Some(directive) = self.try_parse_directive()? {
+                    match directive.as_str() {
+                        "#include" => {
+                            let id = self.next()?;
+                            match id.kind {
+                                TokenKind::Identifier(id_str) | TokenKind::C4Id(id_str) => {
+                                    includes.push(id_str);
+                                }
+                                _ => {
+                                    return Err(ParseError::new(
+                                        "expected definition ID after #include",
+                                        id.line,
+                                        id.column,
+                                    ))
+                                }
+                            }
+                        }
+                        "#appendto" => {
+                            let next = self.next()?;
+                            appends.push(match &next.kind {
+                                TokenKind::Identifier(id) | TokenKind::C4Id(id) => {
+                                    AppendTo::Id(id.clone())
+                                }
+                                TokenKind::Symbol(Symbol::Star) => AppendTo::Wildcard,
+                                _ => {
+                                    return Err(ParseError::new(
+                                        "expected definition ID or '*' after #appendto",
+                                        next.line,
+                                        next.column,
+                                    ))
+                                }
+                            });
+                            if let Ok(token) = self.peek() {
+                                if matches!(&token.kind, TokenKind::Identifier(word) if word == "nowarn")
+                                {
+                                    self.next()?;
+                                }
+                            }
+                        }
+                        "#strict" => {
+                            // C++ stores STRICT1 before validating an
+                            // explicit level, so `#strict 4` retains level 1.
+                            strict_level = Some(1);
+                            self.strict_level = 1;
+                            if let Ok(token) = self.peek().cloned() {
+                                if let TokenKind::Number(level) = token.kind {
+                                    if (1..=3).contains(&level) {
+                                        strict_level = Some(level as u8);
+                                        self.strict_level = level as u8;
+                                        self.next()?;
+                                    } else {
+                                        return Err(ParseError::new(
+                                            "unknown strict level",
+                                            token.line,
+                                            token.column,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(ParseError::new(
+                                format!("unknown directive: {directive}"),
+                                declaration_token.line,
+                                declaration_token.column,
+                            ));
+                        }
+                    }
+                } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Local) {
+                    self.consume()?;
+                    var_decls.extend(self.parse_var_decl_list(VarDeclKind::Local)?);
+                } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Static) {
+                    self.consume()?;
+                    if self.consume_if_keyword(Keyword::Const)?.is_some() {
+                        var_decls.extend(self.parse_var_decl_list(VarDeclKind::StaticConst)?);
+                    } else {
+                        var_decls.extend(self.parse_var_decl_list(VarDeclKind::Static)?);
+                    }
+                } else {
+                    let (function, error) = self.parse_function_recovering()?;
+                    functions.push(function);
+                    if let Some(error) = error {
+                        diagnostics.push(error);
+                    }
+                }
+                Ok(())
+            })();
+
+            match attempt {
+                Ok(()) => top_level_ok = true,
+                Err(error) => {
+                    if top_level_ok {
+                        diagnostics.push(error);
+                    }
+                    top_level_ok = false;
+                    if self.consumed_tokens == declaration_start {
+                        self.discard_one_recovery_token();
+                    }
+                }
+            }
+        }
+
+        (
+            Script::with_directives(functions, var_decls, includes, appends, strict_level),
+            diagnostics,
+        )
+    }
+
+    #[allow(dead_code)]
     fn parse_function(&mut self) -> Result<Function, ParseError> {
         // Parse optional access modifier (private/protected/public/global)
         // Default is public if no modifier specified
@@ -186,6 +347,77 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_function_recovering(&mut self) -> Result<(Function, Option<ParseError>), ParseError> {
+        let access = if self.consume_if_keyword(Keyword::Private)?.is_some() {
+            AccessLevel::Private
+        } else if self.consume_if_keyword(Keyword::Protected)?.is_some() {
+            AccessLevel::Protected
+        } else if self.consume_if_keyword(Keyword::Public)?.is_some() {
+            AccessLevel::Public
+        } else if self.consume_if_keyword(Keyword::Global)?.is_some() {
+            AccessLevel::Global
+        } else {
+            AccessLevel::Public
+        };
+
+        if !self.check_keyword(Keyword::Func)? {
+            return self.parse_old_style_function_recovering(access);
+        }
+        self.expect_keyword(Keyword::Func, "expected 'func' declaration")?;
+        let returns_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
+        let name_token = self.expect_identifier("expected function name")?;
+        let name = if let TokenKind::Identifier(name) = name_token.kind.clone() {
+            name
+        } else {
+            unreachable!()
+        };
+        self.expect_symbol(Symbol::LParen, "expected '(' after function name")?;
+        let params = self.parse_parameter_list()?;
+        self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
+        self.expect_symbol(Symbol::LBrace, "expected '{' to start function body")?;
+        let body_depth = self.brace_depth;
+
+        let mut description = None;
+        let mut body = Vec::new();
+        let error = match self.parse_function_description() {
+            Ok(parsed) => {
+                description = parsed;
+                let (parsed_body, error) = self.parse_block_statements_until_error();
+                body = parsed_body;
+                match error {
+                    Some(error) => Some(error),
+                    None => self
+                        .expect_symbol(Symbol::RBrace, "expected '}' after function body")
+                        .err(),
+                }
+            }
+            Err(error) => Some(error),
+        };
+
+        if let Some(error) = &error {
+            self.recover_function_body(body_depth);
+            body.push(Stmt::ParseError {
+                message: error.message().to_string(),
+                line: error.line(),
+                column: error.column(),
+            });
+        }
+
+        Ok((
+            Function {
+                name,
+                params,
+                body,
+                access,
+                returns_reference,
+                description,
+                strict_level: None,
+                overloaded: None,
+            },
+            error,
+        ))
+    }
+
     fn parse_old_style_function(&mut self, access: AccessLevel) -> Result<Function, ParseError> {
         let name_token = self.expect_identifier("expected function declaration")?;
         let name = match name_token.kind {
@@ -217,6 +449,82 @@ impl<'a> Parser<'a> {
             strict_level: None,
             overloaded: None,
         })
+    }
+
+    fn parse_old_style_function_recovering(
+        &mut self,
+        access: AccessLevel,
+    ) -> Result<(Function, Option<ParseError>), ParseError> {
+        let name_token = self.expect_identifier("expected function declaration")?;
+        let name = match name_token.kind {
+            TokenKind::Identifier(name) | TokenKind::C4Id(name) => name,
+            _ => unreachable!(),
+        };
+        if self.strict_level >= 2 {
+            return Err(ParseError::new(
+                format!("declaration expected, but found identifier '{name}'"),
+                name_token.line,
+                name_token.column,
+            ));
+        }
+        self.expect_symbol(Symbol::Colon, "expected ':' after old-style function name")?;
+        let body_depth = self.brace_depth;
+
+        let mut description = None;
+        let mut body = Vec::new();
+        let mut error = match self.parse_function_description() {
+            Ok(parsed) => {
+                description = parsed;
+                None
+            }
+            Err(error) => Some(error),
+        };
+
+        while error.is_none() {
+            match self.is_eof() {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(parse_error) => {
+                    error = Some(parse_error);
+                    break;
+                }
+            }
+            match self.is_old_style_function_boundary() {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(parse_error) => {
+                    error = Some(parse_error);
+                    break;
+                }
+            }
+            match self.parse_statement() {
+                Ok(statement) => body.push(statement),
+                Err(parse_error) => error = Some(parse_error),
+            }
+        }
+
+        if let Some(parse_error) = &error {
+            self.recover_old_style_function_body(body_depth);
+            body.push(Stmt::ParseError {
+                message: parse_error.message().to_string(),
+                line: parse_error.line(),
+                column: parse_error.column(),
+            });
+        }
+
+        Ok((
+            Function {
+                name,
+                params: Vec::new(),
+                body,
+                access,
+                returns_reference: false,
+                description,
+                strict_level: None,
+                overloaded: None,
+            },
+            error,
+        ))
     }
 
     /// Old-format functions end at EOF/directives, a new-format declaration,
@@ -446,6 +754,76 @@ impl<'a> Parser<'a> {
         Ok(statements)
     }
 
+    /// Parse as much of a function body as possible. C++ retains bytecode
+    /// emitted before a parser failure, then appends AB_ERR; preserving the
+    /// statement prefix gives the tree-walking VM the same observable order.
+    fn parse_block_statements_until_error(&mut self) -> (Vec<Stmt>, Option<ParseError>) {
+        let mut statements = Vec::new();
+        loop {
+            match self.check_symbol(Symbol::RBrace) {
+                Ok(true) => return (statements, None),
+                Ok(false) => {}
+                Err(error) => return (statements, Some(error)),
+            }
+            match self.is_eof() {
+                Ok(true) => return (statements, None),
+                Ok(false) => {}
+                Err(error) => return (statements, Some(error)),
+            }
+            match self.parse_statement() {
+                Ok(statement) => statements.push(statement),
+                Err(error) => return (statements, Some(error)),
+            }
+        }
+    }
+
+    fn recover_function_body(&mut self, body_depth: usize) {
+        while self.brace_depth >= body_depth {
+            match self.consume() {
+                Ok(token) => {
+                    if matches!(token.kind, TokenKind::Eof) {
+                        break;
+                    }
+                }
+                // The lexer advanced past the bad bytes before returning
+                // its error. Clear any cached token and keep scanning.
+                Err(_) => self.peeked = None,
+            }
+        }
+    }
+
+    fn recover_old_style_function_body(&mut self, body_depth: usize) {
+        loop {
+            if self.brace_depth <= body_depth {
+                match self.is_eof() {
+                    Ok(true) => break,
+                    Ok(false) => {}
+                    Err(_) => {
+                        self.peeked = None;
+                        continue;
+                    }
+                }
+                match self.is_old_style_function_boundary() {
+                    Ok(true) => break,
+                    Ok(false) => {}
+                    Err(_) => {
+                        self.peeked = None;
+                        continue;
+                    }
+                }
+            }
+
+            match self.consume() {
+                Ok(token) => {
+                    if matches!(token.kind, TokenKind::Eof) {
+                        break;
+                    }
+                }
+                Err(_) => self.peeked = None,
+            }
+        }
+    }
+
     fn parse_function_description(&mut self) -> Result<Option<String>, ParseError> {
         if !self.check_symbol(Symbol::LBracket)? {
             return Ok(None);
@@ -617,6 +995,7 @@ impl<'a> Parser<'a> {
             if let Some(peeked_token) = self.peeked.take() {
                 self.lookahead_buffer.insert(0, peeked_token);
             }
+            self.rewind_consumed_token(&lparen_token);
             self.lookahead_buffer.insert(0, lparen_token);
             self.peeked = None;
         }
@@ -797,6 +1176,8 @@ impl<'a> Parser<'a> {
             } else {
                 // C-style for: restore both tokens
                 // Push in reverse order so token1 comes out first
+                self.rewind_consumed_token(&token2);
+                self.rewind_consumed_token(&token1);
                 self.lookahead_buffer.insert(0, token2);
                 self.lookahead_buffer.insert(0, token1);
                 // Clear peeked to ensure restored tokens are seen first
@@ -1317,6 +1698,7 @@ impl<'a> Parser<'a> {
             }
             // Restore tokens in reverse order so they come out in the correct order
             for token in tokens.into_iter().rev() {
+                self.rewind_consumed_token(&token);
                 self.lookahead_buffer.insert(0, token);
             }
         }
@@ -1771,11 +2153,44 @@ impl<'a> Parser<'a> {
         self.peek()?;
         // Now take the peeked token
         let token = self.peeked.take().unwrap();
+        self.account_consumed_token(&token);
         // Track tokens if in speculative mode
         if let Some(ref mut tokens) = self.speculative_tokens {
             tokens.push(token.clone());
         }
         Ok(token)
+    }
+
+    fn account_consumed_token(&mut self, token: &Token) {
+        self.consumed_tokens = self.consumed_tokens.saturating_add(1);
+        match token.kind {
+            TokenKind::Symbol(Symbol::LBrace) => {
+                self.brace_depth = self.brace_depth.saturating_add(1)
+            }
+            TokenKind::Symbol(Symbol::RBrace) => {
+                self.brace_depth = self.brace_depth.saturating_sub(1)
+            }
+            _ => {}
+        }
+    }
+
+    fn rewind_consumed_token(&mut self, token: &Token) {
+        self.consumed_tokens = self.consumed_tokens.saturating_sub(1);
+        match token.kind {
+            TokenKind::Symbol(Symbol::LBrace) => {
+                self.brace_depth = self.brace_depth.saturating_sub(1)
+            }
+            TokenKind::Symbol(Symbol::RBrace) => {
+                self.brace_depth = self.brace_depth.saturating_add(1)
+            }
+            _ => {}
+        }
+    }
+
+    fn discard_one_recovery_token(&mut self) {
+        if self.consume().is_err() {
+            self.peeked = None;
+        }
     }
 
     fn next(&mut self) -> Result<Token, ParseError> {

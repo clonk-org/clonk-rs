@@ -46,10 +46,21 @@ fn old_style_labels_define_separate_callable_functions_below_strict_two() {
 #[test]
 fn strict_two_rejects_old_style_function_labels() {
     // C4AulParse.cpp:1715-1717 makes the legacy declaration a hard parse
-    // error at #strict 2 and above.
-    let error = match Script::compile("#strict 2\nLegacy:\n return(1);") {
-        Ok(_) => panic!("#strict 2 must reject old-style declarations"),
-        Err(error) => error,
-    };
-    assert!(error.message().contains("declaration"));
+    // error at #strict 2 and above. Script loading still recovers at the next
+    // top-level declaration, so the error is retained as a diagnostic.
+    let script = Script::compile("#strict 2\nLegacy:\n return(1);")
+        .expect("the invalid declaration is quarantined instead of aborting the script");
+    assert!(
+        script
+            .parse_diagnostics()
+            .iter()
+            .any(|error| error.message().contains("declaration")),
+        "the strictness violation must remain observable"
+    );
+
+    let mut engine = Engine::new();
+    engine.add_script(script);
+    engine
+        .call("Legacy", &[])
+        .expect_err("a rejected old-style declaration must not become callable");
 }

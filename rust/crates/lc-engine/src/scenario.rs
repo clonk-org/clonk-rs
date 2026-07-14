@@ -2500,11 +2500,20 @@ impl Scenario {
                     .ok_or_else(|| ScenarioError::UnknownDefinition(id.clone()))?,
                 DefinitionLoadStep::Declarations { name, source } => {
                     match lc_script::Script::compile(source) {
-                        Ok(script) => lc_script::register_global_declarations(
-                            script.var_decls(),
-                            &engine.script_globals,
-                            Some(&engine.script_global_consts),
-                        ),
+                        Ok(script) => {
+                            for diagnostic in script.parse_diagnostics() {
+                                tracing::warn!(
+                                    definition = %name,
+                                    %diagnostic,
+                                    "superseded definition parse error quarantined; continuing like C++"
+                                );
+                            }
+                            lc_script::register_global_declarations(
+                                script.var_decls(),
+                                &engine.script_globals,
+                                Some(&engine.script_global_consts),
+                            )
+                        }
                         Err(error) => tracing::warn!(
                             definition = %name,
                             %error,
@@ -17640,19 +17649,19 @@ public func ActualizePhase(pClonk)
 
     #[test]
     fn scenario_script_parse_errors_are_logged_not_fatal_like_cpp() {
-        // A scenario Script.c that fails to compile logs the parse error and
-        // the scenario runs without a script (C4ScriptHost load behavior).
+        // A scenario Script.c with no valid declarations still installs its
+        // recovered (empty) script host after logging the parse error.
         let dir = tempdir().expect("tempdir");
         let scenario_dir = write_resilience_fixture(dir.path(), None, "global func {{{ broken\n");
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         assert!(
-            engine.scenario_script.is_none(),
-            "no scenario script installed when it cannot compile"
+            engine.scenario_script.is_some(),
+            "the recovered scenario script host remains installed"
         );
         assert_eq!(
             join_test_player(&mut engine).len(),
             1,
-            "the scenario still runs without its script"
+            "the scenario still runs after the parse error"
         );
     }
 
