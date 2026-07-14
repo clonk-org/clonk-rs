@@ -20717,7 +20717,11 @@ fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "ShakeFree", "x")?;
     let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "ShakeFree", "y")?;
-    let radius = value_to_i32(&args[2], "ShakeFree", "radius")?;
+    let radius = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "ShakeFree",
+        "radius",
+    )?;
     if radius <= 0 {
         return Ok(Value::Bool(false));
     }
@@ -40062,14 +40066,19 @@ public func RejectConstruction(x, y, builder)
     }
 
     #[test]
-    fn shake_free_rejects_non_positive_radius() {
-        let args = [Value::Int(10), Value::Int(20), Value::Int(0)];
-        let (result, outcome) = with_object_host_context(|| shake_free(&args));
-        assert_eq!(
-            result.expect("ShakeFree handles zero radius"),
-            Value::Bool(false)
-        );
-        assert!(outcome.landscape.is_empty());
+    fn shake_free_missing_and_non_positive_radius_are_noops() {
+        for args in [
+            Vec::new(),
+            vec![Value::Int(10), Value::Int(20)],
+            vec![Value::Int(10), Value::Int(20), Value::Int(0)],
+        ] {
+            let (result, outcome) = with_object_host_context(|| shake_free(&args));
+            assert_eq!(
+                result.expect("ShakeFree handles a missing or zero radius"),
+                Value::Bool(false)
+            );
+            assert!(outcome.landscape.is_empty());
+        }
     }
 
     #[test]
