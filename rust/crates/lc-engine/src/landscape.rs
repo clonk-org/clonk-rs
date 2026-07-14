@@ -5,7 +5,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::material::TemperatureDirection;
-use crate::{EnvironmentSettings, MaterialId, MaterialSet, Vector2};
+use crate::{MaterialId, MaterialSet, Vector2};
+#[cfg(test)]
+use crate::EnvironmentSettings;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -206,6 +208,10 @@ pub struct PixelGrid {
     /// Pix2Mat: the engine `MaterialId` per texmap index.
     #[serde(default)]
     materials: Vec<Option<MaterialId>>,
+    /// C4Landscape::MatCount, rebuilt from the byte plane after material
+    /// resolution and updated incrementally on every pixel write.
+    #[serde(skip)]
+    material_counts: Vec<u32>,
 }
 
 impl PixelGrid {
@@ -227,6 +233,7 @@ impl PixelGrid {
             densities,
             material_names,
             materials,
+            material_counts: Vec::new(),
             texture_names,
             revision: 0,
             render_token,
@@ -349,6 +356,39 @@ impl PixelGrid {
             .iter()
             .map(|name| name.as_deref().and_then(&mut lookup))
             .collect();
+        self.rebuild_material_counts();
+    }
+
+    fn material_for_byte(&self, byte: u8) -> Option<MaterialId> {
+        self.materials
+            .get((byte & 0x7f) as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn rebuild_material_counts(&mut self) {
+        let count = self
+            .materials
+            .iter()
+            .flatten()
+            .map(|material| material.index() + 1)
+            .max()
+            .unwrap_or(0);
+        self.material_counts.clear();
+        self.material_counts.resize(count, 0);
+        for &byte in self.bytes.iter() {
+            if let Some(material) = self.material_for_byte(byte) {
+                self.material_counts[material.index()] =
+                    self.material_counts[material.index()].wrapping_add(1);
+            }
+        }
+    }
+
+    fn material_count(&self, material: MaterialId) -> u32 {
+        self.material_counts
+            .get(material.index())
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Keep the pixel lookup tables aligned with the mutable runtime texmap.
@@ -376,6 +416,7 @@ impl PixelGrid {
         self.densities.clone_from(&texmap.densities);
         self.material_names.clone_from(&texmap.material_names);
         self.texture_names.clone_from(&texmap.texture_names);
+        self.rebuild_material_counts();
     }
 
     fn record_render_change(
@@ -463,6 +504,7 @@ impl PixelGrid {
         );
         crate::chunky::polygon(&mut surface, vertices, byte);
         self.bytes = Arc::new(surface.into_bytes());
+        self.rebuild_material_counts();
         self.revision = self.revision.wrapping_add(1);
         self.render_token = self.advance_rect_render_token(base_token, self.revision, rect);
         self.record_render_change(base_revision, base_token, rect, storage_was_shared);
@@ -497,6 +539,25 @@ impl PixelGrid {
             let old = self.bytes[slot];
             if old == byte {
                 return;
+            }
+            if self.material_counts.is_empty() && self.materials.iter().any(Option::is_some) {
+                self.rebuild_material_counts();
+            }
+            let old_material = self.material_for_byte(old);
+            let new_material = self.material_for_byte(byte);
+            if old_material != new_material {
+                if let Some(old_material) = old_material {
+                    if let Some(count) = self.material_counts.get_mut(old_material.index()) {
+                        *count = count.wrapping_sub(1);
+                    }
+                }
+                if let Some(new_material) = new_material {
+                    if self.material_counts.len() <= new_material.index() {
+                        self.material_counts.resize(new_material.index() + 1, 0);
+                    }
+                    self.material_counts[new_material.index()] =
+                        self.material_counts[new_material.index()].wrapping_add(1);
+                }
             }
             let storage_was_shared = Arc::strong_count(&self.bytes) > 1;
             let base_revision = self.revision;
@@ -961,6 +1022,13 @@ pub struct Landscape {
     /// maintained as the approximation legacy helpers consume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pixels: Option<PixelGrid>,
+    /// C4Landscape::ScanX: the next Surface8 column visited by ExecuteScan.
+    /// SyncClearance-NoSave in C++; restore/synchronize starts at column zero.
+    #[serde(skip)]
+    scan_x: u32,
+    /// C4SLandscape::NoScan disables ExecuteScan entirely.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    no_scan: bool,
     /// Border-open state (C4Landscape.h:64-65): LeftOpen/RightOpen are y
     /// thresholds (`y < LeftOpen` reads sky beyond the side), Top/BottomOpen
     /// are flags. Defaults mirror C4SLandscape::Default
@@ -986,6 +1054,10 @@ pub struct Landscape {
 
 fn default_top_open() -> bool {
     true
+}
+
+fn bool_is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// What `C4Landscape::GetPix` (C4Landscape.h:144-161) reads beyond the
@@ -1042,6 +1114,13 @@ pub enum LandscapeCommand {
 enum TemperatureConversionAction {
     ChangeMaterial { target: MaterialId, strength: i32 },
     RemoveToSky { strength: i32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TemperatureScanAction {
+    target: MaterialId,
+    target_byte: u8,
+    strength: i32,
 }
 
 impl TemperatureConversionAction {
@@ -1166,6 +1245,8 @@ impl Landscape {
             tunnels: HashMap::new(),
             world_height: None,
             pixels: None,
+            scan_x: 0,
+            no_scan: false,
             left_open: 0,
             right_open: 0,
             top_open: true,
@@ -1177,6 +1258,18 @@ impl Landscape {
 
     pub fn width(&self) -> u32 {
         self.width
+    }
+
+    pub fn scan_x(&self) -> u32 {
+        self.scan_x
+    }
+
+    pub fn set_no_scan(&mut self, no_scan: bool) {
+        self.no_scan = no_scan;
+    }
+
+    pub(crate) fn synchronize_temperature_scan(&mut self) {
+        self.scan_x = 0;
     }
 
     pub fn surface(&self) -> &[i32] {
@@ -1595,15 +1688,43 @@ impl Landscape {
     pub fn apply_temperature_conversions(
         &mut self,
         materials: &MaterialSet,
-        environment: &EnvironmentSettings,
-        frame: u64,
+        temperature: i32,
+    ) -> Vec<(i32, i32)> {
+        let mut probes = Vec::new();
+        self.apply_temperature_conversions_with(
+            materials,
+            temperature,
+            &mut |_landscape, x, y| probes.push((x, y)),
+        );
+        probes
+    }
+
+    pub(crate) fn apply_temperature_conversions_with(
+        &mut self,
+        materials: &MaterialSet,
+        temperature: i32,
+        on_instability: &mut dyn FnMut(&Landscape, i32, i32),
+    ) {
+        if self.no_scan || self.surface.is_empty() || materials.is_empty() {
+            return;
+        }
+        if self.pixels.is_some() {
+            self.execute_temperature_scan(materials, temperature, on_instability);
+            return;
+        }
+        self.apply_column_temperature_conversions(materials, temperature);
+    }
+
+    fn apply_column_temperature_conversions(
+        &mut self,
+        materials: &MaterialSet,
+        temperature: i32,
     ) {
         if self.surface.is_empty() || materials.is_empty() {
             return;
         }
         self.ensure_material_capacity();
         self.ensure_liquid_capacity();
-        let world_height = self.estimate_world_height();
         let original_default = self.default_solid_material;
 
         let mut default_change_indices = Vec::new();
@@ -1623,19 +1744,11 @@ impl Landscape {
             let Some(material_id) = material_id else {
                 continue;
             };
-            let surface_height = self.surface[index];
-            let downward_temperature =
-                environment.temperature_at_height(frame, surface_height, world_height);
-            let upward_temperature = environment.temperature_at_height(
-                frame,
-                surface_height.saturating_add(1),
-                world_height,
-            );
             column_actions[index] = find_column_conversion(
                 materials,
                 material_id,
-                downward_temperature,
-                upward_temperature,
+                temperature,
+                temperature,
             );
             if is_default {
                 if let Some(TemperatureConversionAction::ChangeMaterial { target, .. }) =
@@ -1740,7 +1853,7 @@ impl Landscape {
             }
         }
 
-        let temperature_lookup = |y: i32| environment.temperature_at_height(frame, y, world_height);
+        let temperature_lookup = |_y: i32| temperature;
         for column in &mut self.liquids {
             let _ = column.apply_temperature_conversions(
                 materials,
@@ -1748,6 +1861,232 @@ impl Landscape {
                 &temperature_lookup,
             );
         }
+    }
+
+    fn execute_temperature_scan(
+        &mut self,
+        materials: &MaterialSet,
+        temperature: i32,
+        on_instability: &mut dyn FnMut(&Landscape, i32, i32),
+    ) {
+        let Some((width, height)) = self.grid_dimensions() else {
+            return;
+        };
+        if width <= 0 || height <= 0 || !self.temperature_scan_needed(materials, temperature) {
+            return;
+        }
+
+        let scan_speed = (width / 500).clamp(2, 15);
+        let mut scanned_columns = Vec::with_capacity(scan_speed as usize);
+        for _ in 0..scan_speed {
+            let x = (self.scan_x % width as u32) as i32;
+            self.execute_temperature_scan_column(
+                x,
+                height,
+                materials,
+                temperature,
+                on_instability,
+            );
+            scanned_columns.push(x as usize);
+            self.scan_x = (self.scan_x + 1) % width as u32;
+        }
+
+        scanned_columns.sort_unstable();
+        scanned_columns.dedup();
+        for x in scanned_columns {
+            self.refresh_raster_columns(x..x + 1);
+        }
+    }
+
+    fn temperature_scan_needed(&self, materials: &MaterialSet, temperature: i32) -> bool {
+        let Some(grid) = self.pixels.as_ref() else {
+            return false;
+        };
+        materials.iter().any(|material| {
+            let material = material.id();
+            if grid.material_count(material) == 0 {
+                return false;
+            }
+            [
+                TemperatureDirection::Downwards,
+                TemperatureDirection::Upwards,
+            ]
+            .into_iter()
+            .any(|direction| {
+                self.temperature_scan_action(materials, material, direction, temperature)
+                    .is_some()
+            })
+        })
+    }
+
+    fn temperature_scan_action(
+        &self,
+        materials: &MaterialSet,
+        material: MaterialId,
+        direction: TemperatureDirection,
+        temperature: i32,
+    ) -> Option<TemperatureScanAction> {
+        let outcome =
+            materials.evaluate_temperature_conversion(material, direction, temperature)?;
+        let target = outcome.target.as_material_id()?;
+        let target_byte = self.material_texture_byte(&outcome.target_spec, target)?;
+        if target_byte == 0 {
+            return None;
+        }
+        Some(TemperatureScanAction {
+            target,
+            target_byte,
+            strength: outcome.strength,
+        })
+    }
+
+    fn temperature_scan_material_at(&self, x: i32, y: i32) -> Option<MaterialId> {
+        self.pixels
+            .as_ref()
+            .and_then(|grid| grid.material_id_at(x, y))
+    }
+
+    fn execute_temperature_scan_column(
+        &mut self,
+        x: i32,
+        height: i32,
+        materials: &MaterialSet,
+        temperature: i32,
+        on_instability: &mut dyn FnMut(&Landscape, i32, i32),
+    ) {
+        let mut y = 0;
+        let mut last_material = None;
+        while y < height {
+            let material = self.temperature_scan_material_at(x, y);
+            if material != last_material {
+                if let Some(previous) = last_material {
+                    self.do_temperature_scan(
+                        x,
+                        y - 1,
+                        previous,
+                        TemperatureDirection::Upwards,
+                        materials,
+                        temperature,
+                        on_instability,
+                    );
+                }
+                if let Some(material) = material {
+                    y += self.do_temperature_scan(
+                        x,
+                        y,
+                        material,
+                        TemperatureDirection::Downwards,
+                        materials,
+                        temperature,
+                        on_instability,
+                    );
+                }
+            }
+            last_material = material;
+            y += 1;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn do_temperature_scan(
+        &mut self,
+        x: i32,
+        y: i32,
+        material: MaterialId,
+        direction: TemperatureDirection,
+        materials: &MaterialSet,
+        temperature: i32,
+        on_instability: &mut dyn FnMut(&Landscape, i32, i32),
+    ) -> i32 {
+        let Some(action) =
+            self.temperature_scan_action(materials, material, direction, temperature)
+        else {
+            return 0;
+        };
+        let Some((width, height)) = self.grid_dimensions() else {
+            return 0;
+        };
+        let y_direction = match direction {
+            TemperatureDirection::Downwards => 1,
+            TemperatureDirection::Upwards => -1,
+        };
+        let left_material = if x > 0 {
+            self.temperature_scan_material_at(x - 1, y)
+        } else {
+            None
+        };
+        if left_material == Some(material) {
+            return 0;
+        }
+
+        let mut remaining = action.strength;
+        if left_material != Some(action.target) {
+            let search_range = 5.max(remaining);
+            let mut search_x = x;
+            let mut search_y = y;
+            while search_x < width - 1 {
+                search_x += 1;
+                if self.temperature_scan_material_at(search_x, search_y) == Some(material) {
+                    search_y -= y_direction;
+                    while (0..height).contains(&search_y)
+                        && self.temperature_scan_material_at(search_x, search_y) == Some(material)
+                    {
+                        search_y -= y_direction;
+                        remaining =
+                            remaining.min(action.strength - (search_y - y).abs());
+                        if remaining < 0 {
+                            return 0;
+                        }
+                    }
+                    if !(0..height).contains(&search_y) {
+                        break;
+                    }
+                    search_y += y_direction;
+                } else {
+                    search_y += y_direction;
+                    while (0..height).contains(&search_y)
+                        && self.temperature_scan_material_at(search_x, search_y) != Some(material)
+                    {
+                        search_y += y_direction;
+                        if (search_y - y).abs() > search_range {
+                            break;
+                        }
+                    }
+                    if !(0..height).contains(&search_y)
+                        || (search_y - y).abs() > search_range
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut converted_y = y;
+        while remaining >= 0 && (0..height).contains(&converted_y) {
+            if self.temperature_scan_material_at(x, converted_y) != Some(material) {
+                break;
+            }
+            let left_material = if x > 0 {
+                self.temperature_scan_material_at(x - 1, converted_y)
+            } else {
+                None
+            };
+            if left_material == Some(material) {
+                break;
+            }
+            let Some(old_byte) = self.grid_byte_at(x, converted_y) else {
+                break;
+            };
+            self.grid_write_byte(
+                x,
+                converted_y,
+                action.target_byte | (old_byte & 0x80),
+            );
+            on_instability(self, x, converted_y);
+            converted_y += y_direction;
+            remaining -= 1;
+        }
+        (converted_y - y).abs()
     }
 
     fn column_material(&self, index: usize) -> Option<MaterialId> {
@@ -3672,6 +4011,8 @@ impl<'de> Deserialize<'de> for Landscape {
             #[serde(default)]
             pixels: Option<PixelGrid>,
             #[serde(default)]
+            no_scan: bool,
+            #[serde(default)]
             left_open: i32,
             #[serde(default)]
             right_open: i32,
@@ -3720,6 +4061,10 @@ impl<'de> Deserialize<'de> for Landscape {
         landscape.tunnels = data.tunnels;
         landscape.world_height = data.world_height;
         landscape.pixels = data.pixels;
+        if let Some(grid) = landscape.pixels.as_mut() {
+            grid.rebuild_material_counts();
+        }
+        landscape.no_scan = data.no_scan;
         landscape.left_open = data.left_open;
         landscape.right_open = data.right_open;
         landscape.top_open = data.top_open;
@@ -4919,6 +5264,243 @@ mod tests {
         assert!(!landscape.find_mat_slide(&mut fx, &mut fy, 1, mdens, 3, &materials));
     }
 
+    fn temperature_pixel_landscape(
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+        materials: &MaterialSet,
+    ) -> Landscape {
+        let mut densities = vec![0; 128];
+        let mut material_names = vec![None; 128];
+        for material in materials.iter() {
+            let slot = material.id().index() + 1;
+            densities[slot] = material.density();
+            material_names[slot] = Some(material.name().to_string());
+        }
+        let grid = PixelGrid::new(
+            width,
+            height,
+            bytes,
+            densities,
+            material_names,
+            vec![None; 128],
+        );
+        let mut landscape = Landscape::new(width, vec![height as i32; width as usize])
+            .expect("temperature landscape builds");
+        landscape.set_world_height(height as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.resolve_grid_materials(|name| materials.id_of(name));
+        landscape.refresh_all_raster_columns();
+        landscape
+    }
+
+    #[test]
+    fn temperature_scan_uses_global_integer_temperature_without_climate_or_height() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=30
+            AboveTempConvert=4
+            AboveTempConvertDir=1
+            AboveTempConvertTo=Ice
+            TempConvStrength=3
+
+            [Material Ice]
+            Name=Ice
+            Density=80
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let ice = materials.id_of("Ice").expect("ice exists");
+        let water_byte = (water.index() + 1) as u8;
+        let mut bytes = vec![0; 2 * 8];
+        for y in 2..=5 {
+            for x in 0..2 {
+                bytes[y * 2 + x] = water_byte;
+            }
+        }
+        let mut landscape = temperature_pixel_landscape(2, 8, bytes, &materials);
+        let environment = EnvironmentSettings::new(0)
+            .with_temperature(1)
+            .with_climate(20)
+            .with_temperature_range(30);
+
+        landscape.apply_temperature_conversions(&materials, environment.temperature);
+
+        assert_eq!(landscape.material_pixel_count(water, None), 8);
+        assert_eq!(landscape.material_pixel_count(ice, None), 0);
+        assert_eq!(
+            landscape.liquid_material_at(0, 5),
+            Some(water),
+            "the derived column view must not observe the invented warm bottom gradient"
+        );
+    }
+
+    #[test]
+    fn temperature_scan_converts_only_scan_speed_columns_per_frame() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Ice]
+            Name=Ice
+            Density=80
+            AboveTempConvert=0
+            AboveTempConvertDir=0
+            AboveTempConvertTo=Water
+            TempConvStrength=3
+
+            [Material Water]
+            Name=Water
+            Density=30
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let ice = materials.id_of("Ice").expect("ice exists");
+        let water = materials.id_of("Water").expect("water exists");
+        let ice_byte = (ice.index() + 1) as u8;
+        let water_byte = (water.index() + 1) as u8;
+        let mut bytes = vec![0; 6 * 8];
+        for y in 2..8 {
+            for x in 0..6 {
+                bytes[y * 6 + x] = ice_byte;
+            }
+        }
+        let mut landscape = temperature_pixel_landscape(6, 8, bytes, &materials);
+        let environment = EnvironmentSettings::new(0)
+            .with_temperature(10)
+            .with_climate(50)
+            .with_temperature_range(100);
+
+        landscape.apply_temperature_conversions(&materials, environment.temperature);
+
+        assert_eq!(landscape.material_pixel_count(water, None), 8);
+        for x in 0..2 {
+            for y in 2..6 {
+                assert_eq!(landscape.grid_byte_at(x, y), Some(water_byte));
+            }
+        }
+        for x in 2..6 {
+            assert_eq!(landscape.grid_byte_at(x, 2), Some(ice_byte));
+        }
+        assert_eq!(landscape.scan_x(), 2);
+    }
+
+    #[test]
+    fn temperature_scan_preserves_ift_and_strength_zero_converts_one_pixel() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Ice]
+            Name=Ice
+            Density=80
+            AboveTempConvert=0
+            AboveTempConvertTo=Water
+            TempConvStrength=0
+
+            [Material Water]
+            Name=Water
+            Density=30
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let ice = materials.id_of("Ice").expect("ice exists");
+        let water = materials.id_of("Water").expect("water exists");
+        let ice_byte = (ice.index() + 1) as u8;
+        let water_byte = (water.index() + 1) as u8;
+        let mut bytes = vec![0; 2 * 4];
+        for y in 1..4 {
+            bytes[y * 2] = ice_byte | 0x80;
+            bytes[y * 2 + 1] = ice_byte;
+        }
+        let mut landscape = temperature_pixel_landscape(2, 4, bytes, &materials);
+
+        landscape.apply_temperature_conversions(&materials, 1);
+
+        assert_eq!(landscape.grid_byte_at(0, 1), Some(water_byte | 0x80));
+        assert_eq!(landscape.grid_byte_at(1, 1), Some(water_byte));
+        assert_eq!(landscape.grid_byte_at(0, 2), Some(ice_byte | 0x80));
+        assert_eq!(landscape.grid_byte_at(1, 2), Some(ice_byte));
+    }
+
+    #[test]
+    fn temperature_scan_pretty_surface_waits_for_the_left_column() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Ice]
+            Name=Ice
+            Density=80
+            AboveTempConvert=0
+            AboveTempConvertTo=Water
+            TempConvStrength=0
+
+            [Material Water]
+            Name=Water
+            Density=30
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let ice = materials.id_of("Ice").expect("ice exists");
+        let water = materials.id_of("Water").expect("water exists");
+        let ice_byte = (ice.index() + 1) as u8;
+        let mut bytes = vec![0; 2 * 4];
+        bytes[2] = ice_byte;
+        for y in 2..4 {
+            bytes[y * 2] = ice_byte;
+            bytes[y * 2 + 1] = ice_byte;
+        }
+        let mut landscape = temperature_pixel_landscape(2, 4, bytes, &materials);
+
+        landscape.apply_temperature_conversions(&materials, 1);
+
+        assert_eq!(landscape.material_pixel_count(water, None), 1);
+        assert_eq!(
+            landscape.grid_byte_at(1, 2),
+            Some(ice_byte),
+            "the deeper right-hand surface waits while its left pixel is still Ice"
+        );
+    }
+
+    #[test]
+    fn temperature_scan_cursor_pauses_without_an_eligible_conversion_or_when_disabled() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Ice]
+            Name=Ice
+            Density=80
+            AboveTempConvert=10
+            AboveTempConvertTo=Water
+            TempConvStrength=3
+
+            [Material Water]
+            Name=Water
+            Density=30
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let ice = materials.id_of("Ice").expect("ice exists");
+        let ice_byte = (ice.index() + 1) as u8;
+        let mut bytes = vec![0; 4 * 4];
+        for y in 1..4 {
+            for x in 0..4 {
+                bytes[y * 4 + x] = ice_byte;
+            }
+        }
+        let mut landscape = temperature_pixel_landscape(4, 4, bytes, &materials);
+
+        landscape.apply_temperature_conversions(&materials, 10);
+        assert_eq!(landscape.scan_x(), 0, "strict threshold does not scan");
+
+        landscape.set_no_scan(true);
+        landscape.apply_temperature_conversions(&materials, 11);
+        assert_eq!(landscape.scan_x(), 0, "NoScan freezes the cursor");
+        assert_eq!(landscape.material_pixel_count(ice, None), 12);
+    }
+
     #[test]
     fn apply_temperature_conversions_updates_materials() {
         let library = MaterialLibrary::parse(
@@ -4948,7 +5530,7 @@ mod tests {
             .with_temperature(10)
             .with_climate(0)
             .with_temperature_range(0);
-        landscape.apply_temperature_conversions(&materials, &environment, 0);
+        landscape.apply_temperature_conversions(&materials, environment.temperature);
 
         assert_eq!(landscape.solid_material_at(0), Some(water));
         assert_eq!(landscape.solid_material_at(1), Some(water));
@@ -4978,7 +5560,7 @@ mod tests {
             .with_temperature(5)
             .with_climate(0)
             .with_temperature_range(0);
-        landscape.apply_temperature_conversions(&materials, &environment, 0);
+        landscape.apply_temperature_conversions(&materials, environment.temperature);
 
         assert_eq!(landscape.surface(), &[11, 11]);
         assert_eq!(landscape.solid_material_at(0), Some(frost));
@@ -5016,7 +5598,7 @@ mod tests {
             .with_temperature(5)
             .with_climate(0)
             .with_temperature_range(0);
-        landscape.apply_temperature_conversions(&materials, &environment, 0);
+        landscape.apply_temperature_conversions(&materials, environment.temperature);
 
         let column = &landscape.liquids()[0];
         assert_eq!(
@@ -5054,14 +5636,14 @@ mod tests {
             .with_temperature(0)
             .with_climate(0)
             .with_temperature_range(0);
-        landscape.apply_temperature_conversions(&materials, &environment, 0);
+        landscape.apply_temperature_conversions(&materials, environment.temperature);
 
         let column = &landscape.liquids()[0];
         assert_eq!(column.segments(), &[LiquidSegment::new(3, 4)]);
     }
 
     #[test]
-    fn climate_zone_gradient_affects_material_conversion() {
+    fn climate_zone_gradient_does_not_affect_material_conversion() {
         let library = MaterialLibrary::parse(
             r#"
             [Material Ice]
@@ -5082,7 +5664,6 @@ mod tests {
         .expect("material library parses");
         let materials = MaterialSet::from_resource_library(&library);
         let ice = materials.id_of("Ice").expect("ice exists");
-        let water = materials.id_of("Water").expect("water exists");
 
         let mut landscape = Landscape::flat_with_material(2, 20, Some(ice));
         landscape.set_height(0, 5);
@@ -5090,13 +5671,13 @@ mod tests {
 
         let environment = EnvironmentSettings::new(0)
             .with_temperature(0)
-            .with_climate(0)
+            .with_climate(20)
             .with_temperature_range(40);
 
-        landscape.apply_temperature_conversions(&materials, &environment, 0);
+        landscape.apply_temperature_conversions(&materials, environment.temperature);
 
         assert_eq!(landscape.solid_material_at(0), Some(ice));
-        assert_eq!(landscape.solid_material_at(1), Some(water));
+        assert_eq!(landscape.solid_material_at(1), Some(ice));
     }
 
     #[test]

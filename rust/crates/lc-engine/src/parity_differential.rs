@@ -9,8 +9,8 @@
 //! `src/C4ActionDirection.h`, `src/C4ActionCallbacks.h`, and
 //! `src/C4SolidMaskBitmap.h`, plus complete `C4Object::DigOutMaterialCast`,
 //! `C4Game::ShakeObjects`, `C4Object::Fling`, `C4Landscape::ClearPix`,
-//! `BlastFreePix`, and `BlastFree` bodies and the bottom-flight
-//! `C4Object::ContactAction` arm) by
+//! `BlastFreePix`, `BlastFree`, `ExecuteScan`, and `DoScan` bodies and the
+//! bottom-flight `C4Object::ContactAction` arm) by
 //! `parity/oracle/gen_golden.sh` — so this is a genuine differential against
 //! the C++ oracle, not a Rust-vs-Rust regression.
 //!
@@ -1284,7 +1284,132 @@ fn parity_differential_matches_cpp_golden() {
         );
     }
 
-    // 6d. C4Object::ContactAction's bottom DFA_FLIGHT arm
+    // 6d. C4Landscape::ExecuteScan / DoScan (C4Landscape.cpp:89-230). The
+    // C++ oracle mechanically compiles both complete production bodies. Its
+    // 6x8 Surface8 fixture has six Water pixels in every column, scans two
+    // columns per frame, and freezes at four pixels per conversion pass
+    // (`TempConvStrength=3` includes the starting pixel). Compare the exact
+    // material counts and wrapping ScanX cursor after every Engine::tick.
+    {
+        let case = &golden["landscape_scan"];
+        let width = i(case, "width") as u32;
+        let height = i(case, "height") as u32;
+        let water_depth = i(case, "water_depth") as u32;
+        let water_byte = i(case, "water_byte") as u8;
+        let ice_byte = i(case, "ice_byte") as u8;
+        expect_eq(
+            "landscape_scan",
+            0,
+            "scan_speed",
+            i(case, "scan_speed"),
+            i64::from((width as i32 / 500).clamp(2, 15)),
+        );
+        let library = lc_resources::MaterialLibrary::parse(&format!(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=30
+            BelowTempConvert={}
+            BelowTempConvertDir={}
+            BelowTempConvertTo=Ice
+            TempConvStrength={}
+
+            [Material Ice]
+            Name=Ice
+            Density=80
+            "#,
+            i(case, "below_temperature"),
+            i(case, "direction"),
+            i(case, "strength"),
+        ))
+        .expect("landscape scan oracle materials parse");
+
+        let mut bytes = vec![0; width as usize * height as usize];
+        for y in 0..water_depth {
+            bytes[y as usize * width as usize..(y + 1) as usize * width as usize].fill(water_byte);
+        }
+        let mut densities = vec![0; 128];
+        densities[water_byte as usize] = 30;
+        densities[ice_byte as usize] = 80;
+        let mut material_names = vec![None; 128];
+        material_names[water_byte as usize] = Some("Water".to_string());
+        material_names[ice_byte as usize] = Some("Ice".to_string());
+        let grid = PixelGrid::new(
+            width,
+            height,
+            bytes,
+            densities,
+            material_names,
+            vec![None; 128],
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine.configure_materials_from_library(&library);
+        engine.set_environment(
+            crate::EnvironmentSettings::new(0)
+                .with_temperature(i(case, "temperature") as i32)
+                .with_climate(0)
+                .with_temperature_range(0),
+        );
+        let mut landscape = Landscape::flat(width, height as i32);
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+
+        let states = case["states"]
+            .as_array()
+            .expect("landscape_scan.states is an array");
+        for (index, state) in states.iter().enumerate() {
+            expect_eq(
+                "landscape_scan.states",
+                index,
+                "frame",
+                i(state, "frame"),
+                index as i64,
+            );
+            let landscape = engine
+                .landscape()
+                .expect("landscape scan oracle landscape remains");
+            let grid = landscape
+                .pixel_grid()
+                .expect("landscape scan oracle pixel grid remains");
+            let water = grid
+                .bytes()
+                .iter()
+                .filter(|&&byte| byte & 0x7f == water_byte)
+                .count();
+            let ice = grid
+                .bytes()
+                .iter()
+                .filter(|&&byte| byte & 0x7f == ice_byte)
+                .count();
+            expect_eq(
+                "landscape_scan.states",
+                index,
+                "scan_x",
+                i(state, "scan_x"),
+                i64::from(landscape.scan_x()),
+            );
+            expect_eq(
+                "landscape_scan.states",
+                index,
+                "water",
+                i(state, "water"),
+                water as i64,
+            );
+            expect_eq(
+                "landscape_scan.states",
+                index,
+                "ice",
+                i(state, "ice"),
+                ice as i64,
+            );
+            if index + 1 < states.len() {
+                engine.tick().expect("landscape scan oracle frame executes");
+            }
+        }
+    }
+
+    // 6e. C4Object::ContactAction's bottom DFA_FLIGHT arm
     // (C4Object.cpp:4336-4351). The C++ oracle mechanically compiles that
     // complete switch arm and the real ObjectActionFlat helper. In particular,
     // a low-speed action with ObjectDisabled=1 takes the same FlatUp path as

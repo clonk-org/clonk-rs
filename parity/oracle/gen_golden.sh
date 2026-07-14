@@ -46,6 +46,20 @@ awk '
 #    oracle supplies only their surrounding state scaffolding; branch/loop/RNG
 #    order executes byte-for-byte from src/ rather than from a transcription.
 awk '
+  /^void C4Landscape::ExecuteScan\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/landscape_execute_scan.inc"
+
+awk '
+  /^int32_t C4Landscape::DoScan\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Landscape.cpp" > "$gen/landscape_do_scan.inc"
+
+awk '
   /^void C4Game::ShakeObjects\(/ { p = 1 }
   p { print }
   p && /^}$/ { found = 1; exit }

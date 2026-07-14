@@ -21551,10 +21551,10 @@ impl Engine {
         }
         self.tick_weather_wind_audio(frame);
         self.tick_weather_events(frame)?;
+        self.apply_landscape_temperature_conversions();
         if let Some(sky) = &mut self.sky {
             sky.advance(&self.environment);
         }
-        self.apply_landscape_temperature_conversions();
         self.tick_player_systems()?;
         // The control half of Players.Execute (C4Game.cpp:822): flash
         // decrements plus the LastCom COM_Single timeout dispatch.
@@ -31491,10 +31491,21 @@ impl Engine {
         if self.materials.is_empty() {
             return;
         }
+        let materials = &self.materials;
+        let mass_movers = &mut self.mass_movers;
         if let Some(landscape) = self.landscape.as_mut() {
-            let environment = self.environment;
-            let frame = self.frame;
-            landscape.apply_temperature_conversions(&self.materials, &environment, frame);
+            landscape.apply_temperature_conversions_with(
+                materials,
+                self.environment.temperature,
+                &mut |landscape, x, y| {
+                    mass_movers.check_instability_range_for_landscape(
+                        landscape,
+                        materials,
+                        x,
+                        y,
+                    );
+                },
+            );
         }
     }
 
@@ -31737,6 +31748,11 @@ impl Engine {
         self.execute_object_order_commands();
         self.rng = LcgRng::seed_from_u64(self.random_seed);
         self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
+        // C4Landscape::Synchronize resets the progressive material-scan
+        // cursor before synchronized play resumes (C4Landscape.cpp:1662-1667).
+        if let Some(landscape) = self.landscape.as_mut() {
+            landscape.synchronize_temperature_scan();
+        }
         // MassMover.Synchronize() (C4Game.cpp:3700): consolidate the slot
         // set and reset CreatePtr (C4MassMover.cpp:249-252).
         self.mass_movers.synchronize();

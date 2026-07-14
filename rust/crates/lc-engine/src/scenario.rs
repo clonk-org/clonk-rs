@@ -7819,6 +7819,7 @@ fn load_legacy_landscape(
     // C4Landscape::ScenarioInit (C4Landscape.cpp:67-73): the border-open
     // keys, then the AutoScanSideOpen side scan over the built landscape.
     let borders = &manifest.core.landscape;
+    landscape.set_no_scan(borders.no_scan);
     landscape.set_border_open(
         borders.left_open,
         borders.right_open,

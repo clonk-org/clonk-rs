@@ -29,6 +29,9 @@
 //   * `C4Landscape::ClearPix`, `BlastFreePix`, and `BlastFree` are mechanically
 //     extracted in full; a minimal 7x7 Surface8/material scaffold records their
 //     exact scan order, material pre-counts, IFT writes, and RNG consumption.
+//   * `C4Landscape::ExecuteScan` and `DoScan` are mechanically extracted in
+//     full; a 6x8 Water/Ice Surface8 fixture records the exact conversion
+//     cadence and ScanX cursor advancement.
 //   * The complete bottom-contact DFA_FLIGHT arm of `C4Object::ContactAction`
 //     and its Walk/Kneel/Flat helpers are mechanically extracted; a minimal
 //     object scaffold records the low-speed `Disabled` transition to FlatUp.
@@ -88,12 +91,16 @@ inline constexpr int32_t Earth_Oracle = 0;
 inline constexpr int32_t Granite_Oracle = 1;
 inline constexpr int32_t Rock_Oracle = 2;
 inline constexpr int32_t Tunnel_Oracle = 3;
+inline constexpr int32_t Water_Oracle = 4;
+inline constexpr int32_t Ice_Oracle = 5;
 inline constexpr uint8_t EarthPix_Oracle = 1;
 inline constexpr uint8_t GranitePix_Oracle = 2;
 inline constexpr uint8_t RockDefaultPix_Oracle = 3;
 inline constexpr uint8_t TunnelFirstPix_Oracle = 4;
 inline constexpr uint8_t RockShiftPix_Oracle = 5;
 inline constexpr uint8_t TunnelDefaultPix_Oracle = 6;
+inline constexpr uint8_t WaterPix_Oracle = 7;
+inline constexpr uint8_t IcePix_Oracle = 8;
 
 struct C4MaterialOracle
 {
@@ -106,6 +113,13 @@ struct C4MaterialOracle
     int32_t Blast2ObjectRatio{};
     int32_t Blast2PXSRatio{};
     int32_t DefaultMatTex{};
+    int32_t BelowTempConvert{};
+    int32_t BelowTempConvertDir{};
+    int32_t BelowTempConvertTo{};
+    int32_t AboveTempConvert{};
+    int32_t AboveTempConvertDir{};
+    int32_t AboveTempConvertTo{};
+    int32_t TempConvStrength{};
 };
 
 struct C4MaterialMapOracle
@@ -119,10 +133,35 @@ struct C4PXSOracle
     void Cast(int32_t, int32_t, int32_t, int32_t, int32_t) {}
 };
 
+struct C4WeatherOracle
+{
+    int32_t Temperature{};
+    int32_t GetTemperature() const { return Temperature; }
+};
+
+struct C4TexMapEntryOracle
+{
+    int32_t MaterialIndex{MNone_OracleLandscape};
+    int32_t GetMaterialIndex() const { return MaterialIndex; }
+};
+
+struct C4TextureMapOracle
+{
+    C4TexMapEntryOracle Entries[256]{};
+
+    C4TexMapEntryOracle *GetEntry(int32_t texture)
+    {
+        if (texture < 0 || texture >= 256) return nullptr;
+        return &Entries[texture];
+    }
+};
+
 struct C4GameLandscapeOracle
 {
     C4MaterialMapOracle Material;
     C4PXSOracle PXS;
+    C4WeatherOracle Weather;
+    C4TextureMapOracle TextureMap;
     void BlastCastObjects(int32_t, void *, int32_t, int32_t, int32_t, int32_t) {}
 };
 
@@ -133,8 +172,11 @@ class C4Landscape
 public:
     int32_t Width{7};
     int32_t Height{7};
+    int32_t ScanX{};
+    int32_t ScanSpeed{2};
+    uint32_t MatCount[C4MaxMaterial_Oracle]{};
     int32_t BlastMatCount[C4MaxMaterial_Oracle]{};
-    uint8_t Pixels[7 * 7]{};
+    uint8_t Pixels[8 * 8]{};
     int32_t Pix2Mat[256]{};
 
     C4Landscape()
@@ -150,6 +192,8 @@ public:
             Pix2Mat[RockShiftPix_Oracle | IFT_Oracle] = Rock_Oracle;
         Pix2Mat[TunnelDefaultPix_Oracle] =
             Pix2Mat[TunnelDefaultPix_Oracle | IFT_Oracle] = Tunnel_Oracle;
+        Pix2Mat[WaterPix_Oracle] = Pix2Mat[WaterPix_Oracle | IFT_Oracle] = Water_Oracle;
+        Pix2Mat[IcePix_Oracle] = Pix2Mat[IcePix_Oracle | IFT_Oracle] = Ice_Oracle;
     }
 
     uint8_t GetPix(int32_t x, int32_t y) const
@@ -163,9 +207,21 @@ public:
         return Pix2Mat[GetPix(x, y)];
     }
 
+    uint8_t _GetPix(int32_t x, int32_t y) const { return Pixels[y * Width + x]; }
+
+    int32_t _GetMat(int32_t x, int32_t y) const { return Pix2Mat[_GetPix(x, y)]; }
+
     bool SetPix(int32_t x, int32_t y, uint8_t pixel)
     {
         if (x < 0 || y < 0 || x >= Width || y >= Height) return false;
+        const uint8_t oldPixel = Pixels[y * Width + x];
+        const int32_t oldMaterial = Pix2Mat[oldPixel];
+        const int32_t newMaterial = Pix2Mat[pixel];
+        if (oldMaterial != newMaterial)
+        {
+            if (oldPixel && oldMaterial >= 0) --MatCount[oldMaterial];
+            if (pixel && newMaterial >= 0) ++MatCount[newMaterial];
+        }
         Pixels[y * Width + x] = pixel;
         return true;
     }
@@ -180,6 +236,8 @@ public:
     bool ClearPix(int32_t tx, int32_t ty);
     int32_t BlastFreePix(int32_t tx, int32_t ty, int32_t grade, int32_t iBlastSize);
     void BlastFree(int32_t tx, int32_t ty, int32_t rad, int32_t grade, int32_t iByPlayer);
+    void ExecuteScan();
+    int32_t DoScan(int32_t cx, int32_t cy, int32_t mat, int32_t dir);
 };
 
 #define IFT IFT_Oracle
@@ -200,6 +258,20 @@ static int32_t MTunnel = Tunnel_Oracle;
 #include "landscape_clear_pix.inc"
 #include "landscape_blast_free_pix.inc"
 #include "landscape_blast_free.inc"
+#define GBackWdt Width
+#define GBackHgt Height
+#define SBackPix(x, y, pixel) SetPix((x), (y), (pixel))
+#define PixCol2Mat(pixel) (Pix2Mat[static_cast<uint8_t>(pixel)])
+#define PixColIFT(pixel) (static_cast<uint8_t>(pixel) & IFT_Oracle)
+#define PRETTY_TEMP_CONV
+#include "landscape_execute_scan.inc"
+#include "landscape_do_scan.inc"
+#undef PRETTY_TEMP_CONV
+#undef PixColIFT
+#undef PixCol2Mat
+#undef SBackPix
+#undef GBackHgt
+#undef GBackWdt
 #undef GBackIFT
 #undef Game
 #undef C4ID_None
@@ -285,6 +357,53 @@ static void printBlastFreeCase()
            static_cast<unsigned int>(
                zeroRadiusLandscape.Pixels[3 * zeroRadiusLandscape.Width + 3]),
            zeroCountBefore, zeroHoldBefore, RandomCount, RandomHold);
+}
+
+static void printLandscapeScanCase()
+{
+    C4GameLandscapeOracle &game = GameLandscapeOracle;
+    game = C4GameLandscapeOracle{};
+    game.Material.Num = 6;
+    game.Material.Map[Water_Oracle].BelowTempConvert = -10;
+    game.Material.Map[Water_Oracle].BelowTempConvertDir = 0;
+    game.Material.Map[Water_Oracle].BelowTempConvertTo = IcePix_Oracle;
+    game.Material.Map[Water_Oracle].TempConvStrength = 3;
+    game.Material.Map[Water_Oracle].DefaultMatTex = WaterPix_Oracle;
+    game.Material.Map[Ice_Oracle].DefaultMatTex = IcePix_Oracle;
+    game.TextureMap.Entries[WaterPix_Oracle].MaterialIndex = Water_Oracle;
+    game.TextureMap.Entries[IcePix_Oracle].MaterialIndex = Ice_Oracle;
+    game.Weather.Temperature = -20;
+
+    C4Landscape landscape;
+    landscape.Width = 6;
+    landscape.Height = 8;
+    landscape.ScanX = 0;
+    landscape.ScanSpeed = 2;
+    for (int32_t y = 0; y < 6; ++y)
+        for (int32_t x = 0; x < landscape.Width; ++x)
+            landscape.Pixels[y * landscape.Width + x] = WaterPix_Oracle;
+    landscape.MatCount[Water_Oracle] = 36;
+
+    printf("\"landscape_scan\":{\"width\":6,\"height\":8,\"water_depth\":6,"
+           "\"temperature\":-20,"
+           "\"below_temperature\":-10,\"direction\":0,\"strength\":3,"
+           "\"scan_speed\":2,\"water_byte\":%u,\"ice_byte\":%u,\"states\":[",
+           static_cast<unsigned int>(WaterPix_Oracle),
+           static_cast<unsigned int>(IcePix_Oracle));
+    for (int32_t frame = 0; frame <= 6; ++frame)
+    {
+        if (frame) printf(",");
+        int32_t water = 0, ice = 0;
+        for (int32_t index = 0; index < landscape.Width * landscape.Height; ++index)
+        {
+            water += landscape.Pixels[index] == WaterPix_Oracle;
+            ice += landscape.Pixels[index] == IcePix_Oracle;
+        }
+        printf("{\"frame\":%d,\"scan_x\":%d,\"water\":%d,\"ice\":%d}",
+               frame, landscape.ScanX, water, ice);
+        if (frame < 6) landscape.ExecuteScan();
+    }
+    printf("]}");
 }
 
 // --- ShakeObjects + raw Fling: exact production bodies ----------------------
@@ -1412,12 +1531,17 @@ int main()
     printBlastFreeCase();
     printf(",\n");
 
-    // 19. Exact bottom DFA_FLIGHT ContactAction arm, especially the
+    // 19. Exact C4Landscape::ExecuteScan / DoScan conversion cadence and
+    //     ScanX advancement across a wrapping two-column scan.
+    printLandscapeScanCase();
+    printf(",\n");
+
+    // 20. Exact bottom DFA_FLIGHT ContactAction arm, especially the
     //     low-speed `fDisabled` path into ObjectActionFlat / FlatUp.
     printContactActionBottomFlightCases();
     printf(",\n");
 
-    // 20. movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 21. movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    Mirrors C4Movement.cpp:260-261 (fix += dir) and :627 (ydir += gravity),
     //    WITHOUT landscape collision/contact (that is the per-pixel loop, item 4).
     arr_begin("movement");

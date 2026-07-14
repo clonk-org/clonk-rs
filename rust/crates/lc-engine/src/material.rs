@@ -44,7 +44,8 @@ pub enum TemperatureTarget {
 impl TemperatureTarget {
     fn resolve_with(&mut self, lookup: &HashMap<String, MaterialId>) {
         if let TemperatureTarget::MaterialName(name) = self {
-            if let Some(id) = lookup.get(name) {
+            let material_name = name.split_once('-').map(|(name, _)| name).unwrap_or(name);
+            if let Some(id) = lookup.get(material_name) {
                 *self = TemperatureTarget::Material(*id);
             }
         }
@@ -53,11 +54,14 @@ impl TemperatureTarget {
     fn resolved(&self, lookup: &HashMap<String, MaterialId>) -> TemperatureTarget {
         match self {
             TemperatureTarget::Material(id) => TemperatureTarget::Material(*id),
-            TemperatureTarget::MaterialName(name) => lookup
-                .get(name)
-                .copied()
-                .map(TemperatureTarget::Material)
-                .unwrap_or_else(|| TemperatureTarget::MaterialName(name.clone())),
+            TemperatureTarget::MaterialName(name) => {
+                let material_name = name.split_once('-').map(|(name, _)| name).unwrap_or(name);
+                lookup
+                    .get(material_name)
+                    .copied()
+                    .map(TemperatureTarget::Material)
+                    .unwrap_or_else(|| TemperatureTarget::MaterialName(name.clone()))
+            }
         }
     }
 
@@ -69,7 +73,7 @@ impl TemperatureTarget {
     }
 
     pub fn is_sky(&self) -> bool {
-        matches!(self, TemperatureTarget::MaterialName(name) if name == SKY_KEY)
+        matches!(self, TemperatureTarget::MaterialName(name) if name.split_once('-').map(|(name, _)| name).unwrap_or(name).eq_ignore_ascii_case(SKY_KEY))
     }
 }
 
@@ -78,6 +82,7 @@ pub struct TemperatureConversion {
     threshold: i32,
     direction: TemperatureDirection,
     target: TemperatureTarget,
+    target_spec: String,
     kind: TemperatureConversionKind,
 }
 
@@ -104,6 +109,7 @@ impl TemperatureConversion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemperatureConversionOutcome {
     pub target: TemperatureTarget,
+    pub target_spec: String,
     pub strength: i32,
 }
 
@@ -197,18 +203,20 @@ fn parse_temperature_conversion(
     target_key: &str,
     kind: TemperatureConversionKind,
 ) -> Option<TemperatureConversion> {
-    let threshold = definition.int(threshold_key)?;
-    let direction_raw = definition.int(direction_key)?;
+    let threshold = definition.int(threshold_key).unwrap_or(0);
+    let direction_raw = definition.int(direction_key).unwrap_or(0);
     let direction = TemperatureDirection::from_raw(direction_raw)?;
     let target_value = definition.value(target_key)?;
     let trimmed = target_value.trim();
     if trimmed.is_empty() {
         return None;
     }
+    let target_spec = normalize_key(trimmed);
     Some(TemperatureConversion {
         threshold,
         direction,
-        target: TemperatureTarget::MaterialName(normalize_key(trimmed)),
+        target: TemperatureTarget::MaterialName(target_spec.clone()),
+        target_spec,
         kind,
     })
 }
@@ -658,15 +666,17 @@ impl Material {
             self.properties.below_temperature.as_ref(),
             self.properties.above_temperature.as_ref(),
         ];
+        let mut outcome = None;
         for conversion in candidates.into_iter().flatten() {
             if conversion.applies(ambient_temperature, direction) {
-                return Some(TemperatureConversionOutcome {
+                outcome = Some(TemperatureConversionOutcome {
                     target: conversion.target().clone(),
+                    target_spec: conversion.target_spec.clone(),
                     strength: self.properties.temp_conv_strength,
                 });
             }
         }
-        None
+        outcome
     }
 
     fn matches_in_mat_conversion(&self, landscape: Option<&Material>) -> bool {
@@ -1465,6 +1475,31 @@ mod tests {
                 .is_none(),
             "temperature above threshold should not trigger below conversion"
         );
+    }
+
+    #[test]
+    fn temperature_conversion_direction_defaults_downward_like_cpp() {
+        let set = build_material_set(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=30
+            BelowTempConvert=0
+            BelowTempConvertTo=Ice
+            TempConvStrength=3
+
+            [Material Ice]
+            Name=Ice
+            Density=80
+        "#,
+        );
+        let water = set.id_of("Water").expect("water exists");
+        let ice = set.id_of("Ice").expect("ice exists");
+
+        let outcome = set
+            .evaluate_temperature_conversion(water, TemperatureDirection::Downwards, -1)
+            .expect("omitted direction defaults to the downward surface");
+        assert_eq!(outcome.target, TemperatureTarget::Material(ice));
     }
 
     #[test]

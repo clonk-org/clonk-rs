@@ -1,4 +1,4 @@
-use crate::{Engine, MaterialId};
+use crate::{Engine, Landscape, MaterialId, MaterialSet};
 use serde::{Deserialize, Serialize};
 
 /// `C4MassMoverChunk` (C4MassMover.h:25).
@@ -170,6 +170,66 @@ impl MassMoverSet {
         self.slots.iter().filter(|slot| slot.is_some()).count()
     }
 
+    pub(crate) fn check_instability_range_for_landscape(
+        &mut self,
+        landscape: &Landscape,
+        materials: &MaterialSet,
+        tx: i32,
+        ty: i32,
+    ) {
+        if !self.check_instability_for_landscape(landscape, materials, tx, ty) {
+            self.check_instability_for_landscape(landscape, materials, tx, ty - 1);
+            self.check_instability_for_landscape(landscape, materials, tx, ty - 2);
+            self.check_instability_for_landscape(landscape, materials, tx - 1, ty);
+            self.check_instability_for_landscape(landscape, materials, tx + 1, ty);
+        }
+    }
+
+    fn check_instability_for_landscape(
+        &mut self,
+        landscape: &Landscape,
+        materials: &MaterialSet,
+        x: i32,
+        y: i32,
+    ) -> bool {
+        let instable = landscape
+            .material_at(x, y)
+            .and_then(|id| materials.get_by_id(id))
+            .map(|material| material.instable())
+            .unwrap_or(false);
+        instable && self.create_for_landscape(landscape, x, y).is_some()
+    }
+
+    fn create_for_landscape(
+        &mut self,
+        landscape: &Landscape,
+        x: i32,
+        y: i32,
+    ) -> Option<usize> {
+        if self.count() == MASS_MOVER_CHUNK {
+            return None;
+        }
+        let index = self.find_free_slot()?;
+        let (width, height) = landscape
+            .grid_dimensions()
+            .unwrap_or((landscape.width() as i32, landscape.estimated_height()));
+        if !(0..width).contains(&x) || !(0..height).contains(&y) {
+            return None;
+        }
+        let material = landscape.material_at(x, y);
+        self.bump_count();
+        let material = material?;
+        self.fill_slot(
+            index,
+            MassMover {
+                mat: material,
+                x,
+                y,
+            },
+        );
+        Some(index)
+    }
+
     /// `C4MassMoverSet::Consolidate` (C4MassMover.cpp:219-247): pack live
     /// movers down over free slots (preserving order) and reset `CreatePtr`.
     pub(crate) fn consolidate(&mut self) {
@@ -202,25 +262,28 @@ impl Engine {
     /// Instable material at the exact pixel creates a mover — the Instable
     /// gate lives HERE, not in `C4MassMover::Init`.
     pub(crate) fn check_instability(&mut self, tx: i32, ty: i32) -> bool {
-        let instable = self
-            .landscape
-            .as_ref()
-            .and_then(|landscape| landscape.material_at(tx, ty))
-            .and_then(|id| self.materials.get_by_id(id))
-            .map(|material| material.instable())
-            .unwrap_or(false);
-        instable && self.mass_mover_create(tx, ty, false)
+        let Some(landscape) = self.landscape.as_ref() else {
+            return false;
+        };
+        self.mass_movers.check_instability_for_landscape(
+            landscape,
+            &self.materials,
+            tx,
+            ty,
+        )
     }
 
     /// `C4Landscape::CheckInstabilityRange` (C4Landscape.cpp:869-878): try
     /// the pixel itself; ONLY if that fails, probe (tx,ty-1), (tx,ty-2),
     /// (tx-1,ty), (tx+1,ty) — all four, in that order.
     pub(crate) fn check_instability_range(&mut self, tx: i32, ty: i32) {
-        if !self.check_instability(tx, ty) {
-            self.check_instability(tx, ty - 1);
-            self.check_instability(tx, ty - 2);
-            self.check_instability(tx - 1, ty);
-            self.check_instability(tx + 1, ty);
+        if let Some(landscape) = self.landscape.as_ref() {
+            self.mass_movers.check_instability_range_for_landscape(
+                landscape,
+                &self.materials,
+                tx,
+                ty,
+            );
         }
     }
 
@@ -230,48 +293,19 @@ impl Engine {
     /// bounds check and the sky (`MNone`) rejection. `Count` bumps even on
     /// the sky rejection (:99), and `CreatePtr` advances only on success.
     pub(crate) fn mass_mover_create(&mut self, x: i32, y: i32, execute: bool) -> bool {
-        // `if (Count == C4MassMoverChunk) return false;` (:69) — exact
-        // equality: the double-counted ledger can legitimately exceed it.
-        if self.mass_movers.count() == MASS_MOVER_CHUNK {
-            return false;
-        }
-        let Some(index) = self.mass_movers.find_free_slot() else {
+        let Some(landscape) = self.landscape.as_ref() else {
             return false;
         };
-        // C4MassMover::Init (:93-95): out-of-bounds fails BEFORE the count
-        // bump.
-        let Some((width, height)) = self.mass_mover_bounds() else {
+        let Some(index) = self
+            .mass_movers
+            .create_for_landscape(landscape, x, y)
+        else {
             return false;
         };
-        if !(0..width).contains(&x) || !(0..height).contains(&y) {
-            return false;
-        }
-        let mat = self
-            .landscape
-            .as_ref()
-            .and_then(|landscape| landscape.material_at(x, y));
-        // `Game.MassMover.Count++` (:99) fires for sky pixels too, even
-        // though the init then fails and the slot stays free.
-        self.mass_movers.bump_count();
-        let Some(mat) = mat else {
-            return false;
-        };
-        self.mass_movers.fill_slot(index, MassMover { mat, x, y });
         if execute {
             self.execute_mass_mover(index);
         }
         true
-    }
-
-    /// `GBackWdt`/`GBackHgt` for the `C4MassMover::Init` bounds check
-    /// (C4MassMover.cpp:93-95); column-model fixture worlds fall back to
-    /// the scalar width and estimated height.
-    fn mass_mover_bounds(&self) -> Option<(i32, i32)> {
-        self.landscape.as_ref().map(|landscape| {
-            landscape
-                .grid_dimensions()
-                .unwrap_or((landscape.width() as i32, landscape.estimated_height()))
-        })
     }
 
     /// `C4MassMoverSet::Execute` (C4MassMover.cpp:50-65): reset `Count`,
@@ -982,6 +1016,59 @@ mod tests {
         engine.set_materials(materials);
         engine.set_landscape(landscape);
         engine
+    }
+
+    #[test]
+    fn temperature_scan_checks_instability_after_each_converted_pixel() {
+        // C4Landscape::DoScan calls CheckInstabilityRange immediately after
+        // every SetPix. When the left Water pixel freezes first, its right
+        // fallback must therefore arm the still-liquid neighbor before that
+        // neighbor is converted by the next scanned column.
+        let materials = materials(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Instable=1
+            BelowTempConvert=0
+            BelowTempConvertTo=Ice
+            TempConvStrength=0
+
+            [Material Ice]
+            Name=Ice
+            Density=80
+            "#,
+        );
+        let water = materials.id_of("Water").expect("water material");
+        let ice = materials.id_of("Ice").expect("ice material");
+        let water_byte = (water.index() + 1) as u8;
+        let mut densities = vec![0; 128];
+        let mut names = vec![None; 128];
+        densities[water_byte as usize] = 25;
+        densities[ice.index() + 1] = 80;
+        names[water_byte as usize] = Some("Water".into());
+        names[ice.index() + 1] = Some("Ice".into());
+        let grid = crate::landscape::PixelGrid::new(
+            2,
+            2,
+            vec![0, 0, water_byte, water_byte],
+            densities,
+            names,
+            vec![None; 128],
+        );
+        let mut landscape = Landscape::new(2, vec![2, 2]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+        let mut engine = engine_with(materials, landscape);
+        engine.environment.temperature = -1;
+
+        engine.apply_landscape_temperature_conversions();
+
+        let landscape = engine.landscape.as_ref().expect("landscape remains");
+        assert_eq!(landscape.material_at(0, 1), Some(ice));
+        assert_eq!(landscape.material_at(1, 1), Some(ice));
+        assert_eq!(engine.mass_movers.live_movers(), 1);
+        let mover = engine.mass_movers.slot(1).expect("right Water was armed");
+        assert_eq!((mover.mat, mover.x, mover.y), (water, 1, 1));
     }
 
     #[test]
