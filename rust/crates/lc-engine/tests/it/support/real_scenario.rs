@@ -80,13 +80,33 @@ pub fn load_tutorial(number: u8, seed: u64) -> Engine {
 }
 
 pub fn join_local_player(engine: &mut Engine, name: impl Into<String>) -> i32 {
+    join_initialized_local_player(engine, name, None)
+}
+
+/// Join a local virtual player whose team was already selected by the lobby.
+/// Custom active team lists otherwise postpone C++ ScenarioInit until the
+/// synchronized team-selection control executes (C4Player.cpp:299-320,
+/// 111-157,344-349).
+pub fn join_local_player_on_team(
+    engine: &mut Engine,
+    name: impl Into<String>,
+    team: i32,
+) -> i32 {
+    join_initialized_local_player(engine, name, Some(team))
+}
+
+fn join_initialized_local_player(
+    engine: &mut Engine,
+    name: impl Into<String>,
+    team: Option<i32>,
+) -> i32 {
     engine
         .join_player(JoinPlayerConfig {
             name: name.into(),
             player_info_id: 0,
             score: 0,
             total_playing_time: 0,
-            team: None,
+            team,
             color_dw: 0xff_00_00,
             pref_color: 0,
             pref_position: 0,
@@ -96,5 +116,9 @@ pub fn join_local_player(engine: &mut Engine, name: impl Into<String>) -> i32 {
             startup_player_count: 1,
         })
         .unwrap_or_else(|error| panic!("local virtual player joins: {error}"))
-        .number()
+        .initialized()
+        .unwrap_or_else(|| {
+            panic!("local virtual player requires an explicit runtime team selection")
+        })
+        .number
 }

@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
+use crate::support::real_scenario::{
+    join_local_player, join_local_player_on_team, load_installed_scenario, load_tutorial,
+};
 use lc_engine::{
     math, ActionState, AudioCommand, Definition, Direction, EffectVarValue, JoinPlayerConfig,
     ObjectId, ObjectUpdate, PlayerStatus, SpawnConfig, Vector2, COM_DIG, COM_DOWN,
@@ -3039,7 +3041,7 @@ fn alchemy_firelump_collects_its_same_call_fireball_into_the_mage() {
 #[test]
 fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
-    let owner = join_local_player(&mut engine, "Dragon Rock character parity");
+    let owner = join_local_player_on_team(&mut engine, "Dragon Rock character parity", 1);
     let knight = engine
         .crew_cursor(owner)
         .expect("Dragon Rock joins the Scenario.txt KNIG");
@@ -3125,7 +3127,7 @@ fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag() {
 #[test]
 fn dragon_rock_walk_up_enters_the_shipped_tent() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
-    let owner = join_local_player(&mut engine, "Dragon Rock tent-entry parity");
+    let owner = join_local_player_on_team(&mut engine, "Dragon Rock tent-entry parity", 1);
 
     // Choose normal difficulty and the initially selected KNIG. Both choices
     // use the real shipped menus before ordinary crew control resumes
@@ -3202,7 +3204,7 @@ fn dragon_rock_walk_up_enters_the_shipped_tent() {
 #[test]
 fn dragon_rock_initialize_player_grants_both_plan_knowledge_sets() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
-    let owner = join_local_player(&mut engine, "Dragon Rock knowledge parity");
+    let owner = join_local_player_on_team(&mut engine, "Dragon Rock knowledge parity", 1);
 
     // Dragon Rock calls WPPL->SetKnowledge(iPlr) and
     // CPPL->SetKnowledge(iPlr) before continuing player initialization
@@ -3257,7 +3259,7 @@ fn dragon_rock_initialize_player_grants_both_plan_knowledge_sets() {
 #[test]
 fn dragon_rock_real_schedule_enables_and_forces_player_fog_of_war() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
-    let owner = join_local_player(&mut engine, "Dragon Rock fog parity");
+    let owner = join_local_player_on_team(&mut engine, "Dragon Rock fog parity", 1);
     let player = engine.player(owner).expect("joined player remains live");
     assert!(!player.fog_of_war());
     assert!(!player.force_fog_of_war());
@@ -3494,7 +3496,7 @@ fn dragon_rock_scroll_transfer_zone_callbacks_persist_cpp_names() {
 #[test]
 fn dragon_rock_object_lookup_carries_script1_state_into_script3() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
-    join_local_player(&mut engine, "Dragon Rock intro object parity");
+    join_local_player_on_team(&mut engine, "Dragon Rock intro object parity", 1);
 
     // InitializePlayer starts the ordinary C4GameScriptHost counter. Its
     // every-tenth-frame Execute post-increments Counter before calling
@@ -3551,7 +3553,7 @@ fn dragon_rock_object_lookup_carries_script1_state_into_script3() {
 #[test]
 fn dragon_rock_endboss_death_kills_the_shipped_dragon() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
-    join_local_player(&mut engine, "Dragon Rock Kill parity");
+    join_local_player_on_team(&mut engine, "Dragon Rock Kill parity", 1);
 
     // Script1 binds the shipped object numbers to g_pEndboss/g_pDragon.
     // OnClonkDeath then calls Kill(g_pDragon) when the endboss dies
@@ -3586,7 +3588,7 @@ fn dragon_rock_endboss_death_kills_the_shipped_dragon() {
 #[test]
 fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
-    join_local_player(&mut engine, "Dragon Rock CastObjects parity");
+    join_local_player_on_team(&mut engine, "Dragon Rock CastObjects parity", 1);
 
     // Let the shipped counter reach Script15's pause, then resume it through
     // the real dragon-arrival callback (Drachenfels.c4s/Script.c:286-294).

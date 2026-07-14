@@ -1,6 +1,6 @@
 use lc_engine::AudioCommand;
 
-use crate::support::real_scenario::{join_local_player, load_installed_scenario};
+use crate::support::real_scenario::{join_local_player_on_team, load_installed_scenario};
 
 #[test]
 fn dragon_rock_princess_scream_is_one_targeted_non_looping_effect() {
@@ -10,7 +10,7 @@ fn dragon_rock_princess_scream_is_one_targeted_non_looping_effect() {
     // so C++ creates a one-shot effect rather than looping scenario music
     // (C4Script.cpp:2297-2327; C4SoundSystem.cpp:321-355).
     let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
-    join_local_player(&mut engine, "Dragon Rock audio parity");
+    join_local_player_on_team(&mut engine, "Dragon Rock audio parity", 1);
     let mut screams = Vec::new();
     let mut audio_names = Vec::new();
     {

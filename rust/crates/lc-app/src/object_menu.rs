@@ -3477,7 +3477,10 @@ mod tests {
                 player_info_id: 0,
                 score: 0,
                 total_playing_time: 0,
-                team: None,
+                // Drachenfels has an active custom team list. A C++ player
+                // with no selected team stops before ScenarioInit; this menu
+                // fixture models the lobby's Helden selection (team 1).
+                team: Some(1),
                 color_dw: 0xff_00_00,
                 pref_color: 0,
                 pref_position: 0,
@@ -3487,7 +3490,9 @@ mod tests {
                 startup_player_count: 1,
             })
             .expect("Dragon Rock player joins")
-            .number();
+            .initialized()
+            .expect("Dragon Rock team selection initializes the player")
+            .number;
         (engine, owner)
     }
 

@@ -1,6 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 
+use crate::support::real_scenario::load_installed_scenario;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ocf, CommandDirection, Definition, DefinitionTargetRect, Direction, Engine, JoinPlayerConfig,
@@ -124,15 +125,7 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
     // C4MN_Contents=18 (Script.c:120-184). These are the engine-owned
     // permanent menus created/refilled by C4Object/C4ObjectMenu
     // (C4Object.cpp:1919-1980,2044-2062; C4ObjectMenu.cpp:207-435).
-    let content = content_root();
-    let tutorial = content.join("Tutorial.c4f/Tutorial03.c4s");
-    let resolver = ContentResolver {
-        root: content.clone(),
-    };
-    let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
-        .expect("Tutorial03 and the real Objects.c4d load");
-    let mut engine = Engine::with_seed(0);
-    scenario.apply(&mut engine).expect("Tutorial03 applies");
+    let mut engine = load_installed_scenario("Tutorial.c4f/Tutorial03.c4s", 0);
     let joined = engine
         .join_player(JoinPlayerConfig {
             name: "Building-menu tester".to_string(),
