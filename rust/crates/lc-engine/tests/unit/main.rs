@@ -29311,6 +29311,65 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
     }
 
     #[test]
+    fn change_effect_rebinds_the_timer_callback_to_the_new_name() {
+        let script = r#"#strict
+local iOldTimerCalls, iNewTimerCalls;
+public func Boot() {
+  AddEffect("IntFade", this(), 100, 50, this());
+  return ChangeEffect("Int*", this(), 0, "IntFadeOut", 2);
+}
+func FxIntFadeTimer(pThis, iNumber, iTime) {
+  ++iOldTimerCalls;
+  return 0;
+}
+func FxIntFadeOutTimer(pThis, iNumber, iTime) {
+  ++iNewTimerCalls;
+  return 0;
+}
+"#;
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(
+                Definition::from_script("Actr", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actr").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let idx = engine.find_object_index(id).expect("actor exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Boot", Vec::new())
+                .expect("ChangeEffect runs"),
+            Value::Bool(true)
+        );
+
+        let effect = &engine.objects[idx].state.effects[0];
+        assert_eq!(effect.name, "IntFadeOut");
+        assert_eq!(effect.interval, 2);
+        assert_eq!(effect.timer, 0);
+
+        engine.tick().expect("first timer tick");
+        engine.tick().expect("second timer tick");
+        let idx = engine.find_object_index(id).expect("actor remains");
+        assert_eq!(
+            engine.objects[idx]
+                .state
+                .local_vars
+                .get("iOldTimerCalls")
+                .cloned()
+                .unwrap_or(Value::Nil),
+            Value::Nil,
+            "the old callback is no longer bound"
+        );
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iNewTimerCalls"),
+            Some(&Value::Int(1)),
+            "the renamed callback fires at the new interval"
+        );
+    }
+
+    #[test]
     fn queued_commands_can_spawn_and_destroy() {
         let mut engine = Engine::with_seed(42);
         let definition = Definition::from_script(

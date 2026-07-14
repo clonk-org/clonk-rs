@@ -3980,6 +3980,65 @@ fn gold_rush_stalactite_hit_spins_same_call_created_fragments() {
 }
 
 #[test]
+fn gold_rush_fade_out_retimes_its_existing_effect_through_change_effect() {
+    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+    assert!(
+        engine.debug_global_has_function("FadeOut"),
+        "GoldRush Helpers.c supplies FadeOut to the global script layer"
+    );
+    engine
+        .register_definition(
+            Definition::from_script(
+                "FDRV",
+                "Fade driver",
+                r#"#strict
+func StartFade() { return FadeOut(4, 2, this()); }
+func RetargetFade() { return FadeOut(10, 5, this()); }
+"#,
+            )
+            .expect("fade driver compiles"),
+        )
+        .expect("fade driver registers against the installed global table");
+    let target = engine
+        .spawn_object(
+            SpawnConfig::new("FDRV").with_position(Vector2::new(320, 120)),
+        )
+        .expect("the fade driver spawns");
+
+    let index = engine.find_object_index(target).expect("fade driver exists");
+    assert_eq!(
+        engine
+            .call_object_function(index, "StartFade", Vec::new())
+            .expect("the shipped FadeOut starts"),
+        Value::Int(1)
+    );
+    let index = engine.find_object_index(target).expect("fade driver remains");
+    assert_eq!(
+        engine
+            .call_object_function(index, "RetargetFade", Vec::new())
+            .expect("the shipped FxIntFadeAdd path completes"),
+        Value::Int(1)
+    );
+
+    let object = engine
+        .object_snapshot(target)
+        .expect("fade driver remains active");
+    let fades = object
+        .effects
+        .iter()
+        .filter(|effect| effect.name == "IntFade")
+        .collect::<Vec<_>>();
+    assert_eq!(fades.len(), 1, "the second FadeOut merges into the first");
+    assert_eq!(fades[0].interval, 10, "ChangeEffect installs the new timer");
+    assert_eq!(fades[0].timer, 0, "ChangeEffect resets effect time");
+    assert_eq!(
+        fades[0].var(0),
+        EffectVarValue::Int(5),
+        "FxIntFadeAdd keeps the shipped fade direction write"
+    );
+}
+
+#[test]
 fn gold_rush_real_anvil_forges_a_wire_roll_from_its_metal_contents() {
     let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
     let mut forge_action = ActionState::new("Forge");

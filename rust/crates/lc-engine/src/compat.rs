@@ -9290,6 +9290,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     crate::script_constants::register_script_constants(script);
     script.register_host_function("AddEffect", add_effect);
     script.register_host_function("CheckEffect", check_effect);
+    script.register_host_function("ChangeEffect", change_effect);
     script.register_host_function("RemoveEffect", remove_effect);
     script.register_host_function("GetEffect", get_effect);
     script.register_host_function("GetEffectCount", get_effect_count);
@@ -12211,6 +12212,18 @@ fn effect_name_filter<'a>(
     }
 }
 
+/// `SCopy(..., C4MaxName)` in FnChangeEffect copies at most 30 bytes
+/// (C4Script.cpp:5534; C4Constants.h:26). Rust strings must remain valid
+/// UTF-8, so a split code point retreats to the preceding boundary.
+fn truncate_c4_max_name(name: &str) -> String {
+    const C4_MAX_NAME: usize = 30;
+    let mut end = name.len().min(C4_MAX_NAME);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].to_owned()
+}
+
 /// Effect host functions accept ANY object as the state target (the
 /// C4Effect operations attach to the GIVEN object, C4Effect.cpp): a
 /// foreign target re-dispatches through the reentrancy seam so the
@@ -12948,6 +12961,55 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         });
     }
     Ok(Value::Bool(removed.is_some()))
+}
+
+fn change_effect(args: &[Value]) -> Result<Value, RuntimeError> {
+    if let Some(result) = redirect_foreign_effect_target("ChangeEffect", args) {
+        return result.map(|value| match value {
+            // The shared foreign-effect seam uses integer zero when the
+            // target vanished. FnChangeEffect's declared return is bool.
+            Value::Int(0) => Value::Bool(false),
+            other => other,
+        });
+    }
+
+    let name_filter =
+        effect_name_filter("ChangeEffect", args.first().unwrap_or(&Value::Nil))?
+            .map(str::to_owned);
+    let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
+    if matches!(scope, EffectScope::Object) {
+        match args.get(1).unwrap_or(&Value::Nil) {
+            Value::Object(_) | Value::Proplist(_) => {}
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "ChangeEffect: expected object or proplist for object state, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    let index = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "ChangeEffect",
+        "index",
+    )?;
+    let Some(new_name) =
+        effect_name_filter("ChangeEffect", args.get(3).unwrap_or(&Value::Nil))?
+    else {
+        return Ok(Value::Bool(false));
+    };
+    let new_name = truncate_c4_max_name(new_name);
+    let new_timer = value_to_i32(
+        args.get(4).unwrap_or(&Value::Nil),
+        "ChangeEffect",
+        "new timer",
+    )?;
+
+    let changed = with_context_mut(scope, |ctx| {
+        ctx.change_effect(name_filter.as_deref(), index, new_name, new_timer)
+    })?;
+    Ok(Value::Bool(changed))
 }
 
 fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -31994,6 +32056,51 @@ impl EffectScopeContext {
         Some(effect.var(var_index))
     }
 
+    fn change_effect(
+        &mut self,
+        name_filter: Option<&str>,
+        index: i32,
+        new_name: String,
+        new_timer: i32,
+    ) -> bool {
+        let position = if let Some(name) = name_filter {
+            if index < 0 {
+                None
+            } else {
+                let mut remaining = index;
+                self.effects.iter().position(|effect| {
+                    if effect.priority != 0 && s_wildcard_match_ex(&effect.name, name) {
+                        if remaining == 0 {
+                            true
+                        } else {
+                            remaining -= 1;
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                })
+            }
+        } else {
+            self.effects
+                .iter()
+                .position(|effect| effect.number == index && effect.priority != 0)
+        };
+        let Some(position) = position else {
+            return false;
+        };
+
+        let effect = &mut self.effects[position];
+        effect.name = new_name;
+        if new_timer >= 0 {
+            effect.interval = new_timer;
+            effect.timer = 0;
+        }
+        let updated = effect.clone();
+        self.commands.push(EffectCommand::update(updated));
+        true
+    }
+
     fn remove_effect(
         &mut self,
         name_filter: Option<&str>,
@@ -33440,6 +33547,7 @@ mod tests {
         "CastPXS",
         "CastParticles",
         "ChangeDef",
+        "ChangeEffect",
         "CheckEffect",
         "CheckEnergyNeedChain",
         "ClearLastPlrCom",
@@ -40682,6 +40790,132 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn change_effect_renames_retimes_and_supports_number_lookup() {
+        let mut fade = EffectState::new("IntFade")
+            .with_priority(100)
+            .with_interval(7)
+            .with_timer(4);
+        fade.number = 11;
+        let mut keep = EffectState::new("Keep")
+            .with_priority(-120)
+            .with_interval(9)
+            .with_timer(6);
+        keep.number = 12;
+        let mut omitted = EffectState::new("Omitted")
+            .with_priority(80)
+            .with_interval(5)
+            .with_timer(3);
+        omitted.number = 13;
+        let mut long = EffectState::new("Long")
+            .with_priority(70)
+            .with_interval(4)
+            .with_timer(2);
+        long.number = 14;
+        let effects = [fade, keep, omitted, long];
+
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"#strict 2
+func Probe(state) {
+  var renamed = ChangeEffect("Int*", state, 0, "IntFadeOut", 10);
+  var preserved = ChangeEffect("Keep", state, 0, "KeepOut", -1);
+  var empty_rejected = ChangeEffect("KeepOut", state, 0, "", 1);
+  var nil_rejected = ChangeEffect("KeepOut", state, 0, nil, 1);
+  var missing_rejected = ChangeEffect("Missing", state, 0, "StillMissing", 1);
+  var by_number = ChangeEffect(nil, state, 12, "ByNumber", -7);
+  var omitted_timer = ChangeEffect("Omitted", state, 0, "Reset");
+  var clamped = ChangeEffect(nil, state, 14, "abcdefghijklmnopqrstuvwxyz1234567890", -1);
+  return [
+    renamed,
+    GetEffect("IntFadeOut", state, 0, 3),
+    GetEffect("IntFadeOut", state, 0, 6),
+    preserved,
+    empty_rejected,
+    nil_rejected,
+    missing_rejected,
+    by_number,
+    GetEffect(nil, state, 12, 1),
+    GetEffect(nil, state, 12, 3),
+    GetEffect(nil, state, 12, 6),
+    omitted_timer,
+    GetEffect(nil, state, 13, 3),
+    GetEffect(nil, state, 13, 6),
+    clamped,
+    GetEffect(nil, state, 14, 1)
+  ];
+}
+"#,
+            )
+            .expect("ChangeEffect probe compiles");
+
+        let state = empty_state();
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                None,
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &effects,
+                "Idle",
+                0,
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                0,
+                None,
+                None,
+                &[],
+                crate::FULL_CON,
+            )),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || {
+                script
+                    .call("Probe", &[state])
+                    .map_err(|error| RuntimeError::new(error.to_string()))
+            },
+        );
+
+        assert_eq!(
+            result.expect("ChangeEffect probe runs"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(10),
+                Value::Int(0),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::String("ByNumber".into()),
+                Value::Int(9),
+                Value::Int(6),
+                Value::Bool(true),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Bool(true),
+                Value::String("abcdefghijklmnopqrstuvwxyz1234".into()),
+            ])
+        );
+        assert_eq!(
+            outcome
+                .object
+                .iter()
+                .filter(|command| matches!(command, EffectCommand::Update(_)))
+                .count(),
+            5,
+            "only successful changes emit updates"
+        );
     }
 
     #[test]
