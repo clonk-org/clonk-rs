@@ -19,6 +19,9 @@ const MAX_CALL_DEPTH: usize = 512;
 /// (C4Aul.h); `Par(n)` beyond them reads nil and `F(...)` forwards at most
 /// this many.
 const MAX_CALL_PARAMETERS: usize = 10;
+/// `C4ValueList::MaxSize` (C4ValueList.h:30): array reference access may grow
+/// through index 999,999, but the next slot throws "out of memory".
+const ARRAY_MAX_SIZE: usize = 1_000_000;
 /// `C4ValueList::MaxSize` (C4ValueList.h:32): `Global(index)` may grow up to,
 /// but not including, this index.
 const GLOBAL_SLOT_MAX_SIZE: i32 = 1_000_000;
@@ -366,6 +369,18 @@ pub(crate) enum PathSegment {
     Index(Value),
 }
 
+fn array_index(index: &Value) -> Result<usize, RuntimeError> {
+    index
+        .as_c4_int()
+        .map(|index| index.max(0) as usize)
+        .ok_or_else(|| {
+            RuntimeError::new(format!(
+                "array access: can not convert \"{}\" to int",
+                index.type_name()
+            ))
+        })
+}
+
 fn read_path(value: &Value, segments: &[PathSegment]) -> Result<Value, RuntimeError> {
     let mut current = value.clone();
     for segment in segments {
@@ -379,27 +394,16 @@ fn read_path(value: &Value, segments: &[PathSegment]) -> Result<Value, RuntimeEr
                     other.type_name()
                 )))
             }
-            (PathSegment::Index(Value::Int(raw_index)), Value::Array(elements)) => {
-                if *raw_index < 0 {
-                    return Err(RuntimeError::new("array index cannot be negative"));
-                }
-                elements
-                    .get(*raw_index as usize)
-                    .cloned()
-                    .unwrap_or(Value::Nil)
-            }
+            (PathSegment::Index(index), Value::Array(elements)) => elements
+                .get(array_index(index)?)
+                .cloned()
+                .unwrap_or(Value::Nil),
             (PathSegment::Index(Value::String(key)), Value::Proplist(entries)) => {
                 entries.get(key).cloned().unwrap_or(Value::Nil)
             }
             (PathSegment::Index(index), Value::Proplist(_)) => {
                 return Err(RuntimeError::new(format!(
                     "proplist keys must be strings, got {}",
-                    index.type_name()
-                )))
-            }
-            (PathSegment::Index(index), Value::Array(_)) => {
-                return Err(RuntimeError::new(format!(
-                    "array index must be an integer, got {}",
                     index.type_name()
                 )))
             }
@@ -444,17 +448,19 @@ fn write_path(
                 write_path(next, rest, new_value)
             }
         }
-        PathSegment::Index(Value::Int(raw_index)) => {
-            if *raw_index < 0 {
-                return Err(RuntimeError::new("array index cannot be negative"));
-            }
+        PathSegment::Index(index @ Value::Int(_))
+        | PathSegment::Index(index @ Value::Bool(_))
+        | PathSegment::Index(index @ Value::Nil) => {
             let Value::Array(elements) = value else {
                 return Err(RuntimeError::new(format!(
                     "cannot index into value of type {}",
                     value.type_name()
                 )));
             };
-            let index = *raw_index as usize;
+            let index = array_index(index)?;
+            if index >= ARRAY_MAX_SIZE {
+                return Err(RuntimeError::new("out of memory"));
+            }
             if index >= elements.len() {
                 elements.resize(index + 1, Value::Nil);
             }
@@ -1886,8 +1892,21 @@ impl<'a> Vm<'a> {
                 Ok(Value::Proplist(map))
             }
             Expr::Index(target, index) => {
-                let collection = self.evaluate(target, env, depth)?;
+                // Array values are reference-counted containers in C++. Keep
+                // an addressable Rust path live so the otherwise surprising
+                // empty `array[-1]` growth remains visible to the caller.
+                let collection_reference = self.existing_path_lvalue(target, env, depth)?;
+                let collection = if let Some(reference) = &collection_reference {
+                    reference.read()?
+                } else {
+                    self.evaluate(target, env, depth)?
+                };
                 let idx = self.evaluate(index, env, depth)?;
+                Self::grow_empty_negative_array(
+                    collection_reference.as_ref(),
+                    &collection,
+                    &idx,
+                )?;
                 self.eval_index(collection, idx)
             }
             Expr::Property(target, name) => {
@@ -2344,9 +2363,8 @@ impl<'a> Vm<'a> {
 
     fn eval_index(&self, collection: Value, index: Value) -> Result<Value, RuntimeError> {
         match (&collection, index) {
-            (Value::Array(elements), Value::Int(raw_index)) => Ok(usize::try_from(raw_index)
-                .ok()
-                .and_then(|index| elements.get(index))
+            (Value::Array(elements), index) => Ok(elements
+                .get(array_index(&index)?)
                 .cloned()
                 .unwrap_or(Value::Nil)),
             (Value::Proplist(entries), Value::String(key)) => {
@@ -3133,6 +3151,73 @@ impl<'a> Vm<'a> {
         self.assignment_target_to_lvalue(env, &target, depth)
     }
 
+    /// Resolve variable-rooted container paths without evaluating them to a
+    /// detached `Value` clone. Definite `func &` calls retain their returned
+    /// reference too; value-call results remain ordinary rvalues.
+    fn existing_path_lvalue(
+        &self,
+        expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Option<LValueRef>, RuntimeError> {
+        match expr {
+            Expr::Variable(name) => Ok(env
+                .lvalue(name)
+                .or_else(|| self.global_variable_cell(name).map(LValueRef::Cell))),
+            Expr::Property(base, property) => Ok(self
+                .existing_path_lvalue(base, env, depth)?
+                .map(|reference| reference.append(PathSegment::Property(property.clone())))),
+            Expr::Index(base, index_expr) => {
+                let Some(reference) = self.existing_path_lvalue(base, env, depth)? else {
+                    return Ok(None);
+                };
+                let collection = reference.read()?;
+                let index = self.evaluate(index_expr, env, depth)?;
+                Self::grow_empty_negative_array(Some(&reference), &collection, &index)?;
+                Ok(Some(reference.append(PathSegment::Index(index))))
+            }
+            Expr::Call {
+                callee,
+                is_optional,
+                ..
+            } if !is_optional
+                && matches!(callee.as_ref(), Expr::Variable(name) if self
+                    .functions
+                    .get(name)
+                    .or_else(|| self.global_functions.and_then(|functions| functions.get(name)))
+                    .is_some_and(|function| function.returns_reference)) =>
+            {
+                self.expr_to_lvalue(expr, env, depth).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn grow_empty_negative_array(
+        reference: Option<&LValueRef>,
+        collection: &Value,
+        index: &Value,
+    ) -> Result<(), RuntimeError> {
+        let grows = matches!(
+            (collection, index.as_c4_int()),
+            (Value::Array(elements), Some(raw_index))
+                if elements.is_empty() && raw_index < 0
+        );
+        let Some(reference) = reference.filter(|_| grows) else {
+            return Ok(());
+        };
+
+        // Avoid clobbering a nonempty or non-array value if evaluating the
+        // index reassigned this Rust owner after the collection was read.
+        if matches!(
+            reference.read(),
+            Ok(Value::Array(elements)) if elements.is_empty()
+        ) {
+            reference.write(Value::Array(vec![Value::Nil]))?;
+        }
+        Ok(())
+    }
+
     fn evaluate_slot_index(
         &self,
         name: &str,
@@ -3658,20 +3743,99 @@ mod tests {
     }
 
     #[test]
-    fn vm_array_value_access_returns_nil_outside_bounds_like_cpp() {
-        // AB_ARRAYA_V passes noref=true to C4Value::GetContainerElement
-        // (C4AulExec.cpp:906-918), which Set0()s the result whenever the
-        // array does not have the requested index (C4Value.cpp:207-214).
-        let source = "func Test(index) { var arr = [1]; return arr[index]; }";
+    fn vm_array_indices_coerce_clamp_and_grow_like_cpp() {
+        let source = r#"
+            func Test() {
+                var a = [7, 8];
+                var reads = [a[-1], a[nil], a[true], a[2]];
+                a[-1] = 5;
+                var written = a[0];
+                var e = [];
+                var empty = e[-1];
+                var old = a[-1]++;
+                var coerced = [0, 0];
+                coerced[nil] = 3;
+                coerced[true] = 4;
+                return [reads, written, empty, e, old, a[0], coerced];
+            }
+        "#;
 
         assert_eq!(
-            execute_script(source, "Test", &[Value::Int(1)]).expect("read succeeds"),
-            Value::Nil
+            execute_script(source, "Test", &[]).expect("array accesses succeed"),
+            Value::Array(vec![
+                Value::Array(vec![
+                    Value::Int(7),
+                    Value::Int(7),
+                    Value::Int(8),
+                    Value::Nil,
+                ]),
+                Value::Int(5),
+                Value::Nil,
+                Value::Array(vec![Value::Nil]),
+                Value::Int(5),
+                Value::Int(6),
+                Value::Array(vec![Value::Int(3), Value::Int(4)]),
+            ])
         );
+    }
+
+    #[test]
+    fn vm_empty_negative_read_grows_nested_and_reference_return_paths() {
+        let mut engine = crate::engine::Engine::new();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured_by_host = std::sync::Arc::clone(&captured);
+        engine.register_host_function("Capture", move |args| {
+            *captured_by_host.lock().unwrap() = args.first().cloned();
+            Ok(Value::Int(0))
+        });
+        engine
+            .load_script(
+                r#"
+                    local Data;
+
+                    func & GetData() { return Data; }
+                    func GrowThroughReference() {
+                        Data = [];
+                        var ignored = GetData()[-1];
+                        return Data;
+                    }
+                    func GrowBeforeNestedFailure() {
+                        Data = [];
+                        return Data[-1][Capture(Data)];
+                    }
+                "#,
+            )
+            .expect("script loads");
+
         assert_eq!(
-            execute_script(source, "Test", &[Value::Int(-1)]).expect("read succeeds"),
-            Value::Nil
+            engine
+                .call("GrowThroughReference", &[])
+                .expect("reference read succeeds"),
+            Value::Array(vec![Value::Nil])
         );
+        assert!(engine.call("GrowBeforeNestedFailure", &[]).is_err());
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(Value::Array(vec![Value::Nil]))
+        );
+    }
+
+    #[test]
+    fn vm_array_growth_stops_at_cpp_value_list_max_size() {
+        let source = "func Grow(index) { var a = []; a[index] = 1; return a; }";
+        let grown = execute_script(source, "Grow", &[Value::Int(999_999)])
+            .expect("last valid array index grows");
+        let Value::Array(elements) = grown else {
+            panic!("array expected");
+        };
+        assert_eq!(elements.len(), ARRAY_MAX_SIZE);
+        assert_eq!(elements.last(), Some(&Value::Int(1)));
+        drop(elements);
+
+        match execute_script(source, "Grow", &[Value::Int(1_000_000)]) {
+            Ok(_) => panic!("index at array cap unexpectedly succeeded"),
+            Err(error) => assert_eq!(error.message(), "out of memory"),
+        }
     }
 
     #[test]
