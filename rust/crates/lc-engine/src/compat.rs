@@ -10443,6 +10443,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("DoBreath", do_breath);
     script.register_host_function("GetBreath", get_breath);
     script.register_host_function("GetName", get_name);
+    script.register_host_function("GetDesc", get_desc);
     script.register_host_function("SetName", set_name);
     script.register_host_function("GetCon", get_con);
     script.register_host_function("DoCon", do_con);
@@ -16339,6 +16340,37 @@ fn get_name(args: &[Value]) -> Result<Value, RuntimeError> {
         Ok(definition
             .and_then(|id| context.definition_metadata(&id))
             .map(|metadata| Value::String(metadata.name.clone()))
+            .unwrap_or(Value::Nil))
+    })
+}
+
+/// FnGetDesc (C4Script.cpp:1063-1076): an explicit object wins over the
+/// definition argument. The caller object is used only when both slots are
+/// nil/zero; definition-only script contexts do not supply a fallback.
+fn get_desc(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "GetDesc",
+        "object",
+    )?;
+    let definition =
+        parse_definition_argument(args.get(1), "GetDesc")?.filter(|id| !id.is_empty());
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let definition = match (target, definition) {
+            (Some(target), _) => context.object_effective_definition_id(target),
+            (None, Some(definition)) => Some(definition),
+            (None, None) => context
+                .script_object_context
+                .and_then(|target| context.object_effective_definition_id(target)),
+        };
+        Ok(definition
+            .as_deref()
+            .and_then(|id| context.world.definition_description(id))
+            .map(|description| Value::String(description.to_owned()))
             .unwrap_or(Value::Nil))
     })
 }
@@ -36759,6 +36791,7 @@ mod tests {
         "GetDefBottom",
         "GetDefCoreVal",
         "GetDefinition",
+        "GetDesc",
         "GetDir",
         "GetEffect",
         "GetEffectCount",
@@ -38186,6 +38219,107 @@ mod tests {
             result.expect("GetName succeeds"),
             Value::String("Fire".into())
         );
+    }
+
+    #[test]
+    fn get_desc_resolves_caller_object_explicit_object_and_definition() {
+        let message_window = r#"#strict
+global func MessageWindow(string pMsg, int iForPlr, id idIcon, string pCaption)
+{
+    if (!idIcon) idIcon = GetID();
+    if (!pCaption) pCaption = GetName();
+    var pCursor = GetCursor(iForPlr);
+    if (!CreateMenu(idIcon, pCursor, pCursor, 0, pCaption, 0, 2)) return();
+    AddMenuItem(pCaption, "", TIM1, pCursor, 0, 0, pMsg);
+    return 1;
+}
+"#;
+        let script = r#"#strict 2
+public func Probe(object other)
+{
+    return [GetDesc(), GetDesc(0, RULE), GetDesc(0, NOPE),
+            GetDesc(other, RULE)];
+}
+public func Activate(int player) { return MessageWindow(GetDesc(), player); }
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        assert_eq!(
+            engine.install_global_scripts(&[("Helpers.c".into(), message_window.into())]),
+            1
+        );
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Player"))
+            .expect("player registers");
+        let mut goal = crate::Definition::from_script("GOAL", "Goal", script)
+            .expect("goal fixture compiles");
+        goal.set_description(Some("Goal description".into()));
+        engine.register_definition(goal).expect("goal registers");
+        for (id, name, description) in [
+            ("RULE", "Rule", "Rule description"),
+            ("OTHR", "Other", "Other description"),
+        ] {
+            let mut definition = crate::Definition::from_script(id, name, "#strict 2")
+                .expect("description fixture compiles");
+            definition.set_description(Some(description.into()));
+            engine
+                .register_definition(definition)
+                .expect("description fixture registers");
+        }
+        let mut crew = crate::Definition::from_script("CLNK", "Clonk", "#strict 2")
+            .expect("crew fixture compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+
+        let goal = engine
+            .spawn_object(SpawnConfig::new("GOAL"))
+            .expect("goal spawns");
+        let other = engine
+            .spawn_object(SpawnConfig::new("OTHR"))
+            .expect("other object spawns");
+        let crew = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_alive(true)
+                    .with_owner(0)
+                    .with_crew_member(true),
+            )
+            .expect("crew spawns");
+        engine.select_crew(0, [crew]).expect("crew selects");
+        engine
+            .set_crew_cursor(0, Some(crew))
+            .expect("crew cursor sets");
+        let goal_index = engine.find_object_index(goal).expect("goal exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    goal_index,
+                    "Probe",
+                    vec![object_reference_value(other)],
+                )
+                .expect("GetDesc and MessageWindow fixture runs"),
+            Value::Array(vec![
+                Value::String("Goal description".into()),
+                Value::String("Rule description".into()),
+                Value::Nil,
+                Value::String("Other description".into()),
+            ])
+        );
+        assert_eq!(
+            engine
+                .call_object_function(goal_index, "Activate", vec![Value::Int(0)])
+                .expect("goal MessageWindow opens"),
+            Value::Int(1)
+        );
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew remains")
+            .expect("description menu is open");
+        assert_eq!(menu.style, 2);
+        assert_eq!(menu.caption, "Goal");
+        assert_eq!(menu.symbol_id, "GOAL");
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(menu.items[0].info_caption, "Goal description");
     }
 
     #[test]
