@@ -59,7 +59,7 @@ impl C4Fixed {
     /// Absolute value (the C++ `Abs` template over `C4Fixed`).
     #[inline]
     pub fn abs(self) -> Self {
-        Self(self.0.abs())
+        Self(self.0.wrapping_abs())
     }
 
     /// Round to nearest with precision multiplier. Fixed.h:97-105.
@@ -119,14 +119,14 @@ impl C4Fixed {
 impl AddAssign for C4Fixed {
     #[inline]
     fn add_assign(&mut self, rhs: Self) {
-        self.0 += rhs.0;
+        self.0 = self.0.wrapping_add(rhs.0);
     }
 }
 
 impl SubAssign for C4Fixed {
     #[inline]
     fn sub_assign(&mut self, rhs: Self) {
-        self.0 -= rhs.0;
+        self.0 = self.0.wrapping_sub(rhs.0);
     }
 }
 
@@ -147,7 +147,7 @@ impl DivAssign for C4Fixed {
 impl MulAssign<i32> for C4Fixed {
     #[inline]
     fn mul_assign(&mut self, rhs: i32) {
-        self.0 *= rhs;
+        self.0 = self.0.wrapping_mul(rhs);
     }
 }
 
@@ -162,7 +162,7 @@ impl Neg for C4Fixed {
     type Output = Self;
     #[inline]
     fn neg(self) -> Self {
-        Self(-self.0)
+        Self(self.0.wrapping_neg())
     }
 }
 
@@ -369,7 +369,7 @@ pub fn fixed100(x: i32) -> C4Fixed {
 /// `x/256` as fixed-point. Fixed.h:233.
 #[inline]
 pub fn fixed256(x: i32) -> C4Fixed {
-    C4Fixed(x * FPF / 256)
+    C4Fixed(x.wrapping_mul(FPF) / 256)
 }
 
 /// `x/10` as fixed-point. Fixed.h:234.
@@ -563,6 +563,29 @@ mod tests {
     #[test]
     fn sub_int_rhs() {
         assert_eq!(itofix(7) - 3, itofix(4));
+    }
+
+    #[test]
+    fn raw_arithmetic_wraps_like_cpp_int32() {
+        // Fixed.h:121-183 and FIXED256 at :232 use the engine's practical
+        // two's-complement int32 semantics in every build profile.
+        let max = C4Fixed::from_raw(i32::MAX);
+        let one = C4Fixed::from_raw(1);
+        assert_eq!((max + one).val(), i32::MIN);
+        assert_eq!((C4Fixed::from_raw(i32::MIN) - one).val(), i32::MAX);
+        assert_eq!((-C4Fixed::from_raw(i32::MIN)).val(), i32::MIN);
+        assert_eq!(C4Fixed::from_raw(i32::MIN).abs().val(), i32::MIN);
+        assert_eq!((max * 2).val(), -2);
+        assert_eq!(
+            fixed256(i32::MAX).val(),
+            i32::MAX.wrapping_mul(FPF) / 256
+        );
+        assert_eq!(
+            (itofix(100_000) + itofix(100_000)).val(),
+            100_000i32
+                .wrapping_mul(FPF)
+                .wrapping_add(100_000i32.wrapping_mul(FPF))
+        );
     }
 
     // ── Sub-pixel accumulation (the key item-1 regression test) ──────────────
