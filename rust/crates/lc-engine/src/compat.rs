@@ -9327,6 +9327,9 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
     script.register_host_function("CastAny", cast_any);
+    script.register_host_function("CastInt", cast_int);
+    script.register_host_function("CastBool", cast_bool);
+    script.register_host_function("CastC4ID", cast_c4id);
     script.register_host_function("CastObjects", cast_objects);
     script.register_host_function("CastPXS", cast_pxs);
     script.register_host_function("PlaceAnimal", place_animal);
@@ -10236,6 +10239,94 @@ fn cast_any(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(match args.first().cloned().unwrap_or(Value::Nil) {
         Value::Int(0) | Value::Bool(false) | Value::Nil => Value::Nil,
         value => value,
+    })
+}
+
+fn cast_arg(args: &[Value]) -> &Value {
+    args.first().unwrap_or(&Value::Nil)
+}
+
+fn cast_c4id_payload(id: &str) -> u64 {
+    if id.len() < 4 || id == "NONE" {
+        return 0;
+    }
+    if id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return id.bytes().fold(0_u64, |raw, byte| {
+            raw.wrapping_mul(10)
+                .wrapping_add(u64::from(byte - b'0'))
+        });
+    }
+    let mut bytes = [0_u8; 4];
+    for (index, byte) in id.bytes().take(4).enumerate() {
+        bytes[index] = byte;
+    }
+    u64::from(u32::from_le_bytes(bytes))
+}
+
+fn render_cast_c4id(raw: i32) -> String {
+    if (1..=9999).contains(&raw) {
+        return format!("{raw:04}");
+    }
+    (raw as u32)
+        .to_le_bytes()
+        .into_iter()
+        .map(char::from)
+        .collect()
+}
+
+fn cast_stable_raw_i32(value: &Value, function: &str) -> Result<i32, RuntimeError> {
+    match value {
+        Value::Int(raw) => Ok(*raw),
+        Value::Bool(flag) => Ok(i32::from(*flag)),
+        Value::Nil => Ok(0),
+        Value::C4Id(id) => Ok(cast_c4id_payload(id) as i32),
+        Value::Object(_) | Value::String(_) | Value::Array(_) | Value::Proplist(_) => {
+            Err(RuntimeError::new(format!(
+                "{function}: pointer payload cannot be represented as a deterministic integer"
+            )))
+        }
+    }
+}
+
+/// `C4AulDefCastFunc<C4V_Any, C4V_Int>` (C4Script.cpp:6184-6195,
+/// :7043): retain the stable raw payload and replace only its type tag.
+fn cast_int(args: &[Value]) -> Result<Value, RuntimeError> {
+    Ok(Value::Int(cast_stable_raw_i32(
+        cast_arg(args),
+        "CastInt",
+    )?))
+}
+
+/// `C4AulDefCastFunc<C4V_Any, C4V_Bool>`: pointer-backed values are nonzero
+/// in C++, while the scalar variants have deterministic raw payloads here.
+fn cast_bool(args: &[Value]) -> Result<Value, RuntimeError> {
+    let truthy = match cast_arg(args) {
+        Value::Int(raw) => *raw != 0,
+        Value::Bool(flag) => *flag,
+        Value::Nil => false,
+        Value::C4Id(id) => cast_c4id_payload(id) != 0,
+        Value::Object(id) => *id != 0,
+        Value::String(_) | Value::Array(_) | Value::Proplist(_) => true,
+    };
+    Ok(Value::Bool(truthy))
+}
+
+/// `C4AulDefCastFunc<C4V_Any, C4V_C4ID>`: zero becomes C4V_Any/null; numeric
+/// ids keep their decimal representation and other payloads render as four
+/// little-endian id bytes (C4Id.h:31-69).
+fn cast_c4id(args: &[Value]) -> Result<Value, RuntimeError> {
+    if let Value::C4Id(id) = cast_arg(args) {
+        return Ok(if cast_c4id_payload(id) == 0 {
+            Value::Nil
+        } else {
+            Value::C4Id(id.clone())
+        });
+    }
+    let raw = cast_stable_raw_i32(cast_arg(args), "CastC4ID")?;
+    Ok(if raw == 0 {
+        Value::Nil
+    } else {
+        Value::C4Id(render_cast_c4id(raw))
     })
 }
 
@@ -33071,6 +33162,9 @@ mod tests {
         "Call",
         "CastAny",
         "CastBackParticles",
+        "CastBool",
+        "CastC4ID",
+        "CastInt",
         "CastObjects",
         "CastPXS",
         "CastParticles",
@@ -35218,6 +35312,104 @@ func Trigger(object pOther)
         assert_eq!(
             cast_any(&[Value::Int(0)]).expect("CastAny succeeds"),
             Value::Nil
+        );
+    }
+
+    #[test]
+    fn cast_builtins_retag_payloads_and_drive_construction_paths() {
+        let mut engine = crate::Engine::with_seed(3);
+        let builder = crate::Definition::from_script(
+            "BUIL",
+            "Builder",
+            r#"#strict 2
+public func CastValues()
+{
+    return [CastC4ID(1279546187), CastInt(KSDL), CastBool(0), CastBool(7), CastInt(nil), CastC4ID(CastInt(GetID()) + 201135119), CastBool(C4Id("4294967296")), CastInt(C4Id("4294967297")), CastC4ID(C4Id("4294967296")), CastInt(CastC4ID(65536))];
+}
+public func MakePacked() { return CreateContents(CastC4ID(1279546187)); }
+public func ControlCommand(command, target, tx, ty, target2, data)
+{
+    if (command S= "Construct")
+        if (CastC4ID(data)->~RejectConstruction(tx - GetX(), ty - GetY(), this()))
+            return true;
+    return false;
+}
+"#,
+        )
+        .expect("builder script compiles");
+        engine
+            .register_definition(builder)
+            .expect("builder registers");
+        let target = crate::Definition::from_script(
+            "KSDL",
+            "Packed target",
+            r#"#strict 2
+public func RejectConstruction(x, y, builder)
+{
+    if (!builder) return false;
+    return x == 5 && y == 7;
+}
+"#,
+        )
+        .expect("packed target script compiles");
+        engine
+            .register_definition(target)
+            .expect("packed target registers");
+
+        let builder = engine
+            .spawn_object(
+                SpawnConfig::new("BUIL").with_position(Vector2::new(20, 30)),
+            )
+            .expect("builder spawns");
+        let builder_index = engine.find_object_index(builder).expect("builder exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(builder_index, "CastValues", Vec::new())
+                .expect("cast builtins execute"),
+            Value::Array(vec![
+                Value::C4Id("KSDL".into()),
+                Value::Int(1_279_546_187),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Int(0),
+                Value::C4Id("QiFX".into()),
+                Value::Bool(true),
+                Value::Int(1),
+                Value::C4Id("4294967296".into()),
+                Value::Int(65_536),
+            ])
+        );
+
+        let created = engine
+            .call_object_function(builder_index, "MakePacked", Vec::new())
+            .expect("packed id reaches CreateContents");
+        let created = object_id_from_value(&created).expect("CreateContents returns an object");
+        assert_eq!(
+            engine
+                .object_snapshot(created)
+                .expect("created object survives")
+                .definition_id,
+            "KSDL"
+        );
+
+        let rejected = engine
+            .call_object_function(
+                builder_index,
+                "ControlCommand",
+                vec![
+                    Value::String("Construct".into()),
+                    Value::Nil,
+                    Value::Int(25),
+                    Value::Int(37),
+                    Value::Nil,
+                    Value::Int(1_279_546_187),
+                ],
+            )
+            .expect("construction command executes without a script error");
+        assert!(
+            rejected.as_bool(),
+            "the packed definition receives RejectConstruction"
         );
     }
 
