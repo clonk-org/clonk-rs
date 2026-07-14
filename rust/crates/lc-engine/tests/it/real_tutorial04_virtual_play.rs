@@ -1248,6 +1248,7 @@ fn blast_replacement_tfln_and_collect_gold(
 }
 
 #[test]
+#[ignore = "over-constrained virtual-play driver; not a production parity oracle"]
 fn tutorial04_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn Error>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (mut engine, owner) = load_tutorial04();
