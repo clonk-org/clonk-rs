@@ -9472,6 +9472,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GreaterThan", legacy_greater_than);
     script.register_host_function("SEqual", legacy_s_equal);
     script.register_host_function("Random", random);
+    script.register_host_function("AsyncRandom", async_random);
     script.register_host_function("SetGravity", set_gravity);
     script.register_host_function("GetGravity", get_gravity);
     script.register_host_function("GetHomebaseMaterial", get_homebase_material);
@@ -13286,6 +13287,19 @@ fn random(args: &[Value]) -> Result<Value, RuntimeError> {
         let value = rng.random(range);
         Ok(Value::Int(value))
     })
+}
+
+/// FnAsyncRandom (C4Script.cpp:3367-3370): draw from the deliberately
+/// unsynchronized SafeRandom stream without touching the lockstep RNG.
+fn async_random(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "AsyncRandom expects at most 1 argument: upper exclusive bound",
+        ));
+    }
+    let range = legacy_arg_int(args, 0, "AsyncRandom")?;
+    let value = SCRIPT_SAFE_RNG.with(|rng| rng.borrow_mut().random(range));
+    Ok(Value::Int(value))
 }
 
 fn music(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -33047,6 +33061,7 @@ mod tests {
         "AnyContainer",
         "AppendCommand",
         "AssignVar",
+        "AsyncRandom",
         "BitAnd",
         "BlastFree",
         "BlastObject",
@@ -39702,6 +39717,73 @@ func Missing() { return ComponentAll(nil, WOOD); }
     fn random_requires_context_for_positive_ranges() {
         let error = random(&[Value::Int(5)]).expect_err("Random without context fails");
         assert_eq!(error.message(), "Random: host context unavailable");
+    }
+
+    #[test]
+    fn async_random_is_bounded_and_leaves_synced_rng_untouched() {
+        // FnAsyncRandom uses SafeRandom rather than the synchronized Random
+        // ledger (C4Script.cpp:3367-3370, C4Random.h:40-75).
+        SCRIPT_SAFE_RNG.with(|rng| {
+            *rng.borrow_mut() = crate::particles::SafeRng::new(7);
+        });
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script("#strict 2\nfunc Probe() { return [AsyncRandom(10), AsyncRandom(0)]; }")
+            .expect("AsyncRandom probe compiles");
+
+        let initial_rng = LcgRng::new(41);
+        let guard = enter_random_context(initial_rng.clone());
+        let result = script.call("Probe", &[]).expect("AsyncRandom succeeds");
+        let final_rng = guard.finish();
+
+        let Value::Array(values) = result else {
+            panic!("AsyncRandom probe must return an array");
+        };
+        assert!(matches!(values[0], Value::Int(value) if (0..10).contains(&value)));
+        assert_eq!(values[1], Value::Int(0));
+        assert_eq!(final_rng.count, initial_rng.count);
+        assert_eq!(final_rng.hold, initial_rng.hold);
+    }
+
+    #[test]
+    fn async_random_per_frame_keeps_headless_sync_counts_seed_independent(
+    ) -> Result<(), crate::EngineError> {
+        const SCRIPT: &str = r#"
+            global func Step(state, frame, random)
+            {
+                AsyncRandom(32768);
+                return nil;
+            }
+        "#;
+
+        fn replay(safe_seed: u32) -> Result<Vec<i32>, crate::EngineError> {
+            let initial_safe_rng = crate::particles::SafeRng::new(safe_seed);
+            SCRIPT_SAFE_RNG.with(|rng| {
+                *rng.borrow_mut() = initial_safe_rng.clone();
+            });
+            let mut engine = crate::Engine::with_seed(43);
+            engine.install_scenario_script("AsyncRandomReplay", SCRIPT)?;
+
+            let mut random_counts = Vec::new();
+            for _ in 0..16 {
+                engine.tick()?;
+                random_counts.push(engine.sync_check(0).random_count);
+            }
+            SCRIPT_SAFE_RNG.with(|rng| {
+                assert_ne!(
+                    *rng.borrow(),
+                    initial_safe_rng,
+                    "the per-frame script must advance the unsynced stream"
+                );
+            });
+            Ok(random_counts)
+        }
+
+        let first = replay(1)?;
+        let second = replay(2)?;
+        assert_eq!(first, second, "SafeRandom must not affect RandomCount");
+        Ok(())
     }
 
     #[test]
