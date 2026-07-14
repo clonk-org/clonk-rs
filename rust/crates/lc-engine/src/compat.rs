@@ -28778,16 +28778,16 @@ fn set_alive(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetAlive requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Bool(false));
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
 
         object.set_alive(alive);
         Ok(Value::Bool(true))
@@ -46455,43 +46455,95 @@ func Probe(state) {
         assert_eq!(update.alive, Some(false));
     }
 
-    #[test]
-    fn set_alive_respects_target_filter() {
-        let mut target = HashMap::new();
-        target.insert("id".into(), Value::Int(42));
-        let args = [Value::Bool(true), Value::Proplist(target)];
-
-        let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
-            &[],
-            HostWorldContext::default(),
-            1,
-            || set_alive(&args),
+    fn set_alive_target_world(target_id: ObjectId, alive: bool) -> HostWorldContext {
+        let mut state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
         );
+        state.alive = alive;
+        let target = HostWorldObject::new(
+            target_id,
+            "CLNK",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_alive(alive)
+        .with_full_state(Rc::new(state));
+        HostWorldContext::from_objects(vec![target])
+    }
 
-        let value = result.expect("SetAlive returns bool");
-        assert_eq!(value, Value::Bool(false));
-        assert!(outcome.object_update.is_none());
+    #[test]
+    fn set_alive_revives_a_foreign_target_and_exposes_the_staged_state() {
+        let target_id = ObjectId::new(2);
+        let world = set_alive_target_world(target_id, false);
+        let target = object_reference_value(target_id);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            Ok(Value::Array(vec![
+                set_alive(&[Value::Bool(true), target.clone()])?,
+                get_alive(&[target.clone()])?,
+                get_alive(&[])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("foreign SetAlive succeeds"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+            ])
+        );
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+        let update = outcome
+            .other_objects
+            .iter()
+            .find(|object| object.object_id == target_id)
+            .and_then(|object| object.update.as_ref())
+            .expect("foreign alive update recorded");
+        assert_eq!(update.alive, Some(true));
+    }
+
+    #[test]
+    fn set_alive_clears_a_foreign_target() {
+        let target_id = ObjectId::new(2);
+        let world = set_alive_target_world(target_id, true);
+        let target = object_reference_value(target_id);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            Ok(Value::Array(vec![
+                set_alive(&[Value::Bool(false), target.clone()])?,
+                get_alive(&[target])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("foreign SetAlive succeeds"),
+            Value::Array(vec![Value::Bool(true), Value::Bool(false)])
+        );
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+        let update = outcome
+            .other_objects
+            .iter()
+            .find(|object| object.object_id == target_id)
+            .and_then(|object| object.update.as_ref())
+            .expect("foreign alive update recorded");
+        assert_eq!(update.alive, Some(false));
     }
 
     #[test]
