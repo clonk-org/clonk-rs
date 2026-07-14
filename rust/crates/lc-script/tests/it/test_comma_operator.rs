@@ -126,19 +126,17 @@ fn mgsm_line_24_pattern() {
 }
 
 #[test]
-fn simple_comma_in_return() {
-    // return (expr1, expr2)
-    let source = r#"func Test() { return (0, 42); }"#;
-    let result = lc_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+fn nonstrict_spaced_return_parentheses_return_the_first_value() {
+    let mut engine = Engine::new();
+    engine
+        .load_script("func Test() { return (1, 2); }")
+        .expect("nonstrict legacy return syntax loads");
+
+    assert_eq!(
+        engine.call("Test", &[]).expect("Test executes"),
+        Value::Int(1),
+        "nonstrict spaced return parameters keep the first value"
+    );
 }
 
 #[test]
