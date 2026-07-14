@@ -908,6 +908,10 @@ impl HostWorldObject {
         self.velocity
     }
 
+    pub fn fixed_velocity(&self) -> FixedVec2 {
+        self.fixed_velocity
+    }
+
     pub fn vertices(&self) -> &[ObjectVertex] {
         &self.vertices
     }
@@ -23517,11 +23521,7 @@ fn get_velocity_component(
             }
 
             if let Some(other) = context.get_world_object(target) {
-                // World objects only carry whole-pixel velocity from their
-                // snapshot; reconstruct fixed via itofix (sub-pixel fidelity for
-                // foreign objects awaits the snapshot work, task B).
-                let velocity = other.velocity();
-                return Ok(fetch_velocity(FixedVec2::from_ints(velocity.x, velocity.y)));
+                return Ok(fetch_velocity(other.fixed_velocity()));
             }
 
             return Ok(Value::Nil);
@@ -32217,9 +32217,8 @@ impl EffectHostContext {
                 .unwrap_or(object.crew_disabled);
             object.direction = scope.current_direction.to_script_value();
             object.owner = scope.owner();
-            // Staged dir writes surface at whole-pixel grain (the foreign
-            // read reconstructs via itofix — sub-pixel foreign fidelity is
-            // the snapshot work, task B).
+            // Keep the whole-pixel mirror coherent for integer-velocity
+            // consumers; `fixed_velocity` above retains exact sub-pixel dirs.
             if scope.pending_update.fixed_velocity.is_some()
                 || scope.pending_update.fixed_velocity_x.is_some()
                 || scope.pending_update.fixed_velocity_y.is_some()
@@ -46915,6 +46914,59 @@ func Probe(state) {
         let value = result.expect("GetXDir target succeeds");
         // GetXDir on another object: fixtoi(xdir, 10) for -8 px/frame = -80.
         assert_eq!(value, Value::Int(-80));
+    }
+
+    #[test]
+    fn get_velocity_components_preserve_foreign_subpixel_values_and_match_arrow_calls() {
+        let caller_script = r#"#strict 2
+func Probe(object other)
+{
+    return [GetXDir(other, 100), GetYDir(other),
+            other->GetXDir(100), other->GetYDir()];
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(
+                crate::Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller fixture compiles"),
+            )
+            .expect("caller fixture registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("OTHR", "Other", "#strict 2\n")
+                    .expect("target fixture compiles"),
+            )
+            .expect("target fixture registers");
+        let caller = engine
+            .spawn_object(crate::SpawnConfig::new("CALL").with_category(crate::CATEGORY_OBJECT))
+            .expect("caller fixture spawns");
+        let other = engine
+            .spawn_object(
+                crate::SpawnConfig::new("OTHR")
+                    .with_category(crate::CATEGORY_OBJECT)
+                    .with_fixed_velocity(FixedVec2::new(fixed10(26), fixed10(14))),
+            )
+            .expect("target fixture spawns");
+
+        let result = engine
+            .call_object_function(
+                engine.find_object_index(caller).expect("caller exists"),
+                "Probe",
+                vec![object_reference_value(other)],
+            )
+            .expect("velocity fixture runs");
+
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                Value::Int(260),
+                Value::Int(14),
+                Value::Int(260),
+                Value::Int(14),
+            ]),
+            "plain and arrow reads retain the same exact fixed-point velocity"
+        );
     }
 
     #[test]
