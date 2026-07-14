@@ -5778,10 +5778,10 @@ fn refresh_container_collection_ocf(context: &mut EffectHostContext, container: 
     }
 }
 
-/// Direct `C4Object::Exit(obj->x,obj->y)` used by engine-internal object
-/// operations. Unlike the script `Exit` wrapper, the coordinates are
-/// absolute and receive no caller-relative or Shape.y adjustment.
-fn exit_object_at_current_position(target: ObjectId) -> Result<bool, RuntimeError> {
+/// Direct `C4Object::Exit(x, y)` with absolute coordinates. Unlike the
+/// script `Exit` wrapper, these receive no caller-relative or Shape.y
+/// adjustment.
+fn exit_object_at_position(target: ObjectId, position: Vector2) -> Result<bool, RuntimeError> {
     let previous = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
@@ -5792,7 +5792,6 @@ fn exit_object_at_current_position(target: ObjectId) -> Result<bool, RuntimeErro
         }
         let scope = context.object_scope_mut(target)?;
         let previous = scope.container()?;
-        let position = scope.effective_position();
         scope.set_container(None);
         scope.refresh_cached_ocf();
         // Exit assigns x/y even when unchanged and thereby snaps fix_x/y.
@@ -5833,6 +5832,20 @@ fn exit_object_at_current_position(target: ObjectId) -> Result<bool, RuntimeErro
             .and_then(|context| context.get_world_object(target))
             .is_some_and(|object| object.container().is_none())
     }))
+}
+
+/// Engine-internal exits normally retain the object's current coordinates.
+fn exit_object_at_current_position(target: ObjectId) -> Result<bool, RuntimeError> {
+    let position = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.get_world_object(target))
+            .map(|object| object.position)
+    });
+    let Some(position) = position else {
+        return Ok(false);
+    };
+    exit_object_at_position(target, position)
 }
 
 /// Live `C4Object::Enter(target)` without Collect's RejectCollect,
@@ -6156,6 +6169,15 @@ fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, Ru
         return Ok(true);
     }
 
+    // AssignRemoval(true) passes the removed container's x/y to every
+    // direct child's Exit (C4Object.cpp:285-288).
+    let exit_position = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.get_world_object(target))
+            .map(|object| object.position)
+    });
+
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else { return };
@@ -6171,7 +6193,8 @@ fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, Ru
         });
         let Some(child) = child else { break };
         if exit_contents {
-            if !exit_object_at_current_position(child)? {
+            let Some(position) = exit_position else { break };
+            if !exit_object_at_position(child, position)? {
                 break;
             }
             continue;
@@ -30604,9 +30627,9 @@ fn get_alive(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() > 1 {
+    if args.len() > 2 {
         return Err(RuntimeError::new(
-            "RemoveObject expects at most 1 argument: target",
+            "RemoveObject expects at most 2 arguments: target, eject contents",
         ));
     }
 
@@ -30614,11 +30637,15 @@ fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
     if let Some(arg) = args.first() {
         target_id = parse_object_reference_argument(arg, "RemoveObject", "target")?;
     }
+    let exit_contents = value_to_bool(
+        args.get(1).unwrap_or(&Value::Nil),
+        "RemoveObject",
+        "eject contents",
+    )?;
 
-    // FnRemoveObject (C4Script.cpp:455-460): no argument means the calling
-    // object, and ANY object may be removed — a foreign target's removal
-    // lands in its own scope (GoldRush's DoInitialize culls placed editor
-    // leftovers via RemoveObject(FindObject(_ETG))).
+    // FnRemoveObject (C4Script.cpp:455-460): a nil target means the calling
+    // object, and ANY object may be removed. AssignRemoval runs the complete
+    // callback/effect/contents lifecycle synchronously.
     let active = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
@@ -30626,7 +30653,11 @@ fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
     });
     if let Some(target) = target_id {
         if Some(target) != active {
-            if let Some(result) = call_world_object_function(target, "RemoveObject", &[]) {
+            if let Some(result) = call_world_object_function(
+                target,
+                "RemoveObject",
+                &[Value::Nil, Value::Bool(exit_contents)],
+            ) {
                 return result;
             }
             // The nested seam cannot reach spawns of the SAME call (no
@@ -30653,27 +30684,10 @@ fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
-    let removed = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = match borrow.as_mut() {
-            Some(context) => context,
-            None => return None,
-        };
-
-        let removed = match context.object_context() {
-            Some(object) => object.id(),
-            None => return None,
-        };
-        mark_object_destroyed_with_info(context, removed);
-
-        context.clear_non_player_script_object_references(removed);
-        Some(removed)
-    });
-    let Some(removed) = removed else {
+    let Some(target) = target_id.or(active) else {
         return Ok(Value::Bool(false));
     };
-    clear_player_object_pointers_host(removed);
-    Ok(Value::Bool(true))
+    Ok(Value::Bool(assign_removal_live(target, exit_contents)?))
 }
 
 fn with_context_mut<R>(
@@ -53093,6 +53107,139 @@ protected func Construction()
         let (result, outcome) = with_object_host_context(|| remove_object(&[]));
         assert_eq!(result.expect("RemoveObject succeeds"), Value::Bool(true));
         assert!(outcome.destroy_object);
+    }
+
+    #[test]
+    fn remove_object_eject_flag_controls_self_foreign_and_recursive_contents() {
+        let container_script = r#"#strict
+public func RemoveSelfWithEject() { return RemoveObject(0, 1); }
+public func RemoveForeignWithEject(object target) { return RemoveObject(target, true); }
+public func RemoveSelfWithFalse() { return RemoveObject(0, false); }
+public func RemoveSelfWithoutEject() { return RemoveObject(); }
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(
+                crate::Definition::from_script("BOX1", "Container", container_script)
+                    .expect("container script compiles"),
+            )
+            .expect("container registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("ITEM", "Item", "#strict\n")
+                    .expect("item script compiles"),
+            )
+            .expect("item registers");
+
+        let self_position = Vector2::new(120, 80);
+        let self_container = engine
+            .spawn_object(SpawnConfig::new("BOX1").with_position(self_position))
+            .expect("self container spawns");
+        let self_child = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_position(Vector2::new(7, 11))
+                    .with_container(self_container),
+            )
+            .expect("self child spawns");
+        let self_index = engine
+            .find_object_index(self_container)
+            .expect("self container exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(self_index, "RemoveSelfWithEject", Vec::new())
+                .expect("RemoveObject(0, 1) succeeds"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(self_container)
+                .expect("removed container remains delayed")
+                .status,
+            ObjectStatus::Deleted
+        );
+        let self_child = engine
+            .object_snapshot(self_child)
+            .expect("ejected child survives");
+        assert_eq!(self_child.status, ObjectStatus::Normal);
+        assert_eq!(self_child.container, None);
+        assert_eq!(self_child.position, self_position);
+
+        let caller = engine
+            .spawn_object(SpawnConfig::new("BOX1"))
+            .expect("foreign remover spawns");
+        let foreign_position = Vector2::new(300, 160);
+        let foreign_container = engine
+            .spawn_object(SpawnConfig::new("BOX1").with_position(foreign_position))
+            .expect("foreign container spawns");
+        let foreign_child = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_position(Vector2::new(19, 23))
+                    .with_container(foreign_container),
+            )
+            .expect("foreign child spawns");
+        let caller_index = engine.find_object_index(caller).expect("remover exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "RemoveForeignWithEject",
+                    vec![object_reference_value(foreign_container)],
+                )
+                .expect("foreign RemoveObject(target, true) succeeds"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(foreign_container)
+                .expect("foreign container remains delayed")
+                .status,
+            ObjectStatus::Deleted
+        );
+        let foreign_child = engine
+            .object_snapshot(foreign_child)
+            .expect("foreign child survives");
+        assert_eq!(foreign_child.status, ObjectStatus::Normal);
+        assert_eq!(foreign_child.container, None);
+        assert_eq!(foreign_child.position, foreign_position);
+
+        for function in ["RemoveSelfWithFalse", "RemoveSelfWithoutEject"] {
+            let recursive_container = engine
+                .spawn_object(SpawnConfig::new("BOX1"))
+                .expect("recursive container spawns");
+            let recursive_child = engine
+                .spawn_object(SpawnConfig::new("ITEM").with_container(recursive_container))
+                .expect("recursive child spawns");
+            let recursive_grandchild = engine
+                .spawn_object(SpawnConfig::new("ITEM").with_container(recursive_child))
+                .expect("recursive grandchild spawns");
+            let recursive_index = engine
+                .find_object_index(recursive_container)
+                .expect("recursive container exists");
+
+            assert_eq!(
+                engine
+                    .call_object_function(recursive_index, function, Vec::new())
+                    .expect("non-ejecting RemoveObject succeeds"),
+                Value::Bool(true)
+            );
+            for removed in [
+                recursive_container,
+                recursive_child,
+                recursive_grandchild,
+            ] {
+                assert_eq!(
+                    engine
+                        .object_snapshot(removed)
+                        .expect("recursive removal remains delayed")
+                        .status,
+                    ObjectStatus::Deleted
+                );
+            }
+        }
     }
 
     #[test]
