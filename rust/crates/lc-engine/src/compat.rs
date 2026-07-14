@@ -490,6 +490,10 @@ pub enum PlayerCommand {
     },
     /// `FnSetWealth` (C4Script.cpp:2761-2766), already clamped.
     SetWealth { player_id: i32, value: i32 },
+    /// `FnDoScore` -> `C4Player::DoPoints` (C4Script.cpp:2762-2766;
+    /// C4Player.cpp:1824-1828). Keep this incremental so independently
+    /// batched script outcomes compound in their original order.
+    AdjustPoints { player_id: i32, delta: i32 },
     /// `FnEliminatePlayer`'s regular path: mark the player eliminated and
     /// start C4RetireDelay before C4PlayerList retires them.
     Eliminate { player_id: i32 },
@@ -3387,6 +3391,32 @@ fn get_score(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         };
         Ok(Value::Int(player.points))
+    })
+}
+
+/// `FnDoScore` (C4Script.cpp:2762-2766) -> `C4Player::DoPoints`
+/// (C4Player.cpp:1824-1828): add and clamp Points, then return integer 1
+/// for every valid player rather than the new total.
+fn do_score(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "DoScore", "player")?;
+    let change = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "DoScore", "change")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Int(0));
+        };
+        let Some(player) = context.player_state_mut(player_id) else {
+            return Ok(Value::Int(0));
+        };
+        let points = (i64::from(player.points) + i64::from(change))
+            .clamp(-100_000, 100_000) as i32;
+        player.points = points;
+        context.record_player_command(PlayerCommand::AdjustPoints {
+            player_id,
+            delta: change,
+        });
+        Ok(Value::Int(1))
     })
 }
 
@@ -9630,6 +9660,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetScenarioVal", get_scenario_val);
     script.register_host_function("LoadScenarioSection", load_scenario_section);
     script.register_host_function("GetLeague", get_league);
+    script.register_host_function("DoScore", do_score);
     script.register_host_function("GetScore", get_score);
     script.register_host_function("GetScoreboardString", get_scoreboard_string);
     script.register_host_function("GetScoreboardData", get_scoreboard_data);
@@ -35683,6 +35714,7 @@ mod tests {
         "DoHomebaseMaterial",
         "DoHomebaseProduction",
         "DoMagicEnergy",
+        "DoScore",
         "DoScoreboardShow",
         "DrawMap",
         "DrawMaterialQuad",
@@ -40836,6 +40868,73 @@ func ProbeBadIndex(id) {
         let args = [Value::Int(4)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_score(&args));
         assert_eq!(result.expect("GetScore succeeds"), Value::Int(135));
+    }
+
+    #[test]
+    fn do_score_compounds_clamps_and_returns_integer_success() {
+        let player = PlayerState {
+            id: 4,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            assert_eq!(
+                do_score(&[Value::Int(4), Value::Int(5)])?,
+                Value::Int(1)
+            );
+            assert_eq!(
+                do_score(&[Value::Int(4), Value::Int(5)])?,
+                Value::Int(1),
+                "DoPoints returns success, not the running total"
+            );
+            assert_eq!(get_score(&[Value::Int(4)])?, Value::Int(10));
+
+            assert_eq!(
+                do_score(&[Value::Int(4), Value::Int(-200_000)])?,
+                Value::Int(1)
+            );
+            assert_eq!(get_score(&[Value::Int(4)])?, Value::Int(-100_000));
+
+            // C4Aul warns about and discards arguments beyond the native
+            // function's declared arity; they do not abort the call.
+            assert_eq!(
+                do_score(&[Value::Int(4), Value::Int(0), Value::Int(999)])?,
+                Value::Int(1)
+            );
+            assert_eq!(get_score(&[Value::Int(4)])?, Value::Int(-100_000));
+
+            assert_eq!(
+                do_score(&[Value::Int(99), Value::Int(7)])?,
+                Value::Int(0)
+            );
+            assert_eq!(get_score(&[Value::Int(4)])?, Value::Int(-100_000));
+            Ok::<Value, RuntimeError>(Value::Nil)
+        });
+        result.expect("DoScore calls succeed");
+        assert!(matches!(
+            outcome.player_commands.as_slice(),
+            [
+                PlayerCommand::AdjustPoints {
+                    player_id: 4,
+                    delta: 5,
+                },
+                PlayerCommand::AdjustPoints {
+                    player_id: 4,
+                    delta: 5,
+                },
+                PlayerCommand::AdjustPoints {
+                    player_id: 4,
+                    delta: -200_000,
+                },
+                PlayerCommand::AdjustPoints {
+                    player_id: 4,
+                    delta: 0,
+                },
+            ]
+        ));
     }
 
     #[test]

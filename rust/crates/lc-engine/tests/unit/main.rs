@@ -18235,6 +18235,51 @@ func CrewSelection()
     }
 
     #[test]
+    fn shipped_hazard_shuttle_scores_both_driver_owner_transfers_in_order(
+    ) -> Result<(), EngineError> {
+        // SHTL::DriverIsOwner awards the old owner its value, transfers
+        // ownership, then charges the new owner (Hazard Shuttle Script.c:
+        // 239-245). Starting near the upper bound makes the two calls
+        // observably non-reversible: 99_950 + 150 clamps to 100_000, then
+        // subtracting 150 leaves 99_850.
+        let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../content");
+        let group = lc_resources::Group::open(
+            content.join("Hazard.c4d/Vehicles.c4d/Shuttle.c4d"),
+        )
+        .expect("open shipped Shuttle definition");
+        let resource = ResourceDefinitionData::load(&group)
+            .expect("load shipped Shuttle definition");
+
+        let mut engine = Engine::new();
+        engine.register_player(PlayerConfig::new(0, "Owner").with_points(99_950))?;
+        engine.register_definition(simple_definition("WEPN"))?;
+        engine.register_definition(Definition::from_resource(&resource)?)?;
+        engine.register_definition(simple_definition("CLNK"))?;
+        engine.resolve_includes()?;
+
+        let shuttle = engine.spawn_object(
+            SpawnConfig::new("SHTL")
+                .with_owner(0)
+                .with_loaded(true),
+        )?;
+        let driver = engine.spawn_object(SpawnConfig::new("CLNK").with_owner(0))?;
+        let shuttle_index = engine
+            .find_object_index(shuttle)
+            .expect("shuttle exists");
+        engine.call_object_function(
+            shuttle_index,
+            "DriverIsOwner",
+            vec![object_reference_value(driver)],
+        )?;
+
+        assert_eq!(
+            engine.player(0).expect("owner remains").points(),
+            99_850
+        );
+        Ok(())
+    }
+
+    #[test]
     fn player_cursor_tracks_selection_changes() -> Result<(), EngineError> {
         let mut engine = Engine::new();
         engine.register_player(PlayerConfig::new(1, "Cursor"))?;

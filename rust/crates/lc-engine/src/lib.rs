@@ -25692,6 +25692,11 @@ impl Engine {
                         player.set_wealth(value);
                     }
                 }
+                PlayerCommand::AdjustPoints { player_id, delta } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.adjust_points(delta);
+                    }
+                }
                 PlayerCommand::Eliminate { player_id } => {
                     if self
                         .players
