@@ -14493,6 +14493,215 @@ func Trigger() {
         );
     }
 
+    fn player_object_command_fixture() -> (Engine, ObjectId, ObjectId, ObjectId) {
+        let caller_script = r#"#strict 3
+        func Seed(target) { return SetCommand(target, "Wait"); }
+        func PutInto(target) { return PlayerObjectCommand(1, "Put", target, 0, 0); }
+        func BadPlayer(target) { return PlayerObjectCommand(77, "Put", target, 0, 0); }
+        func BadName(target) { return PlayerObjectCommand(1, "NoSuch", target, 0, 0); }
+        func BadCall() { return PlayerObjectCommand(1, "Call"); }
+        func IntData() { return PlayerObjectCommand(1, "Wait", nil, 0, 0, nil, 4711); }
+        func IdData() { return PlayerObjectCommand(1, "Wait", nil, 0, 0, nil, ITEM); }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let mut crew_definition =
+            Definition::from_script("CREW", "Crew", "").expect("crew compiles");
+        crew_definition.set_ocf_base(ocf::CONTAINER);
+        engine
+            .register_definition(crew_definition)
+            .expect("crew registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", "").expect("item compiles"),
+            )
+            .expect("item registers");
+        let mut container_definition =
+            Definition::from_script("CONT", "Container", "").expect("container compiles");
+        container_definition.set_ocf_base(ocf::CONTAINER);
+        engine
+            .register_definition(container_definition)
+            .expect("container registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Player"))
+            .expect("player registers");
+
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let crew = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
+            .expect("crew spawns");
+        engine.select_crew(1, [crew]).expect("crew selected");
+        engine
+            .set_crew_cursor(1, Some(crew))
+            .expect("crew cursor set");
+        engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(crew))
+            .expect("crew inventory spawns");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        engine.tick().expect("fixture initializes");
+
+        (engine, caller, crew, container)
+    }
+
+    fn call_player_object_command_fixture(
+        engine: &mut Engine,
+        caller: ObjectId,
+        function: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, EngineError> {
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        engine.call_object_function(caller_index, function, args)
+    }
+
+    #[test]
+    fn player_object_command_sets_put_and_converts_int_or_id_data() {
+        // FnPlayerObjectCommand delegates to C4Player::ObjectCommand with
+        // C4P_Command_Set, so the selected crew's old stack is replaced.
+        // Its Data slot uses C4Value::getIntOrID for every non-Call command
+        // (C4Script.cpp:961-985; C4Player.cpp:1397-1451).
+        let (mut engine, caller, crew, container) = player_object_command_fixture();
+        let crew_ref = Value::Object(crew.as_u64());
+        let container_ref = Value::Object(container.as_u64());
+
+        assert_eq!(
+            call_player_object_command_fixture(&mut engine, caller, "Seed", vec![crew_ref])
+                .expect("old command seeds"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew exists")
+                .command_stack
+                .command_names(),
+            vec!["Wait".to_string()]
+        );
+
+        assert_eq!(
+            call_player_object_command_fixture(
+                &mut engine,
+                caller,
+                "PutInto",
+                vec![container_ref],
+            )
+            .expect("Put command succeeds"),
+            Value::Bool(true)
+        );
+        let views = engine
+            .object_snapshot(crew)
+            .expect("crew exists")
+            .command_stack
+            .command_views();
+        assert_eq!(views.len(), 1, "Set mode replaces the old Wait stack");
+        assert_eq!(views[0].name, "Put");
+        assert_eq!(views[0].target, Some(container));
+        assert_eq!(views[0].target2, None);
+        assert_eq!(views[0].data, CommandData::Integer(0));
+
+        assert_eq!(
+            call_player_object_command_fixture(&mut engine, caller, "IntData", Vec::new())
+                .expect("integer Data succeeds"),
+            Value::Bool(true)
+        );
+        let views = engine
+            .object_snapshot(crew)
+            .expect("crew exists")
+            .command_stack
+            .command_views();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].data, CommandData::Integer(4711));
+
+        assert_eq!(
+            call_player_object_command_fixture(&mut engine, caller, "IdData", Vec::new())
+                .expect("C4ID Data succeeds"),
+            Value::Bool(true)
+        );
+        let views = engine
+            .object_snapshot(crew)
+            .expect("crew exists")
+            .command_stack
+            .command_views();
+        assert_eq!(views.len(), 1);
+        assert_eq!(
+            views[0].data,
+            CommandData::Integer(i32::from_le_bytes(*b"ITEM"))
+        );
+    }
+
+    #[test]
+    fn player_object_command_rejections_leave_selected_crew_unchanged() {
+        // Player and command validation precede C4Player::ObjectCommand.
+        // C4CMD_Call reaches StrictError before the Set path and is fatal to
+        // a #strict 3 caller (C4Script.cpp:961-985).
+        let (mut engine, caller, crew, container) = player_object_command_fixture();
+        call_player_object_command_fixture(
+            &mut engine,
+            caller,
+            "Seed",
+            vec![Value::Object(crew.as_u64())],
+        )
+        .expect("old command seeds");
+        let before = engine
+            .object_snapshot(crew)
+            .expect("crew exists")
+            .command_stack;
+
+        for function in ["BadPlayer", "BadName"] {
+            assert_eq!(
+                call_player_object_command_fixture(
+                    &mut engine,
+                    caller,
+                    function,
+                    vec![Value::Object(container.as_u64())],
+                )
+                .expect("invalid request returns normally"),
+                Value::Bool(false)
+            );
+            assert_eq!(
+                engine
+                    .object_snapshot(crew)
+                    .expect("crew exists")
+                    .command_stack,
+                before,
+                "{function} must not alter the selected crew's stack"
+            );
+        }
+
+        let error = call_player_object_command_fixture(&mut engine, caller, "BadCall", Vec::new())
+            .expect_err("Call is a strict-3 error");
+        match error {
+            EngineError::Script { source, .. } => assert!(
+                source
+                    .to_string()
+                    .contains("PlayerObjectCommand: Command \"Call\" not supported"),
+                "unexpected strict error: {source}"
+            ),
+            other => panic!("expected script error, got {other:?}"),
+        }
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew exists")
+                .command_stack,
+            before,
+            "strict-3 Call rejection must happen before the Set path"
+        );
+    }
+
     #[test]
     fn tutorial_special2_executes_context_before_control_returns_like_cpp() {
         // FnExecuteCommand dispatches synchronously to C4Object::ExecuteCommand

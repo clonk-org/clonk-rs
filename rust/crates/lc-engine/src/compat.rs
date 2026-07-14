@@ -10132,6 +10132,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetActionData", get_action_data);
     script.register_host_function("GetAction", get_action);
     script.register_host_function("GetCommand", get_command);
+    script.register_host_function("PlayerObjectCommand", player_object_command_host);
     script.register_host_function("ShiftContents", shift_contents);
     script.register_host_function("GetActTime", get_act_time);
     script.register_host_function("GetPhase", get_phase);
@@ -19725,13 +19726,12 @@ fn unselect_crew_host(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     };
     for &id in &crew {
-        let active = HOST_CONTEXT.with(|cell| {
+        let present = HOST_CONTEXT.with(|cell| {
             cell.borrow()
                 .as_ref()
-                .and_then(|context| context.get_world_object(id))
-                .is_some_and(|object| object.status.is_active())
+                .is_some_and(|context| context.object_status_present(id))
         });
-        if active {
+        if present {
             unselect_host_object(id, false);
         }
     }
@@ -23623,6 +23623,372 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
                 context.clear_finished_command_fronts(target);
             }
         });
+    }
+
+    Ok(Value::Bool(true))
+}
+
+/// C4Value::getInt as used for FnPlayerObjectCommand's untyped Tx slot.
+/// Bool converts directly; conversions from C4ID/string/object fail and
+/// therefore yield zero (C4Value.h:159, C4Script.cpp:961-985).
+fn player_object_command_tx(value: Option<&Value>) -> i32 {
+    match value.unwrap_or(&Value::Nil) {
+        Value::Int(value) => *value,
+        Value::Bool(value) => i32::from(*value),
+        _ => 0,
+    }
+}
+
+/// C4Value::getIntOrID for FnPlayerObjectCommand's data slot. Unsupported
+/// types are deliberately zero rather than script errors.
+fn player_object_command_data(value: Option<&Value>) -> i32 {
+    match value.unwrap_or(&Value::Nil) {
+        Value::Int(value) => *value,
+        Value::Bool(value) => i32::from(*value),
+        Value::C4Id(id) => definition_id_to_c4id(id).unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// `C4Player::UpdateSelectionToggleStatus` before ObjectCommand routing
+/// (C4Player.cpp:1355-1365). Cursor helpers already provide the synchronous
+/// CrewSelection callbacks and copied-player preview; the final record after
+/// clearing the two latches makes the authoritative fold retain that state.
+fn update_player_selection_toggle_status_host(player_id: i32) {
+    let Some((cursor_selection, cursor_toggled)) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let player = context.player_state(player_id)?;
+        Some((
+            player.control.cursor_selection,
+            player.control.cursor_toggled,
+        ))
+    }) else {
+        return;
+    };
+    if cursor_selection == 0 {
+        return;
+    }
+
+    if cursor_toggled != 0 {
+        adjust_cursor_host(player_id);
+    } else {
+        // C4Player::SelectSingleByCursor: UnselectCrew, DoSelect(Cursor),
+        // SelectFlash=30, then AdjustCursorCommand.
+        let _ = unselect_crew_host(&[Value::Int(player_id)]);
+        let cursor = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.player_state(player_id))
+                .and_then(|player| player.cursor)
+        });
+        if let Some(cursor) = cursor {
+            do_select_host_object(cursor, false);
+        }
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                if let Some(player) = context.player_state_mut(player_id) {
+                    player.control.select_flash = 30;
+                }
+            }
+        });
+        adjust_cursor_host(player_id);
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        if let Some(player) = context.player_state_mut(player_id) {
+            player.control.cursor_selection = 0;
+            player.control.cursor_toggled = 0;
+        }
+        record_cursor_state(context, player_id);
+    });
+}
+
+/// C4Object::SetCommand(..., fControl=true) for one recipient of
+/// C4Player::ObjectCommand. Command operations live on the target's copied
+/// object scope, so GetCommand observes them before this host call returns and
+/// the ordinary callback outcome fold persists the exact same stack.
+fn set_player_control_command(target: ObjectId, request: CommandRequest) {
+    let staged = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        if !context.ensure_object_scope(target) || !context.object_status_present(target) {
+            return false;
+        }
+        let Some(object) = context.object_scope_mut(target) else {
+            return false;
+        };
+        // SetCommand decrements this delay before clearing the old stack.
+        object.decrement_no_collect_delay();
+        object.clear_command_stack();
+        true
+    });
+    if !staged {
+        return;
+    }
+
+    // The soft menu close happens after ClearCommands. A denial therefore
+    // leaves the stack cleared (plus any command the query callback created).
+    if !close_object_menu(target, false) {
+        return;
+    }
+
+    let callback_args = [
+        Value::String(request.id.to_name().to_string()),
+        request
+            .target
+            .map(object_reference_value)
+            .unwrap_or(Value::Nil),
+        Value::Int(request.tx.unwrap_or(0)),
+        Value::Int(request.ty.unwrap_or(0)),
+        request
+            .target2
+            .map(object_reference_value)
+            .unwrap_or(Value::Nil),
+        command_data_value(&request.data),
+    ];
+    let overloaded = match call_world_object_own_function(
+        target,
+        "ControlCommand",
+        &callback_args,
+    ) {
+        Some(Ok(value)) => value_raw_truthy(&value),
+        Some(Err(error)) => {
+            tracing::warn!(
+                object = %target,
+                %error,
+                "script error in ControlCommand; continuing like the C++ fail-safe exec"
+            );
+            false
+        }
+        None => false,
+    };
+    if overloaded {
+        return;
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        if !context.object_status_present(target) {
+            return;
+        }
+        if let Some(object) = context.object_scope_mut(target) {
+            let _ = object.push_command_front(request);
+        }
+    });
+}
+
+fn player_object_command_request(
+    command: CommandId,
+    target: Option<ObjectId>,
+    tx: i32,
+    ty: i32,
+    target2: Option<ObjectId>,
+    data: i32,
+) -> CommandRequest {
+    CommandRequest::new(command)
+        .with_target(target)
+        .with_target2(target2)
+        .with_tx(Some(tx))
+        .with_ty(Some(ty))
+        .with_data(CommandData::Integer(data))
+        .with_mode(CommandMode::Base)
+}
+
+/// FnPlayerObjectCommand (C4Script.cpp:961-985) ->
+/// C4Player::ObjectCommand(..., C4P_Command_Set) (C4Player.cpp:1397-1451).
+fn player_object_command_host(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "PlayerObjectCommand",
+        "player",
+    )?;
+    let command_name = parse_optional_string(
+        args.get(1),
+        "PlayerObjectCommand",
+        "command",
+    )?;
+    let target = parse_object_reference_argument(
+        args.get(2).unwrap_or(&Value::Nil),
+        "PlayerObjectCommand",
+        "target",
+    )?;
+    let tx = player_object_command_tx(args.get(3));
+    let ty = value_to_i32(
+        args.get(4).unwrap_or(&Value::Nil),
+        "PlayerObjectCommand",
+        "y",
+    )?;
+    let target2 = parse_object_reference_argument(
+        args.get(5).unwrap_or(&Value::Nil),
+        "PlayerObjectCommand",
+        "target2",
+    )?;
+    let data = player_object_command_data(args.get(6));
+
+    // Native parameter conversion precedes the C++ function body, so only
+    // now may player/name/command validation short-circuit. Extra arguments
+    // have already been discarded by C4Aul's fixed parameter frame.
+    let player_exists = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|context| context.player_state(player_id).is_some())
+    });
+    let Some(command_name) = command_name else {
+        return Ok(Value::Bool(false));
+    };
+    if !player_exists {
+        return Ok(Value::Bool(false));
+    }
+    let Some(command) = CommandId::from_name(&command_name) else {
+        return Ok(Value::Bool(false));
+    };
+    if command == CommandId::Call {
+        // The value-only host ABI cannot inspect cthr->Caller's strictness.
+        // Raise the STRICT3 result unconditionally; crucially this precedes
+        // every C4Player/Object command side effect.
+        return Err(RuntimeError::new(
+            "PlayerObjectCommand: Command \"Call\" not supported",
+        ));
+    }
+
+    // FnPlayerObjectCommand ignores ObjectCommand's false result and reports
+    // true for an existing, but eliminated, player.
+    let eliminated = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.player_state(player_id))
+            .is_some_and(|player| {
+                matches!(
+                    player.status,
+                    crate::PlayerStatus::Eliminated | crate::PlayerStatus::Surrendered
+                )
+            })
+    });
+    if eliminated {
+        return Ok(Value::Bool(true));
+    }
+
+    update_player_selection_toggle_status_host(player_id);
+    let crew = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.player_state(player_id))
+            .map(|player| player.crew.clone())
+            .unwrap_or_default()
+    });
+
+    let mut routed_target = target;
+    let mut cursor_processed = false;
+    for crew_id in crew {
+        let route = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let Some(context) = borrow.as_ref() else {
+                return None;
+            };
+            let cursor = context.player_state(player_id).and_then(|player| player.cursor);
+            let object = context.get_world_object(crew_id)?;
+            let selected = context
+                .object_scope(crew_id)
+                .map(ObjectScopeContext::selected)
+                .unwrap_or(object.selected);
+            Some((
+                cursor == Some(crew_id),
+                context.object_status_present(crew_id)
+                    && selected
+                    && Some(crew_id) != routed_target,
+            ))
+        });
+        let Some((is_cursor, should_route)) = route else {
+            continue;
+        };
+        cursor_processed |= is_cursor;
+        if !should_route {
+            continue;
+        }
+
+        let mut object_tx = tx;
+        if command == CommandId::Put && target2.is_none() {
+            let contents_count = HOST_CONTEXT.with(|cell| {
+                let borrow = cell.borrow();
+                let Some(context) = borrow.as_ref() else {
+                    return 0;
+                };
+                let Some(object) = context.get_world_object(crew_id) else {
+                    return 0;
+                };
+                let count = object
+                    .contents()
+                    .iter()
+                    .filter(|content_id| {
+                        context
+                            .get_world_object(**content_id)
+                            .is_some_and(|content| {
+                                content.is_present()
+                                    && (data == 0
+                                        || context
+                                            .object_effective_definition_id(**content_id)
+                                            .and_then(|definition| {
+                                                definition_id_to_c4id(&definition)
+                                            })
+                                            == Some(data))
+                            })
+                    })
+                    .count();
+                i32::try_from(count).unwrap_or(i32::MAX)
+            });
+            if contents_count == 0 {
+                continue;
+            }
+            object_tx = object_tx.min(contents_count);
+        }
+
+        set_player_control_command(
+            crew_id,
+            player_object_command_request(
+                command,
+                routed_target,
+                object_tx,
+                ty,
+                target2,
+                data,
+            ),
+        );
+        if command == CommandId::Construct {
+            routed_target = Some(crew_id);
+        }
+    }
+
+    // Always command a cursor outside Crew; unlike the crew loop this final
+    // path deliberately does not apply Put's contents-count workaround.
+    let cursor = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.player_state(player_id))
+            .and_then(|player| player.cursor)
+    });
+    if let Some(cursor) = cursor.filter(|cursor| {
+        !cursor_processed
+            && Some(*cursor) != routed_target
+            && HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .is_some_and(|context| context.object_status_present(*cursor))
+            })
+    }) {
+        set_player_control_command(
+            cursor,
+            player_object_command_request(command, routed_target, tx, ty, target2, data),
+        );
     }
 
     Ok(Value::Bool(true))
@@ -36433,6 +36799,7 @@ mod tests {
         "PlaceAnimal",
         "PlaceVegetation",
         "PlayerMessage",
+        "PlayerObjectCommand",
         "PlrMessage",
         "Pow",
         "PrivateCall",
