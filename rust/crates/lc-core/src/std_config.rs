@@ -161,7 +161,18 @@ impl Config {
             value,
             comment: None,
         };
-        self.entries.insert((section_owned, key), entry);
+        let map_key = (section_owned.clone(), key);
+        if let Some(existing) = self.entries.get_mut(&map_key) {
+            *existing = entry;
+            return;
+        }
+        let insertion_index = self
+            .entries
+            .values()
+            .rposition(|existing| existing.section == section_owned)
+            .map(|index| index + 1)
+            .unwrap_or(self.entries.len());
+        self.entries.shift_insert(insertion_index, map_key, entry);
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Entry> {
@@ -358,6 +369,32 @@ mod tests {
         let cfg = Config::from_reader(&mut cursor).unwrap();
 
         assert_eq!(cfg.get_in(Some("General"), "Language"), Some("DE"));
+    }
+
+    #[test]
+    fn setting_an_earlier_section_keeps_one_cpp_section_block() {
+        // StdCompilerINIWrite emits one structural section node and all of
+        // its named children together. A later mutation of General must not
+        // serialize a second [General] after Network, because C++ reads only
+        // the first matching section (src/StdCompiler.cpp:517-531,803-855).
+        let mut cfg = Config::new();
+        cfg.set_in(Some("General"), "LanguageEx", "US");
+        cfg.set_in(Some("Network"), "LocalName", "Host");
+        cfg.set_in(Some("General"), "Participants", "Exact.c4p");
+
+        let serialized = cfg.to_string().expect("config serializes");
+        assert_eq!(serialized.matches("[General]").count(), 1);
+        assert!(
+            serialized.find("Participants").expect("participants field")
+                < serialized.find("[Network]").expect("network section")
+        );
+
+        let mut reader = Cursor::new(serialized.as_bytes());
+        let reloaded = Config::from_reader(&mut reader).expect("config reloads");
+        assert_eq!(
+            reloaded.get_in(Some("General"), "Participants"),
+            Some("Exact.c4p")
+        );
     }
 
     #[test]
