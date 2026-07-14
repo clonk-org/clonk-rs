@@ -272,6 +272,33 @@ mod tests {
 
     use crate::ocf;
 
+    #[test]
+    fn c4_angle_matches_cpp_axis_and_diagonal_boundaries() {
+        // C4Math.cpp:33-45 computes atan2f first, then promotes the product
+        // with the double literal 180.0 before truncating to int.
+        assert_eq!(c4_angle(0, 0, 0, 10), 181);
+        assert_eq!(c4_angle(0, 0, 0, -10), 359);
+        assert_eq!(c4_angle(0, 0, 10, 10), 134);
+    }
+
+    #[test]
+    fn c4_angle_inner_angle_matches_cpp_double_chain_exhaustively() {
+        fn cpp_inner_angle(dx: i32, dy: i32) -> i32 {
+            let radians = (dy as f32).atan2(dx as f32);
+            (180.0_f64
+                * f64::from(radians)
+                * f64::from(std::f32::consts::FRAC_1_PI)) as i32
+        }
+
+        for dx in 0..=512 {
+            for dy in 0..=512 {
+                let folded = c4_angle(0, 0, dx, dy);
+                let actual_inner = if dx > 0 { folded - 90 } else { 270 - folded };
+                assert_eq!(actual_inner, cpp_inner_angle(dx, dy), "dx={dx}, dy={dy}");
+            }
+        }
+    }
+
     fn snapshot_with_id(id: u64) -> CommandObjectSnapshot {
         CommandObjectSnapshot {
             contact: 0,
@@ -9367,7 +9394,9 @@ fn inside(value: i32, lo: i32, hi: i32) -> bool {
 fn c4_angle(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
     let dy = (y1 - y2).abs() as f32;
     let dx = (x1 - x2).abs() as f32;
-    let angle = (180.0 * dy.atan2(dx) * std::f32::consts::FRAC_1_PI) as i32;
+    let angle = (180.0_f64
+        * f64::from(dy.atan2(dx))
+        * f64::from(std::f32::consts::FRAC_1_PI)) as i32;
     if x2 > x1 {
         if y2 < y1 {
             90 - angle
