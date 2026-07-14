@@ -53,6 +53,13 @@ pub struct Definition {
     /// localized `Rank*.txt` (`C4Def::iNumRankSymbols`,
     /// src/C4Def.cpp:694-706). `None` means no valid custom rank strip.
     pub rank_symbol_count: Option<u32>,
+    /// Fully resolved custom rank names from the first localized
+    /// `Rank{language}.txt|Rank.txt` component. `C4RankSystem` exposes base
+    /// names first, followed by every leading-`*` extension format applied to
+    /// every base name in order (src/C4RankSystem.cpp:96-180,184-211).
+    /// `None` means that no component was present or that C++ would reject it
+    /// for containing no ordinary rank name.
+    pub rank_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,11 +128,15 @@ impl Definition {
             load_plain_image(group, "Rank.bmp")
         }
         .filter(|image| image.height() > 0 && image.width() / image.height() > 0);
-        let rank_extension_count = load_rank_extension_count(group, languages)?;
+        let rank_name_table = load_rank_name_table(group, languages)?;
+        let rank_extension_count = rank_name_table
+            .as_ref()
+            .map_or(0, |table| table.extension_count);
         let rank_symbol_count = rank_symbols_image.as_ref().and_then(|image| {
             let phase_count = image.width() / image.height().max(1);
             (phase_count > 0).then(|| phase_count.saturating_sub(rank_extension_count).max(1))
         });
+        let rank_names = rank_name_table.map(|table| table.names);
 
         Ok(Self {
             core,
@@ -142,6 +153,7 @@ impl Definition {
             portrait_graphics,
             rank_symbols_image,
             rank_symbol_count,
+            rank_names,
         })
     }
 
@@ -208,42 +220,93 @@ fn first_localized_component<S: AsRef<str>>(
         .find(|name| group.exists(name))
 }
 
-/// Returns the number of extended-rank formats in the selected Rank file.
-/// C4RankSystem::Load counts a non-empty line beginning with `*` as an
-/// extension, ignores `#` comments and `key=value` settings, and accepts the
-/// component only when at least one ordinary rank name exists
-/// (src/C4RankSystem.cpp:96-180).
-fn load_rank_extension_count<S: AsRef<str>>(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RankNameTable {
+    names: Vec<String>,
+    extension_count: u32,
+}
+
+/// Loads and resolves the selected definition rank component exactly in the
+/// order exposed by `C4RankSystem::GetRankName`: ordinary names first, then
+/// each leading-`*` extension applied across all ordinary names. Comments and
+/// settings are retained by neither list, and a component without an ordinary
+/// name is rejected (src/C4RankSystem.cpp:96-211).
+fn load_rank_name_table<S: AsRef<str>>(
     group: &Group,
     languages: &[S],
-) -> Result<u32, DefinitionError> {
+) -> Result<Option<RankNameTable>, DefinitionError> {
     let Some(candidate) = first_localized_component(group, "Rank", languages) else {
-        return Ok(0);
+        return Ok(None);
     };
     let text = decode_legacy_script_text(&group.read_file(candidate)?);
-    let mut regular_count = 0_u32;
-    let mut extension_count = 0_u32;
+    let mut ordinary_names = Vec::new();
+    let mut extensions = Vec::new();
     // The C++ loop only processes lines when it encounters CR or LF within
     // the component data; its appended trailing NUL lies outside that loop.
     // Consequently an unterminated final line is intentionally ignored.
-    for terminated_line in text.split_inclusive(['\r', '\n']) {
+    // Embedded NUL bytes are terminators too because C++ tests `!*pPos`.
+    for terminated_line in text.split_inclusive(['\0', '\r', '\n']) {
         let line = terminated_line
-            .strip_suffix('\r')
+            .strip_suffix('\0')
+            .or_else(|| terminated_line.strip_suffix('\r'))
             .or_else(|| terminated_line.strip_suffix('\n'));
         let Some(line) = line.filter(|line| !line.is_empty()) else {
             continue;
         };
-        if line.starts_with('*') {
-            extension_count = extension_count.saturating_add(1);
+        if let Some(extension) = line.strip_prefix('*') {
+            extensions.push(extension.to_string());
         } else if !line.starts_with('#') && !line.contains('=') {
-            regular_count = regular_count.saturating_add(1);
+            ordinary_names.push(line.to_string());
         }
     }
-    Ok(if regular_count == 0 {
-        0
-    } else {
-        extension_count
-    })
+    if ordinary_names.is_empty() {
+        return Ok(None);
+    }
+
+    let extension_count = u32::try_from(extensions.len()).unwrap_or(u32::MAX);
+    let mut names = Vec::with_capacity(
+        ordinary_names
+            .len()
+            .saturating_mul(extensions.len().saturating_add(1)),
+    );
+    names.extend(ordinary_names.iter().cloned());
+    for extension in extensions {
+        names.extend(
+            ordinary_names
+                .iter()
+                .map(|name| format_rank_extension(&extension, name)),
+        );
+    }
+    Ok(Some(RankNameTable {
+        names,
+        extension_count,
+    }))
+}
+
+/// The shipped rank extensions use the `fmt::sprintf(format, base_name)`
+/// `%s`/`%%` surface. Parse those tokens instead of a blanket replacement so
+/// escaped percent signs cannot accidentally become placeholders.
+fn format_rank_extension(format: &str, base_name: &str) -> String {
+    let mut output = String::with_capacity(format.len().saturating_add(base_name.len()));
+    let mut chars = format.chars().peekable();
+    while let Some(current) = chars.next() {
+        if current != '%' {
+            output.push(current);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('%') => {
+                chars.next();
+                output.push('%');
+            }
+            Some('s') => {
+                chars.next();
+                output.push_str(base_name);
+            }
+            _ => output.push('%'),
+        }
+    }
+    output
 }
 
 /// Decodes a single named image from the def group, `None` when absent.
@@ -2551,14 +2614,65 @@ mod tests {
         let us = Definition::load_with_languages(&group, &["US", "DE"])
             .expect("load US-priority definition");
         assert_eq!(us.rank_symbol_count, Some(4));
+        assert_eq!(
+            us.rank_names,
+            Some(vec!["Recruit".to_string(), "First Recruit".to_string()])
+        );
 
         let de = Definition::load_with_languages(&group, &["DE", "US"])
             .expect("load DE-priority definition");
         assert_eq!(de.rank_symbol_count, Some(3));
+        assert_eq!(
+            de.rank_names,
+            Some(vec![
+                "Rekrut".to_string(),
+                "Erster Rekrut".to_string(),
+                "Zweiter Rekrut".to_string(),
+            ])
+        );
 
         let fallback =
             Definition::load_with_languages(&group, &["FR"]).expect("load fallback definition");
         assert_eq!(fallback.rank_symbol_count, Some(2));
+        assert_eq!(
+            fallback.rank_names,
+            Some(vec![
+                "Fallback".to_string(),
+                "One Fallback".to_string(),
+                "Two Fallback".to_string(),
+                "Three Fallback".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn custom_rank_names_expand_extensions_in_cpp_order() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("ExpandedRanks.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=EXPR\n").expect("DefCore");
+        fs::write(
+            def_dir.join("RankUS.txt"),
+            b"# comment\r\n*First %s\r\nBase=500\r\nRecruit\r\nIgnored=setting\r\nVeteran\r\n*100%% %s\r\nUnterminated",
+        )
+        .expect("rank names");
+
+        let definition = Definition::load_with_languages(
+            &Group::open(&def_dir).expect("open definition"),
+            &["US"],
+        )
+        .expect("load definition");
+        assert_eq!(
+            definition.rank_names,
+            Some(vec![
+                "Recruit".to_string(),
+                "Veteran".to_string(),
+                "First Recruit".to_string(),
+                "First Veteran".to_string(),
+                "100% Recruit".to_string(),
+                "100% Veteran".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -2586,6 +2700,7 @@ mod tests {
             Some(4),
             "C4RankSystem rejects a component without ordinary rank names"
         );
+        assert_eq!(invalid.rank_names, None);
 
         let saturated_dir = temp.path().join("SaturatedRanks.c4d");
         fs::create_dir(&saturated_dir).expect("saturated definition directory");
@@ -2608,6 +2723,15 @@ mod tests {
             Some(1),
             "C++ clamps the base rank symbol count to at least one"
         );
+        assert_eq!(
+            saturated.rank_names,
+            Some(vec![
+                "Recruit".to_string(),
+                "One Recruit".to_string(),
+                "Two Recruit".to_string(),
+                "Three Recruit".to_string(),
+            ])
+        );
 
         fs::write(
             saturated_dir.join("RankUS.txt"),
@@ -2624,6 +2748,7 @@ mod tests {
             Some(2),
             "C++ ignores the final rank line when it has no CR or LF terminator"
         );
+        assert_eq!(unterminated.rank_names, Some(vec!["Recruit".to_string()]));
     }
 
     #[test]

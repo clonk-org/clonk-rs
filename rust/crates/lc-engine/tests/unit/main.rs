@@ -26378,6 +26378,241 @@ func RemoveAndRecruit(object target) {
     }
 
     #[test]
+    fn shipped_hazard_tutorial_script65_awards_crew_experience() {
+        // Exercise the exact shipped call without applying Hazard's very large
+        // Initialize function. Script65 ends the tutorial with
+        // DoCrewExp(100, GetCrew()); 100 is below the first C4RankSystem
+        // promotion threshold (Experience(1) = 1000), so only experience
+        // changes here.
+        let mut engine = Engine::with_seed(0);
+        let mut crew = Definition::from_script("HZCK", "Hazard Clonk", "#strict 2\n")
+            .expect("synthetic Hazard Clonk compiles");
+        crew.set_crew_member(true);
+        engine
+            .register_definition(crew)
+            .expect("synthetic Hazard Clonk registers");
+
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("HZCK".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(JoinPlayerConfig {
+                name: "Hazard trainee".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![player_file::CrewInfo {
+                    id: "HZCK".to_string(),
+                    name: "Rookie".to_string(),
+                    rank: 0,
+                    experience: 0,
+                    total_playing_time: 0,
+                    participation: 1,
+                    in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                }],
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("Hazard trainee joins");
+
+        let crew_id = *engine
+            .player(0)
+            .expect("player zero exists")
+            .crew()
+            .first()
+            .expect("ready HZCK crew exists");
+        let before = engine.capture_state();
+        let link = *before
+            .crew_info_links
+            .get(&crew_id)
+            .expect("HZCK carries its persistent roster link");
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../content/Hazard.c4f/Tutorial.c4s/Script.c");
+        let source = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("shipped Hazard tutorial script reads: {error}"));
+        let source = String::from_utf8_lossy(&source);
+        engine
+            .load_scenario_script_with_convention("Hazard Tutorial", &source, true)
+            .expect("shipped Hazard tutorial script loads without Initialize");
+        engine
+            .call_scenario_script_function("Script65", Vec::new())
+            .expect("shipped Hazard Script65 completes");
+
+        let info = engine
+            .crew_object_info(crew_id)
+            .expect("HZCK keeps its live crew info");
+        assert_eq!(info.experience, 100);
+        assert_eq!(info.rank, 0, "100 experience is below rank one's 1000");
+
+        let after = engine.capture_state();
+        let persisted = &after.crew_info_rosters[&link.player_id][link.roster_index];
+        assert_eq!(persisted.experience, 100);
+        assert_eq!(persisted.rank, 0);
+    }
+
+    #[test]
+    fn do_crew_exp_promotes_once_updates_same_call_and_persists() {
+        let script = r#"#strict 2
+func Award(int amount, object target) {
+    return [DoCrewExp(amount, target), GetRank(target),
+            GetObjectInfoCoreVal("Experience", "ObjectInfo", target)];
+}
+func AwardSelf(int amount) {
+    return [DoCrewExp(amount), GetRank(),
+            GetObjectInfoCoreVal("Experience", "ObjectInfo")];
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut crew = Definition::from_script("CREW", "Crew", script)
+            .expect("experience probe compiles");
+        crew.set_crew_member(true);
+        crew.set_rank_names(Some(vec![
+            "Recruit".to_string(),
+            "Custom One".to_string(),
+            "Custom Two".to_string(),
+        ]));
+        engine.register_definition(crew).expect("crew registers");
+
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("CREW".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(JoinPlayerConfig {
+                name: "Experience owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![player_file::CrewInfo {
+                    id: "CREW".to_string(),
+                    name: "Rookie".to_string(),
+                    rank: 0,
+                    experience: 0,
+                    total_playing_time: 0,
+                    participation: 1,
+                    in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                }],
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("experience owner joins");
+        let crew_id = engine.player(0).expect("player").crew()[0];
+        let crew_index = engine.find_object_index(crew_id).expect("crew index");
+        engine.pending_audio.clear();
+
+        assert_eq!(
+            engine
+                .call_object_function(crew_index, "AwardSelf", vec![Value::Int(8_000)])
+                .expect("large award succeeds"),
+            Value::Array(vec![Value::Bool(true), Value::Int(1), Value::Int(8_000)]),
+            "DoExperience promotes at most one rank and exposes the write immediately"
+        );
+        assert!(engine.pending_audio.iter().any(|command| matches!(
+            command,
+            AudioCommand::PlaySound { name, target, volume: 100, looped: false, .. }
+                if name == "Trumpet" && *target == Some(crew_id)
+        )));
+        let promotion = engine
+            .capture_state()
+            .messages
+            .into_iter()
+            .find(|message| message.snapshot.target == Some(crew_id))
+            .expect("promotion message targets the crew");
+        assert_eq!(
+            promotion.snapshot.lines,
+            vec!["Rookie is promoted".to_string(), "to Custom One!".to_string()]
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(crew_index, "AwardSelf", vec![Value::Int(0)])
+                .expect("zero award can catch up one rank"),
+            Value::Array(vec![Value::Bool(true), Value::Int(2), Value::Int(8_000)])
+        );
+        assert_eq!(
+            engine
+                .call_object_function(crew_index, "AwardSelf", vec![Value::Int(-20_000)])
+                .expect("negative award clamps"),
+            Value::Array(vec![Value::Bool(true), Value::Int(2), Value::Int(0)]),
+            "experience clamps at zero without demoting"
+        );
+
+        let message_count = engine.capture_state().messages.len();
+        engine.pending_audio.clear();
+        assert_eq!(
+            engine
+                .call_object_function(crew_index, "AwardSelf", vec![Value::Int(5_196)])
+                .expect("promotion beyond the custom table succeeds"),
+            Value::Array(vec![Value::Bool(true), Value::Int(3), Value::Int(5_196)])
+        );
+        assert_eq!(engine.capture_state().messages.len(), message_count);
+        assert!(!engine.pending_audio.iter().any(|command| matches!(
+            command,
+            AudioCommand::PlaySound { name, target, .. }
+                if name == "Trumpet" && *target == Some(crew_id)
+        )), "an undefined custom rank promotes silently");
+        assert_eq!(
+            engine
+                .call_object_function(crew_index, "AwardSelf", vec![Value::Int(-20_000)])
+                .expect("experience resets after the silent promotion"),
+            Value::Array(vec![Value::Bool(true), Value::Int(3), Value::Int(0)])
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    crew_index,
+                    "AwardSelf",
+                    vec![Value::Int(100_000_000)],
+                )
+                .expect("maximum award clamps"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(3),
+                Value::Int(100_000_000),
+            ]),
+            "the exact maximum suppresses promotion"
+        );
+
+        let persisted = engine.capture_state();
+        let link = persisted.crew_info_links[&crew_id];
+        let roster_info = &persisted.crew_info_rosters[&link.player_id][link.roster_index];
+        assert_eq!((roster_info.rank, roster_info.experience), (3, 100_000_000));
+
+        let info_less = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("info-less object spawns");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    crew_index,
+                    "Award",
+                    vec![Value::Int(5), Value::Object(info_less.as_u64())],
+                )
+                .expect("info-less award succeeds"),
+            Value::Array(vec![Value::Bool(true), Value::Nil, Value::Nil])
+        );
+
+    }
+
+    #[test]
     fn set_crew_status_retire_accrues_one_stint_and_recruit_restarts_it() {
         let script = r#"#strict 2
 func Join() { return MakeCrewMember(this(), 0); }

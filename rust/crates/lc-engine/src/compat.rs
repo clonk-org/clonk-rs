@@ -474,6 +474,17 @@ pub enum PlayerCommand {
         recruit: bool,
         has_died: bool,
     },
+    /// One ordered `C4Object::DoExperience` call. Keep the change
+    /// incremental so independently produced callback outcomes compound in
+    /// engine order instead of replacing one another with stale snapshots.
+    /// `link` is the pointer-equivalent identity of the persistent info that
+    /// was attached at call time; removal or GrabInfo later in the same
+    /// callback must not lose the mutation.
+    AdjustCrewExperience {
+        object_id: ObjectId,
+        link: Option<CrewInfoLink>,
+        change: i32,
+    },
     AdjustHomeBaseMaterial {
         player_id: i32,
         definition_id: DefinitionId,
@@ -1006,6 +1017,10 @@ pub struct HostWorldContext {
     /// Localized `C4Def::GetDesc` text, kept separate from simulation
     /// metadata so presentation lookup does not enlarge every fixture.
     definition_descriptions: Rc<HashMap<DefinitionId, String>>,
+    /// Finite localized `C4Def::pRankNames` lookup tables. Absence is
+    /// distinct from an empty custom table: absent definitions fall back to
+    /// the game-global rank system during `C4Object::Promote`.
+    definition_rank_names: Rc<HashMap<DefinitionId, Vec<String>>>,
     /// Runtime `Game.Defs` order after C4DefList::SortByID. Definition-indexing
     /// APIs must never observe the nondeterministic order of `definitions`.
     definition_order: Rc<Vec<DefinitionId>>,
@@ -1112,6 +1127,7 @@ impl Default for HostWorldContext {
             base_auto_sell_definitions: Rc::new(HashSet::new()),
             rebuyable_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
+            definition_rank_names: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors: RefCell::new(None),
             transfer_zones: Rc::new(Vec::new()),
@@ -1306,6 +1322,7 @@ impl HostWorldContext {
             base_auto_sell_definitions: Rc::new(HashSet::new()),
             rebuyable_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
+            definition_rank_names: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors,
             transfer_zones: Rc::new(transfer_zones),
@@ -1357,6 +1374,14 @@ impl HostWorldContext {
         descriptions: HashMap<DefinitionId, String>,
     ) -> Self {
         self.definition_descriptions = Rc::new(descriptions);
+        self
+    }
+
+    pub(crate) fn with_definition_rank_names(
+        mut self,
+        names: HashMap<DefinitionId, Vec<String>>,
+    ) -> Self {
+        self.definition_rank_names = Rc::new(names);
         self
     }
 
@@ -3655,6 +3680,133 @@ fn do_score(args: &[Value]) -> Result<Value, RuntimeError> {
             delta: change,
         });
         Ok(Value::Int(1))
+    })
+}
+
+const DEFAULT_RANK_NAMES: [&str; 11] = [
+    "Clonk",
+    "Ensign",
+    "Lieutenant",
+    "Captain",
+    "Major",
+    "Lieutenant Colonel",
+    "Colonel",
+    "Brigade General",
+    "Major General",
+    "Lieutenant General",
+    "General",
+];
+
+fn default_rank_name(rank: i32) -> Option<&'static str> {
+    usize::try_from(rank)
+        .ok()
+        .and_then(|rank| DEFAULT_RANK_NAMES.get(rank).copied())
+}
+
+/// `FnDoCrewExp` -> `C4Object::DoExperience` (C4Script.cpp:4964-4972;
+/// C4Object.cpp:1518-1529). The persistent info pointer is independent of
+/// crew membership, ownership and liveness, so any resolved object succeeds;
+/// an info-less object is simply a successful no-op.
+fn do_crew_exp(args: &[Value]) -> Result<Value, RuntimeError> {
+    let change = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "DoCrewExp",
+        "change",
+    )?;
+    let target_id = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "DoCrewExp",
+        "target",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
+        }
+
+        let Some((link, info, promoted)) = context.object_scope_mut(target).and_then(|scope| {
+            let link = scope.info_link();
+            let mut info = scope.info_core()?.clone();
+            let promoted = crate::adjust_crew_experience(&mut info, change);
+            scope.set_info_core(Some(info.clone()));
+            if promoted {
+                scope.set_info_rank(Some(info.rank));
+            }
+            Some((link, info, promoted))
+        }) else {
+            return Ok(Value::Bool(true));
+        };
+
+        // This projection is live throughout the VM call. A following
+        // GrabObjectInfo/MakeCrewMember must see the changed pointer payload.
+        if let Some(link) = link {
+            let mut state = context.world.crew_info_state.borrow_mut();
+            if let Some(entry) = state.entries.get_mut(&link) {
+                entry.rank = info.rank;
+                entry.experience = info.experience;
+            }
+            for entries in state.idle.values_mut() {
+                for (candidate, entry) in entries {
+                    if *candidate == link {
+                        entry.rank = info.rank;
+                        entry.experience = info.experience;
+                    }
+                }
+            }
+        }
+
+        context.record_player_command(PlayerCommand::AdjustCrewExperience {
+            object_id: target,
+            link,
+            change,
+        });
+
+        if promoted {
+            // Exhausted custom tables promote silently; Game.Rank is used
+            // only when the persistent info definition has no custom table.
+            let rank_name = match context
+                .world
+                .definition_rank_names
+                .get(&info.definition_id)
+            {
+                Some(names) => usize::try_from(info.rank)
+                    .ok()
+                    .and_then(|rank| names.get(rank))
+                    .cloned(),
+                None => default_rank_name(info.rank).map(str::to_owned),
+            };
+            if let Some(rank_name) = rank_name {
+                let object_name = context
+                    .object_custom_name(target)
+                    .unwrap_or_else(|| info.name.clone());
+                context.register_message(MessageCommand::Add(MessageSpec {
+                    kind: MessageKind::Target,
+                    text: format!("{object_name} is promoted|to {rank_name}!"),
+                    target: Some(target),
+                    player: None,
+                    offset: Vector2::ZERO,
+                    color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+                    flags: 0,
+                    width: None,
+                    decoration: None,
+                    frame_decoration: None,
+                    portrait: None,
+                }));
+                context
+                    .audio_mut()
+                    .play_sound("Trumpet", Some(target), 100, false, false, None);
+            }
+        }
+
+        Ok(Value::Bool(true))
     })
 }
 
@@ -9900,6 +10052,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("LoadScenarioSection", load_scenario_section);
     script.register_host_function("GetLeague", get_league);
     script.register_host_function("DoScore", do_score);
+    script.register_host_function("DoCrewExp", do_crew_exp);
     script.register_host_function("GetScore", get_score);
     script.register_host_function("GetScoreboardString", get_scoreboard_string);
     script.register_host_function("GetScoreboardData", get_scoreboard_data);
@@ -33809,7 +33962,11 @@ impl EffectHostContext {
                 .and_then(|scope| scope.pending_update.picture_rect)
                 .unwrap_or(state.picture_rect),
             rank: include_rank
-                .then(|| self.world.crew_rank(target.as_u64()))
+                .then(|| {
+                    scope
+                        .and_then(ObjectScopeContext::info_rank)
+                        .or_else(|| self.world.crew_rank(target.as_u64()))
+                })
                 .flatten(),
         })
     }
@@ -36074,6 +36231,7 @@ mod tests {
         "Div",
         "DoBreath",
         "DoCon",
+        "DoCrewExp",
         "DoDamage",
         "DoEnergy",
         "DoHomebaseMaterial",
@@ -41306,6 +41464,19 @@ func ProbeBadIndex(id) {
                 },
             ]
         ));
+    }
+
+    #[test]
+    fn do_crew_exp_without_an_object_returns_false() {
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            HostWorldContext::default(),
+            1,
+            || do_crew_exp(&[Value::Int(1)]),
+        );
+        assert_eq!(result.expect("DoCrewExp call succeeds"), Value::Bool(false));
+        assert!(outcome.player_commands.is_empty());
     }
 
     #[test]

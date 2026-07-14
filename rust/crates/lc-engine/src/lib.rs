@@ -6041,6 +6041,38 @@ fn fair_crew_rank(experience: i32) -> i32 {
     }
 }
 
+/// `C4RankSystem::Experience` for the game-global rank system initialized
+/// with `RankBase=1000` (C4RankSystem.cpp:226-229; C4Game.cpp:3518-3524).
+/// `C4Object::DoExperience` deliberately uses this system for the promotion
+/// threshold even when the crew definition supplies custom rank names.
+pub(crate) fn crew_rank_experience(rank: i32) -> i32 {
+    if rank < 0 {
+        return 0;
+    }
+    ((rank as f64).powf(1.5) * 1000.0) as i32
+}
+
+/// The state-changing half of `C4Object::DoExperience`
+/// (C4Object.cpp:1518-1529). Returns whether this call promoted the info.
+/// Promotion is intentionally limited to one rank per call, and hitting the
+/// exact maximum suppresses promotion just like the native `< MaxExperience`
+/// guard. The legacy executable performs an unchecked signed addition before
+/// `BoundBy`; wrapping preserves that two's-complement runtime behavior.
+pub(crate) fn adjust_crew_experience(info: &mut CrewObjectInfo, change: i32) -> bool {
+    const MAX_EXPERIENCE: i32 = 100_000_000;
+
+    info.experience = info.experience.wrapping_add(change).clamp(0, MAX_EXPERIENCE);
+    let next_rank = info.rank.saturating_add(1);
+    if info.experience < MAX_EXPERIENCE
+        && info.experience >= crew_rank_experience(next_rank)
+    {
+        info.rank = next_rank;
+        true
+    } else {
+        false
+    }
+}
+
 /// Native field updates in `C4PhysicalInfo::PromotionUpdate`
 /// (C4InfoCore.cpp:207-222), before its optional definition-script
 /// `GetFairCrewPhysical` overrides. Fair crew additionally trains Scale,
@@ -7854,6 +7886,10 @@ pub struct Definition {
     /// Def rank symbols (C4Def::pRankSymbols from Rank.png,
     /// src/C4Def.cpp:684-691) — HUD cursor info only.
     rank_symbols_image: Option<DefinitionPictureImage>,
+    /// Finite localized `C4Def::pRankNames` table used by Promote. This is
+    /// independent of the rank-symbol strip and may be inherited.
+    rank_names: Option<Vec<String>>,
+    rank_names_owned: bool,
     /// Base rank-cell count after localized extension cells are removed.
     rank_symbol_count: Option<u32>,
     /// Whether this definition loaded its own strip. Non-owned pointers are
@@ -8093,6 +8129,8 @@ impl Definition {
             portrait_graphics_image: None,
             portrait_graphics: Vec::new(),
             rank_symbols_image: None,
+            rank_names: None,
+            rank_names_owned: false,
             rank_symbol_count: None,
             rank_symbols_owned: false,
             sprite_image: None,
@@ -8273,6 +8311,9 @@ impl Definition {
 
     pub fn merge_from(&mut self, parent: &Definition) {
         Arc::make_mut(&mut self.script).merge_from(&parent.script);
+        if !self.rank_names_owned {
+            self.rank_names = parent.rank_names.clone();
+        }
         if !self.rank_symbols_owned {
             self.rank_symbols_image = parent.rank_symbols_image.clone();
             self.rank_symbol_count = parent.rank_symbol_count;
@@ -8366,6 +8407,7 @@ impl Definition {
             definition
                 .set_rank_symbols_image(Some(DefinitionPictureImage::from_resource(image, None)));
         }
+        definition.set_rank_names(resource.rank_names.clone());
         definition.set_rank_symbol_count(resource.rank_symbol_count);
         if let Some(image) = resource.graphics_image.as_ref() {
             let mask = resource.color_by_owner_mask.as_ref();
@@ -8960,6 +9002,15 @@ impl Definition {
     pub fn set_rank_symbols_image(&mut self, image: Option<DefinitionPictureImage>) {
         self.rank_symbols_owned = image.is_some();
         self.rank_symbols_image = image;
+    }
+
+    pub fn rank_names(&self) -> Option<&[String]> {
+        self.rank_names.as_deref()
+    }
+
+    pub fn set_rank_names(&mut self, names: Option<Vec<String>>) {
+        self.rank_names_owned = names.is_some();
+        self.rank_names = names;
     }
 
     pub fn rank_symbol_count(&self) -> Option<u32> {
@@ -17094,6 +17145,16 @@ impl Engine {
                     definition
                         .description()
                         .map(|description| (id.clone(), description.to_string()))
+                })
+                .collect(),
+        )
+        .with_definition_rank_names(
+            self.definitions
+                .iter()
+                .filter_map(|(id, definition)| {
+                    definition
+                        .rank_names()
+                        .map(|names| (id.clone(), names.to_vec()))
                 })
                 .collect(),
         )
@@ -25653,6 +25714,49 @@ impl Engine {
                     }
                     Rc::make_mut(&mut self.crew_object_infos).insert(object_id, info.clone());
                     Rc::make_mut(&mut self.crew_ranks).insert(object_id.as_u64(), info.rank);
+                }
+                PlayerCommand::AdjustCrewExperience {
+                    object_id,
+                    link,
+                    change,
+                } => {
+                    // The C4ObjectInfo belongs to the player's persistent
+                    // CrewInfoList independently of the live object pointer.
+                    // Apply there first so a later Retire/Grab in this same
+                    // ordered command stream retains the changed values.
+                    let roster_values = link.and_then(|link| {
+                        self.crew_rosters
+                            .get_mut(&link.player_id)
+                            .and_then(|roster| roster.get_mut(link.roster_index))
+                            .map(|entry| {
+                                let mut info = CrewObjectInfo {
+                                    definition_id: DefinitionId::from(entry.id.as_str()),
+                                    name: entry.name.clone(),
+                                    rank: entry.rank,
+                                    experience: entry.experience,
+                                };
+                                adjust_crew_experience(&mut info, change);
+                                entry.rank = info.rank;
+                                entry.experience = info.experience;
+                                (info.rank, info.experience)
+                            })
+                    });
+
+                    let live_values = {
+                        let infos = Rc::make_mut(&mut self.crew_object_infos);
+                        infos.get_mut(&object_id).map(|info| {
+                            if let Some((rank, experience)) = roster_values {
+                                info.rank = rank;
+                                info.experience = experience;
+                            } else {
+                                adjust_crew_experience(info, change);
+                            }
+                            (info.rank, info.experience)
+                        })
+                    };
+                    if let Some((rank, _)) = live_values.or(roster_values) {
+                        Rc::make_mut(&mut self.crew_ranks).insert(object_id.as_u64(), rank);
+                    }
                 }
                 PlayerCommand::AdjustHomeBaseMaterial {
                     player_id,
