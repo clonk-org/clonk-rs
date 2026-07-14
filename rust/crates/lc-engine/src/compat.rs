@@ -29890,16 +29890,16 @@ fn set_category(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetCategory requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        let target = target_id.or(context.script_object_context);
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
 
         object.set_category(category);
         Ok(Value::Bool(true))
@@ -32321,6 +32321,7 @@ impl EffectHostContext {
             object.action_data = scope.current_action_data;
             object.damage = scope.current_damage;
             object.need_energy = scope.need_energy();
+            object.category = scope.category();
             object.selected = scope.selected();
             object.crew_disabled = scope
                 .pending_update
@@ -48990,6 +48991,126 @@ func Probe(object other)
             .expect("foreign owner update recorded");
         assert_eq!(update.owner, Some(OWNER_NONE));
         assert_eq!(update.controller, Some(OWNER_NONE));
+    }
+
+    fn set_category_target_world(target_id: ObjectId, category: i32) -> HostWorldContext {
+        let state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            category,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        let target = HostWorldObject::with_category(
+            target_id,
+            "TARG",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            category,
+            100,
+            crate::FULL_CON,
+            0,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            0,
+            Vec::new(),
+            0,
+            0,
+            0,
+            None,
+            None,
+        )
+        .with_full_state(Rc::new(state));
+        HostWorldContext::from_objects([target])
+    }
+
+    fn foreign_category_update(outcome: &EffectContextOutcome, target: ObjectId) -> Option<i32> {
+        outcome
+            .other_objects
+            .iter()
+            .find(|object| object.object_id == target)?
+            .update
+            .as_ref()?
+            .category
+    }
+
+    #[test]
+    fn set_category_changes_a_foreign_target_and_leaves_the_caller_unchanged() {
+        let target_id = ObjectId::new(2);
+        let world = set_category_target_world(target_id, crate::CATEGORY_VEHICLE);
+        let target = object_reference_value(target_id);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            Ok(Value::Array(vec![
+                set_category(&[Value::Int(crate::CATEGORY_STATIC_BACK), target.clone()])?,
+                get_category(&[target])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("foreign SetCategory succeeds"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(crate::CATEGORY_STATIC_BACK),
+            ])
+        );
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+        assert_eq!(
+            foreign_category_update(&outcome, target_id),
+            Some(crate::CATEGORY_STATIC_BACK)
+        );
+    }
+
+    #[test]
+    fn set_category_merges_the_foreign_targets_own_sort_bits() {
+        let target_id = ObjectId::new(2);
+        let world = set_category_target_world(target_id, crate::CATEGORY_VEHICLE);
+        let target = object_reference_value(target_id);
+        let expected = crate::CATEGORY_MAGIC | crate::CATEGORY_VEHICLE;
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            Ok(Value::Array(vec![
+                set_category(&[Value::Int(crate::CATEGORY_MAGIC), target.clone()])?,
+                get_category(&[target])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("foreign SetCategory merge succeeds"),
+            Value::Array(vec![Value::Bool(true), Value::Int(expected)])
+        );
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+        assert_eq!(foreign_category_update(&outcome, target_id), Some(expected));
+    }
+
+    #[test]
+    fn set_category_accepts_an_explicit_target_without_an_object_context() {
+        let target_id = ObjectId::new(2);
+        let world = set_category_target_world(target_id, crate::CATEGORY_VEHICLE);
+        let target = object_reference_value(target_id);
+        let (result, outcome) = with_effect_context(None, &[], world, 3, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                set_category(&[Value::Int(crate::CATEGORY_STATIC_BACK), target.clone()])?,
+                get_category(&[target])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("scenario-scope SetCategory succeeds"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(crate::CATEGORY_STATIC_BACK),
+            ])
+        );
+        assert!(outcome.object_update.is_none());
+        assert_eq!(
+            foreign_category_update(&outcome, target_id),
+            Some(crate::CATEGORY_STATIC_BACK)
+        );
     }
 
     #[test]
