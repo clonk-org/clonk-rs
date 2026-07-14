@@ -4068,7 +4068,7 @@ global func MenuCommand(state, kind, selection)
 {
     if (kind == "focus")
     {
-        SetOwner(42);
+        SetR(42);
         return true;
     }
     return false;
@@ -4588,7 +4588,7 @@ func Probe()
     CheckEffect("Clean", this(), 300, 0)
   ];
 }
-func FxWorldEffect() { SetOwner(99); return(-1); }
+func FxWorldEffect() { SetR(99); return(-1); }
 func FxShieldEffect(szNew, pTarget, iNumber, iUnused, iValue)
 {
   if (szNew == "Denied" && pTarget == this() && iNumber > 0 && !iUnused && iValue == 42) return(-1);
@@ -4597,7 +4597,7 @@ func FxShieldEffect(szNew, pTarget, iNumber, iUnused, iValue)
 }
 func FxShieldAdd(pTarget, iNumber, szNew, iInterval, iValue)
 {
-  if (pTarget == this() && szNew == "Merge" && iInterval == 9) SetOwner(iValue);
+  if (pTarget == this() && szNew == "Merge" && iInterval == 9) SetR(iValue);
   return(0);
 }
 "#,
@@ -4641,7 +4641,10 @@ func FxShieldAdd(pTarget, iNumber, szNew, iInterval, iValue)
             ])
         );
         assert_eq!(
-            engine.object_snapshot(object).expect("caller remains live").owner,
+            engine
+                .object_snapshot(object)
+                .expect("caller remains live")
+                .rotation,
             6,
             "FxShieldAdd received the proposed interval/value and ran synchronously"
         );
@@ -4675,7 +4678,7 @@ func FxKillerEffect(szNew, pTarget)
   RemoveEffect("Victim", this(), 0, true);
   return(0);
 }
-func FxVictimEffect(szNew) { if (szNew == "Probe") { SetOwner(9); return(-1); } return(0); }
+func FxVictimEffect(szNew) { if (szNew == "Probe") { SetR(9); return(-1); } return(0); }
 "#,
         )
         .expect("caller compiles");
@@ -4717,8 +4720,11 @@ func FxVictimEffect(szNew) { if (szNew == "Probe") { SetOwner(9); return(-1); } 
             Value::Int(0)
         );
         assert_eq!(
-            engine.object_snapshot(walked).expect("caller remains live").owner,
-            1,
+            engine
+                .object_snapshot(walked)
+                .expect("caller remains live")
+                .rotation,
+            0,
             "the removed later Victim checker was not dispatched from a stale snapshot"
         );
     }
@@ -4735,6 +4741,7 @@ func FxVictimEffect(szNew) { if (szNew == "Probe") { SetOwner(9); return(-1); } 
             r#"
 func Install()
 {
+  SetR(1);
   var iFirst = AddEffect("Shield", this(), 100, 0, this());
   var iSecond = AddEffect("Shield", this(), 200, 0, this());
   return [iFirst, iSecond];
@@ -4742,7 +4749,7 @@ func Install()
 func Probe() { return CheckEffect("Merge", this(), 50, 0); }
 func FxShieldEffect(szNew) { if (szNew == "Merge") return(-2); return(0); }
 func FxShieldAdd() { return(-1); }
-func FxShieldStop() { SetOwner(GetOwner() + 1); return(0); }
+func FxShieldStop() { SetR(GetR() + 1); return(0); }
 "#,
         )
         .expect("caller compiles");
@@ -4751,7 +4758,7 @@ func FxShieldStop() { SetOwner(GetOwner() + 1); return(0); }
             .register_definition(definition)
             .expect("caller registers");
         let object = engine
-            .spawn_object(SpawnConfig::new("CALL").with_owner(1))
+            .spawn_object(SpawnConfig::new("CALL"))
             .expect("caller spawns");
         let index = engine.find_object_index(object).expect("caller index");
         let installed = engine
@@ -4776,7 +4783,7 @@ func FxShieldStop() { SetOwner(GetOwner() + 1); return(0); }
             Value::Int(-2)
         );
         let snapshot = engine.object_snapshot(object).expect("caller remains live");
-        assert_eq!(snapshot.owner, 2, "the acceptor Stop ran exactly once");
+        assert_eq!(snapshot.rotation, 2, "the acceptor Stop ran exactly once");
         assert_eq!(
             snapshot
                 .effects
@@ -4798,20 +4805,20 @@ func Install()
 {
   var iShield = AddEffect("Shield", this(), 100, 0, this());
   AddEffect("Upper", this(), 200, 0, this());
-  SetOwner(0);
+  SetR(0);
   return iShield;
 }
 func Probe() { return CheckEffect("Merge", this(), 50, 0); }
 func FxShieldEffect() { return(-3); }
-func FxShieldAdd() { SetOwner(GetOwner() * 10 + 2); return(0); }
+func FxShieldAdd() { SetR(GetR() * 10 + 2); return(0); }
 func FxUpperStop(pTarget, iNumber, iTemp, fTemp)
 {
-  if (iTemp == 1 && fTemp) SetOwner(GetOwner() * 10 + 1);
+  if (iTemp == 1 && fTemp) SetR(GetR() * 10 + 1);
   return(0);
 }
 func FxUpperStart(pTarget, iNumber, iTemp)
 {
-  if (iTemp == 1) SetOwner(GetOwner() * 10 + 3);
+  if (iTemp == 1) SetR(GetR() * 10 + 3);
   return(0);
 }
 "#,
@@ -4835,7 +4842,10 @@ func FxUpperStart(pTarget, iNumber, iTemp)
             shield
         );
         assert_eq!(
-            engine.object_snapshot(object).expect("caller remains live").owner,
+            engine
+                .object_snapshot(object)
+                .expect("caller remains live")
+                .rotation,
             123,
             "AnnulCalls orders Upper Stop, Shield Add, Upper Start"
         );
@@ -5083,8 +5093,8 @@ func FxUpperStart(pTarget, iNumber, iTemp)
             .object_snapshot(id)
             .expect("object snapshot available");
         assert_eq!(
-            snapshot.owner, 42,
-            "script should update object owner via SetOwner"
+            snapshot.rotation, 42,
+            "script should update object rotation via SetR"
         );
     }
 
@@ -7032,7 +7042,7 @@ public func Arm()
 public func FxGunControlControlDig(pTarget, iNumber)
 {
   // this() is the command target (the gun): mark it and echo the args.
-  SetOwner(9);
+  SetR(9);
   EffectVar(0, pTarget, iNumber) = 7;
   return(1);
 }
@@ -7077,7 +7087,7 @@ public func FxGunControlControlDig(pTarget, iNumber)
 
         let snapshot = engine.snapshot();
         assert_eq!(
-            snapshot.object(gun_id).expect("gun present").owner,
+            snapshot.object(gun_id).expect("gun present").rotation,
             9,
             "Fx callback ran with the command target as context"
         );
@@ -7101,12 +7111,12 @@ public func FxGunControlControlDig(pTarget, iNumber)
         // consulted. Specials bypass containment (:3364).
         let clonk_script = r#"
 global func Initialize(state, random) { return nil; }
-func ControlDig() { SetOwner(3); return 1; }
-func ControlSpecial() { SetOwner(4); return 1; }
+func ControlDig() { SetR(3); return 1; }
+func ControlSpecial() { SetR(4); return 1; }
 "#;
         let hut_script = r#"
 global func Initialize(state, random) { return nil; }
-func ContainedDig(pClonk) { SetOwner(5); return 1; }
+func ContainedDig(pClonk) { SetR(5); return 1; }
 "#;
         let mut clonk =
             Definition::from_script("CLNK", "Clonk", clonk_script).expect("clonk script compiles");
@@ -7142,12 +7152,12 @@ func ContainedDig(pClonk) { SetOwner(5); return 1; }
         assert!(handled, "the container consumed the com (DirectCom returns)");
         let snapshot = engine.snapshot();
         assert_eq!(
-            snapshot.object(hut_id).expect("hut present").owner,
+            snapshot.object(hut_id).expect("hut present").rotation,
             5,
             "ContainedDig ran on the container"
         );
         assert_ne!(
-            snapshot.object(clonk_id).expect("clonk present").owner,
+            snapshot.object(clonk_id).expect("clonk present").rotation,
             3,
             "the clonk's ControlDig was bypassed"
         );
@@ -7156,7 +7166,7 @@ func ContainedDig(pClonk) { SetOwner(5); return 1; }
         engine.handle_control_command(1, ControlCommand::Special, CommandKind::Press)?;
         let snapshot = engine.snapshot();
         assert_eq!(
-            snapshot.object(clonk_id).expect("clonk present").owner,
+            snapshot.object(clonk_id).expect("clonk present").rotation,
             4,
             "ControlSpecial ran on the clonk despite containment"
         );
@@ -7171,7 +7181,7 @@ func ContainedDig(pClonk) { SetOwner(5); return 1; }
         // (Waterskin.c4d/Script.c:110 `return(1)`).
         let script = r#"
 global func Initialize(state, random) { return nil; }
-func EmptyContainer() { SetOwner(7); return 1; }
+func EmptyContainer() { SetR(7); return 1; }
 "#;
         let mut definition =
             Definition::from_script("WSKI", "Waterskin", script).expect("script compiles");
@@ -7188,7 +7198,7 @@ func EmptyContainer() { SetOwner(7); return 1; }
         let handled = engine.execute_context_menu(id, "EmptyContainer")?;
         assert!(handled, "return(1) is truthy like C++'s bool cast");
         let snapshot = engine.object_snapshot(id).expect("object snapshot");
-        assert_eq!(snapshot.owner, 7, "the context function ran");
+        assert_eq!(snapshot.rotation, 7, "the context function ran");
         Ok(())
     }
 
@@ -7205,8 +7215,8 @@ func EmptyContainer() { SetOwner(7); return 1; }
 public func ContextMagic(object pByObject)
 {
   [Magic|Image=MCMS|Condition=ReadyToMagic|Desc=Cast a spell.]
-  if (pByObject == this()) { SetOwner(7); return(1); }
-  SetOwner(8);
+  if (pByObject == this()) { SetR(7); return(1); }
+  SetR(8);
   return(0);
 }
 protected func ReadyToMagic(object pByObject, id image)
@@ -7237,7 +7247,10 @@ protected func ReadyToMagic(object pByObject, id image)
             "the legacy callback's integer return uses C4Value truthiness"
         );
         assert_eq!(
-            engine.object_snapshot(mage).expect("mage snapshot").owner,
+            engine
+                .object_snapshot(mage)
+                .expect("mage snapshot")
+                .rotation,
             7,
             "ContextMagic receives the live menu crew object, not a state proplist"
         );
@@ -20984,6 +20997,9 @@ public func Prep() {
                 Definition::from_script("Vict", "Victim", victim_script).expect("script compiles"),
             )
             .expect("victim registers");
+        engine
+            .register_player(PlayerConfig::new(5, "Owner"))
+            .expect("owner registers");
         let prober = engine
             .spawn_object(SpawnConfig::new("Prob").with_category(CATEGORY_OBJECT))
             .expect("prober spawns");

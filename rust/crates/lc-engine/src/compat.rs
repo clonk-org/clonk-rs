@@ -27796,6 +27796,32 @@ fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
+    let (valid_player, active) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref();
+        (
+            context
+                .map(|context| context.player_state(owner).is_some())
+                .unwrap_or(false),
+            context
+                .and_then(|context| context.object_context().map(|object| object.id())),
+        )
+    });
+    // C4Object::SetOwner accepts only ValidPlr(owner) or NO_OWNER
+    // (C4Object.cpp:5493-5497).
+    if owner != OWNER_NONE && !valid_player {
+        return Ok(Value::Bool(false));
+    }
+
+    if let Some(target) = target_id {
+        if Some(target) != active {
+            return match call_world_object_function(target, "SetOwner", &[Value::Int(owner)]) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
@@ -27805,12 +27831,6 @@ fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
-        }
 
         object.set_owner(owner);
         Ok(Value::Bool(true))
@@ -44617,6 +44637,54 @@ func Missing() { return ComponentAll(nil, WOOD); }
         assert_eq!(value, Value::Int(42));
     }
 
+    fn set_owner_target_world(
+        owner: i32,
+        controller: i32,
+        players: Vec<PlayerState>,
+    ) -> (ObjectId, HostWorldContext) {
+        let target_id = ObjectId::new(2);
+        let target_state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            owner,
+            controller,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        let target = HostWorldObject::new(
+            target_id,
+            "TARG",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            owner,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(target_state));
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        let world = HostWorldContext::from_objects_with_players([target], players)
+            .with_definition_metadata(Rc::new(HashMap::from([(
+                DefinitionId::from("TARG"),
+                DefinitionMetadata::default(),
+            )])))
+            .with_definition_scripts(HashMap::from([(
+                DefinitionId::from("TARG"),
+                Arc::new(script),
+            )]));
+        (target_id, world)
+    }
+
     #[test]
     fn set_owner_records_owner_update() {
         let (result, outcome) = with_effect_context(
@@ -44642,7 +44710,13 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 crate::FULL_CON,
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::from_objects_with_players(
+                Vec::<HostWorldObject>::new(),
+                [PlayerState {
+                    id: 3,
+                    ..PlayerState::default()
+                }],
+            ),
             1,
             || set_owner(&[Value::Int(3)]),
         );
@@ -44651,46 +44725,73 @@ func Missing() { return ComponentAll(nil, WOOD); }
         assert_eq!(value, Value::Bool(true));
         let update = outcome.object_update.expect("owner update recorded");
         assert_eq!(update.owner, Some(3));
+        assert_eq!(update.controller, Some(3));
     }
 
     #[test]
-    fn set_owner_respects_target_filter() {
-        let world = HostWorldContext::default();
-        let mut target = HashMap::new();
-        target.insert("id".into(), Value::Int(99));
-        let args = [Value::Int(2), Value::Proplist(target)];
-
-        let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Normal,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
-                0,
-                0,
-                ActionLibrary::default(),
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
-            &[],
-            world,
-            1,
-            || set_owner(&args),
+    fn set_owner_targets_a_foreign_object_for_a_valid_player() {
+        // FnSetOwner forwards the explicit pObj to C4Object::SetOwner
+        // (C4Script.cpp:821-827), which updates Owner and Controller.
+        let (target_id, world) = set_owner_target_world(
+            OWNER_NONE,
+            4,
+            vec![PlayerState {
+                id: 1,
+                ..PlayerState::default()
+            }],
         );
 
-        let value = result.expect("SetOwner returns bool");
-        assert_eq!(value, Value::Bool(false));
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            set_owner(&[Value::Int(1), object_reference_value(target_id)])
+        });
+
+        assert_eq!(result.expect("SetOwner succeeds"), Value::Bool(true));
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+        assert_eq!(outcome.other_objects.len(), 1, "target changes once");
+        let update = outcome.other_objects[0]
+            .update
+            .as_ref()
+            .expect("foreign owner update recorded");
+        assert_eq!(update.owner, Some(1));
+        assert_eq!(update.controller, Some(1));
+    }
+
+    #[test]
+    fn set_owner_rejects_an_invalid_player_without_changes() {
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            [PlayerState {
+                id: 1,
+                ..PlayerState::default()
+            }],
+        );
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || set_owner(&[Value::Int(7)]));
+
+        assert_eq!(result.expect("SetOwner returns bool"), Value::Bool(false));
         assert!(outcome.object_update.is_none());
+        assert!(outcome.other_objects.is_empty());
+    }
+
+    #[test]
+    fn set_owner_accepts_no_owner_for_a_foreign_object() {
+        let (target_id, world) = set_owner_target_world(1, 4, Vec::new());
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            set_owner(&[
+                Value::Int(OWNER_NONE),
+                object_reference_value(target_id),
+            ])
+        });
+
+        assert_eq!(result.expect("SetOwner succeeds"), Value::Bool(true));
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+        assert_eq!(outcome.other_objects.len(), 1, "target changes once");
+        let update = outcome.other_objects[0]
+            .update
+            .as_ref()
+            .expect("foreign owner update recorded");
+        assert_eq!(update.owner, Some(OWNER_NONE));
+        assert_eq!(update.controller, Some(OWNER_NONE));
     }
 
     #[test]
