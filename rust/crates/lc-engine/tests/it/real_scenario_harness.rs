@@ -5,7 +5,8 @@ use crate::support::real_scenario::{
 };
 use lc_engine::{
     math, ActionState, AudioCommand, Definition, Direction, EffectVarValue, EngineError,
-    JoinPlayerConfig, ObjectId, ObjectUpdate, PlayerStatus, SpawnConfig, Vector2, COM_DIG, COM_DOWN,
+    JoinPlayerConfig, Landscape, ObjectId, ObjectUpdate, PlayerStatus, SpawnConfig, Vector2,
+    COM_DIG, COM_DOWN,
     COM_MENU_SELECT, COM_RELEASE_OFFSET, COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON,
     OWNER_NONE,
 };
@@ -4007,6 +4008,56 @@ public func Paint(int x, int y)
     assert!(
         fuel_after < fuel_before,
         "FnFlameConsumeMaterial extracts at least one inflammable material pixel like C++"
+    );
+}
+
+#[test]
+fn gold_rush_trap_arm_check_uses_the_live_cpp_shape_offset() {
+    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+    let base_x = engine
+        .snapshot()
+        .objects
+        .iter()
+        .map(|object| object.position.x)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1_000);
+    engine.set_landscape(Landscape::flat(
+        u32::try_from(base_x.saturating_add(100)).expect("isolated trap fixture width"),
+        60,
+    ));
+
+    // The shipped formula in TRAP::ArmCheck is
+    // (Dir*2-1)*(TGIN Width 8 + Offset.x -4 + TRPR Width 16 +
+    // Offset.x -8 + 3) = +15. At y=50 over the flat y=60 surface, its
+    // first upward probe leaves solid at i=1 and returns local y=9.
+    let trapper = engine
+        .spawn_object(
+            SpawnConfig::new("TRPR")
+                .with_position(Vector2::new(base_x, 50))
+                .with_direction(Direction::Right)
+                .with_alive(true)
+                .with_loaded(true),
+        )
+        .expect("the real Western trapper spawns");
+    let trap = engine
+        .spawn_object(
+            SpawnConfig::new("TGIN")
+                .with_position(Vector2::new(base_x, 50))
+                .with_loaded(true),
+        )
+        .expect("the real Western gin trap spawns");
+    let trap_index = engine.find_object_index(trap).expect("gin trap index");
+
+    assert_eq!(
+        engine
+            .call_object_function(
+                trap_index,
+                "ArmCheck",
+                vec![Value::Object(trapper.as_u64())],
+            )
+            .expect("the shipped inherited TRAP::ArmCheck runs"),
+        Value::Array(vec![Value::Int(15), Value::Int(9)])
     );
 }
 

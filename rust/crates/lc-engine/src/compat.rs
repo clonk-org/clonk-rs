@@ -145,10 +145,13 @@ pub(crate) struct HostWorldObject {
     #[allow(dead_code)]
     pub velocity: Vector2,
     fixed_velocity: FixedVec2,
+    /// Raw 16.16 fixed-point rotation accumulator (`C4Object::fix_r`).
+    fixed_rotation: C4Fixed,
     /// Raw 16.16 fixed-point angular velocity (`C4Object::rdir`).
     rotation_velocity: C4Fixed,
     pub rotation: i32,
     pub vertices: Vec<ObjectVertex>,
+    own_vertices: bool,
     #[allow(dead_code)]
     pub action_data: i32,
     pub action_ticks: u32,
@@ -221,6 +224,9 @@ pub(crate) struct DefinitionMetadata {
     pub value: i32,
     #[allow(dead_code)]
     pub mass: i32,
+    /// DefCore NoComponentMass suppresses the contents contribution to the
+    /// live cached C4Object::Mass.
+    pub no_component_mass: bool,
     pub constructable: bool,
     pub shape: Option<DefinitionRect>,
     /// DefCore `Placement` (C4Def.cpp:312): PlaceVegetation dispatches
@@ -583,6 +589,11 @@ impl HostWorldObject {
         self
     }
 
+    pub(crate) fn with_fixed_rotation(mut self, fixed_rotation: C4Fixed) -> Self {
+        self.fixed_rotation = fixed_rotation;
+        self
+    }
+
     pub(crate) fn with_direction(mut self, direction: i32) -> Self {
         self.direction = direction;
         self
@@ -688,9 +699,11 @@ impl HostWorldObject {
             fixed_position: FixedVec2::from_ints(position.x, position.y),
             velocity,
             fixed_velocity: FixedVec2::from_ints(velocity.x, velocity.y),
+            fixed_rotation: itofix(rotation),
             rotation_velocity: C4Fixed::ZERO,
             rotation,
             vertices,
+            own_vertices: false,
             action_data,
             action_ticks,
             action_phase,
@@ -706,6 +719,11 @@ impl HostWorldObject {
 
     pub(crate) fn with_commands(mut self, commands: Vec<CommandView>) -> Self {
         self.commands = commands;
+        self
+    }
+
+    pub(crate) fn with_own_vertices(mut self, own_vertices: bool) -> Self {
+        self.own_vertices = own_vertices;
         self
     }
 
@@ -11217,6 +11235,9 @@ pub(crate) struct HostObjectContext<'a> {
     /// The TRUE angular velocity (`rdir`) at call time. None falls back to
     /// the world snapshot or zero for legacy fixtures.
     pub script_rotation_velocity: Option<C4Fixed>,
+    /// The TRUE raw rotation accumulator (`fix_r`) at call time. None falls
+    /// back to the whole-degree rotation for legacy fixtures.
+    pub script_fixed_rotation: Option<C4Fixed>,
 }
 
 impl<'a> HostObjectContext<'a> {
@@ -11352,6 +11373,7 @@ impl<'a> HostObjectContext<'a> {
             script_fixed_position: None,
             script_fixed_velocity: None,
             script_rotation_velocity: None,
+            script_fixed_rotation: None,
         }
     }
 
@@ -11377,6 +11399,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_script_rotation_velocity(mut self, velocity: Option<C4Fixed>) -> Self {
         self.script_rotation_velocity = velocity;
+        self
+    }
+
+    pub fn with_script_fixed_rotation(mut self, rotation: Option<C4Fixed>) -> Self {
+        self.script_fixed_rotation = rotation;
         self
     }
 
@@ -24058,6 +24085,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
+                no_component_mass: false,
                 constructable: false,
                 shape: None,
                 placement: 0,
@@ -24463,6 +24491,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     action_graphics: HashMap::new(),
                     value: 0,
                     mass: 0,
+                    no_component_mass: false,
                     constructable: false,
                     shape: None,
                     placement: 0,
@@ -25548,6 +25577,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
+                no_component_mass: false,
                 constructable: true,
                 shape: None,
                 placement: 0,
@@ -27942,73 +27972,899 @@ fn get_act_map_val(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnGetObjectVal (C4Script.cpp:4184-4195): reflect one entry of the
-/// object's serialization (C4Object::CompileFunc; the Shape is compiled
-/// inline, so "Width"/"Height" are the shape rect, C4Shape.cpp:496-516).
-/// Entries outside our model -> nil.
-fn get_object_val(args: &[Value]) -> Result<Value, RuntimeError> {
-    let entry = match args.first().unwrap_or(&Value::Nil) {
-        Value::String(name) => name.clone(),
-        Value::Nil => return Ok(Value::Nil),
-        other => {
-            return Err(RuntimeError::new(format!(
-                "GetObjectVal: expected string for entry, got {}",
-                other.type_name()
-            )))
+#[derive(Default)]
+struct ObjectValueReflection {
+    primitives: Vec<(Vec<&'static str>, Value)>,
+}
+
+impl ObjectValueReflection {
+    fn push(&mut self, path: &[&'static str], value: Value) {
+        self.primitives.push((path.to_vec(), value));
+    }
+
+    fn push_ints(&mut self, path: &[&'static str], values: impl IntoIterator<Item = i32>) {
+        for value in values {
+            self.push(path, Value::Int(value));
+        }
+    }
+
+    /// StdArrayDefaultAdapt removes only the trailing default-valued slots.
+    fn push_trimmed_ints(&mut self, path: &[&'static str], mut values: Vec<i32>) {
+        while values.last() == Some(&0) {
+            values.pop();
+        }
+        self.push_ints(path, values);
+    }
+
+    fn push_fixed(&mut self, path: &[&'static str], value: C4Fixed) {
+        // C4Fixed::CompileFunc emits its format character before the raw
+        // signed 16.16 payload (Fixed.h:248-265).
+        self.push(path, Value::String("F".to_string()));
+        self.push(path, Value::Int(value.val()));
+    }
+
+    fn get(&self, entry: &str, section: Option<&str>, entry_nr: i32) -> Option<Value> {
+        let mut remaining = usize::try_from(entry_nr).ok()?;
+        for (path, value) in &self.primitives {
+            let matches = match section {
+                Some(section) => {
+                    path.len() >= 2
+                        && path[path.len() - 2] == section
+                        && path[path.len() - 1] == entry
+                }
+                None => path.last().is_some_and(|name| *name == entry),
+            };
+            if !matches {
+                continue;
+            }
+            if remaining == 0 {
+                return Some(value.clone());
+            }
+            remaining -= 1;
+        }
+        None
+    }
+}
+
+fn push_reflected_c4value(
+    reflection: &mut ObjectValueReflection,
+    path: &[&'static str],
+    value: &Value,
+) {
+    let (kind, payload) = match value {
+        Value::Nil => ("A", 0),
+        Value::Int(value) => ("i", *value),
+        Value::Bool(value) => ("b", i32::from(*value)),
+        Value::C4Id(value) if value.is_empty() => ("A", 0),
+        Value::C4Id(value) => ("I", definition_id_to_c4id(value).unwrap_or(0)),
+        Value::Object(value) if *value == 0 => ("A", 0),
+        Value::Object(value) => ("O", *value as i32),
+        Value::String(_) => {
+            // C4Value persists the script string-table enumeration number,
+            // not its text. Rust values do not retain that identity/cache;
+            // -1 is C4String's runtime value before EnumStrings. Loaded
+            // string-table IDs require a future identity-bearing value model.
+            ("S", -1)
+        }
+        Value::Array(values) => {
+            reflection.push(path, Value::String("a".to_string()));
+            reflection.push(path, Value::Int(values.len() as i32));
+            for value in values {
+                push_reflected_c4value(reflection, path, value);
+            }
+            return;
+        }
+        Value::Proplist(values) => {
+            reflection.push(path, Value::String("m".to_string()));
+            reflection.push(path, Value::Int(values.len() as i32));
+            // Rust proplists only retain string keys and not C++'s keyOrder.
+            // Keep the complete recursive stream deterministic; exact loaded
+            // insertion order requires an ordered arbitrary-C4Value map.
+            let mut entries = values.iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (key, value) in entries {
+                push_reflected_c4value(reflection, path, &Value::String(key.clone()));
+                push_reflected_c4value(reflection, path, value);
+            }
+            return;
         }
     };
-    // args[1] is the section name; every entry name we serve is unique.
-    let mut index = 2;
-    let target_id =
-        consume_optional_object_reference_argument(args, &mut index, "GetObjectVal", "target")?;
+    reflection.push(path, Value::String(kind.to_string()));
+    reflection.push(path, Value::Int(payload));
+}
+
+fn reflected_object_mass(
+    context: &EffectHostContext,
+    target: ObjectId,
+    visited: &mut HashSet<ObjectId>,
+) -> i32 {
+    if !visited.insert(target) {
+        return 0;
+    }
+    let scope = context.object_scope(target);
+    let Some(object) = context.get_world_object(target) else {
+        visited.remove(&target);
+        return 1;
+    };
+    let state = object.full_state().map(Rc::as_ref);
+    let definition = scope
+        .and_then(|scope| {
+            scope
+                .pending_update
+                .change_def
+                .as_deref()
+                .or(scope.definition_id.as_deref())
+        })
+        .unwrap_or_else(|| object.definition_id());
+    let Some(metadata) = context.definition_metadata(definition) else {
+        visited.remove(&target);
+        return 1;
+    };
+    let own_mass = scope
+        .map(ObjectScopeContext::own_mass)
+        .or_else(|| state.map(|state| state.own_mass))
+        .unwrap_or(0);
+    let construction = scope
+        .map(ObjectScopeContext::construction)
+        .or_else(|| state.map(|state| state.construction))
+        .unwrap_or(FULL_CON);
+    let mut mass = metadata
+        .mass
+        .saturating_add(own_mass)
+        .saturating_mul(construction)
+        / FULL_CON;
+    mass = mass.max(1);
+    if !metadata.no_component_mass {
+        for content in object.contents() {
+            mass = mass.saturating_add(reflected_object_mass(context, *content, visited));
+        }
+    }
+    visited.remove(&target);
+    mass
+}
+
+fn reflected_object_locals(
+    context: &EffectHostContext,
+    target: ObjectId,
+    state: Option<&ObjectState>,
+    scope: Option<&ObjectScopeContext>,
+) -> HashMap<String, Value> {
+    let mut locals = state
+        .map(|state| state.local_vars.clone())
+        .unwrap_or_default();
+    if let Some(nested) = context.nested_objects.get(&target) {
+        locals.extend(nested.local_vars.clone());
+    }
+    if let Some(update) = scope.and_then(|scope| scope.pending_update.local_vars.as_ref()) {
+        locals.extend(update.clone());
+    }
+    if let Some(cells) = context.session_local_cells.get(&target) {
+        locals.extend(cells.snapshot());
+    }
+    context.overlay_foreign_cells(target, &mut locals);
+    locals
+}
+
+fn reflect_object_values(
+    context: &EffectHostContext,
+    target: ObjectId,
+) -> Option<ObjectValueReflection> {
+    let scope = context.object_scope(target);
+    let world_object = context.get_world_object(target);
+    if scope.is_none() && world_object.is_none() {
+        return None;
+    }
+    let state = world_object
+        .as_ref()
+        .and_then(HostWorldObject::full_state)
+        .map(Rc::as_ref);
+    let definition_id = scope
+        .and_then(|scope| {
+            scope
+                .pending_update
+                .change_def
+                .clone()
+                .or_else(|| scope.definition_id.clone())
+        })
+        .or_else(|| {
+            world_object
+                .as_ref()
+                .map(|object| object.definition_id().to_string())
+        });
+    let metadata = definition_id
+        .as_deref()
+        .and_then(|definition| context.definition_metadata(definition));
+    let position = scope
+        .map(ObjectScopeContext::effective_position)
+        .or_else(|| world_object.as_ref().map(HostWorldObject::position))
+        .unwrap_or_default();
+    let fixed_position = scope
+        .map(ObjectScopeContext::fixed_position)
+        .or_else(|| world_object.as_ref().map(|object| object.fixed_position))
+        .unwrap_or_else(|| FixedVec2::from_ints(position.x, position.y));
+    let fixed_velocity = scope
+        .map(ObjectScopeContext::fixed_velocity)
+        .or_else(|| world_object.as_ref().map(|object| object.fixed_velocity))
+        .unwrap_or_default();
+    let rotation = scope
+        .map(ObjectScopeContext::rotation)
+        .or_else(|| world_object.as_ref().map(|object| object.rotation))
+        .unwrap_or(0);
+    let fixed_rotation = scope
+        .map(ObjectScopeContext::fixed_rotation)
+        .or_else(|| world_object.as_ref().map(|object| object.fixed_rotation))
+        .unwrap_or_else(|| itofix(rotation));
+    let rotation_velocity = scope
+        .map(ObjectScopeContext::rotation_velocity)
+        .or_else(|| world_object.as_ref().map(|object| object.rotation_velocity))
+        .unwrap_or_default();
+    let shape = live_object_shape(context, target).unwrap_or_default();
+    let shape_vertices = scope
+        .map(ObjectScopeContext::shape_vertex_buffer)
+        .or_else(|| state.map(|state| state.shape_vertices.clone()))
+        .unwrap_or_default();
+    let local_vars = reflected_object_locals(context, target, state, scope);
+
+    let mut reflection = ObjectValueReflection::default();
+    let object_path = |name| ["Object", name];
+    reflection.push(
+        &object_path("id"),
+        definition_id
+            .clone()
+            .filter(|id| !id.is_empty())
+            .map(Value::C4Id)
+            .unwrap_or(Value::Nil),
+    );
+    if let Some(name) = context.object_custom_name(target) {
+        reflection.push(&object_path("Name"), Value::String(name));
+    }
+    reflection.push(&object_path("Number"), Value::Int(target.as_u64() as i32));
+    reflection.push(
+        &object_path("Status"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::status)
+                .or_else(|| world_object.as_ref().map(HostWorldObject::status))
+                .unwrap_or(ObjectStatus::Deleted)
+                .to_script_value(),
+        ),
+    );
+    // `Info` serializes the stale nInfo cache refreshed only by
+    // EnumeratePointers; the live crew-info name is not an equivalent value.
+    reflection.push(
+        &object_path("Owner"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::owner)
+                .or_else(|| state.map(|state| state.owner))
+                .or_else(|| world_object.as_ref().map(HostWorldObject::owner))
+                .unwrap_or(OWNER_NONE),
+        ),
+    );
+    reflection.push(
+        &object_path("Timer"),
+        Value::Int(state.map(|state| state.timer).unwrap_or(0)),
+    );
+    reflection.push(
+        &object_path("Controller"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::controller)
+                .or_else(|| state.map(|state| state.controller))
+                .or_else(|| world_object.as_ref().map(HostWorldObject::controller))
+                .unwrap_or(OWNER_NONE),
+        ),
+    );
+    reflection.push(
+        &object_path("LastEngLossPlr"),
+        Value::Int(
+            scope
+                .and_then(|scope| scope.pending_update.energy_loss_cause)
+                .or_else(|| {
+                    world_object
+                        .as_ref()
+                        .map(|object| object.last_energy_loss_cause)
+                })
+                .unwrap_or(OWNER_NONE),
+        ),
+    );
+    reflection.push(
+        &object_path("Category"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::category)
+                .or_else(|| state.map(|state| state.category))
+                .or_else(|| world_object.as_ref().map(HostWorldObject::category))
+                .unwrap_or(0),
+        ),
+    );
+    reflection.push(&object_path("X"), Value::Int(position.x));
+    reflection.push(&object_path("Y"), Value::Int(position.y));
+    reflection.push(&object_path("Rotation"), Value::Int(rotation));
+    // MotionX/MotionY and iLastAttachMovementFrame are serialized engine
+    // caches that ObjectState does not retain. Omit them instead of exposing
+    // plausible-looking defaults that differ after movement.
+    reflection.push(
+        &object_path("NoCollectDelay"),
+        Value::Int(
+            state
+                .map(|state| state.no_collect_delay)
+                .or_else(|| world_object.as_ref().map(|object| object.no_collect_delay))
+                .unwrap_or(0),
+        ),
+    );
+    reflection.push(
+        &object_path("Base"),
+        Value::Int(state.map(|state| state.base).unwrap_or(OWNER_NONE)),
+    );
+    let construction = scope
+        .map(ObjectScopeContext::construction)
+        .or_else(|| state.map(|state| state.construction))
+        .or_else(|| world_object.as_ref().map(HostWorldObject::construction))
+        .unwrap_or(0);
+    reflection.push(&object_path("Size"), Value::Int(construction));
+    reflection.push(
+        &object_path("OwnMass"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::own_mass)
+                .or_else(|| state.map(|state| state.own_mass))
+                .unwrap_or(0),
+        ),
+    );
+    reflection.push(
+        &object_path("Mass"),
+        Value::Int(reflected_object_mass(context, target, &mut HashSet::new())),
+    );
+    reflection.push(
+        &object_path("Damage"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::damage)
+                .or_else(|| state.map(|state| state.damage))
+                .or_else(|| world_object.as_ref().map(HostWorldObject::damage))
+                .unwrap_or(0),
+        ),
+    );
+    reflection.push(
+        &object_path("Energy"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::energy)
+                .or_else(|| state.map(|state| state.energy))
+                .or_else(|| world_object.as_ref().map(HostWorldObject::energy))
+                .unwrap_or(0),
+        ),
+    );
+    reflection.push(
+        &object_path("MagicEnergy"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::magic_energy)
+                .or_else(|| state.map(|state| state.magic_energy))
+                .unwrap_or(0),
+        ),
+    );
+    reflection.push(
+        &object_path("Alive"),
+        Value::Bool(
+            scope
+                .map(ObjectScopeContext::alive)
+                .or_else(|| state.map(|state| state.alive))
+                .or_else(|| world_object.as_ref().map(HostWorldObject::alive))
+                .unwrap_or(false),
+        ),
+    );
+    reflection.push(
+        &object_path("Breath"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::breath)
+                .or_else(|| state.map(|state| state.breath))
+                .unwrap_or(0),
+        ),
+    );
+    let fire_phase = scope
+        .and_then(|scope| scope.pending_update.fire.map(|(_, phase)| phase))
+        .or_else(|| state.map(|state| state.fire_phase))
+        .unwrap_or(0);
+    reflection.push(&object_path("FirePhase"), Value::Int(fire_phase));
+    let color = scope
+        .and_then(|scope| scope.pending_update.color)
+        .or_else(|| state.map(|state| state.color))
+        .unwrap_or(0);
+    reflection.push(&object_path("Color"), Value::Int(color as i32));
+    reflection.push(&object_path("ColorDw"), Value::Int(color as i32));
+
+    let numbered_size = local_vars
+        .keys()
+        .filter_map(|name| name.strip_prefix("__local_")?.parse::<usize>().ok())
+        .max()
+        .map_or(0, |index| index.saturating_add(1));
+    reflection.push(&object_path("Locals"), Value::Int(numbered_size as i32));
+    for index in 0..numbered_size {
+        let value = local_vars
+            .get(&format!("__local_{index}"))
+            .unwrap_or(&Value::Nil);
+        push_reflected_c4value(&mut reflection, &object_path("Locals"), value);
+    }
+
+    reflection.push_fixed(&object_path("FixX"), fixed_position.x);
+    reflection.push_fixed(&object_path("FixY"), fixed_position.y);
+    reflection.push_fixed(&object_path("FixR"), fixed_rotation);
+    reflection.push_fixed(&object_path("XDir"), fixed_velocity.x);
+    reflection.push_fixed(&object_path("YDir"), fixed_velocity.y);
+    reflection.push_fixed(&object_path("RDir"), rotation_velocity);
+
+    reflection.push(&object_path("Width"), Value::Int(shape.width));
+    reflection.push(&object_path("Height"), Value::Int(shape.height));
+    reflection.push_trimmed_ints(&object_path("Offset"), vec![shape.x, shape.y]);
+    reflection.push(
+        &object_path("Vertices"),
+        Value::Int(shape_vertices.active_count() as i32),
+    );
+    reflection.push_trimmed_ints(
+        &object_path("VertexX"),
+        shape_vertices.slots.iter().map(|vertex| vertex.x).collect(),
+    );
+    reflection.push_trimmed_ints(
+        &object_path("VertexY"),
+        shape_vertices.slots.iter().map(|vertex| vertex.y).collect(),
+    );
+    reflection.push_trimmed_ints(
+        &object_path("VertexCNAT"),
+        shape_vertices
+            .slots
+            .iter()
+            .map(|vertex| vertex.cnat as i32)
+            .collect(),
+    );
+    reflection.push_trimmed_ints(
+        &object_path("VertexFriction"),
+        shape_vertices
+            .slots
+            .iter()
+            .map(|vertex| vertex.friction)
+            .collect(),
+    );
+    reflection.push(
+        &object_path("ContactDensity"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::contact_density)
+                .or_else(|| state.map(|state| state.contact_density))
+                .or_else(|| world_object.as_ref().map(HostWorldObject::contact_density))
+                .unwrap_or(crate::CONTACT_DENSITY_SOLID),
+        ),
+    );
+    let fire_top = metadata.map_or(0, |metadata| {
+        if metadata.line != 0 || construction == FULL_CON {
+            metadata.fire.fire_top
+        } else {
+            let percent = construction.saturating_mul(100) / FULL_CON;
+            metadata.fire.fire_top.saturating_mul(percent) / 100
+        }
+    });
+    reflection.push(&object_path("FireTop"), Value::Int(fire_top));
+    let attach = scope
+        .map(|scope| scope.walk_rotation.attach)
+        .or_else(|| state.map(|state| state.shape_attach))
+        .unwrap_or_default();
+    reflection.push(&object_path("AttachX"), Value::Int(attach.x));
+    reflection.push(&object_path("AttachY"), Value::Int(attach.y));
+    reflection.push(&object_path("AttachVtx"), Value::Int(attach.vtx));
+
+    reflection.push(
+        &object_path("OwnVertices"),
+        Value::Bool(
+            scope.is_some_and(|scope| scope.staged_own_vertices)
+                || world_object
+                    .as_ref()
+                    .is_some_and(|object| object.own_vertices),
+        ),
+    );
+    let solid_mask = scope
+        .and_then(|scope| scope.pending_update.solid_mask_override)
+        .or_else(|| state.and_then(|state| state.solid_mask_override))
+        .or_else(|| {
+            definition_id.as_ref().and_then(|definition| {
+                context
+                    .world
+                    .solid_mask_metadata
+                    .get(definition)
+                    .and_then(|metadata| metadata.default_mask)
+            })
+        })
+        .unwrap_or_else(|| crate::DefinitionTargetRect::new(0, 0, 0, 0, 0, 0));
+    reflection.push_ints(
+        &object_path("SolidMask"),
+        [
+            solid_mask.x,
+            solid_mask.y,
+            solid_mask.width,
+            solid_mask.height,
+            solid_mask.target_x,
+            solid_mask.target_y,
+        ],
+    );
+    let picture = scope
+        .and_then(|scope| scope.pending_update.picture_rect)
+        .or_else(|| state.map(|state| state.picture_rect))
+        .unwrap_or_default();
+    reflection.push_ints(
+        &object_path("Picture"),
+        [picture.x, picture.y, picture.width, picture.height],
+    );
+    reflection.push(
+        &object_path("Mobile"),
+        Value::Bool(
+            scope
+                .map(ObjectScopeContext::mobile)
+                .or_else(|| state.map(|state| state.mobile))
+                .unwrap_or(false),
+        ),
+    );
+    reflection.push(
+        &object_path("Selected"),
+        Value::Bool(
+            scope
+                .map(ObjectScopeContext::selected)
+                .or_else(|| state.map(|state| state.selected))
+                .unwrap_or(false),
+        ),
+    );
+    reflection.push(
+        &object_path("OnFire"),
+        Value::Bool(
+            scope
+                .and_then(|scope| scope.pending_update.staged_on_fire())
+                .or_else(|| state.map(|state| state.on_fire))
+                .unwrap_or(false),
+        ),
+    );
+    reflection.push(
+        &object_path("InLiquid"),
+        Value::Bool(
+            scope
+                .map(ObjectScopeContext::in_liquid)
+                .or_else(|| state.map(|state| state.in_liquid))
+                .or_else(|| world_object.as_ref().map(HostWorldObject::in_liquid))
+                .unwrap_or(false),
+        ),
+    );
+    reflection.push(
+        &object_path("EntranceStatus"),
+        Value::Bool(
+            scope
+                .and_then(|scope| scope.pending_update.entrance_status)
+                .or_else(|| state.map(|state| state.entrance_status))
+                .unwrap_or(false),
+        ),
+    );
+    reflection.push(
+        &object_path("PhysicalTemporary"),
+        Value::Bool(
+            scope
+                .map(|scope| scope.temporary_physical.is_some())
+                .or_else(|| state.map(|state| state.temporary_physical.is_some()))
+                .unwrap_or(false),
+        ),
+    );
+    reflection.push(
+        &object_path("NeedEnergy"),
+        Value::Bool(
+            scope
+                .map(ObjectScopeContext::need_energy)
+                .or_else(|| state.map(|state| state.need_energy))
+                .or_else(|| world_object.as_ref().map(|object| object.need_energy))
+                .unwrap_or(false),
+        ),
+    );
+    reflection.push(
+        &object_path("OCF"),
+        Value::Int(
+            scope
+                .map(|scope| scope.staged_ocf(scope.ocf()))
+                .or_else(|| world_object.as_ref().map(HostWorldObject::ocf))
+                .unwrap_or(0) as i32,
+        ),
+    );
+
+    let action_name = scope
+        .map(|scope| scope.effective_action_name().to_string())
+        .or_else(|| state.map(|state| state.action.name.clone()))
+        .or_else(|| world_object.as_ref().map(|object| object.action_name.clone()))
+        .unwrap_or_default();
+    reflection.push(&object_path("Action"), Value::String(action_name));
+    reflection.push(
+        &object_path("Dir"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::direction)
+                .or_else(|| state.map(|state| state.direction))
+                .unwrap_or_default()
+                .to_script_value(),
+        ),
+    );
+    reflection.push(
+        &object_path("ComDir"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::command_direction)
+                .or_else(|| state.map(|state| state.command_direction))
+                .unwrap_or_default()
+                .to_script_value(),
+        ),
+    );
+    reflection.push(
+        &object_path("ActionTime"),
+        Value::Int(
+            scope
+                .map(|scope| scope.current_action_ticks.min(i32::MAX as u32) as i32)
+                .or_else(|| state.map(|state| state.action.time.min(i32::MAX as u32) as i32))
+                .unwrap_or(0),
+        ),
+    );
+    reflection.push(
+        &object_path("ActionData"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::effective_action_data)
+                .or_else(|| state.map(|state| state.action.data))
+                .unwrap_or(0),
+        ),
+    );
+    reflection.push(
+        &object_path("Phase"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::action_phase)
+                .or_else(|| state.map(|state| state.action.phase))
+                .unwrap_or(0),
+        ),
+    );
+    let phase_delay = scope
+        .and_then(|scope| {
+            scope.pending_update.action.as_ref().and_then(|action| {
+                action
+                    .ticks
+                    .map(|ticks| ticks.min(i32::MAX as u32) as i32)
+                    .or_else(|| action.name.as_ref().map(|_| 0))
+            })
+        })
+        .or_else(|| state.map(|state| state.action.ticks.min(i32::MAX as u32) as i32))
+        .unwrap_or(0);
+    reflection.push(&object_path("PhaseDelay"), Value::Int(phase_delay));
+
+    // Contained, ActionTarget1/2 and Layer compile their independent
+    // C4EnumeratedObjectPtr::number caches, not the live ObjectId. Rust does
+    // not yet retain those raw cache values, so live IDs would be incorrect.
+
+    let components = scope
+        .and_then(|scope| scope.pending_update.components.as_ref())
+        .or_else(|| state.map(|state| &state.components));
+    let component_order = scope
+        .and_then(|scope| scope.pending_update.component_order.as_ref())
+        .or_else(|| state.map(|state| &state.component_order));
+    if let (Some(components), Some(order)) = (components, component_order) {
+        for id in order {
+            reflection.push(
+                &object_path("Component"),
+                if id.as_str().is_empty() {
+                    Value::Nil
+                } else {
+                    Value::C4Id(id.as_str().to_string())
+                },
+            );
+            reflection.push(
+                &object_path("Component"),
+                Value::Int(components.get(id).copied().unwrap_or(0) as i32),
+            );
+        }
+    }
+    if let Some(object) = world_object.as_ref() {
+        for content in object.contents() {
+            reflection.push(
+                &object_path("Contents"),
+                Value::Int(content.as_u64() as i32),
+            );
+        }
+    }
+    reflection.push(
+        &object_path("PlrViewRange"),
+        Value::Int(
+            scope
+                .map(ObjectScopeContext::plr_view_range)
+                .or_else(|| state.map(|state| state.plr_view_range))
+                .unwrap_or(0),
+        ),
+    );
+    reflection.push(
+        &object_path("Visibility"),
+        Value::Int(
+            scope
+                .and_then(|scope| scope.pending_update.visibility)
+                .or_else(|| state.map(|state| state.visibility))
+                .unwrap_or(0),
+        ),
+    );
+    let local_names = definition_id
+        .as_deref()
+        .and_then(|definition| context.world.definition_script(definition))
+        .map(|script| {
+            script
+                .local_variable_names()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            let mut names = local_vars
+                .keys()
+                .filter(|name| !name.starts_with("__local_"))
+                .cloned()
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        });
+    reflection.push(
+        &object_path("LocalNamed"),
+        Value::Int(local_names.len() as i32),
+    );
+    for name in &local_names {
+        reflection.push(&object_path("LocalNamed"), Value::String(name.clone()));
+        push_reflected_c4value(
+            &mut reflection,
+            &object_path("LocalNamed"),
+            local_vars.get(name).unwrap_or(&Value::Nil),
+        );
+    }
+    reflection.push(
+        &object_path("ColorMod"),
+        Value::Int(
+            scope
+                .and_then(|scope| scope.pending_update.color_modulation)
+                .or_else(|| state.map(|state| state.color_modulation))
+                .unwrap_or(0) as i32,
+        ),
+    );
+    reflection.push(
+        &object_path("BlitMode"),
+        Value::Int(
+            context
+                .object_blit_mode(target)
+                .or_else(|| state.map(|state| state.blit_mode))
+                .unwrap_or(0) as i32,
+        ),
+    );
+    reflection.push(
+        &object_path("CrewDisabled"),
+        Value::Bool(
+            context
+                .object_crew_disabled(target)
+                .or_else(|| state.map(|state| state.crew_disabled))
+                .unwrap_or(false),
+        ),
+    );
+    let base_graphics = match scope {
+        Some(scope) => scope.base_graphics.as_ref(),
+        None => state.and_then(|state| state.base_graphics.as_ref()),
+    };
+    let graphics_definition = base_graphics
+        .map(|graphics| graphics.definition.as_str())
+        .or(definition_id.as_deref())
+        .unwrap_or_default();
+    let graphics_name = base_graphics
+        .and_then(|graphics| graphics.graphics_name.as_deref())
+        .unwrap_or_default();
+    reflection.push(
+        &object_path("Graphics"),
+        Value::C4Id(graphics_definition.to_string()),
+    );
+    reflection.push(
+        &object_path("Graphics"),
+        Value::String(graphics_name.to_string()),
+    );
+
+    // PhysicalTemporary follows the Object root as a sibling section.
+    let physical = match scope {
+        Some(scope) => scope.temporary_physical,
+        None => state.and_then(|state| state.temporary_physical),
+    };
+    if let Some(physical) = physical {
+        for (name, value) in [
+            ("Energy", physical.energy),
+            ("Breath", physical.breath),
+            ("Walk", physical.walk),
+            ("Jump", physical.jump),
+            ("Scale", physical.scale),
+            ("Hangle", physical.hangle),
+            ("Dig", physical.dig),
+            ("Swim", physical.swim),
+            ("Throw", physical.throw),
+            ("Push", physical.push),
+            ("Fight", physical.fight),
+            ("Magic", physical.magic),
+            ("Float", physical.float),
+            ("CanScale", physical.can_scale),
+            ("CanHangle", physical.can_hangle),
+            ("CanDig", physical.can_dig),
+            ("CanConstruct", physical.can_construct),
+            ("CanChop", physical.can_chop),
+            ("CanFly", physical.can_fly),
+            ("CorrosionResist", physical.corrosion_resist),
+            ("BreatheWater", physical.breathe_water),
+        ] {
+            reflection.push(&["Physical", name], Value::Int(value));
+        }
+    }
+
+    Some(reflection)
+}
+
+/// FnGetObjectVal (C4Script.cpp:4184-4195): reflect the modeled live portion
+/// of C4Object::CompileFunc's named primitive stream. Shape, Action and
+/// Graphics fields are inline under Object; Physical is a sibling section.
+fn get_object_val(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 4 {
+        return Err(RuntimeError::new(
+            "GetObjectVal expects at most 4 arguments",
+        ));
+    }
+    let Some(entry) = parse_optional_string(args.first(), "GetObjectVal", "entry")? else {
+        return Ok(Value::Nil);
+    };
+    let section = parse_optional_string(args.get(1), "GetObjectVal", "section")?
+        .filter(|section| !section.is_empty());
+    let target_arg = args.get(2).unwrap_or(&Value::Nil);
+    let target = if matches!(target_arg, Value::Bool(false)) {
+        None
+    } else {
+        parse_object_reference_argument(target_arg, "GetObjectVal", "target")?
+    };
+    let entry_nr = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "GetObjectVal",
+        "entry_nr",
+    )?;
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
-
-        let self_id = context.object_context().map(|object| object.id());
-        let resolved_target = target_id.or(self_id);
-        let Some(target) = resolved_target else {
+        let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
-
-        if matches!(entry.as_str(), "Width" | "Height") {
-            return Ok(live_object_shape(context, target)
-                .map(|shape| {
-                    Value::Int(if entry == "Width" {
-                        shape.width
-                    } else {
-                        shape.height
-                    })
-                })
-                .unwrap_or(Value::Nil));
-        }
-
-        if Some(target) == self_id {
-            if let Some(object) = context.object_context() {
-                match entry.as_str() {
-                    "Owner" => return Ok(Value::Int(object.owner())),
-                    "Category" => return Ok(Value::Int(object.category())),
-                    "Energy" => return Ok(Value::Int(object.current_energy)),
-                    "Damage" => return Ok(Value::Int(object.current_damage)),
-                    _ => {}
+        let target = target.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let Some(target) = target else {
+            return Ok(Value::Nil);
+        };
+        // These shipped hot paths run from movement callbacks every frame.
+        // Their compiler paths are unique and inline directly under Object,
+        // so avoid materializing the complete reflection stream (including
+        // locals and recursive contents mass) just to read one shape scalar.
+        if section.as_deref().is_none_or(|section| section == "Object") {
+            if let Some(shape) = live_object_shape(context, target) {
+                let value = match entry.as_str() {
+                    "Width" if entry_nr == 0 => Some(Value::Int(shape.width)),
+                    "Height" if entry_nr == 0 => Some(Value::Int(shape.height)),
+                    "Offset" => {
+                        let mut values = vec![shape.x, shape.y];
+                        while values.last() == Some(&0) {
+                            values.pop();
+                        }
+                        usize::try_from(entry_nr)
+                            .ok()
+                            .and_then(|index| values.get(index).copied())
+                            .map(Value::Int)
+                    }
+                    _ => None,
+                };
+                if matches!(entry.as_str(), "Width" | "Height" | "Offset") {
+                    return Ok(value.unwrap_or(Value::Nil));
                 }
             }
         }
-
-        let Some(world_object) = context.get_world_object(target) else {
-            return Ok(Value::Nil);
-        };
-        Ok(match entry.as_str() {
-            "Owner" => Value::Int(world_object.owner),
-            "Category" => Value::Int(world_object.category),
-            "Energy" => Value::Int(world_object.energy),
-            "Damage" => Value::Int(world_object.damage),
-            _ => Value::Nil,
-        })
+        Ok(reflect_object_values(context, target)
+            .and_then(|reflection| reflection.get(&entry, section.as_deref(), entry_nr))
+            .unwrap_or(Value::Nil))
     })
 }
 
@@ -28492,6 +29348,7 @@ fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
                     .expect("scope just ensured");
                 let base = state.scope.vertices().to_vec();
                 write(&base, &mut state.scope.pending_update.vertices);
+                state.scope.staged_own_vertices |= own_vertex_mode != 0;
                 Ok(Value::Bool(true))
             }
             _ => {
@@ -28501,6 +29358,7 @@ fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
                 };
                 let base = object.vertices().to_vec();
                 write(&base, &mut object.pending_update.vertices);
+                object.staged_own_vertices |= own_vertex_mode != 0;
                 Ok(Value::Bool(true))
             }
         }
@@ -30833,6 +31691,7 @@ impl EffectHostContext {
                 script_fixed_position,
                 script_fixed_velocity,
                 script_rotation_velocity,
+                script_fixed_rotation,
             } = ctx;
             {
                 let mut scope = ObjectScopeContext::new(
@@ -30902,6 +31761,9 @@ impl EffectHostContext {
                 if let Some(rotation_velocity) = script_rotation_velocity {
                     scope.current_rotation_velocity = rotation_velocity;
                 }
+                if let Some(fixed_rotation) = script_fixed_rotation {
+                    scope.current_fixed_rotation = fixed_rotation;
+                }
                 scope
             }
         });
@@ -30918,6 +31780,7 @@ impl EffectHostContext {
                     scope.walk_rotation.t_attach = state.t_attach;
                 }
                 scope.current_rotation_velocity = world_object.rotation_velocity;
+                scope.current_fixed_rotation = world_object.fixed_rotation;
             }
         }
         let global = Some(EffectScopeContext::new(global_effects));
@@ -31235,6 +32098,9 @@ impl EffectHostContext {
             };
             object.container = scope.current_container;
             object.position = scope.effective_position();
+            object.fixed_position = scope.fixed_position();
+            object.fixed_velocity = scope.fixed_velocity();
+            object.fixed_rotation = scope.fixed_rotation();
             object.vertices = scope.vertices().to_vec();
             object.action_name = scope.current_action_name.clone();
             object.action_phase = scope.current_action_phase;
@@ -31307,6 +32173,14 @@ impl EffectHostContext {
         for child in entered {
             let position = self.contents_insert_position(&object.contents, child);
             object.contents.insert(position, child);
+        }
+        if let Some(new_front) = self
+            .object_scope(id)
+            .and_then(|scope| scope.pending_update.contents_front)
+        {
+            if let Some(index) = object.contents.iter().position(|child| *child == new_front) {
+                object.contents.rotate_left(index);
+            }
         }
         Some(object)
     }
@@ -31884,7 +32758,7 @@ impl EffectHostContext {
             state.effects.clone(),
             metadata.action_library.clone(),
             state.action.name.clone(),
-            state.action.ticks,
+            state.action.time,
             state.action.data,
             state.action.phase,
             state.direction,
@@ -31912,6 +32786,7 @@ impl EffectHostContext {
         scope.current_info_core = self.world.crew_infos.get(&object.id).cloned();
         scope.current_fixed_position = object.fixed_position;
         scope.current_fixed_velocity = object.fixed_velocity;
+        scope.current_fixed_rotation = object.fixed_rotation;
         scope.current_rotation_velocity = object.rotation_velocity;
         scope.current_mobile = state.mobile;
         scope.current_t_attach = state.t_attach;
@@ -33152,6 +34027,8 @@ struct ObjectScopeContext {
     current_action_target: Option<ObjectId>,
     current_action_target2: Option<ObjectId>,
     current_action_data: i32,
+    /// Legacy-named storage for C4Action::Time, distinct from PhaseDelay
+    /// (`ActionUpdate::ticks`).
     current_action_ticks: u32,
     current_action_phase: i32,
     current_energy: i32,
@@ -33170,6 +34047,9 @@ struct ObjectScopeContext {
     /// This frame's live C4Action::t_attach bitset.
     current_t_attach: u32,
     current_in_liquid: bool,
+    /// Same-call transition into C4Object::fOwnVertices via SetVertex's
+    /// nonzero own-vertex mode.
+    staged_own_vertices: bool,
     current_own_mass: i32,
     current_owner: i32,
     /// C4Object::Select, staged synchronously so nested calls and later host
@@ -33196,6 +34076,8 @@ struct ObjectScopeContext {
     /// entry awaits the snapshot work, task B).
     current_fixed_velocity: FixedVec2,
     current_rotation: i32,
+    /// Live raw `C4Object::fix_r`, independently reflected from Rotation.
+    current_fixed_rotation: C4Fixed,
     /// Live `C4Object::rdir`, including writes earlier in this VM call.
     current_rotation_velocity: C4Fixed,
     shape_vertices: ShapeVertexBuffer,
@@ -33294,6 +34176,7 @@ impl ObjectScopeContext {
             current_mobile: false,
             current_t_attach: 0,
             current_in_liquid: in_liquid,
+            staged_own_vertices: false,
             current_own_mass: own_mass,
             current_owner: owner,
             current_selected: false,
@@ -33312,6 +34195,7 @@ impl ObjectScopeContext {
             // within (-180, 180] and FnGetR reads it unnormalized; only
             // SetR normalizes (C4Object::SetRotation, C4Object.cpp:5632).
             current_rotation: rotation,
+            current_fixed_rotation: itofix(rotation),
             current_rotation_velocity: C4Fixed::ZERO,
             shape_vertices,
             graphics_overlays,
@@ -34076,15 +34960,6 @@ impl ObjectScopeContext {
         update.set_phase(phase);
     }
 
-    fn set_action_ticks(&mut self, ticks: u32) {
-        let update = self
-            .pending_update
-            .action
-            .get_or_insert_with(ActionUpdate::default);
-        update.set_ticks(ticks);
-        self.current_action_ticks = ticks;
-    }
-
     fn reset_action_ticks(&mut self) {
         let update = self
             .pending_update
@@ -34217,7 +35092,12 @@ impl ObjectScopeContext {
         // C4Object::SetRotation always re-seeds fix_r and refreshes the
         // solid mask/face, even when the integer angle is unchanged.
         self.current_rotation = normalized;
+        self.current_fixed_rotation = itofix(normalized);
         self.pending_update.rotation = Some(normalized);
+    }
+
+    fn fixed_rotation(&self) -> C4Fixed {
+        self.current_fixed_rotation
     }
 
     fn command_direction(&self) -> CommandDirection {
@@ -39700,6 +40580,7 @@ func ProbeBadIndex(id) {
                 action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
+                no_component_mass: false,
                 constructable: false,
                 shape: None,
                 placement: 0,
@@ -39755,6 +40636,7 @@ func ProbeBadIndex(id) {
                     action_graphics: HashMap::new(),
                     value: 0,
                     mass: 0,
+                    no_component_mass: false,
                     constructable: false,
                     shape: None,
                     placement: 0,
@@ -39788,6 +40670,7 @@ func ProbeBadIndex(id) {
                     action_graphics: HashMap::new(),
                     value: 0,
                     mass: 0,
+                    no_component_mass: false,
                     constructable: false,
                     shape: None,
                     placement: 0,
@@ -39845,6 +40728,7 @@ func ProbeBadIndex(id) {
                 action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
+                no_component_mass: false,
                 constructable: false,
                 shape: None,
                 placement: 0,
@@ -39914,6 +40798,7 @@ func ProbeBadIndex(id) {
                 action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
+                no_component_mass: false,
                 constructable: false,
                 shape: None,
                 placement: 0,
@@ -39993,6 +40878,7 @@ func ProbeBadIndex(id) {
             action_graphics: HashMap::new(),
             value: 0,
             mass: 0,
+            no_component_mass: false,
             constructable: false,
             shape: None,
             placement: 0,
@@ -41106,6 +41992,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
+                no_component_mass: false,
                 constructable: false,
                 shape: None,
                 placement: 0,
@@ -41160,6 +42047,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
+                no_component_mass: false,
                 constructable: false,
                 shape: None,
                 placement: 0,
@@ -41230,6 +42118,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
+                no_component_mass: false,
                 constructable: false,
                 shape: None,
                 placement: 0,
@@ -43196,6 +44085,256 @@ func Probe(state) {
                 Value::Int(30),
                 Value::Int(27),
                 Value::Int(41),
+            ])
+        );
+    }
+
+    #[test]
+    fn get_object_val_follows_cpp_primitive_indexing_sections_and_types() {
+        // FnGetObjectVal decompiles C4Object::CompileFunc through the
+        // C4ValueGetCompiler. Shape and Action are inline under Object;
+        // Offset trims trailing zeros, C4Fixed starts with its "F" format
+        // character, and same-name entries across sibling sections share
+        // one no-section entry counter (C4Script.cpp:3937-4040,4185-4195).
+        let target = ObjectId::new(7);
+        let mut action = ActionState::new("Walk");
+        action.time = 17;
+        action.ticks = 3;
+        action.data = 44;
+        action.phase = 2;
+        let mut state = crate::preview_spawn_state(
+            Vector2::new(11, 22),
+            4,
+            5,
+            DEFAULT_CATEGORY,
+            FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        state.custom_name = Some("Oracle".to_string());
+        state.energy = 123;
+        state.need_energy = true;
+        state.action = action.clone();
+        state.mobile = true;
+        state.on_fire = true;
+        state.in_liquid = true;
+        state.entrance_status = true;
+        state.own_mass = 37;
+        state.plr_view_range = 650;
+        state.local_vars = HashMap::from([
+            ("named".to_string(), Value::Int(7)),
+            ("__local_0".to_string(), Value::Int(42)),
+        ]);
+        let temporary = PhysicalInfo {
+            energy: 900,
+            ..PhysicalInfo::default()
+        };
+        let action_library = ActionLibrary::new(
+            Some("Walk".to_string()),
+            HashMap::from([(
+                "Walk".to_string(),
+                ActionSpec::default().with_length(5),
+            )]),
+        );
+        state.temporary_physical = Some(temporary);
+        let base_graphics = ObjectBaseGraphics {
+            definition: "SKIN".to_string(),
+            graphics_name: Some("Alt".to_string()),
+            blit_mode: 0,
+        };
+        state.base_graphics = Some(base_graphics.clone());
+        let fixed_position = FixedVec2::new(C4Fixed::from_raw(12_345), itofix(22));
+        let fixed_velocity =
+            FixedVec2::new(C4Fixed::from_raw(333), C4Fixed::from_raw(-444));
+        let fixed_rotation = C4Fixed::from_raw(22_222);
+        let world_object = HostWorldObject::with_category(
+            target,
+            "SELF",
+            ObjectStatus::Normal,
+            action.name.clone(),
+            None,
+            None,
+            None,
+            state.owner,
+            state.category,
+            state.energy,
+            state.construction,
+            state.damage,
+            state.position,
+            state.velocity,
+            state.rotation,
+            Vec::new(),
+            state.action.data,
+            state.action.time,
+            state.action.phase,
+            None,
+            None,
+        )
+        .with_fixed_motion(fixed_position, fixed_velocity)
+        .with_fixed_rotation(fixed_rotation)
+        .with_in_liquid(true)
+        .with_need_energy(true)
+        .with_full_state(Rc::new(state.clone()));
+        let definitions = Rc::new(HashMap::from([(
+            DefinitionId::from("SELF"),
+            DefinitionMetadata {
+                name: "Self".to_string(),
+                shape: Some(DefinitionRect::new(0, -4, 27, 41)),
+                mass: 50,
+                action_library: action_library.clone(),
+                ..DefinitionMetadata::default()
+            },
+        )]));
+        let world = HostWorldContext::from_objects(vec![world_object])
+            .with_definition_metadata(definitions);
+        let object = HostObjectContext::with_category(
+            target,
+            None,
+            ObjectStatus::Normal,
+            state.energy,
+            state.damage,
+            state.construction,
+            state.owner,
+            state.position,
+            state.velocity,
+            state.rotation,
+            &[],
+            action.name,
+            action.time,
+            action.data,
+            action.phase,
+            action_library,
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            state.category,
+            ocf::NORMAL,
+            false,
+            None,
+            None,
+        )
+        .with_definition_id("SELF")
+        .with_script_fixed_position(Some(fixed_position))
+        .with_script_fixed_velocity(Some(fixed_velocity))
+        .with_script_fixed_rotation(Some(fixed_rotation))
+        .with_own_mass(37)
+        .with_in_liquid(true)
+        .with_need_energy(true)
+        .with_plr_view_range(650)
+        .with_base_graphics(Some(base_graphics))
+        .with_physicals(None, Some(temporary), Vec::new(), PhysicalInfo::default());
+
+        let (result, _) = with_effect_context(Some(object), &[], world, 8, || {
+            set_phase(&[Value::Int(4)])?;
+            let call = |entry: &str, section: Value, entry_nr: Value| {
+                get_object_val(&[
+                    Value::String(entry.to_string()),
+                    section,
+                    object_reference_value(target),
+                    entry_nr,
+                ])
+            };
+            let phase_delay_after_set_phase =
+                call("PhaseDelay", Value::Nil, Value::Int(0))?;
+            set_action(&[Value::String("Walk".to_string())])?;
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                call("Offset", Value::Nil, Value::Nil)?,
+                call("Offset", Value::Nil, Value::Bool(false))?,
+                call("Offset", Value::Nil, Value::Bool(true))?,
+                call("Offset", Value::Nil, Value::Int(2))?,
+                call("Offset", Value::Nil, Value::Int(-1))?,
+                call("Offset", Value::String("Object".into()), Value::Int(1))?,
+                call("Offset", Value::String("Shape".into()), Value::Int(0))?,
+                call("offset", Value::Nil, Value::Int(0))?,
+                call("id", Value::Nil, Value::Int(0))?,
+                call("Name", Value::Nil, Value::Int(0))?,
+                call("Alive", Value::Nil, Value::Int(0))?,
+                call("OwnMass", Value::Nil, Value::Int(0))?,
+                call("Mobile", Value::Nil, Value::Int(0))?,
+                call("OnFire", Value::Nil, Value::Int(0))?,
+                call("InLiquid", Value::Nil, Value::Int(0))?,
+                call("EntranceStatus", Value::Nil, Value::Int(0))?,
+                call("PhysicalTemporary", Value::Nil, Value::Int(0))?,
+                call("NeedEnergy", Value::Nil, Value::Int(0))?,
+                call("PlrViewRange", Value::Nil, Value::Int(0))?,
+                call("ActionTime", Value::Nil, Value::Int(0))?,
+                call("ActionData", Value::Nil, Value::Int(0))?,
+                phase_delay_after_set_phase,
+                call("PhaseDelay", Value::Nil, Value::Int(0))?,
+                call("FixX", Value::Nil, Value::Int(0))?,
+                call("FixX", Value::Nil, Value::Int(1))?,
+                call("FixR", Value::Nil, Value::Int(1))?,
+                call("XDir", Value::Nil, Value::Int(1))?,
+                call("YDir", Value::Nil, Value::Int(1))?,
+                call("Energy", Value::Nil, Value::Int(0))?,
+                call("Energy", Value::Nil, Value::Int(1))?,
+                call("Energy", Value::String("Object".into()), Value::Int(0))?,
+                call("Energy", Value::String("Physical".into()), Value::Int(0))?,
+                call(
+                    "ActionTime",
+                    Value::String("Action".into()),
+                    Value::Int(0),
+                )?,
+                call("Object", Value::Nil, Value::Int(0))?,
+                call("Physical", Value::Nil, Value::Int(0))?,
+                call("Graphics", Value::Nil, Value::Int(0))?,
+                call("Graphics", Value::Nil, Value::Int(1))?,
+                call("LocalNamed", Value::Nil, Value::Int(0))?,
+                call("LocalNamed", Value::Nil, Value::Int(1))?,
+                call("Locals", Value::Nil, Value::Int(0))?,
+                call("Locals", Value::Nil, Value::Int(1))?,
+                call("Locals", Value::Nil, Value::Int(2))?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("GetObjectVal probes succeed"),
+            Value::Array(vec![
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(-4),
+                Value::Nil,
+                Value::Nil,
+                Value::Int(-4),
+                Value::Nil,
+                Value::Nil,
+                Value::C4Id("SELF".to_string()),
+                Value::String("Oracle".to_string()),
+                Value::Bool(true),
+                Value::Int(37),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Int(650),
+                Value::Int(17),
+                Value::Int(44),
+                Value::Int(3),
+                Value::Int(0),
+                Value::String("F".to_string()),
+                Value::Int(12_345),
+                Value::Int(22_222),
+                Value::Int(333),
+                Value::Int(-444),
+                Value::Int(123),
+                Value::Int(900),
+                Value::Int(123),
+                Value::Int(900),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::C4Id("SKIN".to_string()),
+                Value::String("Alt".to_string()),
+                Value::Int(1),
+                Value::String("named".to_string()),
+                Value::Int(1),
+                Value::String("i".to_string()),
+                Value::Int(42),
             ])
         );
     }
@@ -49481,6 +50620,7 @@ public func SeedFull()
                 action_graphics: HashMap::new(),
                 value: 0,
                 mass: 100,
+                no_component_mass: false,
                 constructable: true,
                 shape: Some(DefinitionRect::new(-10, -40, 20, 40)),
                 placement: 0,
@@ -49696,6 +50836,7 @@ protected func Construction()
             action_graphics: HashMap::new(),
             value: 0,
             mass: 100,
+            no_component_mass: false,
             constructable: true,
             shape: Some(DefinitionRect::new(-10, -40, 20, 40)),
             placement: 0,

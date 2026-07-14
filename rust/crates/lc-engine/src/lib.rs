@@ -2952,6 +2952,11 @@ pub struct ObjectState {
     /// Like the fixed position/velocity mirrors, this is never persisted.
     #[serde(skip)]
     pub script_rotation_velocity: Option<C4Fixed>,
+    /// Transient script-call mirror of the raw 16.16 rotation accumulator
+    /// (`C4Object::fix_r`). GetObjectVal reflects this independently of the
+    /// whole-degree `Rotation` field.
+    #[serde(skip)]
+    pub script_fixed_rotation: Option<C4Fixed>,
     #[serde(default)]
     pub rotation: i32,
     pub energy: i32,
@@ -3218,6 +3223,7 @@ pub(crate) fn preview_spawn_state(
         script_fixed_position: None,
         script_fixed_velocity: None,
         script_rotation_velocity: None,
+        script_fixed_rotation: None,
         position,
         velocity: Vector2::ZERO,
         rotation: 0,
@@ -4856,6 +4862,7 @@ impl Object {
         state.script_fixed_position = Some(self.fixed_position);
         state.script_fixed_velocity = Some(self.fixed_velocity);
         state.script_rotation_velocity = Some(self.rotation_velocity);
+        state.script_fixed_rotation = Some(self.fixed_rotation);
         state
     }
 
@@ -9611,6 +9618,7 @@ impl Definition {
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_script_rotation_velocity(state.script_rotation_velocity)
+                .with_script_fixed_rotation(state.script_fixed_rotation)
                 .with_magic_energy(state.magic_energy)
                 .with_breath(state.breath)
                 .with_need_energy(state.need_energy)
@@ -9833,6 +9841,7 @@ impl Definition {
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_script_rotation_velocity(state.script_rotation_velocity)
+                .with_script_fixed_rotation(state.script_fixed_rotation)
                 .with_magic_energy(state.magic_energy)
                 .with_breath(state.breath)
                 .with_need_energy(state.need_energy)
@@ -10029,6 +10038,7 @@ impl Definition {
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_script_rotation_velocity(state.script_rotation_velocity)
+                .with_script_fixed_rotation(state.script_fixed_rotation)
                 .with_magic_energy(state.magic_energy)
                 .with_breath(state.breath)
                 .with_need_energy(state.need_energy)
@@ -10236,6 +10246,7 @@ impl Definition {
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_script_rotation_velocity(state.script_rotation_velocity)
+                .with_script_fixed_rotation(state.script_fixed_rotation)
                 .with_magic_energy(state.magic_energy)
                 .with_breath(state.breath)
                 .with_need_energy(state.need_energy)
@@ -10359,6 +10370,7 @@ impl Definition {
         .with_script_fixed_position(state.script_fixed_position)
         .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_script_rotation_velocity(state.script_rotation_velocity)
+        .with_script_fixed_rotation(state.script_fixed_rotation)
         .with_magic_energy(state.magic_energy)
         .with_breath(state.breath)
         .with_need_energy(state.need_energy)
@@ -10498,6 +10510,7 @@ impl Definition {
         .with_script_fixed_position(state.script_fixed_position)
         .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_script_rotation_velocity(state.script_rotation_velocity)
+        .with_script_fixed_rotation(state.script_fixed_rotation)
         .with_magic_energy(state.magic_energy)
         .with_breath(state.breath)
         .with_need_energy(state.need_energy)
@@ -10747,6 +10760,7 @@ impl Definition {
         .with_script_fixed_position(state.script_fixed_position)
         .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_script_rotation_velocity(state.script_rotation_velocity)
+        .with_script_fixed_rotation(state.script_fixed_rotation)
         .with_magic_energy(state.magic_energy)
         .with_breath(state.breath)
         .with_need_energy(state.need_energy)
@@ -10992,6 +11006,7 @@ impl Definition {
         .with_script_fixed_position(state.script_fixed_position)
         .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_script_rotation_velocity(state.script_rotation_velocity)
+        .with_script_fixed_rotation(state.script_fixed_rotation)
         .with_magic_energy(state.magic_energy)
         .with_breath(state.breath)
         .with_need_energy(state.need_energy)
@@ -11589,6 +11604,7 @@ impl Definition {
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_script_rotation_velocity(state.script_rotation_velocity)
+                .with_script_fixed_rotation(state.script_fixed_rotation)
                 .with_magic_energy(state.magic_energy)
                 .with_breath(state.breath)
                 .with_need_energy(state.need_energy)
@@ -16765,6 +16781,7 @@ impl Engine {
                             action_graphics: definition.action_graphics().clone(),
                             value: definition.value(),
                             mass: definition.mass(),
+                            no_component_mass: definition.no_component_mass(),
                             constructable: definition.is_constructable(),
                             shape: definition.shape_rect(),
                             placement: definition.placement(),
@@ -16912,7 +16929,9 @@ impl Engine {
                     object.state.draw_transform,
                 )
                 .with_fixed_motion(object.fixed_position, object.fixed_velocity)
+                .with_fixed_rotation(object.fixed_rotation)
                 .with_rotation_velocity(object.rotation_velocity)
+                .with_own_vertices(object.own_shape_vertices.is_some())
                 .with_move_to_range(definition.map_or(0, Definition::move_to_range))
                 .with_pathfinder(definition.map_or(0, Definition::pathfinder))
                 .with_no_transfer_zones(definition.map_or(0, Definition::no_transfer_zones))
@@ -23947,6 +23966,7 @@ impl Engine {
                     script_fixed_position: None,
                     script_fixed_velocity: None,
                     script_rotation_velocity: snapshot.rotation_velocity,
+                    script_fixed_rotation: snapshot.fixed_rotation,
                     position: snapshot.position,
                     velocity: snapshot.velocity,
                     // Objects.txt `Rotation` loads verbatim (C4Object.cpp:
@@ -37688,6 +37708,7 @@ impl Engine {
                 script_fixed_position: None,
                 script_fixed_velocity: None,
                 script_rotation_velocity: rotation_velocity,
+                script_fixed_rotation: None,
                 position,
                 velocity,
                 // C4Object::Init stores its nr argument verbatim; script-level
@@ -38666,6 +38687,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         script_fixed_position: None,
         script_fixed_velocity: None,
         script_rotation_velocity: snapshot.rotation_velocity,
+        script_fixed_rotation: snapshot.fixed_rotation,
         position: snapshot.position,
         velocity: snapshot.velocity,
         rotation: snapshot.rotation,
@@ -38755,6 +38777,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     action_graphics: HashMap::new(),
                     value: 0,
                     mass: 0,
+                    no_component_mass: false,
                     constructable: false,
                     shape: None,
                     placement: 0,
@@ -38825,7 +38848,13 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     .fixed_velocity
                     .unwrap_or_else(|| FixedVec2::from_ints(object.velocity.x, object.velocity.y)),
             )
+            .with_fixed_rotation(
+                object
+                    .fixed_rotation
+                    .unwrap_or_else(|| itofix(object.rotation)),
+            )
             .with_rotation_velocity(object.rotation_velocity.unwrap_or_default())
+            .with_own_vertices(object.own_vertices.is_some())
             .with_contact_density(object.contact_density)
             .with_direction(object.direction.to_script_value())
             .with_contents(object.contents.clone())
