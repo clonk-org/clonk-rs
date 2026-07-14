@@ -32,6 +32,92 @@ fn tutorial_harness_boots_the_installed_cpp_global_script_layer() {
 }
 
 #[test]
+fn wipfrace_get_scenario_val_uses_loaded_map_zoom_and_player_id_lists() {
+    let mut engine = load_installed_scenario("Races.c4f/Wipfrace.c4s", 0);
+
+    // Wipfrace's shipped Initialize reaches GetScenMapZoom through the
+    // installed System.c4g wrapper. Scenario.txt has MapZoom=9, so the snake
+    // request is (132*9,84*9); SNKE's initial DoCon shifts its integer center
+    // five pixels upward while preserving the requested x coordinate.
+    let snakes = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .filter(|object| object.definition_id == "SNKE")
+        .collect::<Vec<_>>();
+    assert!(
+        (5..=8).contains(&snakes.len()),
+        "Wipfrace creates 5..=8 snakes from its synced random draw"
+    );
+    assert!(
+        snakes
+            .iter()
+            .all(|object| object.position == Vector2::new(1188, 751)),
+        "GetScenMapZoom must place every snake at the C++ coordinate: {:?}",
+        snakes
+            .iter()
+            .map(|object| object.position)
+            .collect::<Vec<_>>()
+    );
+
+    let mut trap_x = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .filter(|object| object.definition_id == "RCTP")
+        .map(|object| object.position.x)
+        .collect::<Vec<_>>();
+    trap_x.sort_unstable();
+    assert_eq!(trap_x, [963, 1053, 1098, 1170, 1197, 1224]);
+
+    // Probe the same applied Game.C4S snapshot directly. C4ValueGetCompiler
+    // flattens HomeBaseMaterial as ID,count pairs in file order.
+    engine
+        .register_definition(
+            Definition::from_script(
+                "SCVP",
+                "Scenario value probe",
+                r#"#strict
+public func Read(string entry, string section, int index)
+{
+    return GetScenarioVal(entry, section, index);
+}
+"#,
+            )
+            .expect("scenario-value probe compiles"),
+        )
+        .expect("scenario-value probe registers");
+    let probe = engine
+        .spawn_object(SpawnConfig::new("SCVP"))
+        .expect("scenario-value probe spawns");
+    let probe_index = engine.find_object_index(probe).expect("probe index");
+    let mut read = |entry: &str, section: &str, index: i32| {
+        engine
+            .call_object_function(
+                probe_index,
+                "Read",
+                vec![
+                    Value::String(entry.to_string()),
+                    Value::String(section.to_string()),
+                    Value::Int(index),
+                ],
+            )
+            .expect("GetScenarioVal probe succeeds")
+    };
+    assert_eq!(read("MapZoom", "Landscape", 0), Value::Int(9));
+    assert_eq!(
+        read("HomeBaseMaterial", "Player1", 0),
+        Value::C4Id("CNKT".to_string())
+    );
+    assert_eq!(read("HomeBaseMaterial", "Player1", 1), Value::Int(5));
+    assert_eq!(
+        read("HomeBaseMaterial", "Player1", 2),
+        Value::C4Id("LNKT".to_string())
+    );
+    assert_eq!(read("HomeBaseMaterial", "Player1", 3), Value::Int(8));
+}
+
+#[test]
 fn arctic_lightning_spell_launches_three_creatorless_native_bolts() {
     // Far Worlds LGT2 calls native LaunchLightning three times with the
     // caster's global vertex and y-ranges 36/41/46, then removes itself.

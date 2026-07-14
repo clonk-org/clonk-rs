@@ -18,7 +18,7 @@ use lc_resources::{
 };
 use serde::de::Error as _;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::landscape::{LandscapeRasterState, RuntimeTexMapMaterial, RuntimeTexMapState};
 use crate::{
@@ -590,7 +590,7 @@ impl ScenarioLoaderHead {
     ) -> Result<Self, ScenarioError> {
         let manifest = parse_legacy_scenario_manifest(group)?;
         let savegame_definition_override =
-            load_savegame_definition_override(group, manifest.core.head.save_game)?;
+            load_savegame_definition_override(group, manifest.core.head.save_game != 0)?;
         let scenario_title = match load_loader_scenario_title(group, languages)? {
             Some(title) => title,
             None => validate_name_ex_no_empty(manifest.core.head.title.clone())?,
@@ -605,8 +605,8 @@ impl ScenarioLoaderHead {
             local_only: manifest.core.definitions.local_only,
             effective_min_players: legacy_effective_min_players(&manifest.core),
             max_players: manifest.core.head.max_player,
-            save_game: manifest.core.head.save_game,
-            replay: manifest.core.head.replay,
+            save_game: manifest.core.head.save_game != 0,
+            replay: manifest.core.head.replay != 0,
             savegame_definition_override,
             scenario_title,
         })
@@ -1436,10 +1436,10 @@ impl Scenario {
         }
 
         let manifest = parse_legacy_scenario_manifest(group)?;
-        if manifest.core.head.save_game {
+        if manifest.core.head.save_game != 0 {
             return Err(ScenarioError::OfflineStartupSavegameUnsupported);
         }
-        if manifest.core.head.replay {
+        if manifest.core.head.replay != 0 {
             return Err(ScenarioError::OfflineStartupReplayUnsupported);
         }
         if read_optional_legacy_entry(group, "SavePlayerInfos.txt")?.is_some() {
@@ -2028,7 +2028,7 @@ impl Scenario {
         // Discover that boundary before trying to resolve Scenario.txt modules:
         // those modules may intentionally no longer exist.
         let savegame_override =
-            load_savegame_definition_override(group, manifest.core.head.save_game)?;
+            load_savegame_definition_override(group, manifest.core.head.save_game != 0)?;
         let has_unresolved_savegame_definitions = matches!(
             &savegame_override,
             ScenarioSavegameDefinitionOverride::GameText { .. }
@@ -2205,8 +2205,8 @@ impl Scenario {
                 effective_min_players,
                 max_players: manifest.core.head.max_player,
                 max_players_league: manifest.core.head.max_player_league,
-                save_game: manifest.core.head.save_game,
-                replay: manifest.core.head.replay,
+                save_game: manifest.core.head.save_game != 0,
+                replay: manifest.core.head.replay != 0,
                 loader: ScenarioLoaderMetadata {
                     configured_specification: manifest.core.head.loader.clone(),
                 },
@@ -2263,7 +2263,7 @@ impl Scenario {
                 & BASEFUNC_AUTO_SELL_CONTENTS)
                 != 0,
             landscape_insert_thrust: manifest.core.game.realism.landscape_insert_thrust != 0,
-            disable_mouse: manifest.core.head.disable_mouse,
+            disable_mouse: manifest.core.head.disable_mouse != 0,
             forced_auto_context_menu: (manifest.core.head.forced_auto_context_menu >= 0)
                 .then_some(manifest.core.head.forced_auto_context_menu != 0),
             forced_control_style: (manifest.core.head.forced_control_style >= 0)
@@ -2280,8 +2280,8 @@ impl Scenario {
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
             map_zoom: manifest.core.landscape.map_zoom,
             init_placement: Some(LegacyInitPlacement {
-                save_game: manifest.core.head.save_game,
-                no_initialize: manifest.core.head.no_initialize,
+                save_game: manifest.core.head.save_game != 0,
+                no_initialize: manifest.core.head.no_initialize != 0,
                 vegetation: id_list_pairs(&manifest.core.landscape.vegetation),
                 vegetation_level: manifest.core.landscape.vegetation_level,
                 in_earth: id_list_pairs(&manifest.core.landscape.in_earth),
@@ -2410,6 +2410,24 @@ impl Scenario {
         final_synchronize: bool,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
         engine.clear_scenario_script();
+        // C4Scenario::Load/ConvertGoals and C4Landscape::Init have completed
+        // before any definition/scenario initialization callback can query
+        // Game.C4S. Reset on every apply so a reused Engine cannot retain the
+        // preceding scenario's reflection state.
+        engine.set_scenario_values(
+            self.legacy_core
+                .as_ref()
+                .map(|core| {
+                    ScenarioValueStore::from_runtime_core(
+                        core,
+                        self.sky
+                            .as_ref()
+                            .and_then(|sky| sky.surface.as_ref())
+                            .is_some(),
+                    )
+                })
+                .unwrap_or_default(),
+        );
         // C4GraphicsSystem::Default initializes all nine controls before a
         // fresh scenario-apply boundary, after which scenario Initialize may
         // call SetGamma. Save loading restores its captured controls after
@@ -3247,11 +3265,11 @@ struct LegacyHead {
     max_player: i32,
     max_player_league: i32,
     min_player: i32,
-    save_game: bool,
-    replay: bool,
+    save_game: i32,
+    replay: i32,
     film: i32,
-    disable_mouse: bool,
-    no_initialize: bool,
+    disable_mouse: i32,
+    no_initialize: i32,
     random_seed: i32,
     forced_auto_context_menu: i32,
     forced_control_style: i32,
@@ -3277,11 +3295,11 @@ impl Default for LegacyHead {
             max_player: 12,
             max_player_league: 12,
             min_player: 0,
-            save_game: false,
-            replay: false,
+            save_game: 0,
+            replay: 0,
             film: 0,
-            disable_mouse: false,
-            no_initialize: false,
+            disable_mouse: 0,
+            no_initialize: 0,
             random_seed: 0,
             forced_auto_context_menu: -1,
             forced_control_style: -1,
@@ -3302,6 +3320,9 @@ struct LegacyDefinitions {
     local_only: bool,
     allow_user_change: bool,
     definitions: Vec<String>,
+    /// Exact strings retained in C4Scenario for StdCompiler reflection.
+    /// `definitions` remains path-normalized for the Rust resource resolver.
+    reflected_definitions: Option<Vec<String>>,
     skip_defs: LegacyIdList,
 }
 
@@ -3371,7 +3392,7 @@ struct LegacyPlayer {
     clonks: LegacyC4SVal,
     wealth: LegacyC4SVal,
     position: [i32; 2],
-    enforce_position: bool,
+    enforce_position: i32,
     crew: LegacyIdList,
     buildings: LegacyIdList,
     vehicles: LegacyIdList,
@@ -3389,7 +3410,7 @@ impl Default for LegacyPlayer {
             clonks: LegacyC4SVal::new(1, 0, 1, 10),
             wealth: LegacyC4SVal::new(0, 0, 0, 250),
             position: [-1, -1],
-            enforce_position: false,
+            enforce_position: 0,
             crew: Vec::new(),
             buildings: Vec::new(),
             vehicles: Vec::new(),
@@ -3463,7 +3484,7 @@ impl PlayerStart {
             crew_count: player.clonks,
             wealth: player.wealth,
             position: player.position,
-            enforce_position: player.enforce_position,
+            enforce_position: player.enforce_position != 0,
             ready_crew: id_list(&player.crew),
             ready_base: id_list(&player.buildings),
             ready_vehic: id_list(&player.vehicles),
@@ -3615,6 +3636,427 @@ struct LegacyAnimals {
 #[derive(Debug, Clone, Default)]
 struct LegacyEnvironment {
     objects: LegacyIdList,
+}
+
+/// One primitive exposed by `GetValByStdCompiler` while reflecting
+/// `Game.C4S` (`C4Script.cpp:3997-4148,4244-4250`).  Keep this distinct from
+/// `lc_script::Value`: scenario loading must not know about VM ownership or
+/// string interning, and the host boundary performs the final conversion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ScenarioValue {
+    Int(i32),
+    Bool(bool),
+    String(String),
+    C4Id(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ScenarioValueEntry {
+    name: String,
+    values: Vec<ScenarioValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ScenarioValueSection {
+    name: String,
+    entries: Vec<ScenarioValueEntry>,
+}
+
+/// The fully defaulted `C4Scenario::CompileFunc` view retained at runtime for
+/// `GetScenarioVal`.  Values stay in compiler traversal order because
+/// `C4ValueGetCompiler` treats `entry_nr` as an index over primitive callbacks
+/// (C4Script.cpp:3997-4006), including alternating ID/count list entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[doc(hidden)]
+pub struct ScenarioValueStore {
+    sections: Vec<ScenarioValueSection>,
+}
+
+impl Default for ScenarioValueStore {
+    fn default() -> Self {
+        let mut core = LegacyScenarioCore::default();
+        // C4Scenario's main-file compiler default differs from
+        // C4SRealism::Default (C4Scenario.cpp:237-238).
+        core.game.realism.landscape_insert_thrust = 1;
+        Self::from_runtime_core(&core, false)
+    }
+}
+
+impl ScenarioValueStore {
+    fn entry(name: &'static str, values: Vec<ScenarioValue>) -> ScenarioValueEntry {
+        ScenarioValueEntry {
+            name: name.to_string(),
+            values,
+        }
+    }
+
+    fn ints(values: impl IntoIterator<Item = i32>) -> Vec<ScenarioValue> {
+        values.into_iter().map(ScenarioValue::Int).collect()
+    }
+
+    fn trimmed_ints<const N: usize>(values: [i32; N], default: i32) -> Vec<ScenarioValue> {
+        let len = values
+            .iter()
+            .rposition(|value| *value != default)
+            .map_or(0, |index| index + 1);
+        Self::ints(values.into_iter().take(len))
+    }
+
+    fn c4s(value: LegacyC4SVal) -> Vec<ScenarioValue> {
+        Self::ints([value.std, value.rnd, value.min, value.max])
+    }
+
+    fn c4id(value: &str) -> ScenarioValue {
+        if value.len() != 4 || value == "NONE" || value == "0000" {
+            ScenarioValue::C4Id(String::new())
+        } else {
+            ScenarioValue::C4Id(value.to_string())
+        }
+    }
+
+    fn ids(values: &LegacyIdList) -> Vec<ScenarioValue> {
+        values
+            .iter()
+            .flat_map(|entry| {
+                [
+                    Self::c4id(&entry.id),
+                    ScenarioValue::Int(entry.count.unwrap_or(0)),
+                ]
+            })
+            .collect()
+    }
+
+    fn names(values: &LegacyNameList) -> Vec<ScenarioValue> {
+        values
+            .iter()
+            .flat_map(|entry| {
+                [
+                    ScenarioValue::String(entry.name.clone()),
+                    ScenarioValue::Int(entry.count.unwrap_or(0)),
+                ]
+            })
+            .collect()
+    }
+
+    fn from_core(core: &LegacyScenarioCore) -> Self {
+        let head = &core.head;
+        let mut sections = vec![ScenarioValueSection {
+            name: "Head".to_string(),
+            entries: vec![
+                Self::entry("Icon", Self::ints([head.icon])),
+                Self::entry("Title", vec![ScenarioValue::String(head.title.clone())]),
+                Self::entry("Loader", vec![ScenarioValue::String(head.loader.clone())]),
+                Self::entry("Font", vec![ScenarioValue::String(head.font.clone())]),
+                Self::entry("Version", Self::trimmed_ints(head.version, 0)),
+                Self::entry("Difficulty", Self::ints([head.difficulty])),
+                // C4SHead::CompileFunc reflects a local, permanently-zero
+                // compatibility value for the obsolete Access entry.
+                Self::entry("Access", Self::ints([0])),
+                Self::entry("MaxPlayer", Self::ints([head.max_player])),
+                Self::entry("MaxPlayerLeague", Self::ints([head.max_player_league])),
+                Self::entry("MinPlayer", Self::ints([head.min_player])),
+                Self::entry("SaveGame", Self::ints([head.save_game])),
+                Self::entry("Replay", Self::ints([head.replay])),
+                Self::entry("Film", Self::ints([head.film])),
+                Self::entry("DisableMouse", Self::ints([head.disable_mouse])),
+                Self::entry("NoInitialize", Self::ints([head.no_initialize])),
+                Self::entry("RandomSeed", Self::ints([head.random_seed])),
+                Self::entry(
+                    "ForcedAutoContextMenu",
+                    Self::ints([head.forced_auto_context_menu]),
+                ),
+                Self::entry(
+                    "ForcedAutoStopControl",
+                    Self::ints([head.forced_control_style]),
+                ),
+                Self::entry("Engine", vec![ScenarioValue::String(head.engine.clone())]),
+                Self::entry(
+                    "MissionAccess",
+                    vec![ScenarioValue::String(head.mission_access.clone())],
+                ),
+                Self::entry("NetworkGame", vec![ScenarioValue::Bool(head.network_game)]),
+                Self::entry(
+                    "NetworkRuntimeJoin",
+                    vec![ScenarioValue::Bool(head.network_runtime_join)],
+                ),
+                Self::entry("ForcedGfxMode", Self::ints([head.forced_gfx_mode])),
+                Self::entry("ForcedNoCrew", Self::ints([head.forced_fair_crew])),
+                Self::entry("DefCrewStrength", Self::ints([head.fair_crew_strength])),
+                Self::entry(
+                    "Origin",
+                    vec![ScenarioValue::String(
+                        head.origin.clone().unwrap_or_default(),
+                    )],
+                ),
+            ],
+        }];
+
+        let definitions = &core.definitions;
+        sections.push(ScenarioValueSection {
+            name: "Definitions".to_string(),
+            entries: vec![
+                Self::entry(
+                    "LocalOnly",
+                    vec![ScenarioValue::Bool(definitions.local_only)],
+                ),
+                Self::entry(
+                    "AllowUserChange",
+                    vec![ScenarioValue::Bool(definitions.allow_user_change)],
+                ),
+                Self::entry(
+                    "Definitions",
+                    definitions
+                        .reflected_definitions
+                        .as_ref()
+                        .unwrap_or(&definitions.definitions)
+                        .iter()
+                        .cloned()
+                        .map(ScenarioValue::String)
+                        .collect(),
+                ),
+                Self::entry("SkipDefs", Self::ids(&definitions.skip_defs)),
+            ],
+        });
+
+        let game = &core.game;
+        sections.push(ScenarioValueSection {
+            name: "Game".to_string(),
+            entries: vec![
+                Self::entry("Mode", Self::ints([game.mode])),
+                Self::entry("Elimination", Self::ints([game.elimination])),
+                Self::entry("CooperativeGoal", Self::ints([game.cooperative_goal])),
+                Self::entry("CreateObjects", Self::ids(&game.create_objects)),
+                Self::entry("ClearObjects", Self::ids(&game.clear_objects)),
+                Self::entry("ClearMaterials", Self::names(&game.clear_materials)),
+                Self::entry("ValueGain", Self::ints([game.value_gain])),
+                Self::entry(
+                    "EnableRemoveFlag",
+                    vec![ScenarioValue::Bool(game.enable_remove_flag)],
+                ),
+                Self::entry(
+                    "StructNeedMaterial",
+                    vec![ScenarioValue::Bool(
+                        game.realism.construction_needs_material,
+                    )],
+                ),
+                Self::entry(
+                    "StructNeedEnergy",
+                    vec![ScenarioValue::Bool(game.realism.structures_need_energy)],
+                ),
+                Self::entry("ValueOverloads", Self::ids(&game.realism.value_overloads)),
+                Self::entry(
+                    "LandscapePushPull",
+                    Self::ints([game.realism.landscape_push_pull]),
+                ),
+                Self::entry(
+                    "LandscapeInsertThrust",
+                    Self::ints([game.realism.landscape_insert_thrust]),
+                ),
+                Self::entry(
+                    "BaseFunctionality",
+                    Self::ints([game.realism.base_functionality]),
+                ),
+                Self::entry(
+                    "BaseRegenerateEnergyPrice",
+                    Self::ints([game.realism.base_regenerate_energy_price]),
+                ),
+                Self::entry("Goals", Self::ids(&game.goals)),
+                Self::entry("Rules", Self::ids(&game.rules)),
+                Self::entry("FoWColor", Self::ints([game.fow_color as i32])),
+            ],
+        });
+
+        for index in 0..MAX_PLAYER_STARTS {
+            let player = core.players.get(index).cloned().unwrap_or_default();
+            sections.push(ScenarioValueSection {
+                name: format!("Player{}", index + 1),
+                entries: vec![
+                    Self::entry(
+                        "StandardCrew",
+                        vec![Self::c4id(
+                            player.standard_crew.as_deref().unwrap_or_default(),
+                        )],
+                    ),
+                    Self::entry("Clonks", Self::c4s(player.clonks)),
+                    Self::entry("Wealth", Self::c4s(player.wealth)),
+                    Self::entry("Position", Self::trimmed_ints(player.position, -1)),
+                    Self::entry("EnforcePosition", Self::ints([player.enforce_position])),
+                    Self::entry("Crew", Self::ids(&player.crew)),
+                    Self::entry("Buildings", Self::ids(&player.buildings)),
+                    Self::entry("Vehicles", Self::ids(&player.vehicles)),
+                    Self::entry("Material", Self::ids(&player.material)),
+                    Self::entry("Knowledge", Self::ids(&player.knowledge)),
+                    Self::entry("HomeBaseMaterial", Self::ids(&player.home_base_material)),
+                    Self::entry(
+                        "HomeBaseProduction",
+                        Self::ids(&player.home_base_production),
+                    ),
+                    Self::entry("Magic", Self::ids(&player.magic)),
+                ],
+            });
+        }
+
+        let landscape = &core.landscape;
+        sections.push(ScenarioValueSection {
+            name: "Landscape".to_string(),
+            entries: vec![
+                Self::entry(
+                    "ExactLandscape",
+                    vec![ScenarioValue::Bool(landscape.exact_landscape)],
+                ),
+                Self::entry("Vegetation", Self::ids(&landscape.vegetation)),
+                Self::entry("VegetationLevel", Self::c4s(landscape.vegetation_level)),
+                Self::entry("InEarth", Self::ids(&landscape.in_earth)),
+                Self::entry("InEarthLevel", Self::c4s(landscape.in_earth_level)),
+                Self::entry(
+                    "Sky",
+                    vec![ScenarioValue::String(
+                        landscape.sky.clone().unwrap_or_default(),
+                    )],
+                ),
+                Self::entry("SkyFade", Self::trimmed_ints(landscape.sky_fade, 0)),
+                Self::entry("NoSky", vec![ScenarioValue::Bool(landscape.no_sky)]),
+                Self::entry(
+                    "BottomOpen",
+                    vec![ScenarioValue::Bool(landscape.bottom_open)],
+                ),
+                Self::entry("TopOpen", vec![ScenarioValue::Bool(landscape.top_open)]),
+                Self::entry("LeftOpen", Self::ints([landscape.left_open])),
+                Self::entry("RightOpen", Self::ints([landscape.right_open])),
+                Self::entry(
+                    "AutoScanSideOpen",
+                    vec![ScenarioValue::Bool(landscape.auto_scan_side_open)],
+                ),
+                Self::entry("MapWidth", Self::c4s(landscape.map_width)),
+                Self::entry("MapHeight", Self::c4s(landscape.map_height)),
+                Self::entry("MapZoom", Self::c4s(landscape.map_zoom)),
+                Self::entry("Amplitude", Self::c4s(landscape.amplitude)),
+                Self::entry("Phase", Self::c4s(landscape.phase)),
+                Self::entry("Period", Self::c4s(landscape.period)),
+                Self::entry("Random", Self::c4s(landscape.random)),
+                Self::entry(
+                    "Material",
+                    vec![ScenarioValue::String(landscape.material.clone())],
+                ),
+                Self::entry(
+                    "Liquid",
+                    vec![ScenarioValue::String(landscape.liquid.clone())],
+                ),
+                Self::entry("LiquidLevel", Self::c4s(landscape.liquid_level)),
+                Self::entry(
+                    "MapPlayerExtend",
+                    vec![ScenarioValue::Bool(landscape.map_player_extend)],
+                ),
+                Self::entry("Layers", Self::names(&landscape.layers)),
+                Self::entry("Gravity", Self::c4s(landscape.gravity)),
+                Self::entry("NoScan", vec![ScenarioValue::Bool(landscape.no_scan)]),
+                Self::entry(
+                    "KeepMapCreator",
+                    vec![ScenarioValue::Bool(landscape.keep_map_creator)],
+                ),
+                Self::entry("SkyScrollMode", Self::ints([landscape.sky_scroll_mode])),
+                Self::entry(
+                    "NewStyleLandscape",
+                    Self::ints([landscape.new_style_landscape]),
+                ),
+                Self::entry("FoWRes", Self::ints([landscape.fow_resolution])),
+                Self::entry(
+                    "ShadeMaterials",
+                    vec![ScenarioValue::Bool(landscape.shade_materials)],
+                ),
+            ],
+        });
+
+        sections.push(ScenarioValueSection {
+            name: "Animals".to_string(),
+            entries: vec![
+                Self::entry("Animal", Self::ids(&core.animals.free_life)),
+                Self::entry("Nest", Self::ids(&core.animals.earth_nest)),
+            ],
+        });
+
+        let weather = &core.weather;
+        sections.push(ScenarioValueSection {
+            name: "Weather".to_string(),
+            entries: vec![
+                Self::entry("Climate", Self::c4s(weather.climate)),
+                Self::entry("StartSeason", Self::c4s(weather.start_season)),
+                Self::entry("YearSpeed", Self::c4s(weather.year_speed)),
+                Self::entry("Rain", Self::c4s(weather.rain)),
+                Self::entry("Wind", Self::c4s(weather.wind)),
+                Self::entry("Lightning", Self::c4s(weather.lightning)),
+                Self::entry(
+                    "Precipitation",
+                    vec![ScenarioValue::String(weather.precipitation.clone())],
+                ),
+                Self::entry("NoGamma", vec![ScenarioValue::Bool(weather.no_gamma)]),
+            ],
+        });
+
+        sections.push(ScenarioValueSection {
+            name: "Disasters".to_string(),
+            entries: vec![
+                Self::entry("Meteorite", Self::c4s(core.disasters.meteorite)),
+                Self::entry("Volcano", Self::c4s(core.disasters.volcano)),
+                Self::entry("Earthquake", Self::c4s(core.disasters.earthquake)),
+            ],
+        });
+
+        sections.push(ScenarioValueSection {
+            name: "Environment".to_string(),
+            entries: vec![Self::entry("Objects", Self::ids(&core.environment.objects))],
+        });
+
+        Self { sections }
+    }
+
+    /// Project the state visible to scripts after C4Scenario::Load,
+    /// ConvertGoals, and the initial C4Landscape/C4Sky initialization, which
+    /// all precede scenario `Initialize` (C4Scenario.cpp:86-97;
+    /// C4Landscape.cpp:569-570,677; C4Sky.cpp:84-91).
+    fn from_runtime_core(core: &LegacyScenarioCore, has_sky_surface: bool) -> Self {
+        let mut runtime = core.after_load_conversion();
+        runtime.landscape.map_width.max = 10_000;
+        runtime.landscape.map_height.max = 10_000;
+        runtime.landscape.new_style_landscape = 2;
+        if !has_sky_surface {
+            runtime.landscape.sky = runtime.landscape.sky.map(|sky| sky.replace(',', ";"));
+        }
+        Self::from_core(&runtime)
+    }
+
+    /// Mirrors C4ValueGetCompiler's traversal: with no section, same-name
+    /// fields in successive sections contribute to one primitive stream;
+    /// with a section, only that named C4Scenario child is traversed.
+    pub(crate) fn get(
+        &self,
+        entry: &str,
+        section: Option<&str>,
+        entry_nr: i32,
+    ) -> Option<&ScenarioValue> {
+        let mut remaining = usize::try_from(entry_nr).ok()?;
+        for candidate in self
+            .sections
+            .iter()
+            .filter(|candidate| section.map_or(true, |name| candidate.name == name))
+        {
+            // In the one-name form a root section with the requested name
+            // becomes the active match. Its named children are then one
+            // level too deep for haveCompleteMatch(), so a same-name child
+            // (notably [Definitions].Definitions) is shadowed rather than
+            // returned (C4Script.cpp:3958-3989).
+            if section.is_none() && candidate.name == entry {
+                continue;
+            }
+            for field in candidate.entries.iter().filter(|field| field.name == entry) {
+                if remaining < field.values.len() {
+                    return field.values.get(remaining);
+                }
+                remaining -= field.values.len();
+            }
+        }
+        None
+    }
 }
 
 fn parse_bool_field(field: &str, raw: &str) -> Result<bool, ScenarioError> {
@@ -3887,10 +4329,18 @@ impl LegacyHead {
                     })?;
                 }
                 "savegame" => {
-                    self.save_game = parse_bool_field(key, raw)?;
+                    self.save_game = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
                 }
                 "replay" => {
-                    self.replay = parse_bool_field(key, raw)?;
+                    self.replay = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
                 }
                 "film" => {
                     self.film = parse_i32(raw).map_err(|err| {
@@ -3900,10 +4350,18 @@ impl LegacyHead {
                     })?;
                 }
                 "disablemouse" => {
-                    self.disable_mouse = parse_bool_field(key, raw)?;
+                    self.disable_mouse = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
                 }
                 "noinitialize" => {
-                    self.no_initialize = parse_bool_field(key, raw)?;
+                    self.no_initialize = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
                 }
                 "randomseed" => {
                     self.random_seed = parse_i32(raw).map_err(|err| {
@@ -4000,30 +4458,36 @@ impl LegacyDefinitions {
         // C4SDefinitions::CompileFunc first compiles the comma-separated
         // modern container. Only when that is empty does it query exactly
         // Definition1 through Definition10, one literal module per slot.
-        self.definitions = entries
+        let reflected_definitions = entries
             .iter()
             .find(|(key, _)| key == "Definitions")
-            .map(|(_, value)| {
-                lc_resources::scenario::parse_c4s_string_list(value)
-                    .into_iter()
-                    .map(|value| value.replace('\\', "/"))
-                    .collect()
-            })
+            .map(|(_, value)| lc_resources::scenario::parse_c4s_string_list(value))
             .unwrap_or_default();
-        if self.definitions.is_empty() {
+        let mut definitions = reflected_definitions
+            .iter()
+            .map(|value| value.replace('\\', "/"))
+            .collect::<Vec<_>>();
+        let mut reflected_definitions = reflected_definitions;
+        if definitions.is_empty() {
             for index in 1..=10 {
                 let key = format!("Definition{index}");
-                let Some(value) = entries
+                let Some(raw) = entries
                     .iter()
                     .find(|(entry_key, _)| entry_key == &key)
-                    .map(|(_, value)| normalize_definition_path(value))
+                    // mkStringAdaptA uses RCT_All: skip leading spaces/tabs,
+                    // then retain every byte through the line ending,
+                    // including quotes and trailing spaces.
+                    .map(|(_, value)| value.trim_start_matches([' ', '\t'].as_ref()))
                     .filter(|value| !value.is_empty())
                 else {
                     continue;
                 };
-                self.definitions.push(value);
+                reflected_definitions.push(raw.to_string());
+                definitions.push(normalize_definition_path(raw));
             }
         }
+        self.reflected_definitions = Some(reflected_definitions);
+        self.definitions = definitions;
         Ok(())
     }
 }
@@ -4199,11 +4663,14 @@ impl LegacyPlayer {
             let raw = value.trim();
             match key_lower.as_str() {
                 "standardcrew" => {
-                    if raw.is_empty() {
-                        self.standard_crew = None;
-                    } else {
-                        self.standard_crew = Some(raw.to_ascii_uppercase());
-                    }
+                    let id = raw
+                        .bytes()
+                        .take_while(|byte| is_std_identifier_byte(*byte))
+                        .take(4)
+                        .map(char::from)
+                        .collect::<String>();
+                    self.standard_crew =
+                        (id.len() == 4 && id != "NONE" && id != "0000").then_some(id);
                 }
                 "clonks" => {
                     self.clonks = parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(1, 0, 1, 10))?;
@@ -4216,7 +4683,11 @@ impl LegacyPlayer {
                     self.position = parse_position(key, raw)?;
                 }
                 "enforceposition" => {
-                    self.enforce_position = parse_bool_field(key, raw)?;
+                    self.enforce_position = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
                 }
                 "crew" => {
                     self.crew = parse_legacy_id_list(key, raw)?;
@@ -4705,11 +5176,11 @@ fn serialize_legacy_head(head: &LegacyHead) -> LegacyIniFields {
         head.max_player,
     );
     push_value(&mut fields, "MinPlayer", head.min_player, 0);
-    push_i32_bool(&mut fields, "SaveGame", head.save_game, false);
-    push_i32_bool(&mut fields, "Replay", head.replay, false);
+    push_value(&mut fields, "SaveGame", head.save_game, 0);
+    push_value(&mut fields, "Replay", head.replay, 0);
     push_value(&mut fields, "Film", head.film, 0);
-    push_i32_bool(&mut fields, "DisableMouse", head.disable_mouse, false);
-    push_i32_bool(&mut fields, "NoInitialize", head.no_initialize, false);
+    push_value(&mut fields, "DisableMouse", head.disable_mouse, 0);
+    push_value(&mut fields, "NoInitialize", head.no_initialize, 0);
     push_value(&mut fields, "RandomSeed", head.random_seed, 0);
     push_value(
         &mut fields,
@@ -4846,12 +5317,7 @@ fn serialize_legacy_player(player: &LegacyPlayer) -> LegacyIniFields {
         LegacyC4SVal::new(0, 0, 0, 250),
     );
     push_i32_array(&mut fields, "Position", &player.position, -1);
-    push_i32_bool(
-        &mut fields,
-        "EnforcePosition",
-        player.enforce_position,
-        false,
-    );
+    push_value(&mut fields, "EnforcePosition", player.enforce_position, 0);
     push_id_list(&mut fields, "Crew", &player.crew);
     push_id_list(&mut fields, "Buildings", &player.buildings);
     push_id_list(&mut fields, "Vehicles", &player.vehicles);
@@ -8228,7 +8694,7 @@ fn derive_legacy_weather_init(
         meteorite: legacy_c4s_value(disasters, "meteorite", LegacyC4SVal::new(0, 0, 0, 100))?,
         volcano: legacy_c4s_value(disasters, "volcano", LegacyC4SVal::new(0, 0, 0, 100))?,
         earthquake: legacy_c4s_value(disasters, "earthquake", LegacyC4SVal::new(0, 0, 0, 100))?,
-        no_initialize: manifest.core.head.no_initialize,
+        no_initialize: manifest.core.head.no_initialize != 0,
     })
 }
 
@@ -11090,6 +11556,189 @@ global func Step(state, frame, random)
 }
 "#;
 
+    #[test]
+    fn scenario_value_store_follows_c4value_compiler_indexing_and_types() {
+        let directory = tempdir().expect("scenario directory");
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            "[Head]\n\
+             Version=4,9\n\
+             SaveGame=2\n\
+             Replay=-3\n\
+             \n\
+             [Definitions]\n\
+             Definition1=Objects.c4d\n\
+             Definition2= \"Foo\\Bar.c4d\"  \n\
+             \n\
+             [Player1]\n\
+             StandardCrew=NONE\n\
+             EnforcePosition=7\n\
+             HomeBaseMaterial=WOOD=5;ROCK;\n\
+             \n\
+             [Player2]\n\
+             StandardCrew=0000\n\
+             EnforcePosition=8\n\
+             \n\
+             [Player3]\n\
+             StandardCrew=clnkextra\n\
+             \n\
+             [Player4]\n\
+             StandardCrew=CL-Nextra\n\
+             \n\
+             [Landscape]\n\
+             MapWidth=64,2,32,250\n\
+             MapZoom=8,2,5,15\n\
+             Sky=Clouds1,Clouds2\n\
+             \n\
+             [Disasters]\n\
+             Volcano=12,3,0,100\n",
+        )
+        .expect("scenario core");
+        let group = Group::open(directory.path()).expect("scenario group");
+        let manifest = parse_legacy_scenario_manifest(&group).expect("parsed scenario core");
+        let values = ScenarioValueStore::from_runtime_core(&manifest.core, false);
+
+        assert_eq!(
+            values.get("MapZoom", Some("Landscape"), 0),
+            Some(&ScenarioValue::Int(8))
+        );
+        assert_eq!(
+            values.get("MapZoom", Some("Landscape"), 1),
+            Some(&ScenarioValue::Int(2))
+        );
+        assert_eq!(
+            values.get("MapZoom", Some("Landscape"), 2),
+            Some(&ScenarioValue::Int(5))
+        );
+        assert_eq!(
+            values.get("MapZoom", Some("Landscape"), 3),
+            Some(&ScenarioValue::Int(15))
+        );
+        assert_eq!(values.get("MapZoom", Some("Landscape"), 4), None);
+        assert_eq!(values.get("MapZoom", Some("Landscape"), -1), None);
+
+        assert_eq!(
+            values.get("HomeBaseMaterial", Some("Player1"), 0),
+            Some(&ScenarioValue::C4Id("WOOD".to_string()))
+        );
+        assert_eq!(
+            values.get("HomeBaseMaterial", Some("Player1"), 1),
+            Some(&ScenarioValue::Int(5))
+        );
+        assert_eq!(
+            values.get("HomeBaseMaterial", Some("Player1"), 2),
+            Some(&ScenarioValue::C4Id("ROCK".to_string()))
+        );
+        assert_eq!(
+            values.get("HomeBaseMaterial", Some("Player1"), 3),
+            Some(&ScenarioValue::Int(0))
+        );
+        assert_eq!(values.get("HomeBaseMaterial", Some("Player1"), 4), None);
+
+        assert_eq!(
+            values.get("SaveGame", Some("Head"), 0),
+            Some(&ScenarioValue::Int(2))
+        );
+        assert_eq!(
+            values.get("Replay", Some("Head"), 0),
+            Some(&ScenarioValue::Int(-3))
+        );
+        assert_eq!(
+            values.get("EnforcePosition", Some("Player1"), 0),
+            Some(&ScenarioValue::Int(7))
+        );
+        assert_eq!(
+            values.get("EnforcePosition", None, 1),
+            Some(&ScenarioValue::Int(8)),
+            "a no-section lookup carries entry_nr across repeated names"
+        );
+        assert_eq!(
+            values.get("Version", Some("Head"), 1),
+            Some(&ScenarioValue::Int(9))
+        );
+        assert_eq!(values.get("Version", Some("Head"), 2), None);
+        assert_eq!(
+            values.get("Definitions", Some("Definitions"), 0),
+            Some(&ScenarioValue::String("Objects.c4d".to_string()))
+        );
+        assert_eq!(
+            values.get("Definitions", Some("Definitions"), 1),
+            Some(&ScenarioValue::String("\"Foo\\Bar.c4d\"  ".to_string()))
+        );
+        assert_eq!(
+            values.get("Definitions", None, 0),
+            None,
+            "the root [Definitions] match shadows its same-name child"
+        );
+        assert_eq!(
+            values.get("StandardCrew", Some("Player1"), 0),
+            Some(&ScenarioValue::C4Id(String::new()))
+        );
+        assert_eq!(
+            values.get("StandardCrew", Some("Player2"), 0),
+            Some(&ScenarioValue::C4Id(String::new()))
+        );
+        assert_eq!(
+            values.get("StandardCrew", Some("Player3"), 0),
+            Some(&ScenarioValue::C4Id("clnk".to_string()))
+        );
+        assert_eq!(
+            values.get("StandardCrew", Some("Player4"), 0),
+            Some(&ScenarioValue::C4Id("CL-N".to_string()))
+        );
+
+        // C4Landscape::Init mutates these three Game.C4S fields before any
+        // scenario callback can observe them.
+        assert_eq!(
+            values.get("MapWidth", Some("Landscape"), 3),
+            Some(&ScenarioValue::Int(10_000))
+        );
+        assert_eq!(
+            values.get("MapHeight", Some("Landscape"), 3),
+            Some(&ScenarioValue::Int(10_000))
+        );
+        assert_eq!(
+            values.get("NewStyleLandscape", Some("Landscape"), 0),
+            Some(&ScenarioValue::Int(2))
+        );
+        assert_eq!(
+            values.get("Sky", Some("Landscape"), 0),
+            Some(&ScenarioValue::String("Clouds1;Clouds2".to_string()))
+        );
+        let values_with_sky_surface = ScenarioValueStore::from_runtime_core(&manifest.core, true);
+        assert_eq!(
+            values_with_sky_surface.get("Sky", Some("Landscape"), 0),
+            Some(&ScenarioValue::String("Clouds1,Clouds2".to_string()))
+        );
+        assert_eq!(
+            values.get("Volcano", Some("Disasters"), 0),
+            Some(&ScenarioValue::Int(12))
+        );
+        assert_eq!(values.get("Volcano", Some("Weather"), 0), None);
+        assert_eq!(values.get("StartupPlayerCount", Some("Head"), 0), None);
+        assert_eq!(values.get("mapzoom", Some("Landscape"), 0), None);
+
+        let mut engine = Engine::new();
+        engine.set_scenario_values(values.clone());
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("scenario values serialize with engine state");
+        let state = crate::EngineState::from_json_str(&encoded)
+            .expect("scenario values deserialize with engine state");
+        let mut restored = Engine::new();
+        restored
+            .restore_state(&state)
+            .expect("scenario values restore into a fresh engine");
+        assert_eq!(restored.scenario_values.as_ref(), &values);
+
+        let defaults = ScenarioValueStore::default();
+        assert_eq!(
+            defaults.get("MapZoom", Some("Landscape"), 0),
+            Some(&ScenarioValue::Int(10))
+        );
+    }
+
     // Clean differential captured from the stock pre-port C++ merge-base
     // 9ffa0a5d. SHA-256 of the pristine 1302-byte Scenario.txt:
     // 99351a3dede2076f8e4666d62c71362db25ddc3c953bcf60b711960100c80914.
@@ -12330,7 +12979,7 @@ RandomTeamCount=2
 
         assert_eq!(manifest.core.head.max_player, 7);
         assert_eq!(manifest.core.head.min_player, 0);
-        assert!(!manifest.core.head.save_game);
+        assert_eq!(manifest.core.head.save_game, 0);
         assert!(!manifest.core.head.network_game);
         assert_eq!(manifest.core.head.loader, "Loader* // literal  ");
         assert_eq!(manifest.description.as_deref(), Some("Searchable // literal  "));
@@ -12345,7 +12994,7 @@ RandomTeamCount=2
 
         let integer_flag = parse_legacy_scenario_text("[Head]\nSaveGame=true\n")
             .expect("integer-backed flag defaults on a boolean token");
-        assert!(!integer_flag.core.head.save_game);
+        assert_eq!(integer_flag.core.head.save_game, 0);
     }
 
     #[test]
@@ -12731,9 +13380,9 @@ Objects=STNE=1;TREE=1
         assert_eq!(core.head.max_player, 6);
         assert_eq!(core.head.max_player_league, 4);
         assert_eq!(core.head.min_player, 2);
-        assert!(core.head.save_game);
-        assert!(core.head.disable_mouse);
-        assert!(core.head.no_initialize);
+        assert_eq!(core.head.save_game, 1);
+        assert_eq!(core.head.disable_mouse, 1);
+        assert_eq!(core.head.no_initialize, 1);
         assert_eq!(core.head.random_seed, 12345);
         assert_eq!(core.head.forced_auto_context_menu, 0);
         assert_eq!(core.head.forced_control_style, 1);
@@ -12791,7 +13440,7 @@ Objects=STNE=1;TREE=1
         assert_eq!(player.clonks.rnd, 1);
         assert_eq!(player.wealth.std, 50);
         assert_eq!(player.position, [100, 200]);
-        assert!(player.enforce_position);
+        assert_eq!(player.enforce_position, 1);
         assert_eq!(player.crew.len(), 2);
         assert_eq!(player.buildings.len(), 1);
         assert_eq!(player.vehicles.len(), 1);

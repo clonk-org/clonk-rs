@@ -7163,6 +7163,12 @@ pub struct EngineState {
     pub next_object_id: u64,
     #[serde(default)]
     pub landscape: Option<Landscape>,
+    /// Standalone Rust state files retain the active `Game.C4S` reflection
+    /// view. C++ saves this beside Game.txt as Scenario.txt; `None` keeps the
+    /// preloaded scenario when reading older Rust states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[doc(hidden)]
+    pub scenario_values: Option<scenario::ScenarioValueStore>,
     #[serde(default)]
     pub objects: Vec<PersistedObject>,
     /// Main object-list order in execution direction (the C++ list reversed).
@@ -7328,6 +7334,7 @@ impl EngineState {
             gamma: snapshot.environment.gamma,
             next_object_id,
             landscape: snapshot.landscape.clone(),
+            scenario_values: None,
             objects,
             object_order: snapshot.render_order.clone(),
             particles: snapshot.particles.clone(),
@@ -12459,6 +12466,10 @@ pub struct Engine {
     /// `[Landscape] MapZoom` retained as a C4SVal: ScenarioInit evaluates
     /// it per start coordinate (C4Player.cpp:713-714) — synced RNG draws.
     map_zoom: scenario::LegacyC4SVal,
+    /// Fully defaulted, post-load `Game.C4S` reflection table used by
+    /// GetScenarioVal. Kept independently of evaluated landscape/weather
+    /// state, exactly like C++ retains C4Scenario beside those subsystems.
+    scenario_values: Rc<scenario::ScenarioValueStore>,
     /// Per-player crew info lists (C4Player::CrewInfoList): the roster
     /// GetIdle/New recruit from at join.
     crew_rosters: HashMap<i32, Vec<player_file::CrewInfo>>,
@@ -14245,6 +14256,7 @@ impl Engine {
             player_starts: vec![scenario::PlayerStart::default(); scenario::MAX_PLAYER_STARTS],
             standard_names: None,
             map_zoom: scenario::LegacyC4SVal::new(10, 0, 5, 15),
+            scenario_values: Rc::new(scenario::ScenarioValueStore::default()),
             crew_rosters: HashMap::new(),
             crew_info_order: HashMap::new(),
             crew_object_infos: Rc::new(HashMap::new()),
@@ -14447,6 +14459,10 @@ impl Engine {
     /// configured start coordinate (C4Player.cpp:713-714).
     pub fn set_map_zoom(&mut self, map_zoom: scenario::LegacyC4SVal) {
         self.map_zoom = map_zoom;
+    }
+
+    pub(crate) fn set_scenario_values(&mut self, values: scenario::ScenarioValueStore) {
+        self.scenario_values = Rc::new(values);
     }
 
     /// The C4ObjectInfo data linked to a crew object (CreateInfoObject,
@@ -16937,6 +16953,7 @@ impl Engine {
             self.team_home_base_rule,
         )
         .with_solid_mask_metadata(solid_mask_metadata)
+        .with_scenario_values(Rc::clone(&self.scenario_values))
         .with_teams(Rc::clone(&self.teams))
         .with_movement_solid_masks(self.ocf_solid_mask_overlay())
         .with_definition_order(Rc::clone(&self.runtime_definition_order))
@@ -23720,6 +23737,7 @@ impl Engine {
             gamma: self.gamma,
             next_object_id: self.next_object_id,
             landscape: self.landscape.clone(),
+            scenario_values: Some(self.scenario_values.as_ref().clone()),
             objects,
             object_order: self.exec_list.clone(),
             particles,
@@ -23776,6 +23794,9 @@ impl Engine {
         self.landscape_insert_thrust = state.landscape_insert_thrust;
         self.structures_snow_in = state.structures_snow_in;
         self.landscape = state.landscape.clone();
+        if let Some(values) = &state.scenario_values {
+            self.scenario_values = Rc::new(values.clone());
+        }
         // C4MassMoverSet::Load semantics (C4MassMover.cpp:204-217): the
         // saved slots restore verbatim; nothing is re-derived from the
         // landscape.

@@ -21,6 +21,7 @@ use crate::message::{
 use crate::ocf;
 use crate::rng::LcgRng;
 use crate::scoreboard::ScoreboardPresentationSink;
+use crate::scenario::{ScenarioValue, ScenarioValueStore};
 use crate::sector::{SectorMap, SectorObject};
 use crate::sky::SkyAdjustment;
 use crate::text_spec::{parse_text_spec, TextSpec};
@@ -932,6 +933,10 @@ pub struct HostWorldContext {
     /// the forward master list (C4Game.cpp:3732-3744).
     master_order: Rc<Vec<ObjectId>>,
     landscape: Option<Rc<Landscape>>,
+    /// Fully defaulted, post-load `Game.C4S` reflection data. This remains
+    /// separate from the evaluated runtime landscape: GetScenarioVal reads
+    /// the scenario core, not C4Landscape's mutable state.
+    scenario_values: Rc<ScenarioValueStore>,
     /// C4SolidMask pixels not already baked into the landscape plane.
     /// Grid worlds bake MCVehic directly; column fixtures retain the same
     /// overlay used by movement/contact checks.
@@ -1037,6 +1042,7 @@ impl Default for HostWorldContext {
             order: Rc::new(Vec::new()),
             master_order: Rc::new(Vec::new()),
             landscape: None,
+            scenario_values: Rc::new(ScenarioValueStore::default()),
             movement_solid_masks: Rc::new(Vec::new()),
             definitions: Rc::new(HashMap::new()),
             solid_mask_metadata: Rc::new(HashMap::new()),
@@ -1226,6 +1232,7 @@ impl HostWorldContext {
             master_order: Rc::clone(&order),
             order,
             landscape: landscape.map(Rc::new),
+            scenario_values: Rc::new(ScenarioValueStore::default()),
             movement_solid_masks: Rc::new(Vec::new()),
             definitions,
             solid_mask_metadata: Rc::new(HashMap::new()),
@@ -1524,6 +1531,23 @@ impl HostWorldContext {
 
     pub(crate) fn landscape_ref(&self) -> Option<&Landscape> {
         self.landscape.as_deref()
+    }
+
+    pub(crate) fn with_scenario_values(
+        mut self,
+        values: Rc<ScenarioValueStore>,
+    ) -> Self {
+        self.scenario_values = values;
+        self
+    }
+
+    fn scenario_value(
+        &self,
+        entry: &str,
+        section: Option<&str>,
+        entry_nr: i32,
+    ) -> Option<&ScenarioValue> {
+        self.scenario_values.get(entry, section, entry_nr)
     }
 
     pub(crate) fn with_movement_solid_masks(
@@ -7407,40 +7431,46 @@ fn get_league(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Nil)
 }
 
-/// FnGetScenarioVal (C4Script.cpp:4250-4256): StdCompiler reflection over
-/// Game.C4S by entry/section. Like the GetDefCoreVal port, the hot entries
-/// real content reads are modeled — the Landscape border-open keys resolve
-/// from the loaded landscape, which C4Landscape::ScenarioInit seeds from
-/// exactly those scenario values (`bool BottomOpen, TopOpen; int32_t
-/// LeftOpen, RightOpen`, C4Scenario.h:224-225, C4Landscape.cpp:67-71).
-/// Anything else is nil with a debug note (PORT_STATUS).
+/// FnGetScenarioVal (C4Script.cpp:4244-4250): exact StdCompiler reflection
+/// over the retained, post-load `Game.C4S`. `entry_nr` counts primitive
+/// callbacks inside the matched named value: C4SVal is Std/Rnd/Min/Max and
+/// ID lists are ID/count pairs (C4Script.cpp:3997-4006).
 fn get_scenario_val(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(entry) = parse_optional_string(args.first(), "GetScenarioVal", "entry")? else {
         return Ok(Value::Nil);
     };
-    let section = parse_optional_string(args.get(1), "GetScenarioVal", "section")?;
-    let _entry_index = parse_optional_i32(args.get(2), "GetScenarioVal", "entry_nr")?.unwrap_or(0);
+    let section = parse_optional_string(args.get(1), "GetScenarioVal", "section")?
+        .filter(|section| !section.is_empty());
+    let entry_index = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "GetScenarioVal",
+        "entry_nr",
+    )?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
-        let landscape_entry = matches!(section.as_deref(), None | Some("Landscape"));
-        if landscape_entry {
-            if let Some(landscape) = context.landscape_ref() {
-                match entry.as_str() {
-                    "BottomOpen" => return Ok(Value::Bool(landscape.bottom_open())),
-                    "TopOpen" => return Ok(Value::Bool(landscape.top_open())),
-                    "LeftOpen" => return Ok(Value::Int(landscape.left_open())),
-                    "RightOpen" => return Ok(Value::Int(landscape.right_open())),
-                    _ => {}
-                }
-            }
+        if let Some(value) =
+            context
+                .world
+                .scenario_value(entry.as_str(), section.as_deref(), entry_index)
+        {
+            return Ok(match value {
+                ScenarioValue::Int(value) => Value::Int(*value),
+                ScenarioValue::Bool(value) => Value::Bool(*value),
+                ScenarioValue::String(value) => Value::String(value.clone()),
+                // C4Value(C4ID_None) has C4V_Any type, i.e. nil rather than
+                // a typed zero ID (C4Value.h:113,306).
+                ScenarioValue::C4Id(value) if value.is_empty() => Value::Nil,
+                ScenarioValue::C4Id(value) => Value::C4Id(value.clone()),
+            });
         }
         tracing::debug!(
             entry = entry.as_str(),
             section = section.as_deref().unwrap_or(""),
-            "GetScenarioVal entry not modeled; nil"
+            entry_index,
+            "GetScenarioVal entry not found; nil"
         );
         Ok(Value::Nil)
     })
@@ -37055,41 +37085,119 @@ public func RejectConstruction(x, y, builder)
     }
 
     #[test]
-    fn get_scenario_val_reads_landscape_border_openness() {
-        // FnGetScenarioVal reflects Game.C4S by entry/section
-        // (C4Script.cpp:4250-4256); C4SLandscape carries `bool BottomOpen,
-        // TopOpen; int32_t LeftOpen, RightOpen` (C4Scenario.h:224-225) which
-        // seed the landscape borders (C4Landscape.cpp:67-71). The dragon's
-        // MoveTo reads BottomOpen (Fantasy.c4d Dragon.c4d Script.c:1549).
-        let mut landscape = Landscape::flat(32, 20);
-        landscape.set_border_open(7, 0, true, false);
-        let world = || {
-            HostWorldContext::with_landscape(
-                Vec::<HostWorldObject>::new(),
-                Some(landscape.clone()),
-                HashMap::new(),
-                Vec::new(),
-                HashMap::new(),
-                HashMap::new(),
+    fn get_scenario_val_reflects_defaults_types_and_index_coercion() {
+        // C4ValueGetCompiler sees fully defaulted fields, preserves their
+        // primitive type, and flattens C4SVal as Std/Rnd/Min/Max.
+        let query = |entry: &str, section: Value, entry_nr: Value| {
+            let (result, _) = with_effect_context(
+                None,
+                &[],
+                HostWorldContext::default(),
                 1,
-                false,
-            )
-        };
-        let query = |entry: &str| {
-            let (result, _) = with_effect_context(None, &[], world(), 1, || {
-                get_scenario_val(&[
-                    Value::String(entry.into()),
-                    Value::String("Landscape".into()),
-                ])
-            });
+                || {
+                    get_scenario_val(&[
+                        Value::String(entry.into()),
+                        section,
+                        entry_nr,
+                    ])
+                },
+            );
             result.expect("GetScenarioVal succeeds")
         };
-        assert_eq!(query("BottomOpen"), Value::Bool(false));
-        assert_eq!(query("TopOpen"), Value::Bool(true));
-        assert_eq!(query("LeftOpen"), Value::Int(7));
-        assert_eq!(query("RightOpen"), Value::Int(0));
-        // Unmodeled entries are nil with a debug note, like GetDefCoreVal.
-        assert_eq!(query("SkyDef"), Value::Nil);
+        let landscape = || Value::String("Landscape".into());
+        assert_eq!(
+            query("MapZoom", landscape(), Value::Int(0)),
+            Value::Int(10)
+        );
+        assert_eq!(
+            query("MapZoom", landscape(), Value::Bool(true)),
+            Value::Int(0),
+            "a bool entry_nr converts through the C4ValueInt parameter"
+        );
+        assert_eq!(
+            query("MapZoom", landscape(), Value::Int(2)),
+            Value::Int(5)
+        );
+        assert_eq!(
+            query("MapZoom", landscape(), Value::Int(3)),
+            Value::Int(15)
+        );
+        assert_eq!(query("MapZoom", landscape(), Value::Int(4)), Value::Nil);
+        assert_eq!(query("MapZoom", landscape(), Value::Int(-1)), Value::Nil);
+
+        assert_eq!(
+            query("BottomOpen", landscape(), Value::Int(0)),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            query("TopOpen", landscape(), Value::Int(0)),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            query("LeftOpen", landscape(), Value::Int(0)),
+            Value::Int(0)
+        );
+        assert_eq!(
+            query("RightOpen", landscape(), Value::Int(0)),
+            Value::Int(0)
+        );
+
+        assert_eq!(
+            query("Title", Value::String("Head".into()), Value::Nil),
+            Value::String("Default Title".into())
+        );
+        assert_eq!(
+            query("SaveGame", Value::String("Head".into()), Value::Nil),
+            Value::Int(0)
+        );
+        assert_eq!(
+            query("NetworkGame", Value::String("Head".into()), Value::Nil),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            query("MissionAccess", Value::String("Head".into()), Value::Nil),
+            Value::String(String::new())
+        );
+        assert_eq!(
+            query("StandardCrew", Value::String("Player1".into()), Value::Nil),
+            Value::Nil,
+            "C4ID_None is C4V_Any"
+        );
+        assert_eq!(
+            query("MapZoom", Value::String(String::new()), Value::Nil),
+            Value::Int(10),
+            "an empty section is the no-section form"
+        );
+        assert_eq!(
+            query("mapzoom", landscape(), Value::Nil),
+            Value::Nil,
+            "runtime compiler names are case-sensitive"
+        );
+        assert_eq!(
+            query(
+                "StartupPlayerCount",
+                Value::String("Head".into()),
+                Value::Nil,
+            ),
+            Value::Nil,
+            "StartupPlayerCount belongs to Game.Parameters, not C4Scenario"
+        );
+        assert_eq!(
+            query(
+                "Volcano",
+                Value::String("Weather".into()),
+                Value::Nil,
+            ),
+            Value::Nil
+        );
+        assert_eq!(
+            query(
+                "Volcano",
+                Value::String("Disasters".into()),
+                Value::Nil,
+            ),
+            Value::Int(0)
+        );
     }
 
     #[test]
