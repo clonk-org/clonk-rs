@@ -4329,6 +4329,34 @@ fn gold_rush_real_anvil_forges_a_wire_roll_from_its_metal_contents() {
 }
 
 #[test]
+fn knights_bow_trajectory_runs_through_shipped_arc_cos_calls() {
+    // KNIG::FireBowAt computes both candidate launch angles with ArcCos
+    // (Knight.c4d/Script.c:1454-1455). These coordinates reach both calls
+    // and then fail the shipped +/-120 aiming gate, before bow/equipment
+    // callbacks can affect this registration probe.
+    let mut engine = load_installed_scenario("Knights.c4f/Camp.c4s", 0);
+    let knight = engine
+        .spawn_object(
+            SpawnConfig::new("KNIG")
+                .with_position(Vector2::new(100, 100))
+                .with_loaded(true),
+        )
+        .expect("shipped KNIG spawns");
+    let index = engine.find_object_index(knight).expect("KNIG index");
+
+    assert_eq!(
+        engine
+            .call_object_function(
+                index,
+                "FireBowAt",
+                vec![Value::Int(150), Value::Int(150), Value::Bool(false)],
+            )
+            .expect("shipped Knight bow trajectory completes"),
+        Value::Nil
+    );
+}
+
+#[test]
 fn knights_lance_rank_five_target_collision_matches_cpp() {
     // The shipped attached lance reads its rider's C4ObjectInfo rank while
     // aiming, then its phase callback punches prey at vertex one

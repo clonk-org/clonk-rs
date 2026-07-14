@@ -9804,6 +9804,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Min", min_func);
     script.register_host_function("Max", max_func);
     script.register_host_function("Sqrt", sqrt_func);
+    script.register_host_function("ArcSin", arc_sin_func);
+    script.register_host_function("ArcCos", arc_cos_func);
     script.register_host_function("Angle", angle_func);
     script.register_host_function("Mod", modulo);
     script.register_host_function("GetMass", get_mass);
@@ -14356,6 +14358,46 @@ fn sqrt_func(args: &[Value]) -> Result<Value, RuntimeError> {
     // C++ implementation does: sqrt, then adjusts for rounding
     let result = (value as f64).sqrt() as i32;
     Ok(Value::Int(result))
+}
+
+fn inverse_trig_func(
+    args: &[Value],
+    function: &str,
+    inverse: fn(f64) -> f64,
+) -> Result<Value, RuntimeError> {
+    let value = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        function,
+        "value",
+    )?;
+    let radius = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        function,
+        "radius",
+    )?;
+    // FnArcSin/FnArcCos (C4Script.cpp:3276-3298): the comparison is
+    // deliberately signed (negative values within the domain remain
+    // valid), followed by double-precision libm in degrees and
+    // floor(angle + 0.5).
+    if radius == 0 || value > radius {
+        return Ok(Value::Int(0));
+    }
+    let angle = inverse(f64::from(value) / f64::from(radius))
+        * 180.0
+        * std::f64::consts::FRAC_1_PI;
+    Ok(Value::Int(round_inverse_angle(angle)))
+}
+
+fn round_inverse_angle(angle: f64) -> i32 {
+    (angle + 0.5).floor() as i32
+}
+
+fn arc_sin_func(args: &[Value]) -> Result<Value, RuntimeError> {
+    inverse_trig_func(args, "ArcSin", f64::asin)
+}
+
+fn arc_cos_func(args: &[Value]) -> Result<Value, RuntimeError> {
+    inverse_trig_func(args, "ArcCos", f64::acos)
 }
 
 /// FnAngle (C4Script.cpp:3255-3280): the position-to-position angle in
@@ -34417,6 +34459,8 @@ mod tests {
         "Angle",
         "AnyContainer",
         "AppendCommand",
+        "ArcCos",
+        "ArcSin",
         "AssignVar",
         "AsyncRandom",
         "BitAnd",
@@ -35292,6 +35336,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn arc_sin_and_arc_cos_match_cpp_inverse_trig_and_rounding() {
+        // FnArcSin/FnArcCos use double-precision libm in degrees and round
+        // with floor(angle + 0.5), including for negative angles
+        // (C4Script.cpp:3276-3298). The 10_000-radius pairs straddle the
+        // 30.5-degree boundary on either side.
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script(
+                r#"
+                func Probe() {
+                    return [
+                        ArcCos(0, 100), ArcCos(100, 100),
+                        ArcCos(-100, 100), ArcCos(50, 100),
+                        ArcCos(7, 0), ArcCos(101, 100),
+                        ArcSin(50, 100), ArcSin(7, 0),
+                        ArcCos(8617, 10000), ArcCos(8616, 10000),
+                        ArcSin(-5075, 10000), ArcSin(-5076, 10000)
+                    ];
+                }
+                "#,
+            )
+            .expect("inverse-trig probe compiles");
+
+        assert_eq!(
+            engine.call("Probe", &[]).expect("inverse trig runs"),
+            Value::Array(vec![
+                Value::Int(90),
+                Value::Int(0),
+                Value::Int(180),
+                Value::Int(60),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(30),
+                Value::Int(0),
+                Value::Int(30),
+                Value::Int(31),
+                Value::Int(-30),
+                Value::Int(-31),
+            ])
+        );
+        assert_eq!(round_inverse_angle(30.5), 31);
+        assert_eq!(round_inverse_angle(-30.5), -30);
     }
 
     fn empty_state() -> Value {
