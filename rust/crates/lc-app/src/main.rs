@@ -17009,9 +17009,13 @@ impl GameApp {
                     .replace(player, Some(IngameMenuState::rules_menu(&rules)));
             }
             MenuAction::ActivateNewPlayer => {
-                return Err(classic_ingame_menu_child_error(
-                    ClassicIngameMenuChild::NewPlayer,
-                ));
+                let conditions = self.main_menu_conditions_for(player);
+                if conditions.is_league || conditions.player_count >= conditions.max_players {
+                    return Ok(());
+                }
+                let players = self.available_runtime_player_files();
+                self.ingame_menu
+                    .replace(player, Some(IngameMenuState::new_player_menu(&players)));
             }
             MenuAction::ActivateOptions => {
                 self.ingame_menu.replace(
@@ -17085,18 +17089,53 @@ impl GameApp {
                 // treats surrendered players as inactive. Network games route
                 // this through the next complete control tick.
                 if self.network.is_some() {
-                    return Err(classic_ingame_menu_child_error(
-                        ClassicIngameMenuChild::NetworkSurrender,
-                    ));
-                } else if let Err(err) = self.engine.set_player_surrendered(self.local_owner, true)
-                {
+                    let tick = self.local_control_submission_tick();
+                    if let Some(Err(error)) = self
+                        .network
+                        .as_ref()
+                        .map(|network| network.submit_surrender_player(tick, player))
+                    {
+                        tracing::warn!(player, %error, "failed to queue player surrender");
+                    }
+                } else if let Err(err) = self.engine.set_player_surrendered(player, true) {
                     tracing::error!(error = ?err, "surrender failed");
                 }
             }
             MenuAction::Part => {
-                return Err(classic_ingame_menu_child_error(
-                    ClassicIngameMenuChild::ClientDisconnect,
-                ));
+                // Non-league Part clears C4Network2, which changes the live
+                // round to local control instead of aborting it
+                // (C4MainMenu.cpp:820-831; C4GameControl.cpp:93-127).
+                if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                    if let Some(local_client_id) = self
+                        .network
+                        .as_ref()
+                        .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                    {
+                        let league_self_kick = self.network_is_league
+                            && self
+                                .engine
+                                .players()
+                                .any(|player| player.at_client().get() == local_client_id);
+                        if league_self_kick {
+                            if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                                network.submit_vote(
+                                    lc_engine::VOTE_TYPE_KICK,
+                                    true,
+                                    local_client_id,
+                                )
+                            }) {
+                                tracing::warn!(%error, "failed to submit league self-kick vote");
+                            }
+                        } else {
+                            if let Some(Err(error)) =
+                                self.network.as_ref().map(NetworkManager::graceful_part)
+                            {
+                                tracing::warn!(%error, "failed to notify host before parting");
+                            }
+                            self.change_network_control_to_local(local_client_id);
+                        }
+                    }
+                }
             }
             MenuAction::SaveSlot(slot) => {
                 // "Save:Game:<file>:<title>" -> Game.QuickSave + reopen the
@@ -17168,11 +17207,15 @@ impl GameApp {
                     ClassicIngameMenuChild::RuleInfo(id),
                 ));
             }
-            MenuAction::JoinPlayer(file) => {
-                return Err(classic_ingame_menu_child_error(
-                    ClassicIngameMenuChild::JoinPlayer(file),
-                ));
-            }
+            MenuAction::JoinPlayer(file) => match self.submit_runtime_network_player(&file) {
+                Ok(()) => {
+                    self.status_text = format!("Joining player {file}");
+                }
+                Err(error) => {
+                    tracing::warn!(%file, %error, "runtime network player join failed");
+                    self.status_text = format!("Unable to join player: {error}");
+                }
+            },
             MenuAction::SelectTeam(team) => {
                 self.engine.mark_team_selection_pending(player)?;
                 if self.network.is_some() {
@@ -18222,6 +18265,17 @@ impl GameApp {
         }
         {
             for event in events {
+                // C4GameControlNetwork::HandleControlPkt executes synchronized
+                // controls immediately while network control is frozen in the
+                // lobby (src/C4GameControlNetwork.cpp:558-588).
+                let frozen_lobby = self.network_lobby.is_some() || self.classic_host_lobby_active();
+                if frozen_lobby && matches!(&event, NetworkEvent::ScheduledSync { .. }) {
+                    let NetworkEvent::ScheduledSync { tick, controls } = event else {
+                        unreachable!("ScheduledSync was matched above");
+                    };
+                    self.apply_ready_controls(tick, controls)?;
+                    continue;
+                }
                 if self.classic_host_lobby_active() {
                     let boundary = match &event {
                         NetworkEvent::PeerConnected { client_id: 0, .. } => None,
@@ -22325,11 +22379,9 @@ impl GameApp {
                         )
                     {
                         if let Some((identifier, title)) = selected_scenario.as_ref() {
-                            // HEAD's prepared-host route predates the exact
-                            // classic-lobby projection. Keep its selected
-                            // scenario and admission state alive as an
-                            // internal lobby model; rendering this state still
-                            // fails closed at `reject_generic_startup_view`.
+                            // Keep the prepared host's selected scenario and
+                            // admission state alive in the established network
+                            // lobby projection.
                             let mut lobby = NetworkLobbyState::new(
                                 manager.local_client_id(),
                                 self.player_name.clone(),
@@ -22403,10 +22455,27 @@ impl GameApp {
                         }
                     }
                 } else {
-                    let boundary =
-                        "classic client lobby app integration is not available after connecting";
-                    tracing::error!(%boundary, "refusing to open generic Rust network lobby");
-                    self.status_text = format!("Network lobby unavailable: {boundary}");
+                    let lobby = NetworkLobbyState::new(
+                        manager.local_client_id(),
+                        self.player_name.clone(),
+                        false,
+                    );
+                    self.network_game_advertiser = None;
+                    self.advertised_game_reference = None;
+                    self.network_max_players = initial_network_max_players(Some(&mode));
+                    self.network_is_league = initial_network_is_league(Some(&mode));
+                    self.network_control_clock = initial_network_control_clock(Some(&mode));
+                    self.control_clients = initial_control_clients(Some(&manager), Some(&mode));
+                    self.network_mode = Some(mode);
+                    self.network = Some(manager);
+                    self.network_control_running = false;
+                    self.network_team_assignment = None;
+                    self.network_lobby = Some(lobby);
+                    self.classic_host_lobby = None;
+                    self.host_lobby_countdown = None;
+                    self.mode = AppMode::Menu;
+                    self.open_network_lobby();
+                    return;
                 }
                 self.classic_host_lobby = None;
                 self.network = None;
@@ -27048,6 +27117,9 @@ impl GameApp {
     ) -> Result<()> {
         self.preflight_startup_presentation()?;
         self.preflight_visible_gui_overlay_resources()?;
+        if self.startup_view != StartupView::MainMenu {
+            return Ok(());
+        }
         let Some(fonts) = self.native_startup_fonts.as_deref() else {
             return Ok(());
         };
@@ -27388,7 +27460,10 @@ impl GameApp {
     }
 
     fn reject_generic_startup_view(&self) -> Result<()> {
-        if self.startup_view != StartupView::NetworkLobby || self.classic_host_lobby.is_some() {
+        if self.startup_view != StartupView::NetworkLobby
+            || self.classic_host_lobby.is_some()
+            || self.network_lobby.is_some()
+        {
             return Ok(());
         }
         Err(anyhow::Error::new(report_classic_parity_boundary(
@@ -43480,9 +43555,9 @@ mod tests {
     }
 
     #[test]
-    fn connected_client_still_fails_before_generic_lobby() {
+    fn connected_client_enters_exact_classic_lobby() {
         let mut app = new_menu_app(640, 480);
-        let (manager, _events) = NetworkManager::test_stub();
+        let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
         let (sender, receiver) = mpsc::channel();
         sender
             .send(Ok((
@@ -43499,11 +43574,20 @@ mod tests {
             purpose: StartupNetworkPurpose::Join,
         });
         app.poll_startup_network_connection();
-        assert!(app.network.is_none());
-        assert!(app.network_mode.is_none());
+        assert!(app.network.is_some());
+        assert!(matches!(app.network_mode, Some(NetworkMode::Client(_))));
         assert!(app.classic_host_lobby.is_none());
-        assert_ne!(app.startup_view, StartupView::NetworkLobby);
-        assert!(app.status_text.contains("classic client lobby"));
+        assert_eq!(app.startup_view, StartupView::NetworkLobby);
+        let lobby = app
+            .network_lobby
+            .as_ref()
+            .expect("connected client lobby model");
+        assert_eq!(lobby.local_client_id, 7);
+        assert!(!lobby.is_host);
+        assert!(app.status_text.is_empty());
+        assert!(!app.network_control_running);
+        assert!(app.control_clients.contains(7));
+        assert!(!app.control_clients.is_activated(7));
     }
 
     // C4StartupScenSelDlg::OnSearchBarEnter -> UpdateList filters the
@@ -45082,13 +45166,22 @@ mod tests {
         // The classic renderer remains fail-closed when its required assets
         // are absent; NetworkLobby must not re-enable the old generic pane.
         let mut assetless = new_menu_app(320, 200);
+        Arc::get_mut(&mut assetless.assets)
+            .expect("frontend assets are app-owned")
+            .startup_dialog_images
+            .remove("GUIButtonDown.png")
+            .expect("classic fixture includes the pressed button sheet");
         assetless.startup_view = StartupView::NetworkLobby;
         assetless.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
         let mut untouched = vec![0x3c; 320 * 200 * 4];
         let error = assetless
             .render(&mut untouched)
             .expect_err("assetless lobby refuses generic fallback");
-        assert!(error.to_string().contains("refusing generic Rust fallback"));
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::GlobalGuiBootstrapResources { issues })
+                if issues.contains(&ClassicGuiBootstrapIssue::missing("GUIButtonDown"))
+        ));
         assert!(untouched.iter().all(|byte| *byte == 0x3c));
         reset_cached_app_paths();
     }
@@ -47395,7 +47488,7 @@ mod tests {
     }
 
     #[test]
-    fn network_lobby_empty_status_boundary_precedes_matching_cache() {
+    fn network_lobby_empty_status_replays_matching_exact_cache() {
         let mut app = new_classic_menu_app(320, 200);
         app.startup_view = StartupView::NetworkLobby;
         app.network_lobby = Some(NetworkLobbyState::new(7, "Host".to_string(), true));
@@ -47412,19 +47505,8 @@ mod tests {
         });
         let mut frame = vec![0x73; 320 * 200 * 4];
 
-        let error = app
-            .render(&mut frame)
-            .expect_err("generic network lobby must fail before matching-cache replay");
-        assert!(matches!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::StartupScreen {
-                view: StartupView::NetworkLobby,
-            })
-        ));
-        assert!(
-            frame.iter().all(|byte| *byte == 0x73),
-            "generic lobby must not copy cached or freshly composed pixels"
-        );
+        assert!(!app.render(&mut frame).expect("exact lobby cache replays"));
+        assert_eq!(frame, cached);
         assert_eq!(
             app.menu_frame_cache
                 .as_ref()
@@ -47434,15 +47516,8 @@ mod tests {
         );
 
         let mut native_frame = vec![0x47; 960 * 600 * 4];
-        let native_error = app
-            .render_native_main_menu_text(&mut native_frame, 960, 600)
-            .expect_err("generic lobby must also fail before native main-menu text");
-        assert!(matches!(
-            native_error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::StartupScreen {
-                view: StartupView::NetworkLobby,
-            })
-        ));
+        app.render_native_main_menu_text(&mut native_frame, 960, 600)
+            .expect("network lobby has no deferred main-menu text pass");
         assert!(native_frame.iter().all(|byte| *byte == 0x47));
     }
 
@@ -47790,12 +47865,9 @@ mod tests {
             (MenuAction::ActivateHostility, "Hostility"),
             (MenuAction::ActivateTeamSelection, "TeamSelection"),
             (MenuAction::ActivateObserver, "Observer"),
-            (MenuAction::ActivateNewPlayer, "NewPlayer"),
             (MenuAction::ActivateHostDisconnect, "HostDisconnect"),
-            (MenuAction::Part, "ClientDisconnect"),
             (MenuAction::GoalInfo("GOAL".into()), "GoalInfo"),
             (MenuAction::RuleInfo("RULE".into()), "RuleInfo"),
-            (MenuAction::JoinPlayer("Player.c4p".into()), "JoinPlayer"),
         ];
         for (action, label) in unsupported {
             app.ingame_menu.clear();
@@ -47811,14 +47883,6 @@ mod tests {
             assert!(app.ingame_menu.is_none());
             assert!(app.status_text.is_empty());
         }
-
-        let (manager, _events) = NetworkManager::test_stub();
-        app.network = Some(manager);
-        let error = app
-            .apply_ingame_menu_action(MenuAction::Surrender)
-            .expect_err("network surrender must fail instead of setting status");
-        assert!(error.to_string().contains("NetworkSurrender"));
-        assert!(app.status_text.is_empty());
     }
 
     #[test]
@@ -56508,6 +56572,41 @@ mod tests {
 
         app.process_network_events()
             .expect("execute frozen activation");
+
+        assert!(app.control_clients.is_activated(3));
+        assert!(app.network_sync.scheduled.is_empty());
+    }
+
+    #[test]
+    fn frozen_classic_host_lobby_executes_synchronized_activation_immediately() {
+        // The exact classic-host projection is the same frozen GS_Lobby
+        // control state as the client lobby (src/C4GameControlNetwork.cpp:558-588).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        install_test_classic_host_lobby(&mut app);
+        app.control_clients.register(3, false, false);
+        event_tx
+            .send(NetworkEvent::ScheduledSync {
+                tick: 0,
+                controls: vec![NetworkControl::ClientUpdate(
+                    lc_engine::ClientUpdateControlData {
+                        update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                        client_id: 3,
+                        data: 1,
+                        by_client: 0,
+                    },
+                )],
+            })
+            .expect("queue frozen classic-host activation");
+
+        app.process_network_events()
+            .expect("execute frozen classic-host activation");
 
         assert!(app.control_clients.is_activated(3));
         assert!(app.network_sync.scheduled.is_empty());
