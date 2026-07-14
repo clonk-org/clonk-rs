@@ -17166,6 +17166,12 @@ impl Engine {
         .with_network_game(self.network_game)
         .with_control_host(self.control_host, Rc::clone(&self.player_info_updates))
         .with_local_players(local_players)
+        .with_player_info_ids(
+            self.round_results
+                .players
+                .iter()
+                .map(|player| player.player_info_id),
+        )
         .with_mission_access(Rc::clone(&self.mission_access))
         .with_scoreboard(Rc::clone(&self.scoreboard))
         .with_scoreboard_presentations(Rc::clone(&self.scoreboard_presentations))
@@ -25628,6 +25634,13 @@ impl Engine {
                     preserve_ids,
                 } => {
                     let _ = self.load_scenario_section(&name, flags, preserve_ids)?;
+                }
+                PlayerCommand::AddEvaluationData {
+                    player_info_id,
+                    text,
+                } => {
+                    self.round_results
+                        .add_custom_evaluation_string(&text, player_info_id);
                 }
                 PlayerCommand::SetPlayerTeam {
                     player_id,
@@ -39314,6 +39327,13 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
     .with_sky_adjustment(sky_adjustment)
     .with_scoreboard(Rc::new(RefCell::new(snapshot.hud.scoreboard.clone())))
     .with_local_players(snapshot.hud.local_players.iter().copied())
+    .with_player_info_ids(
+        snapshot
+            .round_results
+            .players
+            .iter()
+            .map(|player| player.player_info_id),
+    )
 }
 
 fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {

@@ -72,6 +72,39 @@ impl RoundResultsState {
             && self.custom_evaluation_strings.is_empty()
             && self.players.is_empty()
     }
+
+    /// `C4RoundResults::AddCustomEvaluationString` and its per-player
+    /// counterpart (C4RoundResults.cpp:94-98,346-359). Global entries are
+    /// separate GUI lines (`|`); entries in one player row use exactly three
+    /// spaces. `FnAddEvaluationData` validates the text and player-info ID
+    /// before reaching this state mutation.
+    pub fn add_custom_evaluation_string(&mut self, text: &str, player_info_id: i32) {
+        if player_info_id == 0 {
+            if !self.custom_evaluation_strings.is_empty() {
+                self.custom_evaluation_strings.push('|');
+            }
+            self.custom_evaluation_strings.push_str(text);
+            return;
+        }
+
+        let index = self
+            .players
+            .iter()
+            .position(|player| player.player_info_id == player_info_id)
+            .unwrap_or_else(|| {
+                let index = self.players.len();
+                self.players.push(RoundResultsPlayerState {
+                    player_info_id,
+                    ..RoundResultsPlayerState::default()
+                });
+                index
+            });
+        let player = &mut self.players[index];
+        if !player.custom_evaluation_strings.is_empty() {
+            player.custom_evaluation_strings.push_str("   ");
+        }
+        player.custom_evaluation_strings.push_str(text);
+    }
 }
 
 const fn invalid_score() -> i32 {
@@ -132,5 +165,25 @@ mod tests {
             ..RoundResultsState::default()
         }
         .is_empty());
+    }
+
+    #[test]
+    fn custom_evaluation_strings_keep_cpp_global_and_player_separators() {
+        let mut results = RoundResultsState::default();
+        results.add_custom_evaluation_string("Global one", 0);
+        results.add_custom_evaluation_string("Global two", 0);
+        results.add_custom_evaluation_string("Kills: 3", 17);
+        results.add_custom_evaluation_string("Deaths: 1", 17);
+        results.add_custom_evaluation_string("Other", 9);
+
+        assert_eq!(results.custom_evaluation_strings, "Global one|Global two");
+        assert_eq!(
+            results
+                .players
+                .iter()
+                .map(|player| (player.player_info_id, player.custom_evaluation_strings.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(17, "Kills: 3   Deaths: 1"), (9, "Other")]
+        );
     }
 }

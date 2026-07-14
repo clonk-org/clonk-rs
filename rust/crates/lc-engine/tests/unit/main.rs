@@ -19294,6 +19294,70 @@ func CrewSelection()
     }
 
     #[test]
+    fn shipped_hazard_teams_do_evaluation_records_both_player_lines() {
+        // Execute Hazard's actual TEAM::DoEvaluation body while bypassing
+        // its scoreboard-heavy Initialize. Player number and player-info id
+        // deliberately match here: their distinction is covered by CLO-221,
+        // while this regression isolates AddEvaluationData and its ordered
+        // accumulation of the two shipped calls.
+        let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../content");
+        let group = lc_resources::Group::open(
+            content.join("Hazard.c4d/Goals.c4d/Teams.c4d"),
+        )
+        .expect("open shipped Hazard Teams definition");
+        let resource = ResourceDefinitionData::load(&group)
+            .expect("load shipped Hazard Teams definition");
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(
+                PlayerConfig::new(1, "Hazard evaluator").with_player_info_id(1),
+            )
+            .expect("Hazard evaluator registers");
+        engine
+            .register_definition(
+                Definition::from_resource(&resource)
+                    .expect("shipped Hazard Teams script compiles"),
+            )
+            .expect("shipped Hazard Teams definition registers");
+
+        let teams = engine
+            .spawn_object(
+                SpawnConfig::new("TEAM")
+                    .with_loaded(true)
+                    .with_local_vars(HashMap::from([
+                        (
+                            "aKill".to_string(),
+                            Value::Array(vec![Value::Nil, Value::Int(12)]),
+                        ),
+                        (
+                            "aDeath".to_string(),
+                            Value::Array(vec![Value::Nil, Value::Int(3)]),
+                        ),
+                    ])),
+            )
+            .expect("loaded Hazard Teams goal spawns without Initialize");
+        let teams_index = engine
+            .find_object_index(teams)
+            .expect("Hazard Teams goal exists");
+        engine
+            .call_object_function(teams_index, "DoEvaluation", vec![Value::Int(1)])
+            .expect("shipped Hazard Teams DoEvaluation completes");
+
+        let result = engine
+            .round_results
+            .players
+            .iter()
+            .find(|result| result.player_info_id == 1)
+            .expect("Hazard evaluator has a round-results row");
+        assert_eq!(
+            result.custom_evaluation_strings,
+            "{{PIWP}}$Kills$: 12   {{KAMB}}$Death$: 3"
+        );
+    }
+
+    #[test]
     fn legacy_state_without_round_results_restores_cpp_defaults() {
         let state = Engine::new().capture_state();
         let mut value = serde_json::to_value(state)

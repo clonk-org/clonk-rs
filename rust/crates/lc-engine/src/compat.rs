@@ -438,6 +438,12 @@ pub enum PlayerCommand {
         /// can preserve them while replacing the active section world.
         preserve_ids: Vec<ObjectId>,
     },
+    /// `C4RoundResults::AddCustomEvaluationString`, keyed by persistent
+    /// C4PlayerInfo ID (zero is the global evaluation text).
+    AddEvaluationData {
+        player_info_id: i32,
+        text: String,
+    },
     /// `FnSetPlayerTeam`'s complete, callback-approved team transition.
     /// The host has already made every field visible to the still-running
     /// VM; this payload lets the authoritative engine repeat the transition
@@ -1030,6 +1036,10 @@ pub struct HostWorldContext {
     sectors: RefCell<Option<Rc<SectorMap>>>,
     transfer_zones: Rc<Vec<TransferZoneState>>,
     players: Rc<HashMap<i32, PlayerState>>,
+    /// IDs present in `Game.PlayerInfos`, including retained infos whose
+    /// runtime C4Player has already retired. ID zero is the global-results
+    /// sentinel and is never stored here.
+    player_info_ids: Rc<HashSet<i32>>,
     player_order: Rc<Vec<i32>>,
     teams: Rc<Vec<TeamInfo>>,
     local_players: Rc<HashSet<i32>>,
@@ -1132,6 +1142,7 @@ impl Default for HostWorldContext {
             sectors: RefCell::new(None),
             transfer_zones: Rc::new(Vec::new()),
             players: Rc::new(HashMap::new()),
+            player_info_ids: Rc::new(HashSet::new()),
             player_order: Rc::new(Vec::new()),
             teams: Rc::new(Vec::new()),
             local_players: Rc::new(HashSet::new()),
@@ -1308,6 +1319,11 @@ impl HostWorldContext {
         let order = Rc::new(order);
         let mut player_ids: Vec<_> = players.keys().copied().collect();
         player_ids.sort_unstable();
+        let player_info_ids = players
+            .values()
+            .map(|player| player.player_info_id)
+            .filter(|id| *id != 0)
+            .collect();
         Self {
             objects: Rc::new(lookup),
             master_order: Rc::clone(&order),
@@ -1328,6 +1344,7 @@ impl HostWorldContext {
             transfer_zones: Rc::new(transfer_zones),
             local_players: Rc::new(player_ids.iter().copied().collect()),
             player_order: Rc::new(player_ids),
+            player_info_ids: Rc::new(player_info_ids),
             players: Rc::new(players),
             teams: Rc::new(Vec::new()),
             crew_selection: Rc::new(crew_selection),
@@ -1416,6 +1433,20 @@ impl HostWorldContext {
     {
         self.local_players = Rc::new(players.into_iter().collect());
         self
+    }
+
+    pub(crate) fn with_player_info_ids<I>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = i32>,
+    {
+        let mut known = self.player_info_ids.as_ref().clone();
+        known.extend(ids.into_iter().filter(|id| *id != 0));
+        self.player_info_ids = Rc::new(known);
+        self
+    }
+
+    fn player_info_id_known(&self, id: i32) -> bool {
+        self.player_info_ids.contains(&id)
     }
 
     pub(crate) fn with_teams(mut self, teams: Rc<Vec<TeamInfo>>) -> Self {
@@ -8971,6 +9002,38 @@ fn sort_scoreboard(args: &[Value]) -> Result<Value, RuntimeError> {
     })))
 }
 
+/// `FnAddEvaluationData` (C4Script.cpp:5915-5924): append one nonempty
+/// scenario string to either the global evaluation text (ID zero) or the row
+/// identified by the persistent C4PlayerInfo ID.
+fn add_evaluation_data(args: &[Value]) -> Result<Value, RuntimeError> {
+    // Native parameter conversion happens before the body, so convert both
+    // slots before taking the empty-text early return.
+    let text = parse_optional_string(args.first(), "AddEvaluationData", "text")?;
+    let player_info_id = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "AddEvaluationData",
+        "player info ID",
+    )?;
+    let Some(text) = text.filter(|text| !text.is_empty()) else {
+        return Ok(Value::Bool(false));
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if player_info_id != 0 && !context.world.player_info_id_known(player_info_id) {
+            return Ok(Value::Bool(false));
+        }
+        context.record_player_command(PlayerCommand::AddEvaluationData {
+            player_info_id,
+            text,
+        });
+        Ok(Value::Bool(true))
+    })
+}
+
 fn c4id_to_definition(id: i32) -> Option<String> {
     if id == 0 {
         return None;
@@ -10398,6 +10461,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("C4Id", c4_id);
     script.register_host_function("ScoreboardCol", scoreboard_col);
     script.register_host_function("SortScoreboard", sort_scoreboard);
+    script.register_host_function("AddEvaluationData", add_evaluation_data);
     script.register_host_function("Pow", pow_func);
     script.register_host_function("BoundBy", bound_by_func);
     script.register_host_function("Sin", sin_func);
@@ -36532,6 +36596,7 @@ mod tests {
         "ActIdle",
         "AddCommand",
         "AddEffect",
+        "AddEvaluationData",
         "AddMenuItem",
         "AddMessage",
         "AddVertex",
@@ -37372,6 +37437,68 @@ mod tests {
         assert_eq!(result.expect("remote show call succeeds"), Value::Bool(true));
         assert_eq!(scoreboard.borrow().show_count(), 0);
         assert!(presentations.borrow_mut().drain().is_empty());
+    }
+
+    #[test]
+    fn add_evaluation_data_validates_info_ids_and_preserves_append_order() {
+        let player = PlayerState {
+            id: 7,
+            player_info_id: 41,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            [player],
+        )
+        .with_player_info_ids([57]);
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            assert_eq!(add_evaluation_data(&[])?, Value::Bool(false));
+            assert_eq!(
+                add_evaluation_data(&[Value::String(String::new()), Value::Int(41)])?,
+                Value::Bool(false)
+            );
+            assert_eq!(
+                add_evaluation_data(&[Value::String("unknown".into()), Value::Int(99)])?,
+                Value::Bool(false)
+            );
+            assert_eq!(
+                add_evaluation_data(&[Value::String("global".into())])?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                add_evaluation_data(&[Value::String("kills".into()), Value::Int(41)])?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                add_evaluation_data(&[Value::String("kills".into()), Value::Int(41)])?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                add_evaluation_data(&[Value::String("retired".into()), Value::Int(57)])?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                add_evaluation_data(&[Value::String("   ".into()), Value::Int(41)])?,
+                Value::Bool(true),
+                "whitespace-only strings are nonempty in C++"
+            );
+            Ok::<Value, RuntimeError>(Value::Nil)
+        });
+        result.expect("AddEvaluationData calls succeed");
+        assert!(matches!(
+            outcome.player_commands.as_slice(),
+            [
+                PlayerCommand::AddEvaluationData { player_info_id: 0, text },
+                PlayerCommand::AddEvaluationData { player_info_id: 41, text: first },
+                PlayerCommand::AddEvaluationData { player_info_id: 41, text: duplicate },
+                PlayerCommand::AddEvaluationData { player_info_id: 57, text: retired },
+                PlayerCommand::AddEvaluationData { player_info_id: 41, text: whitespace },
+            ] if text == "global"
+                && first == "kills"
+                && duplicate == "kills"
+                && retired == "retired"
+                && whitespace == "   "
+        ));
     }
 
     #[test]
