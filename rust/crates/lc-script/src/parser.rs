@@ -1399,14 +1399,62 @@ impl<'a> Parser<'a> {
 
         if is_assign {
             let op_token = self.consume()?;
-            // Validate the left side is a legal assignment target
-            let target = Self::expression_to_assignment_target(left.clone(), &op_token)?;
+            let op_symbol = op_symbol.ok_or_else(|| {
+                ParseError::new(
+                    "missing assignment operator",
+                    op_token.line,
+                    op_token.column,
+                )
+            })?;
+            let operator = match op_symbol {
+                Symbol::Equal => "=",
+                Symbol::PlusEqual => "+=",
+                Symbol::MinusEqual => "-=",
+                Symbol::StarEqual => "*=",
+                Symbol::SlashEqual => "/=",
+                Symbol::PercentEqual => "%=",
+                Symbol::AndEqual => "&=",
+                Symbol::OrEqual => "|=",
+                Symbol::XorEqual => "^=",
+                Symbol::LeftShiftEqual => "<<=",
+                Symbol::RightShiftEqual => ">>=",
+                Symbol::ConcatEqual => "..=",
+                Symbol::QuestionQuestionEqual => "??=",
+                _ => {
+                    return Err(ParseError::new(
+                        format!("unknown assignment operator {op_symbol:?}"),
+                        op_token.line,
+                        op_token.column,
+                    ))
+                }
+            };
+            // C4Aul's precedence parser can emit AB_Set after a value result;
+            // AB_Set rejects that result as a non-reference at runtime. Keep
+            // this narrow to the `!`-led shape whose old speculative parse
+            // incorrectly swallowed the assignment into the unary operand.
+            let target = match Self::expression_to_assignment_target(left.clone(), &op_token) {
+                Ok(target) => target,
+                Err(_) if matches!(&left, Expr::Unary(UnaryOp::Not, _)) => {
+                    AssignmentTarget::InvalidValue {
+                        expression: Box::new(left.clone()),
+                        operator,
+                    }
+                }
+                Err(error) => return Err(error),
+            };
 
             // Right-associative: a = b = c parses as a = (b = c)
             let value = self.parse_assignment()?;
 
+            if matches!(&target, AssignmentTarget::InvalidValue { .. }) {
+                // The target's reference conversion always fails, so compound
+                // arithmetic never runs. Store only the raw RHS to preserve
+                // C++'s single left-then-right evaluation before that error.
+                return Ok(Expr::Assignment(target, Box::new(value)));
+            }
+
             // Desugar compound assignments: a += b becomes a = a + b
-            let final_value = match op_symbol.unwrap() {
+            let final_value = match op_symbol {
                 Symbol::Equal => value,
                 Symbol::PlusEqual => Expr::Binary(Box::new(left), BinaryOp::Add, Box::new(value)),
                 Symbol::MinusEqual => Expr::Binary(Box::new(left), BinaryOp::Sub, Box::new(value)),
@@ -1436,7 +1484,7 @@ impl<'a> Parser<'a> {
                 }
                 _ => {
                     return Err(ParseError::new(
-                        format!("unknown assignment operator {:?}", op_symbol.unwrap()),
+                        format!("unknown assignment operator {op_symbol:?}"),
                         op_token.line,
                         op_token.column,
                     ))
@@ -1677,11 +1725,6 @@ impl<'a> Parser<'a> {
         self.speculative_tokens = Some(Vec::new());
     }
 
-    fn commit_speculative(&mut self) {
-        // Clear speculative tokens without restoring
-        self.speculative_tokens = None;
-    }
-
     fn reset_speculative(&mut self) {
         if let Some(tokens) = self.speculative_tokens.take() {
             // A peeked-but-unconsumed token is NOT in the speculative
@@ -1704,57 +1747,22 @@ impl<'a> Parser<'a> {
         if self.consume_if_symbol(Symbol::Bang)?.is_some()
             || self.consume_if_identifier("not")?.is_some()
         {
-            // Only use speculative parsing if we're not already in speculative mode
-            // This avoids nested speculative parsing (e.g., !!x or nested expressions)
-            let already_speculative = self.speculative_tokens.is_some();
-
-            if !already_speculative {
-                // Speculative parse: try parsing assignment expression as operand
-                // This allows patterns like: !x = y  →  !(x = y)
-                // While preserving precedence for: !a + b  →  (!a) + b
-
-                // NOTE: ! token already consumed, speculative mode tracks only the operand tokens
+            // Preserve the existing speculative preflight for lexer-error
+            // recovery until CLO-111 makes oversized integer tokens
+            // rewindable. Its AST must never choose precedence: replay and
+            // parse only the unary operand, so `!x = y` stays `(!x) = y`.
+            if self.speculative_tokens.is_none() {
                 self.begin_speculative();
-
-                // Try parsing an assignment expression
-                let result = self.parse_assignment();
-
-                // Ensure we always clean up speculative mode
-                let final_result = match result {
-                    Ok(expr @ Expr::Assignment(..)) => {
-                        // The DYNB pattern: !x = y parses as !(x = y).
-                        self.commit_speculative();
-                        Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)))
-                    }
-                    Ok(_) => {
-                        // C4Aul precedence: `!` binds its unary operand only
-                        // (`!A && B` is `(!A) && B`). Committing the full
-                        // assignment-level parse here swallowed binary
-                        // chains into the negation — the Cowboy Riding
-                        // guard fired without evaluating its second
-                        // operand (the rider 1425 SetAction recursion).
-                        self.reset_speculative();
-                        match self.parse_unary() {
-                            Ok(operand) => Ok(Expr::Unary(UnaryOp::Not, Box::new(operand))),
-                            Err(e) => Err(e),
-                        }
-                    }
-                    Err(e) => {
-                        // Parse failed, reset and try normal precedence (skip ! handling since already consumed)
-                        self.reset_speculative();
-                        match self.parse_unary() {
-                            Ok(operand) => Ok(Expr::Unary(UnaryOp::Not, Box::new(operand))),
-                            Err(_) => Err(e), // Return original error
-                        }
-                    }
+                let speculative_result = self.parse_assignment();
+                self.reset_speculative();
+                return match self.parse_unary() {
+                    Ok(expr) => Ok(Expr::Unary(UnaryOp::Not, Box::new(expr))),
+                    Err(error) => Err(speculative_result.err().unwrap_or(error)),
                 };
-
-                return final_result;
-            } else {
-                // Already in speculative mode, use normal precedence
-                let expr = self.parse_unary()?;
-                return Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)));
             }
+
+            let expr = self.parse_unary()?;
+            return Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)));
         }
         if self.consume_if_symbol(Symbol::Minus)?.is_some() {
             let expr = self.parse_unary()?;
@@ -2296,17 +2304,30 @@ fn static_const_multi_declarators_parse() {
         }
     }
 
-    // The DYNB pattern keeps its special parse: `!x = y` -> `!(x = y)`.
+    // C4Aul binds `!` before `=`: the assignment targets the resulting
+    // boolean value and fails its reference conversion at runtime.
     #[test]
-    fn bang_assignment_still_parses_as_negated_assignment() {
+    fn bang_assignment_targets_the_negated_value() {
         let script = parse_script(r#"func Test() { var x; return !x = 42; }"#).expect("parses");
         let function = &script.functions[0];
         let Stmt::Return(Some(expr)) = &function.body[1] else {
             panic!("expected return with expression");
         };
         assert!(
-            matches!(expr, Expr::Unary(UnaryOp::Not, inner) if matches!(&**inner, Expr::Assignment(..))),
-            "expected !(x = 42), got {expr:?}"
+            matches!(
+                expr,
+                Expr::Assignment(
+                    AssignmentTarget::InvalidValue {
+                        expression: left,
+                        operator: "="
+                    },
+                    value
+                )
+                    if matches!(&**left, Expr::Unary(UnaryOp::Not, operand)
+                        if matches!(&**operand, Expr::Variable(name) if name == "x"))
+                        && matches!(&**value, Expr::Literal(Literal::Int(42)))
+            ),
+            "expected (!x) = 42 shape, got {expr:?}"
         );
     }
 

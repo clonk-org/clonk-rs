@@ -1224,8 +1224,7 @@ impl<'a> Vm<'a> {
                 Ok(ControlFlow::Normal)
             }
             Stmt::Assignment { target, value } => {
-                let evaluated = self.evaluate(value, env, depth)?;
-                self.assign_target(env, target, evaluated)?;
+                self.evaluate_assignment(target, value, env, depth)?;
                 Ok(ControlFlow::Normal)
             }
             Stmt::Return(expr) => {
@@ -1914,12 +1913,7 @@ impl<'a> Vm<'a> {
                 self.eval_property(proplist, name)
             }
             Expr::Assignment(target, value_expr) => {
-                // Evaluate the value first
-                let value = self.evaluate(value_expr, env, depth)?;
-                // Assign to target
-                self.assign_target(env, target, value.clone())?;
-                // Return the assigned value (assignment is an expression)
-                Ok(value)
+                self.evaluate_assignment(target, value_expr, env, depth)
             }
             Expr::Comma(exprs) => {
                 // Comma operator: evaluate all expressions left-to-right, return the last value
@@ -2783,6 +2777,36 @@ impl<'a> Vm<'a> {
         }
     }
 
+    fn evaluate_assignment(
+        &self,
+        target: &AssignmentTarget,
+        value_expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        if let AssignmentTarget::InvalidValue {
+            expression,
+            operator,
+        } = target
+        {
+            let left = self.evaluate(expression, env, depth)?;
+            if *operator == "??=" && !matches!(left, Value::Nil) {
+                return Ok(left);
+            }
+            self.evaluate(value_expr, env, depth)?;
+            return Err(RuntimeError::new(format!(
+                "operator \"{operator}\" left side: got \"{}\", but expected \"&\"!",
+                left.type_name()
+            )));
+        }
+
+        // Preserve the existing RHS-first behavior for valid targets; this
+        // issue only restores AB_Set's invalid-value path.
+        let value = self.evaluate(value_expr, env, depth)?;
+        self.assign_target(env, target, value.clone())?;
+        Ok(value)
+    }
+
     fn assignment_target_value(
         &self,
         env: &mut Environment,
@@ -2890,6 +2914,9 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<LValueRef, RuntimeError> {
         match target {
+            AssignmentTarget::InvalidValue { .. } => Err(RuntimeError::new(
+                "this assignment target is a value, not a reference",
+            )),
             AssignmentTarget::Variable(name) => env
                 .lvalue(name)
                 .or_else(|| self.global_variable_cell(name).map(LValueRef::Cell))

@@ -274,6 +274,12 @@ pub enum ForInit {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssignmentTarget {
+    /// A value expression accepted syntactically by C4Aul's precedence
+    /// parser but rejected by AB_Set's runtime reference conversion.
+    InvalidValue {
+        expression: Box<Expr>,
+        operator: &'static str,
+    },
     Variable(String),
     Property(Box<AssignmentTarget>, String),
     Index(Box<AssignmentTarget>, Box<Expr>), // arr[index] as lvalue

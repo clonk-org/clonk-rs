@@ -1,4 +1,134 @@
-// Test for assignment expressions as operands to unary NOT operator
+// Test C4Aul assignment precedence around the unary NOT operator.
+
+use lc_script::{Engine, Script, Value};
+
+fn global_value(globals: &lc_script::GlobalVariables, name: &str) -> Value {
+    globals
+        .borrow()
+        .get(name)
+        .map(|value| value.borrow().clone())
+        .unwrap_or(Value::Nil)
+}
+
+#[test]
+fn bang_assignment_errors_after_rhs_without_writing_or_continuing() {
+    // C4AulParse.cpp:2702-2966 leaves `!x` as the assignment's lhs;
+    // AB_Set then evaluates the chained rhs before rejecting bool -> reference
+    // (C4AulExec.cpp:858-864). The failed outer write must not reach x.
+    let source = r#"
+        #strict 2
+        static x;
+        static y;
+        static rhs_calls;
+        static after;
+        func Mark() { ++rhs_calls; return 42; }
+        func Test() { !x = y = Mark(); after = 1; }
+    "#;
+    let script = Script::compile(source).expect("runtime-invalid assignment still compiles");
+    assert!(
+        script.parse_diagnostics().is_empty(),
+        "the C++-valid expression must not be quarantined: {:?}",
+        script.parse_diagnostics()
+    );
+
+    let globals = lc_script::new_global_variables();
+    let mut engine = Engine::new();
+    engine.set_global_variables(globals.clone());
+    engine.add_script(script);
+    engine.adopt_statics_into_globals();
+
+    let error = engine
+        .call("Test", &[])
+        .expect_err("assigning through the bool result of !x must fail");
+    assert!(
+        error.to_string().contains("operator \"=\" left side")
+            && error.to_string().contains("bool"),
+        "unexpected runtime error: {error}"
+    );
+
+    assert_eq!(
+        global_value(&globals, "x"),
+        Value::Nil,
+        "the invalid outer lhs is never written"
+    );
+    assert_eq!(
+        global_value(&globals, "y"),
+        Value::Int(42),
+        "the nested rhs assignment runs"
+    );
+    assert_eq!(
+        global_value(&globals, "rhs_calls"),
+        Value::Int(1),
+        "the rhs runs exactly once"
+    );
+    assert_eq!(
+        global_value(&globals, "after"),
+        Value::Nil,
+        "the runtime error aborts the function"
+    );
+}
+
+#[test]
+fn bang_compound_assignment_remains_a_runtime_reference_error() {
+    let source = r#"
+        #strict 2
+        static x;
+        static rhs_calls;
+        static after;
+        func Mark() { ++rhs_calls; return 42; }
+        func Test() { !x += Mark(); after = 1; }
+    "#;
+    let script = Script::compile(source).expect("runtime-invalid compound assignment compiles");
+    assert!(
+        script.parse_diagnostics().is_empty(),
+        "the C++-valid compound expression must not be quarantined: {:?}",
+        script.parse_diagnostics()
+    );
+
+    let globals = lc_script::new_global_variables();
+    let mut engine = Engine::new();
+    engine.set_global_variables(globals.clone());
+    engine.add_script(script);
+    engine.adopt_statics_into_globals();
+
+    let error = engine
+        .call("Test", &[])
+        .expect_err("the bool result of !x is not a += reference");
+    assert!(
+        error.to_string().contains("operator \"+=\" left side")
+            && error.to_string().contains("bool"),
+        "unexpected runtime error: {error}"
+    );
+    assert_eq!(global_value(&globals, "x"), Value::Nil);
+    assert_eq!(global_value(&globals, "rhs_calls"), Value::Int(1));
+    assert_eq!(global_value(&globals, "after"), Value::Nil);
+}
+
+#[test]
+fn bang_nil_coalescing_assignment_short_circuits_before_reference_check() {
+    let source = r#"
+        #strict 2
+        static x;
+        static rhs_calls;
+        func Mark() { ++rhs_calls; return 42; }
+        func Test() { return !x ??= Mark(); }
+    "#;
+    let script = Script::compile(source).expect("nil-coalescing assignment compiles");
+    assert!(script.parse_diagnostics().is_empty());
+
+    let globals = lc_script::new_global_variables();
+    let mut engine = Engine::new();
+    engine.set_global_variables(globals.clone());
+    engine.add_script(script);
+    engine.adopt_statics_into_globals();
+
+    assert_eq!(
+        engine.call("Test", &[]).expect("non-nil lhs skips AB_Set"),
+        Value::Bool(true)
+    );
+    assert_eq!(global_value(&globals, "x"), Value::Nil);
+    assert_eq!(global_value(&globals, "rhs_calls"), Value::Nil);
+}
 
 #[test]
 fn dynb_line_57_pattern() {
@@ -25,7 +155,7 @@ fn dynb_line_57_pattern() {
 
 #[test]
 fn not_with_assignment() {
-    // Simple: !x = y should parse as !(x = y)
+    // Simple: !x = y is C++-valid syntax with a runtime-invalid bool lhs.
     let source = r#"func Test() { var x; if(!x = 42) return 1; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {

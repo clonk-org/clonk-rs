@@ -4,8 +4,8 @@ use crate::support::real_scenario::{
     join_local_player, join_local_player_on_team, load_installed_scenario, load_tutorial,
 };
 use lc_engine::{
-    math, ActionState, AudioCommand, Definition, Direction, EffectVarValue, JoinPlayerConfig,
-    ObjectId, ObjectUpdate, PlayerStatus, SpawnConfig, Vector2, COM_DIG, COM_DOWN,
+    math, ActionState, AudioCommand, Definition, Direction, EffectVarValue, EngineError,
+    JoinPlayerConfig, ObjectId, ObjectUpdate, PlayerStatus, SpawnConfig, Vector2, COM_DIG, COM_DOWN,
     COM_MENU_SELECT, COM_RELEASE_OFFSET, COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON,
     OWNER_NONE,
 };
@@ -4168,6 +4168,38 @@ fn gold_rush_scorching_timer_returns_kill_before_playing_sound() {
             .all(|effect| effect.name != "IntScorching"),
         "return (FX_Execute_Kill, Sound(...)) returns the kill code after playing the sound"
     );
+}
+
+#[test]
+fn gold_rush_incomplete_dynamite_box_ignition_errors_before_exploding() {
+    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+    let dynamite_box = engine
+        .spawn_object(
+            SpawnConfig::new("DYNB")
+                .with_position(Vector2::new(320, 120))
+                .with_construction(FULL_CON / 2),
+        )
+        .expect("the incomplete shipped dynamite box spawns");
+    let index = engine
+        .find_object_index(dynamite_box)
+        .expect("dynamite box index");
+    let error = engine
+        .call_object_function(index, "Ignition", Vec::new())
+        .expect_err("assigning through `!iCount` must fail like C++");
+    let EngineError::Script { source, .. } = error else {
+        panic!("unexpected ignition error: {error}");
+    };
+    assert!(
+        source.to_string().contains("operator \"=\" left side")
+            && source.to_string().contains("bool"),
+        "unexpected script error: {source}"
+    );
+
+    let box_after = engine
+        .object_snapshot(dynamite_box)
+        .expect("the failed ignition must not remove or explode the box");
+    assert!(box_after.status.is_active());
+    assert_eq!(box_after.construction, FULL_CON / 2);
 }
 
 #[test]
