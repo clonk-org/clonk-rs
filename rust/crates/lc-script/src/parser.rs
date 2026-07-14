@@ -849,8 +849,8 @@ impl<'a> Parser<'a> {
         if self.consume_if_keyword(Keyword::Var)?.is_some() {
             return self.parse_var_decl();
         }
-        if let Some(return_token) = self.consume_if_keyword(Keyword::Return)? {
-            return self.parse_return(return_token);
+        if self.consume_if_keyword(Keyword::Return)?.is_some() {
+            return self.parse_return();
         }
         if self.consume_if_keyword(Keyword::Break)?.is_some() {
             self.expect_symbol(Symbol::Semicolon, "expected ';' after break")?;
@@ -922,30 +922,18 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_return(&mut self, return_token: Token) -> Result<Stmt, ParseError> {
-        // return_token is the consumed Return keyword token
-
+    fn parse_return(&mut self) -> Result<Stmt, ParseError> {
         // Handle: return;
         if self.consume_if_symbol(Symbol::Semicolon)?.is_some() {
             return Ok(Stmt::Return(None));
         }
 
-        // Check if lparen immediately follows return (no space)
-        // Use column numbers to detect: if return ends at col X and ( starts at col X+6 ("return".len())
-        // then they're adjacent (no space)
-        let lparen_immediately_follows = if self.check_symbol(Symbol::LParen)? {
-            let lparen_token = self.peek()?;
-            // "return" is 6 characters, so if lparen is at return_col + 6, they're adjacent
-            return_token.column + 6 == lparen_token.column
-        } else {
-            false
-        };
-
         // Before #strict 2, C4Aul has a compatibility-only multi-parameter
-        // `return(first, unused, ...)` form when `(` immediately follows the
-        // keyword. All parameters execute, but the first one is returned
-        // (C4AulParse.cpp Parse_Statement's multi_params_hack).
-        if lparen_immediately_follows && self.strict_level < 2 {
+        // `return (first, unused, ...)` form. Tokenization discards whitespace,
+        // so adjacency to `return` is irrelevant. Probe for a top-level comma
+        // first: a single `(expr)` must stay on the normal expression path so
+        // suffixes such as `return (1 + 1) * 3` keep parsing.
+        if self.strict_level < 2 && self.parenthesized_return_has_top_level_comma()? {
             self.consume()?; // consume '('
 
             // Handle: return(); (empty parentheses)
@@ -1004,6 +992,46 @@ impl<'a> Parser<'a> {
         let expr = self.parse_expression()?;
         self.expect_symbol(Symbol::Semicolon, "expected ';' after return value")?;
         Ok(Stmt::Return(Some(expr)))
+    }
+
+    fn parenthesized_return_has_top_level_comma(&mut self) -> Result<bool, ParseError> {
+        if !self.check_symbol(Symbol::LParen)? {
+            return Ok(false);
+        }
+
+        self.begin_speculative();
+        let result = (|| {
+            self.consume()?; // outer '('
+            let mut paren_depth = 1usize;
+            let mut bracket_depth = 0usize;
+            let mut brace_depth = 0usize;
+
+            loop {
+                let token = self.consume()?;
+                match token.kind {
+                    TokenKind::Symbol(Symbol::LParen) => paren_depth += 1,
+                    TokenKind::Symbol(Symbol::RParen) if paren_depth == 1 => return Ok(false),
+                    TokenKind::Symbol(Symbol::RParen) => paren_depth -= 1,
+                    TokenKind::Symbol(Symbol::LBracket) => bracket_depth += 1,
+                    TokenKind::Symbol(Symbol::RBracket) => {
+                        bracket_depth = bracket_depth.saturating_sub(1)
+                    }
+                    TokenKind::Symbol(Symbol::LBrace) => brace_depth += 1,
+                    TokenKind::Symbol(Symbol::RBrace) => {
+                        brace_depth = brace_depth.saturating_sub(1)
+                    }
+                    TokenKind::Symbol(Symbol::Comma)
+                        if paren_depth == 1 && bracket_depth == 0 && brace_depth == 0 =>
+                    {
+                        return Ok(true)
+                    }
+                    TokenKind::Eof => return Ok(false),
+                    _ => {}
+                }
+            }
+        })();
+        self.reset_speculative();
+        result
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {

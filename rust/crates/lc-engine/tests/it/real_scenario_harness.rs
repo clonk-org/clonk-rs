@@ -4039,6 +4039,52 @@ func RetargetFade() { return FadeOut(10, 5, this()); }
 }
 
 #[test]
+fn gold_rush_scorching_timer_returns_kill_before_playing_sound() {
+    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+    assert!(engine.debug_global_has_function("SetScorching"));
+    assert!(engine.debug_global_has_function("FxIntScorchingTimer"));
+    engine
+        .register_definition(
+            Definition::from_script(
+                "SCRH",
+                "Scorching driver",
+                "#strict\nfunc StartScorching() { return SetScorching(this()); }",
+            )
+            .expect("scorching driver compiles"),
+        )
+        .expect("scorching driver registers");
+    let target = engine
+        .spawn_object(SpawnConfig::new("SCRH").with_position(Vector2::new(320, 120)))
+        .expect("scorching driver spawns");
+    let index = engine.find_object_index(target).expect("driver exists");
+    engine
+        .call_object_function(index, "StartScorching", Vec::new())
+        .expect("the shipped SetScorching helper runs");
+    assert!(
+        engine
+            .object_snapshot(target)
+            .expect("driver remains active")
+            .effects
+            .iter()
+            .any(|effect| effect.name == "IntScorching"),
+        "SetScorching installs the shipped smoke effect"
+    );
+
+    for _ in 0..10 {
+        engine.tick().expect("the scorching timer approaches");
+    }
+    assert!(
+        engine
+            .object_snapshot(target)
+            .expect("driver remains active")
+            .effects
+            .iter()
+            .all(|effect| effect.name != "IntScorching"),
+        "return (FX_Execute_Kill, Sound(...)) returns the kill code after playing the sound"
+    );
+}
+
+#[test]
 fn gold_rush_real_anvil_forges_a_wire_roll_from_its_metal_contents() {
     let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
     let mut forge_action = ActionState::new("Forge");

@@ -3,7 +3,7 @@
 use lc_script::{Engine, Value};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 #[test]
@@ -32,7 +32,71 @@ fn legacy_adjacent_return_parentheses_returns_first_and_evaluates_the_rest() {
 }
 
 #[test]
-fn strict2_adjacent_return_parentheses_uses_the_normal_comma_operator() {
+fn legacy_spaced_return_parentheses_returns_first_and_evaluates_the_rest() {
+    let evaluation_order = Arc::new(Mutex::new(Vec::new()));
+    let observed_order = Arc::clone(&evaluation_order);
+    let mut engine = Engine::new();
+    engine.register_host_function("Mark", move |args| {
+        let Some(Value::Int(marker)) = args.first() else {
+            panic!("Mark requires one integer")
+        };
+        observed_order.lock().expect("order lock").push(*marker);
+        Ok(Value::Int(*marker))
+    });
+    engine
+        .load_script(
+            "#strict\n\
+             func One() { return (Mark(1), Mark(2)); }\n\
+             func Zero() { return (0, Mark(7)); }",
+        )
+        .expect("legacy spaced return syntax compiles");
+
+    assert_eq!(
+        engine.call("One", &[]).expect("One executes"),
+        Value::Int(1),
+        "tokenizer whitespace must not disable the legacy return-parameter path"
+    );
+    assert_eq!(
+        *evaluation_order.lock().expect("order lock"),
+        vec![1, 2],
+        "both operands execute from left to right"
+    );
+
+    evaluation_order.lock().expect("order lock").clear();
+    assert_eq!(
+        engine.call("Zero", &[]).expect("Zero executes"),
+        Value::Int(0),
+        "the first falsy value remains the return value"
+    );
+    assert_eq!(
+        *evaluation_order.lock().expect("order lock"),
+        vec![7],
+        "the unused return parameter still executes exactly once"
+    );
+}
+
+#[test]
+fn comma_nested_inside_a_call_does_not_trigger_legacy_return_parameters() {
+    let mut engine = Engine::new();
+    engine.register_host_function("Second", |args| {
+        Ok(args.get(1).cloned().unwrap_or(Value::Nil))
+    });
+    engine
+        .load_script("#strict\nfunc Probe() { return (Second(1, 2)); }")
+        .expect("nested call comma compiles");
+
+    assert_eq!(
+        engine.call("Probe", &[]).expect("Probe executes"),
+        Value::Int(2),
+        "only commas directly inside the return parentheses are legacy parameters"
+    );
+}
+
+#[test]
+fn strict2_does_not_enter_the_legacy_multi_parameter_return_path() {
+    // C++ rejects this because it has no generic comma operator. CLO-149
+    // tracks removing Rust's invented comma-expression grammar; CLO-99 only
+    // restores the pre-strict-2 return compatibility path and must not widen it.
     let mut engine = Engine::new();
     engine
         .load_script("#strict 2\nfunc Probe() { return(0, 42); }")
@@ -41,7 +105,7 @@ fn strict2_adjacent_return_parentheses_uses_the_normal_comma_operator() {
     assert_eq!(
         engine.call("Probe", &[]).expect("Probe executes"),
         Value::Int(42),
-        "#strict 2 has no legacy multi-parameter return hack"
+        "#strict 2 must not enter the first-value legacy return path"
     );
 }
 
