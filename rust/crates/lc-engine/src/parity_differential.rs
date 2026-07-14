@@ -26,7 +26,7 @@ use lc_script::{c4_hash_combine, cnv_fn, C4VType, Value as ScriptValue};
 use serde_json::Value;
 
 use crate::landscape::{Landscape, LandscapeRasterState, PixelGrid};
-use crate::compat::LandscapeOperation;
+use crate::compat::{cos_func, sin_func, LandscapeOperation};
 use crate::material::{consume_corrosion_effect_rng, evaluate_corrosion, MaterialSet};
 use crate::math::{
     fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed,
@@ -550,6 +550,42 @@ fn parity_differential_matches_cpp_golden() {
             "cos",
             i(e, "cos"),
             angle.cos_deg().val() as i64,
+        );
+    }
+
+    // 4b. Script FnSin/FnCos default radius: omitted integer parameters are
+    // zero-filled and only precision is corrected to one (C4Script.cpp:
+    // 3224-3238).
+    for (idx, e) in golden["script_trig_default_radius"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let deg = i(e, "deg") as i32;
+        let ScriptValue::Int(rust_sin) =
+            sin_func(&[ScriptValue::Int(deg)]).expect("script Sin oracle input succeeds")
+        else {
+            panic!("script Sin did not return int")
+        };
+        let ScriptValue::Int(rust_cos) =
+            cos_func(&[ScriptValue::Int(deg)]).expect("script Cos oracle input succeeds")
+        else {
+            panic!("script Cos did not return int")
+        };
+        expect_eq(
+            "script_trig_default_radius",
+            idx,
+            "sin",
+            i(e, "sin"),
+            i64::from(rust_sin),
+        );
+        expect_eq(
+            "script_trig_default_radius",
+            idx,
+            "cos",
+            i(e, "cos"),
+            i64::from(rust_cos),
         );
     }
 

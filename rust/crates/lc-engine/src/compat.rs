@@ -14343,7 +14343,7 @@ fn bound_by_func(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(value.clamp(min, max)))
 }
 
-fn sin_func(args: &[Value]) -> Result<Value, RuntimeError> {
+pub(crate) fn sin_func(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() || args.len() > 3 {
         return Err(RuntimeError::new(
             "Sin expects 1-3 arguments: angle, radius, precision",
@@ -14364,7 +14364,7 @@ fn sin_func(args: &[Value]) -> Result<Value, RuntimeError> {
     let radius = if args.len() > 1 {
         match &args[1] {
             Value::Int(v) => *v,
-            Value::Nil => 1,
+            Value::Nil => 0,
             other => {
                 return Err(RuntimeError::new(format!(
                     "Sin: expected int for radius, got {}",
@@ -14373,7 +14373,7 @@ fn sin_func(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
     } else {
-        1
+        0
     };
 
     let precision = if args.len() > 2 {
@@ -14404,7 +14404,7 @@ fn sin_func(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(result))
 }
 
-fn cos_func(args: &[Value]) -> Result<Value, RuntimeError> {
+pub(crate) fn cos_func(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() || args.len() > 3 {
         return Err(RuntimeError::new(
             "Cos expects 1-3 arguments: angle, radius, precision",
@@ -14425,7 +14425,7 @@ fn cos_func(args: &[Value]) -> Result<Value, RuntimeError> {
     let radius = if args.len() > 1 {
         match &args[1] {
             Value::Int(v) => *v,
-            Value::Nil => 1,
+            Value::Nil => 0,
             other => {
                 return Err(RuntimeError::new(format!(
                     "Cos: expected int for radius, got {}",
@@ -14434,7 +14434,7 @@ fn cos_func(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
     } else {
-        1
+        0
     };
 
     let precision = if args.len() > 2 {
@@ -33812,6 +33812,21 @@ mod tests {
             cos_func(&[Value::Int(300), Value::Int(1)]).expect("Cos succeeds"),
             Value::Int(0)
         );
+
+        // Missing/nil integer parameters convert to zero. FnSin/FnCos only
+        // default precision, not radius (C4Script.cpp:3224-3238).
+        for args in [
+            vec![Value::Int(90)],
+            vec![Value::Int(90), Value::Nil],
+        ] {
+            assert_eq!(sin_func(&args).expect("Sin succeeds"), Value::Int(0));
+        }
+        for args in [
+            vec![Value::Int(0)],
+            vec![Value::Int(0), Value::Nil],
+        ] {
+            assert_eq!(cos_func(&args).expect("Cos succeeds"), Value::Int(0));
+        }
 
         for angle in -359..=359 {
             for radius in -100..=100 {

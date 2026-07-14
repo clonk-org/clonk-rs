@@ -1171,6 +1171,19 @@ int main()
     arr_end();
     printf(",\n");
 
+    // 4b. FnSin/FnCos with omitted radius. C4Script.cpp:3224-3238 only
+    // defaults precision; the zero-filled radius therefore reaches fixtoi.
+    arr_begin("script_trig_default_radius");
+    const int script_degs[] = {0, 30, 90, 180, 270, 359, -45};
+    for (int d : script_degs)
+    {
+        sep();
+        printf("{\"deg\":%d,\"sin\":%d,\"cos\":%d}",
+               d, fixtoi(Sin(itofix(d)), 0), fixtoi(Cos(itofix(d)), 0));
+    }
+    arr_end();
+    printf(",\n");
+
     // 5. RNG: the C++ LCG. FixedRandom(seed) then Random(range) sequence.
     {
         const uint32_t seed = 12345;
