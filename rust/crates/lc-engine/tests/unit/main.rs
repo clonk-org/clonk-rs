@@ -7042,6 +7042,7 @@ public func Arm()
 public func FxGunControlControlDig(pTarget, iNumber)
 {
   // this() is the command target (the gun): mark it and echo the args.
+  Enter(FindObject(BOXX));
   SetR(9);
   EffectVar(0, pTarget, iNumber) = 7;
   return(1);
@@ -7061,6 +7062,7 @@ public func FxGunControlControlDig(pTarget, iNumber)
         let mut engine = Engine::new();
         engine.register_definition(clonk)?;
         engine.register_definition(gun)?;
+        engine.register_definition(simple_definition("BOXX"))?;
         engine.register_player(PlayerConfig::new(1, "Test"))?;
 
         let clonk_id = engine
@@ -7074,6 +7076,9 @@ public func FxGunControlControlDig(pTarget, iNumber)
         let gun_id = engine
             .spawn_object(SpawnConfig::new("GUNX").with_owner(1))
             .expect("spawn gun");
+        let box_id = engine
+            .spawn_object(SpawnConfig::new("BOXX"))
+            .expect("spawn box");
         engine.set_crew_cursor(1, Some(clonk_id))?;
 
         let armed = engine.execute_context_menu(gun_id, "Arm")?;
@@ -7090,6 +7095,16 @@ public func FxGunControlControlDig(pTarget, iNumber)
             snapshot.object(gun_id).expect("gun present").rotation,
             9,
             "Fx callback ran with the command target as context"
+        );
+        assert_eq!(
+            snapshot.object(gun_id).expect("gun present").container,
+            Some(box_id),
+            "omitted-subject Enter uses the effect command target's this()"
+        );
+        assert_eq!(
+            snapshot.object(clonk_id).expect("clonk present").container,
+            None,
+            "the affected effect carrier is not FnEnter's cthr->Obj"
         );
         let clonk_effects = &snapshot.object(clonk_id).expect("clonk present").effects;
         assert_eq!(
@@ -29024,6 +29039,266 @@ public func Stash(pItem, pBox) { Enter(pBox, pItem); return(1); }
         );
     }
 
+    #[test]
+    fn script_enter_runs_the_cpp_veto_transfer_and_callback_pipeline() -> Result<(), EngineError> {
+        let driver_script = r#"#strict
+public func Put(pTarget, pObject) { return(Enter(pTarget, pObject)); }
+"#;
+        let item_script = r#"#strict
+local callback_order, entrance_target, departure_target, shadow_called;
+
+// A foreign Enter(target, object) must not redispatch by name on object.
+public func Enter(pTarget) { shadow_called = 1; return(0); }
+
+public func Mark(iStep)
+{
+  callback_order = callback_order * 10 + iStep;
+  return(1);
+}
+
+protected func RejectEntrance(pTarget)
+{
+  return(GetID(pTarget) == DENY);
+}
+
+protected func Departure(pOldContainer)
+{
+  Mark(2);
+  departure_target = pOldContainer;
+  return(1);
+}
+
+protected func Entrance(pContainer)
+{
+  Mark(4);
+  entrance_target = pContainer;
+  return(1);
+}
+"#;
+        let old_script = r#"#strict
+protected func Ejection(pObject) { pObject->Mark(1); return(1); }
+"#;
+        let new_script = r#"#strict
+protected func Collection2(pObject) { pObject->Mark(3); return(1); }
+"#;
+        let self_veto_script = r#"#strict
+public func TryEnter(pTarget) { return(Enter(pTarget)); }
+protected func RejectEntrance(pTarget) { return(1); }
+"#;
+
+        let mut engine = Engine::with_seed(3);
+        engine.register_definition(Definition::from_script("DRV1", "Driver", driver_script)?)?;
+        let mut item = Definition::from_script("ITEM", "Item", item_script)?;
+        item.set_c4_callback_convention(true);
+        engine.register_definition(item)?;
+        let mut old = Definition::from_script("OLD1", "Old", old_script)?;
+        old.set_c4_callback_convention(true);
+        engine.register_definition(old)?;
+        let mut new = Definition::from_script("NEW1", "New", new_script)?;
+        new.set_c4_callback_convention(true);
+        engine.register_definition(new)?;
+        engine.register_definition(simple_definition("DENY"))?;
+        let mut self_veto = Definition::from_script("VETO", "Veto", self_veto_script)?;
+        self_veto.set_c4_callback_convention(true);
+        engine.register_definition(self_veto)?;
+
+        let driver = engine.spawn_object(SpawnConfig::new("DRV1"))?;
+        let old = engine.spawn_object(SpawnConfig::new("OLD1"))?;
+        let new = engine.spawn_object(SpawnConfig::new("NEW1").with_controller(7))?;
+        let deny = engine.spawn_object(SpawnConfig::new("DENY"))?;
+        let self_veto = engine.spawn_object(SpawnConfig::new("VETO"))?;
+        let item = engine.spawn_object(
+            SpawnConfig::new("ITEM")
+                .with_container(old)
+                .with_controller(2),
+        )?;
+        let driver_index = engine.find_object_index(driver).expect("driver exists");
+
+        let self_veto_index = engine
+            .find_object_index(self_veto)
+            .expect("self-veto object exists");
+        assert_eq!(
+            engine.call_object_function(
+                self_veto_index,
+                "TryEnter",
+                vec![object_reference_value(new)],
+            )?,
+            Value::Bool(false),
+            "one-argument Enter defaults the subject to the calling object"
+        );
+        let self_veto_index = engine
+            .find_object_index(self_veto)
+            .expect("self-veto object exists");
+        assert_eq!(engine.objects[self_veto_index].state.container, None);
+
+        assert_eq!(
+            engine.call_object_function(
+                driver_index,
+                "Put",
+                vec![object_reference_value(deny), object_reference_value(item)],
+            )?,
+            Value::Bool(false),
+            "RejectEntrance vetoes before the old containment is changed"
+        );
+        let item_index = engine.find_object_index(item).expect("item exists");
+        assert_eq!(engine.objects[item_index].state.container, Some(old));
+        assert_eq!(
+            engine.objects[item_index]
+                .state
+                .local_vars
+                .get("callback_order"),
+            Some(&Value::Nil),
+            "a veto fires no transfer or entry callbacks"
+        );
+
+        let driver_index = engine.find_object_index(driver).expect("driver exists");
+        assert_eq!(
+            engine.call_object_function(
+                driver_index,
+                "Put",
+                vec![object_reference_value(new), object_reference_value(item)],
+            )?,
+            Value::Bool(true)
+        );
+        let item_index = engine.find_object_index(item).expect("item exists");
+        let item_state = &engine.objects[item_index].state;
+        assert_eq!(item_state.container, Some(new));
+        assert_eq!(item_state.controller, 7, "nonliving entrants adopt control");
+        assert_eq!(
+            item_state.local_vars.get("callback_order"),
+            Some(&Value::Int(1234)),
+            "Ejection -> Departure -> Collection2 -> Entrance"
+        );
+        assert_eq!(
+            item_state.local_vars.get("departure_target"),
+            Some(&object_reference_value(old))
+        );
+        assert_eq!(
+            item_state.local_vars.get("entrance_target"),
+            Some(&object_reference_value(new))
+        );
+        assert_eq!(
+            item_state.local_vars.get("shadow_called"),
+            Some(&Value::Nil),
+            "the explicit subject's script function named Enter is not called"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn script_enter_uses_the_post_collection_container_and_fails_quietly_on_cycles(
+    ) -> Result<(), EngineError> {
+        let driver_script = r#"#strict
+public func Put(pTarget, pObject) { return(Enter(pTarget, pObject)); }
+"#;
+        let item_script = r#"#strict
+local entrance_count, entrance_target;
+
+public func Enter(pTarget) { return(0); }
+protected func RejectEntrance(pTarget) { return(0); }
+protected func Entrance(pContainer)
+{
+  entrance_count += 1;
+  entrance_target = pContainer;
+  return(1);
+}
+"#;
+        let redirect_script = r#"#strict
+local destination;
+public func Configure(pDestination) { destination = pDestination; return(1); }
+protected func Collection2(pObject)
+{
+  Enter(destination, pObject);
+  return(1);
+}
+"#;
+
+        let mut engine = Engine::with_seed(3);
+        engine.register_definition(Definition::from_script("DRV1", "Driver", driver_script)?)?;
+        let mut item = Definition::from_script("ITEM", "Item", item_script)?;
+        item.set_c4_callback_convention(true);
+        engine.register_definition(item)?;
+        let mut redirect = Definition::from_script("RDIR", "Redirect", redirect_script)?;
+        redirect.set_c4_callback_convention(true);
+        engine.register_definition(redirect)?;
+        engine.register_definition(simple_definition("DEST"))?;
+        engine.register_definition(simple_definition("CHLD"))?;
+
+        let driver = engine.spawn_object(SpawnConfig::new("DRV1"))?;
+        let redirect = engine.spawn_object(SpawnConfig::new("RDIR"))?;
+        let destination = engine.spawn_object(SpawnConfig::new("DEST"))?;
+        let item = engine.spawn_object(SpawnConfig::new("ITEM"))?;
+        let redirect_index = engine
+            .find_object_index(redirect)
+            .expect("redirect exists");
+        engine.call_object_function(
+            redirect_index,
+            "Configure",
+            vec![object_reference_value(destination)],
+        )?;
+
+        let driver_index = engine.find_object_index(driver).expect("driver exists");
+        assert_eq!(
+            engine.call_object_function(
+                driver_index,
+                "Put",
+                vec![
+                    object_reference_value(redirect),
+                    object_reference_value(item),
+                ],
+            )?,
+            Value::Bool(true),
+            "a callback-driven move after the initial link does not undo Enter's success"
+        );
+        let item_index = engine.find_object_index(item).expect("item exists");
+        let item_state = &engine.objects[item_index].state;
+        assert_eq!(item_state.container, Some(destination));
+        assert_eq!(
+            item_state.local_vars.get("entrance_target"),
+            Some(&object_reference_value(destination)),
+            "the outer Entrance callback receives the container left by Collection2"
+        );
+        assert_eq!(
+            item_state.local_vars.get("entrance_count"),
+            Some(&Value::Int(2)),
+            "the nested Enter and then the original Enter each run Entrance"
+        );
+
+        let parent = engine.spawn_object(SpawnConfig::new("ITEM"))?;
+        let child = engine.spawn_object(SpawnConfig::new("CHLD").with_container(parent))?;
+        let driver_index = engine.find_object_index(driver).expect("driver exists");
+        assert_eq!(
+            engine.call_object_function(
+                driver_index,
+                "Put",
+                vec![object_reference_value(child), object_reference_value(parent)],
+            )?,
+            Value::Bool(false),
+            "a containment cycle is a quiet false"
+        );
+        let parent_index = engine.find_object_index(parent).expect("parent exists");
+        let child_index = engine.find_object_index(child).expect("child exists");
+        assert_eq!(engine.objects[parent_index].state.container, None);
+        assert_eq!(engine.objects[child_index].state.container, Some(parent));
+
+        let deleted = engine.spawn_object(SpawnConfig::new("DEST"))?;
+        engine.apply_object_update(
+            deleted,
+            ObjectUpdate::new().with_status(ObjectStatus::Deleted),
+        )?;
+        let driver_index = engine.find_object_index(driver).expect("driver exists");
+        assert_eq!(
+            engine.call_object_function(
+                driver_index,
+                "Put",
+                vec![object_reference_value(deleted), object_reference_value(parent)],
+            )?,
+            Value::Bool(false),
+            "a deleted target returns false"
+        );
+        Ok(())
+    }
+
     // FnLocal returns a live reference (C4Script.cpp:3423-3433): a write
     // to a JUST-CREATED object's numbered slot persists into later frames.
     // GoldRush: WINC::ControlThrow creates the WCHR crosshair and stores
@@ -39536,9 +39811,17 @@ protected func FlyBaseStart()
             "CLNK",
             "Clonk",
             r#"#strict
+local entrance_count;
+
 public func Board(pTarget)
 {
   return(SetCommand(this(), "Enter", pTarget));
+}
+
+protected func Entrance(pTarget)
+{
+  entrance_count += 1;
+  return(1);
 }
 "#,
         )?;
@@ -40043,12 +40326,16 @@ protected func Sale(int player)
     }
 
     #[test]
-    fn enter_auto_sell_re_resolves_container_and_requires_original_target_live_like_cpp(
+    fn nested_script_enter_finishes_before_the_outer_target_liveness_gate_like_cpp(
     ) -> Result<(), EngineError> {
-        // Collection2 may move the entrant. Entrance and auto-sale use its
-        // current Contained, but both tails still require the original
-        // pTarget to remain live (src/C4Object.cpp:1625-1634).
-        fn run_case(remove_original: bool) -> Result<(Engine, ObjectId, ObjectId), EngineError> {
+        // Collection2 may move the entrant with a nested script Enter. That
+        // nested Enter finishes its own Entrance and auto-sale before the
+        // callback returns. The outer Entrance/auto-sale tail then uses the
+        // current Contained, but still requires its original pTarget to be
+        // live (src/C4Object.cpp:1625-1634).
+        fn run_case(
+            remove_original: bool,
+        ) -> Result<(Engine, ObjectId, ObjectId, ObjectId), EngineError> {
             let mut engine = Engine::new();
             engine.register_player(PlayerConfig::new(1, "Test"))?;
             register_auto_sell_enter_definitions(&mut engine)?;
@@ -40103,30 +40390,52 @@ protected func Collection2(pObject)
                 Some(destination),
                 "Collection2 redirected the entrant before the callback tail"
             );
-            Ok((engine, gold, target))
+            Ok((engine, crew, gold, target))
         }
 
-        let (live_target, live_gold, _target) = run_case(false)?;
+        let (live_target, live_crew, live_gold, _target) = run_case(false)?;
         assert_eq!(
             live_target.player(1).expect("player exists").wealth(),
             5,
-            "auto-sale uses the live post-Collection2 container"
+            "the nested Enter auto-sells in the redirected base"
         );
         assert!(live_target.object_snapshot(live_gold).is_none());
+        let live_crew_index = live_target
+            .find_object_index(live_crew)
+            .expect("crew remains");
+        assert_eq!(
+            live_target.objects[live_crew_index]
+                .state
+                .local_vars
+                .get("entrance_count"),
+            Some(&Value::Int(2)),
+            "nested and outer Enter both reach their Entrance tail"
+        );
 
-        let (removed_target, retained_gold, target) = run_case(true)?;
+        let (removed_target, removed_crew, sold_gold, target) = run_case(true)?;
         assert!(
             removed_target.object_snapshot(target).is_none(),
             "Collection2 removed the original target"
         );
         assert_eq!(
             removed_target.player(1).expect("player exists").wealth(),
-            0,
-            "a removed original pTarget aborts the post-callback auto-sale"
+            5,
+            "the nested Enter sells before Collection2 removes the outer pTarget"
         );
         assert!(
-            removed_target.object_snapshot(retained_gold).is_some(),
-            "the redirected GOLD remains unsold when pTarget died"
+            removed_target.object_snapshot(sold_gold).is_none(),
+            "the nested Enter completed its auto-sale"
+        );
+        let removed_crew_index = removed_target
+            .find_object_index(removed_crew)
+            .expect("crew remains");
+        assert_eq!(
+            removed_target.objects[removed_crew_index]
+                .state
+                .local_vars
+                .get("entrance_count"),
+            Some(&Value::Int(1)),
+            "a removed original pTarget suppresses only the outer Entrance tail"
         );
         Ok(())
     }

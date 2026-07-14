@@ -5484,7 +5484,7 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
     let active = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
+            .and_then(|context| context.script_object_context)
     });
     if let Some(target) = target {
         if Some(target) != active {
@@ -6454,11 +6454,7 @@ fn auto_sell_after_enter(entering: ObjectId, original_target: ObjectId) -> Resul
 }
 
 /// FnEnter (C4Script.cpp:365-370): pObj (or the scope object) enters the
-/// container pTarget (C4Object::Enter; the entry/departure callbacks run
-/// when the container change folds, apply_container_change). A FOREIGN
-/// subject routes through the reentrancy seam so the change lands in the
-/// subject's own scope; the seam re-runs this function with the subject
-/// active, which terminates in the self branch.
+/// container pTarget through the synchronous C4Object::Enter pipeline.
 fn enter(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) =
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "Enter", "target")?
@@ -6472,32 +6468,10 @@ fn enter(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_ref()
             .and_then(|context| context.object_context().map(|object| object.id()))
     });
-    if let Some(subject) = subject {
-        if Some(subject) != active {
-            return match call_world_object_function(
-                subject,
-                "Enter",
-                &[object_reference_value(target)],
-            ) {
-                Some(result) => result,
-                None => Ok(Value::Bool(false)),
-            };
-        }
-    }
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
-        let Some(object) = context.object_context_mut() else {
-            return Ok(Value::Bool(false));
-        };
-        if object.id() == target {
-            return Ok(Value::Bool(false)); // cannot contain itself
-        }
-        object.set_container(Some(target));
-        Ok(Value::Bool(true))
-    })
+    let Some(subject) = subject.or(active) else {
+        return Ok(Value::Bool(false));
+    };
+    Ok(Value::Bool(enter_object_live(subject, target)?))
 }
 
 /// FnCollect (C4Script.cpp:391-415) routes through C4Object::Collect:
