@@ -1534,30 +1534,26 @@ impl<'a> Vm<'a> {
                             return Ok(value);
                         }
                         // FnSetLocal (C4Script.cpp:3408-3414): writes the
-                        // numbered Local slot, returns the value; the object
-                        // defaults to the caller. An explicit FOREIGN target
-                        // still writes the caller's slot (numbered locals are
-                        // not on the cross-object cell hook yet — PORT_STATUS).
+                        // numbered Local slot, returns the value; a nil or
+                        // absent object defaults to the executing object.
                         if name == "SetLocal"
                             && (1..=3).contains(&args.len())
                             && !self.functions.contains_key(name)
                             && !self.has_host_function(name)
                         {
-                            let index_expr = Box::new(
-                                args.first()
-                                    .cloned()
-                                    .unwrap_or(Expr::Literal(Literal::Int(0))),
-                            );
+                            let index =
+                                self.evaluate_slot_index("SetLocal()", &args[0], env, depth + 1)?;
                             let value = args
                                 .get(1)
                                 .map(|arg| self.evaluate(arg, env, depth + 1))
                                 .transpose()?
                                 .unwrap_or(Value::Nil);
-                            let index =
-                                self.evaluate_slot_index("SetLocal()", &index_expr, env, depth)?;
-                            if let LValueRef::Cell(cell) = env.local_slot_lvalue(index) {
-                                *cell.borrow_mut() = value.clone();
-                            }
+                            let target = args
+                                .get(2)
+                                .map(|arg| self.evaluate(arg, env, depth + 1))
+                                .transpose()?;
+                            let cell = self.numbered_local_cell(env, index, target);
+                            *cell.borrow_mut() = value.clone();
                             return Ok(value);
                         }
                         // `LocalN("name")` is a reference to the executing
@@ -2445,6 +2441,33 @@ impl<'a> Vm<'a> {
             }
             let cell = self.numbered_local_cell(env, index, Some(target));
             let value = cell.borrow().clone();
+            return Ok(value);
+        }
+        // `pObj->SetLocal(index, value[, target])`: arrow dispatch makes
+        // pObj the executing object, so an omitted/falsy explicit target
+        // defaults to the receiver. Route directly through the same numbered
+        // local cell hook as Local(index, pObj), never world method dispatch.
+        if matches!(target, Value::Object(_))
+            && name == "SetLocal"
+            && (1..=3).contains(&args.len())
+            && !self.functions.contains_key(name)
+            && !self.has_host_function(name)
+        {
+            let index = self.evaluate_slot_index("SetLocal()", &args[0], env, depth + 1)?;
+            let value = args
+                .get(1)
+                .map(|arg| self.evaluate(arg, env, depth + 1))
+                .transpose()?
+                .unwrap_or(Value::Nil);
+            let explicit_target = args
+                .get(2)
+                .map(|arg| self.evaluate(arg, env, depth + 1))
+                .transpose()?;
+            let destination = explicit_target
+                .filter(|value| !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false)))
+                .unwrap_or_else(|| target.clone());
+            let cell = self.numbered_local_cell(env, index, Some(destination));
+            *cell.borrow_mut() = value.clone();
             return Ok(value);
         }
         match &target {
