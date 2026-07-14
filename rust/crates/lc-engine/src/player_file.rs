@@ -4,6 +4,7 @@
 //! `C4Player::Load` (C4Player.cpp:1089-1107).
 
 use lc_resources::Group;
+use serde::{Deserialize, Serialize};
 
 use crate::scenario::ScenarioError;
 
@@ -11,7 +12,7 @@ use crate::scenario::ScenarioError;
 /// the runtime recruitment flags (C4ObjectInfo::InAction / HasDied) that
 /// `GetIdle` filters on (C4ObjectInfoList.cpp:113-142) — both start clear
 /// when loaded from file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrewInfo {
     /// `id` (C4ID of the crew definition; "Clonk" defaults to none here —
     /// C4ID_None loads stay unresolvable like C++).
@@ -22,10 +23,16 @@ pub struct CrewInfo {
     pub rank: i32,
     /// `Experience` (default 0) — GetIdle prefers the highest.
     pub experience: i32,
+    /// Persistent active-play seconds (C4ObjectInfoCore::TotalPlayingTime).
+    #[serde(default)]
+    pub total_playing_time: i32,
     /// `Participation` (default 1) — GetIdle requires 1.
     pub participation: i32,
     /// Recruited this round (C4ObjectInfo::InAction).
     pub in_action: bool,
+    /// Game time at the last Recruit call; meaningful only in action.
+    #[serde(default)]
+    pub in_action_time: i32,
     /// Died this round (C4ObjectInfo::HasDied).
     pub has_died: bool,
 }
@@ -53,8 +60,10 @@ impl CrewInfo {
             name: entry("ObjectInfo", "Name").unwrap_or_else(|| "Clonk".to_string()),
             rank: int("ObjectInfo", "Rank", 0),
             experience: int("ObjectInfo", "Experience", 0),
+            total_playing_time: int("ObjectInfo", "TotalPlayingTime", 0),
             participation: int("ObjectInfo", "Participation", 1),
             in_action: false,
+            in_action_time: 0,
             has_died: false,
         }
     }

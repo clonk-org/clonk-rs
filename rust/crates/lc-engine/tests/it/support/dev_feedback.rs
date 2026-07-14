@@ -242,8 +242,10 @@ impl ReplayCrewInfoV1 {
             name: self.name.clone(),
             rank: self.rank,
             experience: self.experience,
+            total_playing_time: 0,
             participation: self.participation,
             in_action: self.in_action,
+            in_action_time: 0,
             has_died: self.has_died,
         }
     }

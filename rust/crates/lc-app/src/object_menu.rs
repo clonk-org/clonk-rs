@@ -3533,6 +3533,7 @@ mod tests {
             controller: 1,
             category: 0,
             crew_member: false,
+            plr_view_range: 0,
             selected: false,
             alive: true,
             base_graphics: None,

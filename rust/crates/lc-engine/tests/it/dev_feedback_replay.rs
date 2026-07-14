@@ -234,7 +234,10 @@ fn stale_checkpoint_writes_before_failing_diff_and_metrics() -> Result<(), Box<d
     let temp = tempfile::tempdir()?;
     let _artifact_root = EnvRestore::set("LC_TEST_ARTIFACT_DIR", temp.path());
     let mut replay = ScenarioReplayV1::from_path(&replay_fixture("tutorial01-idle.json"))?;
-    replay.checkpoints.last_mut().unwrap().snapshot_hash = "0000000000000000".to_owned();
+    let current_hash = std::mem::replace(
+        &mut replay.checkpoints.first_mut().unwrap().snapshot_hash,
+        "0000000000000000".to_owned(),
+    );
 
     let error = run_replay_twice(&replay, "stale-checkpoint")
         .expect_err("a stale committed checkpoint must fail");
@@ -258,6 +261,7 @@ fn stale_checkpoint_writes_before_failing_diff_and_metrics() -> Result<(), Box<d
         serde_json::from_str(&fs::read_to_string(bundle.join("diff.json"))?)?;
     assert_eq!(diff["entries"][0]["path"], "/snapshot_hash");
     assert_eq!(diff["entries"][0]["expected"], "0000000000000000");
+    assert_eq!(diff["entries"][0]["actual"], current_hash);
     Ok(())
 }
 

@@ -468,6 +468,7 @@ mod tests {
                 controller: OWNER_NONE,
                 category: crate::DEFAULT_CATEGORY,
                 crew_member: false,
+                plr_view_range: 0,
                 selected: false,
                 alive: true,
                 base_graphics: None,

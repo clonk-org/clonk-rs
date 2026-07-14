@@ -7148,6 +7148,7 @@ mod tests {
                 controller: 0,
                 category: lc_engine::DEFAULT_CATEGORY,
                 crew_member: true,
+                plr_view_range: 0,
                 selected: false,
                 alive: true,
                 base_graphics: None,

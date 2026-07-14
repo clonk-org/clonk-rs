@@ -29,8 +29,9 @@ use crate::transfer::TransferZoneTable;
 use crate::{LiquidSegment, PlayerViewport};
 use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionState, ActionUpdate,
-    AudioCommand, CommandDirection, CrewObjectInfo, CrewSelectionState, DefinitionId, DefinitionRect,
-    Direction, DrawTransform, EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape,
+    AudioCommand, CommandDirection, CrewInfoLink, CrewObjectInfo, CrewSelectionState, DefinitionId,
+    DefinitionRect, Direction, DrawTransform, EnvironmentSettings, FloatVector2,
+    GraphicsOverlayMode, Landscape,
     MenuRequest, MenuRequestKind, ObjectBaseGraphics, ObjectGraphicsOverlay, ObjectId, ObjectState,
     ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer,
     ParticleScope, PathFinder, PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState,
@@ -419,6 +420,30 @@ const PHYS_STACK_TEMPORARY: i32 = 3;
 #[derive(Debug, Clone)]
 #[doc(hidden)]
 pub enum PlayerCommand {
+    /// Final live `C4Player::Crew` lists after a synchronous crew mutation.
+    /// Membership is per player and independent of C4Object::Owner; one
+    /// object may therefore occur in more than one roster.
+    SetCrewRosters {
+        rosters: Vec<(i32, Vec<ObjectId>)>,
+    },
+    /// `C4ObjectInfo::Retire` for an info owned by this player's
+    /// `CrewInfoList`. The object pointer itself is cleared by ObjectUpdate;
+    /// this command keeps the persistent roster entry idle for later reuse.
+    RetireCrewInfo {
+        object_id: ObjectId,
+        link: CrewInfoLink,
+    },
+    /// Link an exact persistent CrewInfo entry to a live object. A newly
+    /// created entry is appended before the link is installed; an existing
+    /// entry is merely recruited. The full payload moves with GrabInfo.
+    LinkCrewInfo {
+        object_id: ObjectId,
+        link: Option<CrewInfoLink>,
+        info: CrewObjectInfo,
+        created_entry: Option<crate::player_file::CrewInfo>,
+        recruit: bool,
+        has_died: bool,
+    },
     AdjustHomeBaseMaterial {
         player_id: i32,
         definition_id: DefinitionId,
@@ -497,6 +522,14 @@ pub enum PlayerCommand {
     /// C4Player::ClearPointers for an object removed during the same script
     /// call. Ordered after earlier SetPlrView/SetViewCursor commands.
     ClearObjectPointers { object: ObjectId },
+    /// One `C4Player::ClearPointers` step whose `AdjustCursorCommand` already
+    /// ran synchronously in the host. Keeping this per-player preserves the
+    /// exact player-list interleaving with selection callbacks: a callback
+    /// may mutate another player's pointers before that player's turn.
+    ClearPlayerObjectPointersWithoutAdjust {
+        player_id: i32,
+        object: ObjectId,
+    },
     /// FnSetViewOffset (C4Script.cpp:5676-5687): presentation displacement
     /// for the player's local viewport. Remote players are sync-safe no-ops.
     SetViewOffset {
@@ -878,6 +911,16 @@ impl HostWorldObject {
     }
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct HostCrewInfoState {
+    pub(crate) idle:
+        HashMap<(i32, String), Vec<(CrewInfoLink, crate::player_file::CrewInfo)>>,
+    pub(crate) entries: HashMap<CrewInfoLink, crate::player_file::CrewInfo>,
+    pub(crate) order: HashMap<i32, Vec<CrewInfoLink>>,
+    pub(crate) next_indices: HashMap<i32, usize>,
+    pub(crate) roster_names: HashMap<i32, Vec<String>>,
+}
+
 // Not `derive(Debug)`: `ScriptEngine` (in `definition_scripts`) has no Debug.
 #[derive(Clone)]
 #[doc(hidden)]
@@ -937,13 +980,14 @@ pub struct HostWorldContext {
     /// C4RULE_StructuresNeedEnergy (Game.Rules; FnEnergyCheck gates on
     /// it, C4Script.cpp:1845-1856).
     structures_need_energy: bool,
-    /// Game.Names newline count (the New() fallback name range).
-    standard_name_newlines: i32,
-    /// Idle crew infos per (player, definition), in roster order as
-    /// (experience, rank). C4ObjectInfoList::GetIdle picks the first
-    /// highest-experience entry; consuming it exposes the next one to later
-    /// MakeCrewMember calls in the same script callback.
-    idle_crew_ranks: RefCell<HashMap<(i32, String), Vec<(i32, i32)>>>,
+    /// Exact Game.Names text and per-definition ClonkNames sources used by
+    /// C4ObjectInfoList::New inside a synchronous MakeCrewMember call.
+    standard_crew_names: Option<String>,
+    definition_crew_names: Rc<HashMap<String, String>>,
+    /// Mutable projection of the players' C4ObjectInfoList state. A host
+    /// callback can recruit/create several infos before its outcome is folded
+    /// into Engine, so consumed entries and newly allocated indices live here.
+    crew_info_state: Rc<RefCell<HostCrewInfoState>>,
     /// Names of loaded particle defs (C4ParticleSystem::GetDef,
     /// C4Particles.cpp:465-473). `None` = no registry attached (legacy
     /// fixture contexts): name lookups behave permissively. `Some` = engine
@@ -964,6 +1008,10 @@ pub struct HostWorldContext {
     crew_ranks: Rc<HashMap<u64, i32>>,
     /// Full modeled C4ObjectInfoCore values for GetObjectInfoCoreVal.
     crew_infos: Rc<HashMap<ObjectId, CrewObjectInfo>>,
+    /// Player whose `CrewInfoList` owns each live C4Object::Info pointer.
+    /// This is intentionally independent of both object Owner and crew-list
+    /// membership (C4Player::SetObjectCrewStatus may change either alone).
+    crew_info_links: Rc<HashMap<ObjectId, CrewInfoLink>>,
     /// The scenario script, shared from `Engine.scenario_script`, for
     /// GameCall/GameCallEx mid-VM-call resolution (C++ resolves on
     /// `Game.Script`, C4Script.cpp:3483). `None` when no scenario script is
@@ -1010,14 +1058,16 @@ impl Default for HostWorldContext {
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             scenario_script_counter: 0,
             structures_need_energy: false,
-            standard_name_newlines: 0,
-            idle_crew_ranks: RefCell::new(HashMap::new()),
+            standard_crew_names: None,
+            definition_crew_names: Rc::new(HashMap::new()),
+            crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
             team_home_base_rule: false,
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
             crew_infos: Rc::new(HashMap::new()),
+            crew_info_links: Rc::new(HashMap::new()),
             materials: None,
             frame: 0,
             base_buy_enabled: true,
@@ -1053,11 +1103,13 @@ impl HostWorldContext {
 
     pub(crate) fn with_crew_name_sources(
         mut self,
-        standard_name_newlines: i32,
-        idle_crew_ranks: HashMap<(i32, String), Vec<(i32, i32)>>,
+        standard_names: Option<String>,
+        definition_names: HashMap<String, String>,
+        info_state: HostCrewInfoState,
     ) -> Self {
-        self.standard_name_newlines = standard_name_newlines;
-        self.idle_crew_ranks = RefCell::new(idle_crew_ranks);
+        self.standard_crew_names = standard_names;
+        self.definition_crew_names = Rc::new(definition_names);
+        self.crew_info_state = Rc::new(RefCell::new(info_state));
         self
     }
 
@@ -1196,13 +1248,15 @@ impl HostWorldContext {
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             scenario_script_counter: 0,
             structures_need_energy: false,
-            standard_name_newlines: 0,
-            idle_crew_ranks: RefCell::new(HashMap::new()),
+            standard_crew_names: None,
+            definition_crew_names: Rc::new(HashMap::new()),
+            crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
             crew_infos: Rc::new(HashMap::new()),
+            crew_info_links: Rc::new(HashMap::new()),
             materials: None,
             frame: 0,
             base_buy_enabled: true,
@@ -1419,9 +1473,21 @@ impl HostWorldContext {
         self
     }
 
+    pub(crate) fn with_crew_info_links(
+        mut self,
+        links: Rc<HashMap<ObjectId, CrewInfoLink>>,
+    ) -> Self {
+        self.crew_info_links = links;
+        self
+    }
+
     /// The crew object's Info rank; `None` for info-less objects.
     pub(crate) fn crew_rank(&self, object: u64) -> Option<i32> {
         self.crew_ranks.get(&object).copied()
+    }
+
+    pub(crate) fn crew_info_link(&self, object: ObjectId) -> Option<CrewInfoLink> {
+        self.crew_info_links.get(&object).copied()
     }
 
     /// `Some(known?)` when a registry is attached, `None` otherwise.
@@ -5243,16 +5309,46 @@ fn get_plr_view(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnSetPlrViewRange (C4Script.cpp:5286-5293): the object's FoW view
-/// range — presentation/FoW only (PlrViewRange serializes but the
-/// comparator does not cover it); acknowledged (PORT_STATUS).
+/// FnSetPlrViewRange (C4Script.cpp:3681-3691): persist the object's FoW
+/// range, including the legacy low-range clamp unless `exact` is true.
 fn set_plr_view_range(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _ = value_to_i32(
+    let mut range = value_to_i32(
         args.first().unwrap_or(&Value::Nil),
         "SetPlrViewRange",
         "range",
     )?;
-    Ok(Value::Bool(true))
+    let target = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetPlrViewRange",
+        "obj",
+    )?;
+    let exact = value_to_bool(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetPlrViewRange",
+        "exact",
+    )?;
+    if !exact && range > 0 && range < 128 {
+        range = 128;
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let target = target.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
+        }
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.set_plr_view_range(range);
+            Ok(Value::Bool(true))
+        } else {
+            Ok(Value::Bool(false))
+        }
+    })
 }
 
 /// FnSetSolidMask (C4Script.cpp:271-278): sets the object's SolidMask
@@ -5953,6 +6049,27 @@ fn clear_effects_for_assign_removal(target: ObjectId) -> Result<bool, RuntimeErr
 /// The synchronous callback-visible portion of `C4Object::AssignRemoval`.
 /// The final object/effect cleanup still rides the normal nested outcome,
 /// but status and references change immediately inside this VM call.
+fn mark_object_destroyed_with_info(context: &mut EffectHostContext, target: ObjectId) -> bool {
+    if !context.ensure_object_scope(target) {
+        return false;
+    }
+    let link = context.object_scope(target).and_then(ObjectScopeContext::info_link);
+    if let Some(link) = link {
+        if retire_host_crew_info(context, link) {
+            context.record_player_command(PlayerCommand::RetireCrewInfo {
+                object_id: target,
+                link,
+            });
+        }
+    }
+    if let Some(scope) = context.object_scope_mut(target) {
+        scope.mark_destroy();
+        true
+    } else {
+        false
+    }
+}
+
 fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, RuntimeError> {
     if !object_is_present(target) {
         return Ok(false);
@@ -6000,11 +6117,7 @@ fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, Ru
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else { return };
-        if context.ensure_object_scope(target) {
-            if let Some(scope) = context.object_scope_mut(target) {
-                scope.mark_destroy();
-            }
-        }
+        mark_object_destroyed_with_info(context, target);
     });
 
     loop {
@@ -6039,8 +6152,9 @@ fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, Ru
         if let Some(scope) = context.object_scope_mut(target) {
             scope.set_container(None);
         }
-        context.clear_script_object_references(target);
+        context.clear_non_player_script_object_references(target);
     });
+    clear_player_object_pointers_host(target);
     Ok(true)
 }
 
@@ -7337,7 +7451,6 @@ fn get_hi_rank(args: &[Value]) -> Result<Value, RuntimeError> {
     // C4Player::GetHiRankActiveCrew(false) (C4Player.cpp:1003-1020): walk
     // the crew in order, rank from the linked Info (no info = -1); only a
     // strictly higher rank replaces, so the first of equal ranks wins.
-    // CrewDisabled is not tracked yet; the crew list holds active objects.
     let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetHiRank", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -7349,7 +7462,14 @@ fn get_hi_rank(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         let mut best: Option<(u64, i32)> = None;
         for crew_id in &player.crew {
-            let rank = context.world.crew_rank(crew_id.as_u64()).unwrap_or(-1);
+            if context.object_crew_disabled(*crew_id).unwrap_or(false) {
+                continue;
+            }
+            let rank = match context.object_scope(*crew_id) {
+                Some(scope) => scope.info_rank(),
+                None => context.world.crew_rank(crew_id.as_u64()),
+            }
+            .unwrap_or(-1);
             match best {
                 Some((_, best_rank)) if best_rank >= rank => {}
                 _ => best = Some((crew_id.as_u64(), rank)),
@@ -9388,6 +9508,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetCrewCount", get_crew_count);
     script.register_host_function("GetCursor", get_cursor_host);
     script.register_host_function("SelectCrew", select_crew_host);
+    script.register_host_function("SetCrewStatus", set_crew_status);
     script.register_host_function("UnselectCrew", unselect_crew_host);
     script.register_host_function("GetViewCursor", get_view_cursor);
     script.register_host_function("SetViewCursor", set_view_cursor);
@@ -10992,6 +11113,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub ocf: u32,
     pub ocf_base: u32,
     pub crew_member: bool,
+    pub plr_view_range: i32,
     pub position: Vector2,
     pub velocity: Vector2,
     pub rotation: i32,
@@ -11133,6 +11255,7 @@ impl<'a> HostObjectContext<'a> {
             ocf: ocf::NORMAL,
             ocf_base,
             crew_member,
+            plr_view_range: 0,
             position,
             velocity,
             rotation,
@@ -11231,6 +11354,11 @@ impl<'a> HostObjectContext<'a> {
     #[cfg(test)]
     pub fn with_crew_member(mut self, crew_member: bool) -> Self {
         self.crew_member = crew_member;
+        self
+    }
+
+    pub fn with_plr_view_range(mut self, plr_view_range: i32) -> Self {
+        self.plr_view_range = plr_view_range;
         self
     }
 
@@ -14305,18 +14433,10 @@ fn get_mass(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnMakeCrewMember (C4Script.cpp:2164-2168) -> C4Player::MakeCrewMember
-/// (C4Player.cpp:1167-1215): valid player + CrewMember def required; adds
-/// to the crew and fires OnJoinCrew(player). NOT modeled (PORT_STATUS):
-/// the crew-info GetIdle/New assignment (a ClonkNames RNG draw in C++),
-/// PlrViewRange, and Controller — the port keys crew off Owner, so the
-/// owner is set to the player instead.
 /// FnGrabObjectInfo (C4Script.cpp:2170-2176) -> C4Object::GrabInfo
 /// (C4Object.cpp:5696-5726): `pTo` (default: the caller) takes pFrom's
-/// info section, retires its own, and re-registers as crew. The port
-/// The transferred payload includes the live info rank, crew flag, donor
-/// portrait source and permanent physicals (the GetPhysical info fallback,
-/// C4Object.cpp:2118-2134). Name/experience remain outside this host seam.
+/// exact info pointer, after both objects are removed from every player crew,
+/// then registers the receiver with its unchanged Owner.
 fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
     let from = parse_object_reference_argument(
         args.first().unwrap_or(&Value::Nil),
@@ -14331,33 +14451,84 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
         "GrabObjectInfo",
         "to",
     )?;
-    HOST_CONTEXT.with(|cell| {
+    let result = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
+            return None;
         };
         let active = context.object_context().map(|object| object.id());
         let Some(to) = to.or(active) else {
-            return Ok(Value::Bool(false));
+            return None;
         };
         if from == to {
-            // own info: success (C4Object.cpp:5701)
-            return Ok(Value::Bool(true));
+            return Some((to, None));
         }
-        // Materialize scopes for both sides (C++ mutates the live objects).
         if !context.ensure_object_scope(from) || !context.ensure_object_scope(to) {
-            return Ok(Value::Bool(false));
+            return None;
         }
-        // only if the other object has an info (C4Object.cpp:5703)
-        let (donor_rank, donor_physical) = context
+        if !context.object_status_present(from) || !context.object_status_present(to) {
+            return None;
+        }
+        let donor_has_info = context
             .object_scope(from)
-            .map(|scope| (scope.info_rank(), scope.info_physical))
-            .unwrap_or((None, None));
-        let Some(donor_rank) = donor_rank else {
-            return Ok(Value::Bool(false));
-        };
-        // the grabbed info carries the donor's portrait
-        // (C4Object.cpp:5715 Info transfer; portrait rides the info)
+            .is_some_and(|scope| scope.info_core().is_some() || scope.info_rank().is_some());
+        if !donor_has_info {
+            return None;
+        }
+
+        // Retire and clear the receiver's old Info before either global
+        // ClearPointers call.
+        let receiver_link = context.object_scope(to).and_then(ObjectScopeContext::info_link);
+        if let Some(link) = receiver_link {
+            if retire_host_crew_info(context, link) {
+                context.record_player_command(PlayerCommand::RetireCrewInfo {
+                    object_id: to,
+                    link,
+                });
+            }
+        }
+        if let Some(scope) = context.object_scope_mut(to) {
+            scope.set_info_rank(None);
+            scope.set_info_link(None);
+            scope.set_info_core(None);
+            scope.info_physical = None;
+            scope.record_physicals();
+        }
+
+        // ClearPointers may synchronously run CrewSelection through cursor
+        // replacement. Release the host borrow so those nested callbacks see
+        // and mutate the same live context, then re-read donor Info.
+        drop(borrow);
+        clear_player_object_pointers_host(from);
+        clear_player_object_pointers_host(to);
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        if !context.ensure_object_scope(from) || !context.ensure_object_scope(to) {
+            return None;
+        }
+        let (donor_core, donor_link, donor_physical) = context
+            .object_scope(from)
+            .map(|scope| {
+                (
+                    scope.info_core().cloned().or_else(|| {
+                        let rank = scope.info_rank()?;
+                        let definition = scope.definition_id.as_deref()?;
+                        Some(CrewObjectInfo {
+                            definition_id: DefinitionId::from(definition),
+                            name: context
+                                .definition_metadata(definition)
+                                .map(|metadata| metadata.name.clone())
+                                .unwrap_or_else(|| "Clonk".to_string()),
+                            rank,
+                            experience: 0,
+                        })
+                    }),
+                    scope.info_link(),
+                    scope.info_physical,
+                )
+            })
+            .unwrap_or((None, None, None));
+        let donor_core = donor_core?;
         let donor_portrait = context
             .get_world_object(from)
             .and_then(|object| {
@@ -14370,30 +14541,300 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                     .get_world_object(from)
                     .map(|object| (object.definition_id().to_string(), "1".to_string()))
             });
-        // the donor loses its info/crew slot — and with it the info's
-        // permanent physicals (`pFrom->ClearInfo(pFrom->Info)`,
-        // C4Object.cpp:5710-5715)
+
         if let Some(scope) = context.object_scope_mut(from) {
-            scope.set_crew_member(false);
+            scope.set_crew_status_member(false);
             scope.set_info_rank(None);
+            scope.set_info_link(None);
+            scope.set_info_core(None);
             scope.info_physical = None;
             scope.record_physicals();
         }
-        // the grabber takes the info wholesale: crew registration, the
-        // donor's portrait and its permanent physicals
-        // (C4Object.cpp:5715-5723; GetPhysical's info fallback,
-        // C4Object.cpp:2118-2134)
+
+        let target_alive = context
+            .object_scope(to)
+            .is_some_and(ObjectScopeContext::alive);
+        let linked = donor_link.filter(|link| {
+            let valid = retire_host_crew_info(context, *link);
+            if valid {
+                context.record_player_command(PlayerCommand::RetireCrewInfo {
+                    object_id: from,
+                    link: *link,
+                });
+                relink_host_crew_info(context, *link, target_alive, !target_alive);
+            }
+            valid
+        });
         if let Some(scope) = context.object_scope_mut(to) {
-            scope.set_crew_member(true);
-            scope.set_info_rank(Some(donor_rank));
+            scope.set_info_rank(Some(donor_core.rank));
+            scope.set_info_link(linked);
+            scope.set_info_core(Some(donor_core.clone()));
             scope.info_physical = donor_physical;
             scope.record_physicals();
             if let Some((source, name)) = donor_portrait {
                 scope.set_portrait(source, name);
             }
         }
-        Ok(Value::Bool(true))
-    })
+        context.record_player_command(PlayerCommand::LinkCrewInfo {
+            object_id: to,
+            link: linked,
+            info: donor_core,
+            created_entry: None,
+            recruit: target_alive,
+            has_died: !target_alive,
+        });
+
+        let owner = context.object_scope(to).map(ObjectScopeContext::owner);
+        let callback_owner = owner.filter(|owner| {
+            context.player_state(*owner).is_some()
+                && context.object_status_present(to)
+                && context
+                    .object_effective_definition_id(to)
+                    .and_then(|definition| context.definition_metadata(&definition))
+                    .is_some_and(|metadata| metadata.crew_member)
+        });
+        if let Some(owner) = callback_owner {
+            context.insert_player_crew(owner, to);
+            if let Some(scope) = context.object_scope_mut(to) {
+                scope.set_controller(owner);
+                if scope.plr_view_range() == 0 {
+                    scope.set_plr_view_range(500);
+                }
+            }
+        }
+        let donor_member = context.object_in_any_crew(from);
+        let receiver_member = context.object_in_any_crew(to);
+        if let Some(scope) = context.object_scope_mut(from) {
+            scope.set_crew_status_member(donor_member);
+        }
+        if let Some(scope) = context.object_scope_mut(to) {
+            scope.set_crew_status_member(receiver_member);
+        }
+        context.record_crew_rosters();
+        Some((to, callback_owner))
+    });
+
+    let Some((to, callback_owner)) = result else {
+        return Ok(Value::Bool(false));
+    };
+    if let Some(owner) = callback_owner {
+        call_recruitment_callback(to, owner);
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            let donor_member = context.object_in_any_crew(from);
+            let receiver_member = context.object_in_any_crew(to);
+            if let Some(scope) = context.object_scope_mut(from) {
+                scope.set_crew_status_member(donor_member);
+            }
+            if let Some(scope) = context.object_scope_mut(to) {
+                scope.set_crew_status_member(receiver_member);
+            }
+            context.record_crew_rosters();
+        });
+    }
+    Ok(Value::Bool(true))
+}
+
+/// FnMakeCrewMember (C4Script.cpp:2164-2168) -> C4Player::MakeCrewMember
+/// (C4Player.cpp:1167-1215): valid player + CrewMember def required; assigns
+/// an exact idle/new info, joins the independent roster and calls Recruitment.
+
+/// `pObj->Call(PSF_OnJoinCrew)` where PSF_OnJoinCrew is the fail-safe
+/// `~Recruitment` name and C4Object::Call uses fPassError=false.
+fn call_recruitment_callback(target: ObjectId, player: i32) {
+    if let Some(Err(error)) =
+        call_world_object_own_function(target, "Recruitment", &[Value::Int(player)])
+    {
+        tracing::warn!(
+            object = %target,
+            error = %error,
+            "script error in Recruitment callback; continuing like C++"
+        );
+    }
+}
+
+fn retire_host_crew_info(context: &mut EffectHostContext, link: CrewInfoLink) -> bool {
+    let (entry, order) = {
+        let mut state = context.world.crew_info_state.borrow_mut();
+        let Some(entry) = state.entries.get_mut(&link) else {
+            return false;
+        };
+        entry.in_action = false;
+        (
+            entry.clone(),
+            state.order.get(&link.player_id).cloned().unwrap_or_default(),
+        )
+    };
+    let key = (link.player_id, entry.id.clone());
+    let mut state = context.world.crew_info_state.borrow_mut();
+    if context.world.definition_metadata(&entry.id).is_none() {
+        state.idle.remove(&key);
+        return true;
+    }
+    let rebuilt: Vec<_> = order
+        .into_iter()
+        .filter_map(|candidate| {
+            let info = state.entries.get(&candidate)?;
+            (info.id == entry.id
+                && info.participation != 0
+                && !info.in_action
+                && !info.has_died)
+                .then(|| (candidate, info.clone()))
+        })
+        .collect();
+    if rebuilt.is_empty() {
+        state.idle.remove(&key);
+    } else {
+        state.idle.insert(key, rebuilt);
+    }
+    true
+}
+
+fn relink_host_crew_info(
+    context: &mut EffectHostContext,
+    link: CrewInfoLink,
+    recruit: bool,
+    has_died: bool,
+) -> bool {
+    let mut state = context.world.crew_info_state.borrow_mut();
+    let Some(entry) = state.entries.get_mut(&link) else {
+        return false;
+    };
+    entry.has_died = has_died;
+    entry.in_action = recruit;
+    let key = (link.player_id, entry.id.clone());
+    if let Some(pool) = state.idle.get_mut(&key) {
+        pool.retain(|(candidate, _)| *candidate != link);
+    }
+    true
+}
+
+fn recruit_or_create_crew_info(
+    context: &mut EffectHostContext,
+    player: i32,
+    definition_id: &str,
+) -> Result<
+    Option<(
+        CrewInfoLink,
+        CrewObjectInfo,
+        Option<crate::player_file::CrewInfo>,
+    )>,
+    RuntimeError,
+> {
+    let key = (player, definition_id.to_string());
+    let idle = {
+        let mut state = context.world.crew_info_state.borrow_mut();
+        let picked = state.idle.get_mut(&key).and_then(|pool| {
+            let best = pool
+                .iter()
+                .enumerate()
+                .fold(None, |best: Option<(usize, i32)>, (index, (_, info))| {
+                    match best {
+                        Some((_, best_exp)) if best_exp >= info.experience => best,
+                        _ => Some((index, info.experience)),
+                    }
+                })
+                .map(|(index, _)| index)?;
+            Some(pool.remove(best))
+        });
+        if let Some((link, _)) = picked.as_ref() {
+            if let Some(entry) = state.entries.get_mut(link) {
+                entry.in_action = true;
+            }
+        }
+        picked
+    };
+    if let Some((link, entry)) = idle {
+        let info = CrewObjectInfo {
+            definition_id: DefinitionId::from(entry.id.as_str()),
+            name: entry.name.clone(),
+            rank: entry.rank,
+            experience: entry.experience,
+        };
+        return Ok(Some((link, info, None)));
+    }
+
+    let names_source = context
+        .world
+        .definition_crew_names
+        .get(definition_id)
+        .cloned()
+        .or_else(|| context.world.standard_crew_names.clone());
+    const C4_MAX_NAME: usize = 30;
+    let mut name = match names_source {
+        Some(names) if names.to_ascii_lowercase().contains("names.txt") => {
+            draw_context_random(1000)?;
+            "Clonk".to_string()
+        }
+        Some(names) => {
+            let newline_count = names.bytes().filter(|&byte| byte == b'\n').count() as i32;
+            let segment_index = draw_context_random(newline_count)? as usize;
+            let segment = names
+                .split('\n')
+                .nth(segment_index)
+                .unwrap_or_default()
+                .replace('\r', "");
+            let cleaned: String = segment.trim().chars().take(C4_MAX_NAME).collect();
+            if cleaned.is_empty() {
+                "Clonk".to_string()
+            } else {
+                cleaned
+            }
+        }
+        None => "Clonk".to_string(),
+    };
+
+    let (link, entry) = {
+        let mut state = context.world.crew_info_state.borrow_mut();
+        {
+            let names = state.roster_names.entry(player).or_default();
+            let base = name.clone();
+            let mut next_number = 2;
+            while names
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&name))
+            {
+                let digits = next_number.to_string();
+                let keep = base
+                    .chars()
+                    .count()
+                    .min(C4_MAX_NAME.saturating_sub(digits.len()));
+                name = base.chars().take(keep).collect::<String>() + &digits;
+                next_number += 1;
+            }
+            names.push(name.clone());
+        }
+        let roster_index = *state.next_indices.entry(player).or_insert(0);
+        state.next_indices.insert(player, roster_index + 1);
+        let link = CrewInfoLink {
+            player_id: player,
+            roster_index,
+        };
+        let entry = crate::player_file::CrewInfo {
+            id: definition_id.to_string(),
+            name,
+            rank: 0,
+            experience: 0,
+            total_playing_time: 0,
+            participation: 1,
+            in_action: false,
+            in_action_time: 0,
+            has_died: false,
+        };
+        state.entries.insert(link, entry.clone());
+        state.order.entry(player).or_default().insert(0, link);
+        (link, entry)
+    };
+    let info = CrewObjectInfo {
+        definition_id: DefinitionId::from(entry.id.as_str()),
+        name: entry.name.clone(),
+        rank: entry.rank,
+        experience: entry.experience,
+    };
+    Ok(Some((link, info, Some(entry))))
 }
 
 fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -14431,9 +14872,12 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(id) = context.object_context().map(|object| object.id()) else {
             return Ok(false);
         };
+        if !context.object_status_present(id) {
+            return Ok(false); // !pObj->Status (C4Player.cpp:1169)
+        }
         let crew_def = context
-            .get_world_object(id)
-            .and_then(|object| context.world.definition_metadata(object.definition_id()))
+            .object_effective_definition_id(id)
+            .and_then(|definition| context.world.definition_metadata(&definition))
             .map(|metadata| metadata.crew_member)
             .unwrap_or(false);
         if !crew_def {
@@ -14445,67 +14889,50 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         // C4ObjectInfoList::New draws the name Random over the def's
         // ClonkNames (or the game standard names) — a synced ledger draw
         // that must fire INSIDE this call.
-        let already_crew = context
+        let already_has_info = context
             .object_context()
             .is_some_and(|object| object.info_rank().is_some());
-        let mut assigned_rank = None;
-        if !already_crew {
-            let definition_id = context
+        let assignment = if already_has_info {
+            None
+        } else {
+            let Some(definition_id) = context
                 .object_context()
-                .and_then(|object| object.definition_id.clone());
-            if let Some(definition_id) = definition_id {
-                let key = (player, definition_id.clone());
-                let idle_rank = {
-                    let mut pools = context.world.idle_crew_ranks.borrow_mut();
-                    pools.get_mut(&key).and_then(|pool| {
-                        let best = pool
-                            .iter()
-                            .enumerate()
-                            .fold(None, |best: Option<(usize, i32)>, (index, (exp, _))| {
-                                match best {
-                                    Some((_, best_exp)) if best_exp >= *exp => best,
-                                    _ => Some((index, *exp)),
-                                }
-                            })
-                            .map(|(index, _)| index)?;
-                        Some(pool.remove(best).1)
-                    })
-                };
-                assigned_rank = match idle_rank {
-                    Some(rank) => Some(rank),
-                    None => {
-                        let newlines = context
-                            .world
-                            .definition_metadata(&definition_id)
-                            .and_then(|metadata| metadata.clonk_name_newlines)
-                            .unwrap_or(context.world.standard_name_newlines);
-                        draw_context_random(newlines)?;
-                        Some(0)
-                    }
-                };
-            } else {
-                assigned_rank = Some(0);
-            }
-        }
-        let Some(object) = context.object_context_mut() else {
-            return Ok(false);
+                .and_then(|object| object.definition_id.clone())
+            else {
+                return Ok(false);
+            };
+            recruit_or_create_crew_info(context, player, &definition_id)?
         };
-        object.set_crew_member(true);
-        if let Some(rank) = assigned_rank {
-            object.set_info_rank(Some(rank));
-            // The new crew member gets an info whose physicals resolve at
-            // once (C4Player::MakeCrewMember → C4ObjectInfoList::New;
-            // C4Object::Init `if (Alive) Energy = GetPhysical()->Energy`,
-            // C4Object.cpp:192). With FairCrew ON (the LegacyClonk default)
-            // the def physicals promote to RankByExperience(strength).
-            let promoted = crate::crew_info_physical(object.definition_physical, rank);
-            object.info_physical = Some(promoted);
-            object.record_physicals();
-            if object.alive() {
-                object.set_energy(promoted.energy);
+        {
+            let Some(object) = context.object_context_mut() else {
+                return Ok(false);
+            };
+            object.set_crew_member(true);
+            if object.plr_view_range() == 0 {
+                object.set_plr_view_range(500);
             }
+            if let Some((link, info, _)) = assignment.as_ref() {
+                object.set_info_rank(Some(info.rank));
+                object.set_info_link(Some(*link));
+                object.set_info_core(Some(info.clone()));
+                let promoted = crate::crew_info_physical(object.definition_physical, info.rank);
+                object.info_physical = Some(promoted);
+                object.record_physicals();
+            }
+            // C4Player::MakeCrewMember changes Controller, never Owner
+            // (C4Player.cpp:1202-1204).
+            object.set_controller(player);
         }
-        object.set_owner(player);
+        if let Some((link, info, created_entry)) = assignment {
+            context.record_player_command(PlayerCommand::LinkCrewInfo {
+                object_id: id,
+                link: Some(link),
+                info,
+                created_entry,
+                recruit: true,
+                has_died: false,
+            });
+        }
         // C4Player::MakeCrewMember inserts into the LIVE C4Player::Crew
         // before Recruitment returns (C4Player.cpp:1194-1209). Later calls
         // in the same scenario callback must therefore see the member via
@@ -14513,54 +14940,19 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         // category/id branch: prefer the first equal category+id link, then
         // the first link whose relative category is <= the new one
         // (C4ObjectList.cpp:110-195).
-        let roster = context
-            .player_state(player)
-            .map(|state| state.crew.clone())
-            .unwrap_or_default();
-        if !roster.contains(&id) {
-            let target_key = context.get_world_object(id).map(|object| {
-                (
-                    object.category() & CATEGORY_SORT_LIMIT,
-                    object.definition_id().to_string(),
-                )
-            });
-            let insertion = target_key
-                .as_ref()
-                .and_then(|(target_category, target_definition)| {
-                    roster
-                        .iter()
-                        .position(|crew| {
-                            context.get_world_object(*crew).is_some_and(|object| {
-                                object.category() & CATEGORY_SORT_LIMIT == *target_category
-                                    && object.definition_id() == target_definition
-                            })
-                        })
-                        .or_else(|| {
-                            roster.iter().position(|crew| {
-                                context.get_world_object(*crew).is_some_and(|object| {
-                                    object.category() & CATEGORY_SORT_LIMIT <= *target_category
-                                })
-                            })
-                        })
-                })
-                .unwrap_or(roster.len());
-            if let Some(state) = context.player_state_mut(player) {
-                state.crew.insert(insertion.min(state.crew.len()), id);
-            }
+        if !context.insert_player_crew(player, id) {
+            return Ok(false);
         }
+        context.record_crew_rosters();
         Ok(true)
     })?;
     if joined {
         // PSF_OnJoinCrew resolves to the script function "Recruitment"
         // (C4Script.h:107 `#define PSF_OnJoinCrew "~Recruitment"`), fired
-        // inside MakeCrewMember (C4Player.cpp:1206-1209); errors pass
-        // like any script call.
+        // inside MakeCrewMember (C4Player.cpp:1206-1209). C4Object::Call's
+        // default fPassError=false makes it fail-safe.
         if let Some(active) = active {
-            if let Some(result) =
-                call_world_object_script_function(active, "Recruitment", &[Value::Int(player)])
-            {
-                result?;
-            }
+            call_recruitment_callback(active, player);
         }
     }
     Ok(Value::Bool(joined))
@@ -15109,8 +15501,7 @@ fn get_breath(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 /// FnGetName (C4Script.cpp:992-1005): the definition Name for an id
-/// argument; the object's custom/definition name otherwise. Crew-info name
-/// fallback awaits the object-info port.
+/// argument; otherwise CustomName, live Info name, then definition name.
 fn get_name(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_id = args
         .first()
@@ -15135,6 +15526,17 @@ fn get_name(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         if let Some(custom_name) = context.object_custom_name(target) {
             return Ok(Value::String(custom_name));
+        }
+        let info_name = match context.object_scope(target) {
+            Some(scope) => scope.info_core().map(|info| info.name.clone()),
+            None => context
+                .world
+                .crew_infos
+                .get(&target)
+                .map(|info| info.name.clone()),
+        };
+        if let Some(info_name) = info_name {
+            return Ok(Value::String(info_name));
         }
         let definition = context
             .get_world_object(target)
@@ -18268,26 +18670,18 @@ fn hi_rank_active_crew(context: &EffectHostContext, player: &PlayerState, select
         let Some(object) = context.get_world_object(id) else {
             continue;
         };
-        if !object.status.is_active()
-            || context.object_crew_disabled(id).unwrap_or(false)
-            || (selected && !object.selected)
-        {
+        let is_selected = context
+            .object_scope(id)
+            .map(ObjectScopeContext::selected)
+            .unwrap_or(object.selected);
+        if context.object_crew_disabled(id).unwrap_or(false) || (selected && !is_selected) {
             continue;
         }
-        let rank = context
-            .world
-            .crew_rank(id.as_u64())
-            .or_else(|| {
-                // A same-call MakeCrewMember creates its new C4ObjectInfo
-                // at rank zero before SelectCrew adjusts the cursor
-                // (C4Player.cpp:1180-1209). The immutable frame snapshot
-                // cannot contain that fresh info yet, but its live scope
-                // already carries the promoted info physicals.
-                context
-                    .object_scope(id)
-                    .and_then(|scope| scope.info_physical.is_some().then_some(0))
-            })
-            .unwrap_or(-1);
+        let rank = match context.object_scope(id) {
+            Some(scope) => scope.info_rank(),
+            None => context.world.crew_rank(id.as_u64()),
+        }
+        .unwrap_or(-1);
         if best.is_none() || rank > highest_rank {
             best = Some(id);
             highest_rank = rank;
@@ -18308,6 +18702,43 @@ fn record_cursor_state(context: &mut EffectHostContext, player_id: i32) {
         object,
         control,
     });
+}
+
+/// C4PlayerList::ClearPointers in player-list order. Cursor replacement and
+/// its selection callbacks run before the next player's pointers are cleared,
+/// exactly as the C++ loop does.
+fn clear_player_object_pointers_host(target: ObjectId) {
+    let players = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Vec::new();
+        };
+        context.player_ids().to_vec()
+    });
+    for player_id in players {
+        let removed_cursor = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return false;
+            };
+            let removed_cursor = context
+                .player_state(player_id)
+                .is_some_and(|player| player.cursor == Some(target));
+            if let Some(player) = context.player_state_mut(player_id) {
+                player.clear_object_pointers(target);
+            }
+            context.record_player_command(
+                PlayerCommand::ClearPlayerObjectPointersWithoutAdjust {
+                    player_id,
+                    object: target,
+                },
+            );
+            removed_cursor
+        });
+        if removed_cursor {
+            adjust_cursor_host(player_id);
+        }
+    }
 }
 
 /// C4Player::AdjustCursorCommand (C4Player.cpp:1235-1258).
@@ -18422,6 +18853,173 @@ fn select_crew_host(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(
         target.is_some_and(|target| select_crew_host_impl(player_id, target, select, no_cursor_adjust)),
     ))
+}
+
+/// FnSetCrewStatus (C4Script.cpp:2984-2993) delegates to
+/// C4Player::SetObjectCrewStatus (C4Player.cpp:2107-2136). Crew membership
+/// is an ordered per-player list independent of Owner; the return type is
+/// C4ValueInt, so expose exact integer 0/1 rather than a script bool.
+fn set_crew_status(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetCrewStatus",
+        "player",
+    )?;
+    let in_crew = value_to_bool(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetCrewStatus",
+        "in crew",
+    )?;
+    let explicit = parse_object_reference_argument(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetCrewStatus",
+        "object",
+    )?;
+
+    let target = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        borrow
+            .as_ref()
+            .and_then(|context| explicit.or(context.script_object_context))
+    });
+    let Some(target) = target else {
+        return Ok(Value::Int(0));
+    };
+
+    if in_crew {
+        let added = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return None;
+            };
+            let Some(player) = context.player_state(player_id) else {
+                return None;
+            };
+            // SetObjectCrewStatus's idempotent fast path has no controller,
+            // view-range or Recruitment side effects.
+            if player.crew.contains(&target) {
+                return Some(false);
+            }
+            if !context.ensure_object_scope(target)
+                || !context.object_status_present(target)
+                || !context
+                    .object_effective_definition_id(target)
+                    .and_then(|definition| context.definition_metadata(&definition))
+                    .is_some_and(|metadata| metadata.crew_member)
+            {
+                return None;
+            }
+            if let Some(scope) = context.object_scope_mut(target) {
+                scope.set_crew_status_member(true);
+                // MakeCrewMember(pObj, false): Controller changes; Owner and
+                // Info do not (C4Player.cpp:1167-1215).
+                scope.set_controller(player_id);
+                if scope.plr_view_range() == 0 {
+                    scope.set_plr_view_range(500);
+                }
+            }
+            if !context.insert_player_crew(player_id, target) {
+                return None;
+            }
+            context.record_crew_rosters();
+            Some(true)
+        });
+        let Some(added) = added else {
+            return Ok(Value::Int(0));
+        };
+
+        if added {
+            call_recruitment_callback(target, player_id);
+            HOST_CONTEXT.with(|cell| {
+                let mut borrow = cell.borrow_mut();
+                if let Some(context) = borrow.as_mut() {
+                    let still_member = context.object_in_any_crew(target);
+                    if let Some(scope) = context.object_scope_mut(target) {
+                        scope.set_crew_status_member(still_member);
+                    }
+                    context.record_crew_rosters();
+                }
+            });
+        }
+        return Ok(Value::Int(1));
+    }
+
+    let removal = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return None;
+        };
+        let player = context.player_state(player_id)?;
+        if !player.crew.contains(&target) {
+            // Already absent is a successful side-effect-free no-op.
+            return Some((false, false));
+        }
+        if let Some(player) = context.player_state_mut(player_id) {
+            player.crew.retain(|member| *member != target);
+        }
+        context.record_crew_rosters();
+        Some((
+            true,
+            context
+                .object_scope(target)
+                .map(ObjectScopeContext::selected)
+                .or_else(|| context.get_world_object(target).map(|object| object.selected))
+                .unwrap_or(false),
+        ))
+    });
+    let Some((was_present, selected)) = removal else {
+        return Ok(Value::Int(0));
+    };
+    if !was_present {
+        return Ok(Value::Int(1));
+    }
+
+    // Crew.Remove happens before UnSelect; Info remains attached while the
+    // fail-safe CrewSelection(true,false) callback runs.
+    if selected {
+        unselect_host_object(target, false);
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        if !context.ensure_object_scope(target) {
+            return;
+        }
+        // A live explicit None must NOT fall back to the immutable entry
+        // snapshot: CrewSelection may have moved/cleared Info synchronously.
+        let info_link = match context.object_scope(target) {
+            Some(scope) => scope.info_link(),
+            None => context.world.crew_info_link(target),
+        };
+        if info_link.is_some_and(|link| link.player_id == player_id) {
+            let link = info_link.expect("checked above");
+            if retire_host_crew_info(context, link) {
+                if let Some(scope) = context.object_scope_mut(target) {
+                    scope.set_info_rank(None);
+                    scope.set_info_link(None);
+                    scope.set_info_core(None);
+                    scope.info_physical = None;
+                    scope.record_physicals();
+                }
+                context.record_player_command(PlayerCommand::RetireCrewInfo {
+                    object_id: target,
+                    link,
+                });
+            }
+        }
+        let still_member = context.object_in_any_crew(target);
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.set_crew_status_member(still_member);
+        }
+        // A CrewSelection callback may have re-entered SetCrewStatus. The
+        // outer removal preserves that final roster but still performs the
+        // Info retirement above, matching C++ ordering.
+        context.record_crew_rosters();
+    });
+    Ok(Value::Int(1))
 }
 
 fn unselect_crew_host(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -27339,7 +27937,14 @@ fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         };
         let target = target.or_else(|| context.object_context().map(|object| object.id()));
-        let Some(info) = target.and_then(|target| context.world.crew_infos.get(&target)) else {
+        let Some(target) = target else {
+            return Ok(Value::Nil);
+        };
+        let info = match context.object_scope(target) {
+            Some(scope) => scope.info_core(),
+            None => context.world.crew_infos.get(&target),
+        };
+        let Some(info) = info else {
             return Ok(Value::Nil);
         };
         if section
@@ -28935,39 +29540,46 @@ fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
             // number stays consumed, exactly like C++ where the object
             // existed and died (the GoldRush TRPR Recruitment temp,
             // Trapper.c4d/Script.c:19-25).
-            return HOST_CONTEXT.with(|cell| {
+            let removed = HOST_CONTEXT.with(|cell| {
                 let mut borrow = cell.borrow_mut();
                 let Some(context) = borrow.as_mut() else {
-                    return Ok(Value::Bool(false));
+                    return false;
                 };
+                mark_object_destroyed_with_info(context, target);
                 let removed = context.cancel_pending_spawn(target);
                 if removed {
-                    context.clear_script_object_references(target);
+                    context.clear_non_player_script_object_references(target);
                 }
-                Ok(Value::Bool(removed))
+                removed
             });
+            if removed {
+                clear_player_object_pointers_host(target);
+            }
+            return Ok(Value::Bool(removed));
         }
     }
 
-    HOST_CONTEXT.with(|cell| {
+    let removed = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = match borrow.as_mut() {
             Some(context) => context,
-            None => return Ok(Value::Bool(false)),
+            None => return None,
         };
 
-        let removed = match context.object_context_mut() {
-            Some(object) => {
-                let id = object.id();
-                object.mark_destroy();
-                id
-            }
-            None => return Ok(Value::Bool(false)),
+        let removed = match context.object_context() {
+            Some(object) => object.id(),
+            None => return None,
         };
+        mark_object_destroyed_with_info(context, removed);
 
-        context.clear_script_object_references(removed);
-        Ok(Value::Bool(true))
-    })
+        context.clear_non_player_script_object_references(removed);
+        Some(removed)
+    });
+    let Some(removed) = removed else {
+        return Ok(Value::Bool(false));
+    };
+    clear_player_object_pointers_host(removed);
+    Ok(Value::Bool(true))
 }
 
 fn with_context_mut<R>(
@@ -29011,9 +29623,14 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_id =
         consume_optional_object_reference_argument(args, &mut index, "SetObjectStatus", "target")?;
 
+    let mut clear_pointers = false;
     if let Some(arg) = args.get(index) {
         match arg {
-            Value::Bool(_) | Value::Nil => {
+            Value::Bool(value) => {
+                clear_pointers = *value;
+                index += 1;
+            }
+            Value::Nil => {
                 index += 1;
             }
             other => {
@@ -29031,25 +29648,57 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
+    let (success, clear_target) = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow.as_mut().ok_or_else(|| {
             RuntimeError::new("SetObjectStatus requires an active engine context")
         })?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        let object_id = match context.object_context() {
+            Some(object) => object.id(),
+            None => return Ok((false, None)),
         };
 
         if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
+            if target != object_id {
+                return Ok((false, None));
             }
         }
-
-        object.set_status(status);
-        Ok(Value::Bool(true))
-    })
+        let current = context
+            .object_scope(object_id)
+            .map(ObjectScopeContext::status)
+            .unwrap_or(ObjectStatus::Deleted);
+        if current == ObjectStatus::Deleted {
+            return Ok((false, None));
+        }
+        if current == status {
+            return Ok((true, None));
+        }
+        if let Some(object) = context.object_scope_mut(object_id) {
+            object.set_status(status);
+        }
+        Ok((
+            true,
+            (status == ObjectStatus::Inactive && clear_pointers).then_some(object_id),
+        ))
+    })?;
+    if !success {
+        return Ok(Value::Bool(false));
+    }
+    if let Some(object_id) = clear_target {
+        clear_player_object_pointers_host(object_id);
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            let still_member = context.object_in_any_crew(object_id);
+            if let Some(object) = context.object_scope_mut(object_id) {
+                object.set_crew_status_member(still_member);
+            }
+            context.record_crew_rosters();
+        });
+    }
+    Ok(Value::Bool(true))
 }
 
 fn get_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -29988,6 +30637,7 @@ impl EffectHostContext {
                 ocf,
                 ocf_base,
                 crew_member,
+                plr_view_range,
                 draw_transform,
                 info_physical,
                 temporary_physical,
@@ -30029,6 +30679,7 @@ impl EffectHostContext {
                     shape_vertices,
                     ocf_base,
                     crew_member,
+                    plr_view_range,
                     graphics_overlays,
                     base_graphics,
                     draw_transform,
@@ -30040,6 +30691,8 @@ impl EffectHostContext {
                 scope.current_info_rank = world
                     .crew_rank(scope.id().as_u64())
                     .or_else(|| scope.info_physical.map(|_| 0));
+                scope.current_info_link = world.crew_info_link(scope.id());
+                scope.current_info_core = world.crew_infos.get(&scope.id()).cloned();
                 scope.definition_id = definition_id;
                 // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358).
                 scope.cached_ocf = Some(ocf);
@@ -30075,6 +30728,7 @@ impl EffectHostContext {
                     scope.current_mobile = state.mobile;
                     scope.current_t_attach = state.t_attach;
                     scope.current_contact_density = state.contact_density;
+                    scope.current_plr_view_range = state.plr_view_range;
                     scope.walk_rotation.t_attach = state.t_attach;
                 }
                 scope.current_rotation_velocity = world_object.rotation_velocity;
@@ -30817,7 +31471,7 @@ impl EffectHostContext {
         removed
     }
 
-    fn clear_script_object_references(&mut self, target: ObjectId) {
+    fn clear_non_player_script_object_references(&mut self, target: ObjectId) {
         self.removed_object_references.insert(target);
         let removed = &self.removed_object_references;
 
@@ -30855,13 +31509,6 @@ impl EffectHostContext {
                 }
             }
         }
-        let player_ids = self.player_ids().to_vec();
-        for player_id in player_ids {
-            if let Some(player) = self.player_state_mut(player_id) {
-                player.clear_object_pointers(target);
-            }
-        }
-        self.record_player_command(PlayerCommand::ClearObjectPointers { object: target });
     }
 
     fn unlink_content_for_removal(&mut self, parent: ObjectId, child: ObjectId) {
@@ -31051,6 +31698,7 @@ impl EffectHostContext {
             state.shape_vertices.clone(),
             metadata.ocf_base,
             metadata.crew_member,
+            state.plr_view_range,
             state.graphics_overlays.clone(),
             state.base_graphics.clone(),
             state.draw_transform,
@@ -31063,6 +31711,8 @@ impl EffectHostContext {
             .world
             .crew_rank(object.id.as_u64())
             .or_else(|| scope.info_physical.map(|_| 0));
+        scope.current_info_link = self.world.crew_info_link(object.id);
+        scope.current_info_core = self.world.crew_infos.get(&object.id).cloned();
         scope.current_fixed_position = object.fixed_position;
         scope.current_fixed_velocity = object.fixed_velocity;
         scope.current_rotation_velocity = object.rotation_velocity;
@@ -31548,6 +32198,18 @@ impl EffectHostContext {
             })
     }
 
+    /// C++ truthiness of C4Object::Status: Normal=1 and Inactive=2 are both
+    /// valid for APIs that test only `!pObj->Status`.
+    fn object_status_present(&self, target: ObjectId) -> bool {
+        self.object_scope(target)
+            .map(|scope| scope.status() != ObjectStatus::Deleted)
+            .unwrap_or_else(|| {
+                self.get_world_object(target)
+                    .map(|object| object.status() != ObjectStatus::Deleted)
+                    .unwrap_or(false)
+            })
+    }
+
     /// Capture the effective Picture2Facet inputs at the instant a script
     /// adds an Object/ObjectRank menu image. Pending same-call writes must
     /// win over the frame-start object snapshot just as they do for C++'s
@@ -31670,6 +32332,85 @@ impl EffectHostContext {
             self.player_overrides.insert(id, state);
         }
         self.player_overrides.get_mut(&id)
+    }
+
+    /// C4ObjectList::Add(stMain) insertion into one C4Player::Crew list
+    /// (C4ObjectList.cpp:110-195). This list is independent of Owner.
+    fn crew_insert_position(&self, roster: &[ObjectId], target: ObjectId) -> usize {
+        let Some((category, definition_id)) = self.contents_sort_key(target) else {
+            return roster.len();
+        };
+        if self
+            .definition_metadata(&definition_id)
+            .is_some_and(|metadata| metadata.line != 0)
+        {
+            return roster.len();
+        }
+        let sort_category = category & CATEGORY_SORT_LIMIT;
+        if category & crate::CATEGORY_STATIC_BACK == 0 {
+            if let Some(position) = roster.iter().position(|other| {
+                self.contents_sort_key(*other).is_some_and(
+                    |(other_category, other_definition)| {
+                        other_category & CATEGORY_SORT_LIMIT == sort_category
+                            && other_definition == definition_id
+                    },
+                )
+            }) {
+                return position;
+            }
+        }
+        roster
+            .iter()
+            .position(|other| {
+                self.contents_sort_key(*other)
+                    .is_some_and(|(other_category, _)| {
+                        other_category & CATEGORY_SORT_LIMIT <= sort_category
+                    })
+            })
+            .unwrap_or(roster.len())
+    }
+
+    fn insert_player_crew(&mut self, player_id: i32, target: ObjectId) -> bool {
+        let Some(roster) = self.player_state(player_id).map(|player| player.crew.clone()) else {
+            return false;
+        };
+        if roster.contains(&target) {
+            return true;
+        }
+        let position = self.crew_insert_position(&roster, target);
+        self.player_state_mut(player_id)
+            .map(|player| player.crew.insert(position.min(player.crew.len()), target))
+            .is_some()
+    }
+
+    fn object_in_any_crew(&self, target: ObjectId) -> bool {
+        self.world
+            .player_ids()
+            .iter()
+            .any(|player| self.player_state(*player).is_some_and(|state| state.crew.contains(&target)))
+    }
+
+    fn record_crew_rosters(&mut self) {
+        let rosters = self
+            .world
+            .player_ids()
+            .iter()
+            .filter_map(|player| {
+                self.player_state(*player)
+                    .map(|state| (*player, state.crew.clone()))
+            })
+            .collect();
+        self.record_player_command(PlayerCommand::SetCrewRosters { rosters });
+    }
+
+    fn clear_player_object_pointers(&mut self, target: ObjectId) {
+        let players = self.player_ids().to_vec();
+        for player in players {
+            if let Some(state) = self.player_state_mut(player) {
+                state.clear_object_pointers(target);
+            }
+        }
+        self.record_player_command(PlayerCommand::ClearObjectPointers { object: target });
     }
 
     fn record_player_command(&mut self, command: PlayerCommand) {
@@ -32246,6 +32987,7 @@ struct ObjectScopeContext {
     /// which fall back to the preview-grade recompute.
     cached_ocf: Option<u32>,
     crew_member: bool,
+    current_plr_view_range: i32,
     current_direction: Direction,
     current_command_direction: CommandDirection,
     current_position: Vector2,
@@ -32267,6 +33009,11 @@ struct ObjectScopeContext {
     /// Live pObj->Info->Rank. Unlike `crew_member`, this distinguishes an
     /// object registered as crew from one that actually owns C4ObjectInfo.
     current_info_rank: Option<i32>,
+    /// C4Player::CrewInfoList that owns the live Info pointer.
+    current_info_link: Option<CrewInfoLink>,
+    /// Full live C4ObjectInfoCore payload. Kept in the scope so a nested
+    /// GrabObjectInfo can move an info created earlier in the same callback.
+    current_info_core: Option<CrewObjectInfo>,
     temporary_physical: Option<PhysicalInfo>,
     physical_changes: Vec<(String, i32)>,
     definition_physical: PhysicalInfo,
@@ -32305,6 +33052,7 @@ impl ObjectScopeContext {
         shape_vertices: ShapeVertexBuffer,
         ocf_base: u32,
         crew_member: bool,
+        plr_view_range: i32,
         graphics_overlays: Vec<ObjectGraphicsOverlay>,
         base_graphics: Option<ObjectBaseGraphics>,
         draw_transform: Option<DrawTransform>,
@@ -32357,6 +33105,7 @@ impl ObjectScopeContext {
             ocf_base,
             cached_ocf: None,
             crew_member,
+            current_plr_view_range: plr_view_range,
             current_direction: direction,
             current_command_direction: command_direction,
             current_position: position,
@@ -32373,6 +33122,8 @@ impl ObjectScopeContext {
             current_draw_transform: draw_transform,
             info_physical,
             current_info_rank: None,
+            current_info_link: None,
+            current_info_core: None,
             temporary_physical,
             physical_changes,
             definition_physical,
@@ -32400,7 +33151,29 @@ impl ObjectScopeContext {
 
     fn set_info_rank(&mut self, rank: Option<i32>) {
         self.current_info_rank = rank;
+        match (self.current_info_core.as_mut(), rank) {
+            (Some(info), Some(rank)) => info.rank = rank,
+            (_, None) => self.current_info_core = None,
+            (None, Some(_)) => {}
+        }
         self.pending_update.info_rank = Some(rank);
+    }
+
+    fn info_link(&self) -> Option<CrewInfoLink> {
+        self.current_info_link
+    }
+
+    fn set_info_link(&mut self, link: Option<CrewInfoLink>) {
+        self.current_info_link = link;
+        self.pending_update.info_link = Some(link);
+    }
+
+    fn info_core(&self) -> Option<&CrewObjectInfo> {
+        self.current_info_core.as_ref()
+    }
+
+    fn set_info_core(&mut self, info: Option<CrewObjectInfo>) {
+        self.current_info_core = info;
     }
 
     /// `C4Object::GetPhysical` (C4Object.cpp:2118-2134): temporary set when
@@ -32623,6 +33396,22 @@ impl ObjectScopeContext {
     fn set_crew_member(&mut self, crew_member: bool) {
         self.crew_member = crew_member;
         self.pending_update.crew_member = Some(crew_member);
+    }
+
+    fn set_crew_status_member(&mut self, crew_member: bool) {
+        self.set_crew_member(crew_member);
+        self.pending_update.crew_status_change = true;
+    }
+
+    fn plr_view_range(&self) -> i32 {
+        self.pending_update
+            .plr_view_range
+            .unwrap_or(self.current_plr_view_range)
+    }
+
+    fn set_plr_view_range(&mut self, range: i32) {
+        self.current_plr_view_range = range;
+        self.pending_update.plr_view_range = Some(range);
     }
 
     /// SetPortrait's current portrait bookkeeping (FnSetPortrait,
@@ -32946,6 +33735,8 @@ impl ObjectScopeContext {
 
     fn mark_destroy(&mut self) {
         self.set_info_rank(None);
+        self.set_info_link(None);
+        self.set_info_core(None);
         self.destroy = true;
     }
 
@@ -33826,6 +34617,7 @@ mod tests {
         "SetContactDensity",
         "SetController",
         "SetCrewEnabled",
+        "SetCrewStatus",
         "SetCursor",
         "SetDir",
         "SetEntrance",
@@ -39751,7 +40543,10 @@ func Missing() { return ComponentAll(nil, WOOD); }
                     player_id: 15,
                     object: Some(target),
                 },
-                PlayerCommand::ClearObjectPointers { object },
+                PlayerCommand::ClearPlayerObjectPointersWithoutAdjust {
+                    player_id: 15,
+                    object,
+                },
             ] if *target == removed && *object == removed
         ));
         assert_eq!(state.cursor, Some(cursor));

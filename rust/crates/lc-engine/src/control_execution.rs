@@ -2236,8 +2236,10 @@ mod tests {
             name: "Ada".to_string(),
             rank: 3,
             experience: 50,
+            total_playing_time: 0,
             participation: 1,
             in_action: false,
+            in_action_time: 0,
             has_died: false,
         }];
         let file = PlayerFile {

@@ -17626,10 +17626,20 @@ func Trigger() { return(LaunchVolcano(12)); }
             .expect("definition registers");
 
         let crew_owner_one = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
         let crew_owner_two = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(2))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(2)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
         engine
             .spawn_object(
@@ -17657,10 +17667,20 @@ func Trigger() { return(LaunchVolcano(12)); }
             .expect("definition registers");
 
         let first = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
         let second = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         engine
@@ -17693,7 +17713,8 @@ func Trigger() { return(LaunchVolcano(12)); }
         let crew = engine.spawn_object(
             SpawnConfig::new("Test")
                 .with_alive(true)
-                .with_owner(1),
+                .with_owner(1)
+                .with_crew_member(true),
         )?;
         engine.select_crew(1, [crew])?;
 
@@ -17720,13 +17741,15 @@ func Trigger() { return(LaunchVolcano(12)); }
             SpawnConfig::new("Test")
                 .with_id(ObjectId::new(500))
                 .with_alive(true)
-                .with_owner(1),
+                .with_owner(1)
+                .with_crew_member(true),
         )?;
         let low = engine.spawn_object(
             SpawnConfig::new("Test")
                 .with_id(ObjectId::new(7))
                 .with_alive(true)
-                .with_owner(1),
+                .with_owner(1)
+                .with_crew_member(true),
         )?;
         engine.select_crew(1, [high, low])?;
 
@@ -17779,12 +17802,14 @@ func CrewSelection(fUnselect, fCursor)
         let a = engine.spawn_object(
             SpawnConfig::new("SELC")
                 .with_owner(1)
-                .with_alive(true),
+                .with_alive(true)
+                .with_crew_member(true),
         )?;
         let b = engine.spawn_object(
             SpawnConfig::new("SELC")
                 .with_owner(1)
-                .with_alive(true),
+                .with_alive(true)
+                .with_crew_member(true),
         )?;
 
         let call = |engine: &mut Engine, id: ObjectId, name: &str, args: Vec<Value>| {
@@ -17897,7 +17922,8 @@ func CrewSelection(fUnselect, fCursor)
         let mage = engine.spawn_object(
             SpawnConfig::new("MAGE")
                 .with_owner(1)
-                .with_alive(true),
+                .with_alive(true)
+                .with_crew_member(true),
         )?;
         let helper = engine.spawn_object(
             SpawnConfig::new("HELP")
@@ -17989,12 +18015,14 @@ func CrewSelection(fUnselect, fCursor)
         let a = engine.spawn_object(
             SpawnConfig::new("DSBL")
                 .with_owner(1)
-                .with_alive(true),
+                .with_alive(true)
+                .with_crew_member(true),
         )?;
         let b = engine.spawn_object(
             SpawnConfig::new("DSBL")
                 .with_owner(1)
-                .with_alive(true),
+                .with_alive(true)
+                .with_crew_member(true),
         )?;
         engine.select_crew(1, [a])?;
         engine.set_crew_cursor(1, Some(a))?;
@@ -18227,10 +18255,20 @@ func CrewSelection()
             .expect("definition registers");
 
         let first = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
         let second = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         engine
@@ -18259,10 +18297,20 @@ func CrewSelection()
             .expect("definition registers");
 
         let first = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
         let second = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         engine
@@ -18290,10 +18338,20 @@ func CrewSelection()
             .expect("definition registers");
 
         let owned = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
         let other_owner = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(2))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(2)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         engine
@@ -18322,7 +18380,12 @@ func CrewSelection()
             .expect("definition registers");
 
         let crew = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         engine
@@ -18352,10 +18415,20 @@ func CrewSelection()
             .expect("definition registers");
 
         let owned = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
         let other_owner = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(2))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(2)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         engine
@@ -18384,7 +18457,12 @@ func CrewSelection()
             .expect("definition registers");
 
         let crew = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         engine
@@ -18413,10 +18491,20 @@ func CrewSelection()
             .expect("definition registers");
 
         let first = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
         let second = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         engine
@@ -18536,7 +18624,12 @@ func CrewSelection()
             .expect("definition registers");
 
         let crew = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         engine
@@ -19124,10 +19217,20 @@ func CrewSelection()
             .expect("definition registers");
 
         let owner_one = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
         engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(2))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(2)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         assert!(engine.eliminated_owners().is_empty());
@@ -19168,7 +19271,12 @@ func CrewSelection()
             .expect("definition registers");
 
         let owner = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         engine
@@ -19183,7 +19291,12 @@ func CrewSelection()
         assert!(engine.is_owner_eliminated(1));
 
         engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
         for _ in 0..35 {
             engine.tick().expect("tick succeeds");
@@ -19203,10 +19316,20 @@ func CrewSelection()
             .expect("definition registers");
 
         let first = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
         let second = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         engine
@@ -19251,10 +19374,20 @@ func CrewSelection()
             .expect("definition registers");
 
         let eliminated = engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
         engine
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(2))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(2)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         engine
@@ -19285,7 +19418,12 @@ func CrewSelection()
         assert!(!restored.is_owner_eliminated(2));
 
         restored
-            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_alive(true)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
             .expect("spawn succeeds");
 
         // One-way like C4Player::Eliminate (C4Player.cpp:2015-2017).
@@ -25350,6 +25488,1330 @@ func ReadRank() { return GetRank(); }
                 .expect("transferred rank persists after the callback"),
             Value::Int(0)
         );
+    }
+
+    #[test]
+    fn set_crew_status_keeps_cpp_rosters_owner_info_and_callback_order() {
+        let script = r#"#strict 2
+local recruitments;
+local unselections;
+local removing_player;
+local callback_rank;
+local callback_crew_count;
+
+func Recruitment(int player) {
+    recruitments = recruitments + 1;
+    return 1;
+}
+
+func CrewSelection(bool unselect, bool cursor) {
+    if (unselect) {
+        unselections = unselections + 1;
+        callback_rank = GetRank();
+        callback_crew_count = GetCrewCount(removing_player);
+    }
+    return 1;
+}
+
+func Setup() {
+    var made = MakeCrewMember(this(), 0);
+    var added = SetCrewStatus(1, true, nil);
+    return [made, added, GetOwner(), GetController(), GetRank(),
+            GetCrewCount(0), GetCrewCount(1), GetCrew(1), recruitments];
+}
+
+func RemoveFrom(int player) {
+    removing_player = player;
+    SetCursor(player, this(), true, true, true);
+    SelectCrew(player, this(), true, true);
+    var removed = SetCrewStatus(player, false, nil);
+    return [removed, GetCrewCount(player), GetRank(), unselections,
+            callback_rank, callback_crew_count, GetOwner(), GetController(),
+            GetCursor(player) == this()];
+}
+
+func RemoveAgain(int player) {
+    return [SetCrewStatus(player, false, nil), unselections];
+}
+
+func TryAdd(int player, object target) {
+    return SetCrewStatus(player, true, target);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Info owner"))
+            .expect("player zero registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Second crew"))
+            .expect("player one registers");
+        let mut crew = Definition::from_script("CREW", "Crew", script)
+            .expect("SetCrewStatus probe compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+        engine
+            .register_definition(simple_definition("ROCK"))
+            .expect("non-crew target registers");
+
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("target spawns outside every crew");
+        let target_index = engine.find_object_index(target).expect("target index");
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "Setup", Vec::new())
+                .expect("both crew additions complete"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(1),
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Object(target.as_u64()),
+                Value::Int(2),
+            ])
+        );
+        assert_eq!(engine.crew_members(0), vec![target]);
+        assert_eq!(engine.crew_members(1), vec![target]);
+        assert_eq!(
+            engine.object_snapshot(target).expect("target exists").owner,
+            0,
+            "adding to player one changes Controller but never Owner"
+        );
+        assert!(
+            engine
+                .object_snapshot(target)
+                .expect("target exists")
+                .info_physical
+                .is_some()
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "RemoveFrom", vec![Value::Int(1)])
+                .expect("foreign-info crew removal completes"),
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(1),
+                Value::Bool(true),
+            ])
+        );
+        assert_eq!(engine.crew_members(0), vec![target]);
+        assert!(engine.crew_members(1).is_empty());
+        assert!(
+            engine
+                .object_snapshot(target)
+                .expect("target exists")
+                .info_physical
+                .is_some(),
+            "removing from a foreign crew preserves player zero's Info"
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "RemoveFrom", vec![Value::Int(0)])
+                .expect("own-info crew removal completes"),
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Int(0),
+                Value::Nil,
+                Value::Int(2),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(1),
+                Value::Bool(true),
+            ])
+        );
+        assert!(engine.crew_members(0).is_empty());
+        assert!(
+            engine
+                .object_snapshot(target)
+                .expect("target exists")
+                .info_physical
+                .is_none()
+        );
+        assert!(!engine.object_snapshot(target).expect("target exists").selected);
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "RemoveAgain", vec![Value::Int(0)])
+                .expect("idempotent removal completes"),
+            Value::Array(vec![Value::Int(1), Value::Int(2)]),
+            "already-absent removal has no callback side effects"
+        );
+
+        let newer = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("second crew-capable object spawns outside every crew");
+        for object in [target, newer] {
+            assert_eq!(
+                engine
+                    .call_object_function(
+                        target_index,
+                        "TryAdd",
+                        vec![Value::Int(1), Value::Object(object.as_u64())],
+                    )
+                    .expect("SetCrewStatus add succeeds"),
+                Value::Int(1)
+            );
+        }
+        assert_eq!(
+            engine.crew_members(1),
+            vec![newer, target],
+            "stMain inserts a new equal-category/id member before its existing group"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    target_index,
+                    "TryAdd",
+                    vec![Value::Int(1), Value::Object(target.as_u64())],
+                )
+                .expect("idempotent add succeeds"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            engine.crew_members(1),
+            vec![newer, target],
+            "an already-present member is not reinserted or reordered"
+        );
+
+        let rock = engine
+            .spawn_object(SpawnConfig::new("ROCK").with_owner(0))
+            .expect("rock spawns");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    target_index,
+                    "TryAdd",
+                    vec![Value::Int(1), Value::Object(rock.as_u64())],
+                )
+                .expect("non-crew add returns normally"),
+            Value::Int(0)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    target_index,
+                    "TryAdd",
+                    vec![Value::Int(99), Value::Object(target.as_u64())],
+                )
+                .expect("invalid-player add returns normally"),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn set_crew_status_shared_member_death_only_clears_the_owner_roster() {
+        let script = r#"#strict 2
+func SetupShared() {
+    var made = MakeCrewMember(this(), 0);
+    var shared = SetCrewStatus(1, true);
+    SetCursor(0, this(), true, true, true);
+    SetCursor(1, this(), true, true, true);
+    return [made, shared];
+}
+func Die() { DoEnergy(-100); return 1; }
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Owner"))
+            .expect("owner registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Shared roster"))
+            .expect("second player registers");
+        let mut crew = Definition::from_script("CREW", "Crew", script)
+            .expect("shared-death probe compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_alive(true)
+                    .with_energy(100_000)
+                    .with_crew_member(false),
+            )
+            .expect("shared crew target spawns");
+        let target_index = engine.find_object_index(target).expect("target index");
+
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "SetupShared", Vec::new())
+                .expect("shared membership installs"),
+            Value::Array(vec![Value::Bool(true), Value::Int(1)])
+        );
+        assert_eq!(engine.player(0).expect("owner").crew(), &[target]);
+        assert_eq!(engine.player(1).expect("second player").crew(), &[target]);
+
+        engine
+            .call_object_function(target_index, "Die", Vec::new())
+            .expect("crew death completes");
+
+        let dead = engine.object_snapshot(target).expect("dead crew remains");
+        assert!(!dead.alive);
+        assert!(
+            dead.crew_member,
+            "the legacy bit remains set while any player's Crew contains the object"
+        );
+        assert!(engine.player(0).expect("owner").crew().is_empty());
+        assert_eq!(
+            engine.player(1).expect("second player").crew(),
+            &[target],
+            "AssignDeath calls ClearPointers only for Object::Owner"
+        );
+        assert_eq!(engine.crew_cursor(0), None);
+        assert_eq!(
+            engine.crew_cursor(1),
+            Some(target),
+            "the foreign player's cursor is not an owner pointer"
+        );
+
+        for _ in 0..35 {
+            engine.tick().expect("Tick35 window advances");
+        }
+        assert!(engine.is_owner_eliminated(0));
+        assert!(
+            !engine.is_owner_eliminated(1),
+            "CrewCnt counts roster links regardless of the member's Alive flag"
+        );
+    }
+
+    #[test]
+    fn inactive_crew_preserves_all_rosters_and_pointers_until_reactivated() {
+        let script = r#"#strict 2
+func Setup() {
+    MakeCrewMember(this(), 0);
+    SetCrewStatus(1, true);
+    SetCursor(0, this(), true, true, true);
+    SetCursor(1, this(), true, true, true);
+    SelectCrew(0, this(), true, true);
+    return 1;
+}
+func Deactivate() {
+    var changed = SetObjectStatus(2, nil, false);
+    var added_inactive = SetCrewStatus(2, true);
+    return [changed, added_inactive, GetObjectStatus(),
+            GetCrewCount(0), GetCrewCount(1), GetCrewCount(2),
+            GetCrew(0) == this(), GetCrew(1) == this(),
+            GetCursor(0) == this(), GetCursor(1) == this()];
+}
+func Reactivate() {
+    var changed = SetObjectStatus(1, nil, false);
+    return [changed, GetObjectStatus(),
+            GetCrewCount(0), GetCrewCount(1), GetCrewCount(2),
+            GetCrew(0) == this(), GetCrew(1) == this(),
+            GetCursor(0) == this(), GetCursor(1) == this()];
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Owner"))
+            .expect("owner registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Foreign roster"))
+            .expect("foreign player registers");
+        engine
+            .register_player(PlayerConfig::new(2, "Inactive add"))
+            .expect("inactive-add player registers");
+        let mut crew = Definition::from_script("CREW", "Crew", script)
+            .expect("inactive-crew probe compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("crew target spawns");
+        let target_index = engine.find_object_index(target).expect("target index");
+        engine
+            .call_object_function(target_index, "Setup", Vec::new())
+            .expect("shared membership and pointers install");
+
+        let preserved = Value::Array(vec![
+            Value::Bool(true),
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(1),
+            Value::Int(1),
+            Value::Int(1),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+        ]);
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "Deactivate", Vec::new())
+                .expect("StatusDeactivate(false) completes"),
+            preserved
+        );
+        assert_eq!(
+            engine.object_snapshot(target).expect("target remains").status,
+            ObjectStatus::Inactive
+        );
+        assert_eq!(engine.player(0).expect("owner").crew(), &[target]);
+        assert_eq!(engine.player(1).expect("foreign player").crew(), &[target]);
+        assert_eq!(engine.player(2).expect("inactive add").crew(), &[target]);
+        assert_eq!(engine.crew_cursor(0), Some(target));
+        assert_eq!(engine.crew_cursor(1), Some(target));
+        assert!(
+            engine.object_snapshot(target).expect("target remains").selected,
+            "StatusDeactivate(false) preserves the shared C4Object::Select bit"
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "Reactivate", Vec::new())
+                .expect("StatusActivate completes"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+            ])
+        );
+        assert_eq!(engine.player(0).expect("owner").crew(), &[target]);
+        assert_eq!(engine.player(1).expect("foreign player").crew(), &[target]);
+        assert_eq!(engine.player(2).expect("inactive add").crew(), &[target]);
+    }
+
+    #[test]
+    fn set_crew_status_retires_the_exact_linked_duplicate_info_entry() {
+        let script = r#"#strict 2
+func RemoveAndRecruit(object target) {
+    var removed = SetCrewStatus(0, false);
+    var recruited = MakeCrewMember(target, 0);
+    return [removed, recruited];
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut crew = Definition::from_script("CREW", "Crew", script)
+            .expect("duplicate-info probe compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("CREW".to_string(), 2)];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(JoinPlayerConfig {
+                name: "Duplicate info owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![
+                    player_file::CrewInfo {
+                        id: "CREW".to_string(),
+                        name: "First pointer".to_string(),
+                        rank: 4,
+                        experience: 900,
+                        total_playing_time: 0,
+                        participation: 1,
+                        in_action: false,
+                        in_action_time: 0,
+                        has_died: false,
+                    },
+                    player_file::CrewInfo {
+                        id: "CREW".to_string(),
+                        name: "Second pointer".to_string(),
+                        rank: 4,
+                        experience: 900,
+                        total_playing_time: 0,
+                        participation: 1,
+                        in_action: false,
+                        in_action_time: 0,
+                        has_died: false,
+                    },
+                ],
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("player and both duplicate-field infos join");
+
+        let replacement = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("replacement object spawns without info");
+
+        let second = engine
+            .player(0)
+            .expect("player")
+            .crew()
+            .iter()
+            .copied()
+            .find(|id| {
+                engine
+                    .crew_object_info(*id)
+                    .is_some_and(|info| info.name == "Second pointer")
+            })
+            .expect("second exact info is linked");
+        let second_index = engine.find_object_index(second).expect("second index");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    second_index,
+                    "RemoveAndRecruit",
+                    vec![Value::Object(replacement.as_u64())],
+                )
+                .expect("second exact info retires and is reused synchronously"),
+            Value::Array(vec![Value::Int(1), Value::Bool(true)])
+        );
+        assert_eq!(
+            engine
+                .crew_object_info(replacement)
+                .expect("replacement gets info")
+                .name,
+            "Second pointer",
+            "equal rank/experience must not retire the first matching roster entry"
+        );
+    }
+
+    #[test]
+    fn set_crew_status_retire_accrues_one_stint_and_recruit_restarts_it() {
+        let script = r#"#strict 2
+func Join() { return MakeCrewMember(this(), 0); }
+func Retire() { return SetCrewStatus(0, false); }
+func Recruit(object target) { return MakeCrewMember(target, 0); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Playing time"))
+            .expect("player registers");
+        let mut crew = Definition::from_script("CREW", "Crew", script)
+            .expect("playing-time probe compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("target spawns");
+        let target_index = engine.find_object_index(target).expect("target index");
+
+        engine.game_time = 10;
+        engine
+            .call_object_function(target_index, "Join", Vec::new())
+            .expect("target recruits");
+        let link = *engine
+            .capture_state()
+            .crew_info_links
+            .get(&target)
+            .expect("target has an exact roster link");
+
+        engine.game_time = 17;
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "Retire", Vec::new())
+                .expect("first retirement completes"),
+            Value::Int(1)
+        );
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("retired roster serializes");
+        let retired = EngineState::from_json_str(&encoded).expect("retired roster deserializes");
+        let entry = &retired.crew_info_rosters[&0][link.roster_index];
+        assert!(!entry.in_action);
+        assert_eq!(entry.total_playing_time, 7);
+
+        engine.game_time = 21;
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "Retire", Vec::new())
+                .expect("idempotent retirement completes"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            engine.capture_state().crew_info_rosters[&0][link.roster_index]
+                .total_playing_time,
+            7,
+            "already-absent removal cannot accrue the inactive interval"
+        );
+
+        let replacement = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("replacement spawns");
+        engine.game_time = 23;
+        assert_eq!(
+            engine
+                .call_object_function(
+                    target_index,
+                    "Recruit",
+                    vec![Value::Object(replacement.as_u64())],
+                )
+                .expect("replacement recruits the retired info"),
+            Value::Bool(true)
+        );
+        let recruited = engine.capture_state();
+        assert_eq!(recruited.crew_info_links[&replacement], link);
+        let entry = &recruited.crew_info_rosters[&0][link.roster_index];
+        assert!(entry.in_action);
+        assert_eq!(entry.in_action_time, 23);
+        assert_eq!(entry.total_playing_time, 7);
+    }
+
+    #[test]
+    fn set_crew_status_observes_callback_info_transfer_and_readd_mutations() {
+        let script = r#"#strict 2
+local callback_mode;
+local callback_player;
+local callback_target;
+
+func Join(int player) { return MakeCrewMember(this(), player); }
+func RemoveWithTransfer(int player, object target) {
+    callback_mode = 1;
+    callback_player = player;
+    callback_target = target;
+    SelectCrew(player, this(), true, true);
+    return SetCrewStatus(player, false);
+}
+func RemoveWithReadd(int player) {
+    callback_mode = 2;
+    callback_player = player;
+    SelectCrew(player, this(), true, true);
+    return SetCrewStatus(player, false);
+}
+func CrewSelection(bool unselect, bool cursor) {
+    if (!unselect) return 1;
+    if (callback_mode == 1) callback_target->GrabObjectInfo(this());
+    if (callback_mode == 2) SetCrewStatus(callback_player, true);
+    return 1;
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Callback owner"))
+            .expect("player registers");
+        let mut crew = Definition::from_script("CREW", "Crew", script)
+            .expect("callback-mutation probe compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+
+        let donor = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("transfer donor spawns");
+        let receiver = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("transfer receiver spawns");
+        let donor_index = engine.find_object_index(donor).expect("donor index");
+        engine
+            .call_object_function(donor_index, "Join", vec![Value::Int(0)])
+            .expect("donor joins");
+        let donor_info = engine
+            .crew_object_info(donor)
+            .expect("donor info exists")
+            .clone();
+        assert_eq!(
+            engine
+                .call_object_function(
+                    donor_index,
+                    "RemoveWithTransfer",
+                    vec![Value::Int(0), Value::Object(receiver.as_u64())],
+                )
+                .expect("CrewSelection transfers info during removal"),
+            Value::Int(1)
+        );
+        assert!(engine.crew_object_info(donor).is_none());
+        assert_eq!(engine.crew_object_info(receiver), Some(&donor_info));
+        assert_eq!(engine.player(0).expect("player").crew(), &[receiver]);
+
+        let readded = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("readd target spawns");
+        let readded_index = engine.find_object_index(readded).expect("readd index");
+        engine
+            .call_object_function(readded_index, "Join", vec![Value::Int(0)])
+            .expect("readd target joins");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    readded_index,
+                    "RemoveWithReadd",
+                    vec![Value::Int(0)],
+                )
+                .expect("CrewSelection readds during removal"),
+            Value::Int(1)
+        );
+        assert!(
+            engine.player(0).expect("player").crew().contains(&readded),
+            "the synchronous callback's readd survives the outer removal"
+        );
+        assert!(
+            engine.crew_object_info(readded).is_none(),
+            "the outer removal still retires the current same-player Info after callback"
+        );
+    }
+
+    #[test]
+    fn grab_object_info_clears_every_roster_then_recruits_only_to_receiver_owner() {
+        let script = r#"#strict 2
+func JoinAndShare(int owner, int other) {
+    var made = MakeCrewMember(this(), owner);
+    var shared = SetCrewStatus(other, true);
+    return [made, shared];
+}
+func Take(object donor) { return GrabObjectInfo(donor); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Donor owner"))
+            .expect("donor owner registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Receiver owner"))
+            .expect("receiver owner registers");
+        for id in ["DONR", "RCVR"] {
+            let mut crew = Definition::from_script(id, id, script)
+                .expect("GrabObjectInfo roster probe compiles");
+            crew.set_crew_member(true);
+            engine.register_definition(crew).expect("crew registers");
+        }
+        let donor = engine
+            .spawn_object(
+                SpawnConfig::new("DONR")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("donor spawns");
+        let receiver = engine
+            .spawn_object(
+                SpawnConfig::new("RCVR")
+                    .with_owner(1)
+                    .with_crew_member(false),
+            )
+            .expect("receiver spawns");
+        for (object, owner, other) in [(donor, 0, 1), (receiver, 1, 0)] {
+            let index = engine.find_object_index(object).expect("crew index");
+            assert_eq!(
+                engine
+                    .call_object_function(
+                        index,
+                        "JoinAndShare",
+                        vec![Value::Int(owner), Value::Int(other)],
+                    )
+                    .expect("cross-shared member joins"),
+                Value::Array(vec![Value::Bool(true), Value::Int(1)])
+            );
+        }
+        engine
+            .set_crew_cursor(0, Some(donor))
+            .expect("donor cursor installs");
+        engine
+            .set_crew_cursor(1, Some(receiver))
+            .expect("receiver cursor installs");
+        let receiver_index = engine.find_object_index(receiver).expect("receiver index");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    receiver_index,
+                    "Take",
+                    vec![Value::Object(donor.as_u64())],
+                )
+                .expect("receiver grabs donor info"),
+            Value::Bool(true)
+        );
+
+        assert!(engine.player(0).expect("donor owner").crew().is_empty());
+        assert_eq!(
+            engine.player(1).expect("receiver owner").crew(),
+            &[receiver],
+            "MakeCrewMember runs only for the receiver's Owner after both clears"
+        );
+        assert!(engine.crew_object_info(donor).is_none());
+        assert_eq!(
+            engine
+                .crew_object_info(receiver)
+                .expect("donor info moved")
+                .definition_id
+                .as_str(),
+            "DONR"
+        );
+        assert!(!engine.object_snapshot(donor).expect("donor remains").crew_member);
+        assert!(
+            engine
+                .object_snapshot(receiver)
+                .expect("receiver remains")
+                .crew_member
+        );
+        assert_eq!(engine.crew_cursor(0), None);
+        assert_eq!(engine.crew_cursor(1), None);
+    }
+
+    #[test]
+    fn crew_info_owner_link_survives_save_restore_and_foreign_removal() {
+        let script = r#"#strict 2
+func Setup() {
+    MakeCrewMember(this(), 0);
+    SetCrewStatus(1, true);
+    return [GetRank(), GetCrewCount(0), GetCrewCount(1)];
+}
+func RemoveFrom(int player) { return SetCrewStatus(player, false); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Info owner"))
+            .expect("info owner registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Foreign roster"))
+            .expect("foreign player registers");
+        let mut crew = Definition::from_script("CREW", "Crew", script)
+            .expect("save-info-link probe compiles");
+        crew.set_crew_member(true);
+        engine
+            .register_definition(crew.clone())
+            .expect("crew registers");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("target spawns");
+        let target_index = engine.find_object_index(target).expect("target index");
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "Setup", Vec::new())
+                .expect("target gets owned info and shared membership"),
+            Value::Array(vec![Value::Int(0), Value::Int(1), Value::Int(1)])
+        );
+        let expected_info = engine
+            .crew_object_info(target)
+            .expect("target has info")
+            .clone();
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("crew state serializes");
+        let state = EngineState::from_json_str(&encoded).expect("crew state deserializes");
+
+        let mut restored = Engine::with_seed(9);
+        restored
+            .register_definition(crew)
+            .expect("definition registers for restore");
+        restored.restore_state(&state).expect("crew state restores");
+        assert_eq!(restored.crew_object_info(target), Some(&expected_info));
+        assert_eq!(restored.player(0).expect("info owner").crew(), &[target]);
+        assert_eq!(
+            restored.player(1).expect("foreign player").crew(),
+            &[target]
+        );
+
+        let restored_index = restored.find_object_index(target).expect("restored index");
+        assert_eq!(
+            restored
+                .call_object_function(
+                    restored_index,
+                    "RemoveFrom",
+                    vec![Value::Int(1)],
+                )
+                .expect("foreign membership removes"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            restored.crew_object_info(target),
+            Some(&expected_info),
+            "foreign CrewInfoList must not retire the restored pointer"
+        );
+        assert_eq!(
+            restored
+                .call_object_function(
+                    restored_index,
+                    "RemoveFrom",
+                    vec![Value::Int(0)],
+                )
+                .expect("own membership removes"),
+            Value::Int(1)
+        );
+        assert!(restored.crew_object_info(target).is_none());
+    }
+
+    #[test]
+    fn pre_roster_engine_state_imports_legacy_union_but_modern_empty_is_exact() {
+        let mut engine = Engine::with_seed(0);
+        let mut crew = simple_definition("CREW");
+        crew.set_crew_member(true);
+        engine
+            .register_definition(crew.clone())
+            .expect("crew registers");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(true),
+            )
+            .expect("legacy union member spawns");
+        engine
+            .register_player(PlayerConfig::new(0, "Legacy roster"))
+            .expect("player registers");
+
+        let mut legacy = engine.capture_state();
+        legacy.player_crew_rosters_authoritative = false;
+        legacy.players[0].crew.clear();
+        let mut restored = Engine::with_seed(1);
+        restored
+            .register_definition(crew.clone())
+            .expect("crew registers for legacy restore");
+        restored
+            .restore_state(&legacy)
+            .expect("legacy state restores");
+        assert_eq!(restored.player(0).expect("player").crew(), &[target]);
+
+        let mut modern = legacy;
+        modern.player_crew_rosters_authoritative = true;
+        let mut restored = Engine::with_seed(2);
+        restored
+            .register_definition(crew)
+            .expect("crew registers for modern restore");
+        restored
+            .restore_state(&modern)
+            .expect("modern empty roster restores");
+        assert!(restored.player(0).expect("player").crew().is_empty());
+    }
+
+    #[test]
+    fn scenario_script_after_players_waits_for_the_next_tick35_elimination_check() {
+        let object_script = r#"#strict 2
+func Join() { return MakeCrewMember(this(), 0); }
+func LateRemove() { return SetCrewStatus(0, false); }
+"#;
+        let scenario_script = r#"#strict 2
+protected func Script0() { return 1; }
+protected func Script1() { return 1; }
+protected func Script2() { return 1; }
+protected func Script3() { return 1; }
+protected func Script4() { return 1; }
+protected func Script5() { return 1; }
+protected func Script6() { FindObject(CREW)->LateRemove(); return 1; }
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Late removal"))
+            .expect("player registers");
+        let mut crew = Definition::from_script("CREW", "Crew", object_script)
+            .expect("late-removal crew compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+        engine
+            .install_scenario_script_with_convention("Late removal", scenario_script, true)
+            .expect("scenario script installs");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("crew target spawns");
+        let target_index = engine.find_object_index(target).expect("target index");
+        engine
+            .call_object_function(target_index, "Join", Vec::new())
+            .expect("target joins player crew");
+        engine.scenario_script_go = true;
+
+        for _ in 0..70 {
+            engine.tick().expect("frame through late Script6 advances");
+        }
+        assert!(engine.player(0).expect("player").crew().is_empty());
+        assert!(
+            !engine.is_owner_eliminated(0),
+            "Players.Execute checked CrewCnt before Script.Execute removed the member"
+        );
+
+        for _ in 70..105 {
+            engine.tick().expect("next Tick35 window advances");
+        }
+        assert!(engine.is_owner_eliminated(0));
+    }
+
+    #[test]
+    fn object_phase_created_crew_exists_for_the_same_tick35_player_check() {
+        let mut creator = Definition::from_script(
+            "MAKE",
+            "Crew creator",
+            "#strict 2\nfunc Seed() { var crew = CreateObject(CREW, 0, 0, 0); MakeCrewMember(crew, 0); return 1; }\n",
+        )
+        .expect("creator compiles");
+        creator.set_timer(35);
+        creator.set_timer_call(Some("Seed".to_string()));
+        let mut crew = simple_definition("CREW");
+        crew.set_crew_member(true);
+
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(creator).expect("creator registers");
+        engine.register_definition(crew).expect("crew registers");
+        engine
+            .register_player(PlayerConfig::new(0, "Tick35 recruit"))
+            .expect("player registers");
+        engine
+            .spawn_object(SpawnConfig::new("MAKE"))
+            .expect("creator spawns");
+
+        for _ in 0..35 {
+            engine.tick().expect("Tick35 recruit window advances");
+        }
+        assert_eq!(engine.player(0).expect("player").crew().len(), 1);
+        assert!(
+            !engine.is_owner_eliminated(0),
+            "object-phase CreateObject is live before Players.Execute snapshots CrewCnt"
+        );
+    }
+
+    #[test]
+    fn script_created_crew_definition_only_joins_through_set_crew_status() {
+        let driver_script = r#"#strict 2
+func Probe() {
+    var recruit = CreateObject(CREW, 0, 0, 0);
+    var before = GetCrewCount(0);
+    var added = recruit->SetCrewStatus(0, true);
+    return [recruit, before, added, GetCrewCount(0),
+            recruit->GetOwner(), recruit->GetController(),
+            recruit->RecruitmentCount()];
+}
+"#;
+        let crew_script = r#"#strict 2
+local recruitments;
+func Recruitment(int player) { recruitments = recruitments + 1; return 1; }
+func RecruitmentCount() { return recruitments; }
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Script-created crew"))
+            .expect("player registers");
+        engine
+            .register_definition(
+                Definition::from_script("DRVR", "Driver", driver_script)
+                    .expect("driver compiles"),
+            )
+            .expect("driver registers");
+        let mut crew =
+            Definition::from_script("CREW", "Crew", crew_script).expect("crew compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+
+        let driver = engine
+            .spawn_object(SpawnConfig::new("DRVR").with_owner(OWNER_NONE))
+            .expect("driver spawns");
+        let driver_index = engine.find_object_index(driver).expect("driver index");
+        let result = engine
+            .call_object_function(driver_index, "Probe", Vec::new())
+            .expect("creation and explicit crew admission complete");
+        let Value::Array(values) = result else {
+            panic!("Probe should return an array");
+        };
+        let child = match values.first() {
+            Some(Value::Object(id)) => ObjectId::new(*id),
+            other => panic!("Probe should return the created object, got {other:?}"),
+        };
+        assert_eq!(
+            values,
+            vec![
+                Value::Object(child.as_u64()),
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(1),
+            ],
+            "CreateObject only creates a crew-capable object; SetCrewStatus performs the one admission and callback"
+        );
+        assert_eq!(engine.player(0).expect("player").crew(), &[child]);
+
+        let persisted = engine.capture_state();
+        let child_snapshot = persisted
+            .objects
+            .iter()
+            .find(|object| object.snapshot.id == child)
+            .expect("created crew persists");
+        assert_eq!(child_snapshot.snapshot.owner, 0);
+        assert_eq!(child_snapshot.snapshot.controller, 0);
+        assert_eq!(
+            child_snapshot.snapshot.plr_view_range, 500,
+            "MakeCrewMember(false) installs the C++ default crew view range"
+        );
+    }
+
+    #[test]
+    fn newest_equal_experience_crew_info_stays_first_across_callbacks_and_restore() {
+        let script = r#"#strict 2
+func Join() { return MakeCrewMember(this(), 0); }
+func Retire() { return SetCrewStatus(0, false); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Info order"))
+            .expect("player registers");
+        let mut crew = Definition::from_script("CREW", "Crew", script)
+            .expect("info-order probe compiles");
+        crew.set_crew_member(true);
+        engine
+            .register_definition(crew.clone())
+            .expect("crew registers");
+
+        let objects: Vec<_> = (0..4)
+            .map(|_| {
+                engine
+                    .spawn_object(
+                        SpawnConfig::new("CREW")
+                            .with_owner(0)
+                            .with_crew_member(false),
+                    )
+                    .expect("crew-capable object spawns outside the roster")
+            })
+            .collect();
+        for object in &objects[..2] {
+            let index = engine.find_object_index(*object).expect("crew index");
+            assert_eq!(
+                engine
+                    .call_object_function(index, "Join", Vec::new())
+                    .expect("fresh info recruits in its own callback"),
+                Value::Bool(true)
+            );
+        }
+        let older_name = engine
+            .crew_object_info(objects[0])
+            .expect("older info exists")
+            .name
+            .clone();
+        let newer_name = engine
+            .crew_object_info(objects[1])
+            .expect("newer info exists")
+            .name
+            .clone();
+        assert_ne!(older_name, newer_name, "the exact infos are distinguishable");
+        for object in &objects[..2] {
+            let index = engine.find_object_index(*object).expect("crew index");
+            assert_eq!(
+                engine
+                    .call_object_function(index, "Retire", Vec::new())
+                    .expect("info retires in its own callback"),
+                Value::Int(1)
+            );
+        }
+
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("info order serializes");
+        let state = EngineState::from_json_str(&encoded).expect("info order deserializes");
+        let mut restored = Engine::with_seed(99);
+        restored
+            .register_definition(crew)
+            .expect("crew registers for restore");
+        restored.restore_state(&state).expect("crew state restores");
+
+        for object in &objects[2..] {
+            let index = restored.find_object_index(*object).expect("restored crew index");
+            assert_eq!(
+                restored
+                    .call_object_function(index, "Join", Vec::new())
+                    .expect("idle info recruits in its own callback"),
+                Value::Bool(true)
+            );
+        }
+        assert_eq!(
+            restored
+                .crew_object_info(objects[2])
+                .expect("first replacement gets an info")
+                .name,
+            newer_name,
+            "C4ObjectInfoList::New inserts at the head, so the newest equal-experience idle info wins"
+        );
+        assert_eq!(
+            restored
+                .crew_object_info(objects[3])
+                .expect("second replacement gets an info")
+                .name,
+            older_name,
+            "the older equal-experience info remains next in persistent list order"
+        );
+    }
+
+    #[test]
+    fn grab_object_info_clear_pointers_observes_forward_and_backward_callback_writes() {
+        let script = r#"#strict 2
+local write_player;
+local write_target;
+local writes;
+
+func Join(int player) { return MakeCrewMember(this(), player); }
+func Share(int player) { return SetCrewStatus(player, true); }
+func Arm(int player, object target) {
+    write_player = player;
+    write_target = target;
+    return 1;
+}
+func CrewSelection(bool unselect, bool cursor) {
+    if (!unselect && !cursor && write_target) {
+        writes = writes + 1;
+        SetCursor(write_player, write_target, true, true, true);
+    }
+    return 1;
+}
+func Writes() { return writes; }
+func Take(object donor) { return GrabObjectInfo(donor); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Earlier player"))
+            .expect("player zero registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Later player"))
+            .expect("player one registers");
+        let mut crew = Definition::from_script("CREW", "Crew", script)
+            .expect("pointer-order probe compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+
+        let donor = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("donor spawns");
+        let receiver = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(OWNER_NONE)
+                    .with_crew_member(false),
+            )
+            .expect("ownerless receiver spawns");
+        let earlier_replacement = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("earlier replacement spawns");
+        let later_replacement = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(1)
+                    .with_crew_member(false),
+            )
+            .expect("later replacement spawns");
+
+        let donor_index = engine.find_object_index(donor).expect("donor index");
+        assert_eq!(
+            engine
+                .call_object_function(donor_index, "Join", vec![Value::Int(0)])
+                .expect("donor joins player zero"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(donor_index, "Share", vec![Value::Int(1)])
+                .expect("donor joins player one too"),
+            Value::Int(1)
+        );
+        for (object, player) in [(earlier_replacement, 0), (later_replacement, 1)] {
+            let index = engine.find_object_index(object).expect("replacement index");
+            assert_eq!(
+                engine
+                    .call_object_function(index, "Join", vec![Value::Int(player)])
+                    .expect("replacement joins its player"),
+                Value::Bool(true)
+            );
+        }
+
+        engine
+            .set_crew_cursor(0, Some(donor))
+            .expect("earlier player's donor cursor installs");
+        engine
+            .set_crew_cursor(1, Some(later_replacement))
+            .expect("later player's replacement cursor installs");
+        for (object, write_player) in [(earlier_replacement, 1), (later_replacement, 0)] {
+            let index = engine.find_object_index(object).expect("replacement index");
+            engine
+                .call_object_function(
+                    index,
+                    "Arm",
+                    vec![Value::Int(write_player), Value::Object(donor.as_u64())],
+                )
+                .expect("replacement callback arms");
+        }
+
+        let receiver_index = engine.find_object_index(receiver).expect("receiver index");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    receiver_index,
+                    "Take",
+                    vec![Value::Object(donor.as_u64())],
+                )
+                .expect("receiver grabs donor info"),
+            Value::Bool(true)
+        );
+
+        for object in [earlier_replacement, later_replacement] {
+            let index = engine.find_object_index(object).expect("replacement index");
+            assert_eq!(
+                engine
+                    .call_object_function(index, "Writes", Vec::new())
+                    .expect("callback count reads"),
+                Value::Int(1)
+            );
+        }
+        assert_eq!(
+            engine.crew_cursor(1),
+            Some(later_replacement),
+            "player zero's forward write to the later player is cleared when that player is visited"
+        );
+        assert_eq!(
+            engine.crew_cursor(0),
+            Some(donor),
+            "the later player's backward write survives because player zero was already visited"
+        );
+        assert!(!engine.player(0).expect("player zero").crew().contains(&donor));
+        assert!(!engine.player(1).expect("player one").crew().contains(&donor));
     }
 
     // FnGrabObjectInfo (C4Script.cpp:2170-2176) -> C4Object::GrabInfo

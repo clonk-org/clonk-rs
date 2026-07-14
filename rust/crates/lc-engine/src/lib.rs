@@ -1065,7 +1065,7 @@ impl From<&ControlPlayerInfoEntry> for ControlJoinPlayerSemantics {
 /// The `pObj->Info` data a crew object carries (CreateInfoObject links the
 /// C4ObjectInfo, C4Game.cpp:1156-1170): name shown by GetName, rank used
 /// by GetHiRank.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrewObjectInfo {
     /// Original C4ObjectInfoCore definition id. This deliberately survives a
     /// runtime ChangeDef; System.c4g uses it to cap physical training by the
@@ -1074,6 +1074,15 @@ pub struct CrewObjectInfo {
     pub name: String,
     pub rank: i32,
     pub experience: i32,
+}
+
+/// Stable identity of one C4ObjectInfo inside a player's CrewInfoList.
+/// Roster index is the exact pointer-equivalent needed by Retire and
+/// GrabObjectInfo; info fields are not unique.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CrewInfoLink {
+    pub player_id: i32,
+    pub roster_index: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -3014,6 +3023,10 @@ pub struct ObjectState {
     pub category: i32,
     #[serde(default)]
     pub crew_member: bool,
+    /// C4Object::PlrViewRange, persisted by Objects.txt and initialized to
+    /// zero. Joining a player crew raises a zero range to the classic 500.
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub plr_view_range: i32,
     /// C4Object::Select: the authoritative crew-selection bit persisted as
     /// `Selected` independently of C4Player::Cursor (C4Object.h:153;
     /// C4Object.cpp:2800).
@@ -3237,6 +3250,7 @@ pub(crate) fn preview_spawn_state(
         controller,
         category,
         crew_member: false,
+        plr_view_range: 0,
         selected: false,
         crew_disabled: false,
         alive: true,
@@ -3423,6 +3437,9 @@ impl ObjectState {
         if let Some(crew_member) = delta.crew_member {
             self.crew_member = crew_member;
         }
+        if let Some(plr_view_range) = delta.plr_view_range {
+            self.plr_view_range = plr_view_range;
+        }
         if let Some(selected) = delta.selected {
             self.selected = selected;
         }
@@ -3587,6 +3604,7 @@ struct ObjectDelta {
     category: Option<i32>,
     own_mass: Option<i32>,
     crew_member: Option<bool>,
+    plr_view_range: Option<i32>,
     selected: Option<bool>,
     crew_disabled: Option<bool>,
     alive: Option<bool>,
@@ -3727,6 +3745,9 @@ impl ObjectDelta {
         if let Some(crew_member) = update.crew_member {
             self.crew_member = Some(crew_member);
         }
+        if let Some(plr_view_range) = update.plr_view_range {
+            self.plr_view_range = Some(plr_view_range);
+        }
         if let Some(selected) = update.selected {
             self.selected = Some(selected);
         }
@@ -3839,6 +3860,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             controller: update.controller,
             category: update.category,
             crew_member: update.crew_member,
+            plr_view_range: update.plr_view_range,
             selected: update.selected,
             crew_disabled: update.crew_disabled,
             portrait_source: update.portrait_source,
@@ -3999,6 +4021,13 @@ pub struct ObjectUpdate {
     pub own_mass: Option<i32>,
     #[serde(default)]
     pub crew_member: Option<bool>,
+    /// FnSetPlrViewRange / MakeCrewMember's zero-to-default update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plr_view_range: Option<i32>,
+    /// SetObjectCrewStatus changes the player's roster without running
+    /// AdjustCursorCommand; suppress the generic crew-bit cursor repair.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub crew_status_change: bool,
     /// Live C4Object::Info rank write. Some(Some(rank)) attaches/updates
     /// rank data; Some(None) clears the linked info rank.
     #[serde(
@@ -4007,6 +4036,14 @@ pub struct ObjectUpdate {
         deserialize_with = "deserialize_double_option"
     )]
     pub info_rank: Option<Option<i32>>,
+    /// Player whose CrewInfoList owns the live C4Object::Info pointer.
+    /// Some(None) clears that pointer ownership alongside info_rank.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_double_option"
+    )]
+    pub info_link: Option<Option<CrewInfoLink>>,
     /// C4Object::Select overwrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected: Option<bool>,
@@ -4320,7 +4357,10 @@ impl ObjectUpdate {
             && self.controller.is_none()
             && self.category.is_none()
             && self.crew_member.is_none()
+            && self.plr_view_range.is_none()
+            && !self.crew_status_change
             && self.info_rank.is_none()
+            && self.info_link.is_none()
             && self.selected.is_none()
             && self.alive.is_none()
             && self.entrance_status.is_none()
@@ -5630,6 +5670,7 @@ impl Object {
             controller: self.state.controller,
             category: self.state.category,
             crew_member: self.state.crew_member,
+            plr_view_range: self.state.plr_view_range,
             selected: self.state.selected,
             alive: self.state.alive,
             base_graphics: self.state.base_graphics.clone(),
@@ -6233,6 +6274,9 @@ pub struct SpawnConfig {
     pub controller: Option<i32>,
     #[serde(default)]
     pub crew_member: Option<bool>,
+    /// Saved C4Object::PlrViewRange (`PlrViewRange=` in Objects.txt).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plr_view_range: Option<i32>,
     /// Saved C4Object::Select bit (`Selected=` in Objects.txt).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected: Option<bool>,
@@ -6344,6 +6388,7 @@ impl SpawnConfig {
             owner: OWNER_NONE,
             controller: None,
             crew_member: None,
+            plr_view_range: None,
             selected: None,
             status: None,
             container: None,
@@ -6572,6 +6617,11 @@ impl SpawnConfig {
         self
     }
 
+    pub fn with_plr_view_range(mut self, plr_view_range: i32) -> Self {
+        self.plr_view_range = Some(plr_view_range);
+        self
+    }
+
     pub fn with_selected(mut self, selected: bool) -> Self {
         self.selected = Some(selected);
         self
@@ -6702,6 +6752,9 @@ pub struct ObjectSnapshot {
     pub category: i32,
     #[serde(default)]
     pub crew_member: bool,
+    /// Saved C4Object::PlrViewRange.
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub plr_view_range: i32,
     /// C4Object::Select, persisted independently of the player's cursor
     /// (C4Object.cpp:2800).
     #[serde(default, skip_serializing_if = "is_false")]
@@ -7120,6 +7173,11 @@ pub struct EngineState {
     pub particles: Vec<ParticleSnapshot>,
     #[serde(default)]
     pub players: Vec<PlayerState>,
+    /// States written before ordered C4Player::Crew persistence omitted the
+    /// roster field entirely. False requests the one-time owner+legacy-bit
+    /// compatibility import; true makes an intentionally empty roster exact.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub player_crew_rosters_authoritative: bool,
     /// C4PlayerInfoList::iLastPlayerID (C4PlayerInfo.cpp:1733-1742);
     /// allocation is a later behavior.
     #[serde(default, skip_serializing_if = "i32_is_zero")]
@@ -7137,6 +7195,19 @@ pub struct EngineState {
     pub crew_selection: HashMap<i32, CrewSelectionState>,
     #[serde(default)]
     pub crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
+    /// Persistent C4ObjectInfoList entries for each runtime player.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub crew_info_rosters: HashMap<i32, Vec<player_file::CrewInfo>>,
+    /// Stable list traversal order for each C4ObjectInfoList. Entries live in
+    /// append-only slots so exact object-info pointers remain serializable,
+    /// while C++ `New` inserts the newest list node at the head.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub crew_info_order: HashMap<i32, Vec<usize>>,
+    /// Full payload and exact roster pointer for each live C4Object::Info.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub crew_object_infos: HashMap<ObjectId, CrewObjectInfo>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub crew_info_links: HashMap<ObjectId, CrewInfoLink>,
     #[serde(default)]
     pub global_effects: Vec<EffectState>,
     #[serde(default, skip_serializing_if = "ScriptGlobalState::is_empty")]
@@ -7261,6 +7332,7 @@ impl EngineState {
             object_order: snapshot.render_order.clone(),
             particles: snapshot.particles.clone(),
             players,
+            player_crew_rosters_authoritative: true,
             last_player_info_id: snapshot
                 .players
                 .iter()
@@ -7280,6 +7352,10 @@ impl EngineState {
             teams: Vec::new(),
             crew_selection: snapshot.crew_selection.clone(),
             crew_roles: snapshot.crew_roles.clone(),
+            crew_info_rosters: HashMap::new(),
+            crew_info_order: HashMap::new(),
+            crew_object_infos: HashMap::new(),
+            crew_info_links: HashMap::new(),
             global_effects: snapshot.global_effects.clone(),
             script_globals: snapshot.script_globals.clone(),
             known_crew_owners,
@@ -12386,12 +12462,19 @@ pub struct Engine {
     /// Per-player crew info lists (C4Player::CrewInfoList): the roster
     /// GetIdle/New recruit from at join.
     crew_rosters: HashMap<i32, Vec<player_file::CrewInfo>>,
+    /// C4ObjectInfoList traversal order expressed as stable roster indices.
+    /// New entries are appended to `crew_rosters` for pointer identity but
+    /// inserted at the front here like `C4ObjectInfoList::New`.
+    crew_info_order: HashMap<i32, Vec<usize>>,
     /// Crew object -> its C4ObjectInfo data (name/rank/experience), the
     /// `pObj->Info` link of CreateInfoObject (C4Game.cpp:1156-1170).
     crew_object_infos: Rc<HashMap<ObjectId, CrewObjectInfo>>,
     /// Shared rank view of `crew_object_infos` for host contexts
     /// (GetHiRank); rebuilt when crew infos change (joins are rare).
     crew_ranks: Rc<HashMap<u64, i32>>,
+    /// Owning C4Player::CrewInfoList for each live object-info pointer.
+    /// This is independent of C4Object::Owner and crew-list membership.
+    crew_info_links: Rc<HashMap<ObjectId, CrewInfoLink>>,
     team_home_base_rule: bool,
     construction_needs_material: bool,
     structures_need_energy: bool,
@@ -14163,8 +14246,10 @@ impl Engine {
             standard_names: None,
             map_zoom: scenario::LegacyC4SVal::new(10, 0, 5, 15),
             crew_rosters: HashMap::new(),
+            crew_info_order: HashMap::new(),
             crew_object_infos: Rc::new(HashMap::new()),
             crew_ranks: Rc::new(HashMap::new()),
+            crew_info_links: Rc::new(HashMap::new()),
             team_home_base_rule: false,
             construction_needs_material: false,
             structures_need_energy: false,
@@ -14627,6 +14712,9 @@ impl Engine {
         self.players.insert(number, player);
         self.players_registered = true;
         self.crew_rosters.insert(number, config.crew.clone());
+        self.crew_info_order
+            .insert(number, (0..config.crew.len()).collect());
+        self.bootstrap_player_crew_from_union(number);
         self.sync_player_cursor(number);
         self.sync_team_home_base_for(number);
         number
@@ -14693,17 +14781,11 @@ impl Engine {
         // (strictly-higher rank replaces; the FIRST of equal ranks wins
         // in crew order) and DoSelect marks it selected.
         {
-            let mut crew: Vec<ObjectId> = self
-                .objects
-                .iter()
-                .filter(|object| {
-                    object.state.owner == number
-                        && object.state.crew_member
-                        && object.state.status.is_active()
-                })
-                .map(|object| object.id)
-                .collect();
-            crew.sort_unstable_by_key(|id| std::cmp::Reverse(id.as_u64()));
+            let crew = self
+                .players
+                .get(&number)
+                .map(|player| player.crew().to_vec())
+                .unwrap_or_default();
             let mut hi_rank: Option<(ObjectId, i32)> = None;
             for id in crew {
                 let rank = self.crew_ranks.get(&id.as_u64()).copied().unwrap_or(-1);
@@ -15379,7 +15461,7 @@ impl Engine {
                 .map(|id| id.as_str().to_string())
                 .unwrap_or_else(|| id_token.to_string())
         };
-        let Some(info) = self.recruit_crew_info(number, &resolved) else {
+        let Some((info_index, info)) = self.recruit_crew_info(number, &resolved) else {
             return Ok(());
         };
         let definition_id = DefinitionId::from(info.id.as_str());
@@ -15432,6 +15514,13 @@ impl Engine {
                 experience: info.experience,
             },
         );
+        Rc::make_mut(&mut self.crew_info_links).insert(
+            id,
+            CrewInfoLink {
+                player_id: number,
+                roster_index: info_index,
+            },
+        );
 
         // C4Object::Init receives the crew pInfo: GetPhysical() resolves
         // the INFO physicals (C4Object.cpp:2118-2133). With fair crew ON
@@ -15450,6 +15539,7 @@ impl Engine {
         let promoted = crew_info_physical(definition_physical, info.rank);
         if let Some(index) = self.find_object_index(id) {
             self.objects[index].state.info_physical = Some(promoted);
+            self.objects[index].state.plr_view_range = 500;
             // Init: `if (Alive) Energy = GetPhysical()->Energy`
             // (C4Object.cpp:192) — the spawn used the def physical before
             // the info attached.
@@ -15479,12 +15569,17 @@ impl Engine {
     /// The `while (!(pInfo = GetIdle)) if (!New) break;` recruit loop
     /// (C4Player.cpp:502-504/541-543). Returns the recruited info (marked
     /// InAction) or None when no info could be created.
-    fn recruit_crew_info(&mut self, number: i32, id_token: &str) -> Option<player_file::CrewInfo> {
+    fn recruit_crew_info(
+        &mut self,
+        number: i32,
+        id_token: &str,
+    ) -> Option<(usize, player_file::CrewInfo)> {
         loop {
             if let Some(index) = self.idle_crew_info_index(number, id_token) {
                 let roster = self.crew_rosters.entry(number).or_default();
                 roster[index].in_action = true; // pHiExp->Recruit()
-                return Some(roster[index].clone());
+                roster[index].in_action_time = self.game_time;
+                return Some((index, roster[index].clone()));
             }
             if !self.create_crew_info(number, id_token) {
                 return None;
@@ -15500,7 +15595,18 @@ impl Engine {
     fn idle_crew_info_index(&self, number: i32, id_token: &str) -> Option<usize> {
         let roster = self.crew_rosters.get(&number)?;
         let mut best: Option<usize> = None;
-        for (index, info) in roster.iter().enumerate() {
+        let fallback_order;
+        let order = match self.crew_info_order.get(&number) {
+            Some(order) => order.as_slice(),
+            None => {
+                fallback_order = (0..roster.len()).collect::<Vec<_>>();
+                fallback_order.as_slice()
+            }
+        };
+        for &index in order {
+            let Some(info) = roster.get(index) else {
+                continue;
+            };
             if !self
                 .definitions
                 .contains_key(&DefinitionId::from(info.id.as_str()))
@@ -15510,7 +15616,7 @@ impl Engine {
             if !id_token.is_empty() && info.id != id_token {
                 continue;
             }
-            if info.participation != 1 || info.in_action || info.has_died {
+            if info.participation == 0 || info.in_action || info.has_died {
                 continue;
             }
             match best {
@@ -15593,10 +15699,17 @@ impl Engine {
             name,
             rank: 0,
             experience: 0,
+            total_playing_time: 0,
             participation: 1,
             in_action: false,
+            in_action_time: 0,
             has_died: false,
         });
+        let index = roster.len() - 1;
+        self.crew_info_order
+            .entry(number)
+            .or_insert_with(|| (0..index).collect())
+            .insert(0, index);
         true
     }
 
@@ -15614,6 +15727,8 @@ impl Engine {
         player.control.cursor_flash = 30;
         self.players.insert(id, player);
         self.players_registered = true;
+        self.crew_info_order.entry(id).or_default();
+        self.bootstrap_player_crew_from_union(id);
         self.sync_player_cursor(id);
         self.sync_team_home_base_for(id);
 
@@ -16854,6 +16969,7 @@ impl Engine {
         .with_particle_defs(self.particle_system.def_names())
         .with_crew_ranks(Rc::clone(&self.crew_ranks))
         .with_crew_infos(Rc::clone(&self.crew_object_infos))
+        .with_crew_info_links(Rc::clone(&self.crew_info_links))
         .with_materials(Some(self.materials_shared()))
         .with_definition_scripts(
             self.definitions
@@ -16886,11 +17002,16 @@ impl Engine {
         .with_command_settings(self.frame, self.base_buy_enabled, self.base_sell_enabled)
         .with_structures_need_energy(self.structures_need_energy)
         .with_crew_name_sources(
-            self.standard_names
-                .as_ref()
-                .map(|names| names.bytes().filter(|&b| b == b'\n').count() as i32)
-                .unwrap_or(0),
-            self.idle_crew_rank_pools(),
+            self.standard_names.clone(),
+            self.definitions
+                .iter()
+                .filter_map(|(id, definition)| {
+                    definition
+                        .clonk_names()
+                        .map(|names| (id.as_str().to_string(), names.to_string()))
+                })
+                .collect(),
+            self.host_crew_info_state(),
         )
         .with_sky_adjustment(sky_adjustment)
     }
@@ -17738,6 +17859,20 @@ impl Engine {
     }
 
     pub fn crew_members(&self, owner: i32) -> Vec<ObjectId> {
+        if let Some(player) = self.players.get(&owner) {
+            return player
+                .crew()
+                .iter()
+                .copied()
+                .filter(|id| {
+                    self.find_object_index(*id)
+                        .is_some_and(|index| {
+                            let object = &self.objects[index];
+                            !object.destroyed && object.state.status != ObjectStatus::Deleted
+                        })
+                })
+                .collect();
+        }
         self.objects
             .iter()
             .filter(|object| {
@@ -17820,17 +17955,26 @@ impl Engine {
                 .iter()
                 .find(|object| object.id == id)
                 .ok_or(EngineError::UnknownObject(id))?;
-            if object.state.owner != owner {
-                return Err(EngineError::CrewSelection {
-                    owner,
-                    detail: format!("object {} is owned by {}", id, object.state.owner),
-                });
-            }
-            if !object.state.crew_member {
-                return Err(EngineError::CrewSelection {
-                    owner,
-                    detail: format!("object {} is not a crew member", id),
-                });
+            if let Some(player) = self.players.get(&owner) {
+                if !player.crew().contains(&id) {
+                    return Err(EngineError::CrewSelection {
+                        owner,
+                        detail: format!("object {} is not in this player's crew", id),
+                    });
+                }
+            } else {
+                if object.state.owner != owner {
+                    return Err(EngineError::CrewSelection {
+                        owner,
+                        detail: format!("object {} is owned by {}", id, object.state.owner),
+                    });
+                }
+                if !object.state.crew_member {
+                    return Err(EngineError::CrewSelection {
+                        owner,
+                        detail: format!("object {} is not a crew member", id),
+                    });
+                }
             }
             if !object.state.status.is_active() {
                 return Err(EngineError::CrewSelection {
@@ -17865,11 +18009,14 @@ impl Engine {
     where
         I: IntoIterator<Item = ObjectId>,
     {
+        let roster = self
+            .players
+            .get(&owner)
+            .map(|player| player.crew().to_vec())
+            .unwrap_or_else(|| self.crew_members(owner));
         for id in crew {
             if let Some(index) = self.find_object_index(id) {
-                if self.objects[index].state.owner == owner
-                    && self.objects[index].state.crew_member
-                {
+                if roster.contains(&id) {
                     let _ = self.object_un_select(index, owner, false);
                 }
             }
@@ -17900,17 +18047,26 @@ impl Engine {
                     .iter()
                     .find(|object| object.id == id)
                     .ok_or(EngineError::UnknownObject(id))?;
-                if object.state.owner != owner {
-                    return Err(EngineError::CrewSelection {
-                        owner,
-                        detail: format!("object {} is owned by {}", id, object.state.owner),
-                    });
-                }
-                if !object.state.crew_member {
-                    return Err(EngineError::CrewSelection {
-                        owner,
-                        detail: format!("object {} is not a crew member", id),
-                    });
+                if let Some(player) = self.players.get(&owner) {
+                    if !player.crew().contains(&id) {
+                        return Err(EngineError::CrewSelection {
+                            owner,
+                            detail: format!("object {} is not in this player's crew", id),
+                        });
+                    }
+                } else {
+                    if object.state.owner != owner {
+                        return Err(EngineError::CrewSelection {
+                            owner,
+                            detail: format!("object {} is owned by {}", id, object.state.owner),
+                        });
+                    }
+                    if !object.state.crew_member {
+                        return Err(EngineError::CrewSelection {
+                            owner,
+                            detail: format!("object {} is not a crew member", id),
+                        });
+                    }
                 }
                 if !object.state.status.is_active() {
                     return Err(EngineError::CrewSelection {
@@ -18695,22 +18851,25 @@ impl Engine {
             .iter()
             .find(|object| object.id == object_id)
             .ok_or(EngineError::UnknownObject(object_id))?;
-        if object.state.owner != owner {
+        let valid_member = self
+            .players
+            .get(&owner)
+            .map(|player| player.crew().contains(&object_id))
+            .unwrap_or(object.state.owner == owner && object.state.crew_member);
+        if !valid_member {
             return Err(EngineError::CrewRole {
                 owner,
-                detail: format!("object {} is owned by {}", object_id, object.state.owner),
+                detail: if object.state.owner != owner {
+                    format!("object {} is owned by {}", object_id, object.state.owner)
+                } else {
+                    format!("object {} is not in this player's crew", object_id)
+                },
             });
         }
-        if !object.state.crew_member {
+        if object.destroyed || object.state.status == ObjectStatus::Deleted {
             return Err(EngineError::CrewRole {
                 owner,
-                detail: format!("object {} is not a crew member", object_id),
-            });
-        }
-        if !object.state.status.is_active() {
-            return Err(EngineError::CrewRole {
-                owner,
-                detail: format!("object {} is not active", object_id),
+                detail: format!("object {} no longer exists", object_id),
             });
         }
 
@@ -21544,6 +21703,13 @@ impl Engine {
         }
         self.exec_cursor = None;
 
+        // CreateObject is synchronous inside C4Object::Execute. Rust defers
+        // materialization only so a freshly linked object cannot enter the
+        // current execution-list walk; once that walk closes it must exist
+        // for CrossCheck, world systems, and especially Players.Execute's
+        // Tick35 CrewCnt snapshot.
+        self.process_spawn_queue(spawn_requests)?;
+
         // C4GameObjects::CrossCheck runs once per frame after object        // execution (C4Game.cpp ExecObjects → Objects.CrossCheck()).
         self.cross_check(frame)?;
         self.execute_object_order_commands();
@@ -21581,10 +21747,17 @@ impl Engine {
         if let Some(sky) = &mut self.sky {
             sky.advance(&self.environment);
         }
+        // C4Player::UpdateCounts snapshots CrewCnt at the start of each
+        // Players.Execute pass. CheckElimination later in that same pass
+        // consumes the cached count, before Messages and Scenario Script.
+        let tick35_crew = (frame % 35 == 0).then(|| self.refresh_elimination_state());
         self.tick_player_systems()?;
         // The control half of Players.Execute (C4Game.cpp:822): flash
         // decrements plus the LastCom COM_Single timeout dispatch.
         self.execute_player_controls()?;
+        if let Some(crew_owners) = tick35_crew.as_ref() {
+            self.check_crew_elimination(crew_owners);
+        }
         self.messages.tick(&alive);
         // C4GameScriptHost::Execute (C4ScriptHost.cpp:222-232): while
         // Game.Script.Go, every 10th frame calls Script%d with the counter
@@ -21599,18 +21772,12 @@ impl Engine {
         }
         self.transfer_zones.retain_existing(&alive);
         self.prune_selection();
-        self.process_spawn_queue(spawn_requests)?;
         // C4Game::UpdateRules follows Script.Execute and refreshes only on
         // Tick255 (plus frame one) (C4Game.cpp:845,4038-4047).
         if frame == 1 || frame % 255 == 0 {
             self.refresh_structures_snow_in_rule();
         }
-        let alive_owners = self.refresh_elimination_state();
-        // C4Player::Execute's Tick35 CheckElimination (C4Player.cpp:225-235)
-        // — crewless owners eliminate ONE-WAY at the boundary only.
-        if frame % 35 == 0 {
-            self.check_crew_elimination(&alive_owners);
-        }
+        self.refresh_elimination_state();
         self.check_game_over()?;
         // Control.DoSyncCheck() closes the frame (C4Game.cpp:829)
         self.do_sync_check();
@@ -21683,7 +21850,10 @@ impl Engine {
             owner,
             controller,
             crew_member,
+            plr_view_range,
+            crew_status_change,
             info_rank,
+            info_link,
             crew_disabled,
             portrait_source,
             portrait_name,
@@ -21893,6 +22063,9 @@ impl Engine {
             if let Some(crew_member) = crew_member {
                 object.state.crew_member = crew_member;
             }
+            if let Some(plr_view_range) = plr_view_range {
+                object.state.plr_view_range = plr_view_range;
+            }
             if let Some(crew_disabled) = crew_disabled {
                 object.state.crew_disabled = crew_disabled;
             }
@@ -22013,7 +22186,7 @@ impl Engine {
             // (C4Object.cpp:3792 and UpdateGraphics at :381-402).
             self.update_solid_mask(index);
         }
-        self.apply_info_rank_update(object_id, info_rank);
+        self.apply_info_update(object_id, info_rank, info_link);
         self.update_sector_for_index(index);
         if energy_died {
             self.assign_death(index, false)?;
@@ -22021,7 +22194,11 @@ impl Engine {
         self.update_selection_for_state_change(
             object_id,
             previous_owner,
-            previous_crew,
+            if crew_status_change {
+                new_crew
+            } else {
+                previous_crew
+            },
             new_owner,
             new_crew,
         );
@@ -22045,20 +22222,36 @@ impl Engine {
         Ok(())
     }
 
-    fn apply_info_rank_update(&mut self, object_id: ObjectId, update: Option<Option<i32>>) {
-        let Some(rank) = update else {
-            return;
-        };
-        match rank {
-            Some(rank) => {
-                Rc::make_mut(&mut self.crew_ranks).insert(object_id.as_u64(), rank);
-                if let Some(info) = Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id) {
-                    info.rank = rank;
+    fn apply_info_update(
+        &mut self,
+        object_id: ObjectId,
+        rank_update: Option<Option<i32>>,
+        link_update: Option<Option<CrewInfoLink>>,
+    ) {
+        if let Some(rank) = rank_update {
+            match rank {
+                Some(rank) => {
+                    Rc::make_mut(&mut self.crew_ranks).insert(object_id.as_u64(), rank);
+                    if let Some(info) =
+                        Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id)
+                    {
+                        info.rank = rank;
+                    }
+                }
+                None => {
+                    Rc::make_mut(&mut self.crew_ranks).remove(&object_id.as_u64());
+                    Rc::make_mut(&mut self.crew_object_infos).remove(&object_id);
                 }
             }
-            None => {
-                Rc::make_mut(&mut self.crew_ranks).remove(&object_id.as_u64());
-                Rc::make_mut(&mut self.crew_object_infos).remove(&object_id);
+        }
+        if let Some(link) = link_update {
+            match link {
+                Some(link) => {
+                    Rc::make_mut(&mut self.crew_info_links).insert(object_id, link);
+                }
+                None => {
+                    Rc::make_mut(&mut self.crew_info_links).remove(&object_id);
+                }
             }
         }
     }
@@ -22368,6 +22561,12 @@ impl Engine {
         let info_rank_update = object_update
             .as_ref()
             .and_then(|update| update.info_rank);
+        let info_link_update = object_update
+            .as_ref()
+            .and_then(|update| update.info_link);
+        let crew_status_change = object_update
+            .as_ref()
+            .is_some_and(|update| update.crew_status_change);
 
         if !host_landscape_ops.is_empty() {
             self.apply_landscape_operations(host_landscape_ops);
@@ -22620,7 +22819,7 @@ impl Engine {
                 object.clamp_velocity(&self.physics);
             }
         }
-        self.apply_info_rank_update(object_id, info_rank_update);
+        self.apply_info_update(object_id, info_rank_update, info_link_update);
         self.update_sector_for_index(index);
 
         if energy_died {
@@ -22638,7 +22837,11 @@ impl Engine {
             self.update_selection_for_state_change(
                 object_id,
                 previous_owner,
-                previous_crew_member,
+                if crew_status_change {
+                    new_crew_member
+                } else {
+                    previous_crew_member
+                },
                 new_owner,
                 new_crew_member,
             );
@@ -22832,6 +23035,14 @@ impl Engine {
                 .update
                 .as_ref()
                 .and_then(|update| update.info_rank);
+            let info_link_update = outcome
+                .update
+                .as_ref()
+                .and_then(|update| update.info_link);
+            let crew_status_change = outcome
+                .update
+                .as_ref()
+                .is_some_and(|update| update.crew_status_change);
             let mut energy_died = false;
             let mut delayed_docon_construction = None;
             // FnChangeDef swaps INLINE (C4Object.cpp:1205-1231): apply the
@@ -22902,7 +23113,7 @@ impl Engine {
                     effect_events.extend(object.mark_destroyed());
                 }
             }
-            self.apply_info_rank_update(object_id, info_rank_update);
+            self.apply_info_update(object_id, info_rank_update, info_link_update);
             self.update_sector_for_index(index);
             if energy_died {
                 // C4Object::DoEnergy kills synchronously when a nonzero
@@ -22919,7 +23130,11 @@ impl Engine {
                 self.update_selection_for_state_change(
                     object_id,
                     previous_owner,
-                    previous_crew_member,
+                    if crew_status_change {
+                        new_crew_member
+                    } else {
+                        previous_crew_member
+                    },
                     new_owner,
                     new_crew_member,
                 );
@@ -23134,12 +23349,7 @@ impl Engine {
         owners.dedup();
         let mut hud_players = Vec::with_capacity(owners.len());
         for owner in owners {
-            let mut crew: Vec<_> = self
-                .objects
-                .iter()
-                .filter(|object| object.state.owner == owner && object.state.crew_member)
-                .map(|object| object.id)
-                .collect();
+            let mut crew = self.crew_members(owner);
             // The COMPARATOR surface: the bridge std::sort's its HUD crew
             // ascending before export (RustEngineBridge.cpp:1381), so the
             // rust snapshot mirrors that normalization. Engine-internal
@@ -23170,20 +23380,12 @@ impl Engine {
             .map(|player| {
                 let mut state = player.to_state();
                 let owner = player.id();
-                let mut crew: Vec<_> = self
-                    .objects
-                    .iter()
-                    .filter(|object| {
-                        object.state.owner == owner
-                            && object.state.crew_member
-                            && object.state.status.is_active()
+                state.crew.retain(|id| {
+                    self.find_object_index(*id).is_some_and(|index| {
+                        let object = &self.objects[index];
+                        !object.destroyed && object.state.status != ObjectStatus::Deleted
                     })
-                    .map(|object| object.id)
-                    .collect();
-                // Newest-first like C4Player::Crew (Add stMain inserts new
-                // crew before older ones; GetCrew/GetHiRank follow it).
-                crew.sort_unstable_by_key(|id| std::cmp::Reverse(id.as_u64()));
-                state.crew = crew;
+                });
                 state.cursor = self
                     .crew_selection
                     .get(&owner)
@@ -23522,12 +23724,17 @@ impl Engine {
             object_order: self.exec_list.clone(),
             particles,
             players,
+            player_crew_rosters_authoritative: true,
             last_player_info_id: self.last_player_info_id,
             forced_control_style: self.forced_control_style,
             forced_auto_context_menu: self.forced_auto_context_menu,
             teams: self.teams.as_ref().clone(),
             crew_selection,
             crew_roles,
+            crew_info_rosters: self.crew_rosters.clone(),
+            crew_info_order: self.crew_info_order.clone(),
+            crew_object_infos: self.crew_object_infos.as_ref().clone(),
+            crew_info_links: self.crew_info_links.as_ref().clone(),
             global_effects: self.global_effects.clone(),
             script_globals: self.capture_script_globals(),
             known_crew_owners,
@@ -23589,6 +23796,26 @@ impl Engine {
         self.pending_object_order_commands.clear();
         self.exec_cursor = None;
         self.note_objects_changed();
+        self.crew_rosters = state.crew_info_rosters.clone();
+        self.crew_info_order = state.crew_info_order.clone();
+        for (&player_id, roster) in &self.crew_rosters {
+            let order = self.crew_info_order.entry(player_id).or_default();
+            order.retain(|index| *index < roster.len());
+            let mut seen = HashSet::new();
+            order.retain(|index| seen.insert(*index));
+            order.extend((0..roster.len()).filter(|index| seen.insert(*index)));
+        }
+        self.crew_info_order
+            .retain(|player_id, _| self.crew_rosters.contains_key(player_id));
+        self.crew_object_infos = Rc::new(state.crew_object_infos.clone());
+        self.crew_info_links = Rc::new(state.crew_info_links.clone());
+        self.crew_ranks = Rc::new(
+            state
+                .crew_object_infos
+                .iter()
+                .map(|(object, info)| (object.as_u64(), info.rank))
+                .collect(),
+        );
         self.global_effects = state.global_effects.clone();
         self.particles.clear();
         self.pxs_system.clear();
@@ -23748,6 +23975,7 @@ impl Engine {
                     controller: snapshot.controller,
                     category: snapshot.category,
                     crew_member: snapshot.crew_member,
+                    plr_view_range: snapshot.plr_view_range,
                     selected: snapshot.selected,
                     crew_disabled: false,
                     alive: snapshot.alive,
@@ -23873,11 +24101,18 @@ impl Engine {
         // consistently, so this OR is idempotent.
         for (&owner, selection) in &state.crew_selection {
             for &id in &selection.selected {
+                let roster_membership = state
+                    .players
+                    .iter()
+                    .find(|player| player.id == owner)
+                    .filter(|_| state.player_crew_rosters_authoritative)
+                    .map(|player| player.crew.contains(&id));
                 if let Some(object) = self.objects.iter_mut().find(|object| {
                     object.id == id
-                        && object.state.owner == owner
-                        && object.state.crew_member
-                        && object.state.status.is_active()
+                        && roster_membership
+                            .unwrap_or(object.state.owner == owner && object.state.crew_member)
+                        && !object.destroyed
+                        && object.state.status != ObjectStatus::Deleted
                 }) {
                     object.state.selected = true;
                 }
@@ -23932,10 +24167,23 @@ impl Engine {
             .iter()
             .map(|(&owner, roles)| {
                 let mut filtered = HashMap::new();
+                let roster = state
+                    .players
+                    .iter()
+                    .find(|player| player.id == owner)
+                    .filter(|_| state.player_crew_rosters_authoritative)
+                    .map(|player| player.crew.as_slice());
                 for (&object_id, role) in roles {
                     if let Some(object) = self.objects.iter().find(|object| object.id == object_id)
                     {
-                        if object.state.crew_member && object.state.owner == owner {
+                        if roster
+                            .map(|roster| roster.contains(&object_id))
+                            .unwrap_or(
+                                object.state.owner == owner && object.state.crew_member,
+                            )
+                            && !object.destroyed
+                            && object.state.status != ObjectStatus::Deleted
+                        {
                             filtered.insert(object_id, role.clone());
                         }
                     }
@@ -23968,6 +24216,13 @@ impl Engine {
             .map(Player::from_state)
             .map(|player| (player.id(), player))
             .collect();
+        if !state.player_crew_rosters_authoritative {
+            let mut player_ids: Vec<_> = self.players.keys().copied().collect();
+            player_ids.sort_unstable();
+            for player_id in player_ids {
+                self.bootstrap_player_crew_from_union(player_id);
+            }
+        }
         for player in self.players.values_mut() {
             player.set_game_join_time(self.game_time);
         }
@@ -24900,28 +25155,17 @@ impl Engine {
 
     fn update_selection_for_state_change(
         &mut self,
-        object_id: ObjectId,
-        previous_owner: i32,
-        previous_crew_member: bool,
-        new_owner: i32,
-        new_crew_member: bool,
+        _object_id: ObjectId,
+        _previous_owner: i32,
+        _previous_crew_member: bool,
+        _new_owner: i32,
+        _new_crew_member: bool,
     ) {
-        if previous_owner != new_owner {
-            self.remove_from_selection(previous_owner, object_id);
-            self.remove_from_roles(previous_owner, object_id);
-        }
-        if previous_crew_member && !new_crew_member {
-            self.remove_from_selection(new_owner, object_id);
-            self.remove_from_roles(new_owner, object_id);
-        }
-        if let Some(object) = self.objects.iter().find(|object| object.id == object_id) {
-            if !object.state.status.is_active() {
-                self.remove_from_selection(new_owner, object_id);
-                self.remove_from_roles(new_owner, object_id);
-            }
-        }
-        self.sync_player_cursor(previous_owner);
-        self.sync_player_cursor(new_owner);
+        // Owner, StatusDeactivate(false), and an individual player's crew
+        // membership changes do not implicitly clear C4Object::Select or any
+        // player pointer. The concrete C++ operations that do clear pointers
+        // (death, deletion, StatusDeactivate(true), GrabInfo) handle them at
+        // their exact ordered call sites.
     }
 
     fn remove_from_selection(&mut self, owner: i32, object_id: ObjectId) {
@@ -24975,6 +25219,75 @@ impl Engine {
     pub fn apply_player_commands(&mut self, commands: Vec<PlayerCommand>) -> Result<(), EngineError> {
         for command in commands {
             match command {
+                PlayerCommand::SetCrewRosters { rosters } => {
+                    for (player_id, crew) in rosters {
+                        if let Some(player) = self.players.get_mut(&player_id) {
+                            player.set_crew(crew);
+                        }
+                    }
+                }
+                PlayerCommand::RetireCrewInfo { object_id, link } => {
+                    if let Some(entry) = self
+                        .crew_rosters
+                        .get_mut(&link.player_id)
+                        .and_then(|roster| roster.get_mut(link.roster_index))
+                    {
+                        // C4ObjectInfo::Retire is idempotent and accrues only
+                        // the current active stint.
+                        if entry.in_action {
+                            entry.total_playing_time = entry
+                                .total_playing_time
+                                .wrapping_add(self.game_time.wrapping_sub(entry.in_action_time));
+                            entry.in_action = false;
+                        }
+                    }
+                    if self.crew_info_links.get(&object_id) == Some(&link) {
+                        Rc::make_mut(&mut self.crew_info_links).remove(&object_id);
+                        Rc::make_mut(&mut self.crew_object_infos).remove(&object_id);
+                        Rc::make_mut(&mut self.crew_ranks).remove(&object_id.as_u64());
+                    }
+                }
+                PlayerCommand::LinkCrewInfo {
+                    object_id,
+                    link,
+                    info,
+                    created_entry,
+                    recruit,
+                    has_died,
+                } => {
+                    if let Some(link) = link {
+                        let roster = self.crew_rosters.entry(link.player_id).or_default();
+                        let mut created = false;
+                        if let Some(entry) = created_entry {
+                            if link.roster_index == roster.len() {
+                                roster.push(entry);
+                                created = true;
+                            } else if link.roster_index < roster.len() {
+                                roster[link.roster_index] = entry;
+                                created = true;
+                            }
+                        }
+                        if created {
+                            let order = self.crew_info_order.entry(link.player_id).or_insert_with(
+                                || (0..roster.len()).filter(|index| *index != link.roster_index).collect(),
+                            );
+                            order.retain(|index| *index != link.roster_index);
+                            order.insert(0, link.roster_index);
+                        }
+                        if let Some(entry) = roster.get_mut(link.roster_index) {
+                            entry.has_died = has_died;
+                            if recruit && !entry.in_action {
+                                entry.in_action = true;
+                                entry.in_action_time = self.game_time;
+                            }
+                        }
+                        Rc::make_mut(&mut self.crew_info_links).insert(object_id, link);
+                    } else {
+                        Rc::make_mut(&mut self.crew_info_links).remove(&object_id);
+                    }
+                    Rc::make_mut(&mut self.crew_object_infos).insert(object_id, info.clone());
+                    Rc::make_mut(&mut self.crew_ranks).insert(object_id.as_u64(), info.rank);
+                }
                 PlayerCommand::AdjustHomeBaseMaterial {
                     player_id,
                     definition_id,
@@ -25066,10 +25379,32 @@ impl Engine {
                         if let Some(player) = self.players.get_mut(&owner) {
                             player.clear_object_pointers(object);
                         }
+                        self.remove_from_roles(owner, object);
                         if removed_cursor {
                             self.player_adjust_cursor_command(owner)?;
                         }
                     }
+                }
+                PlayerCommand::ClearPlayerObjectPointersWithoutAdjust {
+                    player_id,
+                    object,
+                } => {
+                        if self.crew_cursor(player_id) == Some(object) {
+                            if let Some(selection) = self.crew_selection.get_mut(&player_id) {
+                                selection.set_cursor(None);
+                            }
+                            if self
+                                .crew_selection
+                                .get(&player_id)
+                                .is_some_and(CrewSelection::is_empty)
+                            {
+                                self.crew_selection.remove(&player_id);
+                            }
+                        }
+                        if let Some(player) = self.players.get_mut(&player_id) {
+                            player.clear_object_pointers(object);
+                        }
+                        self.remove_from_roles(player_id, object);
                 }
                 PlayerCommand::SetViewOffset { player_id, offset } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
@@ -25193,8 +25528,20 @@ impl Engine {
 
     fn prune_selection(&mut self) {
         self.prune_roles();
+        let listed: HashSet<ObjectId> = self
+            .players
+            .values()
+            .flat_map(|player| player.crew().iter().copied())
+            .collect();
         for object in &mut self.objects {
-            if !object.state.crew_member || !object.state.status.is_active() {
+            let member = if self.players.is_empty() {
+                object.state.crew_member
+            } else {
+                listed.contains(&object.id)
+                    || (!self.players.contains_key(&object.state.owner)
+                        && object.state.crew_member)
+            };
+            if !member || object.destroyed || object.state.status == ObjectStatus::Deleted {
                 object.state.selected = false;
             }
         }
@@ -25204,11 +25551,13 @@ impl Engine {
         // such as AIMR/SELR/CBMU while their owning clonk is deselected
         // (C4Script.cpp:2943-2963; C4Player.cpp:1745,1784-1792). Object
         // selection flags remain crew-only above, but prune Cursor only when
-        // its object is no longer active.
+        // its object pointer is gone. Inactive objects remain valid pointers.
         let active: HashSet<ObjectId> = self
             .objects
             .iter()
-            .filter(|object| object.state.status.is_active())
+            .filter(|object| {
+                !object.destroyed && object.state.status != ObjectStatus::Deleted
+            })
             .map(|object| object.id)
             .collect();
         self.crew_selection.retain(|_, selection| {
@@ -25223,17 +25572,46 @@ impl Engine {
             return;
         }
 
-        let mut valid = HashMap::new();
+        let existing: HashSet<ObjectId> = self
+            .objects
+            .iter()
+            .filter(|object| {
+                !object.destroyed && object.state.status != ObjectStatus::Deleted
+            })
+            .map(|object| object.id)
+            .collect();
+        let mut valid: HashMap<i32, HashSet<ObjectId>> = self
+            .players
+            .iter()
+            .map(|(&player_id, player)| {
+                (
+                    player_id,
+                    player
+                        .crew()
+                        .iter()
+                        .copied()
+                        .filter(|object| existing.contains(object))
+                        .collect(),
+                )
+            })
+            .collect();
         for object in &self.objects {
-            if object.state.crew_member && object.state.status.is_active() {
-                valid.insert(object.id, object.state.owner);
+            if !self.players.contains_key(&object.state.owner)
+                && object.state.crew_member
+                && object.state.status.is_active()
+                && !object.destroyed
+            {
+                valid
+                    .entry(object.state.owner)
+                    .or_default()
+                    .insert(object.id);
             }
         }
 
         self.crew_roles.retain(|owner, assignments| {
-            assignments.retain(|object_id, _| match valid.get(object_id) {
-                Some(current_owner) if *current_owner == *owner => true,
-                _ => false,
+            let roster = valid.get(owner);
+            assignments.retain(|object_id, _| {
+                roster.is_some_and(|roster| roster.contains(object_id))
             });
             !assignments.is_empty()
         });
@@ -25262,61 +25640,140 @@ impl Engine {
         }
     }
 
-    /// Refreshes the per-owner crew bookkeeping (C4Player::Crew) and
-    /// returns the owners that still hold living crew. Elimination itself
-    /// is NOT decided here — C4Player::CheckElimination runs on the Tick35
-    /// boundary only (C4Player.cpp:225-235) via `check_crew_elimination`.
+    /// One-time compatibility import for fixtures/old saves that carry only
+    /// the Rust union membership bit. Once a Player exists its ordered Crew
+    /// list is authoritative, so steady-state refresh never repeats this.
+    fn bootstrap_player_crew_from_union(&mut self, player_id: i32) {
+        let already_has_roster = self
+            .players
+            .get(&player_id)
+            .is_some_and(|player| !player.crew().is_empty());
+        if already_has_roster {
+            return;
+        }
+        let crew = self
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .filter(|object_id| {
+                self.find_object_index(*object_id).is_some_and(|index| {
+                    let object = &self.objects[index];
+                    object.state.owner == player_id
+                        && object.state.crew_member
+                        && !object.destroyed
+                        && object.state.status != ObjectStatus::Deleted
+                })
+            })
+            .collect();
+        if let Some(player) = self.players.get_mut(&player_id) {
+            player.set_crew(crew);
+        }
+    }
+
+    fn crew_insert_position(&self, roster: &[ObjectId], target: ObjectId) -> usize {
+        let Some(target_index) = self.find_object_index(target) else {
+            return roster.len();
+        };
+        let object = &self.objects[target_index];
+        if self
+            .definitions
+            .get(&object.definition_id)
+            .is_some_and(|definition| definition.line() != 0)
+        {
+            return roster.len();
+        }
+        let category = object.state.category;
+        let sort_category = category & CATEGORY_SORT_LIMIT;
+        if category & CATEGORY_STATIC_BACK == 0 {
+            if let Some(position) = roster.iter().position(|other| {
+                self.find_object_index(*other).is_some_and(|other_index| {
+                    let other = &self.objects[other_index];
+                    other.state.category & CATEGORY_SORT_LIMIT == sort_category
+                        && other.definition_id == object.definition_id
+                })
+            }) {
+                return position;
+            }
+        }
+        roster
+            .iter()
+            .position(|other| {
+                self.find_object_index(*other).is_some_and(|other_index| {
+                    self.objects[other_index].state.category & CATEGORY_SORT_LIMIT
+                        <= sort_category
+                })
+            })
+            .unwrap_or(roster.len())
+    }
+
+    /// Preserve the ordered C4Player::Crew lists as authoritative pointers.
+    /// Inactive and dead objects remain linked exactly like C++; only a gone
+    /// object pointer is pruned. The return value is raw CrewCnt>0 by player.
     fn refresh_elimination_state(&mut self) -> HashSet<i32> {
-        let mut active_alive = HashSet::new();
+        let mut nonempty = HashSet::new();
         if self.objects.is_empty() && self.known_crew_owners.is_empty() && self.players.is_empty() {
-            return active_alive;
+            return nonempty;
         }
 
-        let mut crew_map: HashMap<i32, Vec<ObjectId>> = HashMap::new();
-        for object in &self.objects {
-            if !object.state.crew_member {
-                continue;
+        if self.players.is_empty() {
+            for object in &self.objects {
+                if object.state.crew_member
+                    && object.state.owner != OWNER_NONE
+                    && !object.destroyed
+                    && object.state.status != ObjectStatus::Deleted
+                {
+                    self.known_crew_owners.insert(object.state.owner);
+                    if object.state.status.is_active() && object.state.alive {
+                        nonempty.insert(object.state.owner);
+                    }
+                }
             }
-            let owner = object.state.owner;
-            if owner == OWNER_NONE {
-                continue;
+            return nonempty;
+        }
+
+        let player_ids: Vec<i32> = self.players.keys().copied().collect();
+        let mut listed = HashSet::new();
+        for player_id in &player_ids {
+            let existing = self
+                .players
+                .get(player_id)
+                .map(|player| player.crew().to_vec())
+                .unwrap_or_default();
+            let mut seen = HashSet::new();
+            let retained = existing
+                .into_iter()
+                .filter(|id| {
+                    seen.insert(*id)
+                        && self.find_object_index(*id).is_some_and(|index| {
+                            let object = &self.objects[index];
+                            !object.destroyed && object.state.status != ObjectStatus::Deleted
+                        })
+                })
+                .collect::<Vec<_>>();
+            listed.extend(retained.iter().copied());
+            if !retained.is_empty() {
+                self.known_crew_owners.insert(*player_id);
+                nonempty.insert(*player_id);
             }
-            self.known_crew_owners.insert(owner);
-            if object.state.status.is_active() && object.state.alive {
-                active_alive.insert(owner);
+            if let Some(player) = self.players.get_mut(player_id) {
+                player.set_crew(retained);
             }
         }
 
-        // C4Player::Crew uses C4ObjectList::stMain, so its links follow the
-        // C++ master object list rather than object numbers. `exec_list` is
-        // that list in reverse execution order; walk it backwards to retain
-        // the exact GetCrew/Cursor order, including loaded arbitrary IDs
-        // (C4ObjectList.cpp:110-195; C4Player.cpp:1003-1020,1261-1293).
-        for &object_id in self.exec_list.iter().rev() {
-            let Some(object) = self
-                .find_object_index(object_id)
-                .map(|index| &self.objects[index])
-            else {
-                continue;
-            };
-            if object.state.crew_member
-                && object.state.owner != OWNER_NONE
-                && object.state.status.is_active()
-            {
-                crew_map
-                    .entry(object.state.owner)
-                    .or_default()
-                    .push(object_id);
+        // Rust retains a compatibility union bit for older snapshots and
+        // host fixtures. Keep it derived from the live per-player links;
+        // never use it to reconstruct a removed link during steady state.
+        for object in &mut self.objects {
+            if object.state.status != ObjectStatus::Deleted {
+                if listed.contains(&object.id) {
+                    object.state.crew_member = true;
+                } else if self.players.contains_key(&object.state.owner) {
+                    object.state.crew_member = false;
+                }
             }
         }
-
-        if !self.players.is_empty() {
-            for (&owner, player) in self.players.iter_mut() {
-                let crew = crew_map.get(&owner).cloned().unwrap_or_default();
-                player.set_crew(crew);
-            }
-        }
-        active_alive
+        nonempty
     }
 
     /// C4Player::CheckElimination (C4Player.cpp:1680-1690), run from the
@@ -25325,16 +25782,27 @@ impl Engine {
     /// ("Already eliminated safety", :1684, :2015-2017). The script-player
     /// NoEliminationCheck flag (CSPF_NoEliminationCheck,
     /// C4Script.cpp:2879) is unmodeled — script players are unported.
-    fn check_crew_elimination(&mut self, alive_owners: &HashSet<i32>) {
-        let mut known: Vec<i32> = self.known_crew_owners.iter().copied().collect();
-        known.sort_unstable();
-        for owner in known {
-            if alive_owners.contains(&owner) {
-                continue;
+    fn check_crew_elimination(&mut self, crew_owners: &HashSet<i32>) {
+        if self.players.is_empty() {
+            let mut known: Vec<i32> = self.known_crew_owners.iter().copied().collect();
+            known.sort_unstable();
+            for owner in known {
+                if !crew_owners.contains(&owner) {
+                    self.eliminated_crew_owners.insert(owner);
+                }
             }
-            self.eliminated_crew_owners.insert(owner);
-            if let Some(player) = self.players.get_mut(&owner) {
-                if player.status() == PlayerStatus::Active {
+            return;
+        }
+        let mut players: Vec<i32> = self.players.keys().copied().collect();
+        players.sort_unstable();
+        for player_id in players {
+            let active = self
+                .players
+                .get(&player_id)
+                .is_some_and(|player| player.status() == PlayerStatus::Active);
+            if active && !crew_owners.contains(&player_id) {
+                self.eliminated_crew_owners.insert(player_id);
+                if let Some(player) = self.players.get_mut(&player_id) {
                     player.eliminate();
                 }
             }
@@ -31197,6 +31665,23 @@ impl Engine {
         // ClearCommands (C4Object.cpp:1157)
         self.objects[idx].command_queue.clear();
         self.objects[idx].commands.clear();
+        // Info->HasDied=true; Info->Retire(), but the pointer remains on the
+        // dead object (C4Object.cpp:1185-1189).
+        if let Some(link) = self.crew_info_links.get(&object_id).copied() {
+            if let Some(info) = self
+                .crew_rosters
+                .get_mut(&link.player_id)
+                .and_then(|roster| roster.get_mut(link.roster_index))
+            {
+                info.has_died = true;
+                if info.in_action {
+                    info.total_playing_time = info
+                        .total_playing_time
+                        .wrapping_add(self.game_time.wrapping_sub(info.in_action_time));
+                    info.in_action = false;
+                }
+            }
+        }
         // Lose contents (C4Object.cpp:1165)
         let contents = std::mem::take(&mut self.objects[idx].state.contents);
         for content_id in contents {
@@ -31229,6 +31714,13 @@ impl Engine {
             player.clear_object_pointers(object_id);
         }
         self.remove_from_roles(owner, object_id);
+        let still_in_crew = self
+            .players
+            .values()
+            .any(|player| player.crew().contains(&object_id));
+        if let Some(index) = self.find_object_index(object_id) {
+            self.objects[index].state.crew_member = still_in_crew;
+        }
         if removed_cursor {
             self.player_adjust_cursor_command(owner)?;
         }
@@ -31977,28 +32469,57 @@ impl Engine {
         definition.set_chopable(core.chopable);
     }
 
-    /// Idle crew infos per (player, definition id) — the GetIdle pool in
-    /// roster order, retaining experience and rank so MakeCrewMember can
-    /// perform C++'s first-highest-experience choice inside a live callback.
-    fn idle_crew_rank_pools(&self) -> HashMap<(i32, String), Vec<(i32, i32)>> {
-        let mut pools: HashMap<(i32, String), Vec<(i32, i32)>> = HashMap::new();
+    /// Exact callback-entry projection of every C4ObjectInfoList. The host
+    /// consumes idle entries synchronously and allocates stable roster-index
+    /// links for new infos before the callback outcome reaches Engine.
+    fn host_crew_info_state(&self) -> compat::HostCrewInfoState {
+        let mut state = compat::HostCrewInfoState::default();
         for (&number, roster) in &self.crew_rosters {
-            for info in roster {
-                if info.participation == 1
+            state.next_indices.insert(number, roster.len());
+            state.roster_names.insert(
+                number,
+                roster.iter().map(|info| info.name.clone()).collect(),
+            );
+            for (roster_index, info) in roster.iter().enumerate() {
+                let link = CrewInfoLink {
+                    player_id: number,
+                    roster_index,
+                };
+                state.entries.insert(link, info.clone());
+            }
+            let fallback_order;
+            let order = match self.crew_info_order.get(&number) {
+                Some(order) => order.as_slice(),
+                None => {
+                    fallback_order = (0..roster.len()).collect::<Vec<_>>();
+                    fallback_order.as_slice()
+                }
+            };
+            for &roster_index in order {
+                let Some(info) = roster.get(roster_index) else {
+                    continue;
+                };
+                let link = CrewInfoLink {
+                    player_id: number,
+                    roster_index,
+                };
+                state.order.entry(number).or_default().push(link);
+                if info.participation != 0
                     && !info.in_action
                     && !info.has_died
                     && self
                         .definitions
                         .contains_key(&DefinitionId::from(info.id.as_str()))
                 {
-                    pools
+                    state
+                        .idle
                         .entry((number, info.id.clone()))
                         .or_default()
-                        .push((info.experience, info.rank));
+                        .push((link, info.clone()));
                 }
             }
         }
-        pools
+        state
     }
 
     /// C4Def::IncludeDefinition (C4Def.cpp:1358-1361): a definition
@@ -34495,6 +35016,27 @@ impl Engine {
         }
 
         if !destroyed.is_empty() {
+            // C4Object::Clear retires and nulls Info before Game.ClearPointers.
+            for object_id in &destroyed {
+                if let Some(link) = self.crew_info_links.get(object_id).copied() {
+                    if let Some(info) = self
+                        .crew_rosters
+                        .get_mut(&link.player_id)
+                        .and_then(|roster| roster.get_mut(link.roster_index))
+                    {
+                        if info.in_action {
+                            info.total_playing_time = info.total_playing_time.wrapping_add(
+                                self.game_time.wrapping_sub(info.in_action_time),
+                            );
+                            info.in_action = false;
+                        }
+                    }
+                }
+                Rc::make_mut(&mut self.crew_info_links).remove(object_id);
+                Rc::make_mut(&mut self.crew_object_infos).remove(object_id);
+                Rc::make_mut(&mut self.crew_ranks).remove(&object_id.as_u64());
+            }
+
             // C4Player::ClearPointers runs synchronously during object
             // removal: Cursor/ViewCursor/ViewTarget must never retain the
             // dead pointer (C4Player.cpp:55-73). Cursor-mode view then falls
@@ -34508,16 +35050,29 @@ impl Engine {
                 })
                 .map(|object| object.id)
                 .collect();
+            let owners: Vec<i32> = self.players.keys().copied().collect();
+            for object in &destroyed {
+                for owner in &owners {
+                    let removed_cursor = self.crew_cursor(*owner) == Some(*object);
+                    if removed_cursor {
+                        if let Some(selection) = self.crew_selection.get_mut(owner) {
+                            selection.set_cursor(None);
+                        }
+                    }
+                    if let Some(player) = self.players.get_mut(owner) {
+                        player.clear_object_pointers(*object);
+                    }
+                    self.remove_from_roles(*owner, *object);
+                    if removed_cursor {
+                        self.player_adjust_cursor_command(*owner)?;
+                    }
+                }
+            }
             self.crew_selection.retain(|_, selection| {
                 selection.prune(&active);
                 !selection.is_empty()
             });
             self.sync_all_player_cursors();
-            for object in destroyed {
-                for player in self.players.values_mut() {
-                    player.clear_object_pointers(object);
-                }
-            }
         }
 
         Ok(())
@@ -36861,6 +37416,7 @@ impl Engine {
             owner,
             controller,
             crew_member,
+            plr_view_range,
             selected,
             status,
             container,
@@ -36890,7 +37446,6 @@ impl Engine {
             action_library,
             definition_category,
             default_action_state,
-            default_crew_member,
             definition_vertices,
             definition_vertex_slots,
             definition_shape_rect,
@@ -36910,7 +37465,6 @@ impl Engine {
                 definition_ref.action_library().clone(),
                 definition_ref.category(),
                 definition_ref.default_action_state(),
-                definition_ref.is_crew(),
                 definition_ref.shape_vertices().to_vec(),
                 definition_ref.shape_vertex_buffer().clone(),
                 definition_ref.shape_rect(),
@@ -36928,7 +37482,11 @@ impl Engine {
             None => default_action_state,
         };
         initial_action.reconcile_with_library(&action_library);
-        let initial_crew_member = crew_member.unwrap_or(default_crew_member);
+        // Def->CrewMember is an object capability (and drives
+        // OCF_CrewMember), not membership in any C4Player::Crew list.
+        // Ordinary CreateObject passes no C4ObjectInfo and starts outside
+        // every roster; ready crew and explicit fixture restores opt in.
+        let initial_crew_member = crew_member.unwrap_or(false);
 
         let id = match explicit_id {
             Some(explicit) => {
@@ -37166,6 +37724,7 @@ impl Engine {
                 controller: initial_controller,
                 category: initial_category,
                 crew_member: initial_crew_member,
+                plr_view_range: plr_view_range.unwrap_or(0),
                 selected: selected.unwrap_or(false),
                 crew_disabled: false,
                 // C4Object::Init sets Alive only for C4D_Living categories
@@ -37675,6 +38234,29 @@ impl Engine {
         self.objects.push(object);
         self.note_objects_changed();
         self.insert_into_exec_list(new_id, loaded);
+        // Legacy Rust SpawnConfig carries a membership bit directly. Fold
+        // that one-time creation intent into the authoritative player list;
+        // steady-state refresh must never recreate a link removed by death
+        // or SetCrewStatus.
+        if initial_crew_member
+            && self
+                .find_object_index(new_id)
+                .is_some_and(|index| self.objects[index].state.status != ObjectStatus::Deleted)
+            && self.players.contains_key(&owner)
+        {
+            let mut roster = self
+                .players
+                .get(&owner)
+                .map(|player| player.crew().to_vec())
+                .unwrap_or_default();
+            if !roster.contains(&new_id) {
+                let position = self.crew_insert_position(&roster, new_id);
+                roster.insert(position.min(roster.len()), new_id);
+                if let Some(player) = self.players.get_mut(&owner) {
+                    player.set_crew(roster);
+                }
+            }
+        }
         // Deferred SetTransferZone commands from the creation callbacks —
         // C++ ran them live with the object already in Game.Objects.
         if !deferred_transfer_zones.is_empty() {
@@ -38096,6 +38678,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         controller: snapshot.controller,
         category: snapshot.category,
         crew_member: snapshot.crew_member,
+        plr_view_range: snapshot.plr_view_range,
         selected: snapshot.selected,
         crew_disabled: false,
         alive: snapshot.alive,

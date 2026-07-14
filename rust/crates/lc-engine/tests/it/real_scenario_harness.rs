@@ -4085,6 +4085,68 @@ fn gold_rush_scorching_timer_returns_kill_before_playing_sound() {
 }
 
 #[test]
+fn gold_rush_sheriff_watch_energy_stop_removes_crew_and_completes() {
+    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+    assert_eq!(
+        engine.debug_definition_has_function("_TLK", "FxWatchEnergyStop"),
+        Some(true),
+        "M_5AshCity_DlgSheriff.c appends the callback to the shipped talker"
+    );
+    let owner = join_local_player(&mut engine, "GoldRush sheriff parity");
+    let target = engine
+        .crew_cursor(owner)
+        .expect("GoldRush joins a selected info-bearing crew member");
+    assert!(
+        engine.crew_object_info(target).is_some(),
+        "the removal path must exercise this player's real CrewInfoList"
+    );
+    engine
+        .apply_object_update(target, ObjectUpdate::new().with_energy(1))
+        .expect("seed the sheriff damage-stop path");
+
+    let talker = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .find(|object| object.definition_id == "_TLK" && object.status.is_active())
+        .map(|object| object.id)
+        .expect("GoldRush Objects.txt contains a live talker");
+    let talker_index = engine.find_object_index(talker).expect("talker index");
+    engine
+        .call_object_function(
+            talker_index,
+            "FxWatchEnergyStop",
+            vec![
+                Value::Object(target.as_u64()),
+                Value::Int(99_999),
+                Value::Int(0),
+                Value::Bool(false),
+            ],
+        )
+        .expect("the shipped sheriff stop callback reaches its tail");
+
+    let sheriff = engine
+        .object_snapshot(target)
+        .expect("the transformed sheriff remains live");
+    assert_eq!(sheriff.definition_id, "SHRF");
+    assert!(!sheriff.crew_member);
+    assert!(!sheriff.selected);
+    assert!(engine.crew_object_info(target).is_none());
+    assert!(!engine.crew_members(owner).contains(&target));
+    assert_eq!(sheriff.energy, 50_000);
+    assert!(sheriff.alive);
+    assert_eq!(sheriff.action.name, "Walk");
+    assert_eq!(sheriff.owner, OWNER_NONE);
+    let stay_there = sheriff
+        .effects
+        .iter()
+        .find(|effect| effect.name == "StayThere")
+        .expect("the callback tail installs the StayThere effect");
+    assert_eq!(stay_there.priority, 1);
+    assert_eq!(stay_there.interval, 35);
+}
+
+#[test]
 fn gold_rush_real_anvil_forges_a_wire_roll_from_its_metal_contents() {
     let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
     let mut forge_action = ActionState::new("Forge");
@@ -4162,8 +4224,10 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
             name: name.to_owned(),
             rank: 5,
             experience: 0,
+            total_playing_time: 0,
             participation: 1,
             in_action: false,
+            in_action_time: 0,
             has_died: false,
         })
         .collect();

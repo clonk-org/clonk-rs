@@ -1064,8 +1064,8 @@ impl Engine {
         Ok(())
     }
 
-    /// The player's crew roster in C4Player::Crew order (join order), with
-    /// only active objects like the C++ list after ClearPointers.
+    /// The player's raw C4Player::Crew order. Inactive objects remain linked;
+    /// only a deleted pointer disappears through ClearPointers.
     fn player_crew_roster(&self, owner: i32) -> Vec<ObjectId> {
         self.players
             .get(&owner)
@@ -1073,24 +1073,37 @@ impl Engine {
             .unwrap_or_else(|| self.crew_members(owner))
             .into_iter()
             .filter(|id| {
-                self.find_object_index(*id)
-                    .is_some_and(|index| self.objects[index].state.status.is_active())
+                self.find_object_index(*id).is_some_and(|index| {
+                    let object = &self.objects[index];
+                    !object.destroyed
+                        && object.state.status != crate::ObjectStatus::Deleted
+                })
             })
             .collect()
     }
 
-    /// `C4Player::GetHiRankActiveCrew` (C4Player.cpp:1003-1021): without
-    /// the crew-info rank model every member ranks -1, so the FIRST
-    /// eligible roster entry wins the strict `iRank > iHighestRank` race.
+    /// `C4Player::GetHiRankActiveCrew` (C4Player.cpp:1003-1021): the
+    /// strictly highest-ranked eligible member wins. Equal ranks retain the
+    /// FIRST eligible roster entry because the C++ loop only replaces its
+    /// candidate for `iRank > iHighestRank`.
     fn player_hi_rank_active_crew(&self, owner: i32, select_only: bool) -> Option<ObjectId> {
         let selected = self.selected_crew(owner);
-        self.player_crew_roster(owner)
-            .into_iter()
-            .filter(|id| {
-                self.find_object_index(*id)
-                    .is_some_and(|index| !self.objects[index].state.crew_disabled)
-            })
-            .find(|id| !select_only || selected.contains(id))
+        let mut highest: Option<(ObjectId, i32)> = None;
+        for id in self.player_crew_roster(owner) {
+            let eligible = self
+                .find_object_index(id)
+                .is_some_and(|index| !self.objects[index].state.crew_disabled)
+                && (!select_only || selected.contains(&id));
+            if !eligible {
+                continue;
+            }
+            let rank = self.crew_ranks.get(&id.as_u64()).copied().unwrap_or(-1);
+            match highest {
+                Some((_, highest_rank)) if highest_rank >= rank => {}
+                _ => highest = Some((id, rank)),
+            }
+        }
+        highest.map(|(id, _)| id)
     }
 
     /// `C4Player::AdjustCursorCommand` (C4Player.cpp:1235-1258).
