@@ -3646,6 +3646,169 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
     }
 
     #[test]
+    fn column_blast_shift_consumes_cpp_random_per_pixel_and_matches_raster() {
+        // C4Landscape::BlastFreePix consumes exactly one
+        // Random(BlastMatCount[mat]) for every BlastShiftTo source pixel,
+        // even after an earlier pixel shifts (C4Landscape.cpp:941-960).
+        // These equivalent column/raster worlds expose ten Granite pixels
+        // in the complete r=2 scan, so both ledgers must advance by ten
+        // identical LCG draws.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Granite]
+            Name=Granite
+            Density=110
+            Friction=35
+            BlastShiftTo=Earth
+
+            [Material Earth]
+            Name=Earth
+            Density=90
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let granite = materials.id_of("Granite").expect("granite exists");
+
+        let mut column_engine = Engine::with_seed(29);
+        column_engine.set_materials(materials.clone());
+        let mut column_world = Landscape::flat_with_material(7, 0, Some(granite));
+        column_world.set_world_height(7);
+        column_engine.set_landscape(column_world);
+
+        let mut raster_engine = Engine::with_seed(29);
+        raster_engine.set_materials(materials);
+        let mut bytes = vec![0; 7 * 7];
+        for y in 0..7 {
+            bytes[y * 7..y * 7 + 7].fill(1);
+        }
+        let grid = landscape::PixelGrid::new(
+            7,
+            7,
+            bytes,
+            vec![0, 110, 90],
+            vec![None, Some("Granite".to_owned()), Some("Earth".to_owned())],
+            vec![None; 3],
+        );
+        let mut raster_world = Landscape::new(7, vec![0; 7]).expect("raster landscape builds");
+        raster_world.set_world_height(7);
+        raster_world.set_pixel_grid(grid);
+        raster_engine.set_landscape(raster_world);
+
+        let count_before = column_engine.rng.count;
+        let mut mirror = column_engine.rng.clone();
+        for _ in 0..10 {
+            mirror.random(10);
+        }
+
+        let center = Vector2::new(3, 3);
+        let column_result = column_engine
+            .blast_circle(center, 2, None)
+            .expect("column blast applies");
+        let raster_result = raster_engine
+            .blast_circle(center, 2, None)
+            .expect("raster blast applies");
+
+        assert_eq!(
+            column_result.pixel_count_by_material.get(&granite),
+            Some(&10)
+        );
+        assert_eq!(
+            column_result
+                .shift_candidates
+                .iter()
+                .map(|candidate| candidate.pixel_count)
+                .sum::<i32>(),
+            10,
+            "column approximation represents the same ten source pixels"
+        );
+        assert_eq!(
+            column_result
+                .shift_candidates
+                .iter()
+                .map(|candidate| candidate.column)
+                .collect::<Vec<_>>(),
+            vec![3, 2, 3, 1, 2, 3, 4, 2, 3, 3],
+            "shift draws retain the C++ y/x scan order"
+        );
+        assert_eq!(
+            raster_result.pixel_count_by_material.get(&granite),
+            Some(&10)
+        );
+        assert_eq!(
+            column_engine.rng.count - count_before,
+            10,
+            "one synced draw per BlastShiftTo pixel"
+        );
+        assert_eq!(column_engine.rng, mirror, "column ledger matches C++ Random");
+        assert_eq!(
+            raster_engine.rng, mirror,
+            "column and faithful raster paths finish on the same ledger"
+        );
+    }
+
+    #[test]
+    fn column_blast_shift_draws_for_non_mutating_shift_sources() {
+        // BlastFreePix calls Random before it clears a BlastFree pixel, and
+        // also calls Random when BlastShiftTo resolves to the source material.
+        // Radius zero has threshold zero, so both cases still consume one draw.
+        for (case, material_properties, expected_surface) in [
+            ("blast-free", "BlastShiftTo=Earth\nBlastFree=1", 1),
+            ("same-target", "BlastShiftTo=Granite", 0),
+        ] {
+            let library = MaterialLibrary::parse(&format!(
+                r#"
+                [Material Granite]
+                Name=Granite
+                Density=110
+                Friction=35
+                {material_properties}
+
+                [Material Earth]
+                Name=Earth
+                Density=90
+                Friction=25
+                "#
+            ))
+            .expect("material library parses");
+            let materials = MaterialSet::from_resource_library(&library);
+            let granite = materials.id_of("Granite").expect("granite exists");
+
+            let mut engine = Engine::with_seed(31);
+            engine.set_materials(materials);
+            let mut world = Landscape::flat_with_material(3, 0, Some(granite));
+            world.set_world_height(3);
+            engine.set_landscape(world);
+
+            let mut mirror = engine.rng.clone();
+            mirror.random(1);
+
+            let result = engine
+                .blast_circle(Vector2::new(1, 0), 0, None)
+                .expect("column blast applies");
+
+            assert_eq!(
+                result.pixel_count_by_material.get(&granite),
+                Some(&1),
+                "{case}: source pixel is pre-counted"
+            );
+            assert_eq!(engine.rng, mirror, "{case}: one C++ Random draw");
+            let landscape = engine.landscape().expect("landscape remains set");
+            assert_eq!(
+                landscape.surface_height(1),
+                Some(expected_surface),
+                "{case}: BlastFree behavior is preserved"
+            );
+            assert_eq!(
+                landscape.solid_material_at(1),
+                Some(granite),
+                "{case}: a non-mutating shift must not recolor the remaining column"
+            );
+        }
+    }
+
+    #[test]
     fn incendiary_particles_spawn_fire_without_eroding_surface() -> Result<(), EngineError> {
         let library = MaterialLibrary::parse(
             r#"

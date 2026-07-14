@@ -220,7 +220,6 @@ pub use lc_script::ScriptError;
 
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, Value};
 use mass_mover::MassMoverSet;
-use rand::Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sky::{SkyAdjustment, SkyState};
 use thiserror::Error;
@@ -35042,19 +35041,7 @@ impl Engine {
             return;
         };
 
-        let blast_size = compute_blast_size(radius);
-        if blast_size <= 0 {
-            return;
-        }
-        let grade = compute_blast_grade(radius);
-        if grade <= 0 {
-            return;
-        }
-        let threshold = (blast_size * grade) / 6;
-        if threshold <= 0 {
-            return;
-        }
-        let limit = threshold as u64;
+        let threshold = (compute_blast_size(radius) * compute_blast_grade(radius)) / 6;
 
         for candidate in &result.shift_candidates {
             let total_pixels = match result.pixel_count_by_material.get(&candidate.material) {
@@ -35068,31 +35055,17 @@ impl Engine {
             if pixel_count <= 0 {
                 continue;
             }
-            let total_pixels_u64 = match u64::try_from(total_pixels) {
-                Ok(value) if value > 0 => value,
-                _ => continue,
-            };
-            let pixel_count_u64 = match u64::try_from(pixel_count) {
-                Ok(value) if value > 0 => value,
-                _ => continue,
-            };
-
-            let should_shift = if limit >= total_pixels_u64 {
-                true
-            } else if limit == 0 {
-                false
-            } else {
-                let mut success = false;
-                for _ in 0..pixel_count_u64 {
-                    if self.rng.gen_range(0..total_pixels_u64) < limit {
-                        success = true;
-                        break;
-                    }
+            // BlastFreePix evaluates every BlastShiftTo source pixel and
+            // calls Random(BlastMatCount[mat]) unconditionally, even after
+            // an earlier pixel shifted successfully (C4Landscape.cpp:941-960).
+            let mut should_shift = false;
+            for _ in 0..pixel_count {
+                if i64::from(self.rng.random(total_pixels)) < threshold {
+                    should_shift = true;
                 }
-                success
-            };
+            }
 
-            if !should_shift {
+            if !should_shift || !candidate.apply_column_shift {
                 continue;
             }
             if candidate.column < 0 {

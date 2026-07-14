@@ -1016,6 +1016,10 @@ pub struct BlastShiftCandidate {
     pub material: MaterialId,
     pub target: MaterialId,
     pub pixel_count: i32,
+    /// Whether a successful per-pixel shift can be represented by changing
+    /// the column's solid material. BlastFree pixels are cleared immediately
+    /// after their shift in C++, so their draw must not recolor what remains.
+    pub apply_column_shift: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2137,6 +2141,26 @@ impl Landscape {
                 let x = center.x.saturating_add(x_offset);
                 if let Some(material_id) = self.material_at(x, y) {
                     *result.pixel_count_by_material.entry(material_id).or_insert(0) += 1;
+                    if let Some(material) = materials.get_by_id(material_id) {
+                        if let Some(target) = material.blast_shift_to_target() {
+                            // Preserve BlastFreePix's y/x scan order. One
+                            // candidate represents one unconditional Random
+                            // call, even when the write is immediately cleared
+                            // or resolves to the source material.
+                            result.shift_candidates.push(BlastShiftCandidate {
+                                column: x,
+                                material: material_id,
+                                target,
+                                pixel_count: 1,
+                                apply_column_shift: !material.blast_free()
+                                    && target != material_id
+                                    && self
+                                        .surface_height(x)
+                                        .is_some_and(|surface| y >= surface)
+                                    && self.solid_material_at(x) == Some(material_id),
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -2213,16 +2237,6 @@ impl Landscape {
 
             let column = index as i32;
             if !material.blast_free() {
-                if let Some(target) = material.blast_shift_to_target() {
-                    if target != material_id {
-                        result.shift_candidates.push(BlastShiftCandidate {
-                            column,
-                            material: material_id,
-                            target,
-                            pixel_count: removed_height,
-                        });
-                    }
-                }
                 continue;
             }
 
