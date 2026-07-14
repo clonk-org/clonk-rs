@@ -4058,7 +4058,7 @@ global func Step(state, frame, random)
     }
     "#;
 
-    const MENU_COMMAND_SCRIPT: &str = r#"
+    const MENU_COMMAND_SCRIPT: &str = r#"#strict 2
 global func Initialize(state, random)
 {
     return nil;
@@ -4075,7 +4075,7 @@ global func MenuCommand(state, kind, selection)
 }
 "#;
 
-    const PROCEDURE_STATE_SCRIPT: &str = r#"
+    const PROCEDURE_STATE_SCRIPT: &str = r#"#strict 2
     global func Initialize(state, random)
     {
         if (state.action && state.action.procedure == "flight")
@@ -4571,7 +4571,7 @@ func Probe(known, missing)
         let definition = Definition::from_script(
             "CALL",
             "Caller",
-            r#"
+            r#"#strict 2
 func EmptyGlobal() { return CheckEffect("Probe", nil, 100, 0); }
 func Install()
 {
@@ -4738,7 +4738,7 @@ func FxVictimEffect(szNew) { if (szNew == "Probe") { SetR(9); return(-1); } retu
         let definition = Definition::from_script(
             "CALL",
             "Caller",
-            r#"
+            r#"#strict 2
 func Install()
 {
   SetR(1);
@@ -29785,7 +29785,7 @@ func FxProbeTimer(pThis, iNumber) {
         // priority get their Fx<Name>Effect callback with the new effect's
         // name — C4Fx_Effect_Deny (-1, C4Effects.h:36) blocks the creation
         // entirely (no Start, no Stop). Priority-1 effects skip the chain.
-        let script = r#"
+        let script = r#"#strict 2
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Armor", priority = 200, interval = 0 } ] };
         }
@@ -29853,7 +29853,7 @@ func FxProbeTimer(pThis, iNumber) {
         // answering C4Fx_Effect_Deny returns immediately — checkers later
         // in the chain (higher priority, asked in ascending list order) are
         // never called for the denied effect.
-        let script = r#"
+        let script = r#"#strict 2
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Armor", priority = 100, interval = 0 } ] };
         }
@@ -30285,7 +30285,7 @@ func FxProbeTimer(pThis, iNumber) {
         // acceptor's Fx<Name>Add merge seam receives the new effect's
         // name, timer interval and parameters (DoCall PSFS_FxAdd with
         // Par1 = name, Par2 = iTimer, rVal1.., C4Effect.cpp:300-301).
-        let script = r#"
+        let script = r#"#strict 2
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
         }
@@ -30449,7 +30449,7 @@ func FxProbeTimer(pThis, iNumber) {
         // acceptor's Fx*Add runs inside a temp remove/readd bracket of the
         // effects ABOVE the acceptor (C4Effect.cpp:297-304). Plain Annul
         // (-2) must not fire the bracket.
-        let script = r#"
+        let script = r#"#strict 2
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
         }
@@ -30553,7 +30553,7 @@ func FxProbeTimer(pThis, iNumber) {
         // Fx*Add answers C4Fx_Start_Deny (-1), the ACCEPTOR itself is
         // killed (full Kill — its Stop callback runs) and the check
         // reports C4Fx_Effect_Annul. Neither effect survives.
-        let script = r#"
+        let script = r#"#strict 2
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
         }

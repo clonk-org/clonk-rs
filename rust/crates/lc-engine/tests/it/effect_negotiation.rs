@@ -1,4 +1,6 @@
+use crate::support::real_scenario::content_root;
 use lc_engine::{Definition, Engine, SpawnConfig};
+use lc_resources::Group;
 use lc_script::Value;
 
 #[test]
@@ -236,4 +238,63 @@ func FxStartDeniedStop() { ++iDeniedStops; }
         Some(&Value::Int(0)),
         "a Start-denied effect dies without Stop"
     );
+}
+
+#[test]
+fn shipped_hazard_jumper_bite_check_uses_strict1_raw_string_identity() {
+    let group = Group::open(content_root().join("Hazard.c4d/Enemies.c4d/Jumper.c4d"))
+        .expect("shipped Hazard Jumper group opens");
+    let resource = lc_resources::definition::Definition::load(&group)
+        .expect("shipped Hazard Jumper definition loads");
+
+    let mut engine = Engine::new();
+    engine
+        .register_definition(
+            Definition::from_resource(&resource).expect("Hazard Jumper script compiles"),
+        )
+        .expect("Hazard Jumper registers");
+    engine
+        .register_definition(
+            Definition::from_script(
+                "FXDR",
+                "Effect driver",
+                r#"#strict 3
+func Probe(object target)
+{
+  AddEffect("Bite", target, 99, 1, target);
+  return AddEffect("Bite", target, 99, 1, target);
+}
+"#,
+            )
+            .expect("effect driver compiles"),
+        )
+        .expect("effect driver registers");
+
+    let jumper = engine
+        .spawn_object(SpawnConfig::new("ALN2").with_loaded(true))
+        .expect("loaded Hazard Jumper spawns without Initialize dependencies");
+    let driver = engine
+        .spawn_object(SpawnConfig::new("FXDR"))
+        .expect("effect driver spawns");
+    let driver_index = engine
+        .find_object_index(driver)
+        .expect("driver remains live");
+    assert_eq!(
+        engine
+            .call_object_function(driver_index, "Probe", vec![Value::Object(jumper.as_u64())])
+            .expect("two same-frame Bite additions complete"),
+        Value::Int(2),
+        "fresh FxBiteEffect name must not raw-equal its interned strict1 literal"
+    );
+
+    let mut bite_numbers = engine
+        .object_snapshot(jumper)
+        .expect("Hazard Jumper remains live")
+        .effects
+        .iter()
+        .filter(|effect| effect.name == "Bite")
+        .map(|effect| effect.number)
+        .collect::<Vec<_>>();
+    bite_numbers.sort_unstable();
+    assert_eq!(bite_numbers, [1, 2]);
 }

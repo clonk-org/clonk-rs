@@ -209,37 +209,296 @@ impl Drop for CallerSlotsGuard {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum RawIdentity {
+    /// Parser literals share the engine string table entry for equal text.
+    InternedString(String),
+    /// Runtime strings and newly evaluated containers own distinct pointers.
+    Heap(Rc<HeapIdentity>),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum HeapIdentity {
+    Opaque,
+    Array(Vec<Option<RawIdentity>>),
+    Proplist(HashMap<String, Option<RawIdentity>>),
+}
+
+impl HeapIdentity {
+    fn opaque_for(value: &Value) -> Self {
+        match value {
+            Value::Array(elements) => {
+                Self::Array(elements.iter().map(RawIdentity::runtime).collect())
+            }
+            Value::Proplist(entries) => Self::Proplist(
+                entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), RawIdentity::runtime(value)))
+                    .collect(),
+            ),
+            _ => Self::Opaque,
+        }
+    }
+
+    fn identity_at(&self, segment: &PathSegment) -> Option<RawIdentity> {
+        self.identity_ref_at(segment).cloned()
+    }
+
+    fn identity_ref_at(&self, segment: &PathSegment) -> Option<&RawIdentity> {
+        match (self, segment) {
+            (Self::Array(identities), PathSegment::Index(index)) => identities
+                .get(array_index(index).ok()?)
+                .and_then(Option::as_ref),
+            (Self::Proplist(identities), PathSegment::Property(key))
+            | (Self::Proplist(identities), PathSegment::Index(Value::String(key))) => {
+                identities.get(key).and_then(Option::as_ref)
+            }
+            _ => None,
+        }
+    }
+
+    fn after_path_write(
+        current: Option<&Self>,
+        value: &Value,
+        segments: &[PathSegment],
+        replacement: Option<RawIdentity>,
+    ) -> Self {
+        let Some((segment, rest)) = segments.split_first() else {
+            return current.cloned().unwrap_or_else(|| Self::opaque_for(value));
+        };
+
+        match (value, segment) {
+            (Value::Array(elements), PathSegment::Index(index)) => {
+                let mut identities = match current {
+                    Some(Self::Array(identities)) => identities.clone(),
+                    _ => match Self::opaque_for(value) {
+                        Self::Array(identities) => identities,
+                        _ => unreachable!(),
+                    },
+                };
+                identities.resize(elements.len(), None);
+                let Some(index) = array_index(index)
+                    .ok()
+                    .filter(|index| *index < elements.len())
+                else {
+                    return Self::Array(identities);
+                };
+                identities[index] = if rest.is_empty() {
+                    replacement
+                } else {
+                    RawIdentity::after_path_write(
+                        identities[index].as_ref(),
+                        &elements[index],
+                        rest,
+                        replacement,
+                    )
+                };
+                Self::Array(identities)
+            }
+            (Value::Proplist(entries), PathSegment::Property(key))
+            | (Value::Proplist(entries), PathSegment::Index(Value::String(key))) => {
+                let mut identities = match current {
+                    Some(Self::Proplist(identities)) => identities.clone(),
+                    _ => match Self::opaque_for(value) {
+                        Self::Proplist(identities) => identities,
+                        _ => unreachable!(),
+                    },
+                };
+                let Some(child) = entries.get(key) else {
+                    return Self::Proplist(identities);
+                };
+                let current_child = identities.get(key).and_then(Option::as_ref);
+                let identity = if rest.is_empty() {
+                    replacement
+                } else {
+                    RawIdentity::after_path_write(current_child, child, rest, replacement)
+                };
+                identities.insert(key.clone(), identity);
+                Self::Proplist(identities)
+            }
+            _ => current.cloned().unwrap_or_else(|| Self::opaque_for(value)),
+        }
+    }
+}
+
+impl RawIdentity {
+    fn runtime(value: &Value) -> Option<Self> {
+        matches!(
+            value,
+            Value::String(_) | Value::Array(_) | Value::Proplist(_)
+        )
+        .then(|| Self::Heap(Rc::new(HeapIdentity::opaque_for(value))))
+    }
+
+    fn identity_at(&self, segment: &PathSegment) -> Option<Self> {
+        match self {
+            Self::Heap(identity) => identity.identity_at(segment),
+            Self::InternedString(_) => None,
+        }
+    }
+
+    fn identity_at_path(&self, segments: &[PathSegment]) -> Option<Self> {
+        self.identity_ref_at_path(segments).cloned()
+    }
+
+    fn identity_ref_at_path(&self, segments: &[PathSegment]) -> Option<&Self> {
+        let mut current = self;
+        for segment in segments {
+            current = match current {
+                Self::Heap(identity) => identity.identity_ref_at(segment)?,
+                Self::InternedString(_) => return None,
+            };
+        }
+        Some(current)
+    }
+
+    fn after_path_write(
+        current: Option<&Self>,
+        value: &Value,
+        segments: &[PathSegment],
+        replacement: Option<Self>,
+    ) -> Option<Self> {
+        if !matches!(value, Value::Array(_) | Value::Proplist(_)) {
+            return Self::runtime(value);
+        }
+        let current = match current {
+            Some(Self::Heap(identity)) => Some(identity.as_ref()),
+            _ => None,
+        };
+        Some(Self::Heap(Rc::new(HeapIdentity::after_path_write(
+            current,
+            value,
+            segments,
+            replacement,
+        ))))
+    }
+}
+
+impl PartialEq for RawIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (RawIdentity::InternedString(left), RawIdentity::InternedString(right)) => {
+                left == right
+            }
+            (RawIdentity::Heap(left), RawIdentity::Heap(right)) => Rc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for RawIdentity {}
+
+#[derive(Clone)]
+pub(crate) struct TrackedValue {
+    value: Value,
+    identity: Option<RawIdentity>,
+}
+
+impl TrackedValue {
+    fn runtime(value: Value) -> Self {
+        let identity = Self::runtime_identity(&value);
+        Self { value, identity }
+    }
+
+    fn runtime_identity(value: &Value) -> Option<RawIdentity> {
+        RawIdentity::runtime(value)
+    }
+
+    fn literal(value: Value, literal: &Literal) -> Self {
+        let identity = match literal {
+            Literal::String(text) => Some(RawIdentity::InternedString(text.clone())),
+            _ => None,
+        };
+        Self { value, identity }
+    }
+
+    fn array(elements: Vec<Self>) -> Self {
+        let identities = elements
+            .iter()
+            .map(|element| element.identity.clone())
+            .collect();
+        let value = Value::Array(elements.into_iter().map(|element| element.value).collect());
+        Self {
+            value,
+            identity: Some(RawIdentity::Heap(Rc::new(HeapIdentity::Array(identities)))),
+        }
+    }
+
+    fn proplist(entries: Vec<(String, Self)>) -> Self {
+        let mut values = HashMap::with_capacity(entries.len());
+        let mut identities = HashMap::with_capacity(entries.len());
+        for (key, entry) in entries {
+            identities.insert(key.clone(), entry.identity);
+            values.insert(key, entry.value);
+        }
+        Self {
+            value: Value::Proplist(values),
+            identity: Some(RawIdentity::Heap(Rc::new(HeapIdentity::Proplist(
+                identities,
+            )))),
+        }
+    }
+
+    fn identity_at(&self, segment: &PathSegment) -> Option<RawIdentity> {
+        self.identity
+            .as_ref()
+            .and_then(|identity| identity.identity_at(segment))
+    }
+}
+
+type RawIdentityCell = Rc<RefCell<Option<RawIdentity>>>;
+
 #[derive(Clone)]
 enum Binding {
-    Direct(ValueCell),
+    Direct {
+        value: ValueCell,
+        identity: RawIdentityCell,
+    },
     Reference(LValueRef),
 }
 
 impl Binding {
     fn direct(value: Value) -> Self {
-        Binding::Direct(value_cell(value))
+        Self::tracked(TrackedValue::runtime(value))
     }
 
-    fn read(&self) -> Result<Value, RuntimeError> {
-        match self {
-            Binding::Direct(cell) => Ok(cell.borrow().clone()),
-            Binding::Reference(reference) => reference.read(),
+    fn tracked(tracked: TrackedValue) -> Self {
+        Binding::Direct {
+            value: value_cell(tracked.value),
+            identity: Rc::new(RefCell::new(tracked.identity)),
         }
     }
 
-    fn write(&self, value: Value) -> Result<(), RuntimeError> {
+    fn read_tracked(&self) -> Result<TrackedValue, RuntimeError> {
         match self {
-            Binding::Direct(cell) => {
-                *cell.borrow_mut() = value;
+            Binding::Direct { value, identity } => Ok(TrackedValue {
+                value: value.borrow().clone(),
+                identity: identity.borrow().clone(),
+            }),
+            Binding::Reference(reference) => reference.read_tracked(),
+        }
+    }
+
+    fn read(&self) -> Result<Value, RuntimeError> {
+        self.read_tracked().map(|tracked| tracked.value)
+    }
+
+    fn write_tracked(&self, tracked: TrackedValue) -> Result<(), RuntimeError> {
+        match self {
+            Binding::Direct { value, identity } => {
+                *value.borrow_mut() = tracked.value;
+                *identity.borrow_mut() = tracked.identity;
                 Ok(())
             }
-            Binding::Reference(reference) => reference.write(value),
+            Binding::Reference(reference) => reference.write_tracked(tracked),
         }
     }
 
     fn lvalue(&self) -> LValueRef {
         match self {
-            Binding::Direct(cell) => LValueRef::Cell(cell.clone()),
+            Binding::Direct { value, identity } => {
+                LValueRef::tracked_cell(value.clone(), identity.clone())
+            }
             Binding::Reference(reference) => reference.clone(),
         }
     }
@@ -247,9 +506,13 @@ impl Binding {
 
 #[derive(Clone)]
 pub(crate) enum LValueRef {
-    Cell(ValueCell),
+    Cell {
+        value: ValueCell,
+        identity: Option<RawIdentityCell>,
+    },
     Path {
         root: ValueCell,
+        root_identity: Option<RawIdentityCell>,
         segments: Vec<PathSegment>,
     },
     /// A reference returned by a value-style host getter/setter. The engine's
@@ -273,7 +536,7 @@ pub struct ValueReference(LValueRef);
 
 impl ValueReference {
     pub fn from_cell(cell: ValueCell) -> Self {
-        Self(LValueRef::Cell(cell))
+        Self(LValueRef::cell(cell))
     }
 
     fn into_lvalue(self) -> LValueRef {
@@ -282,10 +545,83 @@ impl ValueReference {
 }
 
 impl LValueRef {
+    pub(crate) fn cell(value: ValueCell) -> Self {
+        let identity = TrackedValue::runtime_identity(&value.borrow());
+        Self::Cell {
+            value,
+            identity: Some(Rc::new(RefCell::new(identity))),
+        }
+    }
+
+    fn tracked_cell(value: ValueCell, identity: RawIdentityCell) -> Self {
+        Self::Cell {
+            value,
+            identity: Some(identity),
+        }
+    }
+
+    fn detach_container_identity_if_shared(&self) {
+        let (identity, root, segments) = match self {
+            Self::Cell {
+                value,
+                identity: Some(identity),
+            } => (identity, value, &[][..]),
+            Self::Path {
+                root,
+                root_identity: Some(identity),
+                segments,
+            } => (identity, root, segments.as_slice()),
+            _ => return,
+        };
+        let mut identity = identity.borrow_mut();
+        let Some(RawIdentity::Heap(heap)) = identity
+            .as_ref()
+            .and_then(|identity| identity.identity_ref_at_path(segments))
+        else {
+            return;
+        };
+        if Rc::strong_count(heap) <= 1 {
+            return;
+        }
+        let detached = RawIdentity::Heap(Rc::new(heap.as_ref().clone()));
+        *identity = if segments.is_empty() {
+            Some(detached)
+        } else {
+            RawIdentity::after_path_write(
+                identity.as_ref(),
+                &root.borrow(),
+                segments,
+                Some(detached),
+            )
+        };
+    }
+
     fn read(&self) -> Result<Value, RuntimeError> {
+        self.read_tracked().map(|tracked| tracked.value)
+    }
+
+    fn read_tracked(&self) -> Result<TrackedValue, RuntimeError> {
         match self {
-            LValueRef::Cell(cell) => Ok(cell.borrow().clone()),
-            LValueRef::Path { root, segments } => read_path(&root.borrow(), segments),
+            LValueRef::Cell { value, identity } => Ok(TrackedValue {
+                value: value.borrow().clone(),
+                identity: identity
+                    .as_ref()
+                    .and_then(|identity| identity.borrow().clone()),
+            }),
+            LValueRef::Path {
+                root,
+                root_identity,
+                segments,
+            } => {
+                let value = read_path(&root.borrow(), segments)?;
+                let identity = root_identity.as_ref().and_then(|identity| {
+                    identity
+                        .borrow()
+                        .as_ref()
+                        .and_then(|identity| identity.identity_at_path(segments))
+                });
+                Ok(TrackedValue { value, identity })
+            }
             LValueRef::HostPath {
                 function,
                 args,
@@ -293,19 +629,47 @@ impl LValueRef {
                 segments,
             } => {
                 let _guard = CallerSlotsGuard::enter(Some(caller_slots.clone()));
-                read_path(&function(args)?, segments)
+                read_path(&function(args)?, segments).map(TrackedValue::runtime)
             }
         }
     }
 
     fn write(&self, value: Value) -> Result<(), RuntimeError> {
+        self.write_tracked(TrackedValue::runtime(value))
+    }
+
+    fn write_tracked(&self, tracked: TrackedValue) -> Result<(), RuntimeError> {
         match self {
-            LValueRef::Cell(cell) => {
-                *cell.borrow_mut() = value;
+            LValueRef::Cell { value, identity } => {
+                *value.borrow_mut() = tracked.value;
+                if let Some(identity) = identity {
+                    *identity.borrow_mut() = tracked.identity;
+                }
                 Ok(())
             }
-            LValueRef::Path { root, segments } => {
-                write_path(&mut root.borrow_mut(), segments, value)
+            LValueRef::Path {
+                root,
+                root_identity,
+                segments,
+            } => {
+                let TrackedValue {
+                    value,
+                    identity: replacement_identity,
+                } = tracked;
+                write_path(&mut root.borrow_mut(), segments, value)?;
+                if let Some(identity) = root_identity {
+                    let next_identity = {
+                        let current = identity.borrow().clone();
+                        RawIdentity::after_path_write(
+                            current.as_ref(),
+                            &root.borrow(),
+                            segments,
+                            replacement_identity,
+                        )
+                    };
+                    *identity.borrow_mut() = next_identity;
+                }
+                Ok(())
             }
             LValueRef::HostPath {
                 function,
@@ -315,10 +679,10 @@ impl LValueRef {
             } => {
                 let _guard = CallerSlotsGuard::enter(Some(caller_slots.clone()));
                 let replacement = if segments.is_empty() {
-                    value
+                    tracked.value
                 } else {
                     let mut root = function(args)?;
-                    write_path(&mut root, segments, value)?;
+                    write_path(&mut root, segments, tracked.value)?;
                     root
                 };
                 let mut write_args = args.clone();
@@ -332,15 +696,21 @@ impl LValueRef {
 
     fn append(&self, segment: PathSegment) -> Self {
         match self {
-            LValueRef::Cell(root) => LValueRef::Path {
-                root: root.clone(),
+            LValueRef::Cell { value, identity } => LValueRef::Path {
+                root: value.clone(),
+                root_identity: identity.clone(),
                 segments: vec![segment],
             },
-            LValueRef::Path { root, segments } => {
+            LValueRef::Path {
+                root,
+                root_identity,
+                segments,
+            } => {
                 let mut segments = segments.clone();
                 segments.push(segment);
                 LValueRef::Path {
                     root: root.clone(),
+                    root_identity: root_identity.clone(),
                     segments,
                 }
             }
@@ -499,16 +869,24 @@ fn write_path(
 
 #[derive(Clone)]
 pub(crate) enum CallArg {
-    Value(Value),
+    Value(TrackedValue),
     Reference(LValueRef),
 }
 
 impl CallArg {
-    fn read(&self) -> Result<Value, RuntimeError> {
+    fn runtime(value: Value) -> Self {
+        CallArg::Value(TrackedValue::runtime(value))
+    }
+
+    fn read_tracked(&self) -> Result<TrackedValue, RuntimeError> {
         match self {
-            CallArg::Value(value) => Ok(value.clone()),
-            CallArg::Reference(reference) => reference.read(),
+            CallArg::Value(tracked) => Ok(tracked.clone()),
+            CallArg::Reference(reference) => reference.read_tracked(),
         }
+    }
+
+    fn read(&self) -> Result<Value, RuntimeError> {
+        self.read_tracked().map(|tracked| tracked.value)
     }
 }
 
@@ -540,21 +918,25 @@ impl HostCallArg {
 }
 
 enum ReturnValue {
-    Value(Value),
+    Value(TrackedValue),
     Reference(LValueRef),
 }
 
 impl ReturnValue {
     fn into_value(self) -> Result<Value, RuntimeError> {
+        self.into_tracked().map(|tracked| tracked.value)
+    }
+
+    fn into_tracked(self) -> Result<TrackedValue, RuntimeError> {
         match self {
             ReturnValue::Value(value) => Ok(value),
-            ReturnValue::Reference(reference) => reference.read(),
+            ReturnValue::Reference(reference) => reference.read_tracked(),
         }
     }
 
     fn as_value(&self) -> Result<Value, RuntimeError> {
         match self {
-            ReturnValue::Value(value) => Ok(value.clone()),
+            ReturnValue::Value(tracked) => Ok(tracked.value.clone()),
             ReturnValue::Reference(reference) => reference.read(),
         }
     }
@@ -594,6 +976,10 @@ pub struct Vm<'a> {
     globals_consts: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
     /// Cross-object LocalN cell supplier (crate::engine::LocalCellHook).
     local_cell_hook: Option<&'a crate::engine::LocalCellHook>,
+    /// Per-call provenance for persistent/global cells that store only the
+    /// public value representation. Nested script calls share this VM/cache.
+    cell_identities: RefCell<HashMap<usize, RawIdentityCell>>,
+    constant_identities: RefCell<HashMap<String, RawIdentityCell>>,
 }
 
 impl<'a> Vm<'a> {
@@ -618,6 +1004,8 @@ impl<'a> Vm<'a> {
             globals_numbered: None,
             globals_consts: None,
             local_cell_hook: None,
+            cell_identities: RefCell::new(HashMap::new()),
+            constant_identities: RefCell::new(HashMap::new()),
         }
     }
 
@@ -696,6 +1084,68 @@ impl<'a> Vm<'a> {
     ) -> Self {
         self.local_cell_hook = hook;
         self
+    }
+
+    fn identity_for_cell(&self, cell: &ValueCell) -> RawIdentityCell {
+        let key = Rc::as_ptr(cell) as usize;
+        let existing = self.cell_identities.borrow().get(&key).cloned();
+        if let Some(identity) = existing {
+            return identity;
+        }
+        let identity = Rc::new(RefCell::new(TrackedValue::runtime_identity(&cell.borrow())));
+        self.cell_identities
+            .borrow_mut()
+            .insert(key, identity.clone());
+        identity
+    }
+
+    fn tracked_cell(&self, cell: ValueCell) -> LValueRef {
+        let identity = self.identity_for_cell(&cell);
+        LValueRef::tracked_cell(cell, identity)
+    }
+
+    fn read_tracked_cell(&self, cell: &ValueCell) -> TrackedValue {
+        TrackedValue {
+            value: cell.borrow().clone(),
+            identity: self.identity_for_cell(cell).borrow().clone(),
+        }
+    }
+
+    fn read_tracked_named_cell(&self, name: &str, cell: &ValueCell) -> TrackedValue {
+        let value = cell.borrow().clone();
+        let identity = self.identity_for_cell(cell);
+        let is_script_constant = self
+            .global_constant_cell(name)
+            .is_some_and(|constant| Rc::ptr_eq(&constant, cell));
+        if !is_script_constant {
+            return self.read_tracked_cell(cell);
+        }
+        if let Value::String(text) = &value {
+            *identity.borrow_mut() = Some(RawIdentity::InternedString(text.clone()));
+        }
+        let tracked_identity = identity.borrow().clone();
+        TrackedValue {
+            value,
+            identity: tracked_identity,
+        }
+    }
+
+    fn tracked_constant(&self, name: &str, value: Value) -> TrackedValue {
+        let existing = self.constant_identities.borrow().get(name).cloned();
+        let identity = if let Some(identity) = existing {
+            identity
+        } else {
+            let identity = Rc::new(RefCell::new(TrackedValue::runtime_identity(&value)));
+            self.constant_identities
+                .borrow_mut()
+                .insert(name.to_string(), identity.clone());
+            identity
+        };
+        let tracked_identity = identity.borrow().clone();
+        TrackedValue {
+            value,
+            identity: tracked_identity,
+        }
     }
 
     /// Resolves a LocalN target cell: falsy targets and the executing
@@ -825,7 +1275,7 @@ impl<'a> Vm<'a> {
     }
 
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeError> {
-        let args = args.iter().cloned().map(CallArg::Value).collect();
+        let args = args.iter().cloned().map(CallArg::runtime).collect();
         self.invoke_value(name, args, 0, ObjectState::default(), None)
     }
 
@@ -843,7 +1293,7 @@ impl<'a> Vm<'a> {
         args: &[Value],
         cells: &LocalCells,
     ) -> Result<Value, RuntimeError> {
-        let args = args.iter().cloned().map(CallArg::Value).collect();
+        let args = args.iter().cloned().map(CallArg::runtime).collect();
         self.invoke_value(name, args, 0, cells.state.clone(), None)
     }
 
@@ -854,7 +1304,7 @@ impl<'a> Vm<'a> {
         args: &[Value],
         cells: &LocalCells,
     ) -> Result<ValueReference, RuntimeError> {
-        let args = args.iter().cloned().map(CallArg::Value).collect();
+        let args = args.iter().cloned().map(CallArg::runtime).collect();
         self.invoke_reference(name, args, 0, cells.state.clone(), None)
             .map(ValueReference)
     }
@@ -868,7 +1318,7 @@ impl<'a> Vm<'a> {
         local_vars: &HashMap<String, Value>,
     ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
         let object_state = ObjectState::from_local_vars(local_vars);
-        let args = args.iter().cloned().map(CallArg::Value).collect();
+        let args = args.iter().cloned().map(CallArg::runtime).collect();
         let value = self.invoke_value(name, args, 0, object_state.clone(), None)?;
         Ok((value, object_state.to_local_vars(self.var_decls)))
     }
@@ -891,7 +1341,8 @@ impl<'a> Vm<'a> {
         };
         let mut env = Environment::new_with_params(&[], &[], strict_level, object_state.clone())?;
         for var_decl in self.var_decls {
-            env.define_object_local(&var_decl.name);
+            let cell = env.object_state.named_local_cell(&var_decl.name);
+            env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
         let value = self.evaluate(&expr, &mut env, 0)?;
         Ok((value, object_state.to_local_vars(self.var_decls)))
@@ -912,7 +1363,8 @@ impl<'a> Vm<'a> {
         let mut env =
             Environment::new_with_params(&[], &[], strict_level, cells.state.clone())?;
         for var_decl in self.var_decls {
-            env.define_object_local(&var_decl.name);
+            let cell = env.object_state.named_local_cell(&var_decl.name);
+            env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
         self.evaluate(&expr, &mut env, 0)
     }
@@ -929,6 +1381,18 @@ impl<'a> Vm<'a> {
             .into_value()
     }
 
+    fn invoke_tracked_value(
+        &self,
+        name: &str,
+        args: Vec<CallArg>,
+        depth: usize,
+        object_state: ObjectState,
+        caller_slots: Option<SlotMap>,
+    ) -> Result<TrackedValue, RuntimeError> {
+        self.invoke_raw(name, args, depth, object_state, caller_slots)?
+            .into_tracked()
+    }
+
     fn invoke_engine_value(
         &self,
         name: &str,
@@ -937,6 +1401,18 @@ impl<'a> Vm<'a> {
         object_state: ObjectState,
         caller_slots: Option<SlotMap>,
     ) -> Result<Value, RuntimeError> {
+        self.invoke_engine_tracked_value(name, args, depth, object_state, caller_slots)
+            .map(|tracked| tracked.value)
+    }
+
+    fn invoke_engine_tracked_value(
+        &self,
+        name: &str,
+        args: Vec<CallArg>,
+        depth: usize,
+        object_state: ObjectState,
+        caller_slots: Option<SlotMap>,
+    ) -> Result<TrackedValue, RuntimeError> {
         if depth >= MAX_CALL_DEPTH {
             return Err(RuntimeError::new("maximum call depth exceeded"));
         }
@@ -945,18 +1421,22 @@ impl<'a> Vm<'a> {
             if let Some(function) = self.engine_script_function(name) {
                 return self
                     .invoke_script_function(name, function, args, depth, object_state)?
-                    .into_value();
+                    .into_tracked();
             }
 
             if let Some(function) = self.host_functions.get(name) {
                 let values = self.call_args_to_values(&args)?;
                 let _guard = CallerSlotsGuard::enter(caller_slots);
-                return self.invoke_host_function(name, function, &values);
+                return self
+                    .invoke_host_function(name, function, &values)
+                    .map(TrackedValue::runtime);
             }
 
             if let Some(function) = self.host_reference_function(name) {
                 let _guard = CallerSlotsGuard::enter(caller_slots);
-                return self.invoke_host_reference_function(name, function, &args);
+                return self
+                    .invoke_host_reference_function(name, function, &args)
+                    .map(TrackedValue::runtime);
             }
 
             Err(RuntimeError::new(format!("unknown function '{name}'")))
@@ -1020,6 +1500,7 @@ impl<'a> Vm<'a> {
                 let _guard = CallerSlotsGuard::enter(caller_slots);
                 return self
                     .invoke_host_function(name, function, &values)
+                    .map(TrackedValue::runtime)
                     .map(ReturnValue::Value);
             }
 
@@ -1027,6 +1508,7 @@ impl<'a> Vm<'a> {
                 let _guard = CallerSlotsGuard::enter(caller_slots);
                 return self
                     .invoke_host_reference_function(name, function, &args)
+                    .map(TrackedValue::runtime)
                     .map(ReturnValue::Value);
             }
 
@@ -1050,7 +1532,7 @@ impl<'a> Vm<'a> {
         // than the caller passes.
         let mut args = args;
         while args.len() < function.params.len() {
-            args.push(CallArg::Value(Value::Nil));
+            args.push(CallArg::runtime(Value::Nil));
         }
 
         let debug_args = self.call_args_to_values(&args)?;
@@ -1075,7 +1557,8 @@ impl<'a> Vm<'a> {
         // existing binding so MART::Mode0(pObj, ...) receives its argument,
         // rather than the definition's same-name object-local `pObj`.
         for var_decl in self.var_decls {
-            env.define_object_local(&var_decl.name);
+            let cell = env.object_state.named_local_cell(&var_decl.name);
+            env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
 
         // C4Aul `var` declarations are FUNCTION-scoped and hoisted: the
@@ -1088,7 +1571,7 @@ impl<'a> Vm<'a> {
             self.execute_statements(&function.body, &mut env, depth, function.returns_reference)?;
         let value = match result {
             ControlFlow::Return(v) => v,
-            ControlFlow::Normal => ReturnValue::Value(Value::Nil),
+            ControlFlow::Normal => ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
             ControlFlow::Break | ControlFlow::LoopContinue => {
                 return Err(RuntimeError::new(format!(
                     "{} statement outside of loop",
@@ -1211,15 +1694,15 @@ impl<'a> Vm<'a> {
                 "parse error at {line}:{column}: {message}"
             ))),
             Stmt::VarDecl { name, init } => {
-                let value = match init {
-                    Some(expr) => self.evaluate(expr, env, depth)?,
-                    None => Value::Nil,
+                let tracked = match init {
+                    Some(expr) => self.evaluate_tracked(expr, env, depth)?,
+                    None => TrackedValue::runtime(Value::Nil),
                 };
                 // Vars are FUNCTION-scoped in C4Aul: the hoisted slot
                 // (declared at function entry) receives the value — a
                 // `var` inside a block must not shadow it.
-                if env.assign(name, value.clone()).is_err() {
-                    env.define(name, value);
+                if env.assign_tracked(name, tracked.clone()).is_err() {
+                    env.define_tracked(name, tracked);
                 }
                 Ok(ControlFlow::Normal)
             }
@@ -1241,8 +1724,8 @@ impl<'a> Vm<'a> {
                     }
                 } else {
                     ReturnValue::Value(match expr {
-                        Some(expr) => self.evaluate(expr, env, depth)?,
-                        None => Value::Nil,
+                        Some(expr) => self.evaluate_tracked(expr, env, depth)?,
+                        None => TrackedValue::runtime(Value::Nil),
                     })
                 };
                 Ok(ControlFlow::Return(value))
@@ -1287,11 +1770,11 @@ impl<'a> Vm<'a> {
                     match init_clause {
                         ForInit::VarDecls(decls) => {
                             for (name, init_expr) in decls {
-                                let value = match init_expr {
-                                    Some(expr) => self.evaluate(expr, env, depth)?,
-                                    None => Value::Nil,
+                                let tracked = match init_expr {
+                                    Some(expr) => self.evaluate_tracked(expr, env, depth)?,
+                                    None => TrackedValue::runtime(Value::Nil),
                                 };
-                                env.define(name, value);
+                                env.define_tracked(name, tracked);
                             }
                         }
                         ForInit::Expr(expr) => {
@@ -1390,10 +1873,13 @@ impl<'a> Vm<'a> {
     }
 
     fn global_constant(&self, name: &str) -> Option<Value> {
-        self.globals_consts.and_then(|table| {
-            let cell = table.borrow().get(name).cloned();
-            cell.map(|cell| cell.borrow().clone())
-        })
+        self.global_constant_cell(name)
+            .map(|cell| cell.borrow().clone())
+    }
+
+    fn global_constant_cell(&self, name: &str) -> Option<ValueCell> {
+        self.globals_consts
+            .and_then(|table| table.borrow().get(name).cloned())
     }
 
     fn execute_block(
@@ -1436,6 +1922,22 @@ impl<'a> Vm<'a> {
                 self.eval_unary(op, value)
             }
             Expr::Binary(lhs, op, rhs) => {
+                if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
+                    let left = self.evaluate_tracked(lhs, env, depth)?;
+                    let right = self.evaluate_tracked(rhs, env, depth)?;
+                    let equal = self.values_equal(
+                        &left.value,
+                        &right.value,
+                        env.strict_level,
+                        left.identity.as_ref(),
+                        right.identity.as_ref(),
+                    );
+                    return Ok(Value::Bool(if matches!(op, BinaryOp::Equal) {
+                        equal
+                    } else {
+                        !equal
+                    }));
+                }
                 let left = self.evaluate(lhs, env, depth)?;
                 // && and || are Lua-style: they return the surviving operand
                 // value unchanged, not a coerced bool (C4AulExec.cpp:999-1021,
@@ -1553,20 +2055,9 @@ impl<'a> Vm<'a> {
                             && !self.functions.contains_key(name)
                             && !self.has_host_function(name)
                         {
-                            let index =
-                                self.evaluate_slot_index("SetLocal()", &args[0], env, depth + 1)?;
-                            let value = args
-                                .get(1)
-                                .map(|arg| self.evaluate(arg, env, depth + 1))
-                                .transpose()?
-                                .unwrap_or(Value::Nil);
-                            let target = args
-                                .get(2)
-                                .map(|arg| self.evaluate(arg, env, depth + 1))
-                                .transpose()?;
-                            let cell = self.numbered_local_cell(env, index, target);
-                            *cell.borrow_mut() = value.clone();
-                            return Ok(value);
+                            return self
+                                .set_local_tracked(args, None, env, depth + 1)
+                                .map(|tracked| tracked.value);
                         }
                         // `LocalN("name")` is a reference to the executing
                         // object's named local (FnLocalN, C4Script.cpp:4591-4605,
@@ -1663,7 +2154,11 @@ impl<'a> Vm<'a> {
                                 env.object_state.clone(),
                             )?;
                             for var_decl in self.var_decls {
-                                exec_env.define_object_local(&var_decl.name);
+                                let cell = exec_env.object_state.named_local_cell(&var_decl.name);
+                                exec_env.define_object_local(
+                                    &var_decl.name,
+                                    self.identity_for_cell(&cell),
+                                );
                             }
                             // Runtime errors propagate (fPassErrors=true,
                             // C4Script.cpp:4514).
@@ -1938,6 +2433,283 @@ impl<'a> Vm<'a> {
         }
     }
 
+    fn evaluate_tracked(
+        &self,
+        expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<TrackedValue, RuntimeError> {
+        match expr {
+            Expr::Literal(literal) => {
+                Ok(TrackedValue::literal(self.literal_value(literal), literal))
+            }
+            Expr::Variable(name) => match env.get_tracked(name)? {
+                Some(tracked) => Ok(tracked),
+                None => {
+                    if let Some(cell) = self
+                        .global_variable_cell(name)
+                        .or_else(|| self.global_constant_cell(name))
+                    {
+                        Ok(self.read_tracked_named_cell(name, &cell))
+                    } else if let Some(value) = self
+                        .constants
+                        .and_then(|constants| constants.get(name).cloned())
+                    {
+                        Ok(self.tracked_constant(name, value))
+                    } else {
+                        self.evaluate(expr, env, depth).map(TrackedValue::runtime)
+                    }
+                }
+            },
+            Expr::Array(elements) => {
+                let mut tracked = Vec::with_capacity(elements.len());
+                for element in elements {
+                    tracked.push(self.evaluate_tracked(element, env, depth)?);
+                }
+                Ok(TrackedValue::array(tracked))
+            }
+            Expr::Proplist(entries) => {
+                let mut tracked = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    tracked.push((key.clone(), self.evaluate_tracked(value, env, depth)?));
+                }
+                Ok(TrackedValue::proplist(tracked))
+            }
+            Expr::Index(target, index_expr) => {
+                let collection_reference = self.existing_path_lvalue(target, env, depth)?;
+                let mut collection = match &collection_reference {
+                    Some(reference) => reference.read_tracked()?,
+                    None => self.evaluate_tracked(target, env, depth)?,
+                };
+                let index = self.evaluate(index_expr, env, depth)?;
+                Self::grow_empty_negative_array(
+                    collection_reference.as_ref(),
+                    &collection.value,
+                    &index,
+                )?;
+                if let Some(reference) = &collection_reference {
+                    collection = reference.read_tracked()?;
+                }
+                let segment = PathSegment::Index(index.clone());
+                let identity = collection.identity_at(&segment);
+                let value = self.eval_index(collection.value, index)?;
+                Ok(TrackedValue { value, identity })
+            }
+            Expr::Property(target, name) => {
+                let collection = self.evaluate_tracked(target, env, depth)?;
+                let identity = collection.identity_at(&PathSegment::Property(name.clone()));
+                let value = self.eval_property(collection.value, name)?;
+                Ok(TrackedValue { value, identity })
+            }
+            Expr::Binary(left, BinaryOp::Concat, right) => {
+                let left = self.evaluate_tracked(left, env, depth)?;
+                let right = self.evaluate_tracked(right, env, depth)?;
+                match (&left.value, &right.value) {
+                    (Value::Array(_), Value::Array(_)) => {
+                        let mut identities = match left.identity.as_ref() {
+                            Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
+                                HeapIdentity::Array(identities) => identities.clone(),
+                                _ => unreachable!(),
+                            },
+                            _ => match HeapIdentity::opaque_for(&left.value) {
+                                HeapIdentity::Array(identities) => identities,
+                                _ => unreachable!(),
+                            },
+                        };
+                        let right_identities = match right.identity.as_ref() {
+                            Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
+                                HeapIdentity::Array(identities) => identities.clone(),
+                                _ => unreachable!(),
+                            },
+                            _ => match HeapIdentity::opaque_for(&right.value) {
+                                HeapIdentity::Array(identities) => identities,
+                                _ => unreachable!(),
+                            },
+                        };
+                        identities.extend(right_identities);
+                        let value = self.eval_concat(left.value, right.value)?;
+                        Ok(TrackedValue {
+                            value,
+                            identity: Some(RawIdentity::Heap(Rc::new(HeapIdentity::Array(
+                                identities,
+                            )))),
+                        })
+                    }
+                    (Value::Proplist(_), Value::Proplist(_)) => {
+                        let mut identities = match left.identity.as_ref() {
+                            Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
+                                HeapIdentity::Proplist(identities) => identities.clone(),
+                                _ => unreachable!(),
+                            },
+                            _ => match HeapIdentity::opaque_for(&left.value) {
+                                HeapIdentity::Proplist(identities) => identities,
+                                _ => unreachable!(),
+                            },
+                        };
+                        let right_identities = match right.identity.as_ref() {
+                            Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
+                                HeapIdentity::Proplist(identities) => identities.clone(),
+                                _ => unreachable!(),
+                            },
+                            _ => match HeapIdentity::opaque_for(&right.value) {
+                                HeapIdentity::Proplist(identities) => identities,
+                                _ => unreachable!(),
+                            },
+                        };
+                        identities.extend(right_identities);
+                        let value = self.eval_concat(left.value, right.value)?;
+                        Ok(TrackedValue {
+                            value,
+                            identity: Some(RawIdentity::Heap(Rc::new(HeapIdentity::Proplist(
+                                identities,
+                            )))),
+                        })
+                    }
+                    _ => self
+                        .eval_concat(left.value, right.value)
+                        .map(TrackedValue::runtime),
+                }
+            }
+            Expr::Binary(left, BinaryOp::NilCoalescing, right) => {
+                let left = self.evaluate_tracked(left, env, depth)?;
+                if !matches!(left.value, Value::Nil) {
+                    Ok(left)
+                } else {
+                    self.evaluate_tracked(right, env, depth)
+                }
+            }
+            Expr::Binary(left, BinaryOp::And, right) if env.strict_level.unwrap_or(0) >= 2 => {
+                let left = self.evaluate_tracked(left, env, depth)?;
+                if left.value.as_bool() {
+                    self.evaluate_tracked(right, env, depth)
+                } else {
+                    Ok(left)
+                }
+            }
+            Expr::Binary(left, BinaryOp::Or, right) if env.strict_level.unwrap_or(0) >= 2 => {
+                let left = self.evaluate_tracked(left, env, depth)?;
+                if left.value.as_bool() {
+                    Ok(left)
+                } else {
+                    self.evaluate_tracked(right, env, depth)
+                }
+            }
+            Expr::Call {
+                callee,
+                args,
+                is_optional,
+                forward_rest,
+            } if !*is_optional => {
+                if let Expr::Property(base, name) = callee.as_ref() {
+                    let target = self.evaluate(base, env, depth + 1)?;
+                    if matches!(target, Value::Object(_))
+                        && name == "SetLocal"
+                        && (1..=3).contains(&args.len())
+                        && !self.functions.contains_key(name)
+                        && !self.has_host_function(name)
+                    {
+                        return self.set_local_tracked(args, Some(target), env, depth + 1);
+                    }
+                    return self
+                        .invoke_property_call_with_target(
+                            target,
+                            name,
+                            args,
+                            false,
+                            *forward_rest,
+                            env,
+                            depth,
+                        )
+                        .map(TrackedValue::runtime);
+                }
+                if let Expr::Variable(name) = callee.as_ref() {
+                    let function = if env.engine_scope {
+                        self.engine_script_function(name)
+                    } else {
+                        self.functions.get(name).or_else(|| {
+                            self.global_functions
+                                .and_then(|functions| functions.get(name))
+                        })
+                    };
+                    if name == "SetLocal"
+                        && (1..=3).contains(&args.len())
+                        && function.is_none()
+                        && !self.has_host_function(name)
+                    {
+                        return self.set_local_tracked(args, None, env, depth + 1);
+                    }
+                    if env.strict_level.unwrap_or(0) < 2
+                        && function.is_none()
+                        && !self.has_host_function(name)
+                        && args.is_empty()
+                    {
+                        if let Some(cell) = self.global_constant_cell(name) {
+                            return Ok(self.read_tracked_named_cell(name, &cell));
+                        }
+                        if let Some(value) = self
+                            .constants
+                            .and_then(|constants| constants.get(name).cloned())
+                        {
+                            return Ok(self.tracked_constant(name, value));
+                        }
+                    }
+                    let builtin_reference = matches!(name.as_str(), "Var" | "Local")
+                        && args.len() <= 1
+                        || name == "LocalN" && (1..=2).contains(&args.len())
+                        || name == "Global";
+                    if builtin_reference && function.is_none() && !self.has_host_function(name) {
+                        return self.expr_to_lvalue(expr, env, depth)?.read_tracked();
+                    }
+                    if !matches!(name.as_str(), "inherited" | "_inherited")
+                        && (function.is_some() || self.has_host_function(name))
+                    {
+                        let mut evaluated_args =
+                            self.build_call_args(Some(name), function, args, env, depth + 1)?;
+                        if *forward_rest {
+                            Self::append_forwarded_args(&mut evaluated_args, env)?;
+                        }
+                        return if env.engine_scope {
+                            self.invoke_engine_tracked_value(
+                                name,
+                                evaluated_args,
+                                depth + 1,
+                                env.object_state.clone(),
+                                Some(env.var_slots.clone()),
+                            )
+                        } else {
+                            self.invoke_tracked_value(
+                                name,
+                                evaluated_args,
+                                depth + 1,
+                                env.object_state.clone(),
+                                Some(env.var_slots.clone()),
+                            )
+                        };
+                    }
+                }
+                self.evaluate(expr, env, depth).map(TrackedValue::runtime)
+            }
+            Expr::Assignment(target, value_expr) => {
+                if matches!(target, AssignmentTarget::InvalidValue { .. }) {
+                    return self
+                        .evaluate_assignment(target, value_expr, env, depth)
+                        .map(TrackedValue::runtime);
+                }
+                let tracked = self.evaluate_tracked(value_expr, env, depth)?;
+                self.assign_target_tracked(env, target, tracked.clone())?;
+                Ok(tracked)
+            }
+            Expr::Comma(exprs) => {
+                let mut result = TrackedValue::runtime(Value::Nil);
+                for expr in exprs {
+                    result = self.evaluate_tracked(expr, env, depth)?;
+                }
+                Ok(result)
+            }
+            _ => self.evaluate(expr, env, depth).map(TrackedValue::runtime),
+        }
+    }
+
     /// Resolve an increment/decrement operand to its C4Value reference once,
     /// then read and mutate that reference. C++'s AB_Inc1/AB_Dec1 bytecodes
     /// receive one already-evaluated reference on the value stack
@@ -2130,8 +2902,12 @@ impl<'a> Vm<'a> {
                     ))),
                 }
             }
-            Equal => Ok(Value::Bool(self.values_equal(&left, &right, strict))),
-            NotEqual => Ok(Value::Bool(!self.values_equal(&left, &right, strict))),
+            Equal => Ok(Value::Bool(
+                self.values_equal(&left, &right, strict, None, None),
+            )),
+            NotEqual => Ok(Value::Bool(
+                !self.values_equal(&left, &right, strict, None, None),
+            )),
             Less => self.eval_int_cmp(left, right, |a, b| a < b, "<"),
             LessEqual => self.eval_int_cmp(left, right, |a, b| a <= b, "<="),
             Greater => self.eval_int_cmp(left, right, |a, b| a > b, ">"),
@@ -2325,13 +3101,35 @@ impl<'a> Vm<'a> {
         Ok(Value::Bool(cmp(&left.to_string(), &right.to_string())))
     }
 
-    /// `==` per the script's #strict level (C4Value::Equals, C4Value.cpp:823).
-    /// `#strict 3` is type-checked (Int and Bool are distinct types); lower
-    /// levels (NONSTRICT/STRICT1 raw-bits, STRICT2 cross-type numeric) collapse,
-    /// for a value-typed Value, to: compare Int/Bool/nil by integer value
-    /// (so 0==nil, 1==true, 0==false), everything else by type+content.
-    fn values_equal(&self, left: &Value, right: &Value, strict: Option<u8>) -> bool {
-        if strict < Some(3) {
+    /// `==` per `C4Value::Equals` (C4Value.cpp:823-919). NONSTRICT/STRICT1
+    /// compare the raw Data union, so pointer-backed values need their VM-side
+    /// provenance; STRICT2 compares their content and keeps numeric leniency;
+    /// STRICT3 requires matching outer types.
+    fn values_equal(
+        &self,
+        left: &Value,
+        right: &Value,
+        strict: Option<u8>,
+        left_identity: Option<&RawIdentity>,
+        right_identity: Option<&RawIdentity>,
+    ) -> bool {
+        let level = strict.unwrap_or(0);
+        if level < 2 {
+            let left_pointer = matches!(
+                left,
+                Value::String(_) | Value::Array(_) | Value::Proplist(_)
+            );
+            let right_pointer = matches!(
+                right,
+                Value::String(_) | Value::Array(_) | Value::Proplist(_)
+            );
+            if left_pointer || right_pointer {
+                return left_identity
+                    .zip(right_identity)
+                    .is_some_and(|(left, right)| left == right);
+            }
+        }
+        if level < 3 {
             if let (Some(a), Some(b)) = (left.as_c4_int(), right.as_c4_int()) {
                 return a == b;
             }
@@ -2403,7 +3201,29 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<Value, RuntimeError> {
-        let mut target = self.evaluate(base, env, depth + 1)?;
+        let target = self.evaluate(base, env, depth + 1)?;
+        self.invoke_property_call_with_target(
+            target,
+            name,
+            args,
+            failsafe,
+            forward_rest,
+            env,
+            depth,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_property_call_with_target(
+        &self,
+        mut target: Value,
+        name: &str,
+        args: &[Expr],
+        failsafe: bool,
+        forward_rest: bool,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
         // Effect-callback state maps carry the object id ("id" key): an
         // arrow call on one targets THAT object, matching the host-fn
         // object-reference convention (C++ pTarget is C4VObj —
@@ -2472,22 +3292,9 @@ impl<'a> Vm<'a> {
             && !self.functions.contains_key(name)
             && !self.has_host_function(name)
         {
-            let index = self.evaluate_slot_index("SetLocal()", &args[0], env, depth + 1)?;
-            let value = args
-                .get(1)
-                .map(|arg| self.evaluate(arg, env, depth + 1))
-                .transpose()?
-                .unwrap_or(Value::Nil);
-            let explicit_target = args
-                .get(2)
-                .map(|arg| self.evaluate(arg, env, depth + 1))
-                .transpose()?;
-            let destination = explicit_target
-                .filter(|value| !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false)))
-                .unwrap_or_else(|| target.clone());
-            let cell = self.numbered_local_cell(env, index, Some(destination));
-            *cell.borrow_mut() = value.clone();
-            return Ok(value);
+            return self
+                .set_local_tracked(args, Some(target), env, depth + 1)
+                .map(|tracked| tracked.value);
         }
         match &target {
             Value::Nil | Value::Int(0) | Value::Bool(false) => Err(RuntimeError::new(
@@ -2597,7 +3404,7 @@ impl<'a> Vm<'a> {
             if (script_wants_reference || host_wants_reference) && can_be_reference {
                 evaluated_args.push(CallArg::Reference(self.expr_to_lvalue(arg, env, depth)?));
             } else {
-                evaluated_args.push(CallArg::Value(self.evaluate(arg, env, depth)?));
+                evaluated_args.push(CallArg::Value(self.evaluate_tracked(arg, env, depth)?));
             }
         }
         Ok(evaluated_args)
@@ -2612,19 +3419,25 @@ impl<'a> Vm<'a> {
     ) -> Result<(), RuntimeError> {
         let mut index = env.named_param_count;
         while evaluated_args.len() < MAX_CALL_PARAMETERS && index < MAX_CALL_PARAMETERS {
-            let value = env
+            let tracked = env
                 .call_args
                 .get(index)
-                .map(Binding::read)
+                .map(Binding::read_tracked)
                 .transpose()?
-                .unwrap_or(Value::Nil);
-            evaluated_args.push(CallArg::Value(value));
+                .unwrap_or_else(|| TrackedValue::runtime(Value::Nil));
+            evaluated_args.push(CallArg::Value(tracked));
             index += 1;
         }
         // C++ callees always see 10 slots and cannot tell a missing argument
         // from an explicit nil, so dropping the nil tail is observationally
         // identical — and keeps host functions that count arguments honest.
-        while matches!(evaluated_args.last(), Some(CallArg::Value(Value::Nil))) {
+        while matches!(
+            evaluated_args.last(),
+            Some(CallArg::Value(TrackedValue {
+                value: Value::Nil,
+                ..
+            }))
+        ) {
             evaluated_args.pop();
         }
         Ok(())
@@ -2802,9 +3615,37 @@ impl<'a> Vm<'a> {
 
         // Preserve the existing RHS-first behavior for valid targets; this
         // issue only restores AB_Set's invalid-value path.
-        let value = self.evaluate(value_expr, env, depth)?;
-        self.assign_target(env, target, value.clone())?;
+        let tracked = self.evaluate_tracked(value_expr, env, depth)?;
+        let value = tracked.value.clone();
+        self.assign_target_tracked(env, target, tracked)?;
         Ok(value)
+    }
+
+    fn assign_target_tracked(
+        &self,
+        env: &mut Environment,
+        target: &AssignmentTarget,
+        tracked: TrackedValue,
+    ) -> Result<(), RuntimeError> {
+        if let AssignmentTarget::Variable(name) = target {
+            if env.assign_tracked(name, tracked.clone()).is_ok() {
+                return Ok(());
+            }
+        }
+        match target {
+            AssignmentTarget::MethodSlot { method, .. }
+                if matches!(method.as_str(), "LocalN" | "Local") =>
+            {
+                self.assignment_target_to_lvalue(env, target, 0)?
+                    .write_tracked(tracked)
+            }
+            AssignmentTarget::EffectSlot(_) | AssignmentTarget::MethodSlot { .. } => {
+                self.assign_target(env, target, tracked.value)
+            }
+            _ => self
+                .assignment_target_to_lvalue(env, target, 0)?
+                .write_tracked(tracked),
+        }
     }
 
     fn assignment_target_value(
@@ -2919,24 +3760,29 @@ impl<'a> Vm<'a> {
             )),
             AssignmentTarget::Variable(name) => env
                 .lvalue(name)
-                .or_else(|| self.global_variable_cell(name).map(LValueRef::Cell))
+                .or_else(|| {
+                    self.global_variable_cell(name)
+                        .map(|cell| self.tracked_cell(cell))
+                })
                 .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'"))),
-            AssignmentTarget::Property(base, property) => Ok(self
-                .assignment_target_to_lvalue(env, base, depth)?
-                .append(PathSegment::Property(property.clone()))),
+            AssignmentTarget::Property(base, property) => {
+                let reference = self.assignment_target_to_lvalue(env, base, depth)?;
+                reference.detach_container_identity_if_shared();
+                Ok(reference.append(PathSegment::Property(property.clone())))
+            }
             AssignmentTarget::Index(base, index_expr) => {
                 let index = self.evaluate(index_expr, env, depth)?;
-                Ok(self
-                    .assignment_target_to_lvalue(env, base, depth)?
-                    .append(PathSegment::Index(index)))
+                let reference = self.assignment_target_to_lvalue(env, base, depth)?;
+                reference.detach_container_identity_if_shared();
+                Ok(reference.append(PathSegment::Index(index)))
             }
             AssignmentTarget::LocalSlot(index_expr) => {
                 let index = self.evaluate_slot_index("Local()", index_expr, env, depth)?;
-                Ok(env.local_slot_lvalue(index))
+                Ok(self.tracked_cell(env.object_state.local_slot_cell(index)))
             }
             AssignmentTarget::VarSlot(index_expr) => {
                 let index = self.evaluate_slot_index("Var()", index_expr, env, depth)?;
-                Ok(env.var_slot_lvalue(index))
+                Ok(self.tracked_cell(slot_cell(&env.var_slots, index)))
             }
             AssignmentTarget::EffectSlot(args) => {
                 let arg_values = args
@@ -2981,11 +3827,7 @@ impl<'a> Vm<'a> {
                         .is_some_and(|functions| functions.contains_key(name))
                     && !self.has_host_function(name) =>
             {
-                Ok(LValueRef::Cell(self.evaluate_global_slot(
-                    args,
-                    env,
-                    depth + 1,
-                )?))
+                Ok(self.tracked_cell(self.evaluate_global_slot(args, env, depth + 1)?))
             }
             AssignmentTarget::FunctionCall { name, args }
                 if name == "GlobalN"
@@ -2996,7 +3838,7 @@ impl<'a> Vm<'a> {
                     && !self.has_host_function(name) =>
             {
                 self.evaluate_named_global(args, env, depth + 1)?
-                    .map(LValueRef::Cell)
+                    .map(|cell| self.tracked_cell(cell))
                     .ok_or_else(|| {
                         RuntimeError::new("function 'GlobalN' does not return a reference")
                     })
@@ -3023,7 +3865,7 @@ impl<'a> Vm<'a> {
                     .get(1)
                     .map(|arg| self.evaluate(arg, env, depth + 1))
                     .transpose()?;
-                Ok(LValueRef::Cell(self.localn_cell(env, &local_name, target)))
+                Ok(self.tracked_cell(self.localn_cell(env, &local_name, target)))
             }
             AssignmentTarget::FunctionCall { name, args }
                 if name == "Par"
@@ -3082,11 +3924,7 @@ impl<'a> Vm<'a> {
                         )))
                     }
                 };
-                Ok(LValueRef::Cell(self.localn_cell(
-                    env,
-                    &local_name,
-                    Some(object_value),
-                )))
+                Ok(self.tracked_cell(self.localn_cell(env, &local_name, Some(object_value))))
             }
             // `Local(n, obj)` by reference: FnLocal returns
             // `pObj->Local[iIndex].GetRef()` (C4Script.cpp:3423-3433).
@@ -3097,11 +3935,7 @@ impl<'a> Vm<'a> {
             } if method == "Local" && args.len() == 1 => {
                 let object_value = self.evaluate(object, env, depth + 1)?;
                 let index = self.evaluate_slot_index("Local()", &args[0], env, depth)?;
-                Ok(LValueRef::Cell(self.numbered_local_cell(
-                    env,
-                    index,
-                    Some(object_value),
-                )))
+                Ok(self.tracked_cell(self.numbered_local_cell(env, index, Some(object_value))))
             }
             AssignmentTarget::MethodSlot {
                 object,
@@ -3188,9 +4022,10 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<Option<LValueRef>, RuntimeError> {
         match expr {
-            Expr::Variable(name) => Ok(env
-                .lvalue(name)
-                .or_else(|| self.global_variable_cell(name).map(LValueRef::Cell))),
+            Expr::Variable(name) => Ok(env.lvalue(name).or_else(|| {
+                self.global_variable_cell(name)
+                    .map(|cell| self.tracked_cell(cell))
+            })),
             Expr::Property(base, property) => Ok(self
                 .existing_path_lvalue(base, env, depth)?
                 .map(|reference| reference.append(PathSegment::Property(property.clone())))),
@@ -3265,6 +4100,31 @@ impl<'a> Vm<'a> {
                 other.type_name()
             ))),
         }
+    }
+
+    fn set_local_tracked(
+        &self,
+        args: &[Expr],
+        default_target: Option<Value>,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<TrackedValue, RuntimeError> {
+        let index = self.evaluate_slot_index("SetLocal()", &args[0], env, depth)?;
+        let tracked = args
+            .get(1)
+            .map(|arg| self.evaluate_tracked(arg, env, depth))
+            .transpose()?
+            .unwrap_or_else(|| TrackedValue::runtime(Value::Nil));
+        let explicit_target = args
+            .get(2)
+            .map(|arg| self.evaluate(arg, env, depth))
+            .transpose()?;
+        let target = explicit_target
+            .filter(|value| !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false)))
+            .or(default_target);
+        let cell = self.numbered_local_cell(env, index, target);
+        self.tracked_cell(cell).write_tracked(tracked.clone())?;
+        Ok(tracked)
     }
 
     fn expr_to_assignment_target(expr: &Expr) -> Result<AssignmentTarget, RuntimeError> {
@@ -3448,7 +4308,7 @@ impl Environment {
                 {
                     Ok(Binding::Reference(reference.clone()))
                 }
-                _ => Ok(Binding::direct(arg.read()?)),
+                _ => Ok(Binding::tracked(arg.read_tracked()?)),
             })
             .collect::<Result<Vec<_>, RuntimeError>>()?;
         while call_args.len() < MAX_CALL_PARAMETERS {
@@ -3472,21 +4332,19 @@ impl Environment {
         })
     }
 
-    fn var_slot_lvalue(&mut self, index: i32) -> LValueRef {
-        LValueRef::Cell(slot_cell(&self.var_slots, index))
-    }
-
-    fn local_slot_lvalue(&mut self, index: i32) -> LValueRef {
-        LValueRef::Cell(self.object_state.local_slot_cell(index))
-    }
-
-    fn define_object_local(&mut self, name: &str) {
+    fn define_object_local(&mut self, name: &str, identity: RawIdentityCell) {
         let cell = self.object_state.named_local_cell(name);
         if self.scopes.iter().any(|scope| scope.contains_key(name)) {
             return;
         }
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), Binding::Direct(cell));
+            scope.insert(
+                name.to_string(),
+                Binding::Direct {
+                    value: cell,
+                    identity,
+                },
+            );
         }
     }
 
@@ -3499,8 +4357,12 @@ impl Environment {
     }
 
     fn define(&mut self, name: &str, value: Value) {
+        self.define_tracked(name, TrackedValue::runtime(value));
+    }
+
+    fn define_tracked(&mut self, name: &str, tracked: TrackedValue) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), Binding::direct(value));
+            scope.insert(name.to_string(), Binding::tracked(tracked));
         }
     }
 
@@ -3514,18 +4376,27 @@ impl Environment {
     }
 
     fn assign(&mut self, name: &str, value: Value) -> Result<(), RuntimeError> {
+        self.assign_tracked(name, TrackedValue::runtime(value))
+    }
+
+    fn assign_tracked(&mut self, name: &str, tracked: TrackedValue) -> Result<(), RuntimeError> {
         for scope in self.scopes.iter_mut().rev() {
             if let Some(binding) = scope.get(name) {
-                return binding.write(value);
+                return binding.write_tracked(tracked);
             }
         }
         Err(RuntimeError::new(format!("undefined variable '{name}'")))
     }
 
     fn get(&self, name: &str) -> Result<Option<Value>, RuntimeError> {
+        self.get_tracked(name)
+            .map(|tracked| tracked.map(|tracked| tracked.value))
+    }
+
+    fn get_tracked(&self, name: &str) -> Result<Option<TrackedValue>, RuntimeError> {
         for scope in self.scopes.iter().rev() {
             if let Some(value) = scope.get(name) {
-                return value.read().map(Some);
+                return value.read_tracked().map(Some);
             }
         }
         Ok(None)

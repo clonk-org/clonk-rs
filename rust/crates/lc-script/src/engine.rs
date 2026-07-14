@@ -585,7 +585,7 @@ impl Engine {
             args.iter().cloned().map(crate::vm::value_cell).collect();
         let call_args = cells
             .iter()
-            .map(|cell| crate::vm::CallArg::Reference(crate::vm::LValueRef::Cell(cell.clone())))
+            .map(|cell| crate::vm::CallArg::Reference(crate::vm::LValueRef::cell(cell.clone())))
             .collect();
         let result = vm.call_args(name, call_args).map_err(ScriptError::from)?;
         let finals = cells.iter().map(|cell| cell.borrow().clone()).collect();
