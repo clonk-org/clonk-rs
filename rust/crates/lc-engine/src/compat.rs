@@ -6307,30 +6307,47 @@ fn sell_object_to_home_live(target: ObjectId, player: i32) -> Result<bool, Runti
         let _ = sell_object_to_home_live(child, player)?;
     }
 
+    // Sell2Home prices the object against its live containing base. Direct
+    // Sell calls reach this path before Exit, unlike the base-auto-sell path.
+    let base = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.get_world_object(target))
+            .and_then(|object| object.container())
+    });
     let value = match get_value(&[
         object_reference_value(target),
         Value::Nil,
-        Value::Nil,
+        base.map(object_reference_value).unwrap_or(Value::Nil),
         Value::Int(player),
     ]) {
         Ok(Value::Int(value)) => value,
         Ok(_) => 0,
         Err(error) => {
-            tracing::warn!(%error, "CalcValue failed during base auto-sale; using zero");
+            tracing::warn!(%error, "CalcValue failed during home-base sale; using zero");
             0
         }
     };
-    let wealth = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.player_state(player))
-            .map(|state| state.wealth)
-            .unwrap_or(0)
+    // C4Player::DoWealth clamps adjustments to 0..=10000; FnSetWealth's
+    // wider 100000 ceiling does not apply to a home-base sale.
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        let updated = {
+            let Some(state) = context.player_state_mut(player) else {
+                return;
+            };
+            let updated = (i64::from(state.wealth) + i64::from(value)).clamp(0, 10_000) as i32;
+            state.wealth = updated;
+            updated
+        };
+        context.record_player_command(PlayerCommand::SetWealth {
+            player_id: player,
+            value: updated,
+        });
     });
-    let _ = set_wealth(&[
-        Value::Int(player),
-        Value::Int(wealth.saturating_add(value)),
-    ])?;
 
     let original_definition = HOST_CONTEXT.with(|cell| {
         cell.borrow()
@@ -6348,9 +6365,10 @@ fn sell_object_to_home_live(target: ObjectId, player: i32) -> Result<bool, Runti
         Some(Ok(Value::Int(raw @ 1..=9999))) => {
             Some(DefinitionId::from(format!("{raw:04}").as_str()))
         }
-        Some(Ok(_)) | None => original_definition,
+        Some(Ok(_)) => None,
+        None => original_definition,
         Some(Err(error)) => {
-            tracing::warn!(%error, "SellTo failed during base auto-sale; omitting stock");
+            tracing::warn!(%error, "SellTo failed during home-base sale; omitting stock");
             None
         }
     };
@@ -6375,6 +6393,15 @@ fn sell_object_to_home_live(target: ObjectId, player: i32) -> Result<bool, Runti
         }
     }
 
+    let contained = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.get_world_object(target))
+            .is_some_and(|object| object.container().is_some())
+    });
+    if contained && object_is_present(target) {
+        let _ = exit_object_at_position(target, Vector2::ZERO)?;
+    }
     if object_is_present(target) {
         call_object_own_fail_safe(target, "Sale", &[Value::Int(player)]);
     }
@@ -6382,6 +6409,31 @@ fn sell_object_to_home_live(target: ObjectId, player: i32) -> Result<bool, Runti
         let _ = assign_removal_live(target, true)?;
     }
     Ok(true)
+}
+
+/// FnSell (C4Script.cpp:3753-3760): a nil object means the executing
+/// script object; a valid player then runs the complete Sell2Home path.
+fn sell(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "Sell expects at most 2 arguments: player, object",
+        ));
+    }
+    let player = value_to_i32(args.first().unwrap_or(&Value::Nil), "Sell", "player")?;
+    let explicit = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "Sell",
+        "object",
+    )?;
+    let target = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| explicit.or(context.script_object_context))
+    });
+    let Some(target) = target else {
+        return Ok(Value::Bool(false));
+    };
+    Ok(Value::Bool(sell_object_to_home_live(target, player)?))
 }
 
 fn auto_sell_after_enter(entering: ObjectId, original_target: ObjectId) -> Result<(), RuntimeError> {
@@ -9592,6 +9644,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetDefinition", get_definition);
     script.register_host_function("Value", definition_value);
     script.register_host_function("GetValue", get_value);
+    script.register_host_function("Sell", sell);
     script.register_host_function("GetDefCoreVal", get_def_core_val);
     script.register_host_function("Enter", enter);
     script.register_host_function("Collect", collect);
@@ -35849,6 +35902,7 @@ mod tests {
         "ScriptGo",
         "SelectCrew",
         "SelectMenuItem",
+        "Sell",
         "SetAction",
         "SetActionData",
         "SetActionTargets",
@@ -50347,6 +50401,176 @@ protected func Entrance() { entrance_ocf = GetOCF(); }
                 .home_base_material()
                 .get(&DefinitionId::from("GOLD")),
             Some(&1)
+        );
+    }
+
+    #[test]
+    fn sell_host_runs_the_cpp_homebase_transaction_and_defaults_target() {
+        let caller_script = r#"#strict
+public func SellTarget(int player, object target) { return Sell(player, target); }
+"#;
+        let item_script = r#"#strict
+local sale_base;
+public func CalcValue(object base, int player)
+{
+    sale_base = base;
+    if (!base) return(-1000);
+    return(20 + player);
+}
+public func Sale(int player)
+{
+    if (!Contained())
+        sale_base->RecordSale(GetWealth(player), GetHomebaseMaterial(player, VALU));
+}
+public func SellSelf(int player) { return Sell(player); }
+"#;
+        let base_script = r#"#strict
+local sales, sale_wealth, sale_stock;
+public func CalcSellValue(object item, int value) { return(value + 3); }
+public func RecordSale(int wealth, int stock)
+{
+    sales++;
+    sale_wealth = wealth;
+    sale_stock = stock;
+}
+"#;
+
+        let mut engine = crate::Engine::with_seed(32);
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Player"))
+            .expect("player registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("BASE", "Base", base_script)
+                    .expect("base compiles"),
+            )
+            .expect("base registers");
+        let mut item = crate::Definition::from_script("VALU", "Valuable", item_script)
+            .expect("item compiles");
+        item.set_value(99);
+        item.set_rebuyable(true);
+        engine.register_definition(item).expect("item registers");
+
+        let base = engine
+            .spawn_object(SpawnConfig::new("BASE"))
+            .expect("base spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller index");
+
+        let explicit = engine
+            .spawn_object(SpawnConfig::new("VALU").with_container(base))
+            .expect("explicit target spawns");
+        let sold = engine
+            .call_object_function(
+                caller_index,
+                "SellTarget",
+                vec![Value::Int(0), object_reference_value(explicit)],
+            )
+            .expect("explicit Sell runs");
+        assert_eq!(sold, Value::Bool(true));
+        assert!(
+            engine
+                .object_snapshot(explicit)
+                .is_none_or(|object| !object.status.is_active()),
+            "the explicitly sold object is removed"
+        );
+        assert_eq!(engine.player(0).expect("player remains").wealth(), 23);
+        assert_eq!(
+            engine
+                .player(0)
+                .expect("player remains")
+                .home_base_material()
+                .get(&DefinitionId::from("VALU")),
+            Some(&1)
+        );
+        let base_snapshot = engine.object_snapshot(base).expect("base remains");
+        assert_eq!(base_snapshot.local_vars.get("sales"), Some(&Value::Int(1)));
+        assert_eq!(
+            base_snapshot.local_vars.get("sale_wealth"),
+            Some(&Value::Int(23))
+        );
+        assert_eq!(
+            base_snapshot.local_vars.get("sale_stock"),
+            Some(&Value::Int(1))
+        );
+
+        let invalid = engine
+            .spawn_object(SpawnConfig::new("VALU").with_container(base))
+            .expect("invalid-player target spawns");
+        let rejected = engine
+            .call_object_function(
+                caller_index,
+                "SellTarget",
+                vec![Value::Int(99), object_reference_value(invalid)],
+            )
+            .expect("invalid-player Sell returns normally");
+        assert_eq!(rejected, Value::Bool(false));
+        let invalid_snapshot = engine
+            .object_snapshot(invalid)
+            .expect("rejected object remains");
+        assert!(invalid_snapshot.status.is_active());
+        assert_eq!(invalid_snapshot.container, Some(base));
+        assert_eq!(engine.player(0).expect("player remains").wealth(), 23);
+        assert_eq!(
+            engine
+                .player(0)
+                .expect("player remains")
+                .home_base_material()
+                .get(&DefinitionId::from("VALU")),
+            Some(&1)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(base)
+                .expect("base remains")
+                .local_vars
+                .get("sales"),
+            Some(&Value::Int(1))
+        );
+
+        engine
+            .set_player_wealth(0, 9_990)
+            .expect("near-cap wealth installs");
+        let implicit = engine
+            .spawn_object(SpawnConfig::new("VALU").with_container(base))
+            .expect("implicit target spawns");
+        let implicit_index = engine.find_object_index(implicit).expect("implicit index");
+        let sold = engine
+            .call_object_function(implicit_index, "SellSelf", vec![Value::Int(0)])
+            .expect("implicit Sell runs");
+        assert_eq!(sold, Value::Bool(true));
+        assert!(
+            engine
+                .object_snapshot(implicit)
+                .is_none_or(|object| !object.status.is_active()),
+            "the calling object is removed"
+        );
+        assert_eq!(engine.player(0).expect("player remains").wealth(), 10_000);
+        assert_eq!(
+            engine
+                .player(0)
+                .expect("player remains")
+                .home_base_material()
+                .get(&DefinitionId::from("VALU")),
+            Some(&2)
+        );
+        let base_snapshot = engine.object_snapshot(base).expect("base remains");
+        assert_eq!(base_snapshot.local_vars.get("sales"), Some(&Value::Int(2)));
+        assert_eq!(
+            base_snapshot.local_vars.get("sale_wealth"),
+            Some(&Value::Int(10_000))
+        );
+        assert_eq!(
+            base_snapshot.local_vars.get("sale_stock"),
+            Some(&Value::Int(2))
         );
     }
 
