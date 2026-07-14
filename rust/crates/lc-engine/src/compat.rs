@@ -444,6 +444,11 @@ pub enum PlayerCommand {
         player_info_id: i32,
         text: String,
     },
+    /// `FnSetMaxPlayer`'s direct write to
+    /// `C4GameParameters::MaxPlayers`. This is engine-global; like
+    /// `LoadScenarioSection`, it uses the existing ordered player-command
+    /// outcome channel only as script-to-engine transport.
+    SetMaxPlayer { max_players: i32 },
     /// `FnSetPlayerTeam`'s complete, callback-approved team transition.
     /// The host has already made every field visible to the still-running
     /// VM; this payload lets the authoritative engine repeat the transition
@@ -2594,6 +2599,27 @@ fn is_network(_args: &[Value]) -> Result<Value, RuntimeError> {
                 .is_some_and(|context| context.world.network_game()),
         ))
     })
+}
+
+/// `FnSetMaxPlayer` (C4Script.cpp:3698-3706): nonnegative values directly
+/// replace `Game.Parameters.MaxPlayers`; negative values fail without a
+/// write. The C++ host function returns `C4ValueInt`, not a script bool.
+fn set_max_player(args: &[Value]) -> Result<Value, RuntimeError> {
+    let max_players = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetMaxPlayer",
+        "maximum player count",
+    )?;
+    if max_players < 0 {
+        return Ok(Value::Int(0));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.record_player_command(PlayerCommand::SetMaxPlayer { max_players });
+        }
+    });
+    Ok(Value::Int(1))
 }
 
 fn get_player_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -10095,6 +10121,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerInfoCoreVal", get_player_info_core_val);
     script.register_host_function("GetPlayerTeam", get_player_team);
     script.register_host_function("SetPlayerTeam", set_player_team);
+    script.register_host_function("SetMaxPlayer", set_max_player);
     script.register_host_function("GetTeamCount", get_team_count);
     script.register_host_function("GetTeamByIndex", get_team_by_index);
     script.register_host_function("GetTeamColor", get_team_color);
@@ -36911,6 +36938,7 @@ mod tests {
         "SetKiller",
         "SetLength",
         "SetMass",
+        "SetMaxPlayer",
         "SetMenuDecoration",
         "SetMenuSize",
         "SetMenuTextProgress",

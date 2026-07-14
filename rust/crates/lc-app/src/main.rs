@@ -13041,6 +13041,7 @@ impl GameApp {
         let mut engine = Engine::new();
         engine.set_control_host(!matches!(network_mode.as_ref(), Some(NetworkMode::Client(_))));
         engine.set_local_players([runtime.player_owner]);
+        engine.set_max_players(i32::try_from(network_max_players).unwrap_or(i32::MAX));
         let snapshot = engine.snapshot();
 
         let scenarios = scenario_discovery
@@ -17882,6 +17883,12 @@ impl GameApp {
     }
 
     fn handle_script_player_info_updates(&mut self) -> Result<(), EngineError> {
+        // SetMaxPlayer writes Game.Parameters.MaxPlayers inside the engine's
+        // synchronized script call. Mirror that value before either the
+        // queued CreateScriptPlayer admission or the empty fast path.
+        if let Some(max_players) = self.engine.max_players() {
+            self.network_max_players = usize::try_from(max_players).unwrap_or(0);
+        }
         let updates = self.engine.take_script_player_info_updates();
         if updates.is_empty() {
             return Ok(());
@@ -18371,6 +18378,8 @@ impl GameApp {
                             .register_join_data_resources(&join_data);
                         self.network_max_players =
                             usize::try_from(join_data.parameters.max_players).unwrap_or(0);
+                        self.engine
+                            .set_max_players(join_data.parameters.max_players);
                         self.network_is_league =
                             synchronized_parameters_are_league(&join_data.parameters);
                         self.network_control_clock = Some(NetworkControlClock::new(
@@ -22451,6 +22460,10 @@ impl GameApp {
                             {
                                 self.start_prepared_network_game_advertiser(prepared, &manager);
                             }
+                            self.network_max_players = initial_network_max_players(Some(&mode));
+                            self.engine.set_max_players(
+                                i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
+                            );
                             self.control_clients = control_clients;
                             self.network_mode = Some(mode);
                             self.network = Some(manager);
@@ -22479,6 +22492,10 @@ impl GameApp {
                                     self.advertised_game_reference = None;
                                 }
                             }
+                            self.network_max_players = initial_network_max_players(Some(&mode));
+                            self.engine.set_max_players(
+                                i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
+                            );
                             self.control_clients = control_clients;
                             self.network_mode = Some(mode);
                             self.network = Some(manager);
@@ -22518,6 +22535,9 @@ impl GameApp {
                     self.network_game_advertiser = None;
                     self.advertised_game_reference = None;
                     self.network_max_players = initial_network_max_players(Some(&mode));
+                    self.engine.set_max_players(
+                        i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
+                    );
                     self.network_is_league = initial_network_is_league(Some(&mode));
                     self.network_control_clock = initial_network_control_clock(Some(&mode));
                     self.control_clients = initial_control_clients(Some(&manager), Some(&mode));
@@ -28970,6 +28990,9 @@ impl GameApp {
         self.scoreboard_close_pointer_capture = false;
         self.engine = Engine::new();
         self.engine.set_local_players([self.local_owner]);
+        self.engine.set_max_players(
+            i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
+        );
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
@@ -29548,9 +29571,23 @@ impl GameApp {
             .loading_state
             .as_mut()
             .and_then(|loading| loading.offline_startup_players.take());
+        let network_game = self.network.is_some();
+        if !network_game {
+            if let Some(metadata) = scenario_data.lobby_metadata() {
+                let max_players = metadata
+                    .embedded_game_parameter_values()
+                    .map_or_else(
+                        || metadata.game_parameter_defaults().max_players(),
+                        |parameters| parameters.max_players(),
+                    );
+                self.network_max_players = usize::try_from(max_players).unwrap_or(0);
+            }
+        }
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
         engine.set_local_players([self.local_owner]);
-        let network_game = self.network.is_some();
+        engine.set_max_players(
+            i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
+        );
         if let Some(timing) = self
             .network_control_clock
             .filter(|_| network_game)
@@ -29874,6 +29911,9 @@ impl GameApp {
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.engine.set_league_game(self.network_is_league);
+        self.engine.set_max_players(
+            i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
+        );
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.local_controls = LocalControlRegistry::default();
@@ -30048,6 +30088,9 @@ impl GameApp {
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.engine.set_league_game(self.network_is_league);
+        self.engine.set_max_players(
+            i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
+        );
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
@@ -30160,6 +30203,9 @@ impl GameApp {
         self.engine
             .restore_state(&save.engine_state)
             .context("failed to restore saved engine state")?;
+        if let Some(max_players) = self.engine.max_players() {
+            self.network_max_players = usize::try_from(max_players).unwrap_or(0);
+        }
 
         self.snapshot = self.engine.snapshot();
         self.arm_initial_scoreboard_reconcile();
@@ -56325,6 +56371,144 @@ mod tests {
                 .iter()
                 .any(|player| player.player_info_id == info.id),
             "post-control app snapshot includes the joined player"
+        );
+    }
+
+    #[test]
+    fn offline_negative_set_max_player_preserves_cap_and_rejects_queued_script_player() {
+        // Hazard's CreateScriptPlayer runs after SetMaxPlayer in the same
+        // Script1 callback. Exercise the app admission boundary as well as
+        // the VM result: a rejected negative change must leave the one-slot
+        // Game.Parameters cap in force when the deferred PlayerInfo arrives
+        // (src/C4Script.cpp:3693-3705; src/C4PlayerInfo.cpp:781-807).
+        let mut app = new_running_sandbox_app();
+        app.network_max_players = 1;
+        app.engine.set_max_players(1);
+        app.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        app.engine
+            .install_scenario_script_with_convention(
+                "SetMaxPlayer negative admission fixture",
+                r#"
+                static set_result;
+
+                global func RejectLimitAndSpawn()
+                {
+                    set_result = SetMaxPlayer(-1);
+                    CreateScriptPlayer("Rejected Bot", 0x112233, 2, 15, __AI);
+                }
+                "#,
+                true,
+            )
+            .expect("fixture script installs");
+
+        app.engine
+            .call_scenario_script_function("RejectLimitAndSpawn", Vec::new())
+            .expect("negative SetMaxPlayer does not abort its caller");
+
+        let globals = app.engine.snapshot().script_globals.named;
+        assert_eq!(
+            globals.get("set_result"),
+            Some(&Value::Int(0)),
+            "FnSetMaxPlayer has the C4ValueInt false result"
+        );
+        assert_eq!(app.engine.max_players(), Some(1));
+
+        app.handle_script_player_info_updates()
+            .expect("offline admission handles the queued script player");
+
+        assert_eq!(app.network_max_players, 1);
+        assert!(
+            app.control_player_infos
+                .client_info_ids(0)
+                .into_iter()
+                .filter_map(|id| app.control_player_infos.get(id))
+                .all(|info| info.name.as_bytes() != b"Rejected Bot"),
+            "the unchanged full cap rejects the PlayerInfo"
+        );
+        assert!(
+            app.engine
+                .snapshot()
+                .players
+                .iter()
+                .all(|player| player.name != "Rejected Bot"),
+            "a rejected PlayerInfo cannot reach JoinPlayer"
+        );
+    }
+
+    #[test]
+    fn offline_set_max_player_raise_reaches_admission_before_queued_script_player() {
+        // SetMaxPlayer mutates Game.Parameters directly; CreateScriptPlayer
+        // queues its PlayerInfo later in the same callback. The app must copy
+        // the new limit out of Engine before applying that deferred request
+        // (src/C4Script.cpp:2882-2902,3693-3705).
+        let mut app = new_running_sandbox_app();
+        app.network_max_players = 1;
+        app.engine.set_max_players(1);
+        app.engine
+            .install_scenario_script_with_convention(
+                "SetMaxPlayer raised admission fixture",
+                r#"
+                static set_result;
+
+                global func RaiseLimitAndSpawn()
+                {
+                    set_result = SetMaxPlayer(2);
+                    CreateScriptPlayer("Admitted Bot", 0x445566, 2, 15, __AI);
+                }
+                "#,
+                true,
+            )
+            .expect("fixture script installs");
+
+        let before = app.engine.snapshot().players.len();
+        app.engine
+            .call_scenario_script_function("RaiseLimitAndSpawn", Vec::new())
+            .expect("SetMaxPlayer and CreateScriptPlayer execute in order");
+
+        let globals = app.engine.snapshot().script_globals.named;
+        assert_eq!(
+            globals.get("set_result"),
+            Some(&Value::Int(1)),
+            "FnSetMaxPlayer has the C4ValueInt success result"
+        );
+        assert_eq!(app.engine.max_players(), Some(2));
+        assert_eq!(
+            app.engine.snapshot().players.len(),
+            before,
+            "CreateScriptPlayer remains deferred until app admission"
+        );
+
+        app.handle_script_player_info_updates()
+            .expect("raised cap admits the queued script player");
+
+        assert_eq!(
+            app.network_max_players, 2,
+            "the app admission cap follows Game.Parameters.MaxPlayers"
+        );
+        let admitted = app
+            .control_player_infos
+            .client_info_ids(0)
+            .into_iter()
+            .filter_map(|id| app.control_player_infos.get(id))
+            .find(|info| info.name.as_bytes() == b"Admitted Bot")
+            .expect("script PlayerInfo is admitted under the raised cap");
+        assert!(
+            app.engine
+                .snapshot()
+                .players
+                .iter()
+                .any(|player| player.player_info_id == admitted.id),
+            "the admitted PlayerInfo reaches JoinPlayer"
         );
     }
 

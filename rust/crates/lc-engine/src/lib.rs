@@ -7193,6 +7193,10 @@ pub struct EngineState {
     pub frame: u64,
     #[serde(default, skip_serializing_if = "i32_is_zero")]
     pub game_time: i32,
+    /// Saved `Game.Parameters.MaxPlayers`. `None` keeps the parameter value
+    /// seeded by the scenario/app when restoring an older Rust state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_players: Option<i32>,
     pub physics: PhysicsSettings,
     pub environment: EnvironmentSettings,
     /// C4Weather::CompileFunc persists Game.GraphicsSystem.dwGamma under
@@ -7368,6 +7372,7 @@ impl EngineState {
         Self {
             frame: snapshot.frame,
             game_time: snapshot.game_time,
+            max_players: None,
             physics,
             environment: snapshot.environment.settings,
             gamma: snapshot.environment.gamma,
@@ -12432,6 +12437,9 @@ pub struct Engine {
     /// Game.Parameters.RandomSeed - kept for the game-start re-fix
     /// (C4Game::Synchronize, C4Game.cpp:3695).
     random_seed: u64,
+    /// `Game.Parameters.MaxPlayers`. `None` means the embedding app or
+    /// scenario has not attached the active game-parameter value yet.
+    max_players: Option<i32>,
     /// `Game.Parameters.IsNetworkGame`, derived from the app's active
     /// network session just as C++ copies `Game.NetworkActive` during
     /// parameter setup (C4GameParameters.cpp:429-434).
@@ -14293,6 +14301,7 @@ impl Engine {
             scenario_script_go: false,
             scenario_script_counter: 0,
             random_seed: seed,
+            max_players: None,
             network_game: false,
             league_game: false,
             control_host: true,
@@ -16773,6 +16782,14 @@ impl Engine {
 
     pub fn set_network_game(&mut self, network_game: bool) {
         self.network_game = network_game;
+    }
+
+    pub fn set_max_players(&mut self, max_players: i32) {
+        self.max_players = Some(max_players);
+    }
+
+    pub fn max_players(&self) -> Option<i32> {
+        self.max_players
     }
 
     pub fn set_league_game(&mut self, league_game: bool) {
@@ -23892,6 +23909,7 @@ impl Engine {
         EngineState {
             frame: self.frame,
             game_time: self.game_time,
+            max_players: self.max_players,
             physics: self.physics,
             environment: self.environment,
             gamma: self.gamma,
@@ -23946,6 +23964,9 @@ impl Engine {
 
         self.frame = state.frame;
         self.game_time = state.game_time;
+        if let Some(max_players) = state.max_players {
+            self.max_players = Some(max_players);
+        }
         self.time_go = false;
         self.physics = state.physics;
         self.environment = state.environment;
@@ -25641,6 +25662,9 @@ impl Engine {
                 } => {
                     self.round_results
                         .add_custom_evaluation_string(&text, player_info_id);
+                }
+                PlayerCommand::SetMaxPlayer { max_players } => {
+                    self.max_players = Some(max_players);
                 }
                 PlayerCommand::SetPlayerTeam {
                     player_id,

@@ -26651,6 +26651,121 @@ func RemoveAndRecruit(object target) {
     }
 
     #[test]
+    fn set_max_player_returns_cpp_integers_and_only_applies_nonnegative_values() {
+        // FnSetMaxPlayer is registered as a C4ValueInt host function: failure
+        // is integer zero, success is integer one. A negative request must
+        // leave Game.Parameters.MaxPlayers untouched; zero is a valid limit
+        // value and uses the same success path as a positive limit
+        // (C4Script.cpp:3698-3706,6919).
+        let mut engine = Engine::with_seed(0);
+        engine.set_max_players(7);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "MPLR",
+                    "Max-player probe",
+                    r#"#strict 2
+                    func SetLimit(int limit) { return SetMaxPlayer(limit); }
+                    "#,
+                )
+                .expect("max-player probe compiles"),
+            )
+            .expect("max-player probe registers");
+        let probe = engine
+            .spawn_object(SpawnConfig::new("MPLR"))
+            .expect("max-player probe spawns");
+        let probe_index = engine
+            .find_object_index(probe)
+            .expect("max-player probe remains live");
+
+        assert_eq!(
+            engine
+                .call_object_function(probe_index, "SetLimit", vec![Value::Int(-1)])
+                .expect("negative SetMaxPlayer call completes"),
+            Value::Int(0)
+        );
+        assert_eq!(
+            engine.max_players(),
+            Some(7),
+            "a rejected negative limit must not mutate the live parameter"
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(probe_index, "SetLimit", vec![Value::Int(0)])
+                .expect("zero SetMaxPlayer call completes"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            engine.max_players(),
+            Some(0),
+            "zero is a valid player limit"
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(probe_index, "SetLimit", vec![Value::Int(2)])
+                .expect("positive SetMaxPlayer call completes"),
+            Value::Int(1)
+        );
+        assert_eq!(engine.max_players(), Some(2));
+    }
+
+    #[test]
+    fn shipped_hazard_tutorial_script1_raises_limit_before_creating_drones() {
+        // Hazard starts at MaxPlayer=1. Its exact Script1 raises that live
+        // parameter to two immediately before CreateScriptPlayer; an absent
+        // SetMaxPlayer host aborts the call before the script-player request.
+        // As with the Script65 regression below, load the shipped script but
+        // skip its very large Initialize function.
+        let mut engine = Engine::with_seed(0);
+        engine.set_max_players(1);
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/Colors.c".to_string(),
+                "global func RGB(int red, int green, int blue) { return red * 65536 + green * 256 + blue; }"
+                    .to_string(),
+            )]),
+            1,
+            "the app normally supplies System.c4g's RGB helper"
+        );
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../content/Hazard.c4f/Tutorial.c4s/Script.c");
+        let source = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("shipped Hazard tutorial script reads: {error}"));
+        let source = String::from_utf8_lossy(&source);
+        engine
+            .load_scenario_script_with_convention("Hazard Tutorial", &source, true)
+            .expect("shipped Hazard tutorial script loads without Initialize");
+
+        engine
+            .call_scenario_script_function("Script1", Vec::new())
+            .expect("shipped Hazard Script1 reaches CreateScriptPlayer");
+
+        assert_eq!(engine.max_players(), Some(2));
+        let updates = engine.take_script_player_info_updates();
+        let [request] = updates.as_slice() else {
+            panic!("expected one Hazard drone PlayerInfo request, got {updates:?}");
+        };
+        assert_eq!(request.client_id, 0);
+        assert_eq!(request.flags, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS);
+        let [drone] = request.players.as_slice() else {
+            panic!("expected one Hazard drone player, got {:?}", request.players);
+        };
+        assert_eq!(drone.name.as_bytes(), b"$Drones$");
+        assert_eq!(drone.player_type, PLAYER_INFO_TYPE_SCRIPT);
+        assert_eq!((drone.color, drone.original_color), (0x0001_0101, 0x0001_0101));
+        assert_eq!(drone.team, 2);
+        assert_eq!(
+            drone.flags,
+            PLAYER_INFO_FLAG_ATTRIBUTES_FIXED
+                | PLAYER_INFO_FLAG_NO_SCENARIO_INIT
+                | PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK
+                | PLAYER_INFO_FLAG_INVISIBLE
+        );
+    }
+
+    #[test]
     fn shipped_hazard_tutorial_script65_awards_crew_experience() {
         // Exercise the exact shipped call without applying Hazard's very large
         // Initialize function. Script65 ends the tutorial with
