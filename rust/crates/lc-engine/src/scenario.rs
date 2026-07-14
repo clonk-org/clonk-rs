@@ -12963,7 +12963,7 @@ Definitions="Western.c4f\\Misc.c4d"
         let dir = tempdir().expect("tempdir");
         // Keep the moving fixture in C4D_Object: C4Object::SyncClearance
         // zeroes C4D_StaticBack velocity before players join
-        // (C4Object.cpp:3803-3823; C4Game.cpp:473-475).
+        // (C4Object.cpp:3830-3850; C4Game.cpp:473-475).
         let manifest = r#"
         {
             "name": "Temp Scenario",
@@ -18790,7 +18790,12 @@ public func ActualizePhase(pClonk)
         // Loads denumerate Contained without the Enter transfer
         // (C4Object.cpp:1582 never runs): compile default NO_OWNER.
         assert_eq!(gem_snapshot.controller, crate::OWNER_NONE);
-        assert_eq!(gem_snapshot.velocity, Vector2::new(-5, 3));
+        // FixObjectOrder repairs the missing Category=0 sort bit to
+        // C4D_StaticBack after the load-time speed check. Game-start
+        // SyncClearance subsequently zeroes its speed (C4GameObjects.cpp:
+        // 640-663,773-830; C4Object.cpp:3830-3850).
+        assert_eq!(gem_snapshot.category, crate::CATEGORY_STATIC_BACK);
+        assert_eq!(gem_snapshot.velocity, Vector2::ZERO);
         assert_eq!(gem_snapshot.energy, 77);
         assert!(gem_snapshot.need_energy);
         assert!(gem_snapshot.selected);
