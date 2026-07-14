@@ -18212,16 +18212,16 @@ fn set_phase(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetPhase requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
 
         // C4Object::SetPhase (C4Object.cpp:2205-2211): a no-op on idle
         // objects; the phase clamps to [0, Length] (BoundBy is INCLUSIVE
@@ -43672,6 +43672,106 @@ func Probe(state) {
             .unwrap_or(true));
     }
 
+    fn set_phase_target_world(action_name: &str) -> (ObjectId, HostWorldContext) {
+        let target_id = ObjectId::new(2);
+        let mut specs = HashMap::new();
+        specs.insert(
+            "Walk".to_string(),
+            crate::action::ActionSpec::default().with_length(5),
+        );
+        let action_library = ActionLibrary::new(Some("Walk".to_string()), specs);
+        let mut state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        state.action = ActionState::new(action_name);
+        let target = HostWorldObject::new(
+            target_id,
+            "TARG",
+            ObjectStatus::Normal,
+            action_name,
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(state));
+        let world = HostWorldContext::from_objects([target]).with_definition_metadata(Rc::new(
+            HashMap::from([(
+                DefinitionId::from("TARG"),
+                DefinitionMetadata {
+                    action_library,
+                    ..DefinitionMetadata::default()
+                },
+            )]),
+        ));
+        (target_id, world)
+    }
+
+    #[test]
+    fn set_phase_targets_a_foreign_object_like_cpp() {
+        let (target_id, world) = set_phase_target_world("Walk");
+        let target = object_reference_value(target_id);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            Ok(Value::Array(vec![
+                set_phase(&[Value::Int(3), target.clone()])?,
+                get_phase(&[target])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("foreign SetPhase succeeds"),
+            Value::Array(vec![Value::Bool(true), Value::Int(3)])
+        );
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+        let action = outcome
+            .other_objects
+            .iter()
+            .find(|outcome| outcome.object_id == target_id)
+            .and_then(|outcome| outcome.update.as_ref())
+            .and_then(|update| update.action.as_ref())
+            .expect("foreign phase update recorded");
+        assert_eq!(action.phase, Some(3));
+    }
+
+    #[test]
+    fn set_phase_targets_an_object_from_scenario_scope() {
+        let (target_id, world) = set_phase_target_world("Walk");
+        let target = object_reference_value(target_id);
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            Ok::<Value, RuntimeError>(Value::Array(vec![
+                set_phase(&[Value::Int(2), target.clone()])?,
+                get_phase(&[target])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("scenario SetPhase succeeds"),
+            Value::Array(vec![Value::Bool(true), Value::Int(2)])
+        );
+        let action = outcome
+            .other_objects
+            .iter()
+            .find(|outcome| outcome.object_id == target_id)
+            .and_then(|outcome| outcome.update.as_ref())
+            .and_then(|update| update.action.as_ref())
+            .expect("scenario phase update recorded");
+        assert_eq!(action.phase, Some(2));
+    }
+
     #[test]
     fn set_phase_clamps_to_action_length_inclusive_like_cpp() {
         // C4Object::SetPhase (C4Object.cpp:2205-2211): idle → false;
@@ -43707,12 +43807,46 @@ func Probe(state) {
             &[],
             HostWorldContext::default(),
             1,
-            || set_phase(&[Value::Int(9)]),
+            || {
+                Ok::<Value, RuntimeError>(Value::Array(vec![
+                    set_phase(&[Value::Int(3)])?,
+                    get_phase(&[])?,
+                    set_phase(&[Value::Int(-4)])?,
+                    get_phase(&[])?,
+                    set_phase(&[Value::Int(9)])?,
+                    get_phase(&[])?,
+                ]))
+            },
         );
-        assert_eq!(result.expect("SetPhase runs"), Value::Bool(true));
+        assert_eq!(
+            result.expect("SetPhase runs"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(3),
+                Value::Bool(true),
+                Value::Int(0),
+                Value::Bool(true),
+                Value::Int(5),
+            ])
+        );
         let update = outcome.object_update.expect("phase update recorded");
         let action = update.action.expect("action update present");
         assert_eq!(action.phase, Some(5), "9 clamps to Length (5), inclusive");
+    }
+
+    #[test]
+    fn set_phase_rejects_an_idle_foreign_target() {
+        let (target_id, world) = set_phase_target_world("Idle");
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            set_phase(&[Value::Int(2), object_reference_value(target_id)])
+        });
+        assert_eq!(result.expect("idle SetPhase returns bool"), Value::Bool(false));
+        assert!(outcome.object_update.is_none());
+        assert!(outcome.other_objects.iter().all(|outcome| outcome
+            .update
+            .as_ref()
+            .and_then(|update| update.action.as_ref())
+            .is_none()));
     }
 
     #[test]
