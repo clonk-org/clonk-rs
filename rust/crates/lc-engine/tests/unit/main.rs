@@ -34466,6 +34466,121 @@ protected func Initialize() {
     }
 
     #[test]
+    fn no_scenario_init_script_player_skips_broadcasts_and_runs_its_extra_callback(
+    ) -> Result<(), EngineError> {
+        const SCENARIO: &str = r#"
+        global func PreInitializePlayer(player)
+        {
+            CreateObject(PREI, 0, 0, player);
+        }
+        global func InitializePlayer(player, x, y, base, team, extra)
+        {
+            CreateObject(INIT, 0, 0, player);
+        }
+        "#;
+        const AI: &str = r#"
+        func InitializeScriptPlayer(player, team)
+        {
+            CreateObject(MARK, team, 0, player);
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(17);
+        for id in ["PREI", "INIT", "MARK"] {
+            engine.register_definition(Definition::from_script(id, id, "")?)?;
+        }
+        engine.register_definition(Definition::from_script("__AI", "AI", AI)?)?;
+        engine.install_scenario_script_with_convention("Scenario", SCENARIO, true)?;
+
+        let info = ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(b"Bot".to_vec()).expect("valid name"),
+            flags: PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+            id: 7,
+            player_type: PLAYER_INFO_TYPE_SCRIPT,
+            color: 0x0044_5566,
+            original_color: 0x0044_5566,
+            team: 2,
+            extra_data: *b"__AI",
+            ..Default::default()
+        };
+        let join = JoinPlayerControlData {
+            info_id: info.id,
+            ..Default::default()
+        };
+        let config = prepare_join_player_config(JoinPlayerPreparation {
+            join: &join,
+            info: &info,
+            player_file: None,
+            startup_player_count: 1,
+        })
+        .expect("script player config prepares");
+        let rng_before = engine.snapshot().rng;
+        let joined = engine.join_player_with_info(config, &info)?.number();
+        let snapshot = engine.snapshot();
+
+        assert_eq!(snapshot.rng, rng_before, "NoScenarioInit burns no setup RNG");
+        let player = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == joined)
+            .expect("script player joined");
+        assert_eq!(player.team, Some(2));
+        assert_eq!(player.color, Some(RgbColor::new(0x44, 0x55, 0x66)));
+        assert!(snapshot.objects.iter().all(|object| {
+            object.definition_id != "PREI" && object.definition_id != "INIT"
+        }));
+        let marker = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "MARK")
+            .expect("extra-ID definition callback ran");
+        assert_eq!(marker.owner, joined);
+        assert_eq!(marker.position.x, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_script_player_forwards_extra_id_to_initialize_player() -> Result<(), EngineError> {
+        const SCENARIO: &str = r#"
+        global func InitializePlayer(player, x, y, base, team, extra)
+        {
+            if (extra == __AI) CreateObject(MARK, 0, 0, player);
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(19);
+        engine.set_landscape(Landscape::flat(64, 48));
+        engine.register_definition(Definition::from_script("MARK", "Marker", "")?)?;
+        engine.install_scenario_script_with_convention("Scenario", SCENARIO, true)?;
+        let info = ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(b"Bot".to_vec()).expect("valid name"),
+            id: 8,
+            player_type: PLAYER_INFO_TYPE_SCRIPT,
+            color: 0x0011_2233,
+            original_color: 0x0011_2233,
+            extra_data: *b"__AI",
+            ..Default::default()
+        };
+        let join = JoinPlayerControlData {
+            info_id: info.id,
+            ..Default::default()
+        };
+        let config = prepare_join_player_config(JoinPlayerPreparation {
+            join: &join,
+            info: &info,
+            player_file: None,
+            startup_player_count: 1,
+        })
+        .expect("script player config prepares");
+        let joined = engine.join_player_with_info(config, &info)?.number();
+
+        assert!(engine.snapshot().objects.iter().any(|object| {
+            object.definition_id == "MARK" && object.owner == joined
+        }));
+        Ok(())
+    }
+
+    #[test]
     fn scenario_scoreboard_writes_preserve_cpp_row_column_order_and_header_keys(
     ) -> Result<(), EngineError> {
         // FnSetScoreboardData receives (row, col) but forwards (col, row),

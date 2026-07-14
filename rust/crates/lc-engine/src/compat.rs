@@ -927,6 +927,10 @@ pub struct HostWorldContext {
     /// `Game.NetworkActive` session during parameter setup
     /// (C4GameParameters.cpp:429-434).
     network_game: bool,
+    /// `Game.Control.isCtrlHost()`, independent from network-game state.
+    control_host: bool,
+    /// Ordered player-info updates produced inside copied script contexts.
+    player_info_updates: Rc<RefCell<Vec<crate::PlayerInfoUpdateRequest>>>,
     /// Live `Game.Script.Counter`. C4GameScriptHost::Execute increments it
     /// before entering ScriptN, and ScriptCounter() observes that increment.
     scenario_script_counter: i32,
@@ -1002,6 +1006,8 @@ impl Default for HostWorldContext {
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
             network_game: false,
+            control_host: true,
+            player_info_updates: Rc::new(RefCell::new(Vec::new())),
             scenario_script_counter: 0,
             structures_need_energy: false,
             standard_name_newlines: 0,
@@ -1186,6 +1192,8 @@ impl HostWorldContext {
             next_object_id,
             team_home_base_rule,
             network_game: false,
+            control_host: true,
+            player_info_updates: Rc::new(RefCell::new(Vec::new())),
             scenario_script_counter: 0,
             structures_need_energy: false,
             standard_name_newlines: 0,
@@ -1272,6 +1280,16 @@ impl HostWorldContext {
 
     pub(crate) fn with_network_game(mut self, network_game: bool) -> Self {
         self.network_game = network_game;
+        self
+    }
+
+    pub(crate) fn with_control_host(
+        mut self,
+        control_host: bool,
+        updates: Rc<RefCell<Vec<crate::PlayerInfoUpdateRequest>>>,
+    ) -> Self {
+        self.control_host = control_host;
+        self.player_info_updates = updates;
         self
     }
 
@@ -2171,6 +2189,114 @@ fn player_type_matches(_player: &PlayerState, filter: i32) -> bool {
         1 => true,
         _ => false,
     }
+}
+
+fn script_player_extra_data(value: Option<&Value>) -> Result<[u8; 4], RuntimeError> {
+    let text = match value {
+        None | Some(Value::Nil) | Some(Value::Int(0)) | Some(Value::Bool(false)) => None,
+        Some(Value::C4Id(id)) => Some(id.clone()),
+        Some(Value::Int(raw @ 1..=9999)) => Some(format!("{raw:04}")),
+        Some(Value::Int(raw)) => c4id_to_definition(*raw),
+        Some(other) => {
+            return Err(RuntimeError::new(format!(
+                "CreateScriptPlayer: expected C4ID or nil for extra data, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let Some(text) = text.filter(|text| text != "NONE" && text != "0000") else {
+        return Ok(*b"NONE");
+    };
+    let bytes = text.as_bytes();
+    if bytes.len() < 4 {
+        return Ok(*b"NONE");
+    }
+    let mut extra = [0; 4];
+    extra.copy_from_slice(&bytes[..4]);
+    Ok(extra)
+}
+
+/// FnCreateScriptPlayer (C4Script.cpp:2877-2903): validate the name on
+/// every peer, but only the control host emits the additive PlayerInfo
+/// request. The actual join remains delayed in the control pipeline.
+fn create_script_player(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 5 {
+        return Err(RuntimeError::new(
+            "CreateScriptPlayer expects at most 5 arguments: name, color, team, flags and extra data",
+        ));
+    }
+    let name = match args.first().unwrap_or(&Value::Nil) {
+        Value::String(name) if !name.is_empty() => name,
+        Value::String(_) | Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "CreateScriptPlayer: expected string for name, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let color = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "CreateScriptPlayer",
+        "color",
+    )? as u32
+        & 0x00ff_ffff;
+    let team = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "CreateScriptPlayer",
+        "team",
+    )?;
+    let source_flags = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "CreateScriptPlayer",
+        "flags",
+    )?;
+    let extra_data = script_player_extra_data(args.get(4))?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Bool(true));
+        };
+        if !context.world.control_host {
+            return Ok(Value::Bool(true));
+        }
+        let mut flags = 0;
+        if source_flags & 1 != 0 {
+            flags |= crate::PLAYER_INFO_FLAG_ATTRIBUTES_FIXED;
+        }
+        if source_flags & 2 != 0 {
+            flags |= crate::PLAYER_INFO_FLAG_NO_SCENARIO_INIT;
+        }
+        if source_flags & 4 != 0 {
+            flags |= crate::PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK;
+        }
+        if source_flags & 8 != 0 {
+            flags |= crate::PLAYER_INFO_FLAG_INVISIBLE;
+        }
+        let name = crate::LegacyCString::from_bytes(name.as_bytes().to_vec()).ok_or_else(|| {
+            RuntimeError::new("CreateScriptPlayer: name contains an interior NUL")
+        })?;
+        context
+            .world
+            .player_info_updates
+            .borrow_mut()
+            .push(crate::PlayerInfoUpdateRequest {
+                client_id: 0,
+                flags: crate::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                players: vec![crate::ControlPlayerInfoEntry {
+                    name,
+                    flags,
+                    player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
+                    color,
+                    original_color: color,
+                    team,
+                    extra_data,
+                    ..Default::default()
+                }],
+            });
+        Ok(Value::Bool(true))
+    })
 }
 
 fn get_player_count(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -9173,6 +9299,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("IsNetwork", is_network);
     script.register_host_function("GetPlayerCount", get_player_count);
     script.register_host_function("GetPlayerByIndex", get_player_by_index);
+    script.register_host_function("CreateScriptPlayer", create_script_player);
     script.register_host_function("EliminatePlayer", eliminate_player);
     script.register_host_function("GetPlayerName", get_player_name);
     script.register_host_function("GetTaggedPlayerName", get_tagged_player_name);
@@ -33331,6 +33458,7 @@ mod tests {
         "CreateMenu",
         "CreateObject",
         "CreateParticle",
+        "CreateScriptPlayer",
         "CustomMessage",
         "DeathAnnounce",
         "DebugLog",
@@ -33664,6 +33792,70 @@ mod tests {
             .map(|name| name.to_string())
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn create_script_player_maps_the_exact_cpp_player_info_request() {
+        assert_eq!(
+            script_player_extra_data(Some(&Value::C4Id("ABCDE".to_string())))
+                .expect("long C4ID converts"),
+            *b"ABCD",
+            "C4Id keeps the first four bytes like C++"
+        );
+        let updates = Rc::new(RefCell::new(Vec::new()));
+        let world = HostWorldContext::default().with_control_host(true, Rc::clone(&updates));
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            create_script_player(&[
+                Value::String("Bot".to_string()),
+                Value::Int(0xff44_5566_u32 as i32),
+                Value::Int(2),
+                Value::Int(15),
+                Value::C4Id("__AI".to_string()),
+            ])
+        });
+
+        assert_eq!(result.expect("builtin succeeds"), Value::Bool(true));
+        let updates = updates.borrow();
+        assert_eq!(updates.len(), 1);
+        let request = &updates[0];
+        assert_eq!(request.client_id, 0);
+        assert_eq!(request.flags, crate::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS);
+        assert_eq!(request.players.len(), 1);
+        let player = &request.players[0];
+        assert_eq!(player.name.as_bytes(), b"Bot");
+        assert_eq!(player.id, 0);
+        assert_eq!(player.player_type, crate::PLAYER_INFO_TYPE_SCRIPT);
+        assert_eq!((player.color, player.original_color), (0x0044_5566, 0x0044_5566));
+        assert_eq!(player.team, 2);
+        assert_eq!(player.extra_data, *b"__AI");
+        assert_eq!(
+            player.flags,
+            crate::PLAYER_INFO_FLAG_ATTRIBUTES_FIXED
+                | crate::PLAYER_INFO_FLAG_NO_SCENARIO_INIT
+                | crate::PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK
+                | crate::PLAYER_INFO_FLAG_INVISIBLE
+        );
+    }
+
+    #[test]
+    fn create_script_player_validates_name_before_the_control_host_gate() {
+        for name in [Value::Nil, Value::String(String::new())] {
+            let updates = Rc::new(RefCell::new(Vec::new()));
+            let world = HostWorldContext::default().with_control_host(true, Rc::clone(&updates));
+            let (result, _) = with_effect_context(None, &[], world, 1, || {
+                create_script_player(std::slice::from_ref(&name))
+            });
+            assert_eq!(result.expect("invalid name is handled"), Value::Bool(false));
+            assert!(updates.borrow().is_empty());
+        }
+
+        let updates = Rc::new(RefCell::new(Vec::new()));
+        let world = HostWorldContext::default().with_control_host(false, Rc::clone(&updates));
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            create_script_player(&[Value::String("Remote Bot".to_string())])
+        });
+        assert_eq!(result.expect("peer no-op succeeds"), Value::Bool(true));
+        assert!(updates.borrow().is_empty());
     }
 
     #[test]

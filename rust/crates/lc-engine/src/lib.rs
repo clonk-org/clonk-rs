@@ -1032,6 +1032,36 @@ impl JoinPlayerOutcome {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ControlJoinPlayerSemantics {
+    script_player: bool,
+    scenario_init: bool,
+    extra_id: Option<DefinitionId>,
+}
+
+impl Default for ControlJoinPlayerSemantics {
+    fn default() -> Self {
+        Self {
+            script_player: false,
+            scenario_init: true,
+            extra_id: None,
+        }
+    }
+}
+
+impl From<&ControlPlayerInfoEntry> for ControlJoinPlayerSemantics {
+    fn from(info: &ControlPlayerInfoEntry) -> Self {
+        let extra_id = (info.extra_data != *b"NONE" && info.extra_data != *b"0000")
+            .then(|| String::from_utf8(info.extra_data.to_vec()).ok())
+            .flatten();
+        Self {
+            script_player: info.is_script_player(),
+            scenario_init: !info.no_scenario_init(),
+            extra_id,
+        }
+    }
+}
+
 /// The `pObj->Info` data a crew object carries (CreateInfoObject links the
 /// C4ObjectInfo, C4Game.cpp:1156-1170): name shown by GetName, rank used
 /// by GetHiRank.
@@ -12231,6 +12261,13 @@ pub struct Engine {
     /// network session just as C++ copies `Game.NetworkActive` during
     /// parameter setup (C4GameParameters.cpp:429-434).
     network_game: bool,
+    /// Whether this process owns authoritative control input. Offline games
+    /// and network hosts do; clients and replay consumers do not.
+    control_host: bool,
+    /// Deferred CreateScriptPlayer updates. PlayerInfo must enter the same
+    /// app/control path as every other join instead of mutating players from
+    /// inside the script callback.
+    player_info_updates: Rc<RefCell<Vec<PlayerInfoUpdateRequest>>>,
     /// Explicit client-local players. `None` is the standalone/headless
     /// default where every registered player has local control.
     local_players: Option<HashSet<i32>>,
@@ -14061,6 +14098,8 @@ impl Engine {
             scenario_script_counter: 0,
             random_seed: seed,
             network_game: false,
+            control_host: true,
+            player_info_updates: Rc::new(RefCell::new(Vec::new())),
             local_players: None,
             exec_list: Vec::new(),
             pending_object_order_commands: Vec::new(),
@@ -14322,13 +14361,22 @@ impl Engine {
     /// C4Player.cpp:246-352): registers the player, broadcasts
     /// PreInitializePlayer, runs the ScenarioInit placement (crew, ready
     /// material/vehicles/base, synced RNG draws) and broadcasts
-    /// InitializePlayer. Script-player NoScenarioInit joins are not ported
-    /// yet.
+    /// InitializePlayer.
     pub fn join_player(
         &mut self,
         config: JoinPlayerConfig,
     ) -> Result<JoinPlayerOutcome, EngineError> {
         self.join_player_at_client(config, PlayerAtClient::HOST)
+    }
+
+    /// Offline/control form retaining script-player flags carried by the
+    /// authoritative C4PlayerInfo.
+    pub fn join_player_with_info(
+        &mut self,
+        config: JoinPlayerConfig,
+        info: &ControlPlayerInfoEntry,
+    ) -> Result<JoinPlayerOutcome, EngineError> {
+        self.join_player_at_client_with_info(config, PlayerAtClient::HOST, info)
     }
 
     /// Network form of [`Engine::join_player`], retaining the authoritative
@@ -14338,16 +14386,53 @@ impl Engine {
         config: JoinPlayerConfig,
         at_client: PlayerAtClient,
     ) -> Result<JoinPlayerOutcome, EngineError> {
+        self.join_player_at_client_with_semantics(
+            config,
+            at_client,
+            ControlJoinPlayerSemantics::default(),
+        )
+    }
+
+    /// Network-control form retaining C4PlayerInfo-only script flags without
+    /// adding those transient control fields to every ordinary join config.
+    pub fn join_player_at_client_with_info(
+        &mut self,
+        config: JoinPlayerConfig,
+        at_client: PlayerAtClient,
+        info: &ControlPlayerInfoEntry,
+    ) -> Result<JoinPlayerOutcome, EngineError> {
+        self.join_player_at_client_with_semantics(config, at_client, info.into())
+    }
+
+    fn join_player_at_client_with_semantics(
+        &mut self,
+        config: JoinPlayerConfig,
+        at_client: PlayerAtClient,
+        semantics: ControlJoinPlayerSemantics,
+    ) -> Result<JoinPlayerOutcome, EngineError> {
         let has_valid_team = config.team.is_some_and(|team_id| {
             self.teams.iter().any(|team| team.id == team_id)
         });
-        if self.runtime_join_team_choice && !has_valid_team {
+        if self.runtime_join_team_choice && !has_valid_team && !semantics.script_player {
             let number = self.join_player_for_team_selection_at_client(config, at_client)?;
             return Ok(JoinPlayerOutcome::AwaitingTeamSelection { number });
         }
         let number = self.register_joining_player(&config, at_client);
+        if !semantics.scenario_init {
+            if let Some(extra_id) = semantics.extra_id.as_ref() {
+                self.initialize_script_player_from_definition(number, config.team, extra_id)?;
+            }
+            self.finalize_joining_player(number)?;
+            return Ok(JoinPlayerOutcome::Initialized(JoinedPlayer {
+                number,
+                start_x: 0,
+                start_y: 0,
+                first_base: None,
+            }));
+        }
         self.preinitialize_joining_player(number)?;
-        let joined = self.scenario_init_for_player(number, &config)?;
+        let joined =
+            self.scenario_init_for_player(number, &config, semantics.extra_id.as_ref())?;
         self.finalize_joining_player(number)?;
         Ok(JoinPlayerOutcome::Initialized(joined))
     }
@@ -14425,7 +14510,7 @@ impl Engine {
             config.color_dw = color;
             self.set_player_color(number, color)?;
         }
-        let joined = self.scenario_init_for_player(number, &config)?;
+        let joined = self.scenario_init_for_player(number, &config, None)?;
         self.finalize_joining_player(number)?;
         self.pending_player_joins.remove(&number);
         Ok(Some(joined))
@@ -14542,6 +14627,46 @@ impl Engine {
         .map(|_| ())
     }
 
+    fn initialize_script_player_from_definition(
+        &mut self,
+        number: i32,
+        team: Option<i32>,
+        definition_id: &DefinitionId,
+    ) -> Result<(), EngineError> {
+        let Some((script_name, script)) = self
+            .definitions
+            .get(definition_id)
+            .filter(|definition| definition.has_function("InitializeScriptPlayer"))
+            .map(|definition| (definition.id.clone(), definition.script_arc()))
+        else {
+            return Ok(());
+        };
+        let world = self.host_world_context();
+        let (_value, _args, batch, audio_state, rng, script_error) =
+            ScenarioScript::call_value_for_script(
+                &script_name,
+                &script,
+                Some(definition_id.clone()),
+                "InitializeScriptPlayer",
+                &[Value::Int(number), Value::Int(team.unwrap_or(0))],
+                world,
+                self.rng.clone(),
+                self.frame,
+                &self.global_effects.clone(),
+                self.physics,
+                self.environment,
+                self.audio_registry.clone(),
+                self.game_over_triggered,
+            );
+        self.rng = rng;
+        self.audio_registry = audio_state;
+        self.apply_scenario_batch(batch)?;
+        if let Some(error) = script_error {
+            tolerate_script_error::<()>(Err(error))?;
+        }
+        Ok(())
+    }
+
     fn finalize_joining_player(&mut self, number: i32) -> Result<(), EngineError> {
         self.crew_ranks = Rc::new(
             self.crew_object_infos
@@ -14599,6 +14724,7 @@ impl Engine {
         &mut self,
         number: i32,
         config: &JoinPlayerConfig,
+        extra_id: Option<&DefinitionId>,
     ) -> Result<JoinedPlayer, EngineError> {
         // Start index by player number, overridden by the team's one-based
         // PlrStartIndex when configured (C4Player.cpp:670-677).
@@ -14776,7 +14902,9 @@ impl Engine {
                 Value::Int(pty),
                 base_value,
                 Value::Int(config.team.unwrap_or(0)),
-                Value::Nil,
+                extra_id
+                    .map(|id| Value::C4Id(id.as_str().to_string()))
+                    .unwrap_or(Value::Nil),
             ],
         ))?;
 
@@ -16375,6 +16503,17 @@ impl Engine {
         self.network_game = network_game;
     }
 
+    pub fn set_control_host(&mut self, control_host: bool) {
+        self.control_host = control_host;
+    }
+
+    /// Drains authoritative CreateScriptPlayer requests in call order. The
+    /// app feeds them through PlayerInfo admission before any JoinPlayer is
+    /// issued, matching C4PlayerInfoList::DoPlayerInfoUpdate.
+    pub fn take_script_player_info_updates(&mut self) -> Vec<PlayerInfoUpdateRequest> {
+        self.player_info_updates.borrow_mut().drain(..).collect()
+    }
+
     pub fn set_local_players<I>(&mut self, players: I)
     where
         I: IntoIterator<Item = i32>,
@@ -16724,6 +16863,7 @@ impl Engine {
                 .map(ScenarioScript::script_arc),
         )
         .with_network_game(self.network_game)
+        .with_control_host(self.control_host, Rc::clone(&self.player_info_updates))
         .with_local_players(local_players)
         .with_mission_access(Rc::clone(&self.mission_access))
         .with_scoreboard(Rc::clone(&self.scoreboard))

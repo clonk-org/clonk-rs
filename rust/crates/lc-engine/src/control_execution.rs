@@ -843,10 +843,6 @@ pub enum PrepareJoinPlayerError {
     PlayerInfoIdMismatch { control_id: i32, info_id: i32 },
     #[error("user player {info_id} has no player file data")]
     MissingPlayerData { info_id: i32 },
-    #[error("script player {info_id} is not supported yet")]
-    UnsupportedScriptPlayer { info_id: i32 },
-    #[error("NoScenarioInit player {info_id} is not supported yet")]
-    UnsupportedNoScenarioInit { info_id: i32 },
 }
 
 #[derive(Debug)]
@@ -906,11 +902,6 @@ pub fn prepare_join_player_config(
     if input.join.info_id != input.info.id {
         return Err(PrepareJoinPlayerError::PlayerInfoIdMismatch {
             control_id: input.join.info_id,
-            info_id: input.info.id,
-        });
-    }
-    if input.info.no_scenario_init() {
-        return Err(PrepareJoinPlayerError::UnsupportedNoScenarioInit {
             info_id: input.info.id,
         });
     }

@@ -13039,6 +13039,7 @@ impl GameApp {
 
         // Engine starts with default materials; will be updated when boot loading finishes
         let mut engine = Engine::new();
+        engine.set_control_host(!matches!(network_mode.as_ref(), Some(NetworkMode::Client(_))));
         engine.set_local_players([runtime.player_owner]);
         let snapshot = engine.snapshot();
 
@@ -13561,6 +13562,8 @@ impl GameApp {
     }
 
     fn apply_material_library(&mut self) {
+        self.engine
+            .set_control_host(!matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))));
         if let Some(materials) = self.material_library.as_ref() {
             self.engine.set_materials((**materials).clone());
         } else {
@@ -13569,6 +13572,8 @@ impl GameApp {
     }
 
     fn apply_material_library_to(&self, engine: &mut Engine) {
+        engine
+            .set_control_host(!matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))));
         if let Some(materials) = self.material_library.as_ref() {
             engine.set_materials((**materials).clone());
         } else {
@@ -17874,6 +17879,56 @@ impl GameApp {
                 tracing::error!(%error, "failed to submit synchronized JoinPlayer");
             }
         }
+    }
+
+    fn handle_script_player_info_updates(&mut self) -> Result<(), EngineError> {
+        let updates = self.engine.take_script_player_info_updates();
+        if updates.is_empty() {
+            return Ok(());
+        }
+        match self.runtime_network_role() {
+            RuntimeNetworkRole::Host => {
+                let Some(network) = self.network.as_ref() else {
+                    return Ok(());
+                };
+                for update in updates {
+                    if let Err(error) = network.submit_player_info_update(update) {
+                        tracing::error!(%error, "failed to submit script-player PlayerInfo");
+                    }
+                }
+            }
+            RuntimeNetworkRole::Offline => {
+                for update in updates {
+                    let Some(info) = self
+                        .control_player_infos
+                        .admit_request(update, self.network_max_players)
+                    else {
+                        continue;
+                    };
+                    let client_id = info.client_id;
+                    self.control_player_infos.apply(info);
+                    let joins = self
+                        .control_player_infos
+                        .issue_unjoined_local_players(client_id, |_| {
+                            Some(lc_engine::LegacyCString::default())
+                        });
+                    for join in joins {
+                        self.apply_join_player_control(join)?;
+                    }
+                }
+                // Offline admission applies JoinPlayer immediately, after the
+                // regular tick snapshot was captured. Keep rendering and
+                // recording on the post-control engine state.
+                self.snapshot = self.engine.snapshot();
+            }
+            RuntimeNetworkRole::Client | RuntimeNetworkRole::Ambiguous => {
+                tracing::debug!(
+                    count = updates.len(),
+                    "discarding non-host script-player requests"
+                );
+            }
+        }
+        Ok(())
     }
 
     fn prepare_client_network_scenario_if_ready(&mut self) {
@@ -24748,6 +24803,7 @@ impl GameApp {
         self.client_material_resource_groups = None;
         self.control_clients = ControlClientRegistry::default();
         self.control_clients.register(local_client_id, true, false);
+        self.engine.set_control_host(true);
     }
 
     fn apply_ready_controls(
@@ -25206,7 +25262,11 @@ impl GameApp {
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
         let locally_controlled =
             local_client_id == Some(join.at_client) && !info.is_script_player();
-        let player_file = if local_client_id == Some(join.by_client) {
+        let player_file = if info.is_script_player() && join.filename.is_empty() {
+            // Script players have no .c4p file even on the host that issued
+            // their fileless JoinPlayer control (C4Control.cpp:745-749).
+            None
+        } else if local_client_id == Some(join.by_client) {
             let path = PathBuf::from(join.filename.to_string_lossy().into_owned());
             match PlayerFile::load_from_path(&path) {
                 Ok(file) => Some(file),
@@ -25263,7 +25323,11 @@ impl GameApp {
         };
         match self
             .engine
-            .join_player_at_client(config, lc_engine::PlayerAtClient::new(join.at_client))
+            .join_player_at_client_with_info(
+                config,
+                lc_engine::PlayerAtClient::new(join.at_client),
+                &info,
+            )
         {
             Ok(joined) if locally_controlled => {
                 self.control_player_infos.mark_joined(join.info_id);
@@ -25391,6 +25455,7 @@ impl GameApp {
                     .engine
                     .tick()
                     .map_err(map_runtime_flash_producer_engine_error)?;
+                self.handle_script_player_info_updates()?;
                 self.frames_since_second = self.frames_since_second.wrapping_add(1);
                 self.apply_scoreboard_presentation_requests();
                 self.handle_menu_requests()?;
@@ -29653,7 +29718,7 @@ impl GameApp {
                             continue;
                         }
                     };
-                    match self.engine.join_player(config) {
+                    match self.engine.join_player_with_info(config, &info) {
                         Ok(joined) => {
                             self.control_player_infos.mark_joined(join.info_id);
                             self.local_controls.initialize(LocalControlInit {
@@ -56141,6 +56206,78 @@ mod tests {
                     ..Default::default()
                 },
             )]
+        );
+    }
+
+    #[test]
+    fn offline_create_script_player_joins_through_player_info_control_path() {
+        let mut app = new_running_sandbox_app();
+        app.engine
+            .install_scenario_script_with_convention(
+                "CreateScriptPlayer fixture",
+                r#"
+                global func SpawnBot()
+                {
+                    return CreateScriptPlayer("Bot", 0x445566, 2, 15, __AI);
+                }
+                "#,
+                true,
+            )
+            .expect("fixture script installs");
+        let before = app.engine.snapshot().players.len();
+        app.engine
+            .call_scenario_script_function("SpawnBot", Vec::new())
+            .expect("script call succeeds");
+        assert_eq!(
+            app.engine.snapshot().players.len(),
+            before,
+            "CreateScriptPlayer must not join synchronously inside the VM call"
+        );
+
+        app.handle_script_player_info_updates()
+            .expect("offline control path joins script player");
+        app.handle_script_player_info_updates()
+            .expect("drained request is not replayed");
+
+        let infos = app
+            .control_player_infos
+            .client_info_ids(0)
+            .into_iter()
+            .filter_map(|id| app.control_player_infos.get(id))
+            .filter(|info| info.name.as_bytes() == b"Bot")
+            .collect::<Vec<_>>();
+        assert_eq!(infos.len(), 1, "script PlayerInfo is admitted exactly once");
+        let info = infos[0];
+        assert_eq!(info.player_type, lc_engine::PLAYER_INFO_TYPE_SCRIPT);
+        assert_eq!((info.color, info.original_color, info.team), (0x445566, 0x445566, 2));
+        assert_eq!(info.extra_data, *b"__AI");
+        assert_eq!(
+            info.flags
+                & (lc_engine::PLAYER_INFO_FLAG_ATTRIBUTES_FIXED
+                    | lc_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT
+                    | lc_engine::PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK
+                    | lc_engine::PLAYER_INFO_FLAG_INVISIBLE),
+            lc_engine::PLAYER_INFO_FLAG_ATTRIBUTES_FIXED
+                | lc_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT
+                | lc_engine::PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK
+                | lc_engine::PLAYER_INFO_FLAG_INVISIBLE
+        );
+        let runtime = app
+            .engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|player| player.player_info_id == info.id)
+            .expect("script player joined from its PlayerInfo");
+        assert_eq!(runtime.name, "Bot");
+        assert_eq!(runtime.team, Some(2));
+        assert_eq!(runtime.color, Some(lc_engine::RgbColor::new(0x44, 0x55, 0x66)));
+        assert!(
+            app.snapshot
+                .players
+                .iter()
+                .any(|player| player.player_info_id == info.id),
+            "post-control app snapshot includes the joined player"
         );
     }
 
