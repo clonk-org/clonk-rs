@@ -14179,6 +14179,7 @@ impl Engine {
             flags: message::FLAG_TOP | message::FLAG_HCENTER | message::FLAG_ALIGN_CENTER,
             width: Some(400),
             decoration: Some("Mission".to_string()),
+            frame_decoration: None,
             portrait: None,
         };
         self.messages.add_message(spec);

@@ -40,6 +40,25 @@ pub struct NativeClonkFont {
 }
 
 impl NativeClonkFont {
+    /// Integer denominator used by CStdFont's scale-native GUI metrics.
+    pub(crate) fn message_width_units_per_gui_pixel(&self) -> i32 {
+        self.scale as i32
+    }
+
+    /// One `BreakMessage` character advance in physical numerator units.
+    /// C++ accumulates `facet.Wdt / scale + iHSpace`, where the shadowed
+    /// font's `iHSpace` remains -1 GUI pixel (`StdFont.cpp:640-760`). Keeping
+    /// the numerator avoids losing the fractional width before the wrap test.
+    pub(crate) fn message_character_advance_units(&self, character: char) -> i32 {
+        if character < ' ' {
+            return 0;
+        }
+        self.raster
+            .measure(&character.to_string(), false)
+            .0
+            .saturating_add(self.raster.h_space)
+    }
+
     /// CStdFont's internal `iLineHgt`, in physical atlas pixels.
     pub fn raster_line_height(&self) -> i32 {
         self.raster.line_height
@@ -90,22 +109,60 @@ impl NativeClonkFont {
         markup: bool,
         gamma: Option<&GammaRamp>,
     ) {
-        let (logical_width, _) = self.measure(text, markup);
-        let logical_left = x.saturating_sub(match align {
-            TextAlign::Left => 0,
-            TextAlign::Center => logical_width / 2,
-            TextAlign::Right => logical_width,
-        });
-        let scale = self.scale as i32;
-        self.raster.draw_with_gamma(
+        self.draw_to_physical_surface_with_offset(
             surface,
-            logical_left.saturating_mul(scale),
-            y.saturating_mul(scale),
+            x,
+            y,
             text,
             color,
-            TextAlign::Left,
+            align,
             markup,
+            (0, 0),
             gamma,
+        );
+    }
+
+    /// Physical-surface draw with the framebuffer offset of C++'s GL
+    /// viewport. A negative Y offset represents rows clipped from the top.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_to_physical_surface_with_offset(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        physical_offset: (i32, i32),
+        gamma: Option<&GammaRamp>,
+    ) {
+        let scale = self.scale as i32;
+        let line_height = self.logical_line_height();
+        let origins = text
+            .split(|character: char| character == '\n' || (markup && character == '|'))
+            .enumerate()
+            .map(|(line_index, line)| {
+                let logical_width = self.measure(line, markup).0;
+                let logical_left = x.saturating_sub(match align {
+                    TextAlign::Left => 0,
+                    TextAlign::Center => logical_width / 2,
+                    TextAlign::Right => logical_width,
+                });
+                let line_index = i32::try_from(line_index).unwrap_or(i32::MAX);
+                let logical_y = y.saturating_add(line_index.saturating_mul(line_height));
+                (
+                    logical_left
+                        .saturating_mul(scale)
+                        .saturating_add(physical_offset.0),
+                    logical_y
+                        .saturating_mul(scale)
+                        .saturating_add(physical_offset.1),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.raster.draw_lines_at_origins_with_gamma(
+            surface, &origins, text, color, markup, gamma,
         );
     }
 
@@ -126,6 +183,34 @@ impl NativeClonkFont {
         markup: bool,
         gamma: Option<&GammaRamp>,
     ) {
+        self.draw_string_to_physical_surface_with_offset(
+            surface,
+            x,
+            y,
+            text,
+            color,
+            align,
+            markup,
+            (0, 0),
+            gamma,
+        );
+    }
+
+    /// [`Self::draw_string_to_physical_surface`] with the framebuffer offset
+    /// of an oversized C++ GL viewport.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_string_to_physical_surface_with_offset(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        physical_offset: (i32, i32),
+        gamma: Option<&GammaRamp>,
+    ) {
         let (logical_width, _) = self.measure(text, markup);
         let logical_left = x.saturating_sub(match align {
             TextAlign::Left => 0,
@@ -136,8 +221,10 @@ impl NativeClonkFont {
         if !text.contains('\n') && (!markup || !text.contains('|')) {
             self.raster.draw_with_gamma(
                 surface,
-                logical_left.saturating_mul(scale),
-                y.saturating_mul(scale),
+                logical_left
+                    .saturating_mul(scale)
+                    .saturating_add(physical_offset.0),
+                y.saturating_mul(scale).saturating_add(physical_offset.1),
                 text,
                 color,
                 TextAlign::Left,
@@ -164,8 +251,10 @@ impl NativeClonkFont {
             .collect();
         raster.draw_with_gamma(
             surface,
-            logical_left.saturating_mul(scale),
-            y.saturating_mul(scale),
+            logical_left
+                .saturating_mul(scale)
+                .saturating_add(physical_offset.0),
+            y.saturating_mul(scale).saturating_add(physical_offset.1),
             &transformed,
             color,
             TextAlign::Left,

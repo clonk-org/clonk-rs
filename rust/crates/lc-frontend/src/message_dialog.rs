@@ -5,6 +5,7 @@
 //! underlying screen untouched and draws no dimming layer.
 
 use crate::classic_gui::{draw_facet_stretch, ClassicButtonState, ClassicGuiSkin, IntRect};
+use crate::clonk_fonts::NativeClonkFont;
 use crate::{expand_hotkey_markup, ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use anyhow::Result;
 use lc_graphics::clonk_font::{ClonkFont, TextAlign};
@@ -1078,8 +1079,38 @@ impl MessageToken {
 /// `CStdFont::BreakMessage`'s character-level line breaking for ordinary GUI
 /// labels. Valid color/italic tags are widthless and their state naturally
 /// persists across the inserted newline in `ClonkFont::draw_with_gamma`.
-pub(crate) fn break_message(font: &ClonkFont, text: &str, max_width: i32) -> String {
-    let max_width = max_width.max(1);
+pub fn break_message(font: &ClonkFont, text: &str, max_width: i32) -> String {
+    break_message_in_units(text, max_width.max(1), |character| {
+        if character >= ' ' {
+            font.glyph(character)
+                .map_or(0, |glyph| glyph.width)
+                .saturating_add(font.h_space)
+        } else {
+            0
+        }
+    })
+}
+
+/// Scale-native `CStdFont::BreakMessage`. Character widths stay in physical
+/// numerator units until the comparison against the GUI-unit width, matching
+/// C++'s float accumulation without prematurely truncating each glyph.
+pub fn break_native_message(
+    font: &NativeClonkFont,
+    text: &str,
+    max_width: i32,
+) -> String {
+    let units_per_pixel = font.message_width_units_per_gui_pixel();
+    let max_width_units = max_width.max(1).saturating_mul(units_per_pixel);
+    break_message_in_units(text, max_width_units, |character| {
+        font.message_character_advance_units(character)
+    })
+}
+
+fn break_message_in_units(
+    text: &str,
+    max_width: i32,
+    mut character_width: impl FnMut(char) -> i32,
+) -> String {
     let mut tokens = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
@@ -1104,13 +1135,7 @@ pub(crate) fn break_message(font: &ClonkFont, text: &str, max_width: i32) -> Str
             tokens.push(MessageToken::HardBreak);
             continue;
         }
-        let width = if character >= ' ' {
-            font.glyph(character)
-                .map_or(0, |glyph| glyph.width)
-                .saturating_add(font.h_space)
-        } else {
-            0
-        };
+        let width = character_width(character);
         let break_kind = if character.is_ascii_whitespace() {
             Some(false)
         } else if character == '-' {

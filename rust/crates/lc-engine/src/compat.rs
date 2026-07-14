@@ -15,7 +15,7 @@ use crate::math::{
     FixedVec2,
 };
 use crate::message::{
-    MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_MULTIPLE,
+    MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_DROP_SPEECH, FLAG_MULTIPLE,
     HORIZONTAL_POSITION_FLAGS, VERTICAL_POSITION_FLAGS,
 };
 use crate::ocf;
@@ -4923,38 +4923,17 @@ fn set_menu_size(args: &[Value]) -> Result<Value, RuntimeError> {
 /// known (FrameDecoration::SetByDef fails on C4Id2Def null,
 /// C4GuiDialogs.cpp:113-114). SetByDef snapshots five definition callbacks
 /// and eight ActMap facets immediately.
-fn set_menu_decoration(args: &[Value]) -> Result<Value, RuntimeError> {
-    let Some(deco_id) = parse_custom_message_decoration(args.first())? else {
-        return Ok(Value::Bool(false));
-    };
-    let target = parse_object_reference_argument(
-        args.get(1).unwrap_or(&Value::Nil),
-        "SetMenuDecoration",
-        "menu object",
-    )?;
-    let Some(target) = target else {
-        return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1739)
-    };
-    let (menu, metadata, script) = HOST_CONTEXT.with(|cell| {
+fn build_frame_decoration_snapshot(
+    deco_id: &str,
+) -> Option<crate::ObjectMenuFrameDecoration> {
+    let (metadata, script) = HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return (None, None, None);
-        };
-        (
-            context.object_menu(target),
-            context.definition_metadata(&deco_id).cloned(),
-            context.world.definition_script(&deco_id).cloned(),
-        )
-    });
-    let Some(mut menu) = menu else {
-        return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1739)
-    };
-    let Some(metadata) = metadata else {
-        return Ok(Value::Bool(false)); // SetByDef failed (C4Script.cpp:1741-1745)
-    };
-    let Some(script) = script else {
-        return Ok(Value::Bool(false)); // !pSrcDef->Script.IsReady()
-    };
+        let context = borrow.as_ref()?;
+        Some((
+            context.definition_metadata(deco_id).cloned()?,
+            context.world.definition_script(deco_id).cloned()?,
+        ))
+    })?;
     let query = |suffix: &str| {
         let function = format!("FrameDecoration{suffix}");
         match call_scoped_script_function(Arc::clone(&script), &function, &[]) {
@@ -4972,8 +4951,8 @@ fn set_menu_decoration(args: &[Value]) -> Result<Value, RuntimeError> {
             .get(&format!("FrameDeco{suffix}"))
             .and_then(|graphics| graphics.facet.clone())
     };
-    menu.decoration = Some(crate::ObjectMenuFrameDecoration {
-        source_definition: deco_id,
+    Some(crate::ObjectMenuFrameDecoration {
+        source_definition: deco_id.to_string(),
         background_color: query("BackClr") as u32,
         border_top: query("BorderTop"),
         border_left: query("BorderLeft"),
@@ -4987,7 +4966,35 @@ fn set_menu_decoration(args: &[Value]) -> Result<Value, RuntimeError> {
         bottom_left: facet("BottomLeft"),
         left: facet("Left"),
         top_left: facet("TopLeft"),
+    })
+}
+
+fn set_menu_decoration(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(deco_id) = parse_custom_message_decoration(args.first())? else {
+        return Ok(Value::Bool(false));
+    };
+    let target = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetMenuDecoration",
+        "menu object",
+    )?;
+    let Some(target) = target else {
+        return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1739)
+    };
+    let menu = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return None;
+        };
+        context.object_menu(target)
     });
+    let Some(mut menu) = menu else {
+        return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1739)
+    };
+    let Some(decoration) = build_frame_decoration_snapshot(&deco_id) else {
+        return Ok(Value::Bool(false)); // SetByDef failed (C4Script.cpp:1741-1745)
+    };
+    menu.decoration = Some(decoration);
     HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
             .as_mut()
@@ -10025,6 +10032,22 @@ fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(owner)
     };
 
+    // C4GameMessageList::New returns after its clear operation for an empty
+    // message, before C4GameMessage::Init constructs the FrameDecoration
+    // (C4GameMessage.cpp:290-310). Snapshot SetByDef only when Init would run.
+    let creates_message = if flags & FLAG_DROP_SPEECH != 0 {
+        !message.split('$').next().unwrap_or("").is_empty()
+    } else {
+        !message.is_empty()
+    };
+    let frame_decoration = if creates_message {
+        decoration
+            .as_deref()
+            .and_then(build_frame_decoration_snapshot)
+    } else {
+        None
+    };
+
     let spec = MessageSpec {
         kind,
         text: message,
@@ -10035,6 +10058,7 @@ fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
         flags,
         width,
         decoration,
+        frame_decoration,
         portrait,
     };
 
@@ -10358,6 +10382,7 @@ fn message(args: &[Value]) -> Result<Value, RuntimeError> {
                 flags: 0,
                 width: None,
                 decoration: None,
+                frame_decoration: None,
                 portrait: None,
             };
             context.register_message(MessageCommand::Add(spec));
@@ -10412,6 +10437,7 @@ fn death_announce(args: &[Value]) -> Result<Value, RuntimeError> {
             flags: 0,
             width: None,
             decoration: None,
+            frame_decoration: None,
             portrait: None,
         }));
         Ok(Value::Bool(true))
@@ -10488,6 +10514,7 @@ fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
                 flags: 0,
                 width: None,
                 decoration: None,
+                frame_decoration: None,
                 portrait: None,
             };
             context.register_message(MessageCommand::Add(spec));
@@ -10540,6 +10567,7 @@ fn add_message(args: &[Value]) -> Result<Value, RuntimeError> {
                 flags: FLAG_MULTIPLE,
                 width: None,
                 decoration: None,
+                frame_decoration: None,
                 portrait: None,
             };
             context.register_message(MessageCommand::Add(spec));
@@ -10602,6 +10630,7 @@ fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
                 flags: 0,
                 width: None,
                 decoration: None,
+                frame_decoration: None,
                 portrait: None,
             };
             context.register_message(MessageCommand::Add(spec));
@@ -26559,6 +26588,7 @@ fn compose_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                         flags: 0,
                         width: None,
                         decoration: None,
+                        frame_decoration: None,
                         portrait: None,
                     }));
                 }
@@ -34696,24 +34726,67 @@ func Trigger(object pOther)
     }
 
     #[test]
+    #[allow(clippy::arc_with_non_send_sync)] // Definition scripts are single-threaded host fixtures.
     fn custom_message_c4id_decoration_matches_tutorial_call() {
         // FnCustomMessage's decoration parameter is C4ID and succeeds only
         // when C4Id2Def resolves it (C4Script.cpp:5995-6002). Tutorial.c
         // passes the literal DECO, which reaches the Rust VM as Value::C4Id.
-        let world = HostWorldContext::default().with_definition_metadata(Rc::new(
-            HashMap::from([("DECO".into(), DefinitionMetadata::default())]),
-        ));
+        // C4GameMessage::Init immediately snapshots FrameDecoration::SetByDef;
+        // use Tutorial01's actual DECO callback and all eight ActMap facets.
+        let tutorial_facets = [
+            ("TopLeft", crate::DefinitionActionFacet { x: 0, y: 0, width: 16, height: 16, target_x: -8, target_y: -7 }),
+            ("Top", crate::DefinitionActionFacet { x: 16, y: 0, width: 58, height: 12, target_x: 0, target_y: -7 }),
+            ("TopRight", crate::DefinitionActionFacet { x: 74, y: 0, width: 16, height: 16, target_x: -7, target_y: -7 }),
+            ("Right", crate::DefinitionActionFacet { x: 74, y: 16, width: 16, height: 58, target_x: -7, target_y: 0 }),
+            ("BottomRight", crate::DefinitionActionFacet { x: 74, y: 74, width: 16, height: 16, target_x: -7, target_y: -8 }),
+            ("Bottom", crate::DefinitionActionFacet { x: 16, y: 76, width: 58, height: 16, target_x: 0, target_y: -6 }),
+            ("BottomLeft", crate::DefinitionActionFacet { x: 0, y: 74, width: 16, height: 16, target_x: -8, target_y: -8 }),
+            ("Left", crate::DefinitionActionFacet { x: 0, y: 16, width: 16, height: 58, target_x: -8, target_y: 0 }),
+        ];
+        let action_graphics = tutorial_facets
+            .iter()
+            .map(|(suffix, facet)| {
+                (
+                    format!("FrameDeco{suffix}"),
+                    crate::DefinitionActionGraphics {
+                        facet: Some(facet.clone()),
+                        ..crate::DefinitionActionGraphics::default()
+                    },
+                )
+            })
+            .collect();
+        let mut script = ScriptEngine::new();
+        script
+            .load_script(
+                "protected func FrameDecorationBackClr() { return(-2144193998); }",
+            )
+            .expect("DECO callback compiles");
+        let world = HostWorldContext::default()
+            .with_definition_metadata(Rc::new(HashMap::from([(
+                "DECO".into(),
+                DefinitionMetadata {
+                    action_graphics,
+                    ..DefinitionMetadata::default()
+                },
+            )])))
+            .with_definition_scripts(HashMap::from([("DECO".into(), Arc::new(script))]));
         let args = [
-            Value::String("Welcome".into()),
+            Value::String("@Welcome to the world of Clonk.$01_01_en.ogg".into()),
             Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
+            Value::Int(0),
+            Value::Int(50),
+            Value::Int(50),
+            Value::Int(0x00ff_ffff),
             Value::C4Id("DECO".into()),
-            Value::String("Portrait:SCLK::".into()),
-            Value::Nil,
-            Value::Nil,
+            Value::String("Portrait:SCLK::0000ff::1".into()),
+            Value::Int(
+                (crate::message::FLAG_TOP
+                    | FLAG_LEFT
+                    | FLAG_WIDTH_REL
+                    | FLAG_X_REL
+                    | FLAG_DROP_SPEECH) as i32,
+            ),
+            Value::Int(30),
         ];
         let (result, outcome) =
             with_object_host_context_with_world(world, || custom_message(&args));
@@ -34723,7 +34796,35 @@ func Trigger(object pOther)
         match &outcome.messages[0] {
             MessageCommand::Add(spec) => {
                 assert_eq!(spec.decoration.as_deref(), Some("DECO"));
-                assert_eq!(spec.portrait.as_deref(), Some("Portrait:SCLK::"));
+                assert_eq!(spec.portrait.as_deref(), Some("Portrait:SCLK::0000ff::1"));
+                let frame = spec
+                    .frame_decoration
+                    .as_ref()
+                    .expect("C4GameMessage snapshots DECO at creation");
+                assert_eq!(frame.source_definition, "DECO");
+                assert_eq!(frame.background_color, 0x8032_3232);
+                assert_eq!(
+                    (
+                        frame.border_top,
+                        frame.border_left,
+                        frame.border_right,
+                        frame.border_bottom,
+                    ),
+                    (0, 0, 0, 0)
+                );
+                assert_eq!(
+                    [
+                        frame.top_left.as_ref(),
+                        frame.top.as_ref(),
+                        frame.top_right.as_ref(),
+                        frame.right.as_ref(),
+                        frame.bottom_right.as_ref(),
+                        frame.bottom.as_ref(),
+                        frame.bottom_left.as_ref(),
+                        frame.left.as_ref(),
+                    ],
+                    tutorial_facets.each_ref().map(|(_, facet)| Some(facet))
+                );
             }
         }
     }

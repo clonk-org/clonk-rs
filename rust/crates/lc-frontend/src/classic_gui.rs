@@ -366,7 +366,7 @@ pub fn draw_bar(
 /// Stretch-blits an image subregion like `CStdDDraw::Blit`: one quad per C++
 /// texture tile, GL_LINEAR sampling and fragment gamma before alpha blending
 /// (`StdDDraw2.cpp:637-786`, `C4Surface.cpp:166-189,1102-1103`).
-pub(crate) fn draw_facet_stretch(
+pub fn draw_facet_stretch(
     surface: &mut Surface,
     image: &ImageData,
     source: (f32, f32, f32, f32),

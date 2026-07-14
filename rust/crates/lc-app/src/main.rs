@@ -11,6 +11,7 @@
 mod clonk_fonts;
 mod control_options;
 mod draw_commands;
+mod game_message;
 mod game_over;
 mod gamepad;
 mod host_game_resource_sources;
@@ -4579,11 +4580,18 @@ fn main() -> Result<()> {
                     app.can_defer_native_main_menu_text(presenter.scale());
                 let defer_native_loader_text =
                     app.can_defer_native_loader_text(presenter.scale());
+                let defer_native_game_messages =
+                    app.can_defer_native_game_messages(presenter.scale());
+                let native_game_message_gamma = defer_native_game_messages.then(|| {
+                    app.graphics
+                        .active_gamma_ramp(&app.snapshot.environment.gamma)
+                });
                 let refreshed = match presenter.present(pixels.frame_mut(), |frame| {
                     app.render_for_presentation(
                         frame,
                         defer_native_main_text,
                         defer_native_loader_text,
+                        defer_native_game_messages,
                     )
                 }) {
                     Ok(refreshed) => refreshed,
@@ -4608,6 +4616,23 @@ fn main() -> Result<()> {
                         app.render_native_main_menu_text(pixels.frame_mut(), width, height)
                     {
                         tracing::error!(error = ?err, "native main-menu text render failed");
+                        control_flow.set_exit();
+                        return;
+                    }
+                } else if refreshed && defer_native_game_messages {
+                    let (width, height) = presenter.physical_size();
+                    let Some(gamma) = native_game_message_gamma.as_ref() else {
+                        tracing::error!("deferred game-message gamma was not captured");
+                        control_flow.set_exit();
+                        return;
+                    };
+                    if let Err(err) = app.render_native_game_messages(
+                        pixels.frame_mut(),
+                        width,
+                        height,
+                        gamma,
+                    ) {
+                        tracing::error!(error = ?err, "native game-message render failed");
                         control_flow.set_exit();
                         return;
                     }
@@ -6629,8 +6654,9 @@ struct GameApp {
     /// Winning scenario/folder/definition C4GUI sources that cannot yet be
     /// rebound. Empty means the accepted initial base/Extra bundle is active.
     active_global_gui_overrides: HashMap<&'static str, String>,
-    /// Scale-native CStdFont atlas used only after the presenter's bilinear
-    /// base pass. C++ rebuilds its fonts with Application.GetScale()
+    /// Scale-native CStdFont atlas used after the presenter's bilinear base
+    /// pass for startup screens and in-game messages. C++ rebuilds its
+    /// fonts with Application.GetScale()
     /// (C4Fonts.cpp:158-173).
     native_startup_fonts: Option<Arc<lc_frontend::clonk_fonts::NativeClonkFontSet>>,
     /// Exact C4LoaderScreen selected for the currently active startup or
@@ -7721,6 +7747,10 @@ enum ClassicParityBoundary {
         path: PathBuf,
         detail: String,
     },
+    ScenarioStartInspection {
+        path: PathBuf,
+        detail: String,
+    },
     EditorScenario {
         identifier: String,
     },
@@ -7852,6 +7882,11 @@ impl fmt::Display for ClassicParityBoundary {
             Self::FolderMapInspection { path, detail } => write!(
                 f,
                 "cannot verify classic FolderMap layout for {}: {detail}",
+                path.display()
+            ),
+            Self::ScenarioStartInspection { path, detail } => write!(
+                f,
+                "cannot verify classic scenario-start constraints for {}: {detail}",
                 path.display()
             ),
             Self::EditorScenario { identifier } => write!(
@@ -9758,10 +9793,16 @@ impl MainMenuState {
         &self,
         surface: &mut Surface,
         fonts: &lc_frontend::clonk_fonts::NativeClonkFontSet,
+        physical_offset: (i32, i32),
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
-        self.menu
-            .render_native_text(surface, fonts, &self.participants_label, gamma);
+        self.menu.render_native_text_with_offset(
+            surface,
+            fonts,
+            &self.participants_label,
+            physical_offset,
+            gamma,
+        );
     }
 
     fn update_participants_label(&mut self, label: String) {
@@ -12391,6 +12432,37 @@ fn startup_participant_references(paths: &AppPaths) -> io::Result<Vec<String>> {
         .collect())
 }
 
+/// `SModuleCount`: spaces do not start a module, semicolons reset the module
+/// boundary, and every other byte starts at most one module.
+fn c4_module_count(raw: &str) -> i32 {
+    let mut count = 0_i32;
+    let mut new_module = true;
+    for byte in raw.bytes() {
+        match byte {
+            b' ' => {}
+            b';' => new_module = true,
+            _ if new_module => {
+                count = count.saturating_add(1);
+                new_module = false;
+            }
+            _ => new_module = false,
+        }
+    }
+    count
+}
+
+fn startup_participant_module_count(paths: &AppPaths) -> io::Result<i32> {
+    let config = match Config::load(paths.config_file()) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    Ok(config
+        .get_in(Some("General"), "Participants")
+        .map(c4_module_count)
+        .unwrap_or(0))
+}
+
 fn startup_participant_indexed_references(paths: &AppPaths) -> io::Result<Vec<(usize, String)>> {
     let config = match Config::load(paths.config_file()) {
         Ok(config) => config,
@@ -13247,6 +13319,28 @@ impl GameApp {
             && self
                 .loader_render_config
                 .is_some_and(|config| config.application_scale() as f32 == scale)
+            && self
+                .native_startup_fonts
+                .as_ref()
+                .is_some_and(|fonts| fonts.scale() as f32 == scale)
+    }
+
+    fn can_defer_native_game_messages(&self, scale: f32) -> bool {
+        self.mode == AppMode::Running
+            && scale > 1.0
+            // The physical commit point is after the filtered logical frame.
+            // Keep C4Viewport/C4GUI z-order authoritative whenever a layer
+            // that C++ draws after game messages is visible.
+            && self.ingame_selection_frame().is_none()
+            && !self.runtime_help_visible
+            && self
+                .runtime_flash_message
+                .as_ref()
+                .is_none_or(|message| message.remaining_draws == 0)
+            && self.scoreboard_dialog.is_none()
+            && self.game_over_dialog.is_none()
+            && self.message_dialogs.is_empty()
+            && self.context_menu.is_none()
             && self
                 .native_startup_fonts
                 .as_ref()
@@ -21539,6 +21633,25 @@ impl GameApp {
         if let Some(identifier) = start_identifier {
             if let Some(scenario) = self.scenario_catalog.get(&identifier).cloned() {
                 if self.startup_view == StartupView::ScenarioBrowser
+                    && self.scenario_selector_mode == ScenarioSelectorMode::Local
+                {
+                    if let Some(message) = self
+                        .local_scenario_player_count_error(&scenario)
+                        .map_err(classic_parity_engine_error)?
+                    {
+                        self.status_text.clear();
+                        self.push_message_dialog(
+                            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                                message,
+                                "Cannot start scenario.",
+                                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                            ),
+                            MessageDialogContinuation::None,
+                        )?;
+                        return Ok(());
+                    }
+                }
+                if self.startup_view == StartupView::ScenarioBrowser
                     && self.menu_state.definition_checkbox_checked
                 {
                     self.open_definition_selector(scenario)?;
@@ -26750,7 +26863,7 @@ impl GameApp {
     /// replayed menu cache hit returns `false`, letting the caller skip
     /// any output post-processing).
     fn render(&mut self, frame: &mut [u8]) -> Result<bool> {
-        self.render_for_presentation(frame, false, false)
+        self.render_for_presentation(frame, false, false, false)
     }
 
     fn render_for_presentation(
@@ -26758,6 +26871,7 @@ impl GameApp {
         frame: &mut [u8],
         defer_native_main_text: bool,
         defer_native_loader_text: bool,
+        defer_native_game_messages: bool,
     ) -> Result<bool> {
         match self.mode {
             AppMode::Menu => {
@@ -26885,7 +26999,9 @@ impl GameApp {
             AppMode::Loading => self
                 .render_loading(frame, defer_native_loader_text)
                 .map(|()| true),
-            AppMode::Running => self.render_running(frame).map(|()| true),
+            AppMode::Running => self
+                .render_running(frame, defer_native_game_messages)
+                .map(|()| true),
         }
     }
 
@@ -26917,16 +27033,34 @@ impl GameApp {
         ) else {
             return Ok(());
         };
-        self.main_menu_state
-            .render_native_text(&mut surface, fonts, Some(startup_gamma()));
+        let logical = self.graphics.surface();
+        let viewport_width = logical
+            .width()
+            .checked_mul(fonts.scale())
+            .context("native main-menu viewport width overflow")?;
+        let viewport_height = logical
+            .height()
+            .checked_mul(fonts.scale())
+            .context("native main-menu viewport height overflow")?;
+        if frame_width > viewport_width || frame_height > viewport_height {
+            anyhow::bail!(
+                "native main-menu framebuffer {frame_width}x{frame_height} exceeds its {viewport_width}x{viewport_height} scaled viewport"
+            );
+        }
+        let clipped_top = i32::try_from(viewport_height - frame_height)
+            .context("native main-menu viewport offset exceeds C++ integers")?;
+        let physical_offset = (0, -clipped_top);
+        self.main_menu_state.render_native_text(
+            &mut surface,
+            fonts,
+            physical_offset,
+            Some(startup_gamma()),
+        );
 
-        let (width, height) = {
-            let surface = self.graphics.surface();
-            (surface.width() as i32, surface.height() as i32)
-        };
+        let (width, height) = (logical.width() as i32, logical.height() as i32);
         if let Some(logo) = self.assets.logo() {
             let logo_height = (0.4 * logo.height() as f32) as i32;
-            fonts.text.draw_to_physical_surface(
+            fonts.text.draw_to_physical_surface_with_offset(
                 &mut surface,
                 width * 39 / 40,
                 height / 18 + logo_height,
@@ -26934,6 +27068,7 @@ impl GameApp {
                 [255, 255, 255, 255],
                 lc_graphics::clonk_font::TextAlign::Right,
                 true,
+                physical_offset,
                 Some(startup_gamma()),
             );
         }
@@ -27344,7 +27479,97 @@ impl GameApp {
         Ok(())
     }
 
-    fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
+    fn render_native_game_messages(
+        &self,
+        frame: &mut [u8],
+        frame_width: u32,
+        frame_height: u32,
+        gamma: &lc_graphics::GammaRamp,
+    ) -> Result<()> {
+        if self.mode != AppMode::Running || self.snapshot.hud.messages.is_empty() {
+            return Ok(());
+        }
+        let fonts = self
+            .native_startup_fonts
+            .as_deref()
+            .context("scale-native C4GameMessage fonts are unavailable")?;
+        let expected_len = (frame_width as usize)
+            .checked_mul(frame_height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .context("native C4GameMessage frame dimensions overflow")?;
+        anyhow::ensure!(
+            frame.len() == expected_len,
+            "native C4GameMessage frame has {} bytes, expected {expected_len}",
+            frame.len()
+        );
+        let logical = self.graphics.surface();
+        let viewport_width = logical
+            .width()
+            .checked_mul(fonts.scale())
+            .context("native C4GameMessage viewport width overflow")?;
+        let viewport_height = logical
+            .height()
+            .checked_mul(fonts.scale())
+            .context("native C4GameMessage viewport height overflow")?;
+        anyhow::ensure!(
+            frame_width <= viewport_width && frame_height <= viewport_height,
+            "native C4GameMessage framebuffer {frame_width}x{frame_height} exceeds its {viewport_width}x{viewport_height} scaled viewport"
+        );
+        let clipped_top = i32::try_from(viewport_height - frame_height)
+            .context("native C4GameMessage viewport offset exceeds C++ integers")?;
+        let physical_offset = (0, -clipped_top);
+        let mut surface = Surface::from_bytes(
+            frame_width,
+            frame_height,
+            PixelFormat::Rgba8888,
+            frame.to_vec(),
+        )?;
+        let viewports = self.graphics.active_viewport_projections();
+        for viewport in viewports {
+            for message in &self.snapshot.hud.messages {
+                let owned = match message.kind {
+                    MessageKind::Global => true,
+                    MessageKind::GlobalPlayer => {
+                        message.player.unwrap_or(OWNER_NONE) == viewport.owner
+                    }
+                    MessageKind::Target | MessageKind::TargetPlayer => false,
+                };
+                if !owned || !game_message::is_supported(message) {
+                    continue;
+                }
+                let portrait = message
+                    .portrait
+                    .as_deref()
+                    .and_then(|spec| resolve_message_portrait(&self.engine, spec));
+                let decoration_image = message.frame_decoration.as_ref().and_then(|decoration| {
+                    self.engine
+                        .definition_sprite_image(&decoration.source_definition, None)
+                        .map(|image| {
+                            let width = image.width();
+                            let height = image.height();
+                            ImageData::from_arc(width, height, image.into_pixels())
+                        })
+                });
+                game_message::draw_global_message_native(
+                    &mut surface,
+                    &fonts.text,
+                    fonts.scale(),
+                    physical_offset,
+                    viewport.rect,
+                    message,
+                    message.frame_decoration.as_ref(),
+                    decoration_image.as_ref(),
+                    portrait.as_ref(),
+                    Some(gamma),
+                )
+                .map_err(|detail| anyhow!("native C4GameMessage render failed: {detail}"))?;
+            }
+        }
+        frame.copy_from_slice(surface.pixels());
+        Ok(())
+    }
+
+    fn render_running(&mut self, frame: &mut [u8], defer_native_game_messages: bool) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
         self.preflight_visible_gui_overlay_resources()?;
         if self.game_over_dialog.is_some() {
@@ -27707,7 +27932,11 @@ impl GameApp {
         let mut unavailable_visibility_count = 0;
         for message in &self.snapshot.hud.messages {
             match self.hud_message_drawability(message, &message_viewports) {
-                HudMessageDrawability::Drawable => unsupported_message_count += 1,
+                HudMessageDrawability::Drawable => {
+                    if !game_message::is_supported(message) {
+                        unsupported_message_count += 1;
+                    }
+                }
                 HudMessageDrawability::VisibilityUnavailable => {
                     unavailable_visibility_count += 1;
                 }
@@ -27728,6 +27957,7 @@ impl GameApp {
                 },
             )));
         }
+        self.draw_classic_game_messages(&frame_gamma, defer_native_game_messages)?;
 
         // C4Viewport draws menus and game messages before C4MouseControl;
         // the selection frame therefore remains legible over both. A modal
@@ -27925,6 +28155,69 @@ impl GameApp {
             .as_ref()
             .filter(|(_, expires)| self.snapshot.frame < *expires)
             .map(|(line, _)| line.clone())
+    }
+
+    fn draw_classic_game_messages(
+        &mut self,
+        gamma: &lc_graphics::GammaRamp,
+        defer_native_messages: bool,
+    ) -> Result<()> {
+        if self.snapshot.hud.messages.is_empty() {
+            return Ok(());
+        }
+        if defer_native_messages {
+            // At scale >1 the complete message is committed after the
+            // presenter's filtered base. Deferring frame and portrait along
+            // with text preserves C++ insertion order and avoids a 150->64
+            // logical portrait resample before the physical 64*scale draw.
+            return Ok(());
+        }
+        let fonts = self
+            .assets
+            .clonk_fonts
+            .clone()
+            .context("classic C4GameMessage requires FontRegular")?;
+        let messages = self.snapshot.hud.messages.clone();
+        let viewports = self.graphics.active_viewport_projections();
+        for viewport in viewports {
+            for message in &messages {
+                let owned = match message.kind {
+                    MessageKind::Global => true,
+                    MessageKind::GlobalPlayer => {
+                        message.player.unwrap_or(OWNER_NONE) == viewport.owner
+                    }
+                    MessageKind::Target | MessageKind::TargetPlayer => false,
+                };
+                if !owned || !game_message::is_supported(message) {
+                    continue;
+                }
+                let portrait = message
+                    .portrait
+                    .as_deref()
+                    .and_then(|spec| resolve_message_portrait(&self.engine, spec));
+                let decoration_image = message.frame_decoration.as_ref().and_then(|decoration| {
+                    self.engine
+                        .definition_sprite_image(&decoration.source_definition, None)
+                        .map(|image| {
+                            let width = image.width();
+                            let height = image.height();
+                            ImageData::from_arc(width, height, image.into_pixels())
+                        })
+                });
+                game_message::draw_global_message(
+                    self.graphics.surface_mut(),
+                    &fonts.text,
+                    viewport.rect,
+                    message,
+                    message.frame_decoration.as_ref(),
+                    decoration_image.as_ref(),
+                    portrait.as_ref(),
+                    Some(gamma),
+                )
+                .map_err(|detail| anyhow!("classic C4GameMessage render failed: {detail}"))?;
+            }
+        }
+        Ok(())
     }
 
     fn draw_messages(&mut self, gamma: &lc_graphics::GammaRamp) {
@@ -28610,6 +28903,54 @@ impl GameApp {
     fn start_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
         let definition_load = self.scenario_seed_definition_load();
         self.start_scenario_with_definition_load(scenario, definition_load)
+    }
+
+    /// Local `C4ScenarioListLoader::Scenario::CanOpen` player-count gate.
+    /// Replays bypass the regular-game checks. Savegames lift a stale zero
+    /// maximum to their effective minimum before the upper-bound comparison.
+    fn local_scenario_player_count_error(
+        &self,
+        scenario: &FrontendScenario,
+    ) -> std::result::Result<Option<String>, ClassicParityBoundary> {
+        let Some(path) = scenario.path.as_deref() else {
+            return Ok(None);
+        };
+        let Some(paths) = self.app_paths.as_ref() else {
+            // Pathless test/sandbox apps do not represent C4Startup's
+            // installed scenario browser and retain their existing route.
+            return Ok(None);
+        };
+        let inspect_error = |error: &dyn fmt::Display| {
+            report_classic_parity_boundary(ClassicParityBoundary::ScenarioStartInspection {
+                path: path.to_path_buf(),
+                detail: error.to_string(),
+            })
+        };
+        let group = Group::open(path).map_err(|error| inspect_error(&error))?;
+        let head = load_classic_scenario_loader_head(&group, paths)
+            .map_err(|error| inspect_error(&error))?;
+        if head.is_replay() {
+            return Ok(None);
+        }
+        let player_count =
+            startup_participant_module_count(paths).map_err(|error| inspect_error(&error))?;
+        if player_count < head.min_players() {
+            return Ok(Some(format!(
+                "This scenario is designed for a minimum of {} players. Please go to the Player Selection dialog and activate the participants for this round.",
+                head.min_players()
+            )));
+        }
+        let max_players = if head.is_save_game() {
+            head.max_players().max(head.min_players())
+        } else {
+            head.max_players()
+        };
+        Ok((player_count > max_players).then(|| {
+            format!(
+                "This scenario is designed for a maximum of {} players.",
+                head.max_players()
+            )
+        }))
     }
 
     fn scenario_seed_definition_load(&self) -> ScenarioDefinitionLoad {
@@ -37047,6 +37388,10 @@ mod tests {
             .get("TwoPlayers.c4s")
             .cloned()
             .expect("scenario remains discovered");
+        // This deliberately bypasses C4StartupScenSelDlg::DoOK/CanOpen and
+        // exercises C4Game's independent late fullscreen guard. The actual
+        // ScenarioBrowser route is covered by
+        // local_scenario_start_with_no_participants_shows_cpp_error_before_loading.
         app.start_scenario(scenario)
             .expect("begin zero-player scenario load");
         for _ in 0..480 {
@@ -38698,19 +39043,20 @@ mod tests {
     }
 
     #[test]
-    fn running_render_rejects_only_client_visible_c4_game_messages() {
+    fn running_render_draws_supported_globals_and_ignores_remote_or_missing_targets() {
         let mut app = new_running_sandbox_app();
         let visible = lc_engine::MessageSnapshot {
             id: 1,
             kind: MessageKind::Global,
-            lines: vec![String::new()],
+            lines: vec!["Visible".to_string()],
             target: None,
             player: None,
-            offset: Vector2::new(100, 70),
+            offset: Vector2::ZERO,
             color: 0xff20_3040,
             flags: 0,
             width: None,
-            decoration: Some("frame".to_string()),
+            decoration: None,
+            frame_decoration: None,
             portrait: None,
         };
         let mut remote = visible.clone();
@@ -38722,23 +39068,304 @@ mod tests {
         missing_target.kind = MessageKind::Target;
         missing_target.target = Some(ObjectId::new(u64::MAX));
 
-        let mut frame = vec![0; 320 * 200 * 4];
+        let mut baseline = vec![0; 320 * 200 * 4];
         app.snapshot.hud.messages = vec![remote.clone(), missing_target.clone()];
-        app.render(&mut frame)
+        app.render(&mut baseline)
             .expect("remote and missing-target messages are not client-visible");
 
         app.snapshot.hud.messages = vec![remote, missing_target, visible];
-        let error = app
-            .render(&mut frame)
-            .expect_err("generic C4GameMessage renderer must not run");
-        assert!(matches!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::HudGameMessage { count: 1 })
-        ));
+        let mut rendered = vec![0; 320 * 200 * 4];
+        app.render(&mut rendered)
+            .expect("supported global C4GameMessage renders");
+        assert_ne!(rendered, baseline, "the visible global contributes pixels");
     }
 
     #[test]
-    fn secondary_local_viewport_makes_player_global_message_visible() {
+    fn real_tutorial01_renders_cpp_decorated_portrait_message() {
+        // TutorialMessage reaches C4GameMessage::Draw as a permanent
+        // player-global message with DECO framing and an SCLK portrait
+        // (Tutorial.c4f/System.c4g/Tutorial.c:22-31;
+        // src/C4GameMessage.cpp:99-170).
+        let _lock = env_lock().lock();
+        let mut app = real_tutorial_app_with_roster(1, "Tutorial message parity");
+        advance_app_until(&mut app, "Tutorial01 welcome message", 180, |app| {
+            app_tutorial_message_contains(app, "Welcome to the world of Clonk.")
+        });
+        let message = app
+            .snapshot
+            .hud
+            .messages
+            .iter()
+            .find(|message| {
+                message
+                    .lines
+                    .iter()
+                    .any(|line| line == "Welcome to the world of Clonk.")
+            })
+            .expect("shipped Tutorial01 welcome message")
+            .clone();
+        assert_eq!(message.kind, MessageKind::GlobalPlayer);
+        assert_eq!(message.player, Some(app.local_owner));
+        assert_eq!(message.target, None);
+        assert_eq!(message.lines, ["Welcome to the world of Clonk."]);
+        assert_eq!(message.offset, Vector2::new(50, 50));
+        assert_eq!(message.color, 0xffff_ffff);
+        assert_eq!(message.flags, 0x718);
+        assert_eq!(message.width, Some(30));
+        assert_eq!(message.decoration.as_deref(), Some("DECO"));
+        assert_eq!(
+            message.portrait.as_deref(),
+            Some("Portrait:SCLK::0000ff::1")
+        );
+
+        let decoration = message
+            .frame_decoration
+            .as_ref()
+            .expect("C4GameMessage snapshots DECO at creation");
+        assert_eq!(decoration.source_definition, "DECO");
+        assert_eq!(decoration.background_color, 0x8032_3232);
+        assert_eq!(
+            (
+                decoration.border_top,
+                decoration.border_left,
+                decoration.border_right,
+                decoration.border_bottom,
+            ),
+            (0, 0, 0, 0)
+        );
+        let facets = [
+            decoration.top_left.as_ref(),
+            decoration.top.as_ref(),
+            decoration.top_right.as_ref(),
+            decoration.right.as_ref(),
+            decoration.bottom_right.as_ref(),
+            decoration.bottom.as_ref(),
+            decoration.bottom_left.as_ref(),
+            decoration.left.as_ref(),
+        ]
+        .map(|facet| {
+            let facet = facet.expect("Tutorial01 DECO contains all eight frame facets");
+            (
+                facet.x,
+                facet.y,
+                facet.width,
+                facet.height,
+                facet.target_x,
+                facet.target_y,
+            )
+        });
+        assert_eq!(
+            facets,
+            [
+                (0, 0, 16, 16, -8, -7),
+                (16, 0, 58, 12, 0, -7),
+                (74, 0, 16, 16, -7, -7),
+                (74, 16, 16, 58, -7, 0),
+                (74, 74, 16, 16, -7, -8),
+                (16, 76, 58, 16, 0, -6),
+                (0, 74, 16, 16, -8, -8),
+                (0, 16, 16, 58, -8, 0),
+            ]
+        );
+
+        app.resize(1152, 644)
+            .expect("resize to the reported logical surface");
+        let messages = std::mem::take(&mut app.snapshot.hud.messages);
+        let mut warm = vec![0_u8; 1152 * 644 * 4];
+        app.render(&mut warm)
+            .expect("warm the message-free presentation state");
+        let frame_gamma = app
+            .graphics
+            .active_gamma_ramp(&app.snapshot.environment.gamma);
+        let mut baseline = vec![0_u8; 1152 * 644 * 4];
+        app.render(&mut baseline)
+            .expect("render the message-free Tutorial01 baseline");
+        app.snapshot.hud.messages = messages;
+        let mut rendered = vec![0_u8; 1152 * 644 * 4];
+        app.render(&mut rendered)
+            .expect("classic Tutorial01 C4GameMessage renders");
+
+        let viewport = app
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| viewport.owner == app.local_owner)
+            .expect("local Tutorial01 viewport")
+            .rect;
+        assert_eq!(viewport, Rect::new(216, 56, 720, 560));
+        let fonts = app
+            .assets
+            .clonk_fonts
+            .as_deref()
+            .expect("classic FontRegular");
+        assert_eq!(
+            fonts.text.measure("Welcome to the world of Clonk.", true),
+            (194, 22)
+        );
+
+        let core_frame = Rect::new(576, 106, 278, 64);
+        let deco_envelope = Rect::new(568, 99, 295, 81);
+        let inside = |rect: Rect, x: i32, y: i32| {
+            x >= rect.x
+                && x < rect.x + rect.width as i32
+                && y >= rect.y
+                && y < rect.y + rect.height as i32
+        };
+        let changed = rendered
+            .chunks_exact(4)
+            .zip(baseline.chunks_exact(4))
+            .enumerate()
+            .filter_map(|(index, (actual, before))| (actual != before).then_some(index))
+            .collect::<Vec<_>>();
+        assert!(!changed.is_empty(), "the C4GameMessage contributes pixels");
+        assert!(changed.iter().all(|index| {
+            let x = (*index % 1152) as i32;
+            let y = (*index / 1152) as i32;
+            inside(viewport, x, y) && inside(deco_envelope, x, y)
+        }));
+        assert!(
+            changed.iter().any(|index| {
+                let x = (*index % 1152) as i32;
+                let y = (*index / 1152) as i32;
+                !inside(core_frame, x, y)
+            }),
+            "real DECO facets extend outside the core frame"
+        );
+
+        let pixel = |frame: &[u8], x: usize, y: usize| {
+            let offset = (y * 1152 + x) * 4;
+            Color::new(
+                frame[offset],
+                frame[offset + 1],
+                frame[offset + 2],
+                frame[offset + 3],
+            )
+        };
+        assert_eq!(
+            pixel(&rendered, 572, 100),
+            lc_frontend::gamma_encode_fragment(Color::opaque(126, 66, 23), &frame_gamma),
+            "the opaque top-left DECO texel must draw outside the core frame"
+        );
+
+        let mut expected_gap = Surface::new(1, 1, lc_graphics::PixelFormat::Rgba8888);
+        expected_gap
+            .set_pixel(0, 0, pixel(&baseline, 645, 130))
+            .expect("seed the gap background");
+        lc_frontend::classic_gui::draw_engine_box(
+            &mut expected_gap,
+            0,
+            0,
+            0,
+            0,
+            0x8032_3232,
+            Some(&frame_gamma),
+        );
+        assert_eq!(
+            pixel(&rendered, 645, 130),
+            expected_gap.get_pixel(0, 0).expect("blended gap pixel"),
+            "the ten-pixel portrait/text gap contains only DECO background"
+        );
+    }
+
+    #[test]
+    fn scale_three_tutorial_message_commits_native_pixels_after_filtered_base() {
+        // FontRegular is rebuilt with Application.GetScale(), but its public
+        // geometry remains in GUI units. Ordinary frame/portrait pixels pass
+        // through GL_LINEAR first and native glyphs are then drawn into the
+        // physical viewport (C4Fonts.cpp:158-173; StdFont.cpp:319-352,841-842;
+        // C4Viewport.cpp:852-854).
+        let _lock = env_lock().lock();
+        let mut app = real_tutorial_app_with_roster(1, "Native tutorial message parity");
+        advance_app_until(&mut app, "Tutorial01 welcome message", 180, |app| {
+            app_tutorial_message_contains(app, "Welcome to the world of Clonk.")
+        });
+        app.configure_native_startup_fonts(3.0, false);
+        assert!(app.can_defer_native_game_messages(3.0));
+
+        let gamma = app
+            .graphics
+            .active_gamma_ramp(&app.snapshot.environment.gamma);
+        let mut presenter = lc_scaling::FramePresenter::new(3.0, 960, 598);
+        let mut output = vec![0_u8; 960 * 598 * 4];
+        let refreshed = presenter
+            .present(&mut output, |frame| {
+                app.render_for_presentation(frame, false, false, true)
+            })
+            .expect("render filtered base before Tutorial01 message");
+        assert!(refreshed);
+        let filtered_base = output.clone();
+
+        app.render_native_game_messages(&mut output, 960, 598, &gamma)
+            .expect("render native Tutorial01 message text");
+        assert_ne!(
+            output, filtered_base,
+            "the physical C4GameMessage pass must contribute message pixels"
+        );
+
+        // A 320x200 logical surface creates a nominal 960x600 lower-left GL
+        // viewport in a 960x598 framebuffer, clipping two physical rows from
+        // the top. Native message pixels must retain that offset and the
+        // owning C4Viewport clip.
+        let viewport = app
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| viewport.owner == app.local_owner)
+            .expect("local Tutorial01 viewport")
+            .rect;
+        let physical_viewport = Rect::new(
+            viewport.x * 3,
+            viewport.y * 3 - 2,
+            viewport.width * 3,
+            viewport.height * 3,
+        );
+        let changed = output
+            .chunks_exact(4)
+            .zip(filtered_base.chunks_exact(4))
+            .enumerate()
+            .filter_map(|(index, (native, base))| (native != base).then_some(index));
+        let mut changed_count = 0;
+        for index in changed {
+            changed_count += 1;
+            let point = Rect::new((index % 960) as i32, (index / 960) as i32, 1, 1);
+            assert!(
+                physical_viewport.intersection(point).is_some(),
+                "native message pixel ({}, {}) escaped its viewport clip",
+                point.x,
+                point.y
+            );
+        }
+        assert!(changed_count > 0);
+
+        let solid = [17_u8, 29, 43, 255];
+        let mut nominal = solid
+            .into_iter()
+            .cycle()
+            .take(960 * 600 * 4)
+            .collect::<Vec<_>>();
+        let mut clipped = solid
+            .into_iter()
+            .cycle()
+            .take(960 * 598 * 4)
+            .collect::<Vec<_>>();
+        app.render_native_game_messages(&mut nominal, 960, 600, &gamma)
+            .expect("render nominal native-message probe");
+        app.render_native_game_messages(&mut clipped, 960, 598, &gamma)
+            .expect("render clipped native-message probe");
+        for y in 0..598_usize {
+            let clipped_row = &clipped[y * 960 * 4..(y + 1) * 960 * 4];
+            let nominal_row = &nominal[(y + 2) * 960 * 4..(y + 3) * 960 * 4];
+            assert_eq!(
+                clipped_row,
+                nominal_row,
+                "the 598-row framebuffer must clip nominal physical row {}",
+                y + 2
+            );
+        }
+    }
+
+    #[test]
+    fn secondary_local_viewport_draws_its_player_global_message_only_there() {
         let mut app = new_running_sandbox_app();
         let local = app
             .snapshot
@@ -38763,17 +39390,43 @@ mod tests {
             flags: 0,
             width: None,
             decoration: None,
+            frame_decoration: None,
             portrait: None,
         }];
 
-        let mut frame = vec![0; 320 * 200 * 4];
-        let error = app
-            .render(&mut frame)
-            .expect_err("secondary local viewport receives its player-global message");
-        assert!(matches!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::HudGameMessage { count: 1 })
-        ));
+        let messages = std::mem::take(&mut app.snapshot.hud.messages);
+        let mut baseline = vec![0; 320 * 200 * 4];
+        app.render(&mut baseline)
+            .expect("render split-view baseline without the message");
+        app.snapshot.hud.messages = messages;
+        let mut rendered = vec![0; 320 * 200 * 4];
+        app.render(&mut rendered)
+            .expect("secondary local viewport receives its player-global message");
+        let viewport = app
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| viewport.owner == secondary.id)
+            .expect("secondary local viewport")
+            .rect;
+        let changed = rendered
+            .chunks_exact(4)
+            .zip(baseline.chunks_exact(4))
+            .enumerate()
+            .filter_map(|(index, (actual, before))| (actual != before).then_some(index))
+            .collect::<Vec<_>>();
+        assert!(
+            !changed.is_empty(),
+            "the secondary message contributes pixels"
+        );
+        assert!(changed.iter().all(|index| {
+            let x = (*index % 320) as i32;
+            let y = (*index / 320) as i32;
+            x >= viewport.x
+                && x < viewport.x + viewport.width as i32
+                && y >= viewport.y
+                && y < viewport.y + viewport.height as i32
+        }));
     }
 
     #[test]
@@ -38803,6 +39456,7 @@ mod tests {
             flags: 0,
             width: None,
             decoration: None,
+            frame_decoration: None,
             portrait: None,
         }];
 
@@ -38916,6 +39570,7 @@ mod tests {
             flags: 0,
             width: None,
             decoration: None,
+            frame_decoration: None,
             portrait: None,
         };
         let viewport = ActiveViewportProjection {
@@ -38966,6 +39621,7 @@ mod tests {
             flags: 0,
             width: None,
             decoration: None,
+            frame_decoration: None,
             portrait: None,
         }];
 
@@ -38994,6 +39650,7 @@ mod tests {
             flags: 0,
             width: None,
             decoration: None,
+            frame_decoration: None,
             portrait: None,
         };
         let mut frame = vec![0; 320 * 200 * 4];
@@ -39384,9 +40041,9 @@ mod tests {
             .find(|object| object.id == clonk)
             .expect("Tutorial09 cursor remains mutable")
             .breath = capacity;
-        app.render_running(&mut frame)
+        app.render_running(&mut frame, false)
             .expect("render Tutorial09 with full breath");
-        app.render_running(&mut frame)
+        app.render_running(&mut frame, false)
             .expect("stabilize Tutorial09 full-breath frame");
         let without_breath = frame.clone();
 
@@ -39396,7 +40053,7 @@ mod tests {
             .find(|object| object.id == clonk)
             .expect("Tutorial09 cursor remains mutable")
             .breath = current_breath;
-        app.render_running(&mut frame)
+        app.render_running(&mut frame, false)
             .expect("render Tutorial09 with partial breath");
         let with_breath = frame.clone();
 
@@ -39406,7 +40063,7 @@ mod tests {
             .find(|object| object.id == clonk)
             .expect("Tutorial09 cursor remains mutable")
             .breath = capacity;
-        app.render_running(&mut frame)
+        app.render_running(&mut frame, false)
             .expect("render Tutorial09 with breath suppressed again");
         assert_eq!(
             frame, without_breath,
@@ -40336,6 +40993,147 @@ mod tests {
         .expect("cancel selector");
         assert!(app.menu_state.definition_checkbox_checked);
         assert!(matches!(app.mode, AppMode::Menu));
+    }
+
+    #[test]
+    fn participant_module_count_matches_cpp_smodulecount() {
+        assert_eq!(c4_module_count(""), 0);
+        assert_eq!(c4_module_count("   ;  ;; "), 0);
+        assert_eq!(c4_module_count("Alice.c4p;; Bob.c4p"), 2);
+        assert_eq!(c4_module_count(" Alice.c4p ; Bob.c4p ;"), 2);
+        assert_eq!(
+            c4_module_count("\t"),
+            1,
+            "C++ SModuleCount ignores ASCII spaces only"
+        );
+    }
+
+    #[test]
+    fn local_scenario_player_gate_matches_cpp_max_savegame_and_replay_rules() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("isolated player-gate user data");
+        let scenario_group = tempdir().expect("player-gate scenario");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let app = new_menu_app_with_paths(640, 480, &paths);
+        let mut scenario = FrontendScenario::fallback();
+        scenario.path = Some(scenario_group.path().to_path_buf());
+
+        persist_config_value(&paths, "General", "Participants", "Alice.c4p;Bob.c4p")
+            .expect("configure two participant modules");
+        fs::write(
+            scenario_group.path().join("Scenario.txt"),
+            "[Head]\nMinPlayer=1\nMaxPlayer=1\n",
+        )
+        .expect("write maximum-one scenario");
+        assert_eq!(
+            app.local_scenario_player_count_error(&scenario)
+                .expect("inspect regular scenario"),
+            Some("This scenario is designed for a maximum of 1 players.".to_string())
+        );
+
+        fs::write(
+            scenario_group.path().join("Scenario.txt"),
+            "[Head]\nMinPlayer=2\nMaxPlayer=0\nSaveGame=1\n",
+        )
+        .expect("write savegame scenario");
+        assert_eq!(
+            app.local_scenario_player_count_error(&scenario)
+                .expect("inspect savegame scenario"),
+            None,
+            "savegames raise a stale maximum to the minimum player count"
+        );
+
+        persist_config_value(&paths, "General", "Participants", "")
+            .expect("clear participant modules");
+        fs::write(
+            scenario_group.path().join("Scenario.txt"),
+            "[Head]\nMinPlayer=9\nMaxPlayer=0\nReplay=1\n",
+        )
+        .expect("write replay scenario");
+        assert_eq!(
+            app.local_scenario_player_count_error(&scenario)
+                .expect("inspect replay scenario"),
+            None,
+            "replays bypass regular-game player-count checks"
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn local_scenario_start_with_no_participants_shows_cpp_error_before_loading() {
+        // C4StartupScenSelDlg::DoOK calls Scenario::CanOpen before opening
+        // C4DefinitionSelDlg or starting C4Game. A local player-count
+        // shortfall keeps the browser active and opens the classic error
+        // dialog (C4StartupScenSelDlg.cpp:754-781, 1681-1692).
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("isolated no-participant user data");
+        let scenario_group = tempdir().expect("no-participant scenario");
+        fs::write(
+            scenario_group.path().join("Scenario.txt"),
+            "[Head]\nTitle=No participants\nMaxPlayer=4\n\n[Definitions]\nAllowUserChange=true\n",
+        )
+        .expect("write scenario core");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "General", "Participants", "")
+            .expect("clear startup participants");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "NoParticipants.c4s".to_string();
+        scenario.title = "No participants".to_string();
+        scenario.path = Some(scenario_group.path().to_path_buf());
+        scenario.allow_user_change = Some(true);
+        let scenarios = vec![scenario.clone()];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("scenario browser menu");
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+        app.menu_state.definition_checkbox_checked = true;
+
+        app.handle_menu_input(|_| {
+            vec![StartupMenuAction::StartScenario(
+                lc_frontend::ScenarioSummary {
+                    identifier: scenario.identifier.clone(),
+                    title: scenario.title.clone(),
+                    kind: ScenarioKind::Scenario,
+                },
+            )]
+        })
+        .expect("C++ player-count failure is a handled modal");
+
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert!(app.loading_state.is_none());
+        assert!(app.definition_selector.is_none());
+        assert!(app.status_text.is_empty());
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(
+            app.message_dialogs[0].state.caption(),
+            "Cannot start scenario."
+        );
+        assert_eq!(
+            app.message_dialogs[0].state.message(),
+            "This scenario is designed for a minimum of 1 players. Please go to the Player Selection dialog and activate the participants for this round."
+        );
+        assert_eq!(
+            app.message_dialogs[0].state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::ERROR
+        );
+        assert_eq!(
+            app.message_dialogs[0].state.focused_button(),
+            Some(lc_frontend::message_dialog::MessageDialogButton::Ok)
+        );
+        let mut frame = vec![0_u8; 640 * 480 * 4];
+        app.render(&mut frame)
+            .expect("classic error dialog renders over the scenario browser");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss scenario start error");
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert!(app.status_text.is_empty());
+        reset_cached_app_paths();
     }
 
     #[test]
@@ -48066,7 +48864,7 @@ mod tests {
     }
 
     #[test]
-    fn scale_three_loader_uses_native_text_after_chrome_upscale() {
+    fn scale_three_clipped_loader_uses_native_text_after_chrome_upscale() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
@@ -48092,20 +48890,22 @@ mod tests {
         )
         .expect("app");
         app.configure_native_startup_fonts(3.0, false);
-        let mut presenter = lc_scaling::FramePresenter::new(3.0, 960, 600);
-        let mut physical = vec![0_u8; 960 * 600 * 4];
+        // C++ rounds 598 / 3 up to 200 logical rows, renders a nominal
+        // 600-row GL viewport, and lets the framebuffer clip its top two rows.
+        let mut presenter = lc_scaling::FramePresenter::new(3.0, 960, 598);
+        let mut physical = vec![0_u8; 960 * 598 * 4];
         presenter
             .present(&mut physical, |frame| {
-                app.render_for_presentation(frame, false, true)
+                app.render_for_presentation(frame, false, true, false)
             })
             .expect("loader chrome");
-        app.render_native_loader_text(&mut physical, 960, 600)
+        app.render_native_loader_text(&mut physical, 960, 598)
             .expect("native loader text");
         assert!(physical.chunks_exact(4).any(|pixel| pixel[3] != 0));
     }
 
     #[test]
-    fn scale_three_main_menu_commits_native_captions_after_bilinear_base() {
+    fn scale_three_clipped_main_menu_commits_native_captions_after_bilinear_base() {
         // C4FontLoader builds CStdFont with Application.GetScale(), while
         // StdGL filters ordinary image textures when scale != 1
         // (C4Fonts.cpp:158-173; StdFont.cpp:319-352,841-842; StdGL.cpp:527-532).
@@ -48137,16 +48937,16 @@ mod tests {
         app.configure_native_startup_fonts(3.0, false);
         assert!(app.can_defer_native_main_menu_text(3.0));
 
-        let mut presenter = lc_scaling::FramePresenter::new(3.0, 1920, 1440);
-        let mut output = vec![0_u8; 1920 * 1440 * 4];
+        let mut presenter = lc_scaling::FramePresenter::new(3.0, 1920, 1438);
+        let mut output = vec![0_u8; 1920 * 1438 * 4];
         let refreshed = presenter
             .present(&mut output, |frame| {
-                app.render_for_presentation(frame, true, false)
+                app.render_for_presentation(frame, true, false, false)
             })
             .expect("render filtered base");
         assert!(refreshed);
         let filtered_base = output.clone();
-        app.render_native_main_menu_text(&mut output, 1920, 1440)
+        app.render_native_main_menu_text(&mut output, 1920, 1438)
             .expect("render native main-menu captions");
         assert_ne!(output, filtered_base, "physical caption pass must draw");
 
@@ -48170,7 +48970,7 @@ mod tests {
         let with_native_text = output.clone();
         let refreshed = presenter
             .present(&mut output, |frame| {
-                app.render_for_presentation(frame, true, false)
+                app.render_for_presentation(frame, true, false, false)
             })
             .expect("replay cached base");
         assert!(
@@ -51593,7 +52393,7 @@ mod tests {
             ]
         );
         let mut ordinary_frame = vec![0x73; app.graphics.surface().pixels().len()];
-        app.render_running(&mut ordinary_frame)
+        app.render_running(&mut ordinary_frame, false)
             .expect("ordinary local viewport remains renderable");
 
         // An unset or deleted slot focus follows only the owning player's
@@ -51642,7 +52442,7 @@ mod tests {
         app.snapshot.players = vec![eliminated];
         app.snapshot.hud.local_players = vec![local_owner];
         let mut frame = vec![0x91; app.graphics.surface().pixels().len()];
-        app.render_running(&mut frame)
+        app.render_running(&mut frame, false)
             .expect("eliminated local viewport remains renderable");
     }
 
@@ -51658,7 +52458,7 @@ mod tests {
         let expected = ClassicParityBoundary::RunningViewport(expected_reason);
 
         let error = app
-            .render_running(&mut frame)
+            .render_running(&mut frame, false)
             .expect_err("unsupported viewport state must fail closed");
 
         assert_eq!(

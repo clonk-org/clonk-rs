@@ -1,8 +1,8 @@
 //! Graphics.Scale support: the C++ engine lays the GUI out at
 //! `ResolutionX x ResolutionY` and scales every draw by `Scale/100`
 //! (C4Application.cpp:183, C4Gui.cpp:461). The Rust app renders the same
-//! logical layout into a CPU surface and upscales the finished frame to the
-//! window's pixel size, mirroring the GL pipeline's linear magnification.
+//! logical layout into a CPU surface, linearly magnifies it through the same
+//! nominal viewport, and clips any top/right overflow to the framebuffer.
 
 /// GUI layout size for a window pixel size: ceil(pixels / scale), at least
 /// one pixel — C4Application::SetResolution (C4Application.cpp:536-538).
@@ -75,6 +75,66 @@ pub fn upscale_frame(
     }
 }
 
+/// Upscales into C++'s nominal GL viewport and writes only the part covered
+/// by the physical framebuffer. The viewport is anchored at OpenGL's
+/// lower-left, so top-down pixels lose overflow at the top and right.
+#[allow(clippy::too_many_arguments)]
+fn upscale_frame_in_viewport(
+    src: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst: &mut [u8],
+    dst_width: u32,
+    dst_height: u32,
+    viewport_width: u32,
+    viewport_height: u32,
+) {
+    let (sw, sh) = (src_width as usize, src_height as usize);
+    let (dw, dh) = (dst_width as usize, dst_height as usize);
+    let (vw, vh) = (viewport_width as usize, viewport_height as usize);
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 || vw == 0 || vh == 0 {
+        return;
+    }
+    debug_assert!(dw <= vw && dh <= vh);
+    debug_assert!(src.len() >= sw * sh * 4);
+    debug_assert!(dst.len() >= dw * dh * 4);
+
+    let x_taps: Vec<(usize, usize, u32)> = (0..dw).map(|x| axis_tap(x, vw, sw)).collect();
+    let crop_top = vh.saturating_sub(dh);
+    let mut source_words = vec![0u32; sw];
+    let mut top = ScaledRow::new(dw);
+    let mut bottom = ScaledRow::new(dw);
+
+    for dst_y in 0..dh {
+        let viewport_y = dst_y + crop_top;
+        let (y0, y1, fy) = axis_tap(viewport_y, vh, sh);
+        if top.source != y0 {
+            if bottom.source == y0 {
+                std::mem::swap(&mut top, &mut bottom);
+            } else {
+                top.build(src, y0, sw, &x_taps, &mut source_words);
+            }
+        }
+        if bottom.source != y1 {
+            bottom.build(src, y1, sw, &x_taps, &mut source_words);
+        }
+        let out = &mut dst[dst_y * dw * 4..(dst_y * dw + dw) * 4];
+        for ((out_px, &above), &below) in out
+            .chunks_exact_mut(4)
+            .zip(top.words.iter())
+            .zip(bottom.words.iter())
+        {
+            out_px.copy_from_slice(&lerp_word(above, below, fy).to_le_bytes());
+        }
+    }
+}
+
+fn viewport_size_for(logical_width: u32, logical_height: u32, scale: f32) -> (u32, u32) {
+    let scale = scale.max(f32::EPSILON);
+    let scaled = |extent: u32| ((extent as f32) * scale).ceil().clamp(1.0, u32::MAX as f32) as u32;
+    (scaled(logical_width), scaled(logical_height))
+}
+
 /// A source row scaled to the destination width, tagged with its source
 /// row index so consecutive output rows reuse it.
 struct ScaledRow {
@@ -120,8 +180,9 @@ fn lerp_word(a: u32, b: u32, f: u32) -> u32 {
 }
 
 /// Owns the logical-resolution frame the app renders into and upscales it
-/// to the window's pixel buffer — the C++ engine's window/GUI split, where
-/// the GUI lives at `ResX x ResY` and output pixels at `ResX*Scale`.
+/// through the fixed-size viewport used by C++. The GUI lives at
+/// `ResX x ResY`; any fractional final scaled row/column outside the physical
+/// framebuffer is clipped rather than fit-resampled.
 pub struct FramePresenter {
     scale: f32,
     physical: (u32, u32),
@@ -205,13 +266,16 @@ impl FramePresenter {
                 let changed = render(&mut logical.frame)?;
                 let refreshed = changed || self.stale;
                 if refreshed {
-                    upscale_frame(
+                    let viewport = viewport_size_for(logical.width, logical.height, self.scale);
+                    upscale_frame_in_viewport(
                         &logical.frame,
                         logical.width,
                         logical.height,
                         output,
                         self.physical.0,
                         self.physical.1,
+                        viewport.0,
+                        viewport.1,
                     );
                     self.stale = false;
                 }
@@ -243,6 +307,8 @@ mod tests {
         // C4Application.cpp:536-538.
         assert_eq!(logical_size_for(2742, 1716, 3.0), (914, 572));
         assert_eq!(logical_size_for(2743, 1717, 3.0), (915, 573));
+        assert_eq!(logical_size_for(3456, 1930, 3.0), (1152, 644));
+        assert_eq!(viewport_size_for(1152, 644, 3.0), (3456, 1932));
         assert_eq!(logical_size_for(1280, 720, 1.0), (1280, 720));
         assert_eq!(logical_size_for(1, 1, 3.0), (1, 1));
     }
@@ -332,6 +398,37 @@ mod tests {
     }
 
     #[test]
+    fn presenter_crops_a_fixed_scale_viewport_from_the_top_and_right() {
+        // C4Application::SetResolution rounds the 5x5 framebuffer up to a
+        // 2x2 GUI, then CStdGL::UpdateClipper installs a 6x6 viewport. OpenGL
+        // clips its overflow on the visual top and right instead of fitting
+        // the GUI into 5x5 (C4Application.cpp:536-538; StdGL.cpp:398-407).
+        let source = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
+        let mut full_viewport = vec![0_u8; 6 * 6 * 4];
+        upscale_frame(&source, 2, 2, &mut full_viewport, 6, 6);
+        let mut expected = vec![0_u8; 5 * 5 * 4];
+        for y in 0..5_usize {
+            let source_start = ((y + 1) * 6) * 4;
+            let target_start = y * 5 * 4;
+            expected[target_start..target_start + 5 * 4]
+                .copy_from_slice(&full_viewport[source_start..source_start + 5 * 4]);
+        }
+
+        let mut presenter = FramePresenter::new(3.0, 5, 5);
+        let mut output = vec![0_u8; 5 * 5 * 4];
+        presenter
+            .present::<()>(&mut output, |frame| {
+                frame.copy_from_slice(&source);
+                Ok(true)
+            })
+            .unwrap();
+
+        assert_eq!(output, expected);
+    }
+
+    #[test]
     fn presenter_skips_upscale_for_unchanged_frames() {
         let mut presenter = FramePresenter::new(2.0, 4, 4);
         let mut output = vec![0u8; 4 * 4 * 4];
@@ -412,9 +509,9 @@ mod tests {
     }
 
     #[test]
-    fn upscale_handles_cropped_destination() {
-        // ceil() layouts can overdraw by a partial pixel row/column; the
-        // destination just clamps (no panic, edges from the last texels).
+    fn upscale_handles_non_multiple_dimensions() {
+        // The standalone fit-scaler remains safe for arbitrary dimensions;
+        // FramePresenter applies C++'s fixed viewport and clipping policy.
         let src = solid(3, 3, [9, 9, 9, 255]);
         let mut dst = vec![0u8; 8 * 8 * 4];
         upscale_frame(&src, 3, 3, &mut dst, 8, 8);

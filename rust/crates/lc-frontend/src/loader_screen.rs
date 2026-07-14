@@ -598,9 +598,10 @@ impl LoaderScreen {
         Ok(())
     }
 
-    /// Draws loader text directly into an already-upscaled physical surface
-    /// using scale-native CStdFont atlases. `logical_width/height` are
-    /// explicit because the physical surface must be exactly `logical*scale`.
+    /// Draws loader text directly into an already-upscaled, possibly clipped
+    /// physical surface using scale-native CStdFont atlases. `logical_width/height` are
+    /// explicit because each physical dimension must round up to the matching
+    /// logical dimension when divided by the application scale.
     pub fn render_native_text(
         &self,
         surface: &mut Surface,
@@ -624,13 +625,19 @@ impl LoaderScreen {
         let expected_height = logical_height
             .checked_mul(fonts.scale())
             .ok_or_else(|| anyhow::anyhow!("classic loader physical height overflow"))?;
+        let minimum_width = expected_width - (fonts.scale() - 1);
+        let minimum_height = expected_height - (fonts.scale() - 1);
         ensure!(
-            surface.width() == expected_width && surface.height() == expected_height,
-            "classic loader native text expected a {expected_width}x{expected_height} physical surface for {logical_width}x{logical_height} logical pixels at scale {}, got {}x{}",
+            (minimum_width..=expected_width).contains(&surface.width())
+                && (minimum_height..=expected_height).contains(&surface.height()),
+            "classic loader native text expected a physical surface no larger than {expected_width}x{expected_height} whose dimensions round up to {logical_width}x{logical_height} logical pixels at scale {}, got {}x{}",
             fonts.scale(),
             surface.width(),
             surface.height()
         );
+        let clipped_top = i32::try_from(expected_height - surface.height())
+            .map_err(|_| anyhow::anyhow!("classic loader viewport offset exceeds C++ integers"))?;
+        let physical_offset = (0, -clipped_top);
 
         let layout = loader_layout(
             logical_width as i32,
@@ -639,7 +646,7 @@ impl LoaderScreen {
             fonts.text.logical_line_height(),
             self.state.progress,
         );
-        fonts.title.draw_string_to_physical_surface(
+        fonts.title.draw_string_to_physical_surface_with_offset(
             surface,
             layout.title_anchor.0,
             layout.title_anchor.1,
@@ -647,10 +654,11 @@ impl LoaderScreen {
             TITLE_COLOR,
             TextAlign::Right,
             true,
+            physical_offset,
             gamma,
         );
         let progress = self.state.progress;
-        fonts.text.draw_string_to_physical_surface(
+        fonts.text.draw_string_to_physical_surface_with_offset(
             surface,
             layout.progress_text_anchor.0,
             layout.progress_text_anchor.1,
@@ -658,6 +666,7 @@ impl LoaderScreen {
             WHITE,
             TextAlign::Center,
             true,
+            physical_offset,
             gamma,
         );
 
@@ -678,7 +687,7 @@ impl LoaderScreen {
                 continue;
             }
             let extent = fonts.mini.measure(line, true);
-            fonts.mini.draw_to_physical_surface(
+            fonts.mini.draw_to_physical_surface_with_offset(
                 surface,
                 x,
                 y,
@@ -686,6 +695,7 @@ impl LoaderScreen {
                 WHITE,
                 TextAlign::Left,
                 true,
+                physical_offset,
                 gamma,
             );
             y += extent.1;
@@ -698,6 +708,7 @@ impl LoaderScreen {
             x,
             y,
             last_extent,
+            physical_offset,
             gamma,
         )
     }
@@ -908,6 +919,7 @@ fn draw_native_process_suffix(
     mut x: i32,
     mut y: i32,
     last_extent: Option<(i32, i32)>,
+    physical_offset: (i32, i32),
     gamma: Option<&GammaRamp>,
 ) -> Result<()> {
     let Some(process) = process else {
@@ -918,7 +930,7 @@ fn draw_native_process_suffix(
     })?;
     y -= last_height;
     x += last_width;
-    font.draw_to_physical_surface(
+    font.draw_to_physical_surface_with_offset(
         surface,
         x,
         y,
@@ -926,6 +938,7 @@ fn draw_native_process_suffix(
         WHITE,
         TextAlign::Left,
         true,
+        physical_offset,
         gamma,
     );
     Ok(())
@@ -2175,8 +2188,71 @@ mod tests {
                 .render_native_text(&mut wrong_size, &native, 320, 240, None)
                 .unwrap_err()
                 .to_string(),
-            "classic loader native text expected a 640x480 physical surface for 320x240 logical pixels at scale 2, got 641x480"
+            "classic loader native text expected a physical surface no larger than 640x480 whose dimensions round up to 320x240 logical pixels at scale 2, got 641x480"
         );
+        let mut too_short = Surface::new(638, 480, PixelFormat::Rgba8888);
+        assert_eq!(
+            first
+                .render_native_text(&mut too_short, &native, 320, 240, None)
+                .unwrap_err()
+                .to_string(),
+            "classic loader native text expected a physical surface no larger than 640x480 whose dimensions round up to 320x240 logical pixels at scale 2, got 638x480"
+        );
+    }
+
+    #[test]
+    fn native_text_accepts_a_partially_clipped_scaled_viewport() {
+        // C4Application::SetResolution rounds the GUI size up after dividing
+        // by the application scale, while CStdGL::UpdateClipper lets the
+        // scaled viewport extend past the physical framebuffer and relies on
+        // OpenGL clipping (C4Application.cpp:536-538; StdGL.cpp:398-407).
+        let loader = synthetic_screen(LoaderState::initial("Loading..."), [40, 60, 80, 255]);
+        let native = build_native_font_set(&endeavour_bytes(), 3).expect("native fonts");
+        let mut physical = Surface::new(960, 598, PixelFormat::Rgba8888);
+        let before = physical.pixels().to_vec();
+
+        loader
+            .render_native_text(&mut physical, &native, 320, 200, None)
+            .expect("the top two rows of the 3x viewport are clipped");
+
+        assert_ne!(physical.pixels(), before.as_slice());
+    }
+
+    #[test]
+    fn native_text_crops_scaled_viewport_overflow_from_the_top_and_right() {
+        let loader = synthetic_screen(LoaderState::initial("Loading..."), [40, 60, 80, 255]);
+        let native = build_native_font_set(&endeavour_bytes(), 3).expect("native fonts");
+        let mut full = Surface::new(960, 600, PixelFormat::Rgba8888);
+        for (index, pixel) in full.pixels_mut().chunks_exact_mut(4).enumerate() {
+            let x = index % 960;
+            let y = index / 960;
+            pixel.copy_from_slice(&[x as u8, y as u8, (x ^ y) as u8, 255]);
+        }
+        let mut clipped = Surface::new(958, 598, PixelFormat::Rgba8888);
+        for y in 0..598_usize {
+            let source_start = ((y + 2) * 960) * 4;
+            let target_start = y * 958 * 4;
+            clipped.pixels_mut()[target_start..target_start + 958 * 4]
+                .copy_from_slice(&full.pixels()[source_start..source_start + 958 * 4]);
+        }
+
+        loader
+            .render_native_text(&mut full, &native, 320, 200, None)
+            .expect("full viewport text");
+        loader
+            .render_native_text(&mut clipped, &native, 320, 200, None)
+            .expect("clipped viewport text");
+
+        for y in 0..598_usize {
+            let source_start = ((y + 2) * 960) * 4;
+            let target_start = y * 958 * 4;
+            assert_eq!(
+                &clipped.pixels()[target_start..target_start + 958 * 4],
+                &full.pixels()[source_start..source_start + 958 * 4],
+                "physical row {y} must be virtual row {}",
+                y + 2
+            );
+        }
     }
 
     #[test]

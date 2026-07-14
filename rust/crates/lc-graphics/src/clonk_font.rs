@@ -334,6 +334,39 @@ impl ClonkFont {
         }
     }
 
+    /// Draw each logical line at a caller-supplied physical origin while
+    /// retaining one markup stack across the complete text. Scale-native
+    /// CStdFont rendering needs this because C++ advances line positions in
+    /// GUI units before the graphics transform, which can differ from the
+    /// raster atlas's physical `line_height` (`StdDDraw2.cpp:1035-1042`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_lines_at_origins_with_gamma(
+        &self,
+        surface: &mut Surface,
+        origins: &[(i32, i32)],
+        text: &str,
+        color: [u8; 4],
+        markup: bool,
+        gamma: Option<&crate::GammaRamp>,
+    ) {
+        let mut stack: Vec<MarkupTag> = Vec::new();
+        for ((x, y), line) in origins.iter().copied().zip(
+            text.split(|character: char| character == '\n' || (markup && character == '|')),
+        ) {
+            self.draw_line(
+                surface,
+                x,
+                y,
+                line,
+                color,
+                TextAlign::Left,
+                markup,
+                &mut stack,
+                gamma,
+            );
+        }
+    }
+
     /// One `CStdFont::DrawText` call (`src/StdFont.cpp:814-934`).
     #[allow(clippy::too_many_arguments)]
     fn draw_line(

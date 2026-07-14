@@ -582,6 +582,18 @@ impl StartupMainMenu {
         participants_label: &str,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
+        self.render_native_text_with_offset(surface, fonts, participants_label, (0, 0), gamma);
+    }
+
+    /// Native caption pass with the physical offset of C++'s GL viewport.
+    pub fn render_native_text_with_offset(
+        &self,
+        surface: &mut Surface,
+        fonts: &NativeClonkFontSet,
+        participants_label: &str,
+        physical_offset: (i32, i32),
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
         let layout = main_menu_layout(
             self.size.width.max(1.0) as i32,
             self.size.height.max(1.0) as i32,
@@ -602,7 +614,7 @@ impl StartupMainMenu {
             };
             let x1 = rect.x + rect.w - 1;
             let y1 = rect.y + rect.h - 1;
-            font.draw_to_physical_surface(
+            font.draw_to_physical_surface_with_offset(
                 surface,
                 (rect.x + x1) / 2 + offset,
                 (rect.y + y1 - font.logical_line_height()) / 2 + offset,
@@ -610,13 +622,14 @@ impl StartupMainMenu {
                 color,
                 TextAlign::Center,
                 true,
+                physical_offset,
                 gamma,
             );
         }
 
         let (anchor_x, anchor_y) = layout.participants_anchor;
         let (expanded_label, _) = expand_hotkey_markup(participants_label);
-        fonts.title.draw_to_physical_surface(
+        fonts.title.draw_to_physical_surface_with_offset(
             surface,
             anchor_x,
             anchor_y,
@@ -624,11 +637,12 @@ impl StartupMainMenu {
             [255, 255, 255, 255],
             TextAlign::Right,
             true,
+            physical_offset,
             gamma,
         );
         let trademark = "LegacyClonk is a fan project based on Clonk Rage.   \
                          'Clonk' is a registered trademark of Matthes Bender.";
-        fonts.mini.draw_to_physical_surface(
+        fonts.mini.draw_to_physical_surface_with_offset(
             surface,
             layout.trademark_anchor_x,
             layout.client.y + layout.client.h - fonts.mini.logical_line_height() / 2,
@@ -636,6 +650,7 @@ impl StartupMainMenu {
             [255, 255, 255, 255],
             TextAlign::Right,
             false,
+            physical_offset,
             gamma,
         );
     }

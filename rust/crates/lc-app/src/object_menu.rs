@@ -1571,7 +1571,7 @@ pub(crate) fn validate_menu_decoration_for_area(
     Ok(())
 }
 
-fn draw_menu_decoration(
+pub(crate) fn draw_menu_decoration(
     surface: &mut Surface,
     bounds: Rect,
     decoration: &lc_engine::ObjectMenuFrameDecoration,

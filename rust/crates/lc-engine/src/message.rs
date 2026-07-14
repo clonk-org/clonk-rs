@@ -1,4 +1,4 @@
-use crate::{ObjectId, Vector2};
+use crate::{ObjectId, ObjectMenuFrameDecoration, Vector2};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -48,6 +48,8 @@ pub struct MessageSnapshot {
     pub flags: u32,
     pub width: Option<i32>,
     pub decoration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_decoration: Option<ObjectMenuFrameDecoration>,
     pub portrait: Option<String>,
 }
 
@@ -68,6 +70,7 @@ pub struct MessageSpec {
     pub flags: u32,
     pub width: Option<i32>,
     pub decoration: Option<String>,
+    pub frame_decoration: Option<ObjectMenuFrameDecoration>,
     pub portrait: Option<String>,
 }
 
@@ -94,6 +97,7 @@ struct Message {
     flags: u32,
     width: Option<i32>,
     decoration: Option<String>,
+    frame_decoration: Option<ObjectMenuFrameDecoration>,
     portrait: Option<String>,
     remaining: i32,
 }
@@ -111,6 +115,7 @@ impl Message {
             flags: self.flags,
             width: self.width,
             decoration: self.decoration.clone(),
+            frame_decoration: self.frame_decoration.clone(),
             portrait: self.portrait.clone(),
         }
     }
@@ -189,6 +194,7 @@ impl MessageManager {
             flags: spec.flags,
             width: spec.width,
             decoration: spec.decoration,
+            frame_decoration: spec.frame_decoration,
             portrait: spec.portrait,
             remaining,
         });
@@ -244,6 +250,7 @@ impl MessageManager {
                 flags: persisted.snapshot.flags,
                 width: persisted.snapshot.width,
                 decoration: persisted.snapshot.decoration,
+                frame_decoration: persisted.snapshot.frame_decoration,
                 portrait: persisted.snapshot.portrait,
                 remaining: persisted.remaining,
             })
@@ -303,6 +310,7 @@ mod tests {
             flags: FLAG_BOTTOM | FLAG_LEFT | FLAG_X_REL | FLAG_WIDTH_REL,
             width: Some(35),
             decoration: Some("DECO".to_string()),
+            frame_decoration: None,
             portrait: Some("Portrait:SCLK::0000ff::1".to_string()),
         }
     }
@@ -319,5 +327,52 @@ mod tests {
         messages.add_message(tutorial_message(""));
 
         assert!(messages.snapshot().is_empty());
+    }
+
+    #[test]
+    fn frame_decoration_survives_snapshot_persistence_and_legacy_deserialization() {
+        let frame_decoration = ObjectMenuFrameDecoration {
+            source_definition: "DECO".to_string(),
+            background_color: 0x8032_3232,
+            border_top: 0,
+            border_left: 0,
+            border_right: 0,
+            border_bottom: 0,
+            top: None,
+            top_right: None,
+            right: None,
+            bottom_right: None,
+            bottom: None,
+            bottom_left: None,
+            left: None,
+            top_left: None,
+        };
+        let mut spec = tutorial_message("@Welcome to the world of Clonk.");
+        spec.frame_decoration = Some(frame_decoration.clone());
+        let mut messages = MessageManager::new();
+        messages.add_message(spec);
+
+        assert_eq!(
+            messages.snapshot()[0].frame_decoration,
+            Some(frame_decoration.clone())
+        );
+
+        let persisted = serde_json::to_vec(&messages.persisted()).expect("messages serialize");
+        let persisted = serde_json::from_slice(&persisted).expect("messages deserialize");
+        let mut restored = MessageManager::new();
+        restored.restore(persisted);
+        assert_eq!(
+            restored.snapshot()[0].frame_decoration,
+            Some(frame_decoration)
+        );
+
+        let mut legacy = serde_json::to_value(&restored.snapshot()[0]).expect("snapshot encodes");
+        legacy
+            .as_object_mut()
+            .expect("snapshot is an object")
+            .remove("frame_decoration");
+        let legacy: MessageSnapshot =
+            serde_json::from_value(legacy).expect("legacy snapshot remains readable");
+        assert!(legacy.frame_decoration.is_none());
     }
 }

@@ -571,6 +571,10 @@ pub struct ScenarioLoaderHead {
     origin: Option<String>,
     definition_modules: Vec<String>,
     local_only: bool,
+    effective_min_players: i32,
+    max_players: i32,
+    save_game: bool,
+    replay: bool,
     savegame_definition_override: ScenarioSavegameDefinitionOverride,
     scenario_title: String,
 }
@@ -599,6 +603,10 @@ impl ScenarioLoaderHead {
             origin: manifest.core.head.origin.clone(),
             definition_modules: manifest.definition_specs,
             local_only: manifest.core.definitions.local_only,
+            effective_min_players: legacy_effective_min_players(&manifest.core),
+            max_players: manifest.core.head.max_player,
+            save_game: manifest.core.head.save_game,
+            replay: manifest.core.head.replay,
             savegame_definition_override,
             scenario_title,
         })
@@ -624,6 +632,23 @@ impl ScenarioLoaderHead {
 
     pub fn local_only(&self) -> bool {
         self.local_only
+    }
+
+    /// `C4Scenario::GetMinPlayer`, cached by the startup scenario entry.
+    pub fn min_players(&self) -> i32 {
+        self.effective_min_players
+    }
+
+    pub fn max_players(&self) -> i32 {
+        self.max_players
+    }
+
+    pub fn is_save_game(&self) -> bool {
+        self.save_game
+    }
+
+    pub fn is_replay(&self) -> bool {
+        self.replay
     }
 
     pub fn savegame_definition_override(&self) -> &ScenarioSavegameDefinitionOverride {
@@ -11515,6 +11540,32 @@ RandomTeamCount=2
         let group = Group::open(directory.path()).expect("scenario group");
         let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
         assert_eq!(head.loader().configured_specification(), "LoaderMixed*");
+    }
+
+    #[test]
+    fn loader_head_retains_cpp_can_open_player_constraints() {
+        let directory = tempdir().expect("scenario directory");
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            concat!(
+                "[Head]\n",
+                "MinPlayer=0\n",
+                "MaxPlayer=0\n",
+                "SaveGame=1\n",
+                "Replay=0\n",
+                "\n",
+                "[Game]\n",
+                "Mode=1\n",
+            ),
+        )
+        .expect("scenario core");
+        let group = Group::open(directory.path()).expect("scenario group");
+
+        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        assert_eq!(head.min_players(), 2, "melee derives a two-player floor");
+        assert_eq!(head.max_players(), 0);
+        assert!(head.is_save_game());
+        assert!(!head.is_replay());
     }
 
     #[test]
