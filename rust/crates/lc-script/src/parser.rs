@@ -319,12 +319,7 @@ impl<'a> Parser<'a> {
         self.expect_keyword(Keyword::Func, "expected 'func' declaration")?;
         // Check for optional & indicating reference return type
         let returns_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
-        let name_token = self.expect_identifier("expected function name")?;
-        let name = if let TokenKind::Identifier(name) = name_token.kind.clone() {
-            name
-        } else {
-            unreachable!()
-        };
+        let (name, _) = self.expect_identifier("expected function name")?;
         self.expect_symbol(Symbol::LParen, "expected '(' after function name")?;
         let params = self.parse_parameter_list()?;
         self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
@@ -365,12 +360,7 @@ impl<'a> Parser<'a> {
         }
         self.expect_keyword(Keyword::Func, "expected 'func' declaration")?;
         let returns_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
-        let name_token = self.expect_identifier("expected function name")?;
-        let name = if let TokenKind::Identifier(name) = name_token.kind.clone() {
-            name
-        } else {
-            unreachable!()
-        };
+        let (name, _) = self.expect_identifier("expected function name")?;
         self.expect_symbol(Symbol::LParen, "expected '(' after function name")?;
         let params = self.parse_parameter_list()?;
         self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
@@ -419,11 +409,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_old_style_function(&mut self, access: AccessLevel) -> Result<Function, ParseError> {
-        let name_token = self.expect_identifier("expected function declaration")?;
-        let name = match name_token.kind {
-            TokenKind::Identifier(name) | TokenKind::C4Id(name) => name,
-            _ => unreachable!(),
-        };
+        let (name, name_token) = self.expect_identifier("expected function declaration")?;
         if self.strict_level >= 2 {
             return Err(ParseError::new(
                 format!("declaration expected, but found identifier '{name}'"),
@@ -455,11 +441,7 @@ impl<'a> Parser<'a> {
         &mut self,
         access: AccessLevel,
     ) -> Result<(Function, Option<ParseError>), ParseError> {
-        let name_token = self.expect_identifier("expected function declaration")?;
-        let name = match name_token.kind {
-            TokenKind::Identifier(name) | TokenKind::C4Id(name) => name,
-            _ => unreachable!(),
-        };
+        let (name, name_token) = self.expect_identifier("expected function declaration")?;
         if self.strict_level >= 2 {
             return Err(ParseError::new(
                 format!("declaration expected, but found identifier '{name}'"),
@@ -889,12 +871,7 @@ impl<'a> Parser<'a> {
 
         loop {
             // Parse one variable
-            let name_token = self.expect_identifier("expected variable name")?;
-            let name = if let TokenKind::Identifier(name) = name_token.kind {
-                name
-            } else {
-                unreachable!()
-            };
+            let (name, _) = self.expect_identifier("expected variable name")?;
             let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
                 // Use parse_assignment() instead of parse_expression() to avoid comma operator
                 // In variable declarations, commas separate variables, not comma expressions
@@ -1082,12 +1059,7 @@ impl<'a> Parser<'a> {
             self.consume()?; // consume 'var'
 
             // Parse the identifier
-            let name_token = self.expect_identifier("expected variable name")?;
-            let variable = if let TokenKind::Identifier(name) = name_token.kind {
-                name
-            } else {
-                unreachable!()
-            };
+            let (variable, _) = self.expect_identifier("expected variable name")?;
 
             // Check next token to distinguish for-in from C-style
             if self.consume_if_keyword(Keyword::In)?.is_some() {
@@ -1120,12 +1092,7 @@ impl<'a> Parser<'a> {
 
                 // Parse additional comma-separated variables
                 while self.consume_if_symbol(Symbol::Comma)?.is_some() {
-                    let name_token = self.expect_identifier("expected variable name")?;
-                    let name = if let TokenKind::Identifier(name) = name_token.kind {
-                        name
-                    } else {
-                        unreachable!()
-                    };
+                    let (name, _) = self.expect_identifier("expected variable name")?;
                     let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
                         // Use parse_assignment() instead of parse_expression() to avoid comma operator
                         // In variable declarations, commas separate variables, not comma expressions
@@ -1833,29 +1800,18 @@ impl<'a> Parser<'a> {
                 self.expect_symbol(Symbol::RBracket, "expected ']' after index expression")?;
                 expr = Expr::Index(Box::new(expr), Box::new(index));
             } else if self.consume_if_symbol(Symbol::Dot)?.is_some() {
-                let token = self.expect_identifier("expected property name after '.'")?;
-                let name = if let TokenKind::Identifier(name) = token.kind {
-                    name
-                } else {
-                    unreachable!()
-                };
+                let (name, _) = self.expect_identifier("expected property name after '.'")?;
                 expr = Expr::Property(Box::new(expr), name);
             } else if self.consume_if_symbol(Symbol::Arrow)?.is_some() {
                 // Check for optional method call: ->~MethodName()
                 let is_optional = self.consume_if_symbol(Symbol::Tilde)?.is_some();
-                let token = self.expect_identifier("expected property/method name after '->'")?;
-                let mut name = match token.kind {
-                    TokenKind::Identifier(name) | TokenKind::C4Id(name) => name,
-                    _ => unreachable!(),
-                };
+                let (mut name, token) =
+                    self.expect_identifier_or_c4id("expected property/method name after '->'")?;
 
                 // Check for scope resolution: ->DefID::Method
                 if self.consume_if_symbol(Symbol::ColonColon)?.is_some() {
-                    let method_token = self.expect_identifier("expected method name after '::'")?;
-                    let method_name = match method_token.kind {
-                        TokenKind::Identifier(method) | TokenKind::C4Id(method) => method,
-                        _ => unreachable!(),
-                    };
+                    let (method_name, _) =
+                        self.expect_identifier_or_c4id("expected method name after '::'")?;
                     // Combine as "DefID::Method"
                     name = format!("{}::{}", name, method_name);
                 }
@@ -2111,31 +2067,44 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_identifier(&mut self, message: &str) -> Result<Token, ParseError> {
+    fn expect_identifier(&mut self, message: &str) -> Result<(String, Token), ParseError> {
         let token = self.peek()?.clone();
-        match token.kind {
-            TokenKind::Identifier(_) | TokenKind::C4Id(_) => {
-                self.consume()?;
-                Ok(token)
-            }
+        let name = match &token.kind {
+            TokenKind::Identifier(name) => name.clone(),
             // C4Aul keywords are contextual: the C++ tokenizer emits plain
             // ATT_IDTF for every word, so names like `var func, objhgt`
-            // (planet/System.c4g/Commits.c:269) are legal. Normalize to an
-            // identifier token so callers extract the name uniformly.
-            TokenKind::Keyword(keyword) => {
-                self.consume()?;
-                Ok(Token::new(
-                    TokenKind::Identifier(keyword.lexeme().to_string()),
+            // (planet/System.c4g/Commits.c:269) are legal.
+            TokenKind::Keyword(keyword) => keyword.lexeme().to_string(),
+            _ => {
+                return Err(ParseError::new(
+                    message.to_string(),
                     token.line,
                     token.column,
                 ))
             }
-            _ => Err(ParseError::new(
-                message.to_string(),
-                token.line,
-                token.column,
-            )),
-        }
+        };
+        self.consume()?;
+        Ok((name, token))
+    }
+
+    fn expect_identifier_or_c4id(
+        &mut self,
+        message: &str,
+    ) -> Result<(String, Token), ParseError> {
+        let token = self.peek()?.clone();
+        let name = match &token.kind {
+            TokenKind::Identifier(name) | TokenKind::C4Id(name) => name.clone(),
+            TokenKind::Keyword(keyword) => keyword.lexeme().to_string(),
+            _ => {
+                return Err(ParseError::new(
+                    message.to_string(),
+                    token.line,
+                    token.column,
+                ))
+            }
+        };
+        self.consume()?;
+        Ok((name, token))
     }
 
     fn check_keyword(&mut self, keyword: Keyword) -> Result<bool, ParseError> {
@@ -2243,12 +2212,8 @@ impl<'a> Parser<'a> {
 
         loop {
             // Parse variable name
-            let name_token = self.expect_identifier("expected variable name in declaration")?;
-            let name = if let TokenKind::Identifier(name) = name_token.kind {
-                name
-            } else {
-                unreachable!()
-            };
+            let (name, name_token) =
+                self.expect_identifier("expected variable name in declaration")?;
 
             // Check for initializer — parsed BELOW the comma level so the
             // declaration-list comma stays with this loop (`static const

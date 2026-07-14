@@ -1,4 +1,14 @@
-use lc_script::Script;
+use lc_script::{Engine, Script, Value};
+
+fn compile_without_diagnostics(source: &str) -> Script {
+    let script = Script::compile(source).expect("script loads");
+    assert!(
+        script.parse_diagnostics().is_empty(),
+        "unexpected diagnostics: {:?}",
+        script.parse_diagnostics()
+    );
+    script
+}
 
 #[test]
 fn test_c4id_in_scope_resolution() {
@@ -13,12 +23,7 @@ fn test_c4id_in_scope_resolution() {
         }
     "#;
 
-    let result = Script::compile(source);
-    assert!(
-        result.is_ok(),
-        "Should parse C4ID in scope resolution: {:?}",
-        result.err()
-    );
+    compile_without_diagnostics(source);
 }
 
 #[test]
@@ -34,12 +39,7 @@ fn test_c4id_after_arrow_operator() {
         }
     "#;
 
-    let result = Script::compile(source);
-    assert!(
-        result.is_ok(),
-        "Should parse C4ID after -> operator: {:?}",
-        result.err()
-    );
+    compile_without_diagnostics(source);
 }
 
 #[test]
@@ -55,10 +55,64 @@ fn test_complex_c4id_scope_resolution() {
         }
     "#;
 
-    let result = Script::compile(source);
-    assert!(
-        result.is_ok(),
-        "Should parse complex C4ID scope resolution: {:?}",
-        result.err()
+    compile_without_diagnostics(source);
+}
+
+#[test]
+fn c4id_shaped_names_are_quarantined_without_panicking_or_dropping_later_code() {
+    for (bad_declaration, expected_message, broken_is_callable) in [
+        ("func TEST () { return 1; }", "function name", false),
+        ("func Broken() { var ABCD; }", "variable name", true),
+        (
+            "func Broken() { for (var COIN in []) {} }",
+            "variable name",
+            true,
+        ),
+        (
+            "#strict 3\nfunc Broken() { var x = {}; x.FLNT = 1; }",
+            "property name",
+            true,
+        ),
+        ("static ABCD;", "variable name", false),
+        ("static const FLNT = 1;", "variable name", false),
+    ] {
+        let source = format!("{bad_declaration}\nfunc Good() {{ return 7; }}");
+        let script = Script::compile(&source)
+            .unwrap_or_else(|error| panic!("recoverable name error aborted the script: {error}"));
+        assert!(
+            script
+                .parse_diagnostics()
+                .iter()
+                .any(|error| error.message().contains(expected_message)),
+            "missing {expected_message:?} diagnostic for {bad_declaration:?}: {:?}",
+            script.parse_diagnostics()
+        );
+
+        let mut engine = Engine::new();
+        engine.add_script(script);
+        assert_eq!(
+            engine
+                .call("Good", &[])
+                .expect("the later declaration remains callable"),
+            Value::Int(7)
+        );
+        if broken_is_callable {
+            let error = engine
+                .call("Broken", &[])
+                .expect_err("the broken function retains a parse-error sentinel");
+            assert!(error.to_string().contains("parse error"));
+        }
+    }
+}
+
+#[test]
+fn adjacent_c4id_shaped_function_names_and_c4id_values_remain_valid() {
+    let mut engine = Engine::new();
+    engine
+        .load_script("func TEST() { return FLNT; }")
+        .expect("the delimiter-sensitive identifier form loads");
+    assert_eq!(
+        engine.call("TEST", &[]).expect("TEST executes"),
+        Value::C4Id("FLNT".to_string())
     );
 }
