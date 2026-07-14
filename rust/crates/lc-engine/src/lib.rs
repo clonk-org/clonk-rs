@@ -3969,6 +3969,14 @@ pub struct ObjectUpdate {
     pub own_mass: Option<i32>,
     #[serde(default)]
     pub crew_member: Option<bool>,
+    /// Live C4Object::Info rank write. Some(Some(rank)) attaches/updates
+    /// rank data; Some(None) clears the linked info rank.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_double_option"
+    )]
+    pub info_rank: Option<Option<i32>>,
     /// C4Object::Select overwrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected: Option<bool>,
@@ -4282,6 +4290,7 @@ impl ObjectUpdate {
             && self.controller.is_none()
             && self.category.is_none()
             && self.crew_member.is_none()
+            && self.info_rank.is_none()
             && self.selected.is_none()
             && self.alive.is_none()
             && self.entrance_status.is_none()
@@ -16722,7 +16731,7 @@ impl Engine {
                 .as_ref()
                 .map(|names| names.bytes().filter(|&b| b == b'\n').count() as i32)
                 .unwrap_or(0),
-            self.idle_crew_counts(),
+            self.idle_crew_rank_pools(),
         )
         .with_sky_adjustment(sky_adjustment)
     }
@@ -21503,6 +21512,7 @@ impl Engine {
             owner,
             controller,
             crew_member,
+            info_rank,
             crew_disabled,
             portrait_source,
             portrait_name,
@@ -21832,6 +21842,7 @@ impl Engine {
             // (C4Object.cpp:3792 and UpdateGraphics at :381-402).
             self.update_solid_mask(index);
         }
+        self.apply_info_rank_update(object_id, info_rank);
         self.update_sector_for_index(index);
         if energy_died {
             self.assign_death(index, false)?;
@@ -21861,6 +21872,24 @@ impl Engine {
         self.check_game_over()?;
 
         Ok(())
+    }
+
+    fn apply_info_rank_update(&mut self, object_id: ObjectId, update: Option<Option<i32>>) {
+        let Some(rank) = update else {
+            return;
+        };
+        match rank {
+            Some(rank) => {
+                Rc::make_mut(&mut self.crew_ranks).insert(object_id.as_u64(), rank);
+                if let Some(info) = Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id) {
+                    info.rank = rank;
+                }
+            }
+            None => {
+                Rc::make_mut(&mut self.crew_ranks).remove(&object_id.as_u64());
+                Rc::make_mut(&mut self.crew_object_infos).remove(&object_id);
+            }
+        }
     }
 
     fn trigger_action_callbacks(
@@ -22165,6 +22194,9 @@ impl Engine {
         let ocf_override = object_update
             .as_ref()
             .and_then(|update| update.ocf_override);
+        let info_rank_update = object_update
+            .as_ref()
+            .and_then(|update| update.info_rank);
 
         if !host_landscape_ops.is_empty() {
             self.apply_landscape_operations(host_landscape_ops);
@@ -22417,6 +22449,7 @@ impl Engine {
                 object.clamp_velocity(&self.physics);
             }
         }
+        self.apply_info_rank_update(object_id, info_rank_update);
         self.update_sector_for_index(index);
 
         if energy_died {
@@ -22624,6 +22657,10 @@ impl Engine {
                 .update
                 .as_ref()
                 .is_some_and(ObjectUpdate::refreshes_ocf_like_cpp);
+            let info_rank_update = outcome
+                .update
+                .as_ref()
+                .and_then(|update| update.info_rank);
             let mut energy_died = false;
             let mut delayed_docon_construction = None;
             // FnChangeDef swaps INLINE (C4Object.cpp:1205-1231): apply the
@@ -22694,6 +22731,7 @@ impl Engine {
                     effect_events.extend(object.mark_destroyed());
                 }
             }
+            self.apply_info_rank_update(object_id, info_rank_update);
             self.update_sector_for_index(index);
             if energy_died {
                 // C4Object::DoEnergy kills synchronously when a nonzero
@@ -31752,19 +31790,28 @@ impl Engine {
         definition.set_chopable(core.chopable);
     }
 
-    /// Idle crew infos per (player, definition id) — the GetIdle pool
-    /// (C4ObjectInfoList.cpp:113-142) visible to MakeCrewMember's host
-    /// seam so it draws the New name Random exactly when C++ does.
-    fn idle_crew_counts(&self) -> HashMap<(i32, String), u32> {
-        let mut counts = HashMap::new();
+    /// Idle crew infos per (player, definition id) — the GetIdle pool in
+    /// roster order, retaining experience and rank so MakeCrewMember can
+    /// perform C++'s first-highest-experience choice inside a live callback.
+    fn idle_crew_rank_pools(&self) -> HashMap<(i32, String), Vec<(i32, i32)>> {
+        let mut pools: HashMap<(i32, String), Vec<(i32, i32)>> = HashMap::new();
         for (&number, roster) in &self.crew_rosters {
             for info in roster {
-                if !info.in_action {
-                    *counts.entry((number, info.id.clone())).or_insert(0u32) += 1;
+                if info.participation == 1
+                    && !info.in_action
+                    && !info.has_died
+                    && self
+                        .definitions
+                        .contains_key(&DefinitionId::from(info.id.as_str()))
+                {
+                    pools
+                        .entry((number, info.id.clone()))
+                        .or_default()
+                        .push((info.experience, info.rank));
                 }
             }
         }
-        counts
+        pools
     }
 
     /// C4Def::IncludeDefinition (C4Def.cpp:1358-1361): a definition

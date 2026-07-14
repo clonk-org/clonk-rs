@@ -4042,3 +4042,187 @@ fn gold_rush_real_anvil_forges_a_wire_roll_from_its_metal_contents() {
         "ANVL::Forging exits the composed wire roll"
     );
 }
+
+#[test]
+fn knights_lance_rank_five_target_collision_matches_cpp() {
+    // The shipped attached lance reads its rider's C4ObjectInfo rank while
+    // aiming, then its phase callback punches prey at vertex one
+    // (Lance.c4d/Attached.c4d/Script.c:24-55). Camp loads the unmodified
+    // Objects+Knights definition stack without auto-equipping the crew.
+    let mut engine = load_installed_scenario("Knights.c4f/Camp.c4s", 0);
+    let crew = ["Rank Five Rider", "Rank Five Victim"]
+        .into_iter()
+        .map(|name| lc_engine::player_file::CrewInfo {
+            id: "KNIG".to_owned(),
+            name: name.to_owned(),
+            rank: 5,
+            experience: 0,
+            participation: 1,
+            in_action: false,
+            has_died: false,
+        })
+        .collect();
+    let owner = engine
+        .join_player(JoinPlayerConfig {
+            name: "Lance parity".to_owned(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
+            team: Some(1),
+            color_dw: 0xff_00_00,
+            pref_color: 0,
+            pref_position: 0,
+            crew,
+            control_style: false,
+            auto_context_menu: false,
+            startup_player_count: 1,
+        })
+        .expect("rank-five Knights player joins")
+        .initialized()
+        .expect("team one initializes immediately")
+        .number;
+
+    let mut knights = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .filter(|object| {
+            object.owner == owner && object.crew_member && object.definition_id == "KNIG"
+        })
+        .map(|object| object.id)
+        .collect::<Vec<_>>();
+    knights.sort_unstable_by_key(|id| id.as_u64());
+    assert_eq!(knights.len(), 2, "Camp recruits both player-file knights");
+    for knight in &knights {
+        assert_eq!(
+            engine.crew_object_info(*knight).map(|info| info.rank),
+            Some(5),
+            "each live KNIG carries its rank-five C4ObjectInfo"
+        );
+    }
+    let rider = knights[0];
+    let victim = knights[1];
+    engine
+        .apply_object_update(
+            rider,
+            ObjectUpdate::new().with_position(Vector2::new(9_000, 9_000)),
+        )
+        .expect("move the rider away from the collision point");
+    engine
+        .apply_object_update(
+            victim,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(10_000, 9_973))
+                .with_action("Walk"),
+        )
+        .expect("place the victim at attached-lance vertex one");
+    assert_eq!(
+        engine
+            .object_snapshot(victim)
+            .expect("rank-five victim exists")
+            .energy,
+        55_000,
+        "fair-crew promotion raises the real KNIG energy before the hit"
+    );
+
+    let mut lance_action = ActionState::new("Lance");
+    lance_action.target = Some(rider);
+    let lance = engine
+        .spawn_object(
+            SpawnConfig::new("LNCA")
+                .with_position(Vector2::new(10_000, 10_000))
+                .with_owner(owner)
+                .with_action(lance_action)
+                .with_local_vars(std::collections::HashMap::from([
+                    ("high_target".to_owned(), Value::Int(0)),
+                    ("last_x".to_owned(), Value::Int(9_969)),
+                ]))
+                .with_loaded(true),
+        )
+        .expect("the real attached lance spawns");
+
+    // Lancing computes speed_x=31, draws Random(16), reads GetRank(rider)
+    // as 5, and uses divisor BoundBy((5-3)/2,1,6)=1. The resulting angle
+    // always clamps to SetRDir(12) at this speed.
+    let mut expected_rng = engine.debug_rng_clone();
+    expected_rng.random(16);
+    let lance_index = engine.find_object_index(lance).expect("lance index");
+    assert_eq!(
+        engine
+            .call_object_function(lance_index, "Lancing", Vec::new())
+            .expect("the shipped Lancing callback completes"),
+        Value::Int(1)
+    );
+    let aimed_lance = engine.object_snapshot(lance).expect("aimed lance exists");
+    assert_eq!(
+        aimed_lance.rotation_velocity,
+        Some(math::itofix_prec(12, 10)),
+        "rank-five Lancing applies the C++ angular velocity"
+    );
+    assert_eq!(
+        aimed_lance.local_vars.get("speed_x"),
+        Some(&Value::Int(31))
+    );
+    assert_eq!(engine.debug_rng_clone(), expected_rng);
+
+    // Classic script evaluates both operands of this legacy `||`, so the
+    // non-Ride victim still consumes Random(3). KNIG's QueryCatchBlow and
+    // inherited CLNK CatchBlow consume the next two draws; an unshielded
+    // 15% Punch subtracts 15_000 energy and tumbles.
+    expected_rng.random(3);
+    expected_rng.random(50_000);
+    expected_rng.random(5);
+    assert_eq!(
+        engine
+            .call_object_function(lance_index, "Targeting", Vec::new())
+            .expect("the shipped Targeting callback completes"),
+        Value::Int(1)
+    );
+    let hit_victim = engine.object_snapshot(victim).expect("punched victim exists");
+    assert_eq!(hit_victim.energy, 40_000);
+    assert_eq!(hit_victim.action.name, "Tumble");
+    assert_eq!(
+        engine
+            .object_snapshot(lance)
+            .expect("lance survives its hit")
+            .local_vars
+            .get("speed_x"),
+        Some(&Value::Int(0))
+    );
+    assert_eq!(engine.debug_rng_clone(), expected_rng);
+
+    // C4Object::GrabInfo moves the same live Info pointer. Verify the
+    // nonzero rank, not merely the fresh-rank-zero case, is visible on the
+    // recipient immediately and remains there after the callback folds.
+    let rank_probe = Definition::from_script(
+        "RKPR",
+        "Rank transfer probe",
+        "#strict 2\nfunc Take(obj) { return [GrabObjectInfo(obj), GetRank(), GetRank(obj)]; }\nfunc Read() { return GetRank(); }",
+    )
+    .expect("rank transfer probe compiles");
+    engine
+        .register_definition(rank_probe)
+        .expect("rank transfer probe registers");
+    let rank_probe = engine
+        .spawn_object(SpawnConfig::new("RKPR").with_owner(owner))
+        .expect("rank transfer probe spawns");
+    let rank_probe_index = engine
+        .find_object_index(rank_probe)
+        .expect("rank transfer probe index");
+    assert_eq!(
+        engine
+            .call_object_function(
+                rank_probe_index,
+                "Take",
+                vec![Value::Object(victim.as_u64())],
+            )
+            .expect("rank-five info transfer completes"),
+        Value::Array(vec![Value::Bool(true), Value::Int(5), Value::Nil])
+    );
+    assert_eq!(
+        engine
+            .call_object_function(rank_probe_index, "Read", Vec::new())
+            .expect("transferred rank remains linked"),
+        Value::Int(5)
+    );
+}

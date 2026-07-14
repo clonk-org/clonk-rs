@@ -25257,6 +25257,61 @@ func Recruitment(iPlr) {
         );
     }
 
+    #[test]
+    fn get_rank_tracks_same_call_make_crew_and_info_transfer() {
+        let script = r#"#strict 2
+func Probe() {
+    var donor = CreateObject(DONR, 0, 0, 0);
+    var before = GetRank(donor);
+    var made = MakeCrewMember(donor, 0);
+    var made_rank = GetRank(donor);
+    var grabbed = GrabObjectInfo(donor);
+    return [before, made, made_rank, grabbed, GetRank(), GetRank(donor)];
+}
+func ReadRank() { return GetRank(); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Rank owner"))
+            .expect("rank owner registers");
+        let receiver = Definition::from_script("RCVR", "Receiver", script)
+            .expect("GetRank transfer probe compiles");
+        engine
+            .register_definition(receiver)
+            .expect("receiver registers");
+        let mut donor = simple_definition("DONR");
+        donor.set_crew_member(true);
+        engine
+            .register_definition(donor)
+            .expect("crew donor registers");
+        let receiver = engine
+            .spawn_object(SpawnConfig::new("RCVR").with_owner(0))
+            .expect("receiver spawns");
+        let receiver_index = engine
+            .find_object_index(receiver)
+            .expect("receiver index");
+
+        assert_eq!(
+            engine
+                .call_object_function(receiver_index, "Probe", Vec::new())
+                .expect("same-call rank probe runs"),
+            Value::Array(vec![
+                Value::Nil,
+                Value::Bool(true),
+                Value::Int(0),
+                Value::Bool(true),
+                Value::Int(0),
+                Value::Nil,
+            ])
+        );
+        assert_eq!(
+            engine
+                .call_object_function(receiver_index, "ReadRank", Vec::new())
+                .expect("transferred rank persists after the callback"),
+            Value::Int(0)
+        );
+    }
+
     // FnGrabObjectInfo (C4Script.cpp:2170-2176) -> C4Object::GrabInfo
     // (C4Object.cpp:5696-5726): `this` takes pFrom's info section; the
     // GoldRush TRPR Recruitment creates a temp COWB, grabs its info and
@@ -25284,6 +25339,9 @@ func Recruit() {
 "#;
 
         let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Trapper owner"))
+            .expect("trapper owner registers");
         let mut trapper =
             Definition::from_script("TRAP", "Trapper", script).expect("script compiles");
         trapper.set_crew_member(true);

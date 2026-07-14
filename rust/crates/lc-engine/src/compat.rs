@@ -935,11 +935,11 @@ pub struct HostWorldContext {
     structures_need_energy: bool,
     /// Game.Names newline count (the New() fallback name range).
     standard_name_newlines: i32,
-    /// Idle crew infos per (player, definition) — C4ObjectInfoList::GetIdle
-    /// hits skip the New name draw (C4Player.cpp:1186-1195). Consumed
-    /// entries decrement so several MakeCrewMember calls in one script
-    /// call keep drawing like C++.
-    idle_crew_counts: RefCell<HashMap<(i32, String), u32>>,
+    /// Idle crew infos per (player, definition), in roster order as
+    /// (experience, rank). C4ObjectInfoList::GetIdle picks the first
+    /// highest-experience entry; consuming it exposes the next one to later
+    /// MakeCrewMember calls in the same script callback.
+    idle_crew_ranks: RefCell<HashMap<(i32, String), Vec<(i32, i32)>>>,
     /// Names of loaded particle defs (C4ParticleSystem::GetDef,
     /// C4Particles.cpp:465-473). `None` = no registry attached (legacy
     /// fixture contexts): name lookups behave permissively. `Some` = engine
@@ -1002,7 +1002,7 @@ impl Default for HostWorldContext {
             scenario_script_counter: 0,
             structures_need_energy: false,
             standard_name_newlines: 0,
-            idle_crew_counts: RefCell::new(HashMap::new()),
+            idle_crew_ranks: RefCell::new(HashMap::new()),
             team_home_base_rule: false,
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
@@ -1044,10 +1044,10 @@ impl HostWorldContext {
     pub(crate) fn with_crew_name_sources(
         mut self,
         standard_name_newlines: i32,
-        idle_crew_counts: HashMap<(i32, String), u32>,
+        idle_crew_ranks: HashMap<(i32, String), Vec<(i32, i32)>>,
     ) -> Self {
         self.standard_name_newlines = standard_name_newlines;
-        self.idle_crew_counts = RefCell::new(idle_crew_counts);
+        self.idle_crew_ranks = RefCell::new(idle_crew_ranks);
         self
     }
 
@@ -1185,7 +1185,7 @@ impl HostWorldContext {
             scenario_script_counter: 0,
             structures_need_energy: false,
             standard_name_newlines: 0,
-            idle_crew_counts: RefCell::new(HashMap::new()),
+            idle_crew_ranks: RefCell::new(HashMap::new()),
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
             scenario_script: None,
@@ -7225,6 +7225,32 @@ fn get_hi_rank(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetRank (C4Script.cpp:1378-1383): read the linked C4ObjectInfo rank.
+/// A null object defaults to the executing object; objects without Info and
+/// global calls without an object return nil.
+fn get_rank(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = args
+        .first()
+        .map(|value| parse_object_reference_argument(value, "GetRank", "obj"))
+        .transpose()?
+        .flatten();
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(target) = target.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Nil);
+        };
+        let rank = match context.object_scope(target) {
+            Some(scope) => scope.info_rank(),
+            None => context.world.crew_rank(target.as_u64()),
+        };
+        Ok(rank.map(Value::Int).unwrap_or(Value::Nil))
+    })
+}
+
 fn get_crew(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 2 {
         return Err(RuntimeError::new(
@@ -9170,6 +9196,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlrMagic", get_plr_magic);
     script.register_host_function("GetCrew", get_crew);
     script.register_host_function("GetHiRank", get_hi_rank);
+    script.register_host_function("GetRank", get_rank);
     script.register_host_function("SetComponent", set_component);
     script.register_host_function("GetDefinition", get_definition);
     script.register_host_function("Value", definition_value);
@@ -14034,12 +14061,9 @@ fn get_mass(args: &[Value]) -> Result<Value, RuntimeError> {
 /// FnGrabObjectInfo (C4Script.cpp:2170-2176) -> C4Object::GrabInfo
 /// (C4Object.cpp:5696-5726): `pTo` (default: the caller) takes pFrom's
 /// info section, retires its own, and re-registers as crew. The port
-/// keys "has an info" off the crew flag; the transferred payload is the
-/// crew flag, the donor's portrait source and the info's permanent
-/// physicals (the GetPhysical info fallback, C4Object.cpp:2118-2134).
-/// The name/rank/experience payload of C4ObjectInfo is not modeled
-/// (documented gap: GetName reads definition metadata) — GoldRush TRPR
-/// Recruitment, Trapper.c4d/Script.c:19-25.
+/// The transferred payload includes the live info rank, crew flag, donor
+/// portrait source and permanent physicals (the GetPhysical info fallback,
+/// C4Object.cpp:2118-2134). Name/experience remain outside this host seam.
 fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
     let from = parse_object_reference_argument(
         args.first().unwrap_or(&Value::Nil),
@@ -14072,13 +14096,13 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(false));
         }
         // only if the other object has an info (C4Object.cpp:5703)
-        let (from_has_info, donor_physical) = context
+        let (donor_rank, donor_physical) = context
             .object_scope(from)
-            .map(|scope| (scope.crew_member, scope.info_physical))
-            .unwrap_or((false, None));
-        if !from_has_info {
+            .map(|scope| (scope.info_rank(), scope.info_physical))
+            .unwrap_or((None, None));
+        let Some(donor_rank) = donor_rank else {
             return Ok(Value::Bool(false));
-        }
+        };
         // the grabbed info carries the donor's portrait
         // (C4Object.cpp:5715 Info transfer; portrait rides the info)
         let donor_portrait = context
@@ -14098,6 +14122,7 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
         // C4Object.cpp:5710-5715)
         if let Some(scope) = context.object_scope_mut(from) {
             scope.set_crew_member(false);
+            scope.set_info_rank(None);
             scope.info_physical = None;
             scope.record_physicals();
         }
@@ -14107,6 +14132,7 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
         // C4Object.cpp:2118-2134)
         if let Some(scope) = context.object_scope_mut(to) {
             scope.set_crew_member(true);
+            scope.set_info_rank(Some(donor_rank));
             scope.info_physical = donor_physical;
             scope.record_physicals();
             if let Some((source, name)) = donor_portrait {
@@ -14168,52 +14194,65 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         // that must fire INSIDE this call.
         let already_crew = context
             .object_context()
-            .map(|object| context.world.crew_ranks.contains_key(&object.id().as_u64()))
-            .unwrap_or(false);
+            .is_some_and(|object| object.info_rank().is_some());
+        let mut assigned_rank = None;
         if !already_crew {
             let definition_id = context
                 .object_context()
                 .and_then(|object| object.definition_id.clone());
             if let Some(definition_id) = definition_id {
-                let mut idle = context.world.idle_crew_counts.borrow_mut();
                 let key = (player, definition_id.clone());
-                match idle.get_mut(&key) {
-                    Some(count) if *count > 0 => {
-                        *count -= 1;
-                    }
-                    _ => {
+                let idle_rank = {
+                    let mut pools = context.world.idle_crew_ranks.borrow_mut();
+                    pools.get_mut(&key).and_then(|pool| {
+                        let best = pool
+                            .iter()
+                            .enumerate()
+                            .fold(None, |best: Option<(usize, i32)>, (index, (exp, _))| {
+                                match best {
+                                    Some((_, best_exp)) if best_exp >= *exp => best,
+                                    _ => Some((index, *exp)),
+                                }
+                            })
+                            .map(|(index, _)| index)?;
+                        Some(pool.remove(best).1)
+                    })
+                };
+                assigned_rank = match idle_rank {
+                    Some(rank) => Some(rank),
+                    None => {
                         let newlines = context
                             .world
                             .definition_metadata(&definition_id)
                             .and_then(|metadata| metadata.clonk_name_newlines)
                             .unwrap_or(context.world.standard_name_newlines);
-                        drop(idle);
                         draw_context_random(newlines)?;
+                        Some(0)
                     }
-                }
+                };
+            } else {
+                assigned_rank = Some(0);
             }
         }
         let Some(object) = context.object_context_mut() else {
             return Ok(false);
         };
         object.set_crew_member(true);
-        object.set_owner(player);
-        // The new crew member gets an info whose physicals resolve at
-        // once (C4Player::MakeCrewMember → C4ObjectInfoList::New;
-        // C4Object::Init `if (Alive) Energy = GetPhysical()->Energy`,
-        // C4Object.cpp:192). With FairCrew ON (the LegacyClonk default)
-        // the def physicals promote to RankByExperience(strength), including
-        // capability flags and trainable physicals (C4Def.cpp:860-874;
-        // C4InfoCore.cpp:207-222) — the same resolution the join path uses.
-        // Without it the fresh COWB
-        // the GoldRush Trapper recruits-and-grabs carries NO info
-        // physicals, and the grab downgraded the Trapper's max energy.
-        let promoted = crate::crew_info_physical(object.definition_physical, 0);
-        object.info_physical = Some(promoted);
-        object.record_physicals();
-        if object.alive() {
-            object.set_energy(promoted.energy);
+        if let Some(rank) = assigned_rank {
+            object.set_info_rank(Some(rank));
+            // The new crew member gets an info whose physicals resolve at
+            // once (C4Player::MakeCrewMember → C4ObjectInfoList::New;
+            // C4Object::Init `if (Alive) Energy = GetPhysical()->Energy`,
+            // C4Object.cpp:192). With FairCrew ON (the LegacyClonk default)
+            // the def physicals promote to RankByExperience(strength).
+            let promoted = crate::crew_info_physical(object.definition_physical, rank);
+            object.info_physical = Some(promoted);
+            object.record_physicals();
+            if object.alive() {
+                object.set_energy(promoted.energy);
+            }
         }
+        object.set_owner(player);
         // C4Player::MakeCrewMember inserts into the LIVE C4Player::Crew
         // before Recruitment returns (C4Player.cpp:1194-1209). Later calls
         // in the same scenario callback must therefore see the member via
@@ -29733,6 +29772,9 @@ impl EffectHostContext {
                     physical_changes,
                     definition_physical,
                 );
+                scope.current_info_rank = world
+                    .crew_rank(scope.id().as_u64())
+                    .or_else(|| scope.info_physical.map(|_| 0));
                 scope.definition_id = definition_id;
                 // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358).
                 scope.cached_ocf = Some(ocf);
@@ -30752,6 +30794,10 @@ impl EffectHostContext {
             state.physical_changes.clone(),
             metadata.physical,
         );
+        scope.current_info_rank = self
+            .world
+            .crew_rank(object.id.as_u64())
+            .or_else(|| scope.info_physical.map(|_| 0));
         scope.current_fixed_position = object.fixed_position;
         scope.current_fixed_velocity = object.fixed_velocity;
         scope.current_rotation_velocity = object.rotation_velocity;
@@ -31908,6 +31954,9 @@ struct ObjectScopeContext {
     base_graphics: Option<ObjectBaseGraphics>,
     current_draw_transform: Option<DrawTransform>,
     info_physical: Option<PhysicalInfo>,
+    /// Live pObj->Info->Rank. Unlike `crew_member`, this distinguishes an
+    /// object registered as crew from one that actually owns C4ObjectInfo.
+    current_info_rank: Option<i32>,
     temporary_physical: Option<PhysicalInfo>,
     physical_changes: Vec<(String, i32)>,
     definition_physical: PhysicalInfo,
@@ -32013,6 +32062,7 @@ impl ObjectScopeContext {
             base_graphics,
             current_draw_transform: draw_transform,
             info_physical,
+            current_info_rank: None,
             temporary_physical,
             physical_changes,
             definition_physical,
@@ -32032,6 +32082,15 @@ impl ObjectScopeContext {
             temporary: self.temporary_physical,
             changes: self.physical_changes.clone(),
         });
+    }
+
+    fn info_rank(&self) -> Option<i32> {
+        self.current_info_rank
+    }
+
+    fn set_info_rank(&mut self, rank: Option<i32>) {
+        self.current_info_rank = rank;
+        self.pending_update.info_rank = Some(rank);
     }
 
     /// `C4Object::GetPhysical` (C4Object.cpp:2118-2134): temporary set when
@@ -32576,6 +32635,7 @@ impl ObjectScopeContext {
     }
 
     fn mark_destroy(&mut self) {
+        self.set_info_rank(None);
         self.destroy = true;
     }
 
@@ -33346,6 +33406,7 @@ mod tests {
         "GetProcedure",
         "GetR",
         "GetRDir",
+        "GetRank",
         "GetScenarioVal",
         "GetScore",
         "GetScoreboardData",
@@ -38556,6 +38617,53 @@ func Missing() { return ComponentAll(nil, WOOD); }
             object_reference_value(ObjectId::new(22)),
             "rank 3 beats rank 0; the FIRST rank-3 member wins the tie"
         );
+    }
+
+    #[test]
+    fn get_rank_defaults_to_caller_and_requires_linked_crew_info() {
+        // FnGetRank defaults a null pObj to cthr->Obj, then reads exactly
+        // pObj->Info->Rank; an absent caller or absent Info is nil
+        // (C4Script.cpp:1378-1383). Rank zero remains integer zero and
+        // surplus parameters are evaluated by the VM but ignored by C++.
+        let world = HostWorldContext::default().with_crew_ranks(Rc::new(HashMap::from([
+            (1, 5),
+            (3, 0),
+        ])));
+
+        let (object_result, _) = with_object_host_context_with_world(world.clone(), || {
+            Ok(Value::Array(vec![
+                get_rank(&[])?,
+                get_rank(&[Value::Nil])?,
+                get_rank(&[object_reference_value(ObjectId::new(2))])?,
+                get_rank(&[object_reference_value(ObjectId::new(3))])?,
+                get_rank(&[
+                    object_reference_value(ObjectId::new(1)),
+                    Value::String("ignored".to_owned()),
+                ])?,
+            ]))
+        });
+        assert_eq!(
+            object_result.expect("object-context GetRank succeeds"),
+            Value::Array(vec![
+                Value::Int(5),
+                Value::Int(5),
+                Value::Nil,
+                Value::Int(0),
+                Value::Int(5),
+            ])
+        );
+
+        let (global_result, _) = with_effect_context(None, &[], world, 4, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                get_rank(&[])?,
+                get_rank(&[Value::Nil])?,
+            ]))
+        });
+        assert_eq!(
+            global_result.expect("global GetRank succeeds"),
+            Value::Array(vec![Value::Nil, Value::Nil])
+        );
+        assert!(get_rank(&[Value::String("not an object".to_owned())]).is_err());
     }
 
     #[test]
