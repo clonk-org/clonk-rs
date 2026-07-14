@@ -19084,7 +19084,12 @@ impl Engine {
             // first (C4AulParse.cpp:1456; C4AulLink.cpp:86-96).
             for parent_id in includes.iter().rev() {
                 if !engine.definitions.contains_key(parent_id) {
-                    return Err(EngineError::UnknownDefinition(parent_id.clone()));
+                    tracing::warn!(
+                        target = %parent_id,
+                        definition = %child_id,
+                        "script to #include not found"
+                    );
+                    continue;
                 }
                 if !resolve_definition(engine, parent_id, resolving, resolved)? {
                     continue;
@@ -40261,6 +40266,113 @@ mod include_local_order_regression {
             names,
             ["c0", "c1", "b0", "shared", "b1", "a0", "a1"],
             "child locals precede last-declared include B, then include A"
+        );
+    }
+}
+
+#[cfg(test)]
+mod missing_include_regression {
+    use super::*;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::{subscriber, Level};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+    use tracing_subscriber::registry::Registry;
+
+    #[derive(Clone)]
+    struct WarningLayer {
+        messages: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<S> Layer<S> for WarningLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            if *event.metadata().level() != Level::WARN {
+                return;
+            }
+            let mut visitor = MessageVisitor::default();
+            event.record(&mut visitor);
+            if let Some(message) = visitor.message {
+                self.messages.lock().unwrap().push(message);
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct MessageVisitor {
+        message: Option<String>,
+    }
+
+    impl Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            if field.name() == "message" {
+                self.message = Some(format!("{value:?}").trim_matches('"').to_string());
+            }
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "message" {
+                self.message = Some(value.to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn missing_include_warns_and_known_siblings_still_merge() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "KNWN",
+                    "Known parent",
+                    "public func ParentValue() { return 7; }",
+                )
+                .expect("known parent compiles"),
+            )
+            .expect("known parent registers");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "CHLD",
+                    "Child",
+                    "#include KNWN\n#include MISS\npublic func OwnValue() { return 42; }",
+                )
+                .expect("child compiles"),
+            )
+            .expect("child registers");
+
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(WarningLayer {
+            messages: Arc::clone(&messages),
+        });
+        subscriber::with_default(subscriber, || {
+            engine
+                .resolve_includes()
+                .expect("missing include is warning-only");
+        });
+        assert_eq!(
+            *messages.lock().unwrap(),
+            ["script to #include not found"]
+        );
+
+        let object = engine
+            .spawn_object(SpawnConfig::new("CHLD"))
+            .expect("child spawns after linking");
+        let index = engine.find_object_index(object).expect("child exists");
+        assert_eq!(
+            engine
+                .call_object_function(index, "OwnValue", Vec::new())
+                .expect("own function remains callable"),
+            Value::Int(42)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(index, "ParentValue", Vec::new())
+                .expect("known include still merged"),
+            Value::Int(7)
         );
     }
 }

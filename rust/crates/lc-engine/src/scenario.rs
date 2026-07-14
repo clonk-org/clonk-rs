@@ -12491,6 +12491,28 @@ RandomTeamCount=2
     }
 
     #[test]
+    fn json_scenario_with_missing_definition_include_still_applies() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Scenario.json"),
+            r#"{"name":"Missing include","definitions":[{"id":"TEST","script":"Def.c"}]}"#,
+        )
+        .expect("write manifest");
+        std::fs::write(
+            dir.path().join("Def.c"),
+            "#include MISS\npublic func OwnValue() { return 42; }\n",
+        )
+        .expect("write definition script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("JSON scenario loads");
+        let mut engine = Engine::new();
+        scenario
+            .apply(&mut engine)
+            .expect("missing include does not abort complete scenario apply");
+        assert!(engine.definition_script_has_function("TEST", "OwnValue"));
+    }
+
+    #[test]
     fn all_shipped_team_icon_specs_are_retained_recursively() {
         fn collect_team_files(directory: &Path, output: &mut Vec<PathBuf>) {
             let Ok(entries) = std::fs::read_dir(directory) else {
