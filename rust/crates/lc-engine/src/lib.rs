@@ -34795,9 +34795,6 @@ impl Engine {
         requested: bool,
         by_object: Option<ObjectId>,
     ) {
-        if removal_counts.is_empty() {
-            return;
-        }
         let Some(object_id) = by_object else {
             return;
         };
@@ -34814,7 +34811,12 @@ impl Engine {
                 object.add_material_content(*material_id, *removed);
             }
         }
-        self.process_dig_material_conversions(object_index, requested);
+        // DigFree/DigFreeRect add contents on every call, then run the cast
+        // check only on !Tick5 — including calls that removed no new pixels
+        // (C4Landscape.cpp:982,996).
+        if self.frame % 5 == 0 {
+            self.process_dig_material_conversions(object_index, requested);
+        }
     }
 
     fn execute_blast_circle_operation(
@@ -39455,6 +39457,180 @@ fn value_to_liquid_segments(
     }
 
     Ok(segments)
+}
+
+#[cfg(test)]
+mod dig_out_material_cast_tick5_regression {
+    use super::*;
+    use crate::landscape::PixelGrid;
+
+    #[test]
+    fn dig_out_material_cast_waits_for_tick5_and_retains_contents() {
+        // C4Landscape::DigFreeRect always accumulates pixels, but calls
+        // C4Object::DigOutMaterialCast only on !Tick5 (C4Landscape.cpp:986-996).
+        // Repeating the already-cleared rectangle on frame 5 also proves the
+        // cast check is not accidentally conditional on this dig removing more.
+        let library = lc_resources::MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+            Dig2Object=GEM_
+            Dig2ObjectRatio=2
+            "#,
+        )
+        .expect("material fixture parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("Earth exists");
+
+        let grid = PixelGrid::new(
+            2,
+            1,
+            vec![1, 1],
+            vec![0, 80],
+            vec![None, Some("Earth".to_string())],
+            vec![None; 2],
+        );
+        let mut landscape = Landscape::new(2, vec![1; 2]).expect("landscape builds");
+        landscape.set_world_height(1);
+        landscape.set_pixel_grid(grid);
+
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(
+                Definition::from_script("DGRR", "Digger", "#strict\n")
+                    .expect("digger compiles"),
+            )
+            .expect("digger registers");
+        engine
+            .register_definition(
+                Definition::from_script("GEM_", "Gem", "#strict\n").expect("gem compiles"),
+            )
+            .expect("gem registers");
+        let digger = engine
+            .spawn_object(SpawnConfig::new("DGRR"))
+            .expect("digger spawns");
+        let dig = LandscapeOperation::DigRect {
+            origin: Vector2::ZERO,
+            width: 2,
+            height: 1,
+            requested: false,
+            by_object: Some(digger),
+        };
+
+        engine.frame = 1;
+        engine.apply_landscape_operations(vec![dig.clone()]);
+        let digger_index = engine.find_object_index(digger).expect("digger survives");
+        assert_eq!(engine.objects[digger_index].material_content(earth), 2);
+        assert!(
+            engine
+                .objects
+                .iter()
+                .all(|object| object.definition_id != "GEM_"),
+            "off-Tick5 dig must retain contents without spawning"
+        );
+
+        engine.frame = 5;
+        engine.apply_landscape_operations(vec![dig]);
+        assert_eq!(
+            engine
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "GEM_" && !object.destroyed)
+                .count(),
+            1,
+            "Tick5 dig casts the retained contents even when no new pixel clears"
+        );
+        let digger_index = engine.find_object_index(digger).expect("digger survives");
+        assert_eq!(engine.objects[digger_index].material_content(earth), 0);
+    }
+
+    #[test]
+    fn continuous_dig_replay_matches_cpp_per_frame_spawn_census() {
+        // Frozen from the unmodified C++ ordering: C4Game::Ticks advances
+        // iTick5 before object execution (C4Game.cpp:1906), and every
+        // C4Landscape::DigFreeRect call accumulates first but casts only on
+        // !Tick5 (C4Landscape.cpp:986-996). With ratio 3 and one fresh Earth
+        // pixel per frame, the bucket reaches 4 before each Tick5 cast.
+        const CPP_CUMULATIVE_SPAWNS: [usize; 10] = [0, 0, 0, 0, 1, 1, 1, 1, 1, 2];
+        const CPP_RETAINED_CONTENTS: [i32; 10] = [1, 2, 3, 4, 0, 1, 2, 3, 4, 0];
+
+        let library = lc_resources::MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+            Dig2Object=GEM_
+            Dig2ObjectRatio=3
+            "#,
+        )
+        .expect("material fixture parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("Earth exists");
+
+        let grid = PixelGrid::new(
+            10,
+            1,
+            vec![1; 10],
+            vec![0, 80],
+            vec![None, Some("Earth".to_string())],
+            vec![None; 2],
+        );
+        let mut landscape = Landscape::new(10, vec![1; 10]).expect("landscape builds");
+        landscape.set_world_height(1);
+        landscape.set_pixel_grid(grid);
+
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(
+                Definition::from_script("DGRR", "Digger", "#strict\n")
+                    .expect("digger compiles"),
+            )
+            .expect("digger registers");
+        engine
+            .register_definition(
+                Definition::from_script("GEM_", "Gem", "#strict\n").expect("gem compiles"),
+            )
+            .expect("gem registers");
+        let digger = engine
+            .spawn_object(SpawnConfig::new("DGRR"))
+            .expect("digger spawns");
+
+        for frame_index in 0..10 {
+            engine.frame = (frame_index + 1) as u64;
+            engine.apply_landscape_operations(vec![LandscapeOperation::DigRect {
+                origin: Vector2::new(frame_index as i32, 0),
+                width: 1,
+                height: 1,
+                requested: false,
+                by_object: Some(digger),
+            }]);
+
+            let spawns = engine
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "GEM_" && !object.destroyed)
+                .count();
+            assert_eq!(
+                spawns, CPP_CUMULATIVE_SPAWNS[frame_index],
+                "C++ cumulative Dig2Object census diverged on frame {}",
+                frame_index + 1
+            );
+            let digger_index = engine.find_object_index(digger).expect("digger survives");
+            assert_eq!(
+                engine.objects[digger_index].material_content(earth),
+                CPP_RETAINED_CONTENTS[frame_index],
+                "C++ retained material contents diverged on frame {}",
+                frame_index + 1
+            );
+        }
+    }
 }
 
 #[cfg(test)]
