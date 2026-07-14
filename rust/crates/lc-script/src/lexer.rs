@@ -962,6 +962,22 @@ mod tests {
     }
 
     #[test]
+    fn lone_question_and_nil_coalescing_tokens_remain_distinct() {
+        let tokens = lex_all("? ?? ??=").expect("question operators lex");
+        assert_eq!(
+            tokens
+                .into_iter()
+                .map(|token| token.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                TokenKind::Symbol(Symbol::Question),
+                TokenKind::Symbol(Symbol::QuestionQuestion),
+                TokenKind::Symbol(Symbol::QuestionQuestionEqual),
+            ]
+        );
+    }
+
+    #[test]
     fn tokenizes_string_literals() {
         let source = r#""hello world""#;
         let tokens = lex_all(source).unwrap();
