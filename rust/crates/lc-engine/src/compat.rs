@@ -39186,14 +39186,18 @@ public func CheckGoals()
     fn cast_builtins_retag_payloads_and_drive_construction_paths() {
         let mut engine = crate::Engine::with_seed(3);
         let builder = crate::Definition::from_script(
-            "BUIL",
+            "ACLD",
             "Builder",
             r#"#strict 2
 public func CastValues()
 {
-    return [CastC4ID(1279546187), CastInt(KSDL), CastBool(0), CastBool(7), CastInt(nil), CastC4ID(CastInt(GetID()) + 201135119), CastBool(C4Id("4294967296")), CastInt(C4Id("4294967297")), CastC4ID(C4Id("4294967296")), CastInt(CastC4ID(65536))];
+    return [CastC4ID(1279546187), CastInt(KSDL), CastBool(0), CastBool(7), CastInt(true), CastInt(nil), CastC4ID(0), CastC4ID(CastInt(GetID()) + 201135119), CastBool(C4Id("4294967296")), CastInt(C4Id("4294967297")), CastC4ID(C4Id("4294967296")), CastInt(CastC4ID(65536))];
 }
 public func MakePacked() { return CreateContents(CastC4ID(1279546187)); }
+public func MakeRacesOffset(object container)
+{
+    return CreateContents(CastC4ID(CastInt(GetID()) + 201135119), container);
+}
 public func ControlCommand(command, target, tx, ty, target2, data)
 {
     if (command S= "Construct")
@@ -39222,10 +39226,16 @@ public func RejectConstruction(x, y, builder)
         engine
             .register_definition(target)
             .expect("packed target registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("PWIP", "Races offset target", "#strict 2")
+                    .expect("offset target script compiles"),
+            )
+            .expect("offset target registers");
 
         let builder = engine
             .spawn_object(
-                SpawnConfig::new("BUIL").with_position(Vector2::new(20, 30)),
+                SpawnConfig::new("ACLD").with_position(Vector2::new(20, 30)),
             )
             .expect("builder spawns");
         let builder_index = engine.find_object_index(builder).expect("builder exists");
@@ -39239,8 +39249,10 @@ public func RejectConstruction(x, y, builder)
                 Value::Int(1_279_546_187),
                 Value::Bool(false),
                 Value::Bool(true),
+                Value::Int(1),
                 Value::Int(0),
-                Value::C4Id("QiFX".into()),
+                Value::Nil,
+                Value::C4Id("PWIP".into()),
                 Value::Bool(true),
                 Value::Int(1),
                 Value::C4Id("4294967296".into()),
@@ -39259,6 +39271,18 @@ public func RejectConstruction(x, y, builder)
                 .definition_id,
             "KSDL"
         );
+
+        let offset = engine
+            .call_object_function(
+                builder_index,
+                "MakeRacesOffset",
+                vec![object_reference_value(created)],
+            )
+            .expect("MonsterRescue-style packed id reaches CreateContents");
+        let offset = object_id_from_value(&offset).expect("CreateContents returns an object");
+        let offset = engine.object_snapshot(offset).expect("offset object survives");
+        assert_eq!(offset.definition_id, "PWIP");
+        assert_eq!(offset.container, Some(created));
 
         let rejected = engine
             .call_object_function(
