@@ -51,6 +51,7 @@ mod test_return_with_space;
 mod test_script_constants;
 mod test_statics;
 mod test_strict_equality;
+mod test_string_comparison;
 mod test_swt_issue;
 mod test_this_context;
 mod test_truthiness;

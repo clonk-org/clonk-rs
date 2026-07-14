@@ -349,6 +349,8 @@ pub enum BinaryOp {
     // String comparison operators
     StringEqual,
     StringNotEqual,
+    KeywordStringEqual,
+    KeywordStringNotEqual,
     StringLess,
     StringLessEqual,
     StringGreater,

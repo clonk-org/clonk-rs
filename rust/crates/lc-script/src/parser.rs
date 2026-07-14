@@ -1136,22 +1136,32 @@ impl<'a> Parser<'a> {
     fn parse_equality(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_concat()?;
         loop {
-            if self.consume_if_symbol(Symbol::EqualEqual)?.is_some()
-                || self.consume_if_identifier("eq")?.is_some()
-            {
+            if self.consume_if_symbol(Symbol::EqualEqual)?.is_some() {
                 let right = self.parse_concat()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Equal, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::BangEqual)?.is_some()
-                || self.consume_if_identifier("ne")?.is_some()
-            {
+            } else if self.consume_if_symbol(Symbol::BangEqual)?.is_some() {
                 let right = self.parse_concat()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::NotEqual, Box::new(right));
             } else if self.consume_if_symbol(Symbol::StringEqual)?.is_some() {
                 let right = self.parse_concat()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::StringEqual, Box::new(right));
+            } else if self.consume_if_identifier("eq")?.is_some() {
+                let right = self.parse_concat()?;
+                expr = Expr::Binary(
+                    Box::new(expr),
+                    BinaryOp::KeywordStringEqual,
+                    Box::new(right),
+                );
             } else if self.consume_if_symbol(Symbol::StringNotEqual)?.is_some() {
                 let right = self.parse_concat()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::StringNotEqual, Box::new(right));
+            } else if self.consume_if_identifier("ne")?.is_some() {
+                let right = self.parse_concat()?;
+                expr = Expr::Binary(
+                    Box::new(expr),
+                    BinaryOp::KeywordStringNotEqual,
+                    Box::new(right),
+                );
             } else {
                 break;
             }

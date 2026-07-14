@@ -2127,12 +2127,20 @@ impl<'a> Vm<'a> {
             LeftShift => self.eval_int_op(left, right, |a, b| a << b, "<<"),
             RightShift => self.eval_int_op(left, right, |a, b| a >> b, ">>"),
             // String comparison operators
-            StringEqual => self.eval_string_cmp(left, right, |a, b| a == b, "S="),
-            StringNotEqual => self.eval_string_cmp(left, right, |a, b| a != b, "S!="),
-            StringLess => self.eval_string_cmp(left, right, |a, b| a < b, "S<"),
-            StringLessEqual => self.eval_string_cmp(left, right, |a, b| a <= b, "S<="),
-            StringGreater => self.eval_string_cmp(left, right, |a, b| a > b, "S>"),
-            StringGreaterEqual => self.eval_string_cmp(left, right, |a, b| a >= b, "S>="),
+            StringEqual => self.eval_string_cmp(left, right, strict, |a, b| a == b, "S="),
+            StringNotEqual => self.eval_display_string_cmp(left, right, |a, b| a != b),
+            KeywordStringEqual => {
+                self.eval_string_cmp(left, right, strict, |a, b| a == b, "eq")
+            }
+            KeywordStringNotEqual => {
+                self.eval_string_cmp(left, right, strict, |a, b| a != b, "ne")
+            }
+            // Rust currently accepts these non-C++ operators. Preserve their
+            // existing behavior until the grammar-removal parity issue lands.
+            StringLess => self.eval_display_string_cmp(left, right, |a, b| a < b),
+            StringLessEqual => self.eval_display_string_cmp(left, right, |a, b| a <= b),
+            StringGreater => self.eval_display_string_cmp(left, right, |a, b| a > b),
+            StringGreaterEqual => self.eval_display_string_cmp(left, right, |a, b| a >= b),
         }
     }
 
@@ -2251,16 +2259,54 @@ impl<'a> Vm<'a> {
         &self,
         left: Value,
         right: Value,
+        strict: Option<u8>,
         cmp: F,
-        _symbol: &str,
+        symbol: &str,
     ) -> Result<Value, RuntimeError>
     where
         F: Fn(&str, &str) -> bool,
     {
-        // Convert both operands to strings for comparison
-        let left_str = left.to_string();
-        let right_str = right.to_string();
+        // CheckOpPars for S=/eq/ne converts the left operand first, then the
+        // right (C4AulExec.cpp:289-299,691-707). Below #strict 3, raw-falsy
+        // concrete values are Set0() before conversion and therefore compare
+        // as the empty string. Nil itself converts to String without changing
+        // its Any type, so `_getStr()==nullptr` also reads as "" at strict 3.
+        let convert = |value: Value, side: &str| {
+            let canonical_nil = match &value {
+                Value::Nil | Value::Object(0) => true,
+                Value::C4Id(id) => {
+                    id.len() < 4 || id == "NONE" || id.bytes().all(|byte| byte == b'0')
+                }
+                _ => false,
+            };
+            let typed_falsy = matches!(&value, Value::Int(0) | Value::Bool(false));
+            if canonical_nil || (strict.unwrap_or(0) < 3 && typed_falsy) {
+                return Ok(String::new());
+            }
+            match value {
+                Value::String(text) => Ok(text),
+                Value::Nil => Ok(String::new()),
+                other => Err(RuntimeError::new(format!(
+                    "operator \"{symbol}\" {side} side: got \"{}\", but expected \"string\"!",
+                    other.type_name()
+                ))),
+            }
+        };
+        let left_str = convert(left, "left")?;
+        let right_str = convert(right, "right")?;
         Ok(Value::Bool(cmp(&left_str, &right_str)))
+    }
+
+    fn eval_display_string_cmp<F>(
+        &self,
+        left: Value,
+        right: Value,
+        cmp: F,
+    ) -> Result<Value, RuntimeError>
+    where
+        F: Fn(&str, &str) -> bool,
+    {
+        Ok(Value::Bool(cmp(&left.to_string(), &right.to_string())))
     }
 
     /// `==` per the script's #strict level (C4Value::Equals, C4Value.cpp:823).
