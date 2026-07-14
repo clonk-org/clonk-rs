@@ -24,6 +24,8 @@
 //     used by `C4Object::SetAction`.
 //   * `C4SolidMaskBitmap.h` is the production active-graphics bitmap selection
 //     and transparency conversion used by `C4SolidMask`.
+//   * `C4Object::DigOutMaterialCast` is mechanically extracted in full; a
+//     minimal material/object scaffold records its spawn and RNG ledger.
 //   * `C4Landscape::ClearPix`, `BlastFreePix`, and `BlastFree` are mechanically
 //     extracted in full; a minimal 7x7 Surface8/material scaffold records their
 //     exact scan order, material pre-counts, IFT writes, and RNG consumption.
@@ -95,6 +97,9 @@ inline constexpr uint8_t TunnelDefaultPix_Oracle = 6;
 
 struct C4MaterialOracle
 {
+    int32_t Dig2Object{C4ID_None_Oracle};
+    int32_t Dig2ObjectRatio{};
+    int32_t Dig2ObjectOnRequestOnly{};
     int32_t BlastFree{};
     int32_t BlastShiftTo{};
     int32_t Blast2Object{C4ID_None_Oracle};
@@ -320,8 +325,11 @@ struct C4Object
     struct ShapeState
     {
         int32_t AttachMat{MNone_Oracle};
+        int32_t y{};
+        int32_t Hgt{};
     } Shape;
 
+    int32_t MaterialContents[C4MaxMaterial_Oracle]{};
     int32_t Status{};
     C4Object *Contained{};
     int32_t Category{};
@@ -342,6 +350,7 @@ struct C4Object
     }
 
     void Fling(C4Fixed txdir, C4Fixed tydir, bool addSpeed, int32_t causedBy);
+    void DigOutMaterialCast(bool request);
 
     bool SetActionByName(const char *name)
     {
@@ -385,14 +394,101 @@ inline bool ObjectActionJump(C4Object *, C4Fixed, C4Fixed, bool) { return false;
 struct C4Game
 {
     C4ObjectListOracle Objects;
+    C4MaterialMapOracle Material;
+    struct DigSpawnRecord
+    {
+        int32_t count{};
+        int32_t definition{};
+        C4Object *creator{};
+        int32_t owner{};
+        int32_t x{};
+        int32_t y{};
+        int32_t rotation{};
+    } DigSpawn;
+
     void ShakeObjects(int32_t tx, int32_t ty, int32_t range, int32_t causedBy);
+
+    C4Object *CreateObject(
+        int32_t definition,
+        C4Object *creator,
+        int32_t owner,
+        int32_t x,
+        int32_t y,
+        int32_t rotation)
+    {
+        DigSpawn = {
+            DigSpawn.count + 1,
+            definition,
+            creator,
+            owner,
+            x,
+            y,
+            rotation,
+        };
+        return nullptr;
+    }
 };
+
+static C4Game DigGameOracle;
+
+// Exact production DigOutMaterialCast body. The scaffold records the
+// CreateObject arguments, then the fixture continues on the same Random
+// ledger for twenty draws.
+#define Game DigGameOracle
+#define C4ID_None C4ID_None_Oracle
+#include "object_dig_out_material_cast.inc"
+#undef C4ID_None
+#undef Game
 
 // Exact source text generated from src/C4Game.cpp and src/C4Object.cpp.
 #define C4D_Living C4D_Living_Oracle
 #include "shake_objects.inc"
 #include "object_fling.inc"
 #undef C4D_Living
+
+static void printDigOutMaterialCastCase()
+{
+    constexpr uint32_t seed = 28;
+    constexpr int32_t ranges[] = {100, 6, 1000, 2};
+
+    DigGameOracle = C4Game{};
+    DigGameOracle.Material.Num = 1;
+    DigGameOracle.Material.Map[0].Dig2Object = 1;
+    DigGameOracle.Material.Map[0].Dig2ObjectRatio = 1;
+
+    C4Object object;
+    object.x = 2;
+    object.y = 2;
+    object.Shape.y = 2;
+    object.Shape.Hgt = 7;
+    object.MaterialContents[0] = 1;
+
+    FixedRandom(seed);
+    const int32_t countBefore = RandomCount;
+    const uint32_t holdBefore = RandomHold;
+    object.DigOutMaterialCast(false);
+    const int32_t countAfterCast = RandomCount;
+    const uint32_t holdAfterCast = RandomHold;
+
+    printf("\"dig2object_rng\":{\"seed\":%u,"
+           "\"object_x\":%d,\"object_y\":%d,\"shape_y\":%d,\"shape_height\":%d,"
+           "\"rng_before\":{\"count\":%d,\"hold\":%u},"
+           "\"spawn\":{\"count\":%d,\"definition\":%d,\"owner\":%d,"
+           "\"x\":%d,\"y\":%d,\"rotation\":%d},"
+           "\"rng_after_cast\":{\"count\":%d,\"hold\":%u},\"next\":[",
+           seed, object.x, object.y, object.Shape.y, object.Shape.Hgt,
+           countBefore, holdBefore, DigGameOracle.DigSpawn.count,
+           DigGameOracle.DigSpawn.definition, DigGameOracle.DigSpawn.owner,
+           DigGameOracle.DigSpawn.x, DigGameOracle.DigSpawn.y,
+           DigGameOracle.DigSpawn.rotation, countAfterCast, holdAfterCast);
+    for (int32_t index = 0; index < 20; ++index)
+    {
+        if (index) printf(",");
+        const int32_t range = ranges[index % 4];
+        printf("{\"range\":%d,\"value\":%d}", range, Random(range));
+    }
+    printf("],\"rng_after\":{\"count\":%d,\"hold\":%u}}", RandomCount, RandomHold);
+}
 
 static void printShakeObjectsCase()
 {
@@ -1288,22 +1384,27 @@ int main()
     printSolidMaskGraphicsCases();
     printf(",\n");
 
-    // 16. Exact production ShakeObjects master-order/RNG gate sequence and
+    // 16. Exact DigOutMaterialCast spawn arguments and the twenty following
+    //     Random draws on the same synced ledger.
+    printDigOutMaterialCastCase();
+    printf(",\n");
+
+    // 17. Exact production ShakeObjects master-order/RNG gate sequence and
     //     C4Object::Fling raw fallback.
     printShakeObjectsCase();
     printf(",\n");
 
-    // 17. Exact C4Landscape::ClearPix / BlastFreePix / BlastFree scan,
+    // 18. Exact C4Landscape::ClearPix / BlastFreePix / BlastFree scan,
     //     pre-count, IFT-preserving mutation, and RNG order.
     printBlastFreeCase();
     printf(",\n");
 
-    // 18. Exact bottom DFA_FLIGHT ContactAction arm, especially the
+    // 19. Exact bottom DFA_FLIGHT ContactAction arm, especially the
     //     low-speed `fDisabled` path into ObjectActionFlat / FlatUp.
     printContactActionBottomFlightCases();
     printf(",\n");
 
-    // 19. movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 20. movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    Mirrors C4Movement.cpp:260-261 (fix += dir) and :627 (ydir += gravity),
     //    WITHOUT landscape collision/contact (that is the per-pixel loop, item 4).
     arr_begin("movement");

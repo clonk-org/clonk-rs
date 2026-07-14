@@ -6,8 +6,9 @@
 # production script-host helper (src/C4ScriptKiller.h), coarse landscape
 # traversal (src/C4LandscapePath.h), action-direction decisions
 # (src/C4ActionDirection.h), and active solid-mask bitmap sampling
-# (src/C4SolidMaskBitmap.h), complete landscape BlastFree methods, and the
-# bottom-flight C4Object::ContactAction arm. The Rust side
+# (src/C4SolidMaskBitmap.h), complete C4Object::DigOutMaterialCast and
+# landscape BlastFree methods, and the bottom-flight C4Object::ContactAction
+# arm. The Rust side
 # (rust/crates/lc-engine/src/parity_differential.rs) diffs against the committed
 # JSON, so this script only needs to run when the C++ primitives or oracle
 # coverage change.
@@ -57,6 +58,13 @@ awk '
   p && /^}$/ { found = 1; exit }
   END { if (!found) exit 1 }
 ' "$src/C4Object.cpp" > "$gen/object_fling.inc"
+
+awk '
+  /^void C4Object::DigOutMaterialCast\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_dig_out_material_cast.inc"
 
 # The first DFA_FLIGHT arm inside ContactAction is its bottom-contact path.
 # Keep the whole arm (through, but not including, DFA_SCALE) so the decisive

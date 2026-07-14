@@ -7,9 +7,10 @@
 //! engine code (`src/Fixed.h`, `src/Fixed.cpp`'s `SineTable`, `src/C4Random.h`,
 //! `src/C4ScriptKiller.h`, `src/C4LandscapePath.h`, and
 //! `src/C4ActionDirection.h`, `src/C4ActionCallbacks.h`, and
-//! `src/C4SolidMaskBitmap.h`, plus complete `C4Game::ShakeObjects` and
-//! `C4Object::Fling`, `C4Landscape::ClearPix`, `BlastFreePix`, and
-//! `BlastFree` bodies and the bottom-flight `C4Object::ContactAction` arm) by
+//! `src/C4SolidMaskBitmap.h`, plus complete `C4Object::DigOutMaterialCast`,
+//! `C4Game::ShakeObjects`, `C4Object::Fling`, `C4Landscape::ClearPix`,
+//! `BlastFreePix`, and `BlastFree` bodies and the bottom-flight
+//! `C4Object::ContactAction` arm) by
 //! `parity/oracle/gen_golden.sh` — so this is a genuine differential against
 //! the C++ oracle, not a Rust-vs-Rust regression.
 //!
@@ -25,7 +26,8 @@ use lc_script::{c4_hash_combine, cnv_fn, C4VType, Value as ScriptValue};
 use serde_json::Value;
 
 use crate::landscape::{Landscape, LandscapeRasterState, PixelGrid};
-use crate::material::{consume_corrosion_effect_rng, evaluate_corrosion};
+use crate::compat::LandscapeOperation;
+use crate::material::{consume_corrosion_effect_rng, evaluate_corrosion, MaterialSet};
 use crate::math::{
     fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed,
     FixedVec2,
@@ -609,7 +611,180 @@ fn parity_differential_matches_cpp_golden() {
         }
     }
 
-    // 6b. C4Game::ShakeObjects master-list selection, RNG consumption, and
+    // 6b. C4Object::DigOutMaterialCast: drive a real Rust DigRect through a
+    // Dig2ObjectRatio material, then compare the cast and twenty subsequent
+    // draws with the mechanically extracted C++ body/LC_RNG_TRACE ledger.
+    {
+        let case = &golden["dig2object_rng"];
+        let object_x = i(case, "object_x") as i32;
+        let object_y = i(case, "object_y") as i32;
+        let shape_y = i(case, "shape_y") as i32;
+        let shape_height = i(case, "shape_height") as i32;
+
+        let mut digger =
+            Definition::from_script("DGRR", "Digger", "").expect("digger fixture compiles");
+        digger.set_shape_rect(Some(DefinitionRect::new(
+            -2,
+            shape_y,
+            4,
+            shape_height,
+        )));
+        let mut gem =
+            Definition::from_script("GEM_", "Gem", "").expect("gem fixture compiles");
+        gem.set_rotateable(1);
+
+        let material_source = r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+            Dig2Object=GEM_
+            Dig2ObjectRatio=1
+        "#;
+        let library = lc_resources::MaterialLibrary::parse(material_source)
+            .expect("Dig2Object material fixture parses");
+        let materials = MaterialSet::from_resource_library(&library);
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(digger)
+            .expect("digger fixture registers");
+        engine
+            .register_definition(gem)
+            .expect("gem fixture registers");
+        engine.set_materials(materials);
+
+        let mut pixels = vec![0_u8; 25];
+        pixels[object_y as usize * 5 + object_x as usize] = 10;
+        let mut densities = vec![0_i32; 128];
+        densities[10] = 80;
+        let mut material_names = vec![None; 128];
+        material_names[10] = Some("Earth".to_string());
+        let grid = PixelGrid::new(
+            5,
+            5,
+            pixels,
+            densities,
+            material_names,
+            vec![None; 128],
+        );
+        let mut landscape = Landscape::flat(5, 5);
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+
+        let digger_id = engine
+            .spawn_object(
+                SpawnConfig::new("DGRR")
+                    .with_position(crate::Vector2::new(object_x, object_y))
+                    .with_loaded(true),
+            )
+            .expect("digger fixture spawns");
+        engine.rng = LcgRng::new(i(case, "seed") as u32);
+        expect_eq(
+            "dig2object_rng.rng_before",
+            0,
+            "count",
+            i(&case["rng_before"], "count"),
+            i64::from(engine.rng.count),
+        );
+        expect_eq_u64(
+            "dig2object_rng.rng_before",
+            0,
+            "hold",
+            u(&case["rng_before"], "hold"),
+            u64::from(engine.rng.hold),
+        );
+
+        engine.apply_landscape_operations(vec![LandscapeOperation::DigRect {
+            origin: crate::Vector2::new(object_x, object_y),
+            width: 1,
+            height: 1,
+            requested: false,
+            by_object: Some(digger_id),
+        }]);
+
+        let snapshot = engine.snapshot();
+        let gems: Vec<_> = snapshot
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "GEM_")
+            .collect();
+        expect_eq(
+            "dig2object_rng.spawn",
+            0,
+            "count",
+            i(&case["spawn"], "count"),
+            gems.len() as i64,
+        );
+        let gem = gems.first().expect("Dig2Object fixture spawned one gem");
+        expect_eq(
+            "dig2object_rng.spawn",
+            0,
+            "x",
+            i(&case["spawn"], "x"),
+            i64::from(gem.position.x),
+        );
+        expect_eq(
+            "dig2object_rng.spawn",
+            0,
+            "y",
+            i(&case["spawn"], "y"),
+            i64::from(gem.position.y),
+        );
+        expect_eq(
+            "dig2object_rng.spawn",
+            0,
+            "rotation",
+            i(&case["spawn"], "rotation"),
+            i64::from(gem.rotation),
+        );
+        expect_eq(
+            "dig2object_rng.rng_after_cast",
+            0,
+            "count",
+            i(&case["rng_after_cast"], "count"),
+            i64::from(engine.rng.count),
+        );
+        expect_eq_u64(
+            "dig2object_rng.rng_after_cast",
+            0,
+            "hold",
+            u(&case["rng_after_cast"], "hold"),
+            u64::from(engine.rng.hold),
+        );
+
+        for (index, draw) in case["next"]
+            .as_array()
+            .expect("dig2object_rng.next is an array")
+            .iter()
+            .enumerate()
+        {
+            let range = i(draw, "range") as i32;
+            expect_eq(
+                "dig2object_rng.next",
+                index,
+                "value",
+                i(draw, "value"),
+                i64::from(engine.rng.random(range)),
+            );
+        }
+        expect_eq(
+            "dig2object_rng.rng_after",
+            0,
+            "count",
+            i(&case["rng_after"], "count"),
+            i64::from(engine.rng.count),
+        );
+        expect_eq_u64(
+            "dig2object_rng.rng_after",
+            0,
+            "hold",
+            u(&case["rng_after"], "hold"),
+            u64::from(engine.rng.hold),
+        );
+    }
+
+    // 6c. C4Game::ShakeObjects master-list selection, RNG consumption, and
     // raw C4Object::Fling fallback. The oracle compiles the complete method
     // bodies mechanically extracted from C4Game.cpp and C4Object.cpp.
     {

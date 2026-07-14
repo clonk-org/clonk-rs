@@ -34319,12 +34319,18 @@ impl Engine {
 
         let (position, bottom, owner) = {
             let object = &self.objects[idx];
-            let (_, half_height) = Self::object_half_extents(object);
-            (
-                object.state.position,
-                object.state.position.y.saturating_add(half_height),
-                object.state.owner,
-            )
+            let position = object.state.position;
+            let bottom = object
+                .state
+                .shape_override
+                .or_else(|| object.current_shape_rect())
+                .map_or(position.y, |shape| {
+                    position
+                        .y
+                        .saturating_add(shape.y)
+                        .saturating_add(shape.height)
+                });
+            (position, bottom, object.state.owner)
         };
 
         let mut spawn_definitions: Vec<DefinitionId> = Vec::new();
@@ -34356,10 +34362,10 @@ impl Engine {
 
         let spawn_position = Vector2::new(position.x, bottom);
         for definition_id in spawn_definitions {
+            let rotation = self.rng.random(360);
             if !self.definitions.contains_key(&definition_id) {
                 continue;
             }
-            let rotation = self.rng.gen_range(0..360);
             let config = SpawnConfig::new(definition_id)
                 .with_position(spawn_position)
                 .with_owner(owner)

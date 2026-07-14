@@ -7495,6 +7495,90 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             "expected Dig2Object conversion to spawn target definition"
         );
     }
+
+    #[test]
+    fn dig2object_rotation_uses_one_cpp_random_draw() {
+        // C4Object::DigOutMaterialCast passes Random(360) to CreateObject
+        // (C4Object.cpp:4017-4030). This seed makes gen_range reject its
+        // first raw RngCore sample, exposing the extra ledger draw.
+        const SEED: u32 = 28;
+
+        let material_source = r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+            Dig2Object=GEM_
+            Dig2ObjectRatio=1
+        "#;
+        let library = MaterialLibrary::parse(material_source).expect("material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+
+        let mut engine = Engine::with_seed(0);
+        let mut digger_definition =
+            Definition::from_script("DGRR", "Digger", "").expect("digger compiles");
+        digger_definition.set_shape_rect(Some(DefinitionRect::new(-2, 2, 4, 7)));
+        engine
+            .register_definition(digger_definition)
+            .expect("digger registers");
+        let mut gem_definition =
+            Definition::from_script("GEM_", "Gem", "").expect("gem compiles");
+        gem_definition.set_rotateable(1);
+        engine
+            .register_definition(gem_definition)
+            .expect("gem registers");
+        engine.set_materials(materials);
+
+        let mut pixels = vec![0_u8; 25];
+        pixels[2 * 5 + 2] = 10;
+        let mut densities = vec![0_i32; 128];
+        densities[10] = 80;
+        let mut material_names = vec![None; 128];
+        material_names[10] = Some("Earth".to_string());
+        let grid = landscape::PixelGrid::new(
+            5,
+            5,
+            pixels,
+            densities,
+            material_names,
+            vec![None; 128],
+        );
+        let mut landscape = Landscape::flat(5, 5);
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+
+        let digger = engine
+            .spawn_object(
+                SpawnConfig::new("DGRR")
+                    .with_position(Vector2::new(2, 2))
+                    .with_loaded(true),
+            )
+            .expect("digger spawns");
+        engine.rng = LcgRng::new(SEED);
+        let before = engine.debug_rng_clone();
+
+        engine.apply_landscape_operations(vec![LandscapeOperation::DigRect {
+            origin: Vector2::new(2, 2),
+            width: 1,
+            height: 1,
+            requested: false,
+            by_object: Some(digger),
+        }]);
+
+        let expected_hold = SEED.wrapping_mul(214_013).wrapping_add(2_531_011);
+        let expected_rotation = ((expected_hold >> 16) % 360) as i32;
+        let snapshot = engine.snapshot();
+        let spawned = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GEM_")
+            .expect("Dig2Object conversion spawns a gem");
+        assert_eq!(spawned.rotation, expected_rotation);
+        assert_eq!(spawned.position, Vector2::new(2, 11));
+        assert_eq!(snapshot.rng.hold, expected_hold);
+        assert_eq!(snapshot.rng.count, before.count + 1);
+    }
+
     #[test]
     fn dig_procedure_spawns_at_most_one_dig2object_per_tick() {
         let mut digger = Definition::from_script("DGRR", "Digger", PROCEDURE_MOVEMENT_SCRIPT)

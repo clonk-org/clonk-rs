@@ -22,6 +22,7 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `trig` | `src/Fixed.h` + `src/Fixed.cpp` `SineTable` | rotation, `SimFlight` |
 | `rng_random` | `src/C4Random.h` LCG | network sync (`RandomHold`/`RandomCount`, incl. range-0) |
 | `rng_randomize3` | `src/C4Random.cpp` `FRndBuf3` | mass-mover / `Rnd3` |
+| `dig2object_rng` | complete `C4Object::DigOutMaterialCast` body | Dig2Object shape-bottom spawn and `Random(360)` plus the next 20 ledger draws |
 | `material_corrode_rng` | `src/C4Material.cpp` corrosion branches | material reaction execution RNG ordering |
 | `mass_mover_transfer_rng` | `src/C4MassMover.cpp` transfer calls | `Random(10)` before `Rnd3()` immediate-execution decision |
 | `script_value_hash` | `src/C4Value.cpp` `hashCombine` / `std::hash<C4Value>` | map-key lookup for nested script values |
@@ -57,6 +58,10 @@ live shadow-diff — see "Phase 2" below.
   is `#ifdef DEBUGREC`, which the oracle does not define).
 - `Randomize3`/`Rnd3` are reproduced verbatim from `src/C4Random.cpp` (10 trivial
   lines around the real `Random()`).
+- `dig2object_rng` mechanically extracts the complete production
+  `C4Object::DigOutMaterialCast` body. C++ records its `CreateObject` arguments
+  and twenty following `Random` draws; Rust digs an identical one-pixel
+  `Dig2ObjectRatio` material and compares the same spawn and ledger.
 - Material corrosion and mass-mover transfer sections are small source-aligned
   RNG traces copied from the branch order in `src/C4Material.cpp` and
   `src/C4MassMover.cpp`; they intentionally avoid full engine setup while still
