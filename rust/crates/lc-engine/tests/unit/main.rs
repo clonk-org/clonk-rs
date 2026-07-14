@@ -11909,6 +11909,326 @@ func Trigger() {
         );
     }
 
+    fn team_switch_fixture(
+        switcher_team: i32,
+        league_game: bool,
+    ) -> (Engine, ObjectId, ObjectId) {
+        let caller_script = r#"
+        func Switch(no_calls) { return SetPlayerTeam(1, 1, no_calls); }
+        "#;
+        let rule_script = r#"
+        local reject, reject_calls, switch_calls, seen;
+        func Initialize() {
+            reject = 0;
+            reject_calls = 0;
+            switch_calls = 0;
+        }
+        func SetReject(value) { reject = value; }
+        func RejectTeamSwitch(player, new_team) {
+            reject_calls = reject_calls + 1;
+            return reject;
+        }
+        func OnTeamSwitch(player, new_team, old_team) {
+            switch_calls = switch_calls + 1;
+            seen = [
+                player, new_team, old_team, GetPlayerTeam(player),
+                Hostile(player, 2, true), Hostile(2, player, true),
+                Hostile(player, 3, true), Hostile(3, player, true),
+                GetHomebaseMaterial(player, BRCK)
+            ];
+        }
+        func Seen() { return [reject_calls, switch_calls, seen]; }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine.set_league_game(league_game);
+        engine.set_teams(vec![
+            TeamInfo::new(1, "Red", 0x00f4_0000),
+            TeamInfo::new(2, "Blue", 0x0000_c800),
+        ]);
+        engine.set_team_home_base_rule(true);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let mut rule =
+            Definition::from_script("RULE", "Rule", rule_script).expect("rule compiles");
+        rule.set_category(1 << 19); // C4D_Rule
+        engine.register_definition(rule).expect("rule registers");
+        engine
+            .register_definition(
+                Definition::from_script("BRCK", "Brick", "").expect("brick compiles"),
+            )
+            .expect("brick registers");
+
+        engine
+            .register_player(
+                PlayerConfig::new(1, "Alice")
+                    .with_team(Some(switcher_team))
+                    .with_home_base_material(HashMap::from([("BRCK".to_string(), 2)])),
+            )
+            .expect("Alice registers");
+        engine
+            .register_player(
+                PlayerConfig::new(2, "Bob")
+                    .with_team(Some(1))
+                    .with_home_base_material(HashMap::from([("BRCK".to_string(), 7)])),
+            )
+            .expect("Bob registers");
+        engine
+            .register_player(
+                PlayerConfig::new(3, "Carol")
+                    .with_team(Some(2))
+                    .with_home_base_material(HashMap::from([("BRCK".to_string(), 2)])),
+            )
+            .expect("Carol registers");
+
+        // Deliberately seed relations opposite to what team 1 will require:
+        // SetTeamHostility must clear both Alice/Bob declarations and set
+        // both Alice/Carol declarations after the accepted switch.
+        engine
+            .set_hostility(1, 2, true)
+            .expect("Alice hostility seeds");
+        engine
+            .set_hostility(2, 1, true)
+            .expect("Bob hostility seeds");
+        engine
+            .set_hostility(1, 3, false)
+            .expect("Alice alliance seeds");
+        engine
+            .set_hostility(3, 1, false)
+            .expect("Carol alliance seeds");
+
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let rule = engine
+            .spawn_object(SpawnConfig::new("RULE"))
+            .expect("rule spawns");
+        engine.tick().expect("tick succeeds");
+        (engine, caller, rule)
+    }
+
+    fn call_team_switch_fixture(
+        engine: &mut Engine,
+        object: ObjectId,
+        function: &str,
+        args: Vec<Value>,
+    ) -> Value {
+        let index = engine.find_object_index(object).expect("object exists");
+        engine
+            .call_object_function(index, function, args)
+            .expect("script call succeeds")
+    }
+
+    #[test]
+    fn set_player_team_rejects_then_switches_with_live_cpp_side_effects() {
+        // FnSetPlayerTeam first offers a rejecting GRBroadcast, then moves the
+        // player, imports the target captain's homebase material, refreshes
+        // hostility in both directions and broadcasts the completed change
+        // (C4Script.cpp:5730-5784; C4Player.cpp:1022-1034,2354-2367).
+        let (mut engine, caller, rule) = team_switch_fixture(2, false);
+
+        assert_eq!(
+            call_team_switch_fixture(
+                &mut engine,
+                rule,
+                "SetReject",
+                vec![Value::Int(1)],
+            ),
+            Value::Nil
+        );
+        assert_eq!(
+            call_team_switch_fixture(
+                &mut engine,
+                caller,
+                "Switch",
+                vec![Value::Bool(false)],
+            ),
+            Value::Bool(false),
+            "a truthy RejectTeamSwitch vetoes every mutation"
+        );
+        assert_eq!(engine.player(1).expect("Alice exists").team(), Some(2));
+        assert_eq!(
+            engine
+                .player(1)
+                .expect("Alice exists")
+                .home_base_material()
+                .get("BRCK"),
+            Some(&2)
+        );
+        assert!(engine
+            .player(1)
+            .expect("Alice exists")
+            .is_hostile_towards(2));
+        assert!(!engine
+            .player(1)
+            .expect("Alice exists")
+            .is_hostile_towards(3));
+        assert_eq!(
+            call_team_switch_fixture(&mut engine, rule, "Seen", Vec::new()),
+            Value::Array(vec![Value::Int(1), Value::Int(0), Value::Nil])
+        );
+
+        assert_eq!(
+            call_team_switch_fixture(
+                &mut engine,
+                rule,
+                "SetReject",
+                vec![Value::Int(0)],
+            ),
+            Value::Nil
+        );
+        assert_eq!(
+            call_team_switch_fixture(
+                &mut engine,
+                caller,
+                "Switch",
+                vec![Value::Bool(false)],
+            ),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call_team_switch_fixture(&mut engine, rule, "Seen", Vec::new()),
+            Value::Array(vec![
+                Value::Int(2),
+                Value::Int(1),
+                Value::Array(vec![
+                    Value::Int(1),
+                    Value::Int(1),
+                    Value::Int(2),
+                    Value::Int(1),
+                    Value::Bool(false),
+                    Value::Bool(false),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Int(7),
+                ]),
+            ]),
+            "OnTeamSwitch sees the final team, hostilities and homebase synchronously"
+        );
+
+        let alice = engine.player(1).expect("Alice exists");
+        assert_eq!(alice.team(), Some(1));
+        assert!(!alice.is_hostile_towards(2));
+        assert!(alice.is_hostile_towards(3));
+        assert_eq!(alice.home_base_material().get("BRCK"), Some(&7));
+        let bob = engine.player(2).expect("Bob exists");
+        assert!(!bob.is_hostile_towards(1));
+        assert_eq!(bob.home_base_material().get("BRCK"), Some(&7));
+        assert!(engine
+            .player(3)
+            .expect("Carol exists")
+            .is_hostile_towards(1));
+    }
+
+    #[test]
+    fn set_player_team_same_team_short_circuits_and_league_refuses_first() {
+        let (mut same_team, caller, rule) = team_switch_fixture(1, false);
+        call_team_switch_fixture(
+            &mut same_team,
+            rule,
+            "SetReject",
+            vec![Value::Int(1)],
+        );
+        assert_eq!(
+            call_team_switch_fixture(
+                &mut same_team,
+                caller,
+                "Switch",
+                vec![Value::Bool(false)],
+            ),
+            Value::Bool(true),
+            "the existing membership succeeds before callback dispatch"
+        );
+        assert_eq!(
+            call_team_switch_fixture(&mut same_team, rule, "Seen", Vec::new()),
+            Value::Array(vec![Value::Int(0), Value::Int(0), Value::Nil])
+        );
+        assert_eq!(same_team.player(1).expect("Alice exists").team(), Some(1));
+
+        let (mut league, caller, rule) = team_switch_fixture(2, true);
+        call_team_switch_fixture(
+            &mut league,
+            rule,
+            "SetReject",
+            vec![Value::Int(1)],
+        );
+        assert_eq!(
+            call_team_switch_fixture(
+                &mut league,
+                caller,
+                "Switch",
+                vec![Value::Bool(false)],
+            ),
+            Value::Bool(false),
+            "league refusal precedes player, team and callback work"
+        );
+        assert_eq!(league.player(1).expect("Alice exists").team(), Some(2));
+        assert_eq!(
+            call_team_switch_fixture(&mut league, rule, "Seen", Vec::new()),
+            Value::Array(vec![Value::Int(0), Value::Int(0), Value::Nil])
+        );
+        assert_eq!(
+            league
+                .player(1)
+                .expect("Alice exists")
+                .home_base_material()
+                .get("BRCK"),
+            Some(&2)
+        );
+        assert!(league
+            .player(1)
+            .expect("Alice exists")
+            .is_hostile_towards(2));
+        assert!(!league
+            .player(1)
+            .expect("Alice exists")
+            .is_hostile_towards(3));
+    }
+
+    #[test]
+    fn set_player_team_no_calls_changes_only_team_membership() {
+        // fNoCalls still performs the validated team move, but skips both
+        // broadcasts, SetTeamHostility and SyncHomebaseMaterialFromTeam.
+        let (mut engine, caller, rule) = team_switch_fixture(2, false);
+        call_team_switch_fixture(
+            &mut engine,
+            rule,
+            "SetReject",
+            vec![Value::Int(1)],
+        );
+
+        assert_eq!(
+            call_team_switch_fixture(
+                &mut engine,
+                caller,
+                "Switch",
+                vec![Value::Bool(true)],
+            ),
+            Value::Bool(true)
+        );
+        assert_eq!(engine.player(1).expect("Alice exists").team(), Some(1));
+        assert_eq!(
+            call_team_switch_fixture(&mut engine, rule, "Seen", Vec::new()),
+            Value::Array(vec![Value::Int(0), Value::Int(0), Value::Nil])
+        );
+
+        let alice = engine.player(1).expect("Alice exists");
+        assert!(alice.is_hostile_towards(2));
+        assert!(!alice.is_hostile_towards(3));
+        assert_eq!(alice.home_base_material().get("BRCK"), Some(&2));
+        let bob = engine.player(2).expect("Bob exists");
+        assert!(bob.is_hostile_towards(1));
+        assert_eq!(bob.home_base_material().get("BRCK"), Some(&7));
+        assert!(!engine
+            .player(3)
+            .expect("Carol exists")
+            .is_hostile_towards(1));
+    }
+
     #[test]
     fn create_menu_opens_a_script_menu_and_get_menu_reads_it_like_cpp() {
         // FnCreateMenu (C4Script.cpp:1426-1459): inits the object's menu with

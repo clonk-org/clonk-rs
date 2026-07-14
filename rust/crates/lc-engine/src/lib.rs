@@ -990,7 +990,7 @@ const DEFAULT_GENERATED_TEAM_COLORS: [u32; 10] = [
     0x0078_4830,
 ];
 
-fn default_generated_team_color(id: i32) -> Option<u32> {
+pub(crate) fn default_generated_team_color(id: i32) -> Option<u32> {
     id.checked_sub(1)
         .and_then(|index| usize::try_from(index).ok())
         .and_then(|index| DEFAULT_GENERATED_TEAM_COLORS.get(index))
@@ -12385,6 +12385,10 @@ pub struct Engine {
     /// network session just as C++ copies `Game.NetworkActive` during
     /// parameter setup (C4GameParameters.cpp:429-434).
     network_game: bool,
+    /// `Game.Parameters::isLeague()` — specifically whether the synchronized
+    /// LeagueAddress is non-empty. This is independent from network play:
+    /// ordinary network games may still allow script-driven team switches.
+    league_game: bool,
     /// Whether this process owns authoritative control input. Offline games
     /// and network hosts do; clients and replay consumers do not.
     control_host: bool,
@@ -14239,6 +14243,7 @@ impl Engine {
             scenario_script_counter: 0,
             random_seed: seed,
             network_game: false,
+            league_game: false,
             control_host: true,
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             local_players: None,
@@ -16719,6 +16724,10 @@ impl Engine {
         self.network_game = network_game;
     }
 
+    pub fn set_league_game(&mut self, league_game: bool) {
+        self.league_game = league_game;
+    }
+
     pub fn set_control_host(&mut self, control_host: bool) {
         self.control_host = control_host;
     }
@@ -17034,6 +17043,11 @@ impl Engine {
                 .map(|section| section.name.as_str()),
         )
         .with_teams(Rc::clone(&self.teams))
+        .with_team_runtime_options(
+            self.auto_generate_teams,
+            self.team_colors,
+            self.league_game,
+        )
         .with_movement_solid_masks(self.ocf_solid_mask_overlay())
         .with_definition_order(Rc::clone(&self.runtime_definition_order))
         .with_color_by_owner_definitions(
@@ -25478,6 +25492,71 @@ impl Engine {
         Ok(true)
     }
 
+    fn apply_script_player_team(
+        &mut self,
+        player_id: i32,
+        team: Option<i32>,
+        generated_team: Option<TeamInfo>,
+        color: Option<u32>,
+        home_base_material: Option<HashMap<DefinitionId, u32>>,
+        synchronize_hostility: bool,
+    ) -> Result<(), EngineError> {
+        if let Some(generated_team) = generated_team {
+            if !self
+                .teams
+                .iter()
+                .any(|existing| existing.id == generated_team.id)
+            {
+                Rc::make_mut(&mut self.teams).push(generated_team);
+            }
+        }
+        if !self.players.contains_key(&player_id) {
+            return Ok(());
+        }
+        self.players
+            .get_mut(&player_id)
+            .expect("player presence checked above")
+            .set_team(team);
+        if let Some(color) = color {
+            self.set_player_color(player_id, color)?;
+        }
+        if let Some(material) = home_base_material {
+            self.players
+                .get_mut(&player_id)
+                .expect("player remains present")
+                .set_home_base_material(material);
+        }
+        if synchronize_hostility {
+            self.set_player_team_hostility(player_id);
+        }
+        Ok(())
+    }
+
+    /// `C4Player::SetTeamHostility`: a nonzero team makes the switching
+    /// player mutually hostile to every player in another team and mutually
+    /// allied with every teammate. The writes are silent; SetPlayerTeam's
+    /// own callbacks bracket this operation in the synchronous host preview.
+    fn set_player_team_hostility(&mut self, player_id: i32) {
+        let Some(team) = self.players.get(&player_id).and_then(Player::team) else {
+            return;
+        };
+        let relations = self
+            .players
+            .iter()
+            .filter_map(|(&other_id, player)| {
+                (other_id != player_id).then_some((other_id, player.team() != Some(team)))
+            })
+            .collect::<Vec<_>>();
+        for (other_id, hostile) in relations {
+            if let Some(player) = self.players.get_mut(&player_id) {
+                player.set_hostile_towards(other_id, hostile);
+            }
+            if let Some(other) = self.players.get_mut(&other_id) {
+                other.set_hostile_towards(player_id, hostile);
+            }
+        }
+    }
+
     #[doc(hidden)]
     pub fn apply_player_commands(&mut self, commands: Vec<PlayerCommand>) -> Result<(), EngineError> {
         for command in commands {
@@ -25488,6 +25567,23 @@ impl Engine {
                     preserve_ids,
                 } => {
                     let _ = self.load_scenario_section(&name, flags, preserve_ids)?;
+                }
+                PlayerCommand::SetPlayerTeam {
+                    player_id,
+                    team,
+                    generated_team,
+                    color,
+                    home_base_material,
+                    synchronize_hostility,
+                } => {
+                    self.apply_script_player_team(
+                        player_id,
+                        team,
+                        generated_team,
+                        color,
+                        home_base_material,
+                        synchronize_hostility,
+                    )?;
                 }
                 PlayerCommand::SetCrewRosters { rosters } => {
                     for (player_id, crew) in rosters {

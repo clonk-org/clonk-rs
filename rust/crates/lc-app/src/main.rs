@@ -29568,6 +29568,7 @@ impl GameApp {
             }
         }
         engine.set_network_game(network_game);
+        engine.set_league_game(self.network_is_league);
         self.apply_material_library_to(&mut engine);
 
         let apply_result = if network_game {
@@ -29872,6 +29873,7 @@ impl GameApp {
         self.engine = Engine::new();
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
+        self.engine.set_league_game(self.network_is_league);
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.local_controls = LocalControlRegistry::default();
@@ -30045,6 +30047,7 @@ impl GameApp {
         self.engine = Engine::new();
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
+        self.engine.set_league_game(self.network_is_league);
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();

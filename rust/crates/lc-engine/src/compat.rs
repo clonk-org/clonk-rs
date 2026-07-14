@@ -438,6 +438,18 @@ pub enum PlayerCommand {
         /// can preserve them while replacing the active section world.
         preserve_ids: Vec<ObjectId>,
     },
+    /// `FnSetPlayerTeam`'s complete, callback-approved team transition.
+    /// The host has already made every field visible to the still-running
+    /// VM; this payload lets the authoritative engine repeat the transition
+    /// after the copied script context returns.
+    SetPlayerTeam {
+        player_id: i32,
+        team: Option<i32>,
+        generated_team: Option<TeamInfo>,
+        color: Option<u32>,
+        home_base_material: Option<HashMap<DefinitionId, u32>>,
+        synchronize_hostility: bool,
+    },
     /// Final live `C4Player::Crew` lists after a synchronous crew mutation.
     /// Membership is per player and independent of C4Object::Owner; one
     /// object may therefore occur in more than one roster.
@@ -1011,6 +1023,15 @@ pub struct HostWorldContext {
     crew_selection: Rc<HashMap<i32, CrewSelectionState>>,
     next_object_id: u64,
     team_home_base_rule: bool,
+    /// `C4GameParameters::isLeague`: league games forbid every scripted
+    /// team switch, including an otherwise successful same-team no-op.
+    league_game: bool,
+    /// `C4TeamList::fAutoGenerateTeams`: permits the `TEAMID_New` (-1)
+    /// request handled by SetPlayerTeam.
+    auto_generate_teams: bool,
+    /// `C4TeamList::fTeamColors`: joining a team applies its color to the
+    /// player and matching owned objects.
+    team_colors: bool,
     /// `Game.Parameters.IsNetworkGame`, copied from the active
     /// `Game.NetworkActive` session during parameter setup
     /// (C4GameParameters.cpp:429-434).
@@ -1100,6 +1121,9 @@ impl Default for HostWorldContext {
             local_players: Rc::new(HashSet::new()),
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
+            league_game: false,
+            auto_generate_teams: false,
+            team_colors: false,
             network_game: false,
             control_host: true,
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
@@ -1292,6 +1316,9 @@ impl HostWorldContext {
             crew_selection: Rc::new(crew_selection),
             next_object_id,
             team_home_base_rule,
+            league_game: false,
+            auto_generate_teams: false,
+            team_colors: false,
             network_game: false,
             control_host: true,
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
@@ -1371,8 +1398,32 @@ impl HostWorldContext {
         self
     }
 
+    pub(crate) fn with_team_runtime_options(
+        mut self,
+        auto_generate_teams: bool,
+        team_colors: bool,
+        league_game: bool,
+    ) -> Self {
+        self.auto_generate_teams = auto_generate_teams;
+        self.team_colors = team_colors;
+        self.league_game = league_game;
+        self
+    }
+
     pub(crate) fn teams(&self) -> &[TeamInfo] {
         self.teams.as_slice()
+    }
+
+    fn league_game(&self) -> bool {
+        self.league_game
+    }
+
+    fn auto_generate_teams(&self) -> bool {
+        self.auto_generate_teams
+    }
+
+    fn team_colors(&self) -> bool {
+        self.team_colors
     }
 
     /// Attach the scenario script for GameCall/GameCallEx resolution.
@@ -2814,12 +2865,186 @@ fn get_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnSetPlayerTeam (C4Script.cpp:5730-5783): validate before callbacks,
+/// broadcast the rejection hook before any mutation, then switch membership,
+/// synchronize team-owned state, and finally broadcast OnTeamSwitch.
+fn set_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "SetPlayerTeam expects at most 3 arguments: player, team, no-calls",
+        ));
+    }
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetPlayerTeam",
+        "player",
+    )?;
+    let requested_team = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetPlayerTeam",
+        "team",
+    )?;
+    let no_calls = value_to_bool(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetPlayerTeam",
+        "no-calls",
+    )?;
+
+    enum Preflight {
+        Reject,
+        AlreadyThere,
+        Continue,
+    }
+    let preflight = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Preflight::Reject;
+        };
+        // League refusal precedes even the same-team fast path.
+        if context.world.league_game() {
+            return Preflight::Reject;
+        }
+        let Some(player) = context.player_state(player_id) else {
+            return Preflight::Reject;
+        };
+        if player.team.unwrap_or(0) == requested_team {
+            return Preflight::AlreadyThere;
+        }
+
+        let join_allowed = if requested_team == -1 {
+            context.world.auto_generate_teams()
+        } else {
+            context.teams().iter().any(|team| team.id == requested_team)
+                && !context.team_is_full(requested_team)
+        };
+        if join_allowed {
+            Preflight::Continue
+        } else {
+            Preflight::Reject
+        }
+    });
+    match preflight {
+        Preflight::Reject => return Ok(Value::Bool(false)),
+        Preflight::AlreadyThere => return Ok(Value::Bool(true)),
+        Preflight::Continue => {}
+    }
+
+    let reject_args = [Value::Int(player_id), Value::Int(requested_team)];
+    if !no_calls
+        && value_raw_truthy(&broadcast_global_callback(
+            "RejectTeamSwitch",
+            &reject_args,
+            true,
+        )?)
+    {
+        return Ok(Value::Bool(false));
+    }
+
+    let switched = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        // RejectTeamSwitch may itself have changed the player. C++ searches
+        // the old roster only after that callback, so capture the live value
+        // here rather than the preflight snapshot.
+        let old_team = context
+            .player_state(player_id)
+            .and_then(|player| player.team)
+            .unwrap_or(0);
+
+        let (selected_team, generated_team, generated_color) = match requested_team {
+            -1 => {
+                let (team, color) = context.generate_runtime_team();
+                (team.clone(), team, color)
+            }
+            0 => (None, None, None),
+            id => (
+                context.teams().iter().find(|team| team.id == id).cloned(),
+                None,
+                None,
+            ),
+        };
+        let team = selected_team.as_ref().map(|team| team.id);
+
+        // AddPlayer appends the switcher, so any existing member remains the
+        // home-base captain. Excluding the switcher also handles a nested
+        // RejectTeamSwitch callback that already moved this same player.
+        let home_base_material = if !no_calls && context.team_home_base_rule() {
+            team.and_then(|team| {
+                context
+                    .player_ids()
+                    .iter()
+                    .copied()
+                    .filter(|member| *member != player_id)
+                    .find_map(|member| {
+                        context.player_state(member).and_then(|player| {
+                            (player.team == Some(team)).then(|| player.home_base_material.clone())
+                        })
+                    })
+            })
+        } else {
+            None
+        };
+
+        if let Some(player) = context.player_state_mut(player_id) {
+            player.team = team;
+        }
+
+        let color = if context.world.team_colors() {
+            selected_team.as_ref().and_then(|team| {
+                if generated_team.is_some() {
+                    generated_color
+                } else {
+                    Some(team.color)
+                }
+            })
+        } else {
+            None
+        };
+        if let Some(color) = color {
+            context.set_player_color_preview(player_id, color);
+        }
+        if let Some(material) = home_base_material.as_ref() {
+            if let Some(player) = context.player_state_mut(player_id) {
+                player.home_base_material = material.clone();
+            }
+        }
+
+        let synchronize_hostility = !no_calls && team.is_some();
+        if let Some(team) = team.filter(|_| synchronize_hostility) {
+            context.synchronize_team_hostility(player_id, team);
+        }
+
+        context.record_player_command(PlayerCommand::SetPlayerTeam {
+            player_id,
+            team,
+            generated_team,
+            color,
+            home_base_material,
+            synchronize_hostility,
+        });
+        Some((team.unwrap_or(0), old_team))
+    });
+    let Some((new_team, old_team)) = switched else {
+        return Ok(Value::Bool(false));
+    };
+
+    if !no_calls {
+        let changed_args = [
+            Value::Int(player_id),
+            Value::Int(new_team),
+            Value::Int(old_team),
+        ];
+        broadcast_global_callback("OnTeamSwitch", &changed_args, false)?;
+    }
+    Ok(Value::Bool(true))
+}
+
 fn get_team_count(_args: &[Value]) -> Result<Value, RuntimeError> {
     HOST_CONTEXT.with(|cell| {
         Ok(Value::Int(
             cell.borrow()
                 .as_ref()
-                .map(|context| truncate_to_i32(context.world.teams().len() as u64))
+                .map(|context| truncate_to_i32(context.teams().len() as u64))
                 .unwrap_or(0),
         ))
     })
@@ -2838,7 +3063,7 @@ fn get_team_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         Ok(usize::try_from(index)
             .ok()
-            .and_then(|index| context.world.teams().get(index))
+            .and_then(|index| context.teams().get(index))
             .map_or(Value::Nil, |team| Value::Int(team.id)))
     })
 }
@@ -2855,7 +3080,6 @@ fn get_team_color(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         };
         Ok(context
-            .world
             .teams()
             .iter()
             .find(|team| team.id == id)
@@ -2875,7 +3099,6 @@ fn get_team_name(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         };
         Ok(context
-            .world
             .teams()
             .iter()
             .find(|team| team.id == id)
@@ -2962,11 +3185,11 @@ fn set_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// `C4GameScriptHost::GRBroadcast` for the hostility callbacks
-/// (C4ScriptHost.cpp:234-248): live goal/rule/environment objects in the
-/// forward master-list order, followed by the scenario script. Rejection
-/// broadcasts stop at the first truthy result.
-fn broadcast_hostility_callback(
+/// `C4GameScriptHost::GRBroadcast` (C4ScriptHost.cpp:234-248): live
+/// goal/rule/environment objects in forward master-list order, followed by
+/// the scenario script. Rejection broadcasts stop at the first truthy
+/// result. Both hostility and team-switch callbacks use this exact path.
+fn broadcast_global_callback(
     function: &str,
     args: &[Value],
     reject_test: bool,
@@ -3016,6 +3239,21 @@ fn broadcast_hostility_callback(
     match script {
         Some(script) => call_scoped_script_function(script, function, args).unwrap_or(Ok(Value::Nil)),
         None => Ok(Value::Nil),
+    }
+}
+
+fn set_player_hostility_declaration(
+    player: &mut PlayerState,
+    opponent: i32,
+    hostile: bool,
+) {
+    if hostile {
+        if !player.hostility.contains(&opponent) {
+            player.hostility.push(opponent);
+            player.hostility.sort_unstable();
+        }
+    } else {
+        player.hostility.retain(|entry| *entry != opponent);
     }
 }
 
@@ -3115,7 +3353,7 @@ fn set_hostility(args: &[Value]) -> Result<Value, RuntimeError> {
         Value::Bool(new_hostility),
     ];
     if !no_calls
-        && value_raw_truthy(&broadcast_hostility_callback(
+        && value_raw_truthy(&broadcast_global_callback(
             "RejectHostilityChange",
             &reject_args,
             true,
@@ -3159,7 +3397,7 @@ fn set_hostility(args: &[Value]) -> Result<Value, RuntimeError> {
         Value::Bool(new_hostility),
         Value::Bool(old_hostility),
     ];
-    broadcast_hostility_callback("OnHostilityChange", &changed_args, false)?;
+    broadcast_global_callback("OnHostilityChange", &changed_args, false)?;
     Ok(Value::Bool(true))
 }
 
@@ -9641,6 +9879,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerVal", get_player_val);
     script.register_host_function("GetPlayerInfoCoreVal", get_player_info_core_val);
     script.register_host_function("GetPlayerTeam", get_player_team);
+    script.register_host_function("SetPlayerTeam", set_player_team);
     script.register_host_function("GetTeamCount", get_team_count);
     script.register_host_function("GetTeamByIndex", get_team_by_index);
     script.register_host_function("GetTeamColor", get_team_color);
@@ -31812,6 +32051,10 @@ struct EffectHostContext {
     unlinked_content_links: HashSet<(ObjectId, ObjectId)>,
     world: HostWorldContext,
     player_overrides: HashMap<i32, PlayerState>,
+    /// Live C4TeamList projection for this synchronous VM session. Runtime
+    /// TEAMID_New generation must be visible to GetTeam* immediately and to
+    /// callbacks nested later in the same outer call.
+    teams: Vec<TeamInfo>,
     player_commands: Vec<PlayerCommand>,
     object_order_commands: Vec<ObjectOrderCommand>,
     next_mission_commands: Vec<NextMissionCommand>,
@@ -31880,6 +32123,7 @@ impl EffectHostContext {
         let team_home_base_rule = world.team_home_base_rule();
         let scenario_script_counter = world.scenario_script_counter();
         let sky_adjustment = world.sky_adjustment();
+        let teams = world.teams().to_vec();
         let runtime_texmap = world
             .landscape_ref()
             .and_then(Landscape::raster_state)
@@ -32033,6 +32277,7 @@ impl EffectHostContext {
             global,
             world,
             player_overrides: HashMap::new(),
+            teams,
             player_commands: Vec::new(),
             object_order_commands: Vec::new(),
             next_mission_commands: Vec::new(),
@@ -33634,6 +33879,10 @@ impl EffectHostContext {
         self.world.player_ids()
     }
 
+    fn teams(&self) -> &[TeamInfo] {
+        &self.teams
+    }
+
     fn player_state(&self, id: i32) -> Option<&PlayerState> {
         self.player_overrides
             .get(&id)
@@ -33646,6 +33895,119 @@ impl EffectHostContext {
             self.player_overrides.insert(id, state);
         }
         self.player_overrides.get_mut(&id)
+    }
+
+    fn team_is_full(&self, team_id: i32) -> bool {
+        let Some(team) = self.teams.iter().find(|team| team.id == team_id) else {
+            return true;
+        };
+        team.max_players != 0
+            && self
+                .player_ids()
+                .iter()
+                .filter(|player| {
+                    self.player_state(**player).and_then(|state| state.team) == Some(team_id)
+                })
+                .count()
+                >= team.max_players.max(0) as usize
+    }
+
+    /// C4TeamList::GetGenerateTeamByID(TEAMID_New), with the deterministic
+    /// prefix of C4Team::RecheckColor shared with engine-side lobby joins.
+    /// The returned color remains None after the fixed palette is exhausted:
+    /// C++ uses presentation SafeRandom there, which must not consume the
+    /// lockstep RNG in this copied host context.
+    fn generate_runtime_team(&mut self) -> (Option<TeamInfo>, Option<u32>) {
+        if !self.world.auto_generate_teams() {
+            return (None, None);
+        }
+        let Some(id) = self
+            .teams
+            .iter()
+            .map(|team| team.id)
+            .fold(0, i32::max)
+            .checked_add(1)
+        else {
+            return (None, None);
+        };
+        let color = crate::default_generated_team_color(id);
+        let team = TeamInfo::new(id, format!("Team {id}"), color.unwrap_or(0));
+        self.teams.push(team.clone());
+        (Some(team), color)
+    }
+
+    /// C4Player::SetPlayerColor's immediate player and owned-object view.
+    /// Object writes use the ordinary nested-outcome path so GetColorDw and
+    /// callbacks later in this same VM session observe the replacement.
+    fn set_player_color_preview(&mut self, player_id: i32, color: u32) {
+        let old_color = self
+            .player_state(player_id)
+            .and_then(|player| player.color)
+            .map(|color| {
+                u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
+            })
+            .unwrap_or(0);
+        if old_color == color {
+            return;
+        }
+        if let Some(player) = self.player_state_mut(player_id) {
+            player.color = Some(crate::RgbColor::new(
+                ((color >> 16) & 0xff) as u8,
+                ((color >> 8) & 0xff) as u8,
+                (color & 0xff) as u8,
+            ));
+        }
+
+        let recolor = self
+            .master_object_ids()
+            .into_iter()
+            .filter_map(|id| {
+                if !self.object_status_active(id) {
+                    return None;
+                }
+                let object = self.get_world_object(id)?;
+                let scope = self.object_scope(id);
+                let owner = scope.map(ObjectScopeContext::owner).unwrap_or(object.owner());
+                if owner != player_id {
+                    return None;
+                }
+                let object_color = scope
+                    .and_then(|scope| scope.pending_update.color)
+                    .or_else(|| object.full_state().map(|state| state.color))
+                    .unwrap_or(0);
+                ((object_color & 0x00ff_ffff) == (old_color & 0x00ff_ffff))
+                    .then_some((id, object_color))
+            })
+            .collect::<Vec<_>>();
+        for (id, object_color) in recolor {
+            if self.ensure_object_scope(id) {
+                if let Some(scope) = self.object_scope_mut(id) {
+                    scope.pending_update.color =
+                        Some((object_color & 0xff00_0000) | (color & 0x00ff_ffff));
+                }
+            }
+        }
+    }
+
+    fn synchronize_team_hostility(&mut self, player_id: i32, team: i32) {
+        let others = self
+            .player_ids()
+            .iter()
+            .copied()
+            .filter(|other| *other != player_id)
+            .map(|other| {
+                let hostile = self.player_state(other).and_then(|state| state.team) != Some(team);
+                (other, hostile)
+            })
+            .collect::<Vec<_>>();
+        for (other, hostile) in others {
+            if let Some(player) = self.player_state_mut(player_id) {
+                set_player_hostility_declaration(player, other, hostile);
+            }
+            if let Some(opponent) = self.player_state_mut(other) {
+                set_player_hostility_declaration(opponent, player_id, hostile);
+            }
+        }
     }
 
     /// C4ObjectList::Add(stMain) insertion into one C4Player::Crew list
@@ -35978,6 +36340,7 @@ mod tests {
         "SetPhase",
         "SetPhysical",
         "SetPicture",
+        "SetPlayerTeam",
         "SetPlrExtraData",
         "SetPlrKnowledge",
         "SetPlrMagic",
