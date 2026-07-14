@@ -18208,6 +18208,18 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(staged)
 }
 
+/// C++ always has `Game.Material`; `None` only occurs in legacy Rust host
+/// fixtures. Keep their previous byte clamp while making both bridge-data
+/// entry points share one conversion.
+fn clamp_bridge_material(material: i32, materials: Option<&MaterialSet>) -> i32 {
+    match materials {
+        Some(materials) if materials.is_empty() => -1,
+        Some(materials) => material.min(materials.len().saturating_sub(1) as i32),
+        None if material < 0 => -1,
+        None => material.min(0xFF),
+    }
+}
+
 fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 5 {
         return Err(RuntimeError::new(
@@ -18255,37 +18267,22 @@ fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
         // C4Action::SetBridgeData clamps to the last loaded material before
         // packing the low byte (C4Object.cpp:54-62). A loaded empty table has
         // Num-1 == -1 and therefore stores the no-material sentinel 0xff.
-        let material = context
-            .world
-            .materials()
-            .map(|materials| {
-                if materials.is_empty() {
-                    -1
-                } else {
-                    material.min(materials.len().saturating_sub(1) as i32)
-                }
-            })
-            .unwrap_or(material);
+        let material = clamp_bridge_material(material, context.world.materials());
         let encoded = encode_bridge_action_data(length, move_clonk, wall, material);
 
         // FnSetBridgeActionData defaults pObj to cthr->Obj, but an explicit
         // object may be foreign (C4Script.cpp:757-765). LOAM::StartBridge
         // runs in the loam's scope after ObjectSetAction staged "Bridge" on
         // the Clonk, so read and write that target's live nested scope.
-        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
-        else {
+        let Some(target) = target_id.or(context.script_object_context) else {
             return Ok(Value::Bool(false));
         };
-        if !context.ensure_object_scope(target) {
+        if !context.object_status_present(target) || !context.ensure_object_scope(target) {
             return Ok(Value::Bool(false));
         }
         let Some(object) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
-
-        if !object.status().is_active() {
-            return Ok(Value::Bool(false));
-        }
 
         if object.effective_action_procedure() != ActionProcedure::Bridge {
             return Ok(Value::Bool(false));
@@ -18318,26 +18315,22 @@ fn set_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetActionData requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        let bridge_material = clamp_bridge_material(data, context.world.materials());
+        let Some(target) = target_id.or(context.script_object_context) else {
+            return Ok(Value::Bool(false));
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
-        }
-
-        if !object.status().is_active() {
+        if !context.object_status_present(target) || !context.ensure_object_scope(target) {
             return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
 
         let procedure = object.effective_action_procedure();
         let mut next_data = data;
         match procedure {
             ActionProcedure::Bridge => {
-                next_data = if data < 0 { 0xFF } else { data.min(0xFF) };
+                next_data = encode_bridge_action_data(0, false, false, bridge_material);
             }
             ActionProcedure::Attach => {
                 let primary_vertex = (data & 0xFF) as i32;
@@ -44064,7 +44057,7 @@ func Probe(state) {
     }
 
     #[test]
-    fn set_action_data_records_object_update() {
+    fn action_data_setters_share_missing_material_fallback() {
         let mut specs = HashMap::new();
         specs.insert(
             "Idle".to_string(),
@@ -44097,14 +44090,180 @@ func Probe(state) {
             &[],
             HostWorldContext::default(),
             1,
-            || set_action_data(&[Value::Int(512)]),
+            || {
+                Ok::<_, RuntimeError>(Value::Array(vec![
+                    set_bridge_action_data(&[
+                        Value::Int(0),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Int(512),
+                    ])?,
+                    get_action_data(&[])?,
+                    set_action_data(&[Value::Int(512)])?,
+                    get_action_data(&[])?,
+                ]))
+            },
         );
 
-        let value = result.expect("SetActionData returns bool");
-        assert_eq!(value, Value::Bool(true));
+        assert_eq!(
+            result.expect("action-data setters return values"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(255),
+                Value::Bool(true),
+                Value::Int(255),
+            ])
+        );
         let update = outcome.object_update.expect("object update recorded");
         let action = update.action.expect("action update present");
         assert_eq!(action.data, Some(255));
+    }
+
+    fn set_action_data_target_world(
+        procedure: &str,
+        status: ObjectStatus,
+        initial_data: i32,
+        materials: Option<Rc<MaterialSet>>,
+    ) -> (ObjectId, HostWorldContext) {
+        let target_id = ObjectId::new(2);
+        let action_library = ActionLibrary::new(
+            Some("Work".to_string()),
+            HashMap::from([(
+                "Work".to_string(),
+                ActionSpec::default().with_procedure(procedure),
+            )]),
+        );
+        let mut state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        state.status = status;
+        state.action = crate::ActionState::new("Work");
+        state.action.data = initial_data;
+        let target = HostWorldObject::new(
+            target_id,
+            "TARG",
+            status,
+            "Work",
+            None,
+            None,
+            Some(procedure.to_string()),
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            initial_data,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(state));
+        let world = HostWorldContext::from_objects([target])
+            .with_definition_metadata(Rc::new(HashMap::from([(
+                DefinitionId::from("TARG"),
+                DefinitionMetadata {
+                    action_library,
+                    ..DefinitionMetadata::default()
+                },
+            )])))
+            .with_materials(materials);
+        (target_id, world)
+    }
+
+    fn foreign_action_data_update(
+        outcome: &EffectContextOutcome,
+        target: ObjectId,
+    ) -> Option<i32> {
+        outcome
+            .other_objects
+            .iter()
+            .find(|object| object.object_id == target)?
+            .update
+            .as_ref()?
+            .action
+            .as_ref()?
+            .data
+    }
+
+    #[test]
+    fn set_action_data_foreign_attach_uses_the_targets_vertex_validation() {
+        let valid = (29 << 8) | 29;
+        for (data, expected_result, expected_read, expected_update) in [
+            (valid, true, valid, Some(valid)),
+            (30, false, 7, None),
+            ((30 << 8) | 1, false, 7, None),
+        ] {
+            let (target_id, world) =
+                set_action_data_target_world("attach", ObjectStatus::Normal, 7, None);
+            let target = object_reference_value(target_id);
+            let (result, outcome) = with_object_host_context_with_world(world, || {
+                Ok(Value::Array(vec![
+                    set_action_data(&[Value::Int(data), target.clone()])?,
+                    get_action_data(&[target])?,
+                ]))
+            });
+
+            assert_eq!(
+                result.expect("foreign SetActionData runs"),
+                Value::Array(vec![
+                    Value::Bool(expected_result),
+                    Value::Int(expected_read),
+                ])
+            );
+            assert!(outcome.object_update.is_none(), "caller remains unchanged");
+            assert_eq!(
+                foreign_action_data_update(&outcome, target_id),
+                expected_update
+            );
+        }
+    }
+
+    #[test]
+    fn set_action_data_foreign_bridge_clamps_material_and_preserves_sentinel() {
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material Sky]\nName=Sky\n\n[Material Earth]\nName=Earth\n",
+        )
+        .expect("material library parses");
+        let materials = Rc::new(MaterialSet::from_resource_library(&library));
+        let material_count = materials.len() as i32;
+
+        for (case_materials, data, expected_material) in [
+            (materials.clone(), material_count + 5, material_count - 1),
+            (materials.clone(), -1, -1),
+            (Rc::new(MaterialSet::new()), 0, -1),
+        ] {
+            let expected = encode_bridge_action_data(0, false, false, expected_material);
+            let (target_id, world) = set_action_data_target_world(
+                "bridge",
+                ObjectStatus::Normal,
+                0x1234_0301,
+                Some(case_materials),
+            );
+            let target = object_reference_value(target_id);
+            let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+                Ok::<_, RuntimeError>(Value::Array(vec![
+                    set_action_data(&[Value::Int(data), target.clone()])?,
+                    get_action_data(&[target])?,
+                ]))
+            });
+
+            assert_eq!(
+                result.expect("scenario-scope SetActionData runs"),
+                Value::Array(vec![Value::Bool(true), Value::Int(expected)])
+            );
+            assert!(outcome.object_update.is_none());
+            assert_eq!(
+                foreign_action_data_update(&outcome, target_id),
+                Some(expected),
+                "SetActionData bridge conversion clears length and flags"
+            );
+        }
     }
 
     #[test]
@@ -44283,42 +44442,48 @@ func Probe(state) {
     }
 
     #[test]
-    fn set_action_data_requires_active_object() {
-        let mut specs = HashMap::new();
-        specs.insert("Idle".to_string(), ActionSpec::default());
-        let library = ActionLibrary::new(Some("Idle".to_string()), specs);
+    fn set_action_data_and_bridge_data_use_cpp_status_truthiness() {
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material Sky]\nName=Sky\n\n[Material Earth]\nName=Earth\n",
+        )
+        .expect("material library parses");
+        let materials = Rc::new(MaterialSet::from_resource_library(&library));
 
-        let (result, outcome) = with_effect_context(
-            Some(HostObjectContext::new(
-                ObjectId::new(1),
-                None,
-                ObjectStatus::Inactive,
-                100,
-                OWNER_NONE,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                &[],
-                "Idle",
+        for (status, expected, expected_update) in [
+            (ObjectStatus::Inactive, true, Some(1)),
+            (ObjectStatus::Deleted, false, None),
+        ] {
+            // C++ tests `!pObj->Status`: Deleted=0 is rejected, while
+            // Inactive=2 remains a valid object (C4Object.h:39-41).
+            let (target_id, world) = set_action_data_target_world(
+                "bridge",
+                status,
                 0,
-                0,
-                library,
-                Direction::Left,
-                CommandDirection::Stop,
-                0,
-                None,
-                None,
-                &[],
-                crate::FULL_CON,
-            )),
-            &[],
-            HostWorldContext::default(),
-            1,
-            || set_action_data(&[Value::Int(5)]),
-        );
+                Some(materials.clone()),
+            );
+            let target = object_reference_value(target_id);
+            let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+                Ok::<_, RuntimeError>(Value::Array(vec![
+                    set_bridge_action_data(&[
+                        Value::Int(0),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Int(1),
+                        target.clone(),
+                    ])?,
+                    set_action_data(&[Value::Int(1), target])?,
+                ]))
+            });
 
-        let value = result.expect("SetActionData returns bool");
-        assert_eq!(value, Value::Bool(false));
-        assert!(outcome.object_update.is_none());
+            assert_eq!(
+                result.expect("action-data setters run"),
+                Value::Array(vec![Value::Bool(expected), Value::Bool(expected)])
+            );
+            assert_eq!(
+                foreign_action_data_update(&outcome, target_id),
+                expected_update
+            );
+        }
     }
 
     #[test]
