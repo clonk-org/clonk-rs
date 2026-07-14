@@ -971,6 +971,9 @@ pub struct HostWorldContext {
     base_auto_sell_enabled: bool,
     /// Raw `C4Sky::Modulation`/`BackClr` at callback entry.
     sky_adjustment: SkyAdjustment,
+    /// Engine-owned surrogate for process config `MissionAccess`, shared so
+    /// grants are visible immediately to later and nested script calls.
+    mission_access: Rc<RefCell<String>>,
     scoreboard: Rc<RefCell<ScoreboardState>>,
     scoreboard_presentations: Rc<RefCell<ScoreboardPresentationSink>>,
 }
@@ -1015,6 +1018,7 @@ impl Default for HostWorldContext {
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
+            mission_access: Rc::new(RefCell::new(String::new())),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
             scoreboard_presentations: Rc::new(RefCell::new(
                 ScoreboardPresentationSink::default(),
@@ -1197,6 +1201,7 @@ impl HostWorldContext {
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
+            mission_access: Rc::new(RefCell::new(String::new())),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
             scoreboard_presentations: Rc::new(RefCell::new(
                 ScoreboardPresentationSink::default(),
@@ -1226,6 +1231,11 @@ impl HostWorldContext {
         scoreboard: Rc<RefCell<ScoreboardState>>,
     ) -> Self {
         self.scoreboard = scoreboard;
+        self
+    }
+
+    pub(crate) fn with_mission_access(mut self, access: Rc<RefCell<String>>) -> Self {
+        self.mission_access = access;
         self
     }
 
@@ -9378,6 +9388,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Log", log_message);
     script.register_host_function("DebugLog", debug_log_message);
     script.register_host_function("GameOver", game_over);
+    script.register_host_function("GainMissionAccess", gain_mission_access);
+    script.register_host_function("GetMissionAccess", get_mission_access);
     script.register_host_function("SetNextMission", set_next_mission);
     script.register_host_function("Call", call_self);
     script.register_host_function("ObjectCall", object_call);
@@ -10154,6 +10166,58 @@ fn game_over(args: &[Value]) -> Result<Value, RuntimeError> {
         let triggered = context.request_game_over();
         Ok(Value::Bool(triggered))
     })
+}
+
+const CFG_MAX_STRING: usize = 1024;
+
+fn mission_access_contains(list: &str, password: &str) -> bool {
+    list.split(';')
+        .any(|module| module.trim_matches(' ').eq_ignore_ascii_case(password))
+}
+
+/// FnGainMissionAccess (C4Script.cpp:2368-2373): the length guard precedes
+/// case-insensitive SAddModule, whose duplicate/empty no-op still reports
+/// success through this host function.
+fn gain_mission_access(args: &[Value]) -> Result<Value, RuntimeError> {
+    let password = parse_optional_string(args.first(), "GainMissionAccess", "password")?
+        .unwrap_or_default();
+    let granted = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        let mut access = context.world.mission_access.borrow_mut();
+        if access
+            .len()
+            .saturating_add(password.len())
+            .saturating_add(3)
+            > CFG_MAX_STRING
+        {
+            return false;
+        }
+        if !password.is_empty() && !mission_access_contains(&access, &password) {
+            if !access.is_empty() {
+                access.push(';');
+            }
+            access.push_str(&password);
+        }
+        true
+    });
+    Ok(Value::Bool(granted))
+}
+
+/// FnGetMissionAccess (C4Script.cpp:3924-3933): query the same config-side,
+/// case-insensitive semicolon module list; a null string is false.
+fn get_mission_access(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(password) = parse_optional_string(args.first(), "GetMissionAccess", "password")?
+    else {
+        return Ok(Value::Bool(false));
+    };
+    Ok(Value::Bool(HOST_CONTEXT.with(|cell| {
+        cell.borrow().as_ref().is_some_and(|context| {
+            mission_access_contains(&context.world.mission_access.borrow(), &password)
+        })
+    })))
 }
 
 const DEFAULT_NEXT_MISSION_TEXT: &str = "&Next scenario";
@@ -33320,6 +33384,7 @@ mod tests {
         "GBackSemiSolid",
         "GBackSky",
         "GBackSolid",
+        "GainMissionAccess",
         "GameCall",
         "GameCallEx",
         "GameOver",
@@ -33371,6 +33436,7 @@ mod tests {
         "GetMaterialVal",
         "GetMenu",
         "GetMenuSelection",
+        "GetMissionAccess",
         "GetName",
         "GetOCF",
         "GetObjHeight",
@@ -35288,6 +35354,136 @@ func Trigger(object pOther)
                 },
                 NextMissionCommand::Clear,
             ]
+        );
+    }
+
+    #[test]
+    fn gain_mission_access_persists_and_goal_flow_reaches_game_over_return() {
+        let mut engine = crate::Engine::with_seed(7);
+        let definition = crate::Definition::from_script(
+            "GOAL",
+            "Goal",
+            r#"#strict 2
+public func Grant(password) { return GainMissionAccess(password); }
+public func HasAccess(password) { return GetMissionAccess(password); }
+public func CheckGoals()
+{
+    var passwords = ["goal-pass"];
+    for (var missionPassword in passwords)
+    {
+        if (!missionPassword) return 1;
+        GainMissionAccess(missionPassword);
+    }
+    return 0;
+}
+"#,
+        )
+        .expect("goal-style script compiles");
+        engine
+            .register_definition(definition)
+            .expect("goal definition registers");
+        let goal = engine
+            .spawn_object(SpawnConfig::new("GOAL"))
+            .expect("goal spawns");
+        let goal_index = engine.find_object_index(goal).expect("goal exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    goal_index,
+                    "HasAccess",
+                    vec![Value::String(String::new())],
+                )
+                .expect("explicit empty query executes"),
+            Value::Bool(true),
+            "SGetModule exposes the initially empty module"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    goal_index,
+                    "Grant",
+                    vec![Value::String("pw".into())],
+                )
+                .expect("GainMissionAccess executes"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    goal_index,
+                    "Grant",
+                    vec![Value::String("PW".into())],
+                )
+                .expect("duplicate grant remains successful"),
+            Value::Bool(true),
+            "SAddModule de-duplicates case-insensitively"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    goal_index,
+                    "HasAccess",
+                    vec![Value::String(String::new())],
+                )
+                .expect("post-grant empty query executes"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(goal_index, "CheckGoals", Vec::new())
+                .expect("fulfilled Goal.c4d-style loop continues"),
+            Value::Int(0),
+            "the caller reaches its game-over return"
+        );
+        for password in ["pw", "PW", "goal-pass", "GOAL-PASS"] {
+            assert_eq!(
+                engine
+                    .call_object_function(
+                        goal_index,
+                        "HasAccess",
+                        vec![Value::String(password.into())],
+                    )
+                    .expect("GetMissionAccess executes"),
+                Value::Bool(true),
+                "granted password {password:?} remains queryable"
+            );
+        }
+
+        // Existing list is "pw;goal-pass" (12 bytes). The C++ guard allows
+        // exactly 1009 more password bytes because 12 + 1009 + 3 == 1024;
+        // after SAddModule adds the separator, any further non-empty grant
+        // exceeds CFG_MaxString and returns false.
+        let boundary_password = "x".repeat(1009);
+        assert_eq!(
+            engine
+                .call_object_function(
+                    goal_index,
+                    "Grant",
+                    vec![Value::String(boundary_password.clone())],
+                )
+                .expect("boundary grant executes"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    goal_index,
+                    "HasAccess",
+                    vec![Value::String(boundary_password)],
+                )
+                .expect("boundary grant remains queryable"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    goal_index,
+                    "Grant",
+                    vec![Value::String("z".into())],
+                )
+                .expect("oversized grant reports failure without aborting"),
+            Value::Bool(false)
         );
     }
 

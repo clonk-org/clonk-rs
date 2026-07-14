@@ -12356,6 +12356,9 @@ pub struct Engine {
     #[doc(hidden)] pub pending_audio: Vec<AudioCommand>,
     #[doc(hidden)] pub pending_menu_requests: Vec<MenuRequest>,
     messages: MessageManager,
+    /// Engine-held mission-password surrogate for process config. This stays
+    /// outside EngineState/save serialization, like C++ Config.
+    mission_access: Rc<RefCell<String>>,
     scoreboard: Rc<RefCell<ScoreboardState>>,
     scoreboard_presentations: Rc<RefCell<ScoreboardPresentationSink>>,
 }
@@ -14124,6 +14127,7 @@ impl Engine {
             pending_audio: Vec::new(),
             pending_menu_requests: Vec::new(),
             messages: MessageManager::new(),
+            mission_access: Rc::new(RefCell::new(String::new())),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
             scoreboard_presentations: Rc::new(RefCell::new(
                 ScoreboardPresentationSink::default(),
@@ -16721,6 +16725,7 @@ impl Engine {
         )
         .with_network_game(self.network_game)
         .with_local_players(local_players)
+        .with_mission_access(Rc::clone(&self.mission_access))
         .with_scoreboard(Rc::clone(&self.scoreboard))
         .with_scoreboard_presentations(Rc::clone(&self.scoreboard_presentations))
         .with_scenario_script_counter(self.scenario_script_counter)
