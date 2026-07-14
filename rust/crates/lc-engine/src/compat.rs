@@ -15796,10 +15796,8 @@ fn get_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|arg| parse_object_reference_argument(arg, "GetPhysical", "target"))
         .transpose()?
         .flatten();
-    let definition_id = match args.get(3) {
-        Some(Value::String(id)) if !id.is_empty() => Some(id.clone()),
-        _ => None,
-    };
+    let definition_id =
+        parse_definition_argument(args.get(3), "GetPhysical")?.filter(|id| !id.is_empty());
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -47624,6 +47622,69 @@ func Probe(state) {
         assert_eq!(physicals.info, None);
         assert_eq!(physicals.temporary, None);
         assert_eq!(physicals.changes, Vec::<(String, i32)>::new());
+    }
+
+    #[test]
+    fn get_physical_definition_form_accepts_id_representations_and_object_precedence() {
+        let definition_magic = 80_000;
+        let world =
+            HostWorldContext::default().with_definition_metadata(Rc::new(HashMap::from([(
+                DefinitionId::from("MAGE"),
+                DefinitionMetadata {
+                    physical: PhysicalInfo {
+                        magic: definition_magic,
+                        ..PhysicalInfo::default()
+                    },
+                    ..DefinitionMetadata::default()
+                },
+            )])));
+
+        let (result, _) = with_object_host_context_with_world(world, || {
+            let magic = || Value::String("Magic".to_string());
+            // Give the caller a temporary physical set, then lower its live
+            // Magic to zero. GetPhysical(..., nil, GetID()) must still read
+            // the raw definition value (C4Script.cpp:644-653).
+            assert_eq!(
+                set_physical(&[magic(), Value::Int(50_000), Value::Int(PHYS_TEMPORARY),])?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                set_physical(&[magic(), Value::Int(0), Value::Int(PHYS_CURRENT)])?,
+                Value::Bool(true)
+            );
+
+            for definition in [
+                Value::C4Id("MAGE".to_string()),
+                Value::String("MAGE".to_string()),
+                Value::Int(i32::from_le_bytes(*b"MAGE")),
+            ] {
+                for target in [Value::Nil, Value::Int(0)] {
+                    assert_eq!(
+                        get_physical(&[
+                            magic(),
+                            Value::Int(PHYS_CURRENT),
+                            target,
+                            definition.clone(),
+                        ])?,
+                        Value::Int(definition_magic)
+                    );
+                }
+            }
+
+            // A real object argument wins over the conflicting definition id.
+            assert_eq!(
+                get_physical(&[
+                    magic(),
+                    Value::Int(PHYS_CURRENT),
+                    object_reference_value(ObjectId::new(1)),
+                    Value::C4Id("MAGE".to_string()),
+                ])?,
+                Value::Int(0)
+            );
+            Ok(Value::Nil)
+        });
+
+        result.expect("definition physical reads succeed");
     }
 
     #[test]
