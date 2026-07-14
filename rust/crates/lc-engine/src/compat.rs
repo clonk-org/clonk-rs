@@ -9710,6 +9710,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     // compile the engine-wide planet/System.c4g.
     script.register_host_function("GetObjWidth", get_obj_width);
     script.register_host_function("GetObjHeight", get_obj_height);
+    script.register_host_function("GetEntrance", get_entrance);
     script.register_host_function("SetEntrance", set_entrance);
     script.register_host_function("SetColorDw", set_color_dw);
     script.register_host_function("SetPicture", set_picture);
@@ -28144,6 +28145,49 @@ fn get_obj_dimension(target: Option<&Value>, entry: &str) -> Result<Value, Runti
     ])
 }
 
+/// FnGetEntrance (C4Script.cpp:1125-1129): read the object's live
+/// EntranceStatus as an integer, defaulting a nil target to cthr->Obj.
+fn get_entrance(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetEntrance expects at most 1 argument: target",
+        ));
+    }
+
+    let target_id = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "GetEntrance",
+        "target",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(target) = target_id.or(context.script_object_context) else {
+            return Ok(Value::Nil);
+        };
+
+        let scope = context.object_scope(target);
+        let world_object = context.get_world_object(target);
+        if scope.is_none() && world_object.is_none() {
+            return Ok(Value::Nil);
+        }
+
+        let enabled = scope
+            .and_then(|scope| scope.pending_update.entrance_status)
+            .or_else(|| {
+                world_object
+                    .as_ref()
+                    .and_then(|object| object.full_state())
+                    .map(|state| state.entrance_status)
+            })
+            .unwrap_or(false);
+        Ok(Value::Int(i32::from(enabled)))
+    })
+}
+
 /// FnSetEntrance (C4Script.cpp:690-695): toggle the object's EntranceStatus.
 fn set_entrance(args: &[Value]) -> Result<Value, RuntimeError> {
     let enabled = args.first().unwrap_or(&Value::Nil).as_bool();
@@ -34623,6 +34667,7 @@ mod tests {
         "GetEffect",
         "GetEffectCount",
         "GetEnergy",
+        "GetEntrance",
         "GetGravity",
         "GetHiRank",
         "GetHomebaseMaterial",
@@ -46959,6 +47004,14 @@ func Probe(state) {
         assert_eq!(value, Value::Int(ObjectStatus::Inactive.to_script_value()));
         let update = outcome.object_update.expect("status update present");
         assert_eq!(update.status, Some(ObjectStatus::Inactive));
+    }
+
+    #[test]
+    fn get_entrance_without_an_object_returns_nil() {
+        assert_eq!(
+            get_entrance(&[]).expect("GetEntrance without a host context succeeds"),
+            Value::Nil
+        );
     }
 
     #[test]
