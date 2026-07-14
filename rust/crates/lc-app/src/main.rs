@@ -34296,9 +34296,37 @@ mod tests {
         for _ in 0..11 {
             app.update().expect("wait out blast-pocket key buffer");
         }
+        let descent_key = app
+            .engine
+            .object_snapshot(clonk)
+            .zip(app.engine.object_snapshot(elevator_case))
+            .map(|(clonk, elevator)| {
+                if clonk.position.x <= elevator.position.x {
+                    VirtualKeyCode::C
+                } else {
+                    VirtualKeyCode::Z
+                }
+            })
+            .expect("CLNK and ELEC survive the blast-pocket descent");
         hold_app_key_until(
             app,
-            VirtualKeyCode::X,
+            descent_key,
+            &format!("{subject} aligns above ELEC"),
+            160,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .zip(app.engine.object_snapshot(elevator_case))
+                    .is_some_and(|(clonk, elevator)| {
+                        clonk.action.name == "Walk"
+                            && (clonk.position.x - elevator.position.x).abs() <= 25
+                    })
+            },
+        );
+        // ELEC's C++ FindWaitingClonk accepts this WALK Clonk only after the
+        // released horizontal control has set its ComDir to Stop.
+        advance_app_until(
+            app,
             &format!("{subject} descends beside ELEC"),
             160,
             |app| {
@@ -34363,6 +34391,12 @@ mod tests {
                 object.action.name == "Push" && object.action.target == Some(elevator_case)
             })
         });
+        let elevator_start_y = app
+            .engine
+            .object_snapshot(elevator_case)
+            .expect("ELEC survives before its surface ascent")
+            .position
+            .y;
         hold_app_key_until(
             app,
             VirtualKeyCode::S,
@@ -34370,8 +34404,13 @@ mod tests {
             360,
             |app| {
                 app.engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.position.y <= 205)
+                    .object_snapshot(elevator_case)
+                    // Wait for SetMoveTo(RangeTop) to halt naturally. The
+                    // Clonk y<=205 proxy releases Up before ELEC's C++ top
+                    // stop and leaves the surface bridge open.
+                    .is_some_and(|object| {
+                        object.position.y < elevator_start_y && object.action.name == "Wait"
+                    })
             },
         );
         {

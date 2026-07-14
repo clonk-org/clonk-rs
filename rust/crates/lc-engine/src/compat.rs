@@ -22152,18 +22152,30 @@ fn get_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(context) => context,
             None => return Ok(Value::Nil),
         };
-        let object = match context.object_context() {
-            Some(object) => object,
-            None => return Ok(Value::Nil),
-        };
-
         if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Nil);
+            if let Some(object) = context.object_scope(target) {
+                return Ok(Value::Int(
+                    object.command_direction().to_script_value(),
+                ));
             }
+            return Ok(context
+                .get_world_object(target)
+                .map(|object| {
+                    Value::Int(
+                        object
+                            .full_state()
+                            .map(|state| state.command_direction)
+                            .unwrap_or_default()
+                            .to_script_value(),
+                    )
+                })
+                .unwrap_or(Value::Nil));
         }
 
-        Ok(Value::Int(object.command_direction().to_script_value()))
+        match context.object_context() {
+            Some(object) => Ok(Value::Int(object.command_direction().to_script_value())),
+            None => Ok(Value::Nil),
+        }
     })
 }
 
@@ -42848,6 +42860,91 @@ func Probe(state) {
             .and_then(|outcome| outcome.update.as_ref())
             .expect("foreign command-direction update recorded");
         assert_eq!(update.command_direction, Some(CommandDirection::Down));
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+    }
+
+    fn world_object_with_command_direction(
+        id: ObjectId,
+        command_direction: CommandDirection,
+    ) -> HostWorldObject {
+        let mut state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        state.command_direction = command_direction;
+        HostWorldObject::new(
+            id,
+            "CLNK",
+            ObjectStatus::Normal,
+            "Walk",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(state))
+    }
+
+    #[test]
+    fn get_com_dir_reads_explicit_world_object_without_object_context() {
+        let target_id = ObjectId::new(2);
+        let world = HostWorldContext::from_objects([world_object_with_command_direction(
+            target_id,
+            CommandDirection::UpLeft,
+        )]);
+
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            get_com_dir(&[object_reference_value(target_id)])
+        });
+
+        assert_eq!(
+            result.expect("GetComDir succeeds from a definition context"),
+            Value::Int(CommandDirection::UpLeft.to_script_value())
+        );
+    }
+
+    #[test]
+    fn get_com_dir_reads_same_call_staged_foreign_direction() {
+        let target_id = ObjectId::new(2);
+        let world = HostWorldContext::from_objects([world_object_with_command_direction(
+            target_id,
+            CommandDirection::Right,
+        )]);
+
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            let set_result = set_com_dir(&[
+                Value::Int(CommandDirection::DownLeft.to_script_value()),
+                object_reference_value(target_id),
+            ])?;
+            Ok(Value::Array(vec![
+                set_result,
+                get_com_dir(&[object_reference_value(target_id)])?,
+                get_com_dir(&[])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("foreign SetComDir/GetComDir sequence succeeds"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(CommandDirection::DownLeft.to_script_value()),
+                Value::Int(CommandDirection::Stop.to_script_value()),
+            ]),
+            "the staged foreign write is visible without changing local no-arg lookup"
+        );
         assert!(outcome.object_update.is_none(), "caller remains unchanged");
     }
 

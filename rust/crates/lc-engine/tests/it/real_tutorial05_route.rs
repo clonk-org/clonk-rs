@@ -930,6 +930,10 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             },
         )?;
     }
+    // Script68 waits for the pusher's real ComDir to stop. In classic
+    // controls releasing Left does not stop DFA_PUSH, so send the distinct
+    // Down control that maps to ComDir Stop while pushing.
+    player.tap(COM_DOWN)?;
     player.wait_until(
         "Tutorial05 asks the right-hill CLNK to load CATA",
         300,

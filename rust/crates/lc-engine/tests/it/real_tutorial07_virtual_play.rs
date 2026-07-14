@@ -311,7 +311,7 @@ fn return_to_hut(
         .expect("the Clonk and ELEC survive the blast-pocket descent");
     player.hold_until(
         descent_control,
-        format!("{subject} descends beside ELEC"),
+        format!("{subject} aligns above ELEC"),
         160,
         |engine| {
             engine
@@ -319,10 +319,21 @@ fn return_to_hut(
                 .zip(engine.object_snapshot(elevator_case))
                 .is_some_and(|(clonk, elevator_case)| {
                     clonk.action.name == "Walk"
-                        && (clonk.position.y - elevator_case.position.y).abs() <= 20
+                        && (clonk.position.x - elevator_case.position.x).abs() <= 25
                 })
         },
     )?;
+    // ELEC's C++ FindWaitingClonk accepts this WALK Clonk only after the
+    // released horizontal control has set its ComDir to Stop.
+    player.wait_until(format!("{subject} descends beside ELEC"), 160, |engine| {
+        engine
+            .object_snapshot(clonk)
+            .zip(engine.object_snapshot(elevator_case))
+            .is_some_and(|(clonk, elevator_case)| {
+                clonk.action.name == "Walk"
+                    && (clonk.position.y - elevator_case.position.y).abs() <= 20
+            })
+    })?;
     // Crossing the freshly blasted pocket can leave the Clonk on either side
     // of ELEC. Use an ordinary horizontal control to enter its grab rectangle
     // and to separate this Down from the descent Down in C++'s LastCom buffer.
@@ -1576,6 +1587,25 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 })
         },
     )?;
+    player.wait_until(
+        "the home elevator reaches the stopped crystal-carrying Clonk",
+        160,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .zip(engine.object_snapshot(elevator_case))
+                .is_some_and(|(clonk, elevator)| {
+                    let dx = clonk.position.x - elevator.position.x;
+                    let dy = clonk.position.y - elevator.position.y;
+                    clonk.action.name == "Walk"
+                        && elevator.action.name == "Wait"
+                        && engine
+                            .object_current_shape_rect(elevator_case)
+                            .is_some_and(|shape| shape.contains_offset(dx, dy))
+                })
+        },
+    )?;
+    player.wait_out_double_click()?;
     player.double_tap(COM_DOWN)?;
     player.wait_until(
         "the crystal-carrying Clonk grabs the home elevator",
