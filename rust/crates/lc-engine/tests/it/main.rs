@@ -25,6 +25,7 @@ mod get_entrance;
 mod get_inventory;
 mod hangle_movement;
 mod legacy_scenario_loading;
+mod load_scenario_section;
 mod manifest_definitions;
 mod object_visibility;
 mod real_clonk_hangle;

@@ -180,10 +180,19 @@ struct DefinitionActions {
 }
 
 #[derive(Debug, Clone)]
-struct ScenarioSpawn {
-    handle: Option<String>,
-    container_handle: Option<String>,
-    config: SpawnConfig,
+pub(crate) struct ScenarioSpawn {
+    pub(crate) handle: Option<String>,
+    pub(crate) container_handle: Option<String>,
+    pub(crate) config: SpawnConfig,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ScenarioSectionSpec {
+    pub(crate) name: String,
+    pub(crate) landscape: Option<Landscape>,
+    pub(crate) objects: Vec<ScenarioSpawn>,
+    pub(crate) scenario_values: ScenarioValueStore,
+    pub(crate) environment: EnvironmentSettings,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +243,7 @@ pub struct Scenario {
     value_overloads: Vec<(String, i32)>,
     initial_spawns: Vec<ScenarioSpawn>,
     landscape: Option<Landscape>,
+    scenario_sections: Vec<ScenarioSectionSpec>,
     physics: Option<PhysicsSettings>,
     /// The `[Landscape] Gravity` C4SVal — evaluated through the synced
     /// ledger at apply time (C4Landscape::ScenarioInit, C4Landscape.cpp:66).
@@ -2193,6 +2203,21 @@ impl Scenario {
         let (physics, gravity) = derive_legacy_physics(&manifest)?;
         let environment = derive_legacy_environment(&manifest)?;
         let weather_init = derive_legacy_weather_init(&manifest)?;
+        // C4Sky always initializes for a running game (C4Sky::Init,
+        // C4Sky.cpp:71-152): bitmap sky or fade gradient.
+        let sky = derive_legacy_sky(group, &manifest);
+        let scenario_sections = load_legacy_scenario_sections(
+            group,
+            &manifest,
+            &collected,
+            classifier.as_mut(),
+            random_seed,
+            startup_player_count,
+            &landscape,
+            &initial_spawns,
+            environment,
+            sky.surface.is_some(),
+        )?;
         let (_, legacy_team_metadata) = load_initial_network_teams(group, languages)?;
         let (teams, lobby_teams) = load_legacy_teams(group, languages, &manifest.core)?;
         let game_parameter_defaults = game_parameter_defaults(&manifest.core);
@@ -2232,10 +2257,6 @@ impl Scenario {
             embedded_game_parameters,
             teams: lobby_teams,
         };
-        // C4Sky always initializes for a running game (C4Sky::Init,
-        // C4Sky.cpp:71-152): bitmap sky or fade gradient.
-        let sky = derive_legacy_sky(group, &manifest);
-
         Ok(Self {
             legacy_core: Some(legacy_core),
             legacy_team_metadata,
@@ -2248,6 +2269,7 @@ impl Scenario {
             value_overloads: id_list_pairs(&manifest.core.game.realism.value_overloads),
             initial_spawns,
             landscape,
+            scenario_sections,
             physics,
             gravity,
             environment: Some(environment),
@@ -2350,6 +2372,10 @@ impl Scenario {
         !self.initial_spawns.is_empty()
     }
 
+    pub(crate) fn scenario_sections(&self) -> &[ScenarioSectionSpec] {
+        &self.scenario_sections
+    }
+
     pub fn objectives(&self) -> &ScenarioObjectives {
         &self.objectives
     }
@@ -2428,6 +2454,7 @@ impl Scenario {
                 })
                 .unwrap_or_default(),
         );
+        engine.configure_scenario_sections(&self.scenario_sections);
         // C4GraphicsSystem::Default initializes all nine controls before a
         // fresh scenario-apply boundary, after which scenario Initialize may
         // call SetGamma. Save loading restores its captured controls after
@@ -3177,6 +3204,7 @@ impl Scenario {
             value_overloads: Vec::new(),
             initial_spawns: spawns,
             landscape,
+            scenario_sections: Vec::new(),
             physics,
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment,
@@ -5690,6 +5718,60 @@ impl LegacyScenarioCore {
 
         Ok(core)
     }
+
+    /// Applies a scenario-section core over the already loaded main core.
+    /// C4Scenario::Load(..., true) leaves fields absent from the section
+    /// untouched instead of reinstating their ordinary main-file defaults
+    /// (C4Game.cpp:4211-4223).
+    fn apply_section_overrides(
+        &mut self,
+        sections: &HashMap<String, Vec<(String, String)>>,
+    ) -> Result<(), ScenarioError> {
+        if let Some(entries) = sections.get("head") {
+            self.head.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("definitions") {
+            self.definitions.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("game") {
+            self.game.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("landscape") {
+            self.landscape.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("weather") {
+            self.weather.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("disasters") {
+            self.disasters.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("animals") {
+            self.animals.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("environment") {
+            self.environment.apply_entries(entries)?;
+        }
+
+        for (section, entries) in sections {
+            if !section.starts_with("player") {
+                continue;
+            }
+            let Some(owner) = owner_index_from_section(section) else {
+                continue;
+            };
+            if owner < 0 {
+                continue;
+            }
+            let index = owner as usize;
+            if self.players.len() <= index {
+                self.players.resize(index + 1, LegacyPlayer::default());
+            }
+            self.players[index].apply_entries(entries)?;
+        }
+
+        apply_scenario_rct_all_strings(self, sections);
+        Ok(())
+    }
 }
 
 fn parse_legacy_scenario_manifest(group: &Group) -> Result<LegacyScenarioManifest, ScenarioError> {
@@ -5709,6 +5791,40 @@ fn parse_legacy_scenario_manifest(group: &Group) -> Result<LegacyScenarioManifes
     let text = String::from_utf8(bytes[..visible_len].to_vec())
         .map_err(|_| ScenarioError::LegacyCoreEncoding)?;
     parse_legacy_scenario_text(&text)
+}
+
+fn overlay_legacy_scenario_manifest(
+    base: &LegacyScenarioManifest,
+    overlay: LegacyScenarioManifest,
+) -> Result<LegacyScenarioManifest, ScenarioError> {
+    let mut sections = base.sections.clone();
+    for (section_name, override_entries) in &overlay.sections {
+        let entries = sections.entry(section_name.clone()).or_default();
+        for override_entry in override_entries {
+            if let Some(existing) = entries
+                .iter_mut()
+                .find(|(key, _)| key.eq_ignore_ascii_case(override_entry.0.as_str()))
+            {
+                *existing = override_entry.clone();
+            } else {
+                entries.push(override_entry.clone());
+            }
+        }
+    }
+
+    let mut core = base.core.clone();
+    core.apply_section_overrides(&overlay.sections)?;
+    let ground_height_hint = derive_ground_height_hint(&sections);
+    let definition_specs = core.definitions.definitions.clone();
+
+    Ok(LegacyScenarioManifest {
+        title: overlay.title.or_else(|| base.title.clone()),
+        description: overlay.description.or_else(|| base.description.clone()),
+        definition_specs,
+        ground_height_hint,
+        core,
+        sections,
+    })
 }
 
 fn read_group_file_case_insensitive(group: &Group, name: &str) -> Result<Vec<u8>, GroupError> {
@@ -8761,6 +8877,84 @@ fn derive_legacy_environment(
         .with_earthquake(earthquake);
 
     Ok(environment)
+}
+
+fn legacy_scenario_section_name(path: &Path) -> Option<String> {
+    if path.components().count() != 1 {
+        return None;
+    }
+    let filename = path.file_name()?.to_str()?;
+    let lower = filename.to_ascii_lowercase();
+    if !lower.starts_with("sect") || !lower.ends_with(".c4g") || filename.len() <= 8 {
+        return None;
+    }
+    filename.get(4..filename.len() - 4).map(str::to_owned)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_legacy_scenario_sections(
+    group: &Group,
+    main_manifest: &LegacyScenarioManifest,
+    definitions: &[ScenarioDefinition],
+    mut classifier: Option<&mut MapPixelClassifier>,
+    random_seed: u64,
+    startup_player_count: i32,
+    main_landscape: &Option<Landscape>,
+    main_objects: &[ScenarioSpawn],
+    main_environment: EnvironmentSettings,
+    has_sky_surface: bool,
+) -> Result<Vec<ScenarioSectionSpec>, ScenarioError> {
+    let mut sections = vec![ScenarioSectionSpec {
+        name: "main".to_string(),
+        landscape: main_landscape.clone(),
+        objects: main_objects.to_vec(),
+        scenario_values: ScenarioValueStore::from_runtime_core(
+            &main_manifest.core,
+            has_sky_surface,
+        ),
+        environment: main_environment,
+    }];
+
+    let mut discovered = group
+        .entries()?
+        .into_iter()
+        .filter_map(|entry| {
+            legacy_scenario_section_name(&entry.relative_path)
+                .map(|name| (name, entry.relative_path))
+        })
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("main"))
+        .collect::<Vec<_>>();
+    discovered.sort_by(|(left, _), (right, _)| {
+        left.to_ascii_lowercase()
+            .cmp(&right.to_ascii_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+
+    for (name, path) in discovered {
+        let section_group = group.open_child(path)?;
+        let overlay = parse_legacy_scenario_manifest(&section_group)?;
+        let manifest = overlay_legacy_scenario_manifest(main_manifest, overlay)?;
+        let landscape = load_legacy_landscape(
+            &section_group,
+            &manifest,
+            classifier.as_deref_mut(),
+            random_seed,
+            startup_player_count,
+        )?;
+        let objects = collect_legacy_objects(&section_group, definitions)?;
+        let environment = derive_legacy_environment(&manifest)?;
+        let scenario_values =
+            ScenarioValueStore::from_runtime_core(&manifest.core, has_sky_surface);
+        sections.push(ScenarioSectionSpec {
+            name,
+            landscape,
+            objects,
+            scenario_values,
+            environment,
+        });
+    }
+
+    Ok(sections)
 }
 
 fn collect_legacy_objects(
@@ -14399,6 +14593,7 @@ global func Step(state, frame, random)
                 config: SpawnConfig::new("Mover"),
             }],
             landscape: None,
+            scenario_sections: Vec::new(),
             physics: None,
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment: None,
@@ -14512,6 +14707,7 @@ global func Step(state, frame, random)
                 config: SpawnConfig::new("Mover").with_owner(1),
             }],
             landscape: None,
+            scenario_sections: Vec::new(),
             physics: None,
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment: None,

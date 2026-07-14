@@ -427,6 +427,17 @@ const PHYS_STACK_TEMPORARY: i32 = 3;
 #[derive(Debug, Clone)]
 #[doc(hidden)]
 pub enum PlayerCommand {
+    /// Engine-global `C4Game::LoadScenarioSection` request. This uses the
+    /// player-command outcome channel only as the existing synchronous
+    /// script-to-engine transport; it is not scoped to any player.
+    LoadScenarioSection {
+        name: String,
+        flags: i32,
+        /// Inactive objects survive C++'s section teardown. Capture their
+        /// effective identities at the exact host-call point so the engine
+        /// can preserve them while replacing the active section world.
+        preserve_ids: Vec<ObjectId>,
+    },
     /// Final live `C4Player::Crew` lists after a synchronous crew mutation.
     /// Membership is per player and independent of C4Object::Owner; one
     /// object may therefore occur in more than one roster.
@@ -959,6 +970,9 @@ pub struct HostWorldContext {
     /// separate from the evaluated runtime landscape: GetScenarioVal reads
     /// the scenario core, not C4Landscape's mutable state.
     scenario_values: Rc<ScenarioValueStore>,
+    /// Scenario-section group names available to `LoadScenarioSection`,
+    /// normalized to ASCII lowercase like C++'s `SEqualNoCase` lookup.
+    scenario_sections: Rc<HashSet<String>>,
     /// C4SolidMask pixels not already baked into the landscape plane.
     /// Grid worlds bake MCVehic directly; column fixtures retain the same
     /// overlay used by movement/contact checks.
@@ -1065,6 +1079,7 @@ impl Default for HostWorldContext {
             master_order: Rc::new(Vec::new()),
             landscape: None,
             scenario_values: Rc::new(ScenarioValueStore::default()),
+            scenario_sections: Rc::new(HashSet::new()),
             movement_solid_masks: Rc::new(Vec::new()),
             definitions: Rc::new(HashMap::new()),
             solid_mask_metadata: Rc::new(HashMap::new()),
@@ -1255,6 +1270,7 @@ impl HostWorldContext {
             order,
             landscape: landscape.map(Rc::new),
             scenario_values: Rc::new(ScenarioValueStore::default()),
+            scenario_sections: Rc::new(HashSet::new()),
             movement_solid_masks: Rc::new(Vec::new()),
             definitions,
             solid_mask_metadata: Rc::new(HashMap::new()),
@@ -1561,6 +1577,25 @@ impl HostWorldContext {
     ) -> Self {
         self.scenario_values = values;
         self
+    }
+
+    pub(crate) fn with_scenario_sections<I, S>(mut self, sections: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.scenario_sections = Rc::new(
+            sections
+                .into_iter()
+                .map(|name| name.as_ref().to_ascii_lowercase())
+                .collect(),
+        );
+        self
+    }
+
+    pub(crate) fn scenario_section_known(&self, name: &str) -> bool {
+        self.scenario_sections
+            .contains(name.to_ascii_lowercase().as_str())
     }
 
     fn scenario_value(
@@ -7521,6 +7556,54 @@ fn get_scenario_val(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// `FnLoadScenarioSection` (C4Script.cpp:5401-5408): reject a null/empty
+/// name, resolve the section case-insensitively, and hand the engine an
+/// ordered request. C++ removes every active object but deliberately keeps
+/// inactive objects, so their effective identities travel with the request.
+fn load_scenario_section(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "LoadScenarioSection expects at most 2 arguments: name, flags",
+        ));
+    }
+    let Some(name) = parse_optional_string(args.first(), "LoadScenarioSection", "name")? else {
+        return Ok(Value::Int(0));
+    };
+    if name.is_empty() {
+        return Ok(Value::Int(0));
+    }
+    let flags = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "LoadScenarioSection",
+        "flags",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Int(0));
+        };
+        if !context.world.scenario_section_known(&name) {
+            return Ok(Value::Int(0));
+        }
+        let preserve_ids = context
+            .world_object_ids()
+            .into_iter()
+            .filter(|id| {
+                context
+                    .get_world_object(*id)
+                    .is_some_and(|object| object.status() == ObjectStatus::Inactive)
+            })
+            .collect();
+        context.record_player_command(PlayerCommand::LoadScenarioSection {
+            name,
+            flags,
+            preserve_ids,
+        });
+        Ok(Value::Int(1))
+    })
+}
+
 fn get_hi_rank(args: &[Value]) -> Result<Value, RuntimeError> {
     // FnGetHiRank (C4Script.cpp:2792-2796) ->
     // C4Player::GetHiRankActiveCrew(false) (C4Player.cpp:1003-1020): walk
@@ -9519,6 +9602,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlrExtraData", get_plr_extra_data);
     script.register_host_function("SetPlrExtraData", set_plr_extra_data);
     script.register_host_function("GetScenarioVal", get_scenario_val);
+    script.register_host_function("LoadScenarioSection", load_scenario_section);
     script.register_host_function("GetLeague", get_league);
     script.register_host_function("GetScore", get_score);
     script.register_host_function("GetScoreboardString", get_scoreboard_string);
@@ -35745,6 +35829,7 @@ mod tests {
         "LaunchLightning",
         "LaunchVolcano",
         "LessThan",
+        "LoadScenarioSection",
         "Log",
         "MakeCrewMember",
         "Material",
@@ -35893,6 +35978,100 @@ mod tests {
             .map(|name| name.to_string())
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    fn scenario_section_world_object(id: u64, status: ObjectStatus) -> HostWorldObject {
+        HostWorldObject::new(
+            ObjectId::new(id),
+            "TEST",
+            status,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+    }
+
+    #[test]
+    fn load_scenario_section_rejects_missing_empty_and_unknown_names_without_commands() {
+        assert_eq!(
+            load_scenario_section(&[Value::String("Mountains".into())])
+                .expect("a missing host context is a clean failure"),
+            Value::Int(0)
+        );
+
+        let cases = [
+            Vec::new(),
+            vec![Value::Nil],
+            vec![Value::String(String::new())],
+            vec![Value::String("Unknown".into()), Value::Int(3)],
+        ];
+        for args in cases {
+            let world =
+                HostWorldContext::default().with_scenario_sections(["Main", "Mountains"]);
+            let (result, outcome) =
+                with_effect_context(None, &[], world, 1, || load_scenario_section(&args));
+            assert_eq!(result.expect("invalid section is a clean failure"), Value::Int(0));
+            assert!(outcome.player_commands.is_empty());
+        }
+    }
+
+    #[test]
+    fn load_scenario_section_forwards_flags_and_captures_effective_inactive_ids() {
+        let world = HostWorldContext::from_objects([
+            scenario_section_world_object(1, ObjectStatus::Normal),
+            scenario_section_world_object(2, ObjectStatus::Inactive),
+            scenario_section_world_object(3, ObjectStatus::Normal),
+        ])
+        .with_scenario_sections(["Main", "Mountains"]);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            set_object_status(&[Value::Int(ObjectStatus::Inactive.to_script_value())])?;
+            load_scenario_section(&[Value::String("mOuNtAiNs".into()), Value::Int(3)])
+        });
+
+        assert_eq!(result.expect("known section is accepted"), Value::Int(1));
+        match outcome.player_commands.as_slice() {
+            [PlayerCommand::LoadScenarioSection {
+                name,
+                flags,
+                preserve_ids,
+            }] => {
+                assert_eq!(name, "mOuNtAiNs");
+                assert_eq!(*flags, 3);
+                assert_eq!(preserve_ids, &[ObjectId::new(1), ObjectId::new(2)]);
+            }
+            other => panic!("unexpected section commands: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_scenario_section_defaults_flags_to_zero() {
+        let world = HostWorldContext::default().with_scenario_sections(["Main"]);
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            load_scenario_section(&[Value::String("Main".into())])
+        });
+
+        assert_eq!(result.expect("known section is accepted"), Value::Int(1));
+        match outcome.player_commands.as_slice() {
+            [PlayerCommand::LoadScenarioSection {
+                flags,
+                preserve_ids,
+                ..
+            }] => {
+                assert_eq!(*flags, 0);
+                assert!(preserve_ids.is_empty());
+            }
+            other => panic!("unexpected section commands: {other:?}"),
+        }
     }
 
     #[test]

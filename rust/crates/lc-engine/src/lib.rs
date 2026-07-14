@@ -12255,6 +12255,17 @@ pub struct ScenarioBatch {
 }
 
 #[derive(Clone)]
+struct RuntimeScenarioSection {
+    name: String,
+    landscape: Option<Landscape>,
+    initial_objects: Vec<scenario::ScenarioSpawn>,
+    saved_objects: Option<Vec<PersistedObject>>,
+    saved_object_order: Vec<ObjectId>,
+    scenario_values: scenario::ScenarioValueStore,
+    environment: EnvironmentSettings,
+}
+
+#[derive(Clone)]
 enum AppendScriptSource {
     Script(lc_script::Script),
     Definition(DefinitionId),
@@ -12486,6 +12497,12 @@ pub struct Engine {
     /// GetScenarioVal. Kept independently of evaluated landscape/weather
     /// state, exactly like C++ retains C4Scenario beside those subsystems.
     scenario_values: Rc<scenario::ScenarioValueStore>,
+    /// Runtime-loadable `Sect*.c4g` payloads plus the implicit main section.
+    /// Keys are ASCII-lowercase because C4ScenarioSection lookup is
+    /// case-insensitive (C4Game.cpp:4101-4104).
+    scenario_sections: HashMap<String, RuntimeScenarioSection>,
+    current_scenario_section: String,
+    last_scenario_section_flags: Option<i32>,
     /// Per-player crew info lists (C4Player::CrewInfoList): the roster
     /// GetIdle/New recruit from at join.
     crew_rosters: HashMap<i32, Vec<player_file::CrewInfo>>,
@@ -14273,6 +14290,9 @@ impl Engine {
             standard_names: None,
             map_zoom: scenario::LegacyC4SVal::new(10, 0, 5, 15),
             scenario_values: Rc::new(scenario::ScenarioValueStore::default()),
+            scenario_sections: HashMap::new(),
+            current_scenario_section: "main".to_string(),
+            last_scenario_section_flags: None,
             crew_rosters: HashMap::new(),
             crew_info_order: HashMap::new(),
             crew_object_infos: Rc::new(HashMap::new()),
@@ -14479,6 +14499,41 @@ impl Engine {
 
     pub(crate) fn set_scenario_values(&mut self, values: scenario::ScenarioValueStore) {
         self.scenario_values = Rc::new(values);
+    }
+
+    pub(crate) fn configure_scenario_sections(
+        &mut self,
+        sections: &[scenario::ScenarioSectionSpec],
+    ) {
+        self.scenario_sections = sections
+            .iter()
+            .map(|section| {
+                (
+                    section.name.to_ascii_lowercase(),
+                    RuntimeScenarioSection {
+                        name: section.name.clone(),
+                        landscape: section.landscape.clone(),
+                        initial_objects: section.objects.clone(),
+                        saved_objects: None,
+                        saved_object_order: Vec::new(),
+                        scenario_values: section.scenario_values.clone(),
+                        environment: section.environment,
+                    },
+                )
+            })
+            .collect();
+        self.current_scenario_section = "main".to_string();
+        self.last_scenario_section_flags = None;
+    }
+
+    #[doc(hidden)]
+    pub fn debug_current_scenario_section(&self) -> &str {
+        &self.current_scenario_section
+    }
+
+    #[doc(hidden)]
+    pub fn debug_last_scenario_section_flags(&self) -> Option<i32> {
+        self.last_scenario_section_flags
     }
 
     /// The C4ObjectInfo data linked to a crew object (CreateInfoObject,
@@ -16973,6 +17028,11 @@ impl Engine {
         )
         .with_solid_mask_metadata(solid_mask_metadata)
         .with_scenario_values(Rc::clone(&self.scenario_values))
+        .with_scenario_sections(
+            self.scenario_sections
+                .values()
+                .map(|section| section.name.as_str()),
+        )
         .with_teams(Rc::clone(&self.teams))
         .with_movement_solid_masks(self.ocf_solid_mask_overlay())
         .with_definition_order(Rc::clone(&self.runtime_definition_order))
@@ -25256,10 +25316,179 @@ impl Engine {
         }
     }
 
+    fn spawn_scenario_section_objects(
+        &mut self,
+        mut pending: Vec<scenario::ScenarioSpawn>,
+    ) -> Result<(), EngineError> {
+        // Inactive cross-section objects keep their enumeration numbers. If
+        // an original section object reused one, C++'s loader resolves the
+        // live inactive object first; dropping that one colliding template
+        // entry is the safe equivalent until section renumeration is modeled.
+        let retained_ids = self
+            .objects
+            .iter()
+            .map(|object| object.id)
+            .collect::<HashSet<_>>();
+        pending.retain(|spawn| {
+            spawn
+                .config
+                .id
+                .is_none_or(|id| !retained_ids.contains(&id))
+        });
+
+        let max_explicit_id = pending
+            .iter()
+            .filter_map(|spawn| spawn.config.id)
+            .map(ObjectId::as_u64)
+            .max();
+        if let Some(max_id) = max_explicit_id {
+            self.next_object_id = self.next_object_id.max(max_id.saturating_add(1));
+        }
+
+        let mut handles = HashMap::<String, ObjectId>::new();
+        while !pending.is_empty() {
+            let ready = pending.iter().position(|spawn| {
+                spawn
+                    .container_handle
+                    .as_ref()
+                    .is_none_or(|handle| handles.contains_key(handle))
+            });
+            let index = match ready {
+                Some(index) => index,
+                None => {
+                    // Missing/cyclic containers denumerate to null in the
+                    // existing initial-scenario loader. Break one edge and
+                    // let the same deterministic file-order loop continue.
+                    pending[0].container_handle = None;
+                    0
+                }
+            };
+            let mut spawn = pending.remove(index);
+            if let Some(container) = spawn
+                .container_handle
+                .as_ref()
+                .and_then(|handle| handles.get(handle))
+                .copied()
+            {
+                spawn.config = spawn.config.with_container(container);
+            }
+            let id = self.spawn_object(spawn.config)?;
+            if let Some(handle) = spawn.handle {
+                handles.insert(handle, id);
+            }
+        }
+        self.finish_legacy_object_load();
+        Ok(())
+    }
+
+    fn load_scenario_section(
+        &mut self,
+        name: &str,
+        flags: i32,
+        preserve_ids: Vec<ObjectId>,
+    ) -> Result<bool, EngineError> {
+        let key = name.to_ascii_lowercase();
+        if !self.scenario_sections.contains_key(&key) {
+            return Ok(false);
+        }
+
+        let preserved = preserve_ids.into_iter().collect::<HashSet<_>>();
+        let mut state = self.capture_state();
+        let changing_section = key != self.current_scenario_section.to_ascii_lowercase();
+        if changing_section && flags & 3 != 0 {
+            let saved_objects = (flags & 2 != 0).then(|| {
+                state
+                    .objects
+                    .iter()
+                    .filter(|object| object.snapshot.status.is_active())
+                    .filter(|object| !preserved.contains(&object.snapshot.id))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
+            let saved_order = (flags & 2 != 0)
+                .then(|| {
+                    state
+                        .object_order
+                        .iter()
+                        .copied()
+                        .filter(|id| !preserved.contains(id))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if let Some(current) = self
+                .scenario_sections
+                .get_mut(&self.current_scenario_section.to_ascii_lowercase())
+            {
+                if flags & 1 != 0 {
+                    current.landscape = state.landscape.clone();
+                    current.scenario_values = self.scenario_values.as_ref().clone();
+                    current.environment = self.environment;
+                }
+                if let Some(objects) = saved_objects {
+                    current.saved_objects = Some(objects);
+                    current.saved_object_order = saved_order;
+                }
+            }
+        }
+
+        let target = self
+            .scenario_sections
+            .get(&key)
+            .cloned()
+            .expect("section presence checked above");
+        let retained = state
+            .objects
+            .iter()
+            .filter(|object| preserved.contains(&object.snapshot.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let retained_order = state
+            .object_order
+            .iter()
+            .copied()
+            .filter(|id| preserved.contains(id))
+            .collect::<Vec<_>>();
+
+        state.landscape = target.landscape.clone();
+        state.scenario_values = Some(target.scenario_values.clone());
+        state.environment = target.environment;
+        state.global_effects.clear();
+        state.particles.clear();
+        state.transfer_zones.clear();
+        state.mass_movers.clear();
+
+        let load_initial_objects = target.saved_objects.is_none();
+        state.objects = target.saved_objects.unwrap_or_default();
+        state
+            .objects
+            .retain(|object| !preserved.contains(&object.snapshot.id));
+        state.objects.extend(retained);
+        state.object_order = target.saved_object_order;
+        state
+            .object_order
+            .retain(|id| !preserved.contains(id));
+        state.object_order.extend(retained_order);
+
+        self.restore_state(&state)?;
+        if load_initial_objects {
+            self.spawn_scenario_section_objects(target.initial_objects)?;
+        }
+        self.current_scenario_section = target.name;
+        self.last_scenario_section_flags = Some(flags);
+        Ok(true)
+    }
+
     #[doc(hidden)]
     pub fn apply_player_commands(&mut self, commands: Vec<PlayerCommand>) -> Result<(), EngineError> {
         for command in commands {
             match command {
+                PlayerCommand::LoadScenarioSection {
+                    name,
+                    flags,
+                    preserve_ids,
+                } => {
+                    let _ = self.load_scenario_section(&name, flags, preserve_ids)?;
+                }
                 PlayerCommand::SetCrewRosters { rosters } => {
                     for (player_id, crew) in rosters {
                         if let Some(player) = self.players.get_mut(&player_id) {
