@@ -48055,6 +48055,120 @@ func ResortExplicit(object target) { Resort(target); }
     }
 
     #[test]
+    fn set_category_resorts_after_cross_check_before_same_frame_world_phases() {
+        // C4Object::SetCategory calls Resort, and C4Game::ExecObjects consumes
+        // that global request after CrossCheck but before the remaining world
+        // phases. The full stMain re-add puts X at the master-list front of
+        // its new category bracket, which is the exec-list end of the bracket.
+        let mut mover = Definition::from_script(
+            "MOVA",
+            "Mover",
+            "#strict\nfunc Reclassify() { SetCategory(C4D_Object); return(1); }\n",
+        )
+        .expect("mover compiles");
+        mover.set_timer(1);
+        mover.set_timer_call(Some("Reclassify".to_string()));
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.register_definition(mover).expect("mover registers");
+        engine
+            .register_definition(simple_definition("OBJA"))
+            .expect("first object registers");
+        engine
+            .register_definition(simple_definition("OBJB"))
+            .expect("second object registers");
+
+        let mover = engine
+            .spawn_object(SpawnConfig::new("MOVA").with_category(CATEGORY_VEHICLE))
+            .expect("mover spawns");
+        let first = engine
+            .spawn_object(SpawnConfig::new("OBJA").with_category(CATEGORY_OBJECT))
+            .expect("first object spawns");
+        let second = engine
+            .spawn_object(SpawnConfig::new("OBJB").with_category(CATEGORY_OBJECT))
+            .expect("second object spawns");
+        assert_eq!(engine.debug_exec_order(), vec![mover, first, second]);
+
+        engine.tick().expect("frame succeeds");
+
+        let mover_index = engine.find_object_index(mover).expect("mover remains");
+        assert_eq!(
+            engine.objects[mover_index].state.category & CATEGORY_SORT_LIMIT,
+            CATEGORY_OBJECT
+        );
+        assert_eq!(
+            engine.debug_exec_order(),
+            vec![first, second, mover],
+            "the post-CrossCheck sweep is visible before the frame's world phases and next exec"
+        );
+        assert_eq!(
+            engine
+                .sectors
+                .as_ref()
+                .expect("sector map exists")
+                .object_ids(sector::SectorKey::Inside { x: 0, y: 0 }),
+            &[mover, second, first],
+            "sector traversal follows the re-added C++ master-list link"
+        );
+    }
+
+    #[test]
+    fn set_category_resort_prefers_the_same_definition_cluster() {
+        // stMain pass 1 takes precedence over the category-bracket fallback:
+        // after X moves Vehicle -> Object it is inserted at the same-def
+        // cluster head in master order, not at the whole Object bracket head.
+        let same = Definition::from_script(
+            "SAME",
+            "Same",
+            "#strict\nfunc Reclassify() { return(SetCategory(C4D_Object)); }\n",
+        )
+        .expect("same definition compiles");
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.register_definition(same).expect("same registers");
+        engine
+            .register_definition(simple_definition("DIFF"))
+            .expect("separator registers");
+
+        let mover = engine
+            .spawn_object(SpawnConfig::new("SAME").with_category(CATEGORY_VEHICLE))
+            .expect("mover spawns");
+        let peer = engine
+            .spawn_object(SpawnConfig::new("SAME").with_category(CATEGORY_OBJECT))
+            .expect("peer spawns");
+        let separator = engine
+            .spawn_object(SpawnConfig::new("DIFF").with_category(CATEGORY_OBJECT))
+            .expect("separator spawns");
+        assert_eq!(engine.debug_exec_order(), vec![mover, peer, separator]);
+
+        let mover_index = engine.find_object_index(mover).expect("mover exists");
+        assert_eq!(
+            engine
+                .call_object_function(mover_index, "Reclassify", Vec::new())
+                .expect("SetCategory succeeds"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine.debug_exec_order(),
+            vec![mover, peer, separator],
+            "SetCategory leaves the link in place until the post-CrossCheck seam"
+        );
+
+        engine.execute_object_order_commands();
+        assert_eq!(engine.debug_exec_order(), vec![peer, mover, separator]);
+        assert_eq!(
+            engine
+                .sectors
+                .as_ref()
+                .expect("sector map exists")
+                .object_ids(sector::SectorKey::Inside { x: 0, y: 0 }),
+            &[separator, mover, peer],
+            "the same-def cluster order propagates to sector traversal"
+        );
+    }
+
+    #[test]
     fn inactive_exec_list_holes_do_not_participate_in_add_or_unsorted_sweeps() {
         // C4OS_INACTIVE objects live in C4GameObjects::InactiveObjects, not
         // the main list. Rust keeps their ids as inert exec-list holes, so a
