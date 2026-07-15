@@ -21321,6 +21321,7 @@ func Trigger() {
 local order, seen_action, seen_target, finished;
 local after_execute, after_action;
 local remove_on_jump;
+local jump_xdir, jump_ydir, jump_by_com;
 
 public func ResetGrabProbe()
 {
@@ -21331,6 +21332,9 @@ public func ResetGrabProbe()
   after_execute = nil;
   after_action = nil;
   remove_on_jump = false;
+  jump_xdir = nil;
+  jump_ydir = nil;
+  jump_by_com = nil;
   return true;
 }
 
@@ -21372,6 +21376,9 @@ protected func JumpStart()
 
 protected func OnActionJump(xdir, ydir, by_com)
 {
+  jump_xdir = xdir;
+  jump_ydir = ydir;
+  jump_by_com = by_com;
   if (!remove_on_jump) return false;
   RemoveObject(this());
   return true;
@@ -21559,6 +21566,14 @@ protected func RejectGrabbed(clonk)
         let (plain_actor, plain_target) = spawn_grab_probe(&mut engine, "RGPL", "Walk", 200);
         let (scale_actor, _) = spawn_grab_probe(&mut engine, "RGVT", "Scale", 300);
         let (hangle_actor, _) = spawn_grab_probe(&mut engine, "RGVT", "Hangle", 400);
+        let scale_actor_index = engine
+            .find_object_index(scale_actor)
+            .expect("scaler exists");
+        engine.objects[scale_actor_index].state.direction = Direction::Left;
+        let hangle_actor_index = engine
+            .find_object_index(hangle_actor)
+            .expect("hangler exists");
+        engine.objects[hangle_actor_index].state.direction = Direction::Right;
         let (mutating_actor, _) = spawn_grab_probe(&mut engine, "RGAD", "Walk", 500);
         let (zero_id_actor, zero_id_target) =
             spawn_grab_probe(&mut engine, "RGNO", "Walk", 600);
@@ -21658,13 +21673,23 @@ protected func RejectGrabbed(clonk)
             "RejectGrabbed still runs after scale let-go removes the actor"
         );
 
-        for actor in [scale_actor, hangle_actor] {
+        for (actor, expected_xdir) in [(scale_actor, 100), (hangle_actor, -100)] {
             let actor = engine.object_snapshot(actor).expect("climber remains");
             assert_eq!(actor.local_vars.get("order"), Some(&Value::Int(31)));
             assert_eq!(
                 actor.local_vars.get("seen_action"),
                 Some(&Value::String("Jump".to_string())),
                 "let-go and its Jump StartCall precede RejectGrabbed"
+            );
+            assert_eq!(
+                actor.local_vars.get("jump_xdir"),
+                Some(&Value::Int(expected_xdir)),
+                "ObjectComLetGo jumps opposite the climber's facing"
+            );
+            assert_eq!(actor.local_vars.get("jump_ydir"), Some(&Value::Nil));
+            assert_eq!(
+                actor.local_vars.get("jump_by_com"),
+                Some(&Value::Bool(true))
             );
             assert_ne!(actor.action.name, "Push", "the veto prevents grabbing");
         }
@@ -21708,6 +21733,12 @@ protected func RejectGrabbed(clonk)
             spawn_grab_probe(&mut engine, "RGNO", "Walk", 400);
         let (clear_target_actor, clear_target) =
             spawn_grab_probe(&mut engine, "RGCP", "Walk", 500);
+        let (far_scale_actor, far_scale_target) =
+            spawn_grab_probe(&mut engine, "RGVT", "Scale", 600);
+        let far_scale_target_index = engine
+            .find_object_index(far_scale_target)
+            .expect("far scale target exists");
+        engine.objects[far_scale_target_index].set_position(Vector2::new(660, 100));
 
         for (actor, target, expected_order, expected_action, expected_commands) in [
             (veto_actor, veto_target, 1, "Walk", Vec::new()),
@@ -21763,6 +21794,30 @@ protected func RejectGrabbed(clonk)
             );
             assert_eq!(actor.command_stack.command_names(), expected_commands);
         }
+
+        let far_scale_actor_index = engine
+            .find_object_index(far_scale_actor)
+            .expect("far scaler exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    far_scale_actor_index,
+                    "RunGrab",
+                    vec![object_reference_value(far_scale_target)],
+                )
+                .expect("far Scale RunGrab executes"),
+            Value::Nil
+        );
+        let far_scale = engine
+            .object_snapshot(far_scale_actor)
+            .expect("far scaler remains");
+        assert_eq!(far_scale.action.name, "Scale");
+        assert_eq!(far_scale.local_vars.get("jump_xdir"), Some(&Value::Nil));
+        assert_eq!(
+            far_scale.command_stack.command_names(),
+            vec!["MoveTo".to_string(), "Grab".to_string()],
+            "Scale only lets go inside Grab's at-target branch"
+        );
 
         engine.tick().expect("callback-added Wait completes");
         assert!(
@@ -22026,6 +22081,10 @@ protected func ControlCommandFinished(command)
                     "Flight".to_string(),
                     ActionSpec::default().with_procedure("FLIGHT"),
                 ),
+                (
+                    "Swim".to_string(),
+                    ActionSpec::default().with_procedure("SWIM"),
+                ),
             ]),
         );
 
@@ -22150,6 +22209,8 @@ protected func Grabbed(clonk, grab)
         let stopped_build_actor = stopped[0].0;
         let (flight_actor, flight_target) =
             spawn_object_com_grab_probe(&mut engine, "Flight", 400);
+        let (swim_actor, swim_target) =
+            spawn_object_com_grab_probe(&mut engine, "Swim", 450);
         let (removed_actor, removed_actor_target) =
             spawn_object_com_grab_probe(&mut engine, "Walk", 500);
         let removed_actor_index = engine
@@ -22330,20 +22391,23 @@ protected func Grabbed(clonk, grab)
             Some(&Value::String("Walk".to_string()))
         );
 
-        let flight = engine
-            .object_snapshot(flight_actor)
-            .expect("flight actor remains");
-        assert_eq!(flight.action.name, "Flight");
-        assert_eq!(flight.command_direction, CommandDirection::Stop);
-        assert_eq!(flight.local_vars.get("order"), Some(&Value::Int(1)));
-        assert_eq!(
-            engine
-                .object_snapshot(flight_target)
-                .expect("flight target remains")
-                .controller,
-            2,
-            "non-Walk ObjectComGrab cannot propagate Controller"
-        );
+        for (actor, target, expected_action) in [
+            (flight_actor, flight_target, "Flight"),
+            (swim_actor, swim_target, "Swim"),
+        ] {
+            let actor = engine.object_snapshot(actor).expect("air/water actor remains");
+            assert_eq!(actor.action.name, expected_action);
+            assert_eq!(actor.command_direction, CommandDirection::Stop);
+            assert_eq!(actor.local_vars.get("order"), Some(&Value::Int(1)));
+            assert_eq!(
+                engine
+                    .object_snapshot(target)
+                    .expect("air/water target remains")
+                    .controller,
+                2,
+                "non-Walk ObjectComGrab cannot propagate Controller"
+            );
+        }
 
         let removed_actor_target = engine
             .object_snapshot(removed_actor_target)
