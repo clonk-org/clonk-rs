@@ -8728,6 +8728,7 @@ mod tests {
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.position = Vector2::new(0, 90);
+        actor.command_direction = CommandDirection::Right;
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.position = Vector2::new(100, 90);
@@ -8775,6 +8776,7 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none(), "entry MoveTo leaves ComDir Right untouched");
         assert_eq!(result.events.len(), 0);
         assert_eq!(result.operations.len(), 1);
         match &result.operations[0] {
@@ -8798,6 +8800,7 @@ mod tests {
         };
         let next = state.step(&ctx_next);
         assert_eq!(next.status, CommandStatus::Running);
+        assert!(next.update.is_none(), "reissued MoveTo leaves ComDir Right untouched");
         assert!(next.events.is_empty());
         assert_eq!(next.operations.len(), 1);
         match &next.operations[0] {
@@ -8939,6 +8942,10 @@ mod tests {
 
         let follow_up = state.step(&ctx_next);
         assert_eq!(follow_up.status, CommandStatus::Running);
+        assert!(
+            follow_up.update.is_none(),
+            "non-Tick5 Transfer leaves ComDir Right untouched"
+        );
         assert!(follow_up.events.is_empty());
     }
 
@@ -8949,6 +8956,7 @@ mod tests {
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.position = Vector2::new(0, 0);
+        actor.command_direction = CommandDirection::Right;
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.position = Vector2::new(10, 0);
@@ -8983,6 +8991,21 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Failed);
+        assert!(
+            result.update.is_none(),
+            "missing-zone failure leaves ComDir Right untouched"
+        );
+
+        let mut missing_target_state = TransferState::from_request(
+            &CommandRequest::new(CommandId::Transfer).with_target(Some(ObjectId::new(789))),
+        )
+        .expect("state created");
+        let missing_target = missing_target_state.step(&ctx);
+        assert_eq!(missing_target.status, CommandStatus::Failed);
+        assert!(
+            missing_target.update.is_none(),
+            "missing-target failure leaves ComDir Right untouched"
+        );
     }
 
     #[test]
