@@ -8853,6 +8853,120 @@ mod tests {
     }
 
     #[test]
+    fn exit_init_evaluation_cancels_attach_before_executing_exit() {
+        // C4Command::InitEvaluation runs ObjectComCancelAttach and returns
+        // before C4Command::Exit executes (C4Command.cpp:1554-1555,
+        // 1654-1657). The next Execute performs the actual exit.
+        let actor_id = ObjectId::new(49);
+        let container_id = ObjectId::new(50);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(container_id);
+        actor.action_name = "Attach".to_string();
+        actor.action_procedure = ActionProcedure::Attach;
+        actor.command_direction = CommandDirection::Right;
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.position = Vector2::new(17, 23);
+        container.entrance_status = true;
+
+        let objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (container_id, container.clone()),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+
+        let evaluation = state.step(&ctx);
+        assert_eq!(evaluation.status, CommandStatus::Running);
+        assert!(evaluation.update.is_none());
+        assert!(evaluation.operations.is_empty());
+        let [CommandEvent::ApplyObjectUpdate { object_id, update }] = evaluation.events.as_slice()
+        else {
+            panic!("unexpected evaluation events: {:?}", evaluation.events);
+        };
+        assert_eq!(*object_id, actor_id);
+        let action = update.action.as_ref().expect("attach changes to ActIdle");
+        assert_eq!(action.name.as_deref(), Some("Idle"));
+        assert!(!action.force, "ObjectComCancelAttach uses ordinary SetAction");
+        assert!(update.command_direction.is_none());
+        assert!(update.container.is_none());
+        assert!(update.position.is_none());
+        assert!(update.velocity.is_none());
+
+        let execution = state.step(&ctx);
+        assert_eq!(execution.status, CommandStatus::Completed);
+        assert!(execution.operations.is_empty());
+        assert!(execution.events.is_empty());
+        let update = execution.update.expect("second Execute exits");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert_eq!(update.container, Some(None));
+        assert_eq!(update.position, Some(container.position));
+        assert_eq!(update.velocity, Some(Vector2::ZERO));
+    }
+
+    #[test]
+    fn exit_carryable_from_collection_area_exits_above_it_and_jumps() {
+        // With no entrance-area ejection, C++ places a carryable at the
+        // container x / Collection.y-1 point and immediately calls the live
+        // ObjectComJump helper (C4Command.cpp:643-649).
+        let actor_id = ObjectId::new(51);
+        let container_id = ObjectId::new(52);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(container_id);
+        actor.collectible = true;
+        actor.action_name = "Walk".to_string();
+        actor.action_procedure = ActionProcedure::Walk;
+        actor.command_direction = CommandDirection::Left;
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.definition_id = "CARR".to_string();
+        container.position = Vector2::new(80, 120);
+        container.entrance_status = true;
+
+        let objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (container_id, container.clone()),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::from([(
+            container.definition_id.clone(),
+            CommandDefinitionSnapshot {
+                collection_rect: Some(DefinitionRect::new(-10, -25, 20, 30)),
+                ..CommandDefinitionSnapshot::default()
+            },
+        )]);
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let mut state = ExitState::from_request(
+            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.operations.is_empty());
+        assert_eq!(
+            result.events,
+            [CommandEvent::ObjectComExitJump {
+                object_id: actor_id,
+                command_instance_id: 0,
+            }]
+        );
+        let update = result.update.expect("collection-area exit update");
+        assert!(
+            update.command_direction.is_none(),
+            "ObjectComJump consumes the preserved Left ComDir"
+        );
+        assert_eq!(update.container, Some(None));
+        assert_eq!(update.position, Some(Vector2::new(80, 94)));
+        assert_eq!(update.velocity, Some(Vector2::ZERO));
+    }
+
+    #[test]
     fn exit_completes_when_not_contained() {
         let actor_id = ObjectId::new(51);
         let actor = snapshot_with_id(actor_id.as_u64());
@@ -8878,8 +8992,10 @@ mod tests {
             rng: None,
         };
 
-        let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+        let mut state = ExitState::from_request(
+            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
+        )
+        .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -8928,8 +9044,10 @@ mod tests {
             rng: None,
         };
 
-        let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+        let mut state = ExitState::from_request(
+            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
+        )
+        .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -8975,8 +9093,10 @@ mod tests {
             rng: None,
         };
 
-        let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+        let mut state = ExitState::from_request(
+            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
+        )
+        .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -9029,8 +9149,10 @@ mod tests {
             rng: None,
         };
 
-        let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+        let mut state = ExitState::from_request(
+            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
+        )
+        .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -9074,8 +9196,10 @@ mod tests {
             rng: None,
         };
 
-        let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+        let mut state = ExitState::from_request(
+            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
+        )
+        .expect("state created");
         let result = state.step(&ctx);
 
         assert_eq!(result.status, CommandStatus::Running);
@@ -9099,7 +9223,7 @@ mod tests {
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Exit))
+            .push_back(CommandRequest::new(CommandId::Exit).with_evaluated(true))
             .expect("Exit command queues");
         let armed = stack.execute_front(&ctx).expect("Exit arms activation");
         assert!(matches!(
@@ -9126,9 +9250,12 @@ mod tests {
         let mut objects = HashMap::from([(actor_id, actor), (container_id, container)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_update_interval(50))
-                .expect("state created");
+        let mut state = ExitState::from_request(
+            &CommandRequest::new(CommandId::Exit)
+                .with_update_interval(50)
+                .with_evaluated(true),
+        )
+        .expect("state created");
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let first_ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 100);
@@ -9184,8 +9311,10 @@ mod tests {
             rng: None,
         };
 
-        let mut state =
-            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+        let mut state = ExitState::from_request(
+            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
+        )
+        .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -14863,6 +14992,15 @@ pub enum CommandEvent {
         object_id: ObjectId,
         tx: i32,
     },
+    /// C4Command::Exit's collection-area branch calls ObjectComJump
+    /// directly and only finishes Exit after the callbackful helper returns
+    /// (C4Command.cpp:643-649). Keep this separate from the Jump-command
+    /// event, which must not finish a callback-installed C4CMD_Jump.
+    ObjectComExitJump {
+        object_id: ObjectId,
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
     /// C4Command::MoveTo must run the callbackful, ordinary ObjectComStop
     /// before its range/idle/procedure continuation. The continuation is
     /// retained on the live MoveTo state so the engine can resume it in the
@@ -18078,6 +18216,10 @@ impl EnterState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ExitState {
     update_interval: u32,
+    /// C4Command::Evaluated. An ordinary Exit spends its first Execute in
+    /// InitEvaluation, where it cancels DFA_ATTACH and returns before Exit.
+    #[serde(default)]
+    evaluated: bool,
     #[serde(default, skip_serializing_if = "crate::u32_is_zero")]
     activation_pending: u32,
 }
@@ -18086,6 +18228,7 @@ impl ExitState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
         Ok(Self {
             update_interval: request.update_interval.max(1),
+            evaluated: request.evaluated,
             activation_pending: 0,
         })
     }
@@ -18109,6 +18252,23 @@ impl ExitState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        // InitEvaluation consumes this Execute even when there is no attach
+        // action to cancel (C4Command.cpp:1554-1555,1654-1657).
+        if !self.evaluated {
+            self.evaluated = true;
+            let events = (ctx.object.action_procedure == ActionProcedure::Attach)
+                .then(|| CommandEvent::ApplyObjectUpdate {
+                    object_id: ctx.object.id,
+                    // ObjectComCancelAttach uses ordinary SetAction(ActIdle),
+                    // including its synchronous AbortCall (:769-773).
+                    update: ObjectUpdate::new().with_action_update(
+                        ActionUpdate::default().with_name("Idle").with_force(false),
+                    ),
+                })
+                .into_iter()
+                .collect();
+            return CommandStepResult::running(None).with_events(events);
+        }
         let Some(container_id) = ctx.object.container else {
             return CommandStepResult::completed(self.update_to_stop(ctx));
         };
@@ -18158,7 +18318,7 @@ impl ExitState {
             }
         } else {
             update.container = Some(None);
-            update.position = if container_snapshot.entrance_status
+            let entrance_position = if container_snapshot.entrance_status
                 && container_snapshot.ocf & ocf::ENTRANCE != 0
             {
                 container_snapshot.entrance.map(|entrance| {
@@ -18173,8 +18333,41 @@ impl ExitState {
                 })
             } else {
                 None
+            };
+            if let Some(position) = entrance_position {
+                update.position = Some(position);
+            } else if let Some(collection) = ctx
+                .definition(container_snapshot.definition_id.as_str())
+                .and_then(|definition| definition.collection_rect)
+                .filter(|collection| ctx.object.collectible && collection.width != 0)
+            {
+                // Def->Collection is container-local. C++ deliberately uses
+                // the container x (not Collection.x/center) and one pixel
+                // above its top before invoking ObjectComJump (:643-649).
+                update.position = Some(Vector2::new(
+                    container_snapshot.position.x,
+                    container_snapshot
+                        .position
+                        .y
+                        .saturating_add(collection.y)
+                        .saturating_sub(1),
+                ));
+                // C4Object::Exit zeros velocity but preserves Action.ComDir;
+                // ObjectComJump uses that direction before falling back to
+                // facing (C4ObjectCom.cpp:284-296). BUILD's earlier
+                // ObjectComStop is the only arm that intentionally stops it.
+                if ctx.object.action_procedure != ActionProcedure::Build {
+                    update.command_direction = None;
+                }
+                return CommandStepResult::running(Some(update)).with_events(vec![
+                    CommandEvent::ObjectComExitJump {
+                        object_id: ctx.object.id,
+                        command_instance_id: 0,
+                    },
+                ]);
+            } else {
+                update.position = Some(container_snapshot.position);
             }
-            .or(Some(container_snapshot.position));
         }
 
         CommandStepResult::completed(Some(update))
@@ -22799,6 +22992,10 @@ impl ActiveCommand {
                     ..
                 }
                 | CommandEvent::ObjectComUnGrabCommand {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::ObjectComExitJump {
                     command_instance_id,
                     ..
                 } if *command_instance_id == 0 => {

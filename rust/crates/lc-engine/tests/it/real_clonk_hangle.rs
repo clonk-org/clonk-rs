@@ -150,11 +150,17 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
     // ReadyMaterial FLAG enters the ready HUT3 during ScenarioInit, then
     // C4Object::ExecBase assigns Base on Tick10 (C4Object.cpp:1000-1018).
     // Do not enter early: the pre-base context correctly lacks Buy/Sell.
+    // Exit spends its first C++ Execute in InitEvaluation, so Tick10 may
+    // assign Base one frame before the ready crew actually leaves.
     for _ in 0..20 {
         engine.tick().expect("ready-base initialization frame");
-        if engine.snapshot().objects.iter().any(|object| {
+        let base_ready = engine.snapshot().objects.iter().any(|object| {
             object.definition_id == "HUT3" && object.base == joined.number
-        }) {
+        });
+        let crew_exited = engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.container.is_none());
+        if base_ready && crew_exited {
             break;
         }
     }
@@ -170,10 +176,10 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
         "full-con HUT3 exposes its DefCore entrance"
     );
     // PlaceReadyCrew immediately queues Exit after entering the ready base
-    // (C4Player.cpp:551-564), so by the time Tick10 assigns Base the CLNK is
-    // outside. The entrance control path has its own regression below; put
-    // the CLNK back inside here to isolate the tutorial's subsequent
-    // Context -> Buy -> Contents sequence.
+    // (C4Player.cpp:551-564). The loop above waits through its separate
+    // InitEvaluation and execution frames. The entrance control path has its
+    // own regression below; put the CLNK back inside here to isolate the
+    // tutorial's subsequent Context -> Buy -> Contents sequence.
     assert_eq!(
         engine
             .object_snapshot(clonk)

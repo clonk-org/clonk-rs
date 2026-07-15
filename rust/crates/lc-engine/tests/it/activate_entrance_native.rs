@@ -65,11 +65,17 @@ fn install_entrance_fixture(
         "Visitor",
         r#"#strict
 public func StartEnter(pTarget) { return(SetCommand(this(), "Enter", pTarget)); }
-public func StartExit() { return(SetCommand(this(), "Exit")); }
+public func StartExit()
+{
+  var queued = SetCommand(this(), "Exit");
+  ExecuteCommand(); // InitEvaluation
+  return(queued);
+}
 local observed_after_execute;
 public func ExecuteExitAndRead(pTarget)
 {
   SetCommand(this(), "Exit");
+  ExecuteCommand(); // InitEvaluation
   ExecuteCommand();
   observed_after_execute = pTarget->ReadActivateCount();
   return(observed_after_execute);
@@ -78,6 +84,7 @@ public func ExecuteExitAfterRemovingEntrance(pTarget)
 {
   ChangeDef(NENT, pTarget);
   SetCommand(this(), "Exit");
+  ExecuteCommand(); // InitEvaluation
   ExecuteCommand();
   return(GetCommand());
 }
@@ -616,6 +623,15 @@ fn false_activation_does_not_fail_callback_replacement_exit() {
             .command_names(),
         ["Exit"],
         "the callback-installed Exit survives the old false result"
+    );
+
+    engine
+        .tick()
+        .expect("replacement Exit performs InitEvaluation");
+    assert_eq!(
+        local_int(&engine, base, "activate_count"),
+        1,
+        "InitEvaluation does not activate the entrance"
     );
 
     engine

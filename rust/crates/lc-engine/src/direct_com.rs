@@ -6243,7 +6243,7 @@ impl Engine {
     /// `ObjectComJump` (C4ObjectCom.cpp:280-307): predict a deep-liquid
     /// landing from the shape's bottom vertex before falling back to the
     /// script-overridable regular jump.
-    fn object_com_jump(&mut self, index: usize) -> Result<bool, EngineError> {
+    pub(crate) fn object_com_jump(&mut self, index: usize) -> Result<bool, EngineError> {
         if self.object_procedure(index) != ActionProcedure::Walk {
             return Ok(false);
         }
@@ -10325,6 +10325,21 @@ protected func ContainedThrow(object clonk)
         );
         engine
             .tick()
+            .expect("selected cargo Exit evaluation frame");
+        let selected_after_evaluation = engine
+            .object_snapshot(selected_cargo)
+            .expect("selected cargo survives");
+        assert_eq!(
+            selected_after_evaluation.container,
+            Some(kayak),
+            "Exit's InitEvaluation consumes the first cargo execution"
+        );
+        assert_eq!(
+            selected_after_evaluation.command_stack.command_names(),
+            ["Exit"]
+        );
+        engine
+            .tick()
             .expect("selected cargo exits and menu refills");
         assert_eq!(
             engine
@@ -14172,12 +14187,25 @@ public func ContextMagic(object caller)
             .player_in_com(1, COM_THROW, 0)
             .expect("enter Exit row");
 
+        let crew_after_evaluation = engine.object_snapshot(crew).expect("crew survives");
         assert_eq!(
-            engine.object_snapshot(crew).expect("crew survives").container,
-            None,
-            "the selected Exit row executes the real Exit command"
+            crew_after_evaluation.container,
+            Some(hut),
+            "the row's synchronous ExecuteCommand consumes Exit's InitEvaluation"
+        );
+        assert_eq!(
+            crew_after_evaluation.command_stack.command_names(),
+            ["Exit"]
         );
         assert_eq!(engine.debug_object_menu(crew.as_u64()), Some(None));
+
+        engine.tick().expect("run evaluated Exit");
+        let crew_after_exit = engine.object_snapshot(crew).expect("crew survives");
+        assert_eq!(
+            crew_after_exit.container, None,
+            "the selected Exit row exits on the following object execution"
+        );
+        assert!(crew_after_exit.command_stack.is_empty());
     }
 
     #[test]
@@ -14413,11 +14441,22 @@ public func ContextMagic(object caller)
             lorry_after_activate.command_stack.command_names(),
             vec!["Exit"]
         );
-        engine.tick().expect("target Exit command frame");
+        engine.tick().expect("target Exit evaluation frame");
+        let lorry_after_evaluation = engine.object_snapshot(lorry).expect("lorry survives");
+        assert_eq!(
+            lorry_after_evaluation.container,
+            Some(hut),
+            "Exit's InitEvaluation consumes its first object execution"
+        );
+        assert_eq!(
+            lorry_after_evaluation.command_stack.command_names(),
+            vec!["Exit"]
+        );
+        engine.tick().expect("target evaluated Exit frame");
         assert_eq!(
             engine.object_snapshot(lorry).expect("lorry survives").container,
             None,
-            "the vehicle exits on its own object execution"
+            "the vehicle exits on its second object execution"
         );
         let menu = engine
             .debug_object_menu(crew.as_u64())
@@ -14567,7 +14606,15 @@ public func ContextMagic(object caller)
             ["Exit"],
             "the selected row executes C4CMD_Activate on the contained cargo"
         );
-        engine.tick().expect("execute cargo Exit command");
+        engine.tick().expect("execute cargo Exit evaluation frame");
+        let cargo_after_evaluation = engine.object_snapshot(cargo).expect("cargo survives");
+        assert_eq!(cargo_after_evaluation.container, Some(hut));
+        assert_eq!(
+            cargo_after_evaluation.command_stack.command_names(),
+            ["Exit"],
+            "Exit remains queued after its InitEvaluation frame"
+        );
+        engine.tick().expect("execute evaluated cargo Exit command");
         assert_eq!(
             engine.object_snapshot(cargo).expect("cargo survives").container,
             None
@@ -15239,8 +15286,10 @@ protected func RejectCollect(id definition, object item)
     #[test]
     fn closing_auto_context_menu_exits_the_building() {
         // AutoContextMenu installs a close command that issues Exit for
-        // selected clonks; COM_MenuClose invokes it after closing
-        // (C4Object.cpp:2044-2062; C4Menu.cpp:317-331).
+        // selected clonks, then calls ExecuteCommand once. That first call
+        // is Exit's InitEvaluation; the next object tick performs the exit
+        // (C4Object.cpp:2044-2062; C4Menu.cpp:317-331;
+        // C4Command.cpp:1554-1555,1654-1657).
         let mut engine = Engine::new();
         register_clonk(&mut engine, "CLNK", "#strict\n");
         let mut hut =
@@ -15272,13 +15321,25 @@ protected func RejectCollect(id definition, object item)
 
         let crew_snapshot = engine.object_snapshot(crew).expect("crew survives");
         assert_eq!(
-            crew_snapshot.container, None,
-            "the context close command exits"
+            crew_snapshot.container,
+            Some(hut),
+            "the close command's synchronous ExecuteCommand only evaluates Exit"
+        );
+        assert_eq!(
+            crew_snapshot.command_stack.command_names(),
+            vec!["Exit".to_string()]
         );
         assert_eq!(
             engine.debug_object_menu(crew.as_u64()),
             Some(None),
             "the context menu remains closed"
+        );
+
+        engine.tick().expect("run evaluated Exit");
+        assert_eq!(
+            engine.object_snapshot(crew).expect("crew survives").container,
+            None,
+            "the evaluated context close command exits on the next tick"
         );
     }
 

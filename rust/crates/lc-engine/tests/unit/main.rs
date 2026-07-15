@@ -25300,6 +25300,158 @@ func Death(by) { death_by = by; return 1; }
     }
 
     #[test]
+    fn exit_init_evaluation_cancels_live_attach_before_exit() -> Result<(), EngineError> {
+        // An ordinary Exit spends its first Execute in InitEvaluation:
+        // ObjectComCancelAttach changes DFA_ATTACH to ActIdle, but the
+        // object remains contained until the next Execute
+        // (C4Command.cpp:1554-1555,1654-1657).
+        let mut actor = Definition::from_script("EXAT", "Attached exiter", "#strict 2\n")?;
+        actor.configure_actions(
+            Some("Attach".to_string()),
+            HashMap::from([(
+                "Attach".to_string(),
+                ActionSpec::default().with_procedure("ATTACH"),
+            )]),
+        );
+
+        let mut engine = Engine::with_seed(101);
+        engine.register_definition(actor)?;
+        engine.register_definition(simple_definition("EXAC"))?;
+        let container_id = engine.spawn_object(
+            SpawnConfig::new("EXAC").with_position(Vector2::new(40, 70)),
+        )?;
+        let container_index = engine
+            .find_object_index(container_id)
+            .expect("container exists");
+        engine.objects[container_index].state.entrance_status = true;
+        let actor_id = engine.spawn_object(
+            SpawnConfig::new("EXAT")
+                .with_category(CATEGORY_STATIC_BACK)
+                .with_container(container_id)
+                .with_action(ActionState::new("Attach")),
+        )?;
+        let actor_index = engine.find_object_index(actor_id).expect("actor exists");
+        engine.objects[actor_index]
+            .commands
+            .push_back(CommandRequest::new(CommandId::Exit).with_mode(CommandMode::Base))
+            .expect("Exit queues");
+
+        engine.tick()?;
+        let snapshot = engine.object_snapshot(actor_id).expect("actor remains");
+        assert_eq!(snapshot.action.name, "Idle");
+        assert_eq!(snapshot.container, Some(container_id));
+        assert_eq!(
+            snapshot.command_stack.command_names(),
+            vec!["Exit".to_string()]
+        );
+
+        engine.tick()?;
+        let snapshot = engine.object_snapshot(actor_id).expect("actor remains");
+        assert_eq!(snapshot.action.name, "Idle");
+        assert_eq!(snapshot.container, None);
+        assert!(snapshot.command_stack.command_names().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn collection_exit_runs_live_jump_with_preserved_comdir() -> Result<(), EngineError> {
+        // C4Command::Exit's collection arm places the carryable one pixel
+        // above the collection top, then calls ObjectComJump before Finish
+        // (C4Command.cpp:643-649). ObjectComJump must still see the incoming
+        // ComDir; facing is only its fallback (C4ObjectCom.cpp:284-296).
+        let mut actor = Definition::from_script("EXJP", "Collection exit jumper", "#strict 2\n")?;
+        actor.set_collectible(true);
+        actor.set_physical(PhysicalInfo {
+            walk: 50_001,
+            jump: 60_001,
+            ..PhysicalInfo::default()
+        });
+        actor.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Jump".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+            ]),
+        );
+
+        let mut container = simple_definition("EXCT");
+        container.set_collection_rect(Some(DefinitionRect::new(-13, -17, 26, 34)));
+
+        let mut engine = Engine::with_seed(102);
+        engine.register_definition(actor)?;
+        engine.register_definition(container)?;
+        let container_id = engine.spawn_object(
+            SpawnConfig::new("EXCT").with_position(Vector2::new(120, 180)),
+        )?;
+        let container_index = engine
+            .find_object_index(container_id)
+            .expect("container exists");
+        engine.objects[container_index].state.entrance_status = true;
+        assert_eq!(
+            engine.objects[container_index].state.ocf & ocf::ENTRANCE,
+            0,
+            "an actual entrance area would take priority over Collection"
+        );
+
+        let actor_id = engine.spawn_object(
+            SpawnConfig::new("EXJP")
+                // Keep the post-command state stable through this tick's
+                // ExecAction/ExecMovement so the exact native launch is
+                // observable after Engine::tick returns.
+                .with_category(CATEGORY_STATIC_BACK)
+                .with_construction(FULL_CON)
+                .with_container(container_id)
+                .with_action(ActionState::new("Walk"))
+                .with_direction(Direction::Left)
+                .with_command_direction(CommandDirection::Right),
+        )?;
+        let actor_index = engine.find_object_index(actor_id).expect("actor exists");
+        engine.objects[actor_index]
+            .commands
+            .push_back(
+                CommandRequest::new(CommandId::Exit)
+                    .with_mode(CommandMode::Base)
+                    .with_evaluated(true),
+            )
+            .expect("evaluated Exit queues");
+
+        engine.tick()?;
+
+        let actor_index = engine.find_object_index(actor_id).expect("actor remains");
+        let actor = &engine.objects[actor_index];
+        assert_eq!(actor.state.container, None);
+        assert_eq!(actor.state.position, Vector2::new(120, 162));
+        assert_eq!(
+            actor.fixed_position,
+            FixedVec2::from_ints(120, 162),
+            "Exit installs the collection-area position before jumping"
+        );
+        assert_eq!(actor.state.action.name, "Jump");
+        assert_eq!(
+            actor.state.command_direction,
+            CommandDirection::Right,
+            "Exit must not replace the ComDir consumed by ObjectComJump"
+        );
+        assert_eq!(
+            actor.fixed_velocity,
+            FixedVec2::new(
+                math::val_by_physical(280, 50_001),
+                -math::val_by_physical(1000, 60_001),
+            ),
+            "Right ComDir wins over the actor's Left facing"
+        );
+        assert!(actor.state.mobile);
+        assert!(actor.commands.command_names().is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn contained_flight_exit_honors_inside_vehicle_control_overload() {
         let actor_script = r#"#strict
 local own_control_calls;

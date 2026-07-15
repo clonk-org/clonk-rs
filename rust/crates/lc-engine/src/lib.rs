@@ -43302,6 +43302,19 @@ impl Engine {
             CommandEvent::ObjectComJump { object_id, tx } => {
                 self.execute_jump_command(object_id, tx)?;
             }
+            CommandEvent::ObjectComExitJump {
+                object_id,
+                command_instance_id,
+            } => {
+                if let Some(index) = self.find_object_index(object_id) {
+                    let _ = self.object_com_jump(index)?;
+                }
+                if let Some(index) = self.find_object_index(object_id) {
+                    self.objects[index]
+                        .commands
+                        .finish_command_instance(CommandId::Exit, command_instance_id);
+                }
+            }
             CommandEvent::ObjectComStopMoveTo { object_id } => {
                 let _ = self.object_com_stop_live(object_id)?;
                 self.resume_move_to_after_stop(object_id)?;

@@ -35113,6 +35113,7 @@ mod tests {
         clonk: ObjectId,
         elevator_case: ObjectId,
         hut: ObjectId,
+        settle_in_shaft: bool,
         subject: &str,
         target_wealth: Option<i32>,
     ) {
@@ -35122,6 +35123,55 @@ mod tests {
             105,
             &format!("{subject} climbs out of the blast pocket"),
         );
+        if settle_in_shaft {
+            let mut previous_action = String::new();
+            for _ in 0..160 {
+                let action = app
+                    .engine
+                    .object_snapshot(clonk)
+                    .expect("returning Tutorial07 CLNK survives the shaft landing")
+                    .action
+                    .name;
+                if action == "Walk" {
+                    break;
+                }
+                if action == "Hangle" && previous_action != "Hangle" {
+                    // Physical X is COM_Down. Jump'n'Run's DFA_HANGLE arm
+                    // sends it directly through ObjectComLetGo. The cave has
+                    // two ceilings, so release each newly entered Hangle
+                    // before the final objective return's elevator alignment.
+                    AppVirtualKeyboard::new(app)
+                        .press(VirtualKeyCode::X)
+                        .expect("press physical X to release returning CLNK from Hangle");
+                    for _ in 0..4 {
+                        app.update()
+                            .expect("apply held physical X to returning Hangle CLNK");
+                        if app
+                            .engine
+                            .object_snapshot(clonk)
+                            .is_none_or(|object| object.action.name != "Hangle")
+                        {
+                            break;
+                        }
+                    }
+                    AppVirtualKeyboard::new(app)
+                        .release(VirtualKeyCode::X)
+                        .expect("release physical X after returning CLNK lets go");
+                    previous_action = action;
+                    continue;
+                }
+                previous_action = action;
+                app.update()
+                    .expect("settle returning Tutorial07 CLNK in elevator shaft");
+            }
+            assert!(
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk"),
+                "{subject} lets go and lands in the elevator shaft; clonk={:?}",
+                app.engine.object_snapshot(clonk)
+            );
+        }
         for _ in 0..11 {
             app.update().expect("wait out blast-pocket key buffer");
         }
@@ -66838,6 +66888,7 @@ protected func InputCallback(string answer, int player)
             clonk,
             elevator_case,
             hut,
+            false,
             "CLNK after first FLNT blast",
             None,
         );
@@ -66994,6 +67045,7 @@ protected func InputCallback(string answer, int player)
             clonk,
             elevator_case,
             hut,
+            false,
             "first GOLD-carrying CLNK",
             None,
         );
@@ -67028,6 +67080,7 @@ protected func InputCallback(string answer, int player)
                 clonk,
                 elevator_case,
                 hut,
+                false,
                 "GOLD-carrying CLNK",
                 Some(target_wealth),
             );
@@ -67880,6 +67933,7 @@ protected func InputCallback(string answer, int player)
             clonk,
             elevator_case,
             hut,
+            true,
             "CRYS-carrying CLNK",
             None,
         );

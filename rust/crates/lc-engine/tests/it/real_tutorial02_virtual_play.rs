@@ -325,13 +325,17 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             player.engine().snapshot().hud
         );
     }
+    // The ready crew's restored Exit InitEvaluation frame shifts the
+    // phase-sensitive walking route by one global tick. Stop one pixel
+    // earlier so three exact (-16,-16) spans still finish inside Script81's
+    // literal y>=240 rectangle rather than supported at y=239.
     player.hold_until(
         COM_LEFT,
         "Clonk reaches Tutorial02's first bridge position",
         120,
         |engine| {
             engine.object_snapshot(clonk).is_some_and(|object| {
-                object.action.name == "Walk" && (488..=490).contains(&object.position.x)
+                object.action.name == "Walk" && (489..=491).contains(&object.position.x)
             })
         },
     )?;
