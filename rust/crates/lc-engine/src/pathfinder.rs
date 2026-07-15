@@ -387,9 +387,6 @@ impl<'a> PathFinderState<'a> {
             if self.success {
                 break;
             }
-            if processed >= MAX_RAY {
-                break;
-            }
             processed += 1;
             if self.execute_ray(index) {
                 continue_search = true;
@@ -1171,6 +1168,61 @@ mod tests {
         assert!(finder
             .find(Vector2::new(4, 5), Vector2::new(8, 20))
             .is_none());
+    }
+
+    #[test]
+    fn max_ray_final_pass_executes_entire_snapshot_before_stopping() {
+        // C4PathFinder::Execute checks C4PF_MaxRay only after walking the
+        // complete pass-start list. A successful ray beyond position 350
+        // therefore still completes the path before Execute returns false
+        // (C4PathFinder.cpp:576-599).
+        let landscape = Landscape::flat(32, 40);
+        let target = Vector2::new(20, 5);
+        for ray_count in [MAX_RAY as usize, MAX_RAY as usize + 1] {
+            let mut zones = [];
+            let mut state =
+                PathFinderState::new(&landscape, &mut zones, true, 1, Vector2::new(2, 5));
+            for _ in 0..ray_count {
+                assert!(state.add_ray(2, 5, 20, 5, 0, DIRECTION_RIGHT, None, None));
+                state
+                    .rays
+                    .last()
+                    .expect("ray was appended")
+                    .borrow_mut()
+                    .status = RayStatus::Still;
+            }
+            let winner = *state.active.last().expect("snapshot has a final ray");
+            state.rays[winner].borrow_mut().status = RayStatus::Launch;
+
+            assert!(
+                !state.execute_iteration(),
+                "a pass with {ray_count} rays terminates at the post-pass cap"
+            );
+            assert!(
+                state.success,
+                "ray #{ray_count} must execute before MAX_RAY termination"
+            );
+            assert_eq!(state.success_ray, Some(winner));
+            assert!(matches!(state.rays[winner].borrow().status, RayStatus::Still));
+
+            let path = state.into_path(target);
+            assert_eq!(
+                path.waypoints,
+                vec![
+                    PathWaypoint {
+                        x: 2,
+                        y: 5,
+                        transfer_target: None,
+                    },
+                    PathWaypoint {
+                        x: 20,
+                        y: 5,
+                        transfer_target: None,
+                    },
+                ]
+            );
+            assert_eq!(path.length, integer_distance(2, 5, 20, 5));
+        }
     }
 
     #[test]
