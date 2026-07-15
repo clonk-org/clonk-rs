@@ -44805,62 +44805,66 @@ func Missing() { return ComponentAll(nil, WOOD); }
     }
 
     #[test]
-    fn get_hi_rank_prefers_higher_rank_then_crew_order() {
+    fn get_hi_rank_skips_disabled_and_retains_first_equal_rank() {
         // FnGetHiRank (C4Script.cpp:2792-2796) ->
         // C4Player::GetHiRankActiveCrew(false) (C4Player.cpp:1003-1020):
-        // walk the crew in order, rank from the linked Info (no info =
-        // -1); only a STRICTLY higher rank replaces, so the first of equal
-        // ranks wins.
+        // skip CrewDisabled, then replace only for a STRICTLY higher rank,
+        // so the first of equal ranks wins. No eligible crew returns nil.
         let crew_ids = [11_u64, 22_u64, 33_u64];
-        let objects: Vec<HostWorldObject> = crew_ids
-            .iter()
-            .map(|&id| {
-                HostWorldObject::new(
-                    ObjectId::new(id),
-                    "Clonk",
-                    ObjectStatus::Normal,
-                    "Idle",
-                    None,
-                    None,
-                    None,
-                    1,
-                    100,
-                    crate::FULL_CON,
-                    Vector2::ZERO,
-                    Vector2::ZERO,
-                    Vec::new(),
-                    0,
-                    0,
-                    None,
-                )
-            })
-            .collect();
-        let mut player = PlayerState::default();
-        player.id = 1;
-        player.crew = crew_ids.iter().map(|&id| ObjectId::new(id)).collect();
+        let call = |disabled: &[u64]| {
+            let objects: Vec<HostWorldObject> = crew_ids
+                .iter()
+                .map(|&id| {
+                    HostWorldObject::new(
+                        ObjectId::new(id),
+                        "Clonk",
+                        ObjectStatus::Normal,
+                        "Idle",
+                        None,
+                        None,
+                        None,
+                        1,
+                        100,
+                        crate::FULL_CON,
+                        Vector2::ZERO,
+                        Vector2::ZERO,
+                        Vec::new(),
+                        0,
+                        0,
+                        None,
+                    )
+                    .with_crew_disabled(disabled.contains(&id))
+                })
+                .collect();
+            let mut player = PlayerState::default();
+            player.id = 1;
+            player.crew = crew_ids.iter().map(|&id| ObjectId::new(id)).collect();
+            let world = HostWorldContext::with_landscape(
+                objects,
+                None,
+                HashMap::new(),
+                Vec::new(),
+                HashMap::from([(1, player)]),
+                HashMap::new(),
+                1,
+                false,
+            )
+            .with_crew_ranks(std::rc::Rc::new(HashMap::from([
+                (11_u64, 5),
+                (22_u64, 3),
+                (33_u64, 3),
+            ])));
+            let (result, _) =
+                with_effect_context(None, &[], world, 1, || get_hi_rank(&[Value::Int(1)]));
+            result.expect("GetHiRank succeeds")
+        };
 
-        let world = HostWorldContext::with_landscape(
-            objects,
-            None,
-            HashMap::new(),
-            Vec::new(),
-            HashMap::from([(1, player)]),
-            HashMap::new(),
-            1,
-            false,
-        )
-        .with_crew_ranks(std::rc::Rc::new(HashMap::from([
-            (11_u64, 0),
-            (22_u64, 3),
-            (33_u64, 3),
-        ])));
-        let (result, _) =
-            with_effect_context(None, &[], world, 1, || get_hi_rank(&[Value::Int(1)]));
         assert_eq!(
-            result.expect("GetHiRank succeeds"),
+            call(&[11]),
             object_reference_value(ObjectId::new(22)),
-            "rank 3 beats rank 0; the FIRST rank-3 member wins the tie"
+            "the disabled rank-5 member is skipped and the first rank-3 member wins the tie"
         );
+        assert_eq!(call(&crew_ids), Value::Nil, "all disabled returns nil");
     }
 
     #[test]
