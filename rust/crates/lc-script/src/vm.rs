@@ -4780,6 +4780,25 @@ mod tests {
     }
 
     #[test]
+    fn vm_negative_array_indices_clamp_reads_writes_and_compound_ops_to_zero() {
+        let source = r#"#strict 2
+            func Test() {
+                var a = [7, 8];
+                var read = a[-1];
+                a[-2] = 1;
+                var written = a[0];
+                a[-1] += 1;
+                return [read, written, a[0]];
+            }
+        "#;
+
+        assert_eq!(
+            execute_script(source, "Test", &[]).expect("negative array indices clamp"),
+            Value::Array(vec![Value::Int(7), Value::Int(1), Value::Int(2)])
+        );
+    }
+
+    #[test]
     fn vm_empty_negative_read_grows_nested_and_reference_return_paths() {
         let mut engine = crate::engine::Engine::new();
         let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
