@@ -26427,7 +26427,7 @@ fn preview_object_com_drop(actor: ObjectId, object: ObjectId) -> Result<bool, Ru
     Ok(true)
 }
 
-fn preview_object_com_stop_for_grab(actor: ObjectId) -> Result<(), RuntimeError> {
+fn preview_object_com_stop(actor: ObjectId) -> Result<(), RuntimeError> {
     let _ = native_set_action_by_name(actor, "Idle")?;
     HOST_CONTEXT.with(|cell| {
         if let Some(scope) = cell
@@ -26448,6 +26448,78 @@ fn preview_object_com_stop_for_grab(actor: ObjectId) -> Result<(), RuntimeError>
                 scope.set_fixed_velocity(FixedVec2::ZERO);
             }
         });
+    }
+    Ok(())
+}
+
+/// Script-level ExecuteCommand twin of CommandEvent::ObjectComStopMoveTo.
+/// ObjectComStop callbacks and the retained command continuation must both
+/// complete before ExecuteCommand returns to its caller.
+fn preview_move_to_stop(actor: ObjectId) -> Result<(), RuntimeError> {
+    preview_object_com_stop(actor)?;
+
+    let events = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Vec::new();
+        };
+        let (objects, players, definitions, transfers) = context.command_runtime_data();
+        let Some(object_snapshot) = objects.get(&actor) else {
+            return Vec::new();
+        };
+        let landscape = context.world.landscape.clone();
+        let runtime = CommandRuntimeContext {
+            rng: None,
+            frame: context.world.frame,
+            position: object_snapshot.position,
+            landscape: landscape.as_deref(),
+            object: object_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: context.world.structures_need_energy,
+            base_buy_enabled: context.world.base_buy_enabled,
+            base_sell_enabled: context.world.base_sell_enabled,
+            transfer_zones: &transfers,
+        };
+        let Some(scope) = context.object_scope_mut(actor) else {
+            return Vec::new();
+        };
+        let Some(mut result) = scope
+            .live_commands
+            .execute_pending_move_to_stop(&runtime)
+        else {
+            return Vec::new();
+        };
+        scope.command_stack_replaced = true;
+        if let Some(update) = result.update.take() {
+            scope.stage_command_update(update);
+        }
+        scope.command_count = scope.live_commands.len();
+        result.events
+    });
+
+    for event in events {
+        match event {
+            CommandEvent::FailureFeedback { actor_id, feedback } => {
+                preview_command_failure_feedback(actor_id, feedback)?;
+            }
+            other => {
+                HOST_CONTEXT.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    let Some(context) = borrow.as_mut() else {
+                        return;
+                    };
+                    context.pending_command_events.push(other.clone());
+                    if let Some(scope) = context.object_scope_mut(actor) {
+                        scope.queued_commands.push(
+                            QueuedCommand::immediate(ObjectUpdate::default())
+                                .with_events(vec![other]),
+                        );
+                    }
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -26528,7 +26600,7 @@ fn preview_grab_attempt(actor: ObjectId, target: ObjectId) -> Result<(), Runtime
         ActionProcedure::Build | ActionProcedure::Chop
     ) {
         stopped_for_grab = true;
-        preview_object_com_stop_for_grab(actor)?;
+        preview_object_com_stop(actor)?;
     }
     let procedure_after_build_or_chop = HOST_CONTEXT.with(|cell| {
         cell.borrow()
@@ -26539,7 +26611,7 @@ fn preview_grab_attempt(actor: ObjectId, target: ObjectId) -> Result<(), Runtime
     });
     if procedure_after_build_or_chop == ActionProcedure::Dig {
         stopped_for_grab = true;
-        preview_object_com_stop_for_grab(actor)?;
+        preview_object_com_stop(actor)?;
     }
 
     let snapshots = HOST_CONTEXT.with(|cell| {
@@ -26713,13 +26785,23 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
             context.execute_command_preview(target, random.as_ref().map(|rng| &rng.rng))
         })
     });
-    let Some((mut finished, grab_attempts, drop_attempts, failure_feedback)) = preview else {
+    let Some((
+        mut finished,
+        grab_attempts,
+        drop_attempts,
+        failure_feedback,
+        move_to_stops,
+    )) = preview else {
         return Ok(Value::Bool(false));
     };
 
     let had_live_attempt = !grab_attempts.is_empty()
         || !drop_attempts.is_empty()
-        || !failure_feedback.is_empty();
+        || !failure_feedback.is_empty()
+        || !move_to_stops.is_empty();
+    for actor_id in move_to_stops {
+        preview_move_to_stop(actor_id)?;
+    }
     for (actor_id, target_id) in grab_attempts {
         preview_grab_attempt(actor_id, target_id)?;
         while let Some(feedback) = HOST_CONTEXT.with(|cell| {
@@ -37243,6 +37325,17 @@ impl EffectHostContext {
                         )
                     })
                     .flatten();
+                let action_name = scope
+                    .map(|scope| scope.effective_action_name().to_string())
+                    .unwrap_or_else(|| object.action_name.clone());
+                let action_idle = scope
+                    .map(|scope| scope.action_library.is_idle_action(&action_name))
+                    .or_else(|| {
+                        metadata.map(|metadata| {
+                            metadata.action_library.is_idle_action(&action_name)
+                        })
+                    })
+                    .unwrap_or(true);
                 let snapshot = CommandObjectSnapshot {
                     id,
                     master_list_order,
@@ -37268,9 +37361,8 @@ impl EffectHostContext {
                     container: scope
                         .map(ObjectScopeContext::container)
                         .unwrap_or(object.container),
-                    action_name: scope
-                        .map(|scope| scope.effective_action_name().to_string())
-                        .unwrap_or_else(|| object.action_name.clone()),
+                    action_name,
+                    action_idle,
                     action_target: scope
                         .map(|scope| scope.effective_action_target(0))
                         .unwrap_or(object.action_target),
@@ -37414,6 +37506,7 @@ impl EffectHostContext {
         Vec<(ObjectId, ObjectId)>,
         Vec<(ObjectId, ObjectId)>,
         Vec<(ObjectId, CommandFailureFeedback)>,
+        Vec<ObjectId>,
     )> {
         let (objects, players, definitions, transfers) = self.command_runtime_data();
         let object_snapshot = objects.get(&target)?;
@@ -37462,6 +37555,7 @@ impl EffectHostContext {
         let mut grab_attempts = Vec::new();
         let mut drop_attempts = Vec::new();
         let mut failure_feedback = Vec::new();
+        let mut move_to_stops = Vec::new();
         for event in events.drain(..) {
             match event {
                 CommandEvent::AttemptGrab {
@@ -37474,6 +37568,9 @@ impl EffectHostContext {
                 } => drop_attempts.push((actor_id, object_id)),
                 CommandEvent::FailureFeedback { actor_id, feedback } => {
                     failure_feedback.push((actor_id, feedback));
+                }
+                CommandEvent::ObjectComStopMoveTo { object_id } => {
+                    move_to_stops.push(object_id);
                 }
                 CommandEvent::OpenMenu(request) => self.pending_menu_requests.push(request),
                 other => deferred_events.push(other),
@@ -37491,6 +37588,7 @@ impl EffectHostContext {
             grab_attempts,
             drop_attempts,
             failure_feedback,
+            move_to_stops,
         ))
     }
 

@@ -58,6 +58,9 @@ pub struct CommandObjectSnapshot {
     pub category: i32,
     pub container: Option<ObjectId>,
     pub action_name: String,
+    /// Whether Action.Act is ActIdle (or the inactive ActHold slot), as
+    /// opposed to a real ActMap entry that happens to be named "Idle".
+    pub action_idle: bool,
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
     pub action_procedure: ActionProcedure,
@@ -405,6 +408,9 @@ mod tests {
             category: 0,
             container: None,
             action_name: "Idle".to_string(),
+            // Generic command fixtures model a live action unless a test
+            // explicitly opts into the built-in ActIdle slot.
+            action_idle: false,
             action_target: None,
             action_target2: None,
             action_procedure: ActionProcedure::Undefined,
@@ -463,6 +469,8 @@ mod tests {
     fn walking_jumper(position: Vector2) -> CommandObjectSnapshot {
         let mut walker = snapshot_with_id(1);
         walker.position = position;
+        walker.action_name = "Walk".into();
+        walker.action_idle = false;
         walker.action_procedure = ActionProcedure::Walk;
         walker.crew_member = true;
         walker.ocf |= ocf::CREW_MEMBER;
@@ -917,6 +925,8 @@ mod tests {
         let mut mover = snapshot_with_id(1);
         mover.position = Vector2::new(100, 100);
         mover.fixed_position = FixedVec2::from_ints(100, 100);
+        mover.action_name = "Walk".into();
+        mover.action_procedure = ActionProcedure::Walk;
         mover.move_to_range = 20;
         let objects = HashMap::new();
         let players = HashMap::new();
@@ -1316,7 +1326,8 @@ mod tests {
             "the adjusted in-range target finishes immediately (C4Command.cpp:294-307)"
         );
 
-        // NoPosAdjust keeps the raw (100,50): the walker steers Up.
+        // NoPosAdjust keeps the raw (100,50), but DFA_WALK has no vertical
+        // steering arm: the command remains pending without touching ComDir.
         let request = request.with_data(CommandData::Integer(1));
         let mut state = MoveToState::from_request(&request); // unevaluated
         let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
@@ -1325,10 +1336,12 @@ mod tests {
         let mut ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
         ctx.landscape = Some(&landscape);
         let second = state.step(&ctx);
-        assert_eq!(
-            second.update.and_then(|update| update.command_direction),
-            Some(CommandDirection::Up),
-            "NoPosAdjust leaves the mid-air target (C4Command.h:68)"
+        assert!(
+            second
+                .update
+                .and_then(|update| update.command_direction)
+                .is_none(),
+            "NoPosAdjust leaves the mid-air target without inventing vertical Walk steering"
         );
     }
 
@@ -1719,6 +1732,95 @@ mod tests {
             }
             other => panic!("expected jump + side move, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn move_to_idle_fails_after_arrival_check_and_feeds_base_failures() {
+        let mut idle = snapshot_with_id(1);
+        idle.position = Vector2::new(100, 100);
+        idle.action_idle = true;
+        idle.action_procedure = ActionProcedure::Undefined;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::Wait)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("base Wait queues");
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(200))
+                    .with_ty(Some(100))
+                    .with_evaluated(true)
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("MoveTo queues");
+        let ctx = move_to_ctx_at_frame(&idle, &objects, &players, &definitions, 1);
+        let result = stack.execute_front(&ctx).expect("MoveTo executes");
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert_eq!(stack.entries[1].failures, 1);
+        assert!(result.update.is_none(), "idle failure itself does not steer");
+
+        // Native arrival precedes Action.Act<=ActIdle, so the same idle
+        // object succeeds when it is already inside the target range.
+        let mut arrived = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(100))
+                .with_ty(Some(100)),
+        );
+        let result = arrived.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+
+        // A real ActMap entry may also be named "Idle". The exact bit, not
+        // the string, distinguishes it from the built-in inactive slot.
+        let mut active_idle = idle.clone();
+        active_idle.action_idle = false;
+        let ctx = move_to_ctx_at_frame(
+            &active_idle,
+            &objects,
+            &players,
+            &definitions,
+            1,
+        );
+        let mut moving = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(200))
+                .with_ty(Some(100)),
+        );
+        assert_eq!(moving.step(&ctx).status, CommandStatus::Running);
+    }
+
+    #[test]
+    fn move_to_walk_vertical_offset_leaves_command_direction_untouched() {
+        let mut walker = walking_jumper(Vector2::new(100, 100));
+        walker.command_direction = CommandDirection::Left;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(100))
+                .with_ty(Some(140)),
+        );
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(
+            result
+                .update
+                .as_ref()
+                .and_then(|update| update.command_direction)
+                .is_none(),
+            "DFA_WALK has no vertical or catch-all ComDir assignment"
+        );
     }
 
     #[test]
@@ -12556,6 +12658,13 @@ pub enum CommandEvent {
         object_id: ObjectId,
         tx: i32,
     },
+    /// C4Command::MoveTo must run the callbackful, ordinary ObjectComStop
+    /// before its range/idle/procedure continuation. The continuation is
+    /// retained on the live MoveTo state so the engine can resume it in the
+    /// same Execute without decrementing UpdateInterval a second time.
+    ObjectComStopMoveTo {
+        object_id: ObjectId,
+    },
     /// Run C4Command::Grab's live sequence. Build/chop/dig stopping may
     /// change the subsequent At result, while scale/hangle let-go and the
     /// target's RejectGrabbed callback must finish before ObjectComGrab
@@ -12922,6 +13031,11 @@ impl CommandStackSnapshot {
 pub struct CommandStack {
     entries: VecDeque<ActiveCommand>,
     detached_grab_attempts: Vec<DetachedGrabAttempt>,
+    /// A callback may ClearCommands/SetCommand while ObjectComStop is
+    /// running. Native keeps the executing C4Command alive through its
+    /// iExec guard, so retain that detached MoveTo until the same-Execute
+    /// continuation consumes it.
+    detached_move_to_stops: VecDeque<MoveToState>,
     /// Live Grab callbacks resolve inside engine/compat event handling, so
     /// their failure feedback cannot travel on the original CommandEvent.
     /// Keep it transient and let that synchronous caller drain it before
@@ -12961,6 +13075,7 @@ impl CommandStack {
         Self {
             entries: VecDeque::new(),
             detached_grab_attempts: Vec::new(),
+            detached_move_to_stops: VecDeque::new(),
             pending_failure_feedback: VecDeque::new(),
         }
     }
@@ -12988,9 +13103,18 @@ impl CommandStack {
         }
     }
 
+    fn remember_detached_move_to_stop(&mut self, entry: &ActiveCommand) {
+        if let CommandState::MoveTo(state) = &entry.state {
+            if state.stop_continuation.is_some() {
+                self.detached_move_to_stops.push_back(state.clone());
+            }
+        }
+    }
+
     fn pop_front(&mut self) -> Option<ActiveCommand> {
         let entry = self.entries.pop_front()?;
         self.remember_detached_grab(&entry);
+        self.remember_detached_move_to_stop(&entry);
         Some(entry)
     }
 
@@ -13060,6 +13184,17 @@ impl CommandStack {
             .filter_map(Self::pending_grab_attempt)
             .collect::<Vec<_>>();
         self.detached_grab_attempts.extend(attempts);
+        let move_to_stops = self
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.state {
+                CommandState::MoveTo(state) if state.stop_continuation.is_some() => {
+                    Some(state.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.detached_move_to_stops.extend(move_to_stops);
         self.entries.clear();
     }
 
@@ -13101,6 +13236,29 @@ impl CommandStack {
     }
 
     pub fn restore_from_snapshot(&mut self, snapshot: &CommandStackSnapshot) {
+        // A callback-driven replacement detaches the currently executing
+        // MoveTo, but native iExec keeps it alive until Execute returns. If
+        // the incoming snapshot still contains a pending MoveTo, it is the
+        // same retained command and must not also be queued as detached.
+        let snapshot_retains_move_to = snapshot.commands.iter().any(|command| {
+            matches!(
+                &command.state,
+                CommandState::MoveTo(state) if state.stop_continuation.is_some()
+            )
+        });
+        if !snapshot_retains_move_to {
+            let move_to_stops = self
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.state {
+                    CommandState::MoveTo(state) if state.stop_continuation.is_some() => {
+                        Some(state.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            self.detached_move_to_stops.extend(move_to_stops);
+        }
         self.entries = snapshot
             .commands
             .iter()
@@ -13186,6 +13344,63 @@ impl CommandStack {
             }
         }
 
+        self.apply_result_operations(&mut result);
+        Some(result)
+    }
+
+    /// Resume the MoveTo whose live ObjectComStop event is in flight. This
+    /// bypasses the ordinary front-step lifetime decrement: native C++ is
+    /// still inside the same C4Command::Execute call. Action callbacks may
+    /// have pushed another command above it, so locate the retained state
+    /// rather than assuming it remains the stack front.
+    pub(crate) fn execute_pending_move_to_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> Option<CommandStepResult> {
+        let index = self.entries.iter().position(|entry| {
+            matches!(
+                &entry.state,
+                CommandState::MoveTo(state) if state.stop_continuation.is_some()
+            )
+        });
+        let mut result = if let Some(index) = index {
+            let entry = self.entries.get_mut(index)?;
+            let CommandState::MoveTo(state) = &mut entry.state else {
+                return None;
+            };
+            let result = state.resume_after_stop(ctx);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                entry.finished = Some(result.status);
+            }
+            result
+        } else {
+            // ClearCommands marks the executing native command for deletion
+            // but does not interrupt its current MoveTo body. There is no
+            // longer a live stack entry to finish; steering/child operations
+            // still apply to the callback-installed stack.
+            let mut state = self.detached_move_to_stops.pop_front()?;
+            state.resume_after_stop(ctx)
+        };
+
+        if result.status == CommandStatus::Failed {
+            if let Some(index) = index {
+                if let Some(feedback) = self.record_failure_at(index) {
+                    result.events.push(CommandEvent::FailureFeedback {
+                        actor_id: ctx.object.id,
+                        feedback,
+                    });
+                }
+            }
+        }
+
+        self.apply_result_operations(&mut result);
+        Some(result)
+    }
+
+    fn apply_result_operations(&mut self, result: &mut CommandStepResult) {
         for operation in std::mem::take(&mut result.operations) {
             match operation {
                 CommandOperation::Clear => self.clear(),
@@ -13203,7 +13418,6 @@ impl CommandStack {
                 CommandOperation::Restore(snapshot) => self.restore_from_snapshot(&snapshot),
             }
         }
-        Some(result)
     }
 
     /// The finished command C4Object::ExecuteCommand exposes to
@@ -13820,6 +14034,18 @@ fn adjust_move_to_target(
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct MoveToStopContinuation {
+    /// MoveTo's cx/cy, including the final-waypoint push/pull substitution,
+    /// are captured before ObjectComStop callbacks execute.
+    position: Vector2,
+    target: Vector2,
+    /// The definition MoveToRange/default-five value is likewise captured;
+    /// a live post-stop crew still overrides it from its current shape.
+    target_range: i32,
+    next_is_move_to: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct MoveToState {
     target: Option<ObjectId>,
     tx: Option<i32>,
@@ -13840,6 +14066,10 @@ struct MoveToState {
     update_interval: u32,
     tolerance: i32,
     last_direction: CommandDirection,
+    /// Same-Execute continuation staged while the engine performs the live
+    /// ObjectComStop (Idle then Walk with callbacks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_continuation: Option<MoveToStopContinuation>,
 }
 
 impl MoveToState {
@@ -13857,6 +14087,7 @@ impl MoveToState {
             update_interval: request.update_interval,
             tolerance: 5,
             last_direction: CommandDirection::Stop,
+            stop_continuation: None,
         }
     }
 
@@ -14042,16 +14273,80 @@ impl MoveToState {
             }
         }
 
-        let dx = target.x - position.x;
-        let dy = target.y - position.y;
-        // Crew use their shape width rather than the global MoveToRange:
-        // `iTargetRange = Shape.Wdt / 5` (C4Command.cpp:286-292).
-        let target_range = if ctx.object.ocf & ocf::CREW_MEMBER != 0 {
-            ctx.object.shape.width / 5
-        } else if ctx.object.move_to_range > 0 {
+        let target_range = if ctx.object.move_to_range > 0 {
             ctx.object.move_to_range
         } else {
             self.tolerance
+        };
+
+        // The four work procedures synchronously run ordinary
+        // ObjectComStop before the target/idle/procedure checks. Keep the
+        // pre-callback geometry here; the engine resumes this exact command
+        // with a fresh live action snapshot after Idle/Walk callbacks.
+        if matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Chop
+                | ActionProcedure::Build
+                | ActionProcedure::Dig
+                | ActionProcedure::Bridge
+        ) {
+            self.stop_continuation = Some(MoveToStopContinuation {
+                position,
+                target,
+                target_range,
+                next_is_move_to,
+            });
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::ObjectComStopMoveTo {
+                    object_id: ctx.object.id,
+                },
+            ]);
+        }
+
+        self.step_after_procedure(
+            ctx,
+            position,
+            target,
+            target_range,
+            next_is_move_to,
+            false,
+        )
+    }
+
+    fn resume_after_stop(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let Some(continuation) = self.stop_continuation.take() else {
+            return CommandStepResult::running(None);
+        };
+        self.step_after_procedure(
+            ctx,
+            continuation.position,
+            continuation.target,
+            continuation.target_range,
+            continuation.next_is_move_to,
+            true,
+        )
+    }
+
+    /// MoveTo's post-ObjectComStop half. `force_steer` is required because
+    /// the stop has just written ComDir=Stop; a same-direction value cached
+    /// by this command must still be re-applied in this Execute.
+    fn step_after_procedure(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        position: Vector2,
+        target: Vector2,
+        base_target_range: i32,
+        next_is_move_to: bool,
+        force_steer: bool,
+    ) -> CommandStepResult {
+        let dx = target.x - position.x;
+        let dy = target.y - position.y;
+        // Crew use their live post-stop shape width rather than the global
+        // MoveToRange: `iTargetRange = Shape.Wdt / 5` (:286-292).
+        let target_range = if ctx.object.ocf & ocf::CREW_MEMBER != 0 {
+            ctx.object.shape.width / 5
+        } else {
+            base_target_range
         };
         let (range_factor_side, range_factor_top, range_factor_bottom) =
             if next_is_move_to
@@ -14078,8 +14373,25 @@ impl MoveToState {
             return CommandStepResult::completed(Some(update));
         }
 
+        // Action.Act <= ActIdle is tested after arrival, so an idle object
+        // already in range succeeds while an out-of-range one fails.
+        if ctx.object.action_idle {
+            return CommandStepResult::failed(None);
+        }
+
         let float_steering = ctx.object.action_procedure == ActionProcedure::Float;
         let direction = match ctx.object.action_procedure {
+            // DFA_WALK is horizontal-only. When x is already in range C++
+            // does not assign ComDir at all, regardless of vertical error.
+            ActionProcedure::Walk => {
+                if dx > target_range {
+                    Some(CommandDirection::Right)
+                } else if dx < -target_range {
+                    Some(CommandDirection::Left)
+                } else {
+                    None
+                }
+            }
             // DFA_SWIM (C4Command.cpp:370-382): Tick2 frames (Game.iTick2
             // != 0 — odd FrameCounter) steer horizontally with the target
             // range; !Tick2 frames steer vertically toward Ty with no
@@ -14087,54 +14399,54 @@ impl MoveToState {
             ActionProcedure::Swim => {
                 if ctx.frame % 2 != 0 {
                     if dx > target_range {
-                        CommandDirection::Right
+                        Some(CommandDirection::Right)
                     } else if dx < -target_range {
-                        CommandDirection::Left
+                        Some(CommandDirection::Left)
                     } else {
-                        self.last_direction
+                        None
                     }
                 } else if dy > 0 {
-                    CommandDirection::Down
+                    Some(CommandDirection::Down)
                 } else if dy < 0 {
-                    CommandDirection::Up
+                    Some(CommandDirection::Up)
                 } else {
-                    self.last_direction
+                    None
                 }
             }
             // DFA_SCALE (C4Command.cpp:335-338): vertical steering only —
             // cy > Ty + range climbs Up, cy < Ty - range slides Down.
             ActionProcedure::Scale => {
                 if dy < -target_range {
-                    CommandDirection::Up
+                    Some(CommandDirection::Up)
                 } else if dy > target_range {
-                    CommandDirection::Down
+                    Some(CommandDirection::Down)
                 } else {
-                    self.last_direction
+                    None
                 }
             }
             // DFA_FLIGHT (C4Command.cpp:414-417): no ComDir steering —
             // only FlightControl runs (below).
-            ActionProcedure::Flight => self.last_direction,
+            ActionProcedure::Flight => None,
             // DFA_PUSH/DFA_PULL (C4Command.cpp:329-333): horizontal
             // steering only, measured from the vehicle position above.
             ActionProcedure::Push | ActionProcedure::Pull => {
                 if dx > target_range {
-                    CommandDirection::Right
+                    Some(CommandDirection::Right)
                 } else if dx < -target_range {
-                    CommandDirection::Left
+                    Some(CommandDirection::Left)
                 } else {
-                    self.last_direction
+                    None
                 }
             }
             // DFA_HANGLE (C4Command.cpp:384-387): horizontal steering
             // only; the angle-based drop follows below.
             ActionProcedure::Hang => {
                 if dx > target_range {
-                    CommandDirection::Right
+                    Some(CommandDirection::Right)
                 } else if dx < -target_range {
-                    CommandDirection::Left
+                    Some(CommandDirection::Left)
                 } else {
-                    self.last_direction
+                    None
                 }
             }
             // DFA_FLOAT (C4Command.cpp:393-410): normalize the fixed-point
@@ -14149,7 +14461,7 @@ impl MoveToState {
                 fixed_dy *= scale;
                 fixed_dx -= ctx.object.fixed_velocity.x;
                 fixed_dy -= ctx.object.fixed_velocity.y;
-                if fixed_dx.abs() + fixed_dy.abs() < math::fixed100(20) {
+                Some(if fixed_dx.abs() + fixed_dy.abs() < math::fixed100(20) {
                     CommandDirection::Stop
                 } else if fixed_dy.abs() * 3 < fixed_dx {
                     CommandDirection::Right
@@ -14173,38 +14485,28 @@ impl MoveToState {
                     CommandDirection::UpRight
                 } else {
                     CommandDirection::UpLeft
-                }
+                })
             }
-            _ => {
-                if dx > target_range {
-                    CommandDirection::Right
-                } else if dx < -target_range {
-                    CommandDirection::Left
-                } else if dy > target_range {
-                    CommandDirection::Down
-                } else if dy < -target_range {
-                    CommandDirection::Up
-                } else {
-                    CommandDirection::Stop
-                }
-            }
+            // C++ has no default procedure arm: NONE and every other
+            // unmatched procedure leave ComDir untouched.
+            _ => None,
         };
 
         // The C++ Float arm writes ComDir every execution. In particular,
         // COMD_None must stop momentum correction even when this new command
         // has not observed the object's pre-existing ComDir.
-        let steer = if float_steering || direction != self.last_direction {
+        let steer = direction.filter(|direction| {
+            force_steer || float_steering || *direction != ctx.object.command_direction
+        });
+        if let Some(direction) = direction {
             self.last_direction = direction;
-            Some(direction)
-        } else {
-            None
-        };
+        }
 
         // DFA_SCALE let-go control (C4Command.cpp:339-368): jump off the
         // wall toward the target or on wall contact; the C++ `return`
         // ends this Execute with the command still pending.
         if ctx.object.action_procedure == ActionProcedure::Scale {
-            if let Some(xdirf) = self.scale_let_go(ctx, target) {
+            if let Some(xdirf) = self.scale_let_go(ctx, position, target) {
                 return CommandStepResult::running(Some(let_go_update(steer, xdirf)));
             }
         }
@@ -14212,7 +14514,7 @@ impl MoveToState {
         // DFA_HANGLE let-go control (C4Command.cpp:388-390): drop off the
         // ceiling once the target angle leaves the hangling sector.
         if ctx.object.action_procedure == ActionProcedure::Hang
-            && c4_angle(ctx.position.x, ctx.position.y, target.x, target.y).abs()
+            && c4_angle(position.x, position.y, target.x, target.y).abs()
                 > LET_GO_HANGLE_ANGLE
         {
             return CommandStepResult::running(Some(let_go_update(steer, 0)));
@@ -14261,8 +14563,13 @@ impl MoveToState {
     /// from the wall (xdir sign opposite the scaling side) when the
     /// target lies off the wall beyond LetGoRange1 within LetGoRange2
     /// vertically, or on any contact once the action is 3+ frames old.
-    fn scale_let_go(&self, ctx: &CommandRuntimeContext<'_>, target: Vector2) -> Option<i32> {
-        let (cx, cy) = (ctx.position.x, ctx.position.y);
+    fn scale_let_go(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        position: Vector2,
+        target: Vector2,
+    ) -> Option<i32> {
+        let (cx, cy) = (position.x, position.y);
         let contact_let_go = ctx.object.action_time > 2 && ctx.object.contact != 0;
         match ctx.object.direction {
             Direction::Left => (target.x > cx + LET_GO_RANGE1

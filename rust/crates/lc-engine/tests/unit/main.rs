@@ -22686,6 +22686,206 @@ public func Steer()
     }
 
     #[test]
+    fn synchronous_move_to_stops_work_actions_before_same_execute_steering() {
+        let script = r#"#strict
+local stop_order;
+
+public func RunNow() { return ExecuteCommand(); }
+protected func WorkAbort() { stop_order = stop_order * 10 + 1; }
+protected func ClearAbort()
+{
+  stop_order = stop_order * 10 + 1;
+  SetCommand(this(), "Wait", 0, 1);
+}
+protected func WalkStart() { stop_order = stop_order * 10 + 2; }
+"#;
+        let mut definition =
+            Definition::from_script("MVST", "MoveTo stopper", script).expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default()
+                .with_procedure("WALK")
+                .with_start_call("WalkStart"),
+        );
+        for (name, procedure) in [
+            ("Dig", "DIG"),
+            ("Chop", "CHOP"),
+            ("Build", "BUILD"),
+            ("Bridge", "BRIDGE"),
+        ] {
+            actions.insert(
+                name.to_string(),
+                ActionSpec::default()
+                    .with_procedure(procedure)
+                    .with_abort_call("WorkAbort"),
+            );
+        }
+        actions.insert(
+            "DigClear".to_string(),
+            ActionSpec::default()
+                .with_procedure("DIG")
+                .with_abort_call("ClearAbort"),
+        );
+        definition.configure_actions(Some("Walk".to_string()), actions);
+
+        let mut engine = Engine::with_seed(319);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        for (offset, action) in ["Dig", "Chop", "Build", "Bridge"]
+            .into_iter()
+            .enumerate()
+        {
+            let object = engine
+                .spawn_object(
+                    SpawnConfig::new("MVST")
+                        .with_position(Vector2::new(100, 100 + offset as i32 * 30))
+                        .with_fixed_velocity(FixedVec2::new(itofix(2), itofix(-3)))
+                        .with_action(ActionState::new(action))
+                        .with_command_direction(CommandDirection::Left)
+                        .with_alive(true),
+                )
+                .expect("worker spawns");
+            let index = engine.find_object_index(object).expect("worker exists");
+            engine.objects[index]
+                .commands
+                .push_front(
+                    CommandRequest::new(CommandId::MoveTo)
+                        .with_tx(Some(200))
+                        .with_ty(Some(100 + offset as i32 * 30))
+                        .with_evaluated(true),
+                )
+                .expect("MoveTo queues");
+
+            assert_eq!(
+                engine
+                    .call_object_function(index, "RunNow", Vec::new())
+                    .expect("MoveTo executes"),
+                Value::Bool(true)
+            );
+
+            let live_index = engine.find_object_index(object).expect("worker remains");
+            assert_eq!(engine.objects[live_index].fixed_velocity, FixedVec2::ZERO, "{action}");
+            let object = engine.object_snapshot(object).expect("worker remains");
+            assert_eq!(object.action.name, "Walk", "{action}");
+            assert_eq!(
+                object.command_direction,
+                CommandDirection::Right,
+                "{action}: steering must resume after ObjectComStop in the same Execute"
+            );
+            assert_eq!(
+                object.local_vars.get("stop_order"),
+                Some(&Value::Int(12)),
+                "{action}: Idle transition abort precedes Walk start"
+            );
+            assert_eq!(object.command_stack.command_names(), vec!["MoveTo"]);
+        }
+
+        // ClearCommands/SetCommand only detaches an executing native
+        // command (iExec=2); its current MoveTo body still resumes after the
+        // callback and steers the object before being deleted.
+        let replaced = engine
+            .spawn_object(
+                SpawnConfig::new("MVST")
+                    .with_position(Vector2::new(100, 220))
+                    .with_action(ActionState::new("DigClear"))
+                    .with_command_direction(CommandDirection::Left)
+                    .with_alive(true),
+            )
+            .expect("replacement worker spawns");
+        let replaced_index = engine
+            .find_object_index(replaced)
+            .expect("replacement worker exists");
+        engine.objects[replaced_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(200))
+                    .with_ty(Some(220))
+                    .with_evaluated(true),
+            )
+            .expect("replacement MoveTo queues");
+        engine
+            .call_object_function(replaced_index, "RunNow", Vec::new())
+            .expect("replacement MoveTo executes");
+        let replaced = engine
+            .object_snapshot(replaced)
+            .expect("replacement worker remains");
+        assert_eq!(replaced.action.name, "Walk");
+        assert_eq!(replaced.command_direction, CommandDirection::Right);
+        assert_eq!(replaced.local_vars.get("stop_order"), Some(&Value::Int(12)));
+        assert_eq!(replaced.command_stack.command_names(), vec!["Wait"]);
+
+        // The ordinary object-tick path applies the same live command event
+        // before ExecAction later in the frame.
+        let tick_worker = engine
+            .spawn_object(
+                SpawnConfig::new("MVST")
+                    .with_position(Vector2::new(100, 250))
+                    .with_action(ActionState::new("Dig"))
+                    .with_command_direction(CommandDirection::Left)
+                    .with_alive(true),
+            )
+            .expect("tick worker spawns");
+        let tick_index = engine
+            .find_object_index(tick_worker)
+            .expect("tick worker exists");
+        engine.objects[tick_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(200))
+                    .with_ty(Some(250))
+                    .with_evaluated(true),
+            )
+            .expect("tick MoveTo queues");
+        engine.tick().expect("MoveTo tick succeeds");
+        let tick_worker = engine
+            .object_snapshot(tick_worker)
+            .expect("tick worker remains");
+        assert_eq!(tick_worker.action.name, "Walk");
+        assert_eq!(tick_worker.command_direction, CommandDirection::Right);
+        assert_eq!(
+            tick_worker.local_vars.get("stop_order"),
+            Some(&Value::Int(12))
+        );
+
+        // The auto-inserted bare Idle slot is inactive and fails an
+        // out-of-range MoveTo; it is not confused with a real action name.
+        let idle = engine
+            .spawn_object(
+                SpawnConfig::new("MVST")
+                    .with_position(Vector2::new(100, 300))
+                    .with_action(ActionState::new("Idle"))
+                    .with_alive(true),
+            )
+            .expect("idle worker spawns");
+        let idle_index = engine.find_object_index(idle).expect("idle worker exists");
+        engine.objects[idle_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(200))
+                    .with_ty(Some(300))
+                    .with_evaluated(true),
+            )
+            .expect("idle MoveTo queues");
+        engine
+            .call_object_function(idle_index, "RunNow", Vec::new())
+            .expect("idle MoveTo executes");
+        assert!(
+            engine
+                .object_snapshot(idle)
+                .expect("idle worker remains")
+                .command_stack
+                .is_empty(),
+            "out-of-range ActIdle MoveTo fails and clears after its finished callback tail"
+        );
+    }
+
+    #[test]
     fn normal_command_tick_calls_finished_before_clearing_like_cpp() {
         // Every C4Object::Execute runs ExecuteCommand first
         // (C4Object.cpp:1085,3997-4007), so the ordinary per-frame path

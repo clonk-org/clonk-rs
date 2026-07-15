@@ -23205,6 +23205,7 @@ impl Engine {
             pathfinder,
             no_transfer_zones,
             no_push_enter,
+            action_idle,
         ) = self
             .definitions
             .get(&object.definition_id)
@@ -23219,9 +23220,21 @@ impl Engine {
                     definition.pathfinder(),
                     definition.no_transfer_zones(),
                     definition.no_push_enter(),
+                    definition
+                        .action_library()
+                        .is_idle_action(&object.state.action.name),
                 )
             })
-            .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false, 0, 0, 0, 0));
+            .unwrap_or((
+                ActionProcedure::default(),
+                OCF_NORMAL,
+                false,
+                0,
+                0,
+                0,
+                0,
+                true,
+            ));
         CommandObjectSnapshot {
             id: object.id,
             master_list_order,
@@ -23246,6 +23259,7 @@ impl Engine {
             category: object.state.category,
             container: object.state.container,
             action_name: object.state.action.name.clone(),
+            action_idle,
             action_target: object.state.action.target,
             action_target2: object.state.action.target2,
             action_procedure: procedure,
@@ -23274,6 +23288,22 @@ impl Engine {
     /// Throw). It shares the retained-front callback/clear tail with the
     /// ordinary object tick.
     fn execute_object_command_now(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
+        self.execute_object_command_now_inner(object_id, false)
+    }
+
+    /// Resume the post-ObjectComStop half of the retained MoveTo without a
+    /// second UpdateInterval decrement. This is still the same native
+    /// C4Command::Execute invocation; only the live callback boundary made
+    /// the engine rebuild its command snapshot.
+    fn resume_move_to_after_stop(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
+        self.execute_object_command_now_inner(object_id, true)
+    }
+
+    fn execute_object_command_now_inner(
+        &mut self,
+        object_id: ObjectId,
+        resume_move_to: bool,
+    ) -> Result<(), EngineError> {
         let command_snapshots = self
             .objects
             .iter()
@@ -23359,8 +23389,14 @@ impl Engine {
             base_sell_enabled: self.base_sell_enabled,
             transfer_zones: &transfer_zones,
         };
-        let command_gravity = self.physics.gravity_as_c4fixed();
-        let result = self.objects[index].step_command_stack(command_context, command_gravity);
+        let result = if resume_move_to {
+            self.objects[index]
+                .commands
+                .execute_pending_move_to_stop(&command_context)
+        } else {
+            let command_gravity = self.physics.gravity_as_c4fixed();
+            self.objects[index].step_command_stack(command_context, command_gravity)
+        };
         self.rng = command_rng.into_inner();
 
         if let Some(result) = result {
@@ -23478,6 +23514,7 @@ impl Engine {
                 pathfinder,
                 no_transfer_zones,
                 no_push_enter,
+                action_idle,
             ) = self
                 .definitions
                 .get(&object.definition_id)
@@ -23493,9 +23530,21 @@ impl Engine {
                         definition.pathfinder(),
                         definition.no_transfer_zones(),
                         definition.no_push_enter(),
+                        definition
+                            .action_library()
+                            .is_idle_action(&object.state.action.name),
                     )
                 })
-                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false, 0, 0, 0, 0));
+                .unwrap_or((
+                    ActionProcedure::default(),
+                    OCF_NORMAL,
+                    false,
+                    0,
+                    0,
+                    0,
+                    0,
+                    true,
+                ));
             // ExecuteCommand reads the CACHED obj->OCF (C4Command.cpp uses
             // Target->OCF etc. straight off the objects).
             let ocf = object.state.ocf;
@@ -23532,6 +23581,7 @@ impl Engine {
                     category: object.state.category,
                     container: object.state.container,
                     action_name: object.state.action.name.clone(),
+                    action_idle,
                     action_target: object.state.action.target,
                     action_target2: object.state.action.target2,
                     action_procedure: procedure,
@@ -24733,6 +24783,7 @@ impl Engine {
                 pathfinder,
                 no_transfer_zones,
                 no_push_enter,
+                action_idle,
             ) = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
@@ -24747,6 +24798,9 @@ impl Engine {
                         definition.pathfinder(),
                         definition.no_transfer_zones(),
                         definition.no_push_enter(),
+                        definition
+                            .action_library()
+                            .is_idle_action(&self.objects[idx].state.action.name),
                     )
                 })
                 .unwrap_or((
@@ -24757,6 +24811,7 @@ impl Engine {
                     0,
                     0,
                     0,
+                    action_library.is_idle_action(&self.objects[idx].state.action.name),
                 ));
             // ExecuteCommand reads the CACHED obj->OCF (refreshed at this
             // object's Execute-start, C4Object.cpp:1058).
@@ -24797,6 +24852,7 @@ impl Engine {
                     category: self.objects[idx].state.category,
                     container: self.objects[idx].state.container,
                     action_name: self.objects[idx].state.action.name.clone(),
+                    action_idle,
                     action_target: self.objects[idx].state.action.target,
                     action_target2: self.objects[idx].state.action.target2,
                     action_procedure: procedure,
@@ -41703,6 +41759,10 @@ impl Engine {
             }
             CommandEvent::ObjectComJump { object_id, tx } => {
                 self.execute_jump_command(object_id, tx)?;
+            }
+            CommandEvent::ObjectComStopMoveTo { object_id } => {
+                let _ = self.object_com_stop_live(object_id)?;
+                self.resume_move_to_after_stop(object_id)?;
             }
             CommandEvent::AttemptGrab {
                 actor_id,
