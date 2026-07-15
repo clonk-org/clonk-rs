@@ -27972,8 +27972,12 @@ impl Engine {
         definition_id: &DefinitionId,
         solid_mask_indices: &[usize],
     ) -> Result<ExecMovementOutcome, EngineError> {
+        // DoMovement snapshots post-action dirs for Hit* arguments but gates
+        // the callbacks with the already-cached OCF field; command/action
+        // mutations may have refreshed that cache without making its clock
+        // identical to the dirs (C4Movement.cpp:250-252,477-483).
         let old_movement_velocity = self.objects[idx].fixed_velocity;
-        let old_movement_hit_flags = movement_hit_speed_flags(old_movement_velocity);
+        let old_movement_hit_flags = self.objects[idx].state.ocf;
         let action_name = self.objects[idx].state.action.name.clone();
         self.apply_dig_procedure(idx, definition_id);
         let (

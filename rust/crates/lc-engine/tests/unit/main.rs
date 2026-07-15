@@ -39064,6 +39064,184 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
         assert_eq!(object.state.velocity, Vector2::ZERO);
     }
 
+    type HitCallLog =
+        std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<lc_script::Value>)>>>;
+
+    fn hit_gate_probe_definition(id: &str) -> (Definition, HitCallLog) {
+        let calls: HitCallLog = Default::default();
+        let mut hooks = DebuggerHooks::new();
+        {
+            let calls = std::sync::Arc::clone(&calls);
+            hooks.set_on_call(move |name, args| {
+                if matches!(name, "Hit" | "Hit2" | "Hit3") {
+                    calls
+                        .lock()
+                        .unwrap()
+                        .push((name.to_string(), args.to_vec()));
+                }
+            });
+        }
+        let mut definition = Definition::from_script(
+            id,
+            id,
+            r#"
+            #strict 2
+            protected func Hit(int x, int y) { return 1; }
+            protected func Hit2(int x, int y) { return 1; }
+            protected func Hit3(int x, int y) { return 1; }
+            "#,
+        )
+        .expect("hit probe script compiles");
+        definition.set_debugger_hooks(hooks);
+        (definition, calls)
+    }
+
+    #[test]
+    fn gravity_crossing_hit2_threshold_uses_cached_pre_action_ocf() {
+        // UpdateOCF sees ydir=1.9 (HitSpeed1 only), then DFA_FLIGHT adds
+        // GravAccel=0.2 before DoMovement. The contact therefore passes
+        // ydir=2.1 to Hit, but the cached gate must not also call Hit2
+        // (C4Object.cpp:1083-1093; C4Movement.cpp:250-252,477-483).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let (mut definition, calls) = hit_gate_probe_definition("GravityHitProbe");
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, -2, 2, 4)));
+        definition.set_shape_vertices(vec![
+            ObjectVertex::new(-1, 1).with_cnat(CNAT_LEFT | CNAT_BOTTOM),
+            ObjectVertex::new(1, 1).with_cnat(CNAT_RIGHT | CNAT_BOTTOM),
+        ]);
+        definition.set_contact_density(50);
+        definition.configure_actions(
+            Some("Flight".to_string()),
+            HashMap::from([(
+                "Flight".to_string(),
+                ActionSpec::default().with_procedure("FLIGHT"),
+            )]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(20, 7, Some(earth)));
+        engine.set_physics(PhysicsSettings::new(100, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("probe definition registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("GravityHitProbe")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 5))
+                    .with_action(ActionState::new("Flight")),
+            )
+            .expect("probe spawns");
+        let idx = engine.find_object_index(id).expect("probe exists");
+        engine.objects[idx]
+            .set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, fixed100(190)));
+        engine.objects[idx].state.mobile = true;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED1, 0);
+        assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED2, 0);
+
+        let snapshot = engine.tick().expect("gravity/contact tick succeeds");
+
+        assert_eq!(snapshot.object(id).expect("probe survives").position.y, 5);
+        // The script parameter frame canonicalizes a raw integer zero to Nil;
+        // both expose the same C4 integer payload through `_getInt()`.
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [(
+                "Hit".to_string(),
+                vec![lc_script::Value::Nil, lc_script::Value::Int(210)],
+            )],
+            "the cached tier and the post-gravity argument use different clocks"
+        );
+    }
+
+    #[test]
+    fn action_zeroed_velocity_keeps_cached_hit2_gate_on_rotation_contact() {
+        // UpdateOCF sees ydir=2.1 (HitSpeed1+2), DFA_KNEEL zeroes ydir,
+        // and the copied Wheel geometry still registers a contact while
+        // rotating. Hit and Hit2 must both run with movement-entry args 0,0.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let (mut definition, calls) = hit_gate_probe_definition("KneelHitProbe");
+        definition.set_rotateable(360);
+        definition.set_shape_vertices(vec![ObjectVertex::new(2, 0).with_cnat(CNAT_RIGHT)]);
+        definition.set_contact_density(50);
+        definition.configure_actions(
+            Some("Kneel".to_string()),
+            HashMap::from([(
+                "Kneel".to_string(),
+                ActionSpec::default().with_procedure("KNEEL"),
+            )]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        let mut surface = vec![20; 12];
+        surface[6] = 0;
+        let mut landscape =
+            Landscape::new_with_material(12, surface, Some(earth)).expect("landscape constructs");
+        landscape.fill_solid_material(Some(earth));
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("probe definition registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("KneelHitProbe")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(4, 10))
+                    .with_action(ActionState::new("Kneel")),
+            )
+            .expect("probe spawns");
+        let idx = engine.find_object_index(id).expect("probe exists");
+        engine.objects[idx]
+            .set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, fixed100(210)));
+        engine.objects[idx].rotation_velocity = itofix(1);
+        engine.objects[idx].state.mobile = true;
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED1, 0);
+        assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED2, 0);
+        assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED3, 0);
+
+        let snapshot = engine.tick().expect("kneel/contact tick succeeds");
+
+        assert_eq!(snapshot.object(id).expect("probe survives").rotation, 0);
+        // Zero-valued C4 parameters are represented as Nil at this hook.
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [
+                (
+                    "Hit".to_string(),
+                    vec![lc_script::Value::Nil, lc_script::Value::Nil],
+                ),
+                (
+                    "Hit2".to_string(),
+                    vec![lc_script::Value::Nil, lc_script::Value::Nil],
+                ),
+            ],
+            "cached HitSpeed2 survives the action's velocity zeroing"
+        );
+    }
+
     #[test]
     fn hit_callbacks_run_after_contact_with_old_velocity_args_like_cpp() {
         // Mirrors src/C4Movement.cpp:247-252,468-478: movement stores oldxdir,
