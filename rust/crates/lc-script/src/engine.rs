@@ -221,6 +221,12 @@ impl Script {
 #[derive(Clone)]
 pub struct Engine {
     functions: HashMap<String, Function>,
+    /// Strictness of this C4AulScript host itself. Linked include/append
+    /// function copies keep their source strictness for expression semantics,
+    /// but native calls inspect `Func->Owner->Strict` (the destination host).
+    /// The outer Option distinguishes an uninitialized bare Engine from a
+    /// deliberately NONSTRICT base script.
+    owner_strict_level: Option<Option<u8>>,
     host_functions: HashMap<String, HostFunction>,
     host_reference_functions: HashMap<String, HostReferenceFunction>,
     debugger_hooks: Option<DebuggerHooks>,
@@ -259,6 +265,7 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             functions: HashMap::new(),
+            owner_strict_level: None,
             host_functions: HashMap::new(),
             host_reference_functions: HashMap::new(),
             debugger_hooks: None,
@@ -303,6 +310,9 @@ impl Engine {
     }
 
     pub fn add_script(&mut self, script: Script) {
+        if self.owner_strict_level.is_none() {
+            self.owner_strict_level = Some(script.strict_level);
+        }
         for (name, mut function) in script.functions.into_iter() {
             // A redefinition overloads the earlier function: `inherited`
             // reaches it (C++ Fn->OwnerOverloaded).
@@ -341,6 +351,7 @@ impl Engine {
     /// declarations, even when registration is skipped because a relink is
     /// rebuilding an otherwise unchanged host.
     pub fn replace_script(&mut self, script: Script, register_declarations: bool) {
+        self.owner_strict_level = Some(script.strict_level);
         self.functions.clear();
         self.var_decls.clear();
 
@@ -601,6 +612,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -630,6 +642,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -664,6 +677,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -696,6 +710,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -706,6 +721,40 @@ impl Engine {
         .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_this(this);
         vm.call_with_cells(name, args, cells).map_err(ScriptError::from)
+    }
+
+    /// Cross-object AB_CALL bridge entry. This preserves the script caller
+    /// installed by the VM around method dispatch, so a target that resolves
+    /// directly to a native host function still observes the suspended
+    /// caller's Var slots and strict level. Ordinary engine-driven callbacks
+    /// must use [`Engine::call_with_cells_and_this`] and remain callerless.
+    #[doc(hidden)]
+    pub fn call_with_cells_and_this_preserving_caller(
+        &self,
+        name: &str,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<Value, ScriptError> {
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            &self.var_decls,
+            self.debugger_hooks.clone(),
+        )
+        .with_host_reference_functions(&self.host_reference_functions)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
+        .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref())
+        .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_this(this);
+        vm.call_with_cells_preserving_caller(name, args, cells)
+            .map_err(ScriptError::from)
     }
 
     /// Calls a `func &` against shared object-local cells without
@@ -725,6 +774,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -735,6 +785,37 @@ impl Engine {
         .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_this(this);
         vm.call_reference_with_cells(name, args, cells)
+            .map_err(ScriptError::from)
+    }
+
+    /// Reference-returning counterpart to
+    /// [`Engine::call_with_cells_and_this_preserving_caller`].
+    #[doc(hidden)]
+    pub fn call_reference_with_cells_and_this_preserving_caller(
+        &self,
+        name: &str,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<ValueReference, ScriptError> {
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            &self.var_decls,
+            self.debugger_hooks.clone(),
+        )
+        .with_host_reference_functions(&self.host_reference_functions)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
+        .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref())
+        .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_this(this);
+        vm.call_reference_with_cells_preserving_caller(name, args, cells)
             .map_err(ScriptError::from)
     }
 
@@ -752,6 +833,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -783,6 +865,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
@@ -815,6 +898,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())

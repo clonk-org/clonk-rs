@@ -158,11 +158,44 @@ fn slot_cell(slots: &SlotMap, index: i32) -> ValueCell {
         .clone()
 }
 
+/// The script frame immediately calling a native host function. C++ exposes
+/// both pieces through `cthr->Caller`: `NumVars` backs `Var(n)`, while
+/// `Func->Owner->Strict` controls compatibility behavior in native functions
+/// such as CreateObject.
+#[derive(Clone)]
+pub(crate) struct ScriptCallerContext {
+    var_slots: SlotMap,
+    strict_level: Option<u8>,
+}
+
 thread_local! {
-    /// The `Var(n)` slot table of the script function that invoked the
-    /// currently-running HOST function — `cthr->Caller->NumVars`. None
-    /// while no host function with a script caller is executing.
-    static HOST_CALLER_VAR_SLOTS: RefCell<Option<SlotMap>> = const { RefCell::new(None) };
+    /// None while a native host function has no script caller (an
+    /// engine-driven direct call). `strict_level == None` inside a PRESENT
+    /// frame instead means a NONSTRICT script caller.
+    static HOST_CALLER_CONTEXT: RefCell<Option<ScriptCallerContext>> = const {
+        RefCell::new(None)
+    };
+}
+
+/// Strictness of the script frame immediately calling the currently-running
+/// native host function. `NoCaller` and `NonStrict` are deliberately distinct:
+/// C++ native functions can branch on `!cthr->Caller` separately from the
+/// caller script's `NONSTRICT` level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostCallerStrictness {
+    NoCaller,
+    NonStrict,
+    Strict(u8),
+}
+
+pub fn caller_strictness() -> HostCallerStrictness {
+    HOST_CALLER_CONTEXT.with(|cell| match cell.borrow().as_ref() {
+        None => HostCallerStrictness::NoCaller,
+        Some(context) => match context.strict_level {
+            None | Some(0) => HostCallerStrictness::NonStrict,
+            Some(level) => HostCallerStrictness::Strict(level),
+        },
+    })
 }
 
 /// The calling script function's numbered `Var(n)` slots, exposed to host
@@ -171,9 +204,11 @@ thread_local! {
 /// executing host function has no script caller
 /// (`if (!cthr->Caller) return {}`, :1966).
 pub fn caller_var_slots() -> Option<CallerVarSlots> {
-    HOST_CALLER_VAR_SLOTS
-        .with(|cell| cell.borrow().clone())
-        .map(CallerVarSlots)
+    HOST_CALLER_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| CallerVarSlots(context.var_slots.clone()))
+    })
 }
 
 /// A live handle onto the caller's numbered var slots; writes go straight
@@ -191,22 +226,27 @@ impl CallerVarSlots {
     }
 }
 
-/// Scopes HOST_CALLER_VAR_SLOTS to one host-function invocation,
-/// restoring the previous value on drop (nested host calls through
-/// re-entrant VMs keep correct caller attribution).
-struct CallerSlotsGuard(Option<SlotMap>);
+/// Scopes HOST_CALLER_CONTEXT to one host-function invocation, restoring the
+/// previous frame on drop. Nested host calls through re-entrant VMs therefore
+/// see the inner caller while executing and resume the outer attribution on
+/// return, including during error unwinding.
+struct CallerContextGuard(Option<ScriptCallerContext>);
 
-impl CallerSlotsGuard {
-    fn enter(slots: Option<SlotMap>) -> Self {
-        Self(HOST_CALLER_VAR_SLOTS.with(|cell| cell.replace(slots)))
+impl CallerContextGuard {
+    fn enter(context: Option<ScriptCallerContext>) -> Self {
+        Self(HOST_CALLER_CONTEXT.with(|cell| cell.replace(context)))
     }
 }
 
-impl Drop for CallerSlotsGuard {
+impl Drop for CallerContextGuard {
     fn drop(&mut self) {
         let previous = self.0.take();
-        HOST_CALLER_VAR_SLOTS.with(|cell| cell.replace(previous));
+        HOST_CALLER_CONTEXT.with(|cell| cell.replace(previous));
     }
+}
+
+fn current_caller_context() -> Option<ScriptCallerContext> {
+    HOST_CALLER_CONTEXT.with(|cell| cell.borrow().clone())
 }
 
 #[derive(Clone, Debug)]
@@ -538,7 +578,7 @@ pub(crate) enum LValueRef {
     HostPath {
         function: HostFunction,
         args: Vec<Value>,
-        caller_slots: SlotMap,
+        caller: ScriptCallerContext,
         segments: Vec<PathSegment>,
     },
 }
@@ -640,10 +680,10 @@ impl LValueRef {
             LValueRef::HostPath {
                 function,
                 args,
-                caller_slots,
+                caller,
                 segments,
             } => {
-                let _guard = CallerSlotsGuard::enter(Some(caller_slots.clone()));
+                let _guard = CallerContextGuard::enter(Some(caller.clone()));
                 read_path(&function(args)?, segments).map(TrackedValue::runtime)
             }
         }
@@ -689,10 +729,10 @@ impl LValueRef {
             LValueRef::HostPath {
                 function,
                 args,
-                caller_slots,
+                caller,
                 segments,
             } => {
-                let _guard = CallerSlotsGuard::enter(Some(caller_slots.clone()));
+                let _guard = CallerContextGuard::enter(Some(caller.clone()));
                 let replacement = if segments.is_empty() {
                     tracked.value
                 } else {
@@ -732,7 +772,7 @@ impl LValueRef {
             LValueRef::HostPath {
                 function,
                 args,
-                caller_slots,
+                caller,
                 segments,
             } => {
                 let mut segments = segments.clone();
@@ -740,7 +780,7 @@ impl LValueRef {
                 LValueRef::HostPath {
                     function: function.clone(),
                     args: args.clone(),
-                    caller_slots: caller_slots.clone(),
+                    caller: caller.clone(),
                     segments,
                 }
             }
@@ -962,6 +1002,10 @@ impl ReturnValue {
 
 pub struct Vm<'a> {
     functions: &'a HashMap<String, Function>,
+    /// Destination script strictness for `Func->Owner->Strict`. None means
+    /// this bare VM has no configured base script; Some(None) is an
+    /// explicitly NONSTRICT destination.
+    owner_strict_level: Option<Option<u8>>,
     host_functions: &'a HashMap<String, HostFunction>,
     host_reference_functions: Option<&'a HashMap<String, HostReferenceFunction>>,
     var_decls: &'a [VarDecl], // Script-level variable declarations
@@ -1009,6 +1053,7 @@ impl<'a> Vm<'a> {
     ) -> Self {
         Self {
             functions,
+            owner_strict_level: None,
             host_functions,
             host_reference_functions: None,
             var_decls,
@@ -1032,6 +1077,11 @@ impl<'a> Vm<'a> {
         functions: &'a HashMap<String, HostReferenceFunction>,
     ) -> Self {
         self.host_reference_functions = Some(functions);
+        self
+    }
+
+    pub(crate) fn with_owner_strict_level(mut self, strict_level: Option<u8>) -> Self {
+        self.owner_strict_level = Some(strict_level);
         self
     }
 
@@ -1315,6 +1365,22 @@ impl<'a> Vm<'a> {
         self.invoke_value(name, args, 0, cells.state.clone(), None)
     }
 
+    /// Arrow-dispatch bridge entry. Unlike an ordinary engine-driven call,
+    /// AB_CALL already has a suspended script frame; when the target resolves
+    /// directly to a native function, that frame remains `cthr->Caller`.
+    /// The method-dispatch guard makes it available here. Other host-to-VM
+    /// callbacks must keep using [`Vm::call_with_cells`] so they start with no
+    /// caller like C4AulFunc::Exec.
+    pub(crate) fn call_with_cells_preserving_caller(
+        &self,
+        name: &str,
+        args: &[Value],
+        cells: &LocalCells,
+    ) -> Result<Value, RuntimeError> {
+        let args = args.iter().cloned().map(CallArg::runtime).collect();
+        self.invoke_value(name, args, 0, cells.state.clone(), current_caller_context())
+    }
+
     /// Reference-returning counterpart to [`Vm::call_with_cells`].
     pub(crate) fn call_reference_with_cells(
         &self,
@@ -1324,6 +1390,19 @@ impl<'a> Vm<'a> {
     ) -> Result<ValueReference, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::runtime).collect();
         self.invoke_reference(name, args, 0, cells.state.clone(), None)
+            .map(ValueReference)
+    }
+
+    /// Reference-returning counterpart to
+    /// [`Vm::call_with_cells_preserving_caller`].
+    pub(crate) fn call_reference_with_cells_preserving_caller(
+        &self,
+        name: &str,
+        args: &[Value],
+        cells: &LocalCells,
+    ) -> Result<ValueReference, RuntimeError> {
+        let args = args.iter().cloned().map(CallArg::runtime).collect();
+        self.invoke_reference(name, args, 0, cells.state.clone(), current_caller_context())
             .map(ValueReference)
     }
 
@@ -1397,9 +1476,9 @@ impl<'a> Vm<'a> {
         args: Vec<CallArg>,
         depth: usize,
         object_state: ObjectState,
-        caller_slots: Option<SlotMap>,
+        caller: Option<ScriptCallerContext>,
     ) -> Result<Value, RuntimeError> {
-        self.invoke_raw(name, args, depth, object_state, caller_slots)?
+        self.invoke_raw(name, args, depth, object_state, caller)?
             .into_value()
     }
 
@@ -1409,9 +1488,9 @@ impl<'a> Vm<'a> {
         args: Vec<CallArg>,
         depth: usize,
         object_state: ObjectState,
-        caller_slots: Option<SlotMap>,
+        caller: Option<ScriptCallerContext>,
     ) -> Result<TrackedValue, RuntimeError> {
-        self.invoke_raw(name, args, depth, object_state, caller_slots)?
+        self.invoke_raw(name, args, depth, object_state, caller)?
             .into_tracked()
     }
 
@@ -1421,9 +1500,9 @@ impl<'a> Vm<'a> {
         args: Vec<CallArg>,
         depth: usize,
         object_state: ObjectState,
-        caller_slots: Option<SlotMap>,
+        caller: Option<ScriptCallerContext>,
     ) -> Result<Value, RuntimeError> {
-        self.invoke_engine_tracked_value(name, args, depth, object_state, caller_slots)
+        self.invoke_engine_tracked_value(name, args, depth, object_state, caller)
             .map(|tracked| tracked.value)
     }
 
@@ -1433,7 +1512,7 @@ impl<'a> Vm<'a> {
         args: Vec<CallArg>,
         depth: usize,
         object_state: ObjectState,
-        caller_slots: Option<SlotMap>,
+        caller: Option<ScriptCallerContext>,
     ) -> Result<TrackedValue, RuntimeError> {
         if depth >= MAX_CALL_DEPTH {
             return Err(RuntimeError::new("maximum call depth exceeded"));
@@ -1448,14 +1527,14 @@ impl<'a> Vm<'a> {
 
             if let Some(function) = self.host_functions.get(name) {
                 let values = self.call_args_to_values(&args)?;
-                let _guard = CallerSlotsGuard::enter(caller_slots);
+                let _guard = CallerContextGuard::enter(caller);
                 return self
                     .invoke_host_function(name, function, &values)
                     .map(TrackedValue::runtime);
             }
 
             if let Some(function) = self.host_reference_function(name) {
-                let _guard = CallerSlotsGuard::enter(caller_slots);
+                let _guard = CallerContextGuard::enter(caller);
                 return self
                     .invoke_host_reference_function(name, function, &args)
                     .map(TrackedValue::runtime);
@@ -1476,9 +1555,9 @@ impl<'a> Vm<'a> {
         args: Vec<CallArg>,
         depth: usize,
         object_state: ObjectState,
-        caller_slots: Option<SlotMap>,
+        caller: Option<ScriptCallerContext>,
     ) -> Result<LValueRef, RuntimeError> {
-        match self.invoke_raw(name, args, depth, object_state, caller_slots)? {
+        match self.invoke_raw(name, args, depth, object_state, caller)? {
             ReturnValue::Reference(reference) => Ok(reference),
             ReturnValue::Value(_) => Err(RuntimeError::new(format!(
                 "function '{name}' does not return a reference"
@@ -1492,7 +1571,7 @@ impl<'a> Vm<'a> {
         args: Vec<CallArg>,
         depth: usize,
         object_state: ObjectState,
-        caller_slots: Option<SlotMap>,
+        caller: Option<ScriptCallerContext>,
     ) -> Result<ReturnValue, RuntimeError> {
         if depth >= MAX_CALL_DEPTH {
             return Err(RuntimeError::new("maximum call depth exceeded"));
@@ -1519,7 +1598,7 @@ impl<'a> Vm<'a> {
                 // Host functions run under the CALLER's var-slot table
                 // (cthr->Caller->NumVars) for the FindConstructionSite
                 // write-back seam (C4Script.cpp:1966-1978).
-                let _guard = CallerSlotsGuard::enter(caller_slots);
+                let _guard = CallerContextGuard::enter(caller);
                 return self
                     .invoke_host_function(name, function, &values)
                     .map(TrackedValue::runtime)
@@ -1527,7 +1606,7 @@ impl<'a> Vm<'a> {
             }
 
             if let Some(function) = self.host_reference_function(name) {
-                let _guard = CallerSlotsGuard::enter(caller_slots);
+                let _guard = CallerContextGuard::enter(caller);
                 return self
                     .invoke_host_reference_function(name, function, &args)
                     .map(TrackedValue::runtime)
@@ -1573,6 +1652,11 @@ impl<'a> Vm<'a> {
         env.inherited_target = function.overloaded.clone();
         env.function_name = function.name.clone();
         env.engine_scope = function.access == AccessLevel::Global;
+        env.caller_owner_strict_level = if env.engine_scope {
+            Some(3)
+        } else {
+            self.owner_strict_level.unwrap_or(function.strict_level)
+        };
 
         // Parameters resolve before object locals in C++
         // (C4AulParse.cpp:2709-2729). `define_object_local` preserves an
@@ -2273,7 +2357,7 @@ impl<'a> Vm<'a> {
                                     // The overriding script function is the
                                     // host fn's cthr->Caller.
                                     let _guard =
-                                        CallerSlotsGuard::enter(Some(env.var_slots.clone()));
+                                        CallerContextGuard::enter(Some(env.caller_context()));
                                     return self
                                         .invoke_host_function(
                                             &env.function_name.clone(),
@@ -2295,7 +2379,7 @@ impl<'a> Vm<'a> {
                                         Self::append_forwarded_args(&mut evaluated_args, env)?;
                                     }
                                     let _guard =
-                                        CallerSlotsGuard::enter(Some(env.var_slots.clone()));
+                                        CallerContextGuard::enter(Some(env.caller_context()));
                                     return self.invoke_host_reference_function(
                                         &inherited_name,
                                         host,
@@ -2389,7 +2473,7 @@ impl<'a> Vm<'a> {
                                     evaluated_args,
                                     depth + 1,
                                     env.object_state.clone(),
-                                    Some(env.var_slots.clone()),
+                                    Some(env.caller_context()),
                                 )
                             } else {
                                 self.invoke_value(
@@ -2397,7 +2481,7 @@ impl<'a> Vm<'a> {
                                     evaluated_args,
                                     depth + 1,
                                     env.object_state.clone(),
-                                    Some(env.var_slots.clone()),
+                                    Some(env.caller_context()),
                                 )
                             }
                         }
@@ -2730,7 +2814,7 @@ impl<'a> Vm<'a> {
                                 evaluated_args,
                                 depth + 1,
                                 env.object_state.clone(),
-                                Some(env.var_slots.clone()),
+                                Some(env.caller_context()),
                             )
                         } else {
                             self.invoke_tracked_value(
@@ -2738,7 +2822,7 @@ impl<'a> Vm<'a> {
                                 evaluated_args,
                                 depth + 1,
                                 env.object_state.clone(),
-                                Some(env.var_slots.clone()),
+                                Some(env.caller_context()),
                             )
                         };
                     }
@@ -2913,7 +2997,7 @@ impl<'a> Vm<'a> {
                 .map(|arg| self.evaluate(arg, env, 0))
                 .collect::<Result<Vec<_>, _>>()?;
             let old_value = if let Some(host) = self.host_functions.get("EffectVar") {
-                let _guard = CallerSlotsGuard::enter(Some(env.var_slots.clone()));
+                let _guard = CallerContextGuard::enter(Some(env.caller_context()));
                 self.invoke_host_function("EffectVar", host, &arg_values)?
             } else {
                 env.get(&format!(
@@ -2935,7 +3019,7 @@ impl<'a> Vm<'a> {
             if let Some(host) = self.host_functions.get("EffectVar") {
                 let mut write_args = arg_values;
                 write_args.push(Value::Int(new_value));
-                let _guard = CallerSlotsGuard::enter(Some(env.var_slots.clone()));
+                let _guard = CallerContextGuard::enter(Some(env.caller_context()));
                 self.invoke_host_function("EffectVar", host, &write_args)?;
             } else {
                 let slot_name = format!(
@@ -3624,6 +3708,12 @@ impl<'a> Vm<'a> {
                 let dispatch = self
                     .method_dispatch
                     .ok_or_else(|| RuntimeError::new("method dispatch vanished".to_string()))?;
+                // The Rust world bridge may need to re-enter another VM and
+                // resolve this arrow call directly to a native function. Keep
+                // the suspended script frame visible while the bridge runs so
+                // its dedicated preserving entry can reproduce C++ AB_CALL's
+                // `CallCtx.Caller = pCurCtx`.
+                let _guard = CallerContextGuard::enter(Some(env.caller_context()));
                 dispatch(&dispatch_args)
             }
             Value::Object(_) | Value::C4Id(_) => {
@@ -3681,7 +3771,7 @@ impl<'a> Vm<'a> {
             evaluated_args,
             depth + 1,
             env.object_state.clone(),
-            Some(env.var_slots.clone()),
+            Some(env.caller_context()),
         )
     }
 
@@ -3852,7 +3942,7 @@ impl<'a> Vm<'a> {
                 // variables (FnEffectVar by-reference, C4Script.cpp) —
                 // compound assignments (--EffectVar) must see live values.
                 if let Some(host) = self.host_functions.get("EffectVar") {
-                    let _guard = CallerSlotsGuard::enter(Some(env.var_slots.clone()));
+                    let _guard = CallerContextGuard::enter(Some(env.caller_context()));
                     return self.invoke_host_function("EffectVar", host, &arg_values);
                 }
                 // Host-less fixture VMs keep the legacy env-slot shim.
@@ -3986,7 +4076,7 @@ impl<'a> Vm<'a> {
                     return Ok(LValueRef::HostPath {
                         function: function.clone(),
                         args: arg_values,
-                        caller_slots: env.var_slots.clone(),
+                        caller: env.caller_context(),
                         segments: Vec::new(),
                     });
                 }
@@ -4097,7 +4187,7 @@ impl<'a> Vm<'a> {
                     args,
                     depth + 1,
                     env.object_state.clone(),
-                    Some(env.var_slots.clone()),
+                    Some(env.caller_context()),
                 )
             }
             // `LocalN("name", obj) += v` and friends: the foreign-local
@@ -4194,18 +4284,21 @@ impl<'a> Vm<'a> {
                         for arg in &evaluated_args {
                             dispatch_args.push(arg.read()?);
                         }
-                        self.method_reference_dispatch
+                        let dispatch = self
+                            .method_reference_dispatch
                             .ok_or_else(|| {
                                 RuntimeError::new("method reference dispatch vanished")
-                            })?(&dispatch_args)
-                        .map(ValueReference::into_lvalue)
+                            })?;
+                        let _guard =
+                            CallerContextGuard::enter(Some(env.caller_context()));
+                        dispatch(&dispatch_args).map(ValueReference::into_lvalue)
                     }
                     Value::Object(_) | Value::C4Id(_) => self.invoke_reference(
                         method,
                         evaluated_args,
                         depth + 1,
                         env.object_state.clone(),
-                        Some(env.var_slots.clone()),
+                        Some(env.caller_context()),
                     ),
                     other if self.method_reference_dispatch.is_some() => {
                         Err(RuntimeError::new(format!(
@@ -4218,7 +4311,7 @@ impl<'a> Vm<'a> {
                         evaluated_args,
                         depth + 1,
                         env.object_state.clone(),
-                        Some(env.var_slots.clone()),
+                        Some(env.caller_context()),
                     ),
                 }
             }
@@ -4527,6 +4620,10 @@ struct Environment {
     scopes: Vec<HashMap<String, Binding>>,
     /// `#strict` level of the executing function, for level-correct `==`/`!=`.
     strict_level: Option<u8>,
+    /// `cthr->Caller->Func->Owner->Strict` for native calls. Linked function
+    /// bodies keep source strictness above but are owned by the destination
+    /// script, whose strictness can differ.
+    caller_owner_strict_level: Option<u8>,
     /// C4Script numeric scratch slots, addressed by `Var(n)` / `Local(n)`. These
     /// are SEPARATE from named variables (C++ `NumVars` and the object `Local`
     /// array, not `Vars`/`LocalNamed`) and are function-scoped, not block-scoped,
@@ -4586,6 +4683,7 @@ impl Environment {
         Ok(Self {
             scopes,
             strict_level,
+            caller_owner_strict_level: strict_level,
             var_slots: Rc::new(RefCell::new(HashMap::new())),
             object_state,
             call_args: Rc::new(call_args),
@@ -4594,6 +4692,13 @@ impl Environment {
             function_name: String::new(),
             engine_scope: false,
         })
+    }
+
+    fn caller_context(&self) -> ScriptCallerContext {
+        ScriptCallerContext {
+            var_slots: self.var_slots.clone(),
+            strict_level: self.caller_owner_strict_level,
+        }
     }
 
     fn define_object_local(&mut self, name: &str, identity: RawIdentityCell) {

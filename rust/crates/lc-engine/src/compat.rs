@@ -10403,7 +10403,7 @@ fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
             None => Ok(Value::Nil),
         };
     }
-    match call_world_object_function(target, name, &pars) {
+    match call_world_object_function_from_arrow(target, name, &pars) {
         Some(result) => result,
         None if failsafe => Ok(Value::Nil),
         None => Err(RuntimeError::new(format!(
@@ -10479,7 +10479,7 @@ fn arrow_method_reference_dispatch(
                 )))
             });
     }
-    match call_world_object_reference(target, name, &pars) {
+    match call_world_object_reference_from_arrow(target, name, &pars) {
         Some(result) => result,
         None if failsafe => Err(RuntimeError::new(format!(
             "function '{name}' does not return a reference"
@@ -26064,25 +26064,13 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         0
     };
 
-    let mut owner_override: Option<i32> = None;
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Int(value) => {
-                owner_override = Some(*value);
-                index += 1;
-            }
-            Value::Nil => {
-                owner_override = Some(OWNER_NONE);
-                index += 1;
-            }
-            other => {
-                return Err(RuntimeError::new(format!(
-                    "CreateObject: expected int or nil for owner, got {}",
-                    other.type_name()
-                )))
-            }
-        }
-    }
+    let requested_owner = if let Some(arg) = args.get(index) {
+        let owner = value_to_i32(arg, "CreateObject", "owner")?;
+        index += 1;
+        owner
+    } else {
+        0
+    };
 
     if index < args.len() {
         return Err(RuntimeError::new(
@@ -26147,13 +26135,22 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .object_context()
             .map(|object| object.effective_position())
             .unwrap_or(Vector2::ZERO);
-        // An absent owner argument is the DEFAULTED C4ValueInt 0, not
-        // NO_OWNER — FnCreateObject only substitutes the caller's owner
-        // for NONSTRICT scripts (C4Script.cpp FnCreateObject: `if
-        // (!cthr->Caller || ...Strict == NONSTRICT) iOwner =
-        // cthr->Obj->Owner`); GoldRush's global `CreateObject(NOPC)`
-        // lands on owner 0 in C++.
-        let owner = owner_override.unwrap_or(0);
+        // Typed C4ValueInt conversion makes an omitted/explicit nil owner
+        // zero. Local calls replace even an explicit owner when the native
+        // has no script caller or its immediate caller is NONSTRICT.
+        let substitute_local_owner = matches!(
+            lc_script::caller_strictness(),
+            lc_script::HostCallerStrictness::NoCaller
+                | lc_script::HostCallerStrictness::NonStrict
+        );
+        let owner = if substitute_local_owner {
+            context
+                .object_context()
+                .map(ObjectScopeContext::owner)
+                .unwrap_or(requested_owner)
+        } else {
+            requested_owner
+        };
         let raw_position = Vector2::new(
             base_position.x.saturating_add(x_offset),
             base_position.y.saturating_add(y_offset),
@@ -27532,25 +27529,13 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         0
     };
 
-    let mut owner_override: Option<i32> = None;
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Int(value) => {
-                owner_override = Some(*value);
-                index += 1;
-            }
-            Value::Nil => {
-                owner_override = Some(OWNER_NONE);
-                index += 1;
-            }
-            other => {
-                return Err(RuntimeError::new(format!(
-                    "CreateConstruction: expected int or nil for owner, got {}",
-                    other.type_name()
-                )))
-            }
-        }
-    }
+    let requested_owner = if let Some(arg) = args.get(index) {
+        let owner = value_to_i32(arg, "CreateConstruction", "owner")?;
+        index += 1;
+        owner
+    } else {
+        0
+    };
 
     let completion_percent = if let Some(arg) = args.get(index) {
         let value = value_to_i32(arg, "CreateConstruction", "completion")?;
@@ -27637,12 +27622,19 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             .object_context()
             .map(|object| object.effective_position())
             .unwrap_or(Vector2::ZERO);
-        let base_owner = context
-            .object_context()
-            .map(|object| object.owner())
-            .unwrap_or(OWNER_NONE);
-
-        let owner = owner_override.unwrap_or(base_owner);
+        let substitute_local_owner = matches!(
+            lc_script::caller_strictness(),
+            lc_script::HostCallerStrictness::NoCaller
+                | lc_script::HostCallerStrictness::NonStrict
+        );
+        let owner = if substitute_local_owner {
+            context
+                .object_context()
+                .map(ObjectScopeContext::owner)
+                .unwrap_or(requested_owner)
+        } else {
+            requested_owner
+        };
         let position = Vector2::new(
             base_position.x.saturating_add(x_offset),
             base_position.y.saturating_add(y_offset),
@@ -33311,7 +33303,15 @@ pub(crate) fn call_world_object_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_world_object_function_with(target, function, args, true, true, None)
+    call_world_object_function_with(target, function, args, true, true, None, false)
+}
+
+fn call_world_object_function_from_arrow(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    call_world_object_function_with(target, function, args, true, true, None, true)
 }
 
 fn call_world_object_reference(
@@ -33319,7 +33319,15 @@ fn call_world_object_reference(
     function: &str,
     args: &[Value],
 ) -> Option<Result<lc_script::ValueReference, RuntimeError>> {
-    call_world_object_reference_with(target, function, args, true, None)
+    call_world_object_reference_with(target, function, args, true, None, false)
+}
+
+fn call_world_object_reference_from_arrow(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<lc_script::ValueReference, RuntimeError>> {
+    call_world_object_reference_with(target, function, args, true, None, true)
 }
 
 /// `obj->ID::Func(...)` (AB_CALLNS, C4AulParse.cpp:3160-3245): runs the
@@ -33331,7 +33339,7 @@ pub(crate) fn call_world_object_function_in_scope(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_world_object_function_with(target, function, args, false, false, Some(script))
+    call_world_object_function_with(target, function, args, false, false, Some(script), false)
 }
 
 fn call_world_object_reference_in_scope(
@@ -33340,7 +33348,7 @@ fn call_world_object_reference_in_scope(
     function: &str,
     args: &[Value],
 ) -> Option<Result<lc_script::ValueReference, RuntimeError>> {
-    call_world_object_reference_with(target, function, args, false, Some(script))
+    call_world_object_reference_with(target, function, args, false, Some(script), false)
 }
 
 fn call_world_object_reference_with(
@@ -33349,6 +33357,7 @@ fn call_world_object_reference_with(
     args: &[Value],
     include_globals: bool,
     script_override: Option<Arc<ScriptEngine>>,
+    preserve_caller: bool,
 ) -> Option<Result<lc_script::ValueReference, RuntimeError>> {
     let prep = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut().as_mut().and_then(|context| {
@@ -33388,12 +33397,14 @@ fn call_world_object_reference_with(
             .as_mut()
             .and_then(|context| context.script_object_context.replace(target))
     });
-    let call = script.call_reference_with_cells_and_this(
-        function,
-        args,
-        &cells,
-        object_reference_value(target),
-    );
+    let this = object_reference_value(target);
+    let call = if preserve_caller {
+        script.call_reference_with_cells_and_this_preserving_caller(
+            function, args, &cells, this,
+        )
+    } else {
+        script.call_reference_with_cells_and_this(function, args, &cells, this)
+    };
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             context.script_object_context = previous_script_object;
@@ -33443,7 +33454,7 @@ pub(crate) fn call_world_object_script_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_world_object_function_with(target, function, args, false, true, None)
+    call_world_object_function_with(target, function, args, false, true, None, false)
 }
 
 /// Object-call resolution (`C4Object::Call` -> GetSFunc): the target's OWN
@@ -33456,7 +33467,7 @@ pub(crate) fn call_world_object_own_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_world_object_function_with(target, function, args, false, false, None)
+    call_world_object_function_with(target, function, args, false, false, None, false)
 }
 
 fn call_world_object_function_with(
@@ -33466,6 +33477,7 @@ fn call_world_object_function_with(
     host_fallback: bool,
     include_globals: bool,
     script_override: Option<Arc<ScriptEngine>>,
+    preserve_caller: bool,
 ) -> Option<Result<Value, RuntimeError>> {
     let prep = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut().as_mut().and_then(|context| {
@@ -33512,12 +33524,12 @@ fn call_world_object_function_with(
             .as_mut()
             .and_then(|context| context.script_object_context.replace(target))
     });
-    let call = script.call_with_cells_and_this(
-        function,
-        args,
-        &cells,
-        object_reference_value(target),
-    );
+    let this = object_reference_value(target);
+    let call = if preserve_caller {
+        script.call_with_cells_and_this_preserving_caller(function, args, &cells, this)
+    } else {
+        script.call_with_cells_and_this(function, args, &cells, this)
+    };
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             context.script_object_context = previous_script_object;
@@ -53298,9 +53310,9 @@ public func Probe(object carrier)
         let spawn = &outcome.spawns[0];
         assert_eq!(spawn.definition_id, "Clonk");
         assert_eq!(spawn.position, Vector2::ZERO);
-        // The defaulted C4ValueInt owner is 0 (FnCreateObject substitutes
-        // the caller's owner only for NONSTRICT scripts).
-        assert_eq!(spawn.owner, 0);
+        // This direct native invocation has an object context but no script
+        // caller, so FnCreateObject substitutes that object's owner (-1).
+        assert_eq!(spawn.owner, OWNER_NONE);
         assert_eq!(spawn.id, Some(ObjectId::new(1)));
         assert_eq!(outcome.next_object_id, 2);
     }

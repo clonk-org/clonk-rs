@@ -9,6 +9,7 @@ mod action_build;
 mod action_procedure;
 mod component_natives;
 mod component_order;
+mod creation_owner_strictness;
 mod dev_feedback_replay;
 mod dragon_rock_audio;
 mod elevator_motion_oracle;
