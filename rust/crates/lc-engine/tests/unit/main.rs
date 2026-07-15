@@ -20126,6 +20126,137 @@ func Trigger() {
     }
 
     #[test]
+    fn enter_and_exit_force_close_the_moving_objects_menu_before_callbacks() {
+        let moving_script = r#"
+        local callback_order, callback_menu_order, query_calls;
+        public func RecordCallback(int step)
+        {
+            callback_order = callback_order * 10 + step;
+            if (GetMenu(this())) callback_menu_order = callback_menu_order * 10 + step;
+            return(1);
+        }
+        public func OpenMenu()
+        {
+            return CreateMenu(WIPF, this(), this(), 0, "Choose");
+        }
+        public func ResetAndOpen()
+        {
+            callback_order = 0;
+            callback_menu_order = 0;
+            query_calls = 0;
+            return OpenMenu();
+        }
+        public func Board(object container) { return Enter(container); }
+        public func Leave() { return Exit(); }
+        protected func Entrance(object container) { return RecordCallback(2); }
+        protected func Departure(object container) { return RecordCallback(4); }
+        protected func MenuQueryCancel()
+        {
+            query_calls++;
+            return(1);
+        }
+        "#;
+        let container_script = r#"
+        protected func Collection2(object item) { return item->RecordCallback(1); }
+        protected func Ejection(object item) { return item->RecordCallback(3); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", moving_script)
+                    .expect("moving object compiles"),
+            )
+            .expect("moving object registers");
+        engine
+            .register_definition(
+                Definition::from_script("HUT1", "Hut", container_script)
+                    .expect("container compiles"),
+            )
+            .expect("container registers");
+        let container = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("container spawns");
+        let moving = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("moving object spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let index = engine
+                .find_object_index(moving)
+                .expect("moving object remains");
+            engine
+                .call_object_function(index, name, args)
+                .expect("callback probe call succeeds")
+        };
+        assert_eq!(call(&mut engine, "ResetAndOpen", Vec::new()), Value::Bool(true));
+        assert_eq!(
+            call(
+                &mut engine,
+                "Board",
+                vec![object_reference_value(container)],
+            ),
+            Value::Bool(true)
+        );
+
+        let index = engine
+            .find_object_index(moving)
+            .expect("moving object entered");
+        assert_eq!(engine.objects[index].state.container, Some(container));
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("callback_order"),
+            Some(&Value::Int(12)),
+            "Collection2 runs before Entrance"
+        );
+        assert!(
+            !engine.objects[index]
+                .state
+                .local_vars
+                .get("callback_menu_order")
+                .is_some_and(Value::as_bool),
+            "both Enter callbacks observe the old menu already closed"
+        );
+        assert!(
+            !engine.objects[index]
+                .state
+                .local_vars
+                .get("query_calls")
+                .is_some_and(Value::as_bool),
+            "forced Enter close bypasses a denying MenuQueryCancel"
+        );
+
+        assert_eq!(call(&mut engine, "OpenMenu", Vec::new()), Value::Bool(true));
+        assert_eq!(call(&mut engine, "Leave", Vec::new()), Value::Bool(true));
+
+        let index = engine
+            .find_object_index(moving)
+            .expect("moving object exited");
+        assert_eq!(engine.objects[index].state.container, None);
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("callback_order"),
+            Some(&Value::Int(1234)),
+            "Ejection runs before Departure"
+        );
+        assert!(
+            !engine.objects[index]
+                .state
+                .local_vars
+                .get("callback_menu_order")
+                .is_some_and(Value::as_bool),
+            "both Exit callbacks observe the old menu already closed"
+        );
+        assert!(
+            !engine.objects[index]
+                .state
+                .local_vars
+                .get("query_calls")
+                .is_some_and(Value::as_bool),
+            "forced Exit close bypasses a denying MenuQueryCancel"
+        );
+        assert_eq!(engine.debug_object_menu(moving.as_u64()), Some(None));
+    }
+
+    #[test]
     fn engine_internal_container_moves_close_the_object_menu_like_cpp() {
         // Engine-internal container moves (collection cross-check
         // lib.rs `with_container` update, grab/enter DirectCom arms) are
