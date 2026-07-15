@@ -46048,6 +46048,136 @@ protected func Initialize() {
     }
 
     #[test]
+    fn horizontal_fix_zeroes_set_x_dir_and_preserves_vertical_movement() {
+        let script = r#"#strict 2
+func Arm()
+{
+    SetXDir(10);
+    return 1;
+}
+"#;
+        let mut definition =
+            Definition::from_script("RailMover", "RailMover", script).expect("script compiles");
+        definition.set_no_horizontal_move(1);
+
+        let mut engine = Engine::with_seed(67);
+        engine.set_physics(PhysicsSettings::new(0, 0, 0));
+        engine
+            .register_definition(definition)
+            .expect("rail mover registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("RailMover")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("rail mover spawns");
+        let idx = engine.find_object_index(id).expect("rail mover exists");
+        engine
+            .call_object_function(idx, "Arm", Vec::new())
+            .expect("SetXDir arm runs");
+        assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
+        assert!(engine.objects[idx].state.mobile);
+        // Give the same object independent vertical momentum; HorizontalFix
+        // must restrict only the script-written xdir at movement entry.
+        let xdir = engine.objects[idx].fixed_velocity.x;
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(xdir, itofix(2)));
+        assert_eq!(
+            engine.objects[idx].fixed_velocity,
+            FixedVec2::new(itofix(1), itofix(2))
+        );
+
+        let definition_id = engine.objects[idx].definition_id.clone();
+        let actions = engine
+            .definitions
+            .get(&definition_id)
+            .expect("rail mover definition exists")
+            .action_library()
+            .clone();
+        engine
+            .exec_object_movement(idx, &actions, &definition_id, &[])
+            .expect("rail movement succeeds");
+
+        let object = &engine.objects[idx];
+        assert_eq!(object.state.position, Vector2::new(10, 12));
+        assert_eq!(object.fixed_position, FixedVec2::from_ints(10, 12));
+        assert_eq!(object.fixed_velocity.x, C4Fixed::ZERO);
+        assert_eq!(object.state.velocity.x, 0);
+        assert_eq!(object.fixed_velocity.y, itofix(2));
+        assert_eq!(object.state.velocity.y, 2);
+    }
+
+    #[test]
+    fn horizontal_fix_hit_callbacks_receive_zero_old_xdir() {
+        let (mut definition, calls) = hit_gate_probe_definition("HorizontalFixHitProbe");
+        definition.set_no_horizontal_move(1);
+        definition
+            .set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+        definition.set_contact_density(50);
+
+        let mut landscape = vehicle_grid_landscape(24, 24);
+        landscape.set_world_height(24);
+        for x in 0..24 {
+            landscape.grid_write_byte(x, 12, 1);
+        }
+
+        let mut engine = Engine::with_seed(71);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("horizontal-fix hit probe registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("HorizontalFixHitProbe")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_fixed_velocity(FixedVec2::new(itofix(1), itofix(2)))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("horizontal-fix hit probe spawns");
+        let idx = engine
+            .find_object_index(id)
+            .expect("horizontal-fix hit probe exists");
+        engine.refresh_object_ocf(idx);
+        assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED1, 0);
+        assert_ne!(engine.objects[idx].state.ocf & ocf::HIT_SPEED2, 0);
+        assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED3, 0);
+
+        let definition_id = engine.objects[idx].definition_id.clone();
+        let actions = engine
+            .definitions
+            .get(&definition_id)
+            .expect("horizontal-fix hit probe definition exists")
+            .action_library()
+            .clone();
+        engine
+            .exec_object_movement(idx, &actions, &definition_id, &[])
+            .expect("horizontal-fix contact movement succeeds");
+
+        assert_eq!(engine.objects[idx].state.position, Vector2::new(10, 10));
+        assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [
+                (
+                    "Hit".to_string(),
+                    vec![lc_script::Value::Nil, lc_script::Value::Int(200)],
+                ),
+                (
+                    "Hit2".to_string(),
+                    vec![lc_script::Value::Nil, lc_script::Value::Int(200)],
+                ),
+            ],
+            "HorizontalFix runs before oldxdir is captured for Hit arguments"
+        );
+    }
+
+    #[test]
     fn set_x_dir_script_applies_subpixel_velocity_end_to_end() {
         // A script calling SetXDir(15) with the default precision (10) must set
         // xdir = itofix(15, 10) = 1.5 px/frame (raw 16.16 value 98304), matching

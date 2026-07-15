@@ -28570,14 +28570,27 @@ impl Engine {
         definition_id: &DefinitionId,
         solid_mask_indices: &[usize],
     ) -> Result<ExecMovementOutcome, EngineError> {
+        // C4Object::DoMovement applies Def->NoHorizontalMove before DigFree
+        // predicts its target and before the old dirs for Hit* are captured
+        // (C4Movement.cpp:224-251).
+        let no_horizontal_move = self
+            .definitions
+            .get(&self.objects[idx].definition_id)
+            .map(Definition::no_horizontal_move)
+            .unwrap_or(0);
+        if no_horizontal_move != 0 {
+            let object = &mut self.objects[idx];
+            object.fixed_velocity.x = C4Fixed::ZERO;
+            object.refresh_velocity_from_fixed();
+        }
+        let action_name = self.objects[idx].state.action.name.clone();
+        self.apply_dig_procedure(idx, definition_id);
         // DoMovement snapshots post-action dirs for Hit* arguments but gates
         // the callbacks with the already-cached OCF field; command/action
         // mutations may have refreshed that cache without making its clock
         // identical to the dirs (C4Movement.cpp:250-252,477-483).
         let old_movement_velocity = self.objects[idx].fixed_velocity;
         let old_movement_hit_flags = self.objects[idx].state.ocf;
-        let action_name = self.objects[idx].state.action.name.clone();
-        self.apply_dig_procedure(idx, definition_id);
         let (
             contact_density,
             contact_function_calls,
