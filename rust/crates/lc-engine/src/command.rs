@@ -1598,6 +1598,172 @@ mod tests {
     }
 
     #[test]
+    fn follow_enters_the_targets_container() {
+        let follower_id = ObjectId::new(3);
+        let target_id = ObjectId::new(4);
+        let hut_id = ObjectId::new(5);
+
+        let mut follower = snapshot_with_id(follower_id.as_u64());
+        follower.position = Vector2::new(10, 10);
+        follower.crew_member = true;
+        follower.owner = 1;
+        follower.selected = true;
+        follower.command_direction = CommandDirection::Left;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.container = Some(hut_id);
+
+        let mut hut = snapshot_with_id(hut_id.as_u64());
+        hut.position = Vector2::new(10, 10);
+        hut.shape = DefinitionRect::new(0, 0, 20, 20);
+        hut.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
+        hut.entrance_status = true;
+        hut.category = CATEGORY_STRUCTURE;
+
+        let objects = HashMap::from([
+            (follower_id, follower),
+            (target_id, target),
+            (hut_id, hut),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let follower = objects.get(&follower_id).expect("follower present");
+        let ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 0);
+        let mut follow = FollowState::from_request(
+            &CommandRequest::new(CommandId::Follow).with_target(Some(target_id)),
+        )
+        .expect("Follow state");
+
+        let result = follow.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none(), "Follow does not stop before Enter");
+        let enter = pushed_request(&result.operations, CommandId::Enter);
+        assert_eq!(enter.target, Some(hut_id));
+        assert_eq!(enter.update_interval, 50);
+        assert_eq!(enter.mode, CommandMode::SilentSub);
+
+        // The requested Enter is immediately executable at the hut and
+        // emits the ordered containment event used by the live engine.
+        let mut enter_state = EnterState::from_request(&enter).expect("Enter state");
+        let entered = enter_state.step(&ctx);
+        assert_eq!(entered.status, CommandStatus::Completed);
+        assert_eq!(
+            entered.events,
+            vec![CommandEvent::EnterObject {
+                object_id: follower_id,
+                container_id: hut_id,
+            }]
+        );
+
+        let mut contained_objects = objects.clone();
+        contained_objects
+            .get_mut(&follower_id)
+            .expect("follower present")
+            .container = Some(ObjectId::new(9));
+        let contained_follower = contained_objects
+            .get(&follower_id)
+            .expect("follower present");
+        let contained_ctx = move_to_ctx_at_frame(
+            contained_follower,
+            &contained_objects,
+            &players,
+            &definitions,
+            1,
+        );
+        let exit_result = follow.step(&contained_ctx);
+        assert!(exit_result.update.is_none());
+        let exit = pushed_request(&exit_result.operations, CommandId::Exit);
+        assert_eq!(exit.target, None);
+        assert_eq!(exit.update_interval, 50);
+        assert_eq!(exit.mode, CommandMode::SilentSub);
+    }
+
+    #[test]
+    fn follow_grabs_copies_and_releases_the_targets_vehicle() {
+        let follower_id = ObjectId::new(6);
+        let target_id = ObjectId::new(7);
+        let lorry_id = ObjectId::new(8);
+
+        let mut follower = snapshot_with_id(follower_id.as_u64());
+        follower.crew_member = true;
+        follower.owner = 1;
+        follower.selected = true;
+        follower.command_direction = CommandDirection::Left;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.action_procedure = ActionProcedure::Push;
+        target.action_target = Some(lorry_id);
+        target.command_direction = CommandDirection::Right;
+
+        let lorry = snapshot_with_id(lorry_id.as_u64());
+        let mut objects = HashMap::from([
+            (follower_id, follower),
+            (target_id, target),
+            (lorry_id, lorry),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut follow = FollowState::from_request(
+            &CommandRequest::new(CommandId::Follow).with_target(Some(target_id)),
+        )
+        .expect("Follow state");
+
+        let follower = objects.get(&follower_id).expect("follower present");
+        let ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 0);
+        let grab_result = follow.step(&ctx);
+        assert_eq!(grab_result.status, CommandStatus::Running);
+        assert!(grab_result.update.is_none());
+        let grab = pushed_request(&grab_result.operations, CommandId::Grab);
+        assert_eq!(grab.target, Some(lorry_id));
+        assert_eq!(grab.update_interval, 0);
+        assert_eq!(grab.mode, CommandMode::SilentSub);
+
+        let follower = objects.get_mut(&follower_id).expect("follower present");
+        follower.action_procedure = ActionProcedure::Push;
+        follower.action_target = Some(lorry_id);
+        follower.command_direction = CommandDirection::Left;
+        let follower = objects.get(&follower_id).expect("follower present");
+        let ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 1);
+        let copy_result = follow.step(&ctx);
+        assert!(copy_result.operations.is_empty());
+        assert_eq!(
+            copy_result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Right)
+        );
+
+        objects
+            .get_mut(&follower_id)
+            .expect("follower present")
+            .command_direction = CommandDirection::Right;
+        objects
+            .get_mut(&target_id)
+            .expect("target present")
+            .command_direction = CommandDirection::DownRight;
+        let follower = objects.get(&follower_id).expect("follower present");
+        let ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 2);
+        let next_copy = follow.step(&ctx);
+        assert_eq!(
+            next_copy.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::DownRight),
+            "Follow copies the pushed target's current ComDir every evaluation"
+        );
+
+        objects
+            .get_mut(&target_id)
+            .expect("target present")
+            .action_procedure = ActionProcedure::Walk;
+        let follower = objects.get(&follower_id).expect("follower present");
+        let ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 3);
+        let ungrab_result = follow.step(&ctx);
+        assert_eq!(ungrab_result.status, CommandStatus::Running);
+        assert!(ungrab_result.update.is_none());
+        let ungrab = pushed_request(&ungrab_result.operations, CommandId::UnGrab);
+        assert_eq!(ungrab.target, None);
+        assert_eq!(ungrab.update_interval, 0);
+        assert_eq!(ungrab.mode, CommandMode::SilentSub);
+    }
+
+    #[test]
     fn follow_requests_move_when_out_of_range() {
         let follower_id = ObjectId::new(10);
         let target_id = ObjectId::new(20);
@@ -1609,8 +1775,9 @@ mod tests {
         follower.command_direction = CommandDirection::Left;
 
         let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(100, 0);
+        target.position = Vector2::new(100, 20);
         target.crew_member = true;
+        target.alive = false;
 
         let mut objects = HashMap::new();
         objects.insert(follower.id, follower.clone());
@@ -1642,14 +1809,17 @@ mod tests {
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert!(
-            result.update.is_some(),
-            "follower should receive a stop update before moving"
+            result.update.is_none(),
+            "Follow must not force ComDir Stop before its MoveTo child"
         );
         assert_eq!(result.operations.len(), 1);
         match &result.operations[0] {
             CommandOperation::PushFront(request) => {
                 assert_eq!(request.id, CommandId::MoveTo);
-                assert_eq!(request.target, Some(target_id));
+                assert_eq!(request.target, None);
+                assert_eq!((request.tx, request.ty), (Some(100), Some(20)));
+                assert_eq!(request.update_interval, 10);
+                assert_eq!(request.mode, CommandMode::SilentSub);
             }
             other => panic!("expected move request, got {:?}", other),
         }
@@ -1660,6 +1830,18 @@ mod tests {
             first_move,
             "Follow reissues MoveTo on its next execution"
         );
+
+        objects
+            .get_mut(&target_id)
+            .expect("target present")
+            .status = ObjectStatus::Deleted;
+        let follower = objects.get(&follower_id).expect("follower present");
+        let removed_ctx =
+            move_to_ctx_at_frame(follower, &objects, &players, &definitions, 1);
+        let removed = state.step(&removed_ctx);
+        assert_eq!(removed.status, CommandStatus::Failed);
+        assert!(removed.update.is_none());
+        assert!(removed.operations.is_empty());
     }
 
     // FnGetCommand serves the LIVE C4Command fields (C4Script.cpp:
@@ -15440,29 +15622,16 @@ impl FollowState {
         let follower = ctx.object;
 
         if follower.crew_member && follower.owner != OWNER_NONE && !follower.selected {
-            let update = if follower.command_direction != CommandDirection::Stop {
-                Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
-            } else {
-                None
-            };
-            return CommandStepResult::completed(update);
+            return CommandStepResult::completed(None);
         }
 
         let target = match ctx.resolve(self.target) {
             Some(snapshot) => snapshot,
-            None => {
-                let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
-                return CommandStepResult::failed(Some(update));
-            }
+            None => return CommandStepResult::failed(None),
         };
 
-        if !target.is_active() {
-            let update = if follower.command_direction != CommandDirection::Stop {
-                Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
-            } else {
-                None
-            };
-            return CommandStepResult::completed(update);
+        if !target.is_status_active() {
+            return CommandStepResult::failed(None);
         }
 
         if follower.id == target.id {
@@ -15470,16 +15639,36 @@ impl FollowState {
         }
 
         if follower.container != target.container {
-            if follower.crew_member {
-                let update = if follower.command_direction != CommandDirection::Stop {
-                    Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
-                } else {
-                    None
-                };
-                return CommandStepResult::completed(update);
+            if !follower.crew_member {
+                return CommandStepResult::failed(None);
             }
-            let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
-            return CommandStepResult::failed(Some(update));
+            let request = if follower.container.is_some() {
+                CommandRequest::new(CommandId::Exit)
+            } else {
+                CommandRequest::new(CommandId::Enter).with_target(target.container)
+            }
+            .with_update_interval(50);
+            return CommandStepResult::running(None)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+
+        if target.action_procedure == ActionProcedure::Push {
+            if follower.action_procedure == ActionProcedure::Push
+                && follower.action_target == target.action_target
+            {
+                let update = (follower.command_direction != target.command_direction).then(|| {
+                    ObjectUpdate::new().with_command_direction(target.command_direction)
+                });
+                return CommandStepResult::running(update);
+            }
+            let request =
+                CommandRequest::new(CommandId::Grab).with_target(target.action_target);
+            return CommandStepResult::running(None)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
+        } else if follower.action_procedure == ActionProcedure::Push {
+            return CommandStepResult::running(None).with_operations(vec![
+                CommandOperation::PushFront(CommandRequest::new(CommandId::UnGrab)),
+            ]);
         }
 
         const FOLLOW_RANGE: i32 = 6;
@@ -15493,14 +15682,10 @@ impl FollowState {
             return CommandStepResult::running(None);
         }
 
-        let update = if follower.command_direction != CommandDirection::Stop {
-            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
-        } else {
-            None
-        };
-        let mut result = CommandStepResult::running(update);
+        let mut result = CommandStepResult::running(None);
         let request = CommandRequest::new(CommandId::MoveTo)
-            .with_target(Some(self.target))
+            .with_tx(Some(target.position.x))
+            .with_ty(Some(target.position.y))
             .with_update_interval(10);
         result = result.with_operations(vec![CommandOperation::PushFront(request)]);
         result
