@@ -19654,6 +19654,209 @@ func Death(by) { death_by = by; return 1; }
         }
     }
 
+    fn contained_flight_definition(id: &str, script: &str) -> Definition {
+        let mut definition = Definition::from_script(id, id, script).expect("script compiles");
+        definition.set_category(CATEGORY_LIVING);
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Jump".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+                (
+                    "Tumble".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_disabled(true),
+                ),
+            ]),
+        );
+        definition
+    }
+
+    #[test]
+    fn contained_flight_queues_replacing_exit_only_on_tick10() {
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(contained_flight_definition("FALL", ""))
+            .expect("flight definition registers");
+        engine
+            .register_definition(simple_definition("CONT"))
+            .expect("container definition registers");
+        engine.set_physics(PhysicsSettings::new(100, 20, -20));
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        let container_idx = engine
+            .find_object_index(container)
+            .expect("container exists");
+        engine.objects[container_idx].state.entrance_status = true;
+
+        let mut actors = Vec::new();
+        for action in ["Jump", "Tumble"] {
+            let actor = engine
+                .spawn_object(
+                    SpawnConfig::new("FALL")
+                        .with_category(CATEGORY_LIVING)
+                        .with_alive(true)
+                        .with_container(container)
+                        .with_action(ActionState::new(action)),
+                )
+                .expect("contained flier spawns");
+            let idx = engine.find_object_index(actor).expect("flier exists");
+            engine.objects[idx].state.no_collect_delay = 2;
+            engine.objects[idx]
+                .commands
+                .push_front(
+                    CommandRequest::new(CommandId::MoveTo)
+                        .with_tx(Some(20))
+                        .with_ty(Some(5)),
+                )
+                .expect("old command queues");
+            actors.push((actor, action));
+        }
+
+        engine.frame = 9;
+        for &(actor, action) in &actors {
+            let idx = engine.find_object_index(actor).expect("flier exists");
+            engine
+                .apply_physics_at_index(idx)
+                .expect("non-Tick10 flight executes");
+            let snapshot = engine.object_snapshot(actor).expect("flier remains");
+            assert_eq!(snapshot.action.name, action);
+            assert_eq!(engine.objects[idx].state.no_collect_delay, 2);
+            assert_eq!(snapshot.command_stack.command_names(), vec!["MoveTo"]);
+        }
+
+        engine.frame = 10;
+        for &(actor, _) in &actors {
+            let idx = engine.find_object_index(actor).expect("flier exists");
+            engine
+                .apply_physics_at_index(idx)
+                .expect("Tick10 flight executes");
+            let snapshot = engine.object_snapshot(actor).expect("flier remains");
+            assert_eq!(snapshot.action.name, "Walk");
+            assert_eq!(snapshot.command_direction, CommandDirection::Stop);
+            assert_eq!(snapshot.container, Some(container));
+            assert_eq!(engine.objects[idx].state.no_collect_delay, 1);
+            assert_eq!(
+                engine.objects[idx].fixed_velocity.y,
+                math::fixed100(20),
+                "captured FLIGHT still applies gravity after stopping"
+            );
+            assert!(engine.objects[idx].state.mobile);
+            assert_eq!(
+                snapshot.command_stack.command_names(),
+                vec!["Exit"],
+                "SetCommand clears both the old command and delayed Wait"
+            );
+        }
+
+        // The current command port executes Exit on frame 11; C++ spends
+        // that frame on InitEvaluation and exits on frame 12. Checking after
+        // both command phases accepts either timing without pinning L120.
+        engine.tick().expect("first Exit command phase runs");
+        engine.tick().expect("second Exit command phase runs");
+        assert_eq!(engine.frame, 12);
+        for &(actor, _) in &actors {
+            let snapshot = engine.object_snapshot(actor).expect("flier remains");
+            assert_eq!(snapshot.container, None);
+            assert!(snapshot.command_stack.command_names().is_empty());
+        }
+    }
+
+    #[test]
+    fn contained_flight_exit_honors_inside_vehicle_control_overload() {
+        let actor_script = r#"#strict
+local own_control_calls;
+protected func ControlCommand() { own_control_calls = 1; return 1; }
+"#;
+        let container_script = r#"#strict
+local control_calls, control_command, control_by;
+protected func ControlCommand(command, target, tx, ty, target2, data, by)
+{
+    control_calls++;
+    control_command = command;
+    control_by = by;
+    return 1;
+}
+"#;
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(contained_flight_definition("FALL", actor_script))
+            .expect("flight definition registers");
+        let mut container_definition =
+            Definition::from_script("CONT", "Control vehicle", container_script)
+                .expect("container script compiles");
+        container_definition.set_vehicle_control(VEHICLE_CONTROL_INSIDE);
+        engine
+            .register_definition(container_definition)
+            .expect("container definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 0, 0));
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("FALL")
+                    .with_category(CATEGORY_LIVING)
+                    .with_alive(true)
+                    .with_controller(7)
+                    .with_container(container)
+                    .with_action(ActionState::new("Jump")),
+            )
+            .expect("contained flier spawns");
+        let actor_idx = engine.find_object_index(actor).expect("flier exists");
+        engine.objects[actor_idx].state.no_collect_delay = 2;
+        engine.objects[actor_idx]
+            .commands
+            .push_front(CommandRequest::new(CommandId::MoveTo).with_tx(Some(20)))
+            .expect("old command queues");
+
+        engine.frame = 10;
+        engine
+            .apply_physics_at_index(actor_idx)
+            .expect("Tick10 flight executes");
+
+        let actor_snapshot = engine.object_snapshot(actor).expect("flier remains");
+        assert_eq!(actor_snapshot.action.name, "Walk");
+        assert_eq!(engine.objects[actor_idx].state.no_collect_delay, 1);
+        assert!(
+            actor_snapshot.command_stack.command_names().is_empty(),
+            "truthy inside control consumes Exit after SetCommand clears the stack"
+        );
+        assert!(
+            actor_snapshot
+                .local_vars
+                .get("own_control_calls")
+                .is_none(),
+            "native fControl=false skips the actor's own ControlCommand"
+        );
+
+        let container_idx = engine
+            .find_object_index(container)
+            .expect("container remains");
+        let container_state = &engine.objects[container_idx].state;
+        assert_eq!(container_state.controller, 7);
+        assert_eq!(
+            container_state.local_vars.get("control_calls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            container_state.local_vars.get("control_command"),
+            Some(&Value::String("Exit".to_string()))
+        );
+        assert_eq!(
+            container_state.local_vars.get("control_by"),
+            Some(&compat::object_reference_value(actor))
+        );
+    }
+
     #[test]
     fn walk_procedure_automatically_steers_rotation_to_floor_slope() {
         // DFA_WALK calls AdjustWalkRotation(20,20,100) after xdir steering

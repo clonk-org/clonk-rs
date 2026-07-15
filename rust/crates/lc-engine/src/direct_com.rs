@@ -1993,6 +1993,7 @@ impl Engine {
                 count,
                 0,
                 PlayerObjectCommandMode::Set,
+                true,
             )?;
         }
         Ok(())
@@ -4855,7 +4856,7 @@ impl Engine {
                     continue;
                 }
             }
-            self.object_command_to_obj(index, command, target, target2, tx, ty, mode)?;
+            self.object_command_to_obj(index, command, target, target2, tx, ty, mode, true)?;
         }
         // Always apply to cursor, even if it's not selected (:1436-1439).
         if let Some(cursor_id) = cursor {
@@ -4863,7 +4864,7 @@ impl Engine {
                 if let Some(index) = self.find_object_index(cursor_id) {
                     if self.objects[index].state.status.is_active() {
                         self.object_command_to_obj(
-                            index, command, target, target2, tx, ty, mode,
+                            index, command, target, target2, tx, ty, mode, true,
                         )?;
                     }
                 }
@@ -4886,6 +4887,7 @@ impl Engine {
         tx: i32,
         ty: i32,
         mode: PlayerObjectCommandMode,
+        f_control: bool,
     ) -> Result<(), EngineError> {
         let request = CommandRequest::new(command)
             .with_target(target)
@@ -4916,14 +4918,16 @@ impl Engine {
             CommandOperation::DecrementNoCollectDelay,
             CommandOperation::Clear,
         ]);
-        // Close menu — soft: `if (!CloseMenu(false)) return;`
-        // (C4Object.cpp:3944-3946). A MenuQueryCancel denial aborts the
-        // SetCommand with the stack already cleared. The query may run
-        // script, so re-resolve the index afterwards.
         let object_id = self.objects[index].id;
-        if !self.close_object_menu(object_id, false)? {
-            return Ok(());
+        if f_control {
+            // Close menu — soft: `if (!CloseMenu(false)) return;`
+            // (C4Object.cpp:3944-3946). A MenuQueryCancel denial aborts the
+            // SetCommand with the stack already cleared.
+            if !self.close_object_menu(object_id, false)? {
+                return Ok(());
+            }
         }
+        // The optional menu query may run script, so re-resolve the index.
         let Some(index) = self.find_object_index(object_id) else {
             return Ok(());
         };
@@ -4941,11 +4945,13 @@ impl Engine {
                 .unwrap_or(Value::Nil),
             Value::Int(0),
         ];
-        let overloaded = self
-            .contained_call(index, "ControlCommand", &args)
-            .map(|value| compat::value_raw_truthy(&value))?;
-        if overloaded {
-            return Ok(());
+        if f_control {
+            let overloaded = self
+                .contained_call(index, "ControlCommand", &args)
+                .map(|value| compat::value_raw_truthy(&value))?;
+            if overloaded {
+                return Ok(());
+            }
         }
         // Inside vehicle control overload (:3947-3961): the container's
         // ControlCommand with the clonk appended in slot 7.
@@ -5003,6 +5009,22 @@ impl Engine {
         }
         self.objects[index].apply_command_operations([CommandOperation::PushFront(request)]);
         Ok(())
+    }
+
+    /// Native `SetCommand(C4CMD_Exit)` with the default `fControl=false`:
+    /// clear and replace the stack without the menu/own-object control arms,
+    /// while retaining the unconditional inside/outside vehicle overloads.
+    pub(crate) fn set_plain_exit_command(&mut self, index: usize) -> Result<(), EngineError> {
+        self.object_command_to_obj(
+            index,
+            CommandId::Exit,
+            None,
+            None,
+            0,
+            0,
+            PlayerObjectCommandMode::Set,
+            false,
+        )
     }
 }
 

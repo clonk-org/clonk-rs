@@ -28985,7 +28985,7 @@ impl Engine {
     }
 
     #[doc(hidden)]
-    pub fn apply_physics_at_index(&mut self, idx: usize) -> Result<bool, EngineError> {
+    pub fn apply_physics_at_index(&mut self, mut idx: usize) -> Result<bool, EngineError> {
         if idx >= self.objects.len() {
             return Ok(false);
         }
@@ -29218,6 +29218,28 @@ impl Engine {
             pull_handled = true;
         }
 
+        // DFA_FLIGHT contained fall-out (C4Object.cpp:4893-4900): on
+        // Tick10, stop into Walk and add the delayed Wait, then immediately
+        // replace that stack through plain SetCommand(Exit). Keep executing
+        // this frame under the captured FLIGHT procedure so gravity/mobile
+        // still run after the callbacks, just as the stale pAction does.
+        if matches!(procedure, ActionProcedure::Flight)
+            && self.frame % 10 == 0
+            && self.objects[idx].state.container.is_some()
+        {
+            let object_id = self.objects[idx].id;
+            self.stop_action_delay_command(idx, &definition_id)?;
+            let Some(live_idx) = self.find_object_index(object_id) else {
+                return Ok(true);
+            };
+            idx = live_idx;
+            self.set_plain_exit_command(idx)?;
+            let Some(live_idx) = self.find_object_index(object_id) else {
+                return Ok(true);
+            };
+            idx = live_idx;
+        }
+
         let mut exec_set_direction = None;
         {
             let physical = self.object_physical(idx);
@@ -29403,9 +29425,9 @@ impl Engine {
                         movement_profile,
                     );
                 }
-                // DFA_FLIGHT is gravity + Mobile only (C4Object.cpp:
-                // 4875-4886) — ComDir never steers a flier; JumpControl
-                // and landing transitions handle direction.
+                // After the contained Tick10 arm above, DFA_FLIGHT's
+                // remaining steering is gravity + Mobile only
+                // (C4Object.cpp:4893-4904): ComDir never steers a flier.
                 ActionProcedure::Flight => {}
                 ActionProcedure::Swim => {
                     if physical.swim != 0 {
