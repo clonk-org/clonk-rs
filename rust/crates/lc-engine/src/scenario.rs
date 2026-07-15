@@ -3542,13 +3542,12 @@ impl Default for PlayerStart {
 
 impl PlayerStart {
     fn from_legacy(player: &LegacyPlayer) -> Self {
-        // A bare `ID` entry counts as 1 (C4IDList textual entries always
-        // carry counts; the default covers hand-written content), while an
-        // explicit `ID=0` stays zero (GoldRush pins `Magic=EXTG=0;`).
+        // C4IDList::Entry starts at count zero and only compiles a count when
+        // the textual entry has an `=` separator (C4IDList.cpp:239-253).
         let id_list = |entries: &LegacyIdList| {
             entries
                 .iter()
-                .map(|entry| (entry.id.clone(), entry.count.unwrap_or(1)))
+                .map(|entry| (entry.id.clone(), entry.count.unwrap_or(0)))
                 .collect()
         };
         Self {
@@ -17599,6 +17598,69 @@ public func ActualizePhase(pClonk)
             vec![
                 ("GOOD".to_string(), expected_good_name.to_string()),
                 ("PLAI".to_string(), expected_plain_name.to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn player_start_indexed_lists_preserve_cpp_id_list_entry_streams() {
+        let mut player = LegacyPlayer::default();
+        player
+            .apply_entries(&[
+                (
+                    "Knowledge".to_string(),
+                    "GOOD=7;PLAI=-2;GOOD;PLAI=0".to_string(),
+                ),
+                (
+                    "HomeBaseMaterial".to_string(),
+                    "PLAI=-8;GOOD=3;PLAI;GOOD=0".to_string(),
+                ),
+                (
+                    "HomeBaseProduction".to_string(),
+                    "GOOD=0;PLAI=12;GOOD=-4;PLAI".to_string(),
+                ),
+                (
+                    "Magic".to_string(),
+                    "PLAI;GOOD=-6;PLAI=9;GOOD=0".to_string(),
+                ),
+            ])
+            .expect("player fields compile");
+
+        let start = PlayerStart::from_legacy(&player);
+        assert_eq!(
+            start.build_knowledge,
+            vec![
+                ("GOOD".to_string(), 7),
+                ("PLAI".to_string(), -2),
+                ("GOOD".to_string(), 0),
+                ("PLAI".to_string(), 0),
+            ]
+        );
+        assert_eq!(
+            start.home_base_material,
+            vec![
+                ("PLAI".to_string(), -8),
+                ("GOOD".to_string(), 3),
+                ("PLAI".to_string(), 0),
+                ("GOOD".to_string(), 0),
+            ]
+        );
+        assert_eq!(
+            start.home_base_production,
+            vec![
+                ("GOOD".to_string(), 0),
+                ("PLAI".to_string(), 12),
+                ("GOOD".to_string(), -4),
+                ("PLAI".to_string(), 0),
+            ]
+        );
+        assert_eq!(
+            start.magic,
+            vec![
+                ("PLAI".to_string(), 0),
+                ("GOOD".to_string(), -6),
+                ("PLAI".to_string(), 9),
+                ("GOOD".to_string(), 0),
             ]
         );
     }

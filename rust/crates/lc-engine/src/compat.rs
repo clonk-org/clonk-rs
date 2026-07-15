@@ -479,7 +479,7 @@ pub enum PlayerCommand {
         team: Option<i32>,
         generated_team: Option<TeamInfo>,
         color: Option<u32>,
-        home_base_material: Option<HashMap<DefinitionId, u32>>,
+        home_base_material_entries: Option<Vec<(DefinitionId, i32)>>,
         synchronize_hostility: bool,
     },
     /// Final live `C4Player::Crew` lists after a synchronous crew mutation.
@@ -2976,7 +2976,7 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
         "GetPlayerVal",
         "entry_nr",
     )?;
-    if entry_index != 0 || !matches!(section.as_deref(), None | Some("") | Some("Player")) {
+    if entry_index < 0 || !matches!(section.as_deref(), None | Some("") | Some("Player")) {
         return Ok(Value::Nil);
     }
 
@@ -2988,6 +2988,68 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
+        let index = entry_index as usize;
+        let indexed_id_list = |entries: Vec<(DefinitionId, i32)>| {
+            entries
+                .get(index / 2)
+                .map(|(id, count)| {
+                    if index % 2 == 0 {
+                        Value::C4Id(id.clone())
+                    } else {
+                        Value::Int(*count)
+                    }
+                })
+                .unwrap_or(Value::Nil)
+        };
+        let indexed_value = match entry.as_str() {
+            "Hostile" => player
+                .exact_hostility_entries()
+                .get(index / 2)
+                .map(|(raw_id, count)| {
+                    if index % 2 == 0 {
+                        Value::C4Id(render_cast_c4id(*raw_id))
+                    } else {
+                        Value::Int(*count)
+                    }
+                })
+                .unwrap_or(Value::Nil),
+            "HomeBaseMaterial" => {
+                indexed_id_list(player.exact_home_base_material_entries())
+            }
+            "HomeBaseProduction" => {
+                indexed_id_list(player.exact_home_base_production_entries())
+            }
+            "Knowledge" => indexed_id_list(player.exact_knowledge_entries()),
+            "Magic" => indexed_id_list(player.exact_magic_entries()),
+            "Crew" => player
+                .crew
+                .iter()
+                .filter(|object_id| {
+                    context
+                        .get_world_object(**object_id)
+                        .is_some_and(|object| object.status != ObjectStatus::Deleted)
+                })
+                .nth(index)
+                .map(|object_id| Value::Int(truncate_to_i32(object_id.as_u64())))
+                .unwrap_or(Value::Nil),
+            _ => Value::Nil,
+        };
+        if !matches!(&indexed_value, Value::Nil)
+            || matches!(
+                entry.as_str(),
+                "Hostile"
+                    | "HomeBaseMaterial"
+                    | "HomeBaseProduction"
+                    | "Knowledge"
+                    | "Magic"
+                    | "Crew"
+            )
+        {
+            return Ok(indexed_value);
+        }
+        if entry_index != 0 {
+            return Ok(Value::Nil);
+        }
         let view_center = player
             .viewports
             .first()
@@ -3261,18 +3323,42 @@ fn set_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
         // AddPlayer appends the switcher, so any existing member remains the
         // home-base captain. Excluding the switcher also handles a nested
         // RejectTeamSwitch callback that already moved this same player.
-        let home_base_material = if !no_calls && context.team_home_base_rule() {
+        let home_base_material_entries = if !no_calls && context.team_home_base_rule() {
             team.and_then(|team| {
-                context
-                    .player_ids()
-                    .iter()
-                    .copied()
-                    .filter(|member| *member != player_id)
-                    .find_map(|member| {
-                        context.player_state(member).and_then(|player| {
-                            (player.team == Some(team)).then(|| player.home_base_material.clone())
+                let has_player_info_order = selected_team
+                    .as_ref()
+                    .is_some_and(|selected| selected.id == team && !selected.player_ids.is_empty());
+                let captain = selected_team
+                    .as_ref()
+                    .filter(|selected| selected.id == team)
+                    .and_then(|selected| selected.player_ids.first())
+                    .and_then(|captain_info_id| {
+                        context.player_ids().iter().copied().find(|member| {
+                            *member != player_id
+                                && context.player_state(*member).is_some_and(|player| {
+                                    player.team == Some(team)
+                                        && player.player_info_id == *captain_info_id
+                                })
                         })
                     })
+                    .or_else(|| {
+                        // Legacy/synthetic team fixtures may not carry
+                        // C4PlayerInfo IDs. Preserve their deterministic
+                        // runtime-number fallback.
+                        (!has_player_info_order).then(|| {
+                            context.player_ids().iter().copied().find(|member| {
+                                *member != player_id
+                                    && context
+                                        .player_state(*member)
+                                        .is_some_and(|player| player.team == Some(team))
+                            })
+                        })?
+                    });
+                captain.and_then(|member| {
+                    context
+                        .player_state(member)
+                        .map(PlayerState::exact_home_base_material_entries)
+                })
             })
         } else {
             None
@@ -3296,9 +3382,9 @@ fn set_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(color) = color {
             context.set_player_color_preview(player_id, color);
         }
-        if let Some(material) = home_base_material.as_ref() {
+        if let Some(material) = home_base_material_entries.as_ref() {
             if let Some(player) = context.player_state_mut(player_id) {
-                player.home_base_material = material.clone();
+                player.set_home_base_material_entries(material.clone());
             }
         }
 
@@ -3312,7 +3398,7 @@ fn set_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
             team,
             generated_team,
             color,
-            home_base_material,
+            home_base_material_entries,
             synchronize_hostility,
         });
         Some((team.unwrap_or(0), old_team))
@@ -3562,14 +3648,7 @@ fn set_player_hostility_declaration(
     opponent: i32,
     hostile: bool,
 ) {
-    if hostile {
-        if !player.hostility.contains(&opponent) {
-            player.hostility.push(opponent);
-            player.hostility.sort_unstable();
-        }
-    } else {
-        player.hostility.retain(|entry| *entry != opponent);
-    }
+    player.set_hostility_entry(opponent, hostile);
 }
 
 /// FnHostile (C4Script.cpp:2511-2519): the ordinary form is symmetric — one
@@ -3611,9 +3690,8 @@ fn hostile(args: &[Value]) -> Result<Value, RuntimeError> {
         if player == opponent {
             return Ok(Value::Bool(false));
         }
-        let declared = player_state.hostility.contains(&opponent);
-        let hostile = declared
-            || (!one_way && opponent_state.hostility.contains(&player));
+        let declared = player_state.is_hostile_towards(opponent);
+        let hostile = declared || (!one_way && opponent_state.is_hostile_towards(player));
         Ok(Value::Bool(hostile))
     })
 }
@@ -3686,15 +3764,8 @@ fn set_hostility(args: &[Value]) -> Result<Value, RuntimeError> {
             return None;
         }
         let state = context.player_state_mut(player)?;
-        let old = state.hostility.contains(&opponent);
-        if new_hostility {
-            if !old {
-                state.hostility.push(opponent);
-                state.hostility.sort_unstable();
-            }
-        } else {
-            state.hostility.retain(|entry| *entry != opponent);
-        }
+        let old = state.is_hostile_towards(opponent);
+        state.set_hostility_entry(opponent, new_hostility);
         context.record_player_command(PlayerCommand::SetHostility {
             player_id: player,
             opponent,
@@ -8759,7 +8830,7 @@ fn get_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         if let Some(definition) = definition {
-            let known = player.knowledge.iter().any(|entry| entry == &definition);
+            let known = player.knows_definition(&definition);
             return Ok(Value::Bool(known));
         }
 
@@ -8768,16 +8839,16 @@ fn get_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
         }
 
         let filtered: Vec<DefinitionId> = player
-            .knowledge
-            .iter()
-            .filter_map(|entry| {
-                let metadata = context.definition_metadata(entry)?;
+            .exact_knowledge_entries()
+            .into_iter()
+            .filter_map(|(entry, _)| {
+                let metadata = context.definition_metadata(&entry)?;
                 if let Some(mask) = category {
                     if metadata.category & mask == 0 {
                         return None;
                     }
                 }
-                Some(entry.clone())
+                Some(entry)
             })
             .collect();
 
@@ -8819,15 +8890,10 @@ fn set_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
             let Some(player) = context.player_state_mut(player_id) else {
                 return Ok(Value::Bool(false));
             };
-            if let Some(index) = player
-                .knowledge
-                .iter()
-                .position(|entry| entry == &definition)
-            {
-                let removed = player.knowledge.remove(index);
+            if player.remove_knowledge_entry(&definition) {
                 context.record_player_command(PlayerCommand::RevokeKnowledge {
                     player_id,
-                    definition_id: removed,
+                    definition_id: definition,
                 });
                 Ok(Value::Bool(true))
             } else {
@@ -8841,17 +8907,11 @@ fn set_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
                 Some(player) => player,
                 None => return Ok(Value::Bool(false)),
             };
-            let mut added = false;
-            if !player.knowledge.iter().any(|entry| entry == &definition) {
-                player.knowledge.push(definition.clone());
-                added = true;
-            }
-            if added {
-                context.record_player_command(PlayerCommand::GrantKnowledge {
-                    player_id,
-                    definition_id: definition.clone(),
-                });
-            }
+            player.set_knowledge_entry(definition.clone());
+            context.record_player_command(PlayerCommand::GrantKnowledge {
+                player_id,
+                definition_id: definition,
+            });
             Ok(Value::Bool(true))
         }
     })
@@ -8876,25 +8936,22 @@ fn get_plr_magic(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         if let Some(definition) = definition {
-            return Ok(Value::Bool(
-                player.magic.iter().any(|entry| entry == &definition),
-            ));
+            return Ok(Value::Bool(player.knows_magic(&definition)));
         }
         if index < 0 {
             return Ok(Value::Nil);
         }
 
         Ok(player
-            .magic
-            .iter()
-            .filter(|entry| {
+            .exact_magic_entries()
+            .into_iter()
+            .filter(|(entry, _)| {
                 context
                     .definition_metadata(entry)
                     .is_some_and(|metadata| metadata.category & crate::CATEGORY_MAGIC != 0)
             })
             .nth(index as usize)
-            .cloned()
-            .map(Value::C4Id)
+            .map(|(id, _)| Value::C4Id(id))
             .unwrap_or(Value::Nil))
     })
 }
@@ -8921,13 +8978,12 @@ fn set_plr_magic(args: &[Value]) -> Result<Value, RuntimeError> {
             let Some(player) = context.player_state_mut(player_id) else {
                 return Ok(Value::Int(0));
             };
-            let Some(index) = player.magic.iter().position(|entry| entry == &definition) else {
+            if !player.remove_magic_entry(&definition) {
                 return Ok(Value::Int(0));
-            };
-            let removed = player.magic.remove(index);
+            }
             context.record_player_command(PlayerCommand::RevokeMagic {
                 player_id,
-                definition_id: removed,
+                definition_id: definition,
             });
             Ok(Value::Int(1))
         } else {
@@ -8937,13 +8993,11 @@ fn set_plr_magic(args: &[Value]) -> Result<Value, RuntimeError> {
             let Some(player) = context.player_state_mut(player_id) else {
                 return Ok(Value::Int(0));
             };
-            if !player.magic.iter().any(|entry| entry == &definition) {
-                player.magic.push(definition.clone());
-                context.record_player_command(PlayerCommand::GrantMagic {
-                    player_id,
-                    definition_id: definition,
-                });
-            }
+            player.set_magic_entry(definition.clone());
+            context.record_player_command(PlayerCommand::GrantMagic {
+                player_id,
+                definition_id: definition,
+            });
             Ok(Value::Int(1))
         }
     })
@@ -8983,13 +9037,8 @@ fn do_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
                 Some(player) => player,
                 None => return Ok(Value::Bool(false)),
             };
-            adjust_id_count(
-                &mut player.home_base_material,
-                &definition,
-                change,
-                Some(crate::player::MAX_HOME_BASE_MATERIAL),
-            );
-            (player.team, player.home_base_material.clone())
+            player.adjust_home_base_material_entry(definition.clone(), change);
+            (player.team, player.exact_home_base_material_entries())
         };
 
         if context.team_home_base_rule() {
@@ -9006,7 +9055,7 @@ fn do_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
                     .collect();
                 for other_id in teammates {
                     if let Some(member) = context.player_state_mut(other_id) {
-                        member.home_base_material = updated_material.clone();
+                        member.set_home_base_material_entries(updated_material.clone());
                     }
                 }
             }
@@ -9056,7 +9105,7 @@ fn do_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
         if context
             .player_state_mut(player_id)
             .map(|player| {
-                adjust_id_count(&mut player.home_base_production, &definition, change, None);
+                player.adjust_home_base_production_entry(definition.clone(), change);
             })
             .is_none()
         {
@@ -34003,7 +34052,13 @@ impl EffectHostContext {
                         surrendered: state.surrendered,
                         wealth: state.wealth,
                         home_base_material: state.home_base_material.clone(),
-                        knowledge: state.knowledge.clone(),
+                        home_base_material_entries: state
+                            .exact_home_base_material_entries(),
+                        knowledge: state
+                            .exact_knowledge_entries()
+                            .into_iter()
+                            .map(|(id, _)| id)
+                            .collect(),
                     },
                 )
             })
@@ -41881,6 +41936,134 @@ public func RejectConstruction(x, y, builder)
     }
 
     #[test]
+    fn get_player_val_indexed_lists_observe_same_call_mutations() {
+        let player = PlayerState {
+            id: 4,
+            hostility_entries: vec![(3, 1)],
+            knowledge_entries: vec![("BRIK".into(), 0), ("BRIK".into(), 9)],
+            magic_entries: vec![("FIRE".into(), 0), ("FIRE".into(), 4)],
+            home_base_material_entries: vec![("ZINC".into(), 0)],
+            home_base_production_entries: vec![("ROCK".into(), 0)],
+            ..PlayerState::default()
+        };
+        let opponent = PlayerState {
+            id: 2,
+            ..PlayerState::default()
+        };
+        let definitions = ["BRIK", "FIRE", "ZINC", "ROCK"]
+            .into_iter()
+            .map(|id| {
+                (
+                    id.to_string(),
+                    DefinitionMetadata {
+                        category: if id == "FIRE" {
+                            crate::CATEGORY_MAGIC
+                        } else {
+                            1
+                        },
+                        ..DefinitionMetadata::default()
+                    },
+                )
+            })
+            .collect();
+        let world = HostWorldContext::with_landscape(
+            Vec::new(),
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::from([(4, player), (2, opponent)]),
+            HashMap::new(),
+            1,
+            false,
+        );
+
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            assert_eq!(
+                set_hostility(&[
+                    Value::Int(4),
+                    Value::Int(2),
+                    Value::Bool(false),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                ])?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                set_plr_knowledge(&[Value::Int(4), Value::C4Id("BRIK".into())])?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                set_plr_magic(&[Value::Int(4), Value::C4Id("FIRE".into())])?,
+                Value::Int(1)
+            );
+            assert_eq!(
+                do_homebase_material(&[
+                    Value::Int(4),
+                    Value::C4Id("ZINC".into()),
+                    Value::Int(2),
+                ])?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                do_homebase_production(&[
+                    Value::Int(4),
+                    Value::C4Id("ROCK".into()),
+                    Value::Int(1),
+                ])?,
+                Value::Bool(true)
+            );
+
+            let read = |entry: &str, index: i32| {
+                get_player_val(&[
+                    Value::String(entry.into()),
+                    Value::String("Player".into()),
+                    Value::Int(4),
+                    Value::Int(index),
+                ])
+            };
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                read("Hostile", 0)?,
+                read("Hostile", 1)?,
+                read("Knowledge", 0)?,
+                read("Knowledge", 1)?,
+                read("Knowledge", 2)?,
+                read("Knowledge", 3)?,
+                read("Magic", 0)?,
+                read("Magic", 1)?,
+                read("Magic", 2)?,
+                read("Magic", 3)?,
+                read("HomeBaseMaterial", 0)?,
+                read("HomeBaseMaterial", 1)?,
+                read("HomeBaseProduction", 0)?,
+                read("HomeBaseProduction", 1)?,
+                hostile(&[Value::Int(4), Value::Int(2), Value::Bool(true)])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("same-call indexed list mutations succeed"),
+            Value::Array(vec![
+                Value::C4Id("0003".into()),
+                Value::Int(0),
+                Value::C4Id("BRIK".into()),
+                Value::Int(1),
+                Value::C4Id("BRIK".into()),
+                Value::Int(9),
+                Value::C4Id("FIRE".into()),
+                Value::Int(1),
+                Value::C4Id("FIRE".into()),
+                Value::Int(4),
+                Value::C4Id("ZINC".into()),
+                Value::Int(2),
+                Value::C4Id("ROCK".into()),
+                Value::Int(1),
+                Value::Bool(false),
+            ])
+        );
+        assert_eq!(outcome.player_commands.len(), 5);
+    }
+
+    #[test]
     fn get_player_by_index_returns_player_number() {
         let mut alice = PlayerState::default();
         alice.id = 1;
@@ -41978,6 +42161,136 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(
             result.expect("GetPlayerVal runs"),
             Value::Array(vec![Value::Int(306), Value::Int(271)])
+        );
+    }
+
+    #[test]
+    fn get_player_val_reflects_cpp_indexed_player_lists() {
+        let crew = [
+            (42, ObjectStatus::Normal),
+            (7, ObjectStatus::Inactive),
+            (99, ObjectStatus::Deleted),
+        ];
+        let objects = crew
+            .iter()
+            .map(|(id, status)| {
+                HostWorldObject::new(
+                    ObjectId::new(*id),
+                    "CLNK",
+                    *status,
+                    "Idle",
+                    None,
+                    None,
+                    None,
+                    4,
+                    100,
+                    crate::FULL_CON,
+                    Vector2::ZERO,
+                    Vector2::ZERO,
+                    Vec::new(),
+                    0,
+                    0,
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        let player = PlayerState {
+            id: 4,
+            wealth: 17,
+            hostility_entries: vec![(3, 1), (2, 0)],
+            home_base_material_entries: vec![("ZINC".into(), 5), ("BRIK".into(), 0)],
+            home_base_production_entries: vec![("ROCK".into(), -2), ("WOOD".into(), 11)],
+            knowledge_entries: vec![("PLAN".into(), 0), ("KNOW".into(), 3)],
+            magic_entries: vec![("FIRE".into(), 0), ("WIND".into(), 1)],
+            crew: crew
+                .iter()
+                .map(|(id, _)| ObjectId::new(*id))
+                .collect(),
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(objects, vec![player]);
+        let expected = [
+            (
+                "Hostile",
+                vec![
+                    Value::C4Id("0003".into()),
+                    Value::Int(1),
+                    Value::C4Id("0002".into()),
+                    Value::Int(0),
+                ],
+            ),
+            (
+                "HomeBaseMaterial",
+                vec![
+                    Value::C4Id("ZINC".into()),
+                    Value::Int(5),
+                    Value::C4Id("BRIK".into()),
+                    Value::Int(0),
+                ],
+            ),
+            (
+                "HomeBaseProduction",
+                vec![
+                    Value::C4Id("ROCK".into()),
+                    Value::Int(-2),
+                    Value::C4Id("WOOD".into()),
+                    Value::Int(11),
+                ],
+            ),
+            (
+                "Knowledge",
+                vec![
+                    Value::C4Id("PLAN".into()),
+                    Value::Int(0),
+                    Value::C4Id("KNOW".into()),
+                    Value::Int(3),
+                ],
+            ),
+            (
+                "Magic",
+                vec![
+                    Value::C4Id("FIRE".into()),
+                    Value::Int(0),
+                    Value::C4Id("WIND".into()),
+                    Value::Int(1),
+                ],
+            ),
+            ("Crew", vec![Value::Int(42), Value::Int(7)]),
+        ];
+
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            let read = |entry: &str, index: i32| {
+                get_player_val(&[
+                    Value::String(entry.into()),
+                    Value::String("Player".into()),
+                    Value::Int(4),
+                    Value::Int(index),
+                ])
+            };
+            let mut values = Vec::new();
+            for (entry, expected_values) in &expected {
+                for index in 0..expected_values.len() {
+                    values.push(read(entry, index as i32)?);
+                }
+                values.push(read(entry, -1)?);
+                values.push(read(entry, expected_values.len() as i32)?);
+                values.push(read(entry, i32::MAX)?);
+            }
+            values.push(read("Wealth", 0)?);
+            values.push(read("Wealth", 1)?);
+            values.push(read("Wealth", -1)?);
+            Ok::<_, RuntimeError>(Value::Array(values))
+        });
+
+        let mut expected_values = Vec::new();
+        for (_, stream) in expected {
+            expected_values.extend(stream);
+            expected_values.extend([Value::Nil, Value::Nil, Value::Nil]);
+        }
+        expected_values.extend([Value::Int(17), Value::Nil, Value::Nil]);
+        assert_eq!(
+            result.expect("GetPlayerVal indexed reflection succeeds"),
+            Value::Array(expected_values)
         );
     }
 

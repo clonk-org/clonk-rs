@@ -114,6 +114,8 @@ pub struct CommandPlayerSnapshot {
     pub surrendered: bool,
     pub wealth: i32,
     pub home_base_material: HashMap<DefinitionId, u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub home_base_material_entries: Vec<(DefinitionId, i32)>,
     #[serde(default)]
     pub knowledge: Vec<DefinitionId>,
 }
@@ -123,10 +125,19 @@ impl CommandPlayerSnapshot {
         matches!(self.status, PlayerStatus::Active) && !self.surrendered
     }
 
-    pub fn material_count(&self, definition_id: &str) -> u32 {
-        self.home_base_material
-            .get(definition_id)
-            .copied()
+    pub fn material_count(&self, definition_id: &str) -> i32 {
+        if self.home_base_material_entries.is_empty() {
+            return self
+                .home_base_material
+                .get(definition_id)
+                .copied()
+                .map(|count| i32::try_from(count).unwrap_or(i32::MAX))
+                .unwrap_or(0);
+        }
+        self.home_base_material_entries
+            .iter()
+            .find(|(id, _)| id == definition_id)
+            .map(|(_, count)| *count)
             .unwrap_or(0)
     }
 
@@ -3449,6 +3460,7 @@ mod tests {
                 surrendered: false,
                 wealth: 0,
                 home_base_material: HashMap::new(),
+                home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
             },
         )]);
@@ -3528,6 +3540,7 @@ mod tests {
                 surrendered: false,
                 wealth: 100,
                 home_base_material: HashMap::new(),
+                home_base_material_entries: Vec::new(),
                 knowledge: vec![construction_definition.clone()],
             },
         );
@@ -3661,6 +3674,7 @@ mod tests {
                 surrendered: false,
                 wealth: 100,
                 home_base_material: HashMap::new(),
+                home_base_material_entries: Vec::new(),
                 knowledge: vec![construction_definition.clone()],
             },
         );
@@ -7556,6 +7570,7 @@ mod tests {
                 surrendered: false,
                 wealth: 100,
                 home_base_material: home_base,
+                home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
             },
         );
@@ -7681,6 +7696,7 @@ mod tests {
                 surrendered: false,
                 wealth: 100,
                 home_base_material: HashMap::new(),
+                home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
             },
         );
@@ -7781,6 +7797,7 @@ mod tests {
                 surrendered: false,
                 wealth: 100,
                 home_base_material: HashMap::new(),
+                home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
             },
         );
@@ -7874,6 +7891,7 @@ mod tests {
                 surrendered: false,
                 wealth: 10,
                 home_base_material: HashMap::new(),
+                home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
             },
         );
@@ -7984,6 +8002,7 @@ mod tests {
                 surrendered: false,
                 wealth: 0,
                 home_base_material: HashMap::new(),
+                home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
             },
         );
@@ -8055,6 +8074,7 @@ mod tests {
                 surrendered: false,
                 wealth: 50,
                 home_base_material: HashMap::new(),
+                home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
             },
         );
@@ -8142,6 +8162,7 @@ mod tests {
                 surrendered: false,
                 wealth: 40,
                 home_base_material: HashMap::new(),
+                home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
             },
         );
@@ -14425,7 +14446,7 @@ impl BuyState {
         };
 
         let available = base_player.material_count(&self.definition_id);
-        if available == 0 {
+        if available <= 0 {
             return CommandStepResult::failed(update);
         }
 

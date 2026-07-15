@@ -4918,7 +4918,7 @@ global func MenuCommand(state, kind, selection)
     }
 
     #[test]
-    fn apply_player_commands_synchronizes_team_materials_when_rule_enabled() {
+    fn apply_player_commands_synchronizes_the_mutating_team_members_ordered_materials() {
         let mut engine = Engine::new();
         engine.set_team_home_base_rule(true);
 
@@ -4928,19 +4928,33 @@ global func MenuCommand(state, kind, selection)
         engine
             .register_player(PlayerConfig::new(2, "Follower").with_team(Some(1)))
             .expect("follower registered");
+        let starting = vec![("ZINC".into(), 7), ("BRIK".into(), 0)];
+        engine
+            .player_mut(1)
+            .expect("leader")
+            .set_home_base_material_entries(starting.clone());
+        engine
+            .player_mut(2)
+            .expect("follower")
+            .set_home_base_material_entries(starting);
 
         engine
             .apply_player_commands(vec![PlayerCommand::AdjustHomeBaseMaterial {
-                player_id: 1,
-                definition_id: "Brick".to_string(),
+                player_id: 2,
+                definition_id: "ROCK".to_string(),
                 delta: 2,
             }])
             .expect("commands applied");
 
         let leader = engine.player(1).expect("leader present");
         let follower = engine.player(2).expect("follower present");
-        assert_eq!(leader.home_base_material().get("Brick"), Some(&2));
-        assert_eq!(follower.home_base_material().get("Brick"), Some(&2));
+        let expected = &[
+            ("ZINC".to_string(), 7),
+            ("BRIK".to_string(), 0),
+            ("ROCK".to_string(), 2),
+        ];
+        assert_eq!(leader.home_base_material_entries(), expected);
+        assert_eq!(follower.home_base_material_entries(), expected);
     }
 
     #[test]
@@ -5420,11 +5434,11 @@ func FxUpperStart(pTarget, iNumber, iTemp)
         }
         let mut explicit = PlayerStart::default();
         explicit.magic = vec![
-            ("HIGM".into(), 0),
-            ("MISS".into(), 0),
-            ("MIDM".into(), 0),
+            ("HIGM".into(), 7),
+            ("MISS".into(), 99),
+            ("MIDM".into(), -2),
             ("LOWM".into(), 0),
-            ("OBJE".into(), 0),
+            ("OBJE".into(), 3),
         ];
         engine.set_player_starts(vec![explicit, PlayerStart::default()]);
 
@@ -5466,10 +5480,36 @@ func FxUpperStart(pTarget, iNumber, iTemp)
             vec!["MIDM", "LOWM", "NEWM", "HIGM"]
         );
 
-        let encoded = engine
-            .capture_state()
-            .to_json_string()
-            .expect("state serializes");
+        let captured = engine.capture_state();
+        assert_eq!(
+            captured
+                .players
+                .iter()
+                .find(|player| player.id == 0)
+                .expect("explicit state exists")
+                .magic_entries,
+            vec![
+                ("OBJE".into(), 3),
+                ("MIDM".into(), -2),
+                ("LOWM".into(), 0),
+                ("HIGM".into(), 7),
+            ]
+        );
+        assert_eq!(
+            captured
+                .players
+                .iter()
+                .find(|player| player.id == 1)
+                .expect("default state exists")
+                .magic_entries,
+            vec![
+                ("MIDM".into(), 0),
+                ("LOWM".into(), 0),
+                ("NEWM".into(), 0),
+                ("HIGM".into(), 0),
+            ]
+        );
+        let encoded = captured.to_json_string().expect("state serializes");
         let decoded = EngineState::from_json_str(&encoded).expect("state deserializes");
         engine.restore_state(&decoded).expect("state restores");
         assert_eq!(
@@ -5480,6 +5520,21 @@ func FxUpperStart(pTarget, iNumber, iTemp)
                 .cloned()
                 .collect::<Vec<_>>(),
             vec!["OBJE", "MIDM", "LOWM", "HIGM"]
+        );
+        assert_eq!(
+            engine
+                .capture_state()
+                .players
+                .into_iter()
+                .find(|player| player.id == 0)
+                .expect("restored state exists")
+                .magic_entries,
+            vec![
+                ("OBJE".into(), 3),
+                ("MIDM".into(), -2),
+                ("LOWM".into(), 0),
+                ("HIGM".into(), 7),
+            ]
         );
     }
 
@@ -12871,6 +12926,123 @@ func Trigger() {
             .player(3)
             .expect("Carol exists")
             .is_hostile_towards(1));
+    }
+
+    #[test]
+    fn set_player_team_imports_the_team_info_captains_exact_home_base_list() {
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(1, "Ordered", 0).with_player_ids(vec![20, 10]),
+            TeamInfo::new(2, "Old", 0).with_player_ids(vec![30]),
+        ]);
+        engine.set_team_home_base_rule(true);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "CALL",
+                    "Caller",
+                    "func Switch() { return SetPlayerTeam(1, 1, false); }",
+                )
+                .expect("team switch probe compiles"),
+            )
+            .expect("team switch probe registers");
+        for (number, info_id, team) in [(1, 30, 2), (2, 10, 1), (5, 20, 1)] {
+            engine
+                .register_player(
+                    PlayerConfig::new(number, format!("Player {number}"))
+                        .with_player_info_id(info_id)
+                        .with_team(Some(team)),
+                )
+                .expect("player registers");
+        }
+        let captain_material = vec![("ZINC".into(), -3), ("BRIK".into(), 0)];
+        engine
+            .player_mut(5)
+            .expect("team-info captain")
+            .set_home_base_material_entries(captain_material.clone());
+        engine
+            .player_mut(2)
+            .expect("lower runtime number")
+            .set_home_base_material_entries(vec![("ROCK".into(), 9)]);
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller index");
+
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "Switch", Vec::new())
+                .expect("team switch succeeds"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .player(1)
+                .expect("switcher")
+                .home_base_material_entries(),
+            captain_material
+        );
+    }
+
+    #[test]
+    fn set_player_team_does_not_skip_an_unjoined_team_info_captain() {
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(1, "Ordered", 0).with_player_ids(vec![20, 10]),
+            TeamInfo::new(2, "Old", 0).with_player_ids(vec![30]),
+        ]);
+        engine.set_team_home_base_rule(true);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "CALL",
+                    "Caller",
+                    "func Switch() { return SetPlayerTeam(1, 1, false); }",
+                )
+                .expect("team switch probe compiles"),
+            )
+            .expect("team switch probe registers");
+        engine
+            .register_player(
+                PlayerConfig::new(1, "Switcher")
+                    .with_player_info_id(30)
+                    .with_team(Some(2)),
+            )
+            .expect("switcher registers");
+        engine
+            .register_player(
+                PlayerConfig::new(2, "Live noncaptain")
+                    .with_player_info_id(10)
+                    .with_team(Some(1)),
+            )
+            .expect("noncaptain registers");
+        let original = vec![("ZINC".into(), -4)];
+        engine
+            .player_mut(1)
+            .expect("switcher")
+            .set_home_base_material_entries(original.clone());
+        engine
+            .player_mut(2)
+            .expect("live noncaptain")
+            .set_home_base_material_entries(vec![("ROCK".into(), 9)]);
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller index");
+
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "Switch", Vec::new())
+                .expect("team switch succeeds"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .player(1)
+                .expect("switcher")
+                .home_base_material_entries(),
+            original
+        );
     }
 
     #[test]
@@ -27722,7 +27894,9 @@ func Setup() {
     var made = MakeCrewMember(this(), 0);
     var added = SetCrewStatus(1, true, nil);
     return [made, added, GetOwner(), GetController(), GetRank(),
-            GetCrewCount(0), GetCrewCount(1), GetCrew(1), recruitments];
+            GetCrewCount(0), GetCrewCount(1), GetCrew(1), recruitments,
+            GetPlayerVal("Crew", "Player", 0, 0),
+            GetPlayerVal("Crew", "Player", 1, 0)];
 }
 
 func RemoveFrom(int player) {
@@ -27732,7 +27906,8 @@ func RemoveFrom(int player) {
     var removed = SetCrewStatus(player, false, nil);
     return [removed, GetCrewCount(player), GetRank(), unselections,
             callback_rank, callback_crew_count, GetOwner(), GetController(),
-            GetCursor(player) == this()];
+            GetCursor(player) == this(),
+            GetPlayerVal("Crew", "Player", player, 0)];
 }
 
 func RemoveAgain(int player) {
@@ -27780,6 +27955,8 @@ func TryAdd(int player, object target) {
                 Value::Int(1),
                 Value::Object(target.as_u64()),
                 Value::Int(2),
+                Value::Int(target.as_u64() as i32),
+                Value::Int(target.as_u64() as i32),
             ])
         );
         assert_eq!(engine.crew_members(0), vec![target]);
@@ -27811,6 +27988,7 @@ func TryAdd(int player, object target) {
                 Value::Int(0),
                 Value::Int(1),
                 Value::Bool(true),
+                Value::Nil,
             ])
         );
         assert_eq!(engine.crew_members(0), vec![target]);
@@ -27838,6 +28016,7 @@ func TryAdd(int player, object target) {
                 Value::Int(0),
                 Value::Int(1),
                 Value::Bool(true),
+                Value::Nil,
             ])
         );
         assert!(engine.crew_members(0).is_empty());

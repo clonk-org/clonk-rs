@@ -2726,26 +2726,21 @@ impl Engine {
         let base_id = self.objects[base_index].id;
         let base_player = self.objects[base_index].state.base;
         let base_owner = self.objects[base_index].state.owner;
-        let mut material = self
+        let material = self
             .players
             .get(&base_player)
             .map(|player| {
                 player
-                    .home_base_material()
+                    .home_base_material_entries()
                     .iter()
                     .map(|(definition_id, count)| (definition_id.clone(), *count))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        // C4IDList has a stable order. Player currently stores this list in
-        // a HashMap, so impose a deterministic order until that model is
-        // replaced by the C++ ordered list.
-        material.sort_by(|(left, _), (right, _)| left.cmp(right));
         let items = material
             .into_iter()
             .filter_map(|(definition_id, count)| {
                 let definition = self.definitions.get(&definition_id)?;
-                let count = i32::try_from(count).unwrap_or(i32::MAX);
                 let command = format!(
                     "AppendCommand(this,\"Buy\",Object({}),1,0,,0,{})&&ExecuteCommand()",
                     base_id.as_u64(), definition_id
@@ -6314,6 +6309,37 @@ protected func ControlCommand(szCommand) { return(1); }
             )
         );
         assert_eq!(item.command2, item.command);
+    }
+
+    #[test]
+    fn contained_buy_menu_preserves_cpp_home_base_list_order_and_zero_rows() {
+        let mut engine = Engine::new();
+        let (crew, _) = contained_base_fixture(&mut engine, 1);
+        for (id, name) in [("ZINC", "Zinc"), ("BRIK", "Brick")] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, name, "#strict\n")
+                        .expect("buy definition compiles"),
+                )
+                .expect("register buy definition");
+        }
+        engine
+            .player_mut(1)
+            .expect("base player")
+            .set_home_base_material_entries(vec![("ZINC".into(), 2), ("BRIK".into(), 0)]);
+
+        engine.player_in_com(1, COM_UP, 0).expect("open buy menu");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("buy menu opens");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| (item.item_id.as_str(), item.count))
+                .collect::<Vec<_>>(),
+            vec![("ZINC", 2), ("BRIK", 0)]
+        );
     }
 
     #[test]

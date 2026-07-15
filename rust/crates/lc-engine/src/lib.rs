@@ -7256,8 +7256,8 @@ pub fn object_visible_for_player(
             return false;
         };
         first != second
-            && (first_player.hostility.contains(&second)
-                || second_player.hostility.contains(&first))
+            && (first_player.is_hostile_towards(second)
+                || second_player.is_hostile_towards(first))
     }
 
     fn inner(
@@ -15566,33 +15566,20 @@ impl Engine {
         // Wealth, home base material/production, knowledge and magic
         // (C4Player.cpp:702-711); ConsolidateValids keeps known defs only.
         let wealth = start.wealth.evaluate(&mut self.rng);
-        let valid_counts = |entries: &[(String, i32)]| -> HashMap<DefinitionId, u32> {
+        let valid_entries = |entries: &[(String, i32)]| -> Vec<(DefinitionId, i32)> {
             entries
                 .iter()
                 .filter(|(id, _)| {
                     self.definitions
                         .contains_key(&DefinitionId::from(id.as_str()))
                 })
-                .map(|(id, count)| (DefinitionId::from(id.as_str()), (*count).max(0) as u32))
+                .map(|(id, count)| (DefinitionId::from(id.as_str()), *count))
                 .collect()
         };
-        let home_base_material = valid_counts(&start.home_base_material);
-        let home_base_production = valid_counts(&start.home_base_production);
-        let knowledge: Vec<DefinitionId> = start
-            .build_knowledge
-            .iter()
-            .filter(|(id, _)| {
-                self.definitions
-                    .contains_key(&DefinitionId::from(id.as_str()))
-            })
-            .map(|(id, _)| DefinitionId::from(id.as_str()))
-            .collect();
-        let mut magic: Vec<DefinitionId> = start
-            .magic
-            .iter()
-            .map(|(id, _)| DefinitionId::from(id.as_str()))
-            .filter(|id| self.definitions.contains_key(id))
-            .collect();
+        let home_base_material = valid_entries(&start.home_base_material);
+        let home_base_production = valid_entries(&start.home_base_production);
+        let knowledge = valid_entries(&start.build_knowledge);
+        let mut magic = valid_entries(&start.magic);
         if magic.is_empty() {
             magic = self
                 .runtime_definition_order
@@ -15603,9 +15590,10 @@ impl Engine {
                         .is_some_and(|definition| definition.category() & CATEGORY_MAGIC != 0)
                 })
                 .cloned()
+                .map(|id| (id, 0))
                 .collect();
         }
-        magic.sort_by_key(|id| {
+        magic.sort_by_key(|(id, _)| {
             self.definitions
                 .get(id)
                 .map(Definition::value)
@@ -15616,12 +15604,10 @@ impl Engine {
             player.set_status(PlayerStatus::Active);
             player.set_color_index(color_index);
             player.set_wealth(wealth);
-            player.set_home_base_material(home_base_material);
-            player.set_home_base_production(home_base_production);
-            for id in knowledge {
-                player.grant_knowledge(id);
-            }
-            player.set_magic(magic);
+            player.set_home_base_material_entries(home_base_material);
+            player.set_home_base_production_entries(home_base_production);
+            player.set_knowledge_entries(knowledge);
+            player.set_magic_entries(magic);
         }
         // Starting position (C4Player.cpp:713-755).
         let (world_width, world_height) = self
@@ -16881,7 +16867,7 @@ impl Engine {
             let player = self.player_mut(id)?;
             player.set_home_base_material(material);
         }
-        self.sync_team_home_base_for(id);
+        self.sync_team_home_base_from_player(id);
         Ok(())
     }
 
@@ -16905,7 +16891,7 @@ impl Engine {
             let player = self.player_mut(id)?;
             player.adjust_home_base_material(definition_id, delta)
         };
-        self.sync_team_home_base_for(id);
+        self.sync_team_home_base_from_player(id);
         Ok(count)
     }
 
@@ -20938,7 +20924,7 @@ impl Engine {
                     .then(|| {
                         player
                             .team()
-                            .map(|team| (team, player.home_base_material().clone()))
+                            .map(|team| (team, player.home_base_material_entries().to_vec()))
                     })
                     .flatten()
             });
@@ -20948,7 +20934,7 @@ impl Engine {
                     .values_mut()
                     .filter(|player| player.team() == Some(team))
                 {
-                    player.set_home_base_material(material.clone());
+                    player.set_home_base_material_entries(material.clone());
                 }
             }
             self.update_player_asset_value(id);
@@ -21428,6 +21414,9 @@ impl Engine {
                         surrendered: player.surrendered(),
                         wealth: player.wealth(),
                         home_base_material: player.home_base_material().clone(),
+                        home_base_material_entries: player
+                            .home_base_material_entries()
+                            .to_vec(),
                         knowledge: player.knowledge().cloned().collect(),
                     },
                 )
@@ -21674,6 +21663,9 @@ impl Engine {
                         surrendered: player.surrendered(),
                         wealth: player.wealth(),
                         home_base_material: player.home_base_material().clone(),
+                        home_base_material_entries: player
+                            .home_base_material_entries()
+                            .to_vec(),
                         knowledge: player.knowledge().cloned().collect(),
                     },
                 )
@@ -26521,7 +26513,7 @@ impl Engine {
         team: Option<i32>,
         generated_team: Option<TeamInfo>,
         color: Option<u32>,
-        home_base_material: Option<HashMap<DefinitionId, u32>>,
+        home_base_material_entries: Option<Vec<(DefinitionId, i32)>>,
         synchronize_hostility: bool,
     ) -> Result<(), EngineError> {
         if let Some(generated_team) = generated_team {
@@ -26543,11 +26535,11 @@ impl Engine {
         if let Some(color) = color {
             self.set_player_color(player_id, color)?;
         }
-        if let Some(material) = home_base_material {
+        if let Some(material) = home_base_material_entries {
             self.players
                 .get_mut(&player_id)
                 .expect("player remains present")
-                .set_home_base_material(material);
+                .set_home_base_material_entries(material);
         }
         if synchronize_hostility {
             self.set_player_team_hostility(player_id);
@@ -26563,13 +26555,14 @@ impl Engine {
         let Some(team) = self.players.get(&player_id).and_then(Player::team) else {
             return;
         };
-        let relations = self
+        let mut relations = self
             .players
             .iter()
             .filter_map(|(&other_id, player)| {
                 (other_id != player_id).then_some((other_id, player.team() != Some(team)))
             })
             .collect::<Vec<_>>();
+        relations.sort_unstable_by_key(|(other_id, _)| *other_id);
         for (other_id, hostile) in relations {
             if let Some(player) = self.players.get_mut(&player_id) {
                 player.set_hostile_towards(other_id, hostile);
@@ -26626,7 +26619,7 @@ impl Engine {
                     team,
                     generated_team,
                     color,
-                    home_base_material,
+                    home_base_material_entries,
                     synchronize_hostility,
                 } => {
                     self.apply_script_player_team(
@@ -26634,7 +26627,7 @@ impl Engine {
                         team,
                         generated_team,
                         color,
-                        home_base_material,
+                        home_base_material_entries,
                         synchronize_hostility,
                     )?;
                 }
@@ -26971,11 +26964,73 @@ impl Engine {
         if !self.team_home_base_rule {
             return;
         }
-        let team = match self.players.get(&id).and_then(|player| player.team()) {
-            Some(team) => team,
+        let (team, player_info_id) = match self.players.get(&id) {
+            Some(player) => match player.team() {
+                Some(team) => (team, player.player_info_id()),
+                None => return,
+            },
             None => return,
         };
-        self.sync_team_home_base_group(team);
+        let captain_id = self
+            .teams
+            .iter()
+            .find(|candidate| candidate.id == team)
+            .and_then(|team| team.player_ids.first().copied())
+            .and_then(|captain_info_id| {
+                if captain_info_id == player_info_id {
+                    return None;
+                }
+                self.players
+                    .values()
+                    .find(|player| player.player_info_id() == captain_info_id)
+                    .map(Player::id)
+            })
+            .or_else(|| {
+                let has_player_info_order = self
+                    .teams
+                    .iter()
+                    .find(|candidate| candidate.id == team)
+                    .is_some_and(|team| !team.player_ids.is_empty());
+                if has_player_info_order {
+                    None
+                } else {
+                    self.runtime_team_members_in_order(team)
+                        .into_iter()
+                        .next()
+                        .filter(|captain| *captain != id)
+                }
+            });
+        let Some(material) = captain_id.and_then(|captain| {
+            self.players
+                .get(&captain)
+                .map(|player| player.home_base_material_entries().to_vec())
+        }) else {
+            return;
+        };
+        if let Some(player) = self.players.get_mut(&id) {
+            player.set_home_base_material_entries(material);
+        }
+    }
+
+    /// `C4Player::SyncHomebaseMaterialToTeam`: a runtime mutation propagates
+    /// the mutating player's complete ordered list, even when that player is
+    /// not the team's first member (C4Player.cpp:2335-2349).
+    fn sync_team_home_base_from_player(&mut self, id: i32) {
+        if !self.team_home_base_rule {
+            return;
+        }
+        let Some((team, material)) = self.players.get(&id).and_then(|player| {
+            player
+                .team()
+                .map(|team| (team, player.home_base_material_entries().to_vec()))
+        }) else {
+            return;
+        };
+        for (&member_id, member) in &mut self.players {
+            if member_id != id && member.team() == Some(team) {
+                member.set_home_base_material_entries(material.clone());
+            }
+        }
     }
 
     fn runtime_team_order_id(player: &Player) -> i32 {
@@ -27047,12 +27102,12 @@ impl Engine {
         }
         let leader_id = members[0];
         let material = match self.players.get(&leader_id) {
-            Some(leader) => leader.home_base_material().clone(),
+            Some(leader) => leader.home_base_material_entries().to_vec(),
             None => return,
         };
         for member_id in members.into_iter().skip(1) {
             if let Some(member) = self.players.get_mut(&member_id) {
-                member.set_home_base_material(material.clone());
+                member.set_home_base_material_entries(material.clone());
             }
         }
     }

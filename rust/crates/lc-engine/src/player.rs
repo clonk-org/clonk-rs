@@ -96,6 +96,85 @@ fn bounded_message_buf(mut message: String) -> String {
     message
 }
 
+fn set_ordered_id_count<K: PartialEq>(
+    entries: &mut Vec<(K, i32)>,
+    id: K,
+    count: i32,
+    add_new: bool,
+) -> bool {
+    if let Some((_, stored)) = entries.iter_mut().find(|(stored, _)| stored == &id) {
+        *stored = count;
+        true
+    } else if add_new {
+        entries.push((id, count));
+        true
+    } else {
+        false
+    }
+}
+
+fn delete_ordered_id<K: PartialEq>(entries: &mut Vec<(K, i32)>, id: &K) -> bool {
+    let Some(index) = entries.iter().position(|(stored, _)| stored == id) else {
+        return false;
+    };
+    entries.remove(index);
+    true
+}
+
+fn ordered_id_count<K: PartialEq>(entries: &[(K, i32)], id: &K, zero_default: i32) -> i32 {
+    entries
+        .iter()
+        .find(|(stored, _)| stored == id)
+        .map(|(_, count)| if *count == 0 { zero_default } else { *count })
+        .unwrap_or(0)
+}
+
+fn ordered_entries_from_unsigned_map(
+    map: &HashMap<DefinitionId, u32>,
+) -> Vec<(DefinitionId, i32)> {
+    let mut entries = map
+        .iter()
+        .map(|(id, count)| (id.clone(), i32::try_from(*count).unwrap_or(i32::MAX)))
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries
+}
+
+fn unsigned_first_count_projection(
+    entries: &[(DefinitionId, i32)],
+) -> HashMap<DefinitionId, u32> {
+    let mut projection = HashMap::new();
+    for (id, count) in entries {
+        projection
+            .entry(id.clone())
+            .or_insert_with(|| u32::try_from(*count).unwrap_or(0));
+    }
+    projection
+}
+
+fn ordered_ids_projection(entries: &[(DefinitionId, i32)]) -> Vec<DefinitionId> {
+    entries.iter().map(|(id, _)| id.clone()).collect()
+}
+
+fn sorted_unique_ids_projection(entries: &[(DefinitionId, i32)]) -> Vec<DefinitionId> {
+    let mut projection = ordered_ids_projection(entries);
+    projection.sort();
+    projection.dedup();
+    projection
+}
+
+fn hostility_projection(entries: &[(i32, i32)]) -> Vec<i32> {
+    let mut seen = HashSet::new();
+    let mut projection = Vec::new();
+    for (raw_id, count) in entries {
+        if seen.insert(*raw_id) && *count != 0 {
+            projection.push(raw_id.wrapping_sub(1));
+        }
+    }
+    projection.sort_unstable();
+    projection
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlayerViewport {
     #[serde(default)]
@@ -229,10 +308,16 @@ pub struct PlayerState {
     pub initial_value_set: bool,
     #[serde(default)]
     pub knowledge: Vec<DefinitionId>,
-    /// Ordered `C4Player::Magic` ID list (C4Player.h:114). Unlike build
-    /// knowledge, script indexed lookups observe this list's order.
+    /// Exact ordered/signed C4IDList backing for `Knowledge`. The legacy
+    /// projection above remains for old Rust saves; this list is authoritative
+    /// when present and preserves duplicate and zero-count entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub knowledge_entries: Vec<(DefinitionId, i32)>,
+    /// Legacy ID-only projection of the ordered `C4Player::Magic` list.
     #[serde(default)]
     pub magic: Vec<DefinitionId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub magic_entries: Vec<(DefinitionId, i32)>,
     #[serde(default)]
     pub inventory: HashMap<DefinitionId, u32>,
     #[serde(default)]
@@ -272,8 +357,14 @@ pub struct PlayerState {
     pub crew_created: i32,
     #[serde(default)]
     pub home_base_material: HashMap<DefinitionId, u32>,
+    /// Exact ordered/signed `C4Player::HomeBaseMaterial` C4IDList.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub home_base_material_entries: Vec<(DefinitionId, i32)>,
     #[serde(default)]
     pub home_base_production: HashMap<DefinitionId, u32>,
+    /// Exact ordered/signed `C4Player::HomeBaseProduction` C4IDList.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub home_base_production_entries: Vec<(DefinitionId, i32)>,
     #[serde(default)]
     pub production_delay: u32,
     #[serde(default)]
@@ -334,11 +425,14 @@ pub struct PlayerState {
     /// their key labels, and blinking labels (C4Viewport.cpp:1424-1439).
     #[serde(default)]
     pub show_control: i32,
-    /// Players this player declared hostility against (C4Player::Hostility,
-    /// queried by C4PlayerList::Hostile, C4PlayerList.cpp:82-92). Sorted for
-    /// deterministic serialization.
+    /// Sorted/unique nonzero-opponent projection of `C4Player::Hostility`,
+    /// retained for older Rust saves.
     #[serde(default)]
     pub hostility: Vec<i32>,
+    /// Exact C4Player::Hostility C4IDList. Keys are raw numeric C4IDs
+    /// (`opponent Number + 1`), not player numbers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hostility_entries: Vec<(i32, i32)>,
     /// Direct-com input state (C4Player.h:118-121, serialized by
     /// C4Player::CompileFunc "LastCom"/"LastComDel"/"LastComDownDouble"/
     /// "PressedComs"/"AutoStopControl"/"CursorFlash", C4Player.cpp:1596-1604).
@@ -353,6 +447,180 @@ pub struct PlayerState {
 }
 
 impl PlayerState {
+    pub(crate) fn exact_knowledge_entries(&self) -> Vec<(DefinitionId, i32)> {
+        if self.knowledge_entries.is_empty() && !self.knowledge.is_empty() {
+            self.knowledge
+                .iter()
+                .cloned()
+                .map(|id| (id, 1))
+                .collect()
+        } else {
+            self.knowledge_entries.clone()
+        }
+    }
+
+    pub(crate) fn exact_magic_entries(&self) -> Vec<(DefinitionId, i32)> {
+        if self.magic_entries.is_empty() && !self.magic.is_empty() {
+            self.magic
+                .iter()
+                .cloned()
+                .map(|id| (id, 1))
+                .collect()
+        } else {
+            self.magic_entries.clone()
+        }
+    }
+
+    pub(crate) fn exact_home_base_material_entries(&self) -> Vec<(DefinitionId, i32)> {
+        if self.home_base_material_entries.is_empty() && !self.home_base_material.is_empty() {
+            ordered_entries_from_unsigned_map(&self.home_base_material)
+        } else {
+            self.home_base_material_entries.clone()
+        }
+    }
+
+    pub(crate) fn exact_home_base_production_entries(&self) -> Vec<(DefinitionId, i32)> {
+        if self.home_base_production_entries.is_empty() && !self.home_base_production.is_empty() {
+            ordered_entries_from_unsigned_map(&self.home_base_production)
+        } else {
+            self.home_base_production_entries.clone()
+        }
+    }
+
+    pub(crate) fn exact_hostility_entries(&self) -> Vec<(i32, i32)> {
+        if self.hostility_entries.is_empty() && !self.hostility.is_empty() {
+            self.hostility
+                .iter()
+                .copied()
+                .map(|opponent| (opponent.wrapping_add(1), 1))
+                .collect()
+        } else {
+            self.hostility_entries.clone()
+        }
+    }
+
+    pub(crate) fn set_knowledge_entry(&mut self, definition_id: DefinitionId) {
+        let mut entries = self.exact_knowledge_entries();
+        set_ordered_id_count(&mut entries, definition_id, 1, true);
+        self.knowledge = sorted_unique_ids_projection(&entries);
+        self.knowledge_entries = entries;
+    }
+
+    pub(crate) fn remove_knowledge_entry(&mut self, definition_id: &DefinitionId) -> bool {
+        let mut entries = self.exact_knowledge_entries();
+        if !delete_ordered_id(&mut entries, definition_id) {
+            return false;
+        }
+        self.knowledge = sorted_unique_ids_projection(&entries);
+        self.knowledge_entries = entries;
+        true
+    }
+
+    pub(crate) fn knows_definition(&self, definition_id: &DefinitionId) -> bool {
+        self.exact_knowledge_entries()
+            .iter()
+            .any(|(id, _)| id == definition_id)
+    }
+
+    pub(crate) fn set_magic_entry(&mut self, definition_id: DefinitionId) {
+        let mut entries = self.exact_magic_entries();
+        set_ordered_id_count(&mut entries, definition_id, 1, true);
+        self.magic = ordered_ids_projection(&entries);
+        self.magic_entries = entries;
+    }
+
+    pub(crate) fn remove_magic_entry(&mut self, definition_id: &DefinitionId) -> bool {
+        let mut entries = self.exact_magic_entries();
+        if !delete_ordered_id(&mut entries, definition_id) {
+            return false;
+        }
+        self.magic = ordered_ids_projection(&entries);
+        self.magic_entries = entries;
+        true
+    }
+
+    pub(crate) fn knows_magic(&self, definition_id: &DefinitionId) -> bool {
+        self.exact_magic_entries()
+            .iter()
+            .any(|(id, _)| id == definition_id)
+    }
+
+    pub(crate) fn set_hostility_entry(&mut self, opponent: i32, hostile: bool) {
+        let mut entries = self.exact_hostility_entries();
+        set_ordered_id_count(
+            &mut entries,
+            opponent.wrapping_add(1),
+            i32::from(hostile),
+            true,
+        );
+        self.hostility = hostility_projection(&entries);
+        self.hostility_entries = entries;
+    }
+
+    pub(crate) fn is_hostile_towards(&self, opponent: i32) -> bool {
+        if self.hostility_entries.is_empty() {
+            self.hostility.contains(&opponent)
+        } else {
+            ordered_id_count(
+                &self.hostility_entries,
+                &opponent.wrapping_add(1),
+                0,
+            ) != 0
+        }
+    }
+
+    pub(crate) fn set_home_base_material_entries(
+        &mut self,
+        entries: Vec<(DefinitionId, i32)>,
+    ) {
+        self.home_base_material = unsigned_first_count_projection(&entries);
+        self.home_base_material_entries = entries;
+    }
+
+    pub(crate) fn set_home_base_production_entries(
+        &mut self,
+        entries: Vec<(DefinitionId, i32)>,
+    ) {
+        self.home_base_production = unsigned_first_count_projection(&entries);
+        self.home_base_production_entries = entries;
+    }
+
+    pub(crate) fn adjust_home_base_material_entry(
+        &mut self,
+        definition_id: DefinitionId,
+        delta: i32,
+    ) {
+        let mut entries = self.exact_home_base_material_entries();
+        let current = ordered_id_count(&entries, &definition_id, 0);
+        let updated = if delta >= 0 {
+            current
+                .max(0)
+                .saturating_add(delta)
+                .min(MAX_HOME_BASE_MATERIAL as i32)
+        } else {
+            current.saturating_add(delta).max(0)
+        };
+        let add_new = delta != 0 || entries.iter().any(|(id, _)| id == &definition_id);
+        set_ordered_id_count(&mut entries, definition_id, updated, add_new);
+        self.set_home_base_material_entries(entries);
+    }
+
+    pub(crate) fn adjust_home_base_production_entry(
+        &mut self,
+        definition_id: DefinitionId,
+        delta: i32,
+    ) {
+        let mut entries = self.exact_home_base_production_entries();
+        let current = ordered_id_count(&entries, &definition_id, 0);
+        let updated = current.max(0).saturating_add(delta).max(0);
+        if updated == 0 {
+            delete_ordered_id(&mut entries, &definition_id);
+        } else {
+            set_ordered_id_count(&mut entries, definition_id, updated, true);
+        }
+        self.set_home_base_production_entries(entries);
+    }
+
     pub(crate) fn set_view_target(&mut self, target: Option<ObjectId>) {
         self.view_mode = PLAYER_VIEW_MODE_TARGET;
         self.view_target = target;
@@ -505,7 +773,9 @@ pub struct Player {
     objects_owned: u32,
     initial_value_set: bool,
     knowledge: HashSet<DefinitionId>,
+    knowledge_entries: Vec<(DefinitionId, i32)>,
     magic: Vec<DefinitionId>,
+    magic_entries: Vec<(DefinitionId, i32)>,
     inventory: HashMap<DefinitionId, u32>,
     cursor: Option<ObjectId>,
     view_mode: i32,
@@ -519,7 +789,9 @@ pub struct Player {
     crew: Vec<ObjectId>,
     crew_created: i32,
     home_base_material: HashMap<DefinitionId, u32>,
+    home_base_material_entries: Vec<(DefinitionId, i32)>,
     home_base_production: HashMap<DefinitionId, u32>,
+    home_base_production_entries: Vec<(DefinitionId, i32)>,
     production_delay: u32,
     production_unit: u32,
     color: Option<RgbColor>,
@@ -528,6 +800,7 @@ pub struct Player {
     pub(crate) show_control_position: i32,
     pub(crate) show_control: i32,
     hostility: HashSet<i32>,
+    hostility_entries: Vec<(i32, i32)>,
     /// The indexed player color chosen at ScenarioInit
     /// (C4Player.cpp:678-685; C4PlayerList::ColorTaken scans it). -1 until
     /// the join assigns one.
@@ -580,7 +853,9 @@ impl Player {
             objects_owned: 0,
             initial_value_set: false,
             knowledge: HashSet::new(),
+            knowledge_entries: Vec::new(),
             magic: Vec::new(),
+            magic_entries: Vec::new(),
             inventory: HashMap::new(),
             cursor: None,
             view_mode: PLAYER_VIEW_MODE_CURSOR,
@@ -594,7 +869,9 @@ impl Player {
             crew: Vec::new(),
             crew_created: 0,
             home_base_material: HashMap::new(),
+            home_base_material_entries: Vec::new(),
             home_base_production: HashMap::new(),
+            home_base_production_entries: Vec::new(),
             production_delay: 0,
             production_unit: 0,
             color: None,
@@ -603,6 +880,7 @@ impl Player {
             show_control_position: 0,
             show_control: 0,
             hostility: HashSet::new(),
+            hostility_entries: Vec::new(),
             color_index: -1,
             position_index: -1,
             control_set: -1,
@@ -787,6 +1065,20 @@ impl Player {
             production_unit,
             color,
         } = config;
+        let knowledge_entries = knowledge
+            .into_iter()
+            .map(|id| (id, 1))
+            .collect::<Vec<_>>();
+        let knowledge = knowledge_entries
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
+        let magic_entries = magic.into_iter().map(|id| (id, 1)).collect::<Vec<_>>();
+        let magic = magic_entries.iter().map(|(id, _)| id.clone()).collect();
+        let home_base_material_entries =
+            ordered_entries_from_unsigned_map(&home_base_material);
+        let home_base_production_entries =
+            ordered_entries_from_unsigned_map(&home_base_production);
         Self {
             id,
             player_info_id,
@@ -811,8 +1103,10 @@ impl Player {
             value_gain,
             objects_owned,
             initial_value_set,
-            knowledge: knowledge.into_iter().collect(),
+            knowledge,
+            knowledge_entries,
             magic,
+            magic_entries,
             inventory,
             cursor,
             view_mode: PLAYER_VIEW_MODE_CURSOR,
@@ -826,7 +1120,9 @@ impl Player {
             crew: Vec::new(),
             crew_created: 0,
             home_base_material,
+            home_base_material_entries,
             home_base_production,
+            home_base_production_entries,
             production_delay,
             production_unit,
             color,
@@ -835,6 +1131,7 @@ impl Player {
             show_control_position: 0,
             show_control: 0,
             hostility: HashSet::new(),
+            hostility_entries: Vec::new(),
             color_index: -1,
             position_index: -1,
             control_set: -1,
@@ -877,7 +1174,9 @@ impl Player {
             objects_owned,
             initial_value_set,
             knowledge,
+            knowledge_entries,
             magic,
+            magic_entries,
             inventory,
             cursor,
             view_mode,
@@ -891,7 +1190,9 @@ impl Player {
             crew,
             crew_created,
             home_base_material,
+            home_base_material_entries,
             home_base_production,
+            home_base_production_entries,
             production_delay,
             production_unit,
             color,
@@ -913,9 +1214,54 @@ impl Player {
             show_control_position,
             show_control,
             hostility,
+            hostility_entries,
             control,
             extra_data,
         } = state;
+        let knowledge_entries = if knowledge_entries.is_empty() && !knowledge.is_empty() {
+            knowledge.into_iter().map(|id| (id, 1)).collect()
+        } else {
+            knowledge_entries
+        };
+        let knowledge = knowledge_entries
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
+        let magic_entries = if magic_entries.is_empty() && !magic.is_empty() {
+            magic.into_iter().map(|id| (id, 1)).collect()
+        } else {
+            magic_entries
+        };
+        let magic = magic_entries.iter().map(|(id, _)| id.clone()).collect();
+        let home_base_material_entries = if home_base_material_entries.is_empty()
+            && !home_base_material.is_empty()
+        {
+            ordered_entries_from_unsigned_map(&home_base_material)
+        } else {
+            home_base_material_entries
+        };
+        let home_base_material =
+            unsigned_first_count_projection(&home_base_material_entries);
+        let home_base_production_entries = if home_base_production_entries.is_empty()
+            && !home_base_production.is_empty()
+        {
+            ordered_entries_from_unsigned_map(&home_base_production)
+        } else {
+            home_base_production_entries
+        };
+        let home_base_production =
+            unsigned_first_count_projection(&home_base_production_entries);
+        let hostility_entries = if hostility_entries.is_empty() && !hostility.is_empty() {
+            hostility
+                .into_iter()
+                .map(|opponent| (opponent.wrapping_add(1), 1))
+                .collect()
+        } else {
+            hostility_entries
+        };
+        let hostility = hostility_projection(&hostility_entries)
+            .into_iter()
+            .collect();
         Self {
             id,
             player_info_id,
@@ -942,8 +1288,10 @@ impl Player {
             value_gain,
             objects_owned,
             initial_value_set,
-            knowledge: knowledge.into_iter().collect(),
+            knowledge,
+            knowledge_entries,
             magic,
+            magic_entries,
             inventory,
             cursor,
             view_mode,
@@ -957,7 +1305,9 @@ impl Player {
             crew,
             crew_created,
             home_base_material,
+            home_base_material_entries,
             home_base_production,
+            home_base_production_entries,
             production_delay,
             production_unit,
             color,
@@ -965,7 +1315,8 @@ impl Player {
             force_fog_of_war,
             show_control_position,
             show_control,
-            hostility: hostility.into_iter().collect(),
+            hostility,
+            hostility_entries,
             color_index: color_index.unwrap_or(-1),
             position_index: position_index.unwrap_or(-1),
             control_set,
@@ -985,8 +1336,6 @@ impl Player {
     }
 
     pub fn to_state(&self) -> PlayerState {
-        let mut knowledge: Vec<_> = self.knowledge.iter().cloned().collect();
-        knowledge.sort();
         PlayerState {
             id: self.id,
             player_info_id: self.player_info_id,
@@ -1009,8 +1358,10 @@ impl Player {
             value_gain: self.value_gain,
             objects_owned: self.objects_owned,
             initial_value_set: self.initial_value_set,
-            knowledge,
-            magic: self.magic.clone(),
+            knowledge: sorted_unique_ids_projection(&self.knowledge_entries),
+            knowledge_entries: self.knowledge_entries.clone(),
+            magic: ordered_ids_projection(&self.magic_entries),
+            magic_entries: self.magic_entries.clone(),
             inventory: self.inventory.clone(),
             cursor: self.cursor,
             view_mode: self.view_mode,
@@ -1024,7 +1375,9 @@ impl Player {
             crew: self.crew.clone(),
             crew_created: self.crew_created,
             home_base_material: self.home_base_material.clone(),
+            home_base_material_entries: self.home_base_material_entries.clone(),
             home_base_production: self.home_base_production.clone(),
+            home_base_production_entries: self.home_base_production_entries.clone(),
             production_delay: self.production_delay,
             production_unit: self.production_unit,
             color: self.color,
@@ -1045,11 +1398,8 @@ impl Player {
             message_board_queries: self.message_board_queries.clone(),
             show_control_position: self.show_control_position,
             show_control: self.show_control,
-            hostility: {
-                let mut hostility: Vec<i32> = self.hostility.iter().copied().collect();
-                hostility.sort_unstable();
-                hostility
-            },
+            hostility: hostility_projection(&self.hostility_entries),
+            hostility_entries: self.hostility_entries.clone(),
             control: self.control,
             extra_data: self.extra_data.clone(),
         }
@@ -1058,15 +1408,27 @@ impl Player {
     /// Declare or revoke hostility toward another player
     /// (C4Player::Hostility set, fed into C4PlayerList::Hostile).
     pub fn set_hostile_towards(&mut self, opponent: i32, hostile: bool) {
-        if hostile {
-            self.hostility.insert(opponent);
-        } else {
-            self.hostility.remove(&opponent);
-        }
+        set_ordered_id_count(
+            &mut self.hostility_entries,
+            opponent.wrapping_add(1),
+            i32::from(hostile),
+            true,
+        );
+        self.hostility = hostility_projection(&self.hostility_entries)
+            .into_iter()
+            .collect();
     }
 
     pub fn is_hostile_towards(&self, opponent: i32) -> bool {
-        self.hostility.contains(&opponent)
+        ordered_id_count(
+            &self.hostility_entries,
+            &opponent.wrapping_add(1),
+            0,
+        ) != 0
+    }
+
+    pub(crate) fn hostility_entries(&self) -> &[(i32, i32)] {
+        &self.hostility_entries
     }
 
     pub fn id(&self) -> i32 {
@@ -1346,35 +1708,61 @@ impl Player {
     }
 
     pub fn knowledge(&self) -> impl Iterator<Item = &DefinitionId> {
-        self.knowledge.iter()
+        self.knowledge_entries.iter().map(|(id, _)| id)
+    }
+
+    pub(crate) fn knowledge_entries(&self) -> &[(DefinitionId, i32)] {
+        &self.knowledge_entries
+    }
+
+    pub(crate) fn set_knowledge_entries(&mut self, entries: Vec<(DefinitionId, i32)>) {
+        self.knowledge = entries.iter().map(|(id, _)| id.clone()).collect();
+        self.knowledge_entries = entries;
     }
 
     pub fn grant_knowledge(&mut self, definition_id: DefinitionId) {
-        self.knowledge.insert(definition_id);
+        set_ordered_id_count(&mut self.knowledge_entries, definition_id, 1, true);
+        self.knowledge = self
+            .knowledge_entries
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
     }
 
     pub fn revoke_knowledge(&mut self, definition_id: &DefinitionId) {
-        self.knowledge.remove(definition_id);
+        delete_ordered_id(&mut self.knowledge_entries, definition_id);
+        self.knowledge = self
+            .knowledge_entries
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
     }
 
     pub fn magic(&self) -> impl Iterator<Item = &DefinitionId> {
-        self.magic.iter()
+        self.magic_entries.iter().map(|(id, _)| id)
+    }
+
+    pub(crate) fn magic_entries(&self) -> &[(DefinitionId, i32)] {
+        &self.magic_entries
+    }
+
+    pub(crate) fn set_magic_entries(&mut self, entries: Vec<(DefinitionId, i32)>) {
+        self.magic = ordered_ids_projection(&entries);
+        self.magic_entries = entries;
     }
 
     pub fn set_magic(&mut self, magic: Vec<DefinitionId>) {
-        self.magic = magic;
+        self.set_magic_entries(magic.into_iter().map(|id| (id, 1)).collect());
     }
 
     pub fn grant_magic(&mut self, definition_id: DefinitionId) {
-        if !self.magic.iter().any(|entry| entry == &definition_id) {
-            self.magic.push(definition_id);
-        }
+        set_ordered_id_count(&mut self.magic_entries, definition_id, 1, true);
+        self.magic = ordered_ids_projection(&self.magic_entries);
     }
 
     pub fn revoke_magic(&mut self, definition_id: &DefinitionId) {
-        if let Some(index) = self.magic.iter().position(|entry| entry == definition_id) {
-            self.magic.remove(index);
-        }
+        delete_ordered_id(&mut self.magic_entries, definition_id);
+        self.magic = ordered_ids_projection(&self.magic_entries);
     }
 
     pub fn inventory(&self) -> &HashMap<DefinitionId, u32> {
@@ -1560,86 +1948,78 @@ impl Player {
         &self.home_base_material
     }
 
+    pub fn home_base_material_entries(&self) -> &[(DefinitionId, i32)] {
+        &self.home_base_material_entries
+    }
+
     pub fn set_home_base_material(&mut self, material: HashMap<DefinitionId, u32>) {
-        self.home_base_material = material
-            .into_iter()
-            .filter(|(_, count)| *count > 0)
-            .collect();
+        self.set_home_base_material_entries(ordered_entries_from_unsigned_map(&material));
+    }
+
+    pub fn set_home_base_material_entries(&mut self, entries: Vec<(DefinitionId, i32)>) {
+        self.home_base_material = unsigned_first_count_projection(&entries);
+        self.home_base_material_entries = entries;
     }
 
     pub fn home_base_production(&self) -> &HashMap<DefinitionId, u32> {
         &self.home_base_production
     }
 
+    pub fn home_base_production_entries(&self) -> &[(DefinitionId, i32)] {
+        &self.home_base_production_entries
+    }
+
     pub fn set_home_base_production(&mut self, production: HashMap<DefinitionId, u32>) {
-        self.home_base_production = production
-            .into_iter()
-            .filter(|(_, count)| *count > 0)
-            .collect();
+        self.set_home_base_production_entries(ordered_entries_from_unsigned_map(&production));
+    }
+
+    pub fn set_home_base_production_entries(&mut self, entries: Vec<(DefinitionId, i32)>) {
+        self.home_base_production = unsigned_first_count_projection(&entries);
+        self.home_base_production_entries = entries;
     }
 
     pub fn adjust_home_base_material(&mut self, definition_id: DefinitionId, delta: i32) -> u32 {
-        if delta >= 0 {
-            let entry = self
-                .home_base_material
-                .entry(definition_id.clone())
-                .or_insert(0);
-            let added = delta as u32;
-            *entry = entry.saturating_add(added).min(MAX_HOME_BASE_MATERIAL);
-            if *entry == 0 {
-                self.home_base_material.remove(&definition_id);
-                0
-            } else {
-                *entry
-            }
+        let current = ordered_id_count(&self.home_base_material_entries, &definition_id, 0);
+        let updated = if delta >= 0 {
+            current
+                .max(0)
+                .saturating_add(delta)
+                .min(MAX_HOME_BASE_MATERIAL as i32)
         } else {
-            let decrease = delta.saturating_abs() as u32;
-            if let Some(entry) = self.home_base_material.get_mut(&definition_id) {
-                if *entry <= decrease {
-                    // C4Player::Buy calls DecreaseIDCount(id, false): the
-                    // C4IDList slot survives at zero so the permanent Buy
-                    // menu keeps its row (C4Player.cpp:850-852;
-                    // C4IDList.cpp:121-137).
-                    *entry = 0;
-                    0
-                } else {
-                    *entry -= decrease;
-                    *entry
-                }
-            } else {
-                0
-            }
-        }
+            current.saturating_add(delta).max(0)
+        };
+        let add_new = delta != 0
+            || self
+                .home_base_material_entries
+                .iter()
+                .any(|(id, _)| id == &definition_id);
+        set_ordered_id_count(
+            &mut self.home_base_material_entries,
+            definition_id,
+            updated,
+            add_new,
+        );
+        self.home_base_material =
+            unsigned_first_count_projection(&self.home_base_material_entries);
+        u32::try_from(updated).unwrap_or(0)
     }
 
     pub fn adjust_home_base_production(&mut self, definition_id: DefinitionId, delta: i32) -> u32 {
-        if delta >= 0 {
-            let entry = self
-                .home_base_production
-                .entry(definition_id.clone())
-                .or_insert(0);
-            let added = delta as u32;
-            *entry = entry.saturating_add(added);
-            if *entry == 0 {
-                self.home_base_production.remove(&definition_id);
-                0
-            } else {
-                *entry
-            }
+        let current = ordered_id_count(&self.home_base_production_entries, &definition_id, 0);
+        let updated = current.max(0).saturating_add(delta).max(0);
+        if updated == 0 {
+            delete_ordered_id(&mut self.home_base_production_entries, &definition_id);
         } else {
-            let decrease = delta.saturating_abs() as u32;
-            if let Some(entry) = self.home_base_production.get_mut(&definition_id) {
-                if *entry <= decrease {
-                    self.home_base_production.remove(&definition_id);
-                    0
-                } else {
-                    *entry -= decrease;
-                    *entry
-                }
-            } else {
-                0
-            }
+            set_ordered_id_count(
+                &mut self.home_base_production_entries,
+                definition_id,
+                updated,
+                true,
+            );
         }
+        self.home_base_production =
+            unsigned_first_count_projection(&self.home_base_production_entries);
+        u32::try_from(updated).unwrap_or(0)
     }
 
     pub fn advance_home_base_production(&mut self) -> bool {
@@ -1660,30 +2040,41 @@ impl Player {
         self.production_delay = 0;
         self.production_unit = self.production_unit.wrapping_add(1);
         let mut changed = false;
-        for (definition_id, &count) in self.home_base_production.iter() {
-            if count == 0 {
+        let production = self.home_base_production_entries.clone();
+        for (definition_id, count) in production {
+            if count <= 0 {
                 continue;
             }
-            let frequency = (11_i32 - count as i32).clamp(1, 10) as u32;
+            let frequency = (11_i32 - count).clamp(1, 10) as u32;
             if frequency == 0 {
                 continue;
             }
             if self.production_unit % frequency == 0 {
-                let entry = self
-                    .home_base_material
-                    .entry(definition_id.clone())
-                    .or_insert(0);
-                if *entry < MAX_HOME_BASE_MATERIAL {
-                    *entry += 1;
+                let current = ordered_id_count(
+                    &self.home_base_material_entries,
+                    &definition_id,
+                    0,
+                );
+                if current < MAX_HOME_BASE_MATERIAL as i32 {
+                    set_ordered_id_count(
+                        &mut self.home_base_material_entries,
+                        definition_id,
+                        current.saturating_add(1),
+                        true,
+                    );
                     changed = true;
                 }
             }
+        }
+        if changed {
+            self.home_base_material =
+                unsigned_first_count_projection(&self.home_base_material_entries);
         }
         changed
     }
 
     pub fn sync_home_base_material_from(&mut self, other: &Player) {
-        self.home_base_material = other.home_base_material.clone();
+        self.set_home_base_material_entries(other.home_base_material_entries.clone());
     }
 
     pub fn production_delay(&self) -> u32 {
@@ -1863,18 +2254,12 @@ impl PlayerConfig {
     }
 
     pub fn with_home_base_material(mut self, material: HashMap<DefinitionId, u32>) -> Self {
-        self.home_base_material = material
-            .into_iter()
-            .filter(|(_, count)| *count > 0)
-            .collect();
+        self.home_base_material = material;
         self
     }
 
     pub fn with_home_base_production(mut self, production: HashMap<DefinitionId, u32>) -> Self {
-        self.home_base_production = production
-            .into_iter()
-            .filter(|(_, count)| *count > 0)
-            .collect();
+        self.home_base_production = production;
         self
     }
 
@@ -1969,6 +2354,84 @@ mod tests {
             ..PlayerState::default()
         };
         assert_eq!(Player::from_state(evaluated.clone()).to_state(), evaluated);
+    }
+
+    #[test]
+    fn ordered_player_id_lists_preserve_signed_counts_duplicates_and_first_match_mutation() {
+        let state = PlayerState {
+            id: 2,
+            knowledge_entries: vec![("DUPL".into(), 0), ("DUPL".into(), 7)],
+            magic_entries: vec![("FIRE".into(), -3), ("WIND".into(), 0)],
+            home_base_material_entries: vec![("ZINC".into(), -5), ("BRIK".into(), 0)],
+            home_base_production_entries: vec![("ROCK".into(), 11), ("ROCK".into(), 2)],
+            hostility_entries: vec![(4, 0), (4, 9), (2, -1)],
+            ..PlayerState::default()
+        };
+        let json = serde_json::to_string(&state).expect("ordered player state serializes");
+        let decoded: PlayerState =
+            serde_json::from_str(&json).expect("ordered player state deserializes");
+        let mut player = Player::from_state(decoded);
+        let restored = player.to_state();
+
+        assert_eq!(restored.knowledge_entries, state.knowledge_entries);
+        assert_eq!(restored.magic_entries, state.magic_entries);
+        assert_eq!(
+            restored.home_base_material_entries,
+            state.home_base_material_entries
+        );
+        assert_eq!(
+            restored.home_base_production_entries,
+            state.home_base_production_entries
+        );
+        assert_eq!(restored.hostility_entries, state.hostility_entries);
+        assert!(!player.is_hostile_towards(3));
+        assert!(player.is_hostile_towards(1));
+
+        player.grant_knowledge("DUPL".into());
+        assert_eq!(
+            player.knowledge_entries(),
+            &[("DUPL".into(), 1), ("DUPL".into(), 7)]
+        );
+        player.revoke_knowledge(&"DUPL".into());
+        assert_eq!(player.knowledge_entries(), &[("DUPL".into(), 7)]);
+
+        player.set_hostile_towards(8, false);
+        assert_eq!(player.hostility_entries().last(), Some(&(9, 0)));
+        assert!(!player.is_hostile_towards(8));
+    }
+
+    #[test]
+    fn legacy_player_list_projections_migrate_to_ordered_backing() {
+        let legacy: PlayerState = serde_json::from_str(
+            r#"{
+                "id": 3,
+                "knowledge": ["PLAN", "BRIK"],
+                "magic": ["WIND", "FIRE"],
+                "home_base_material": {"ZINC": 0, "BRIK": 4},
+                "home_base_production": {"ROCK": 2},
+                "hostility": [7, 1]
+            }"#,
+        )
+        .expect("legacy player state decodes");
+        let migrated = Player::from_state(legacy).to_state();
+
+        assert_eq!(
+            migrated.knowledge_entries,
+            vec![("PLAN".into(), 1), ("BRIK".into(), 1)]
+        );
+        assert_eq!(
+            migrated.magic_entries,
+            vec![("WIND".into(), 1), ("FIRE".into(), 1)]
+        );
+        assert_eq!(
+            migrated.home_base_material_entries,
+            vec![("BRIK".into(), 4), ("ZINC".into(), 0)]
+        );
+        assert_eq!(
+            migrated.home_base_production_entries,
+            vec![("ROCK".into(), 2)]
+        );
+        assert_eq!(migrated.hostility_entries, vec![(8, 1), (2, 1)]);
     }
 
     #[test]
