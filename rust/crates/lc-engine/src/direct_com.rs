@@ -1609,8 +1609,8 @@ impl Engine {
 
     /// Player-menu execution notices refill-target content-count changes
     /// after objects have run and performs the shared 35-tick refill
-    /// (C4Player.cpp:206-212; C4ObjectMenu.cpp:448-459). Rebuild internal
-    /// Activate/Get/Contents menus before the AutoContextMenu tail.
+    /// (C4Player.cpp:206-212; C4ObjectMenu.cpp:448-459). Rebuild every
+    /// refill-driven internal object menu before the AutoContextMenu tail.
     fn refill_player_object_menu(&mut self, owner: i32) -> Result<(), EngineError> {
         if self
             .players
@@ -1630,18 +1630,26 @@ impl Engine {
             return Ok(());
         };
         let identification = match menu.identification {
+            Value::Int(4) => 4,
+            Value::Int(5) => 5,
             Value::Int(6) => 6,
             Value::Int(13) => 13,
+            Value::Int(14) => 14,
             Value::Int(18) => 18,
             _ => return Ok(()),
         };
-        let Some(container_id) = menu.refill_object else {
+        let refill_object = menu.refill_object;
+        let previous_count = menu.refill_object_contents_count;
+        let context_has_command_object = menu.command_object.is_some();
+        let Some(container_id) = refill_object else {
+            if periodic_refill {
+                let _ = self.close_object_menu(crew_id, true)?;
+            }
             return Ok(());
         };
-        let previous_count = menu.refill_object_contents_count;
         let Some(container_index) = self.find_object_index(container_id) else {
             if periodic_refill {
-                let _ = self.close_object_menu(crew_id, false)?;
+                let _ = self.close_object_menu(crew_id, true)?;
             }
             return Ok(());
         };
@@ -1649,12 +1657,46 @@ impl Engine {
         if !periodic_refill && current_count == previous_count {
             return Ok(());
         }
+        // DoRefillInternal reports failure for these mode-specific invalid
+        // states; C4Menu::Execute then closes directly, without consulting a
+        // user-menu cancellation callback (C4ObjectMenu.cpp:207-242,328-334;
+        // C4Menu.cpp:990-999).
+        let refill_fails = match identification {
+            4 => {
+                !self.base_buy_enabled
+                    || !self
+                        .players
+                        .contains_key(&self.objects[container_index].state.base)
+            }
+            5 => !self.base_sell_enabled,
+            14 => !context_has_command_object,
+            _ => false,
+        };
+        if refill_fails {
+            let _ = self.close_object_menu(crew_id, true)?;
+            return Ok(());
+        }
         match identification {
+            4 => self.refill_base_buy_menu(crew_index, container_index)?,
+            5 => self.refill_base_sell_menu(crew_index, container_index)?,
             6 => self.open_activate_menu(crew_index, container_index)?,
             13 | 18 => {
                 self.open_container_contents_menu(crew_index, container_index, identification)?;
             }
-            _ => unreachable!("filtered internal object-menu id"),
+            14 => self.refill_context_menu(crew_index, container_index, current_count)?,
+            _ => unreachable!("filtered refill-driven object-menu id"),
+        }
+        // C4ObjectMenu::Execute stores the observed count before invoking
+        // the inherited refill. Store it on the still-matching menu after
+        // each non-Context helper returns; Context does the write inside its
+        // token-guarded frozen refill so callback-replaced menus stay clean.
+        if identification != 14 {
+            if let Some(menu) = self.objects[crew_index].state.menu.as_mut().filter(|menu| {
+                menu.identification == Value::Int(identification)
+                    && menu.refill_object == Some(container_id)
+            }) {
+                menu.refill_object_contents_count = current_count;
+            }
         }
         Ok(())
     }
@@ -1774,7 +1816,7 @@ impl Engine {
         else {
             return;
         };
-        if menu.selection == -1 && item.selectable {
+        if menu.internal_refill_token == 0 && menu.selection == -1 && item.selectable {
             menu.selection = menu.items.len() as i32;
         }
         menu.items.push(item);
@@ -2316,6 +2358,37 @@ impl Engine {
         base_index: usize,
         permanent: bool,
     ) -> Result<(), EngineError> {
+        self.build_context_menu(crew_index, base_index, permanent, false, 0)
+    }
+
+    fn refill_context_menu(
+        &mut self,
+        crew_index: usize,
+        base_index: usize,
+        observed_contents_count: i32,
+    ) -> Result<(), EngineError> {
+        let permanent = self.objects[crew_index]
+            .state
+            .menu
+            .as_ref()
+            .is_some_and(|menu| menu.permanent);
+        self.build_context_menu(
+            crew_index,
+            base_index,
+            permanent,
+            true,
+            observed_contents_count,
+        )
+    }
+
+    fn build_context_menu(
+        &mut self,
+        crew_index: usize,
+        base_index: usize,
+        permanent: bool,
+        continue_existing: bool,
+        observed_contents_count: i32,
+    ) -> Result<(), EngineError> {
         const C4MN_ITEM_NO_COUNT: i32 = 12_345_678;
         let crew_id = self.objects[crew_index].id;
         let crew_owner = self.objects[crew_index].state.owner;
@@ -2359,37 +2432,62 @@ impl Engine {
             text_display_progress: -1,
         };
 
-        // ActivateMenu closes and initializes C4MN_Context before Refill
-        // evaluates any scripted conditions. Keep the live menu installed
-        // throughout the build so GetMenu/AddMenuItem/SelectMenuItem observe
-        // the same partially populated menu as C++.
-        let _ = self.close_object_menu(crew_id, true)?;
-        let Some(crew_index) = self.find_object_index(crew_id) else {
-            return Ok(());
+        let continuing_menu = continue_existing
+            .then(|| self.objects[crew_index].state.menu.clone())
+            .flatten()
+            .filter(|menu| {
+                menu.identification == Value::Int(14)
+                    && menu.refill_object == Some(base_id)
+            });
+        let (refill_token, previous_token) = if let Some(mut menu) = continuing_menu {
+            // DoRefillInternal uses ClearItems(false): the same menu shell and
+            // its current Selection remain live while conditions run. The
+            // token models the frozen window: row insertion must not select
+            // the first item until RefillInternal's final AdjustSelection.
+            let previous_token = menu.internal_refill_token;
+            let refill_token = next_internal_object_menu_refill_token();
+            menu.internal_refill_token = refill_token;
+            menu.items.clear();
+            self.objects[crew_index].state.menu = Some(menu);
+            (refill_token, previous_token)
+        } else {
+            if continue_existing {
+                return Ok(());
+            }
+            // ActivateMenu closes and initializes C4MN_Context before Refill
+            // evaluates any scripted conditions. Keep the live menu installed
+            // throughout the build so GetMenu/AddMenuItem/SelectMenuItem
+            // observe the same partially populated menu as C++.
+            let _ = self.close_object_menu(crew_id, true)?;
+            let Some(crew_index) = self.find_object_index(crew_id) else {
+                return Ok(());
+            };
+            let refill_token = next_internal_object_menu_refill_token();
+            self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
+                caption,
+                symbol_id: base_definition.clone(),
+                title_symbol: crate::ObjectMenuSymbol::default(),
+                identification: Value::Int(14),
+                style: 1,
+                equal_item_height: false,
+                permanent,
+                extra: crate::ObjectMenuExtra::default(),
+                extra_data: 0,
+                internal_refill_token: refill_token,
+                selection: -1,
+                user_menu: false,
+                command_object: Some(crew_id),
+                scenario_callbacks: false,
+                refill_object: Some(base_id),
+                refill_object_contents_count: 0,
+                items: Vec::new(),
+                columns: 1,
+                lines: 0,
+                text_progressing: false,
+                decoration: None,
+            });
+            (refill_token, 0)
         };
-        self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
-            caption,
-            symbol_id: base_definition.clone(),
-            title_symbol: crate::ObjectMenuSymbol::default(),
-            identification: Value::Int(14),
-            style: 1,
-            equal_item_height: false,
-            permanent,
-            extra: crate::ObjectMenuExtra::default(),
-            extra_data: 0,
-            internal_refill_token: 0,
-            selection: -1,
-            user_menu: false,
-            command_object: Some(crew_id),
-            scenario_callbacks: false,
-            refill_object: Some(base_id),
-            refill_object_contents_count: 0,
-            items: Vec::new(),
-            columns: 1,
-            lines: 0,
-            text_progressing: false,
-            decoration: None,
-        });
 
         let crew_in_base = self.objects[crew_index].state.container == Some(base_id);
         let crew_pushing_base = self.object_procedure(crew_index) == ActionProcedure::Push
@@ -2562,6 +2660,22 @@ impl Engine {
         }
         for item in items {
             self.add_native_context_menu_item(crew_id, item);
+        }
+        if let Some(menu) = self.objects[crew_index].state.menu.as_mut().filter(|menu| {
+            menu.identification == Value::Int(14)
+                && menu.internal_refill_token == refill_token
+        }) {
+            // RefillInternal's final AdjustSelection uses the selection
+            // left by any refill-time callback, not the pre-refill value.
+            menu.selection = internal_refilled_object_menu_selection(
+                &menu.items,
+                Some(menu.selection),
+                None,
+            );
+            if continue_existing && menu.refill_object == Some(base_id) {
+                menu.refill_object_contents_count = observed_contents_count;
+            }
+            menu.internal_refill_token = previous_token;
         }
         Ok(())
     }
@@ -4479,14 +4593,34 @@ impl Engine {
         crew_index: usize,
         base_index: usize,
     ) -> Result<(), EngineError> {
+        self.build_base_buy_menu(crew_index, base_index, false)
+    }
+
+    fn refill_base_buy_menu(
+        &mut self,
+        crew_index: usize,
+        base_index: usize,
+    ) -> Result<(), EngineError> {
+        self.build_base_buy_menu(crew_index, base_index, true)
+    }
+
+    fn build_base_buy_menu(
+        &mut self,
+        crew_index: usize,
+        base_index: usize,
+        continue_existing: bool,
+    ) -> Result<(), EngineError> {
         let crew_id = self.objects[crew_index].id;
+        let base_id = self.objects[base_index].id;
         let previous_selection = self.objects[crew_index]
             .state
             .menu
             .as_ref()
-            .filter(|menu| menu.identification == Value::Int(4))
+            .filter(|menu| {
+                menu.identification == Value::Int(4)
+                    && (!continue_existing || menu.refill_object == Some(base_id))
+            })
             .map(|menu| menu.selection);
-        let base_id = self.objects[base_index].id;
         let base_player = self.objects[base_index].state.base;
         let base_owner = self.objects[base_index].state.owner;
         let material = self
@@ -4543,6 +4677,17 @@ impl Engine {
             let last = i32::try_from(items.len() - 1).unwrap_or(i32::MAX);
             previous_selection.unwrap_or(0).clamp(0, last)
         };
+
+        if continue_existing {
+            if let Some(menu) = self.objects[crew_index].state.menu.as_mut().filter(|menu| {
+                menu.identification == Value::Int(4)
+                    && menu.refill_object == Some(base_id)
+            }) {
+                menu.items = items;
+                menu.selection = selection;
+            }
+            return Ok(());
+        }
 
         let _ = self.close_object_menu(crew_id, true)?;
         let Some(crew_index) = self.find_object_index(crew_id) else {
@@ -4685,13 +4830,34 @@ impl Engine {
         crew_index: usize,
         base_index: usize,
     ) -> Result<(), EngineError> {
+        self.build_base_sell_menu(crew_index, base_index, false)
+    }
+
+    fn refill_base_sell_menu(
+        &mut self,
+        crew_index: usize,
+        base_index: usize,
+    ) -> Result<(), EngineError> {
+        self.build_base_sell_menu(crew_index, base_index, true)
+    }
+
+    fn build_base_sell_menu(
+        &mut self,
+        crew_index: usize,
+        base_index: usize,
+        continue_existing: bool,
+    ) -> Result<(), EngineError> {
         const CATEGORY_TRADE_LIVING: i32 = 1 << 16;
         let crew_id = self.objects[crew_index].id;
+        let base_id = self.objects[base_index].id;
         let (previous_selection, selected_definition) = self.objects[crew_index]
             .state
             .menu
             .as_ref()
-            .filter(|menu| menu.identification == Value::Int(5))
+            .filter(|menu| {
+                menu.identification == Value::Int(5)
+                    && (!continue_existing || menu.refill_object == Some(base_id))
+            })
             .map(|menu| {
                 let selected_definition = usize::try_from(menu.selection)
                     .ok()
@@ -4700,7 +4866,6 @@ impl Engine {
                 (Some(menu.selection), selected_definition)
             })
             .unwrap_or((None, None));
-        let base_id = self.objects[base_index].id;
         let base_owner = self.objects[base_index].state.owner;
         let base_definition = self.objects[base_index].definition_id.clone();
         let contents = self.objects[base_index].state.contents.clone();
@@ -4769,6 +4934,16 @@ impl Engine {
             .get(&base_definition)
             .map(|definition| definition.name().to_string())
             .unwrap_or_else(|| base_definition.clone());
+        if continue_existing {
+            if let Some(menu) = self.objects[crew_index].state.menu.as_mut().filter(|menu| {
+                menu.identification == Value::Int(5)
+                    && menu.refill_object == Some(base_id)
+            }) {
+                menu.items = items;
+                menu.selection = selection;
+            }
+            return Ok(());
+        }
         let _ = self.close_object_menu(crew_id, true)?;
         let Some(crew_index) = self.find_object_index(crew_id) else {
             return Ok(());
@@ -11995,6 +12170,81 @@ public func SellThenReplace(object base)
     }
 
     #[test]
+    fn periodic_refill_updates_buy_material_on_tick_35() {
+        // HomeBaseMaterial is not part of RefillObject's contents count, so
+        // C4Menu's common tick-35 pass is what makes an already-open Buy menu
+        // observe external stock changes (C4Menu.cpp:990-999;
+        // C4ObjectMenu.cpp:207-237,448-459).
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 1);
+        for (id, name) in [("LORY", "Lorry"), ("FLAG", "Flag")] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, name, "#strict\n")
+                        .expect("buy definition compiles"),
+                )
+                .expect("register buy definition");
+        }
+        engine
+            .player_mut(1)
+            .expect("base player")
+            .set_home_base_material_entries(vec![("LORY".into(), 1)]);
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine
+            .open_base_buy_menu(crew_index, hut_index)
+            .expect("open buy menu");
+        // SetRefillObject's immediate refill leaves the contents-count cache
+        // at zero in C++; prime its first Execute before changing material so
+        // this regression isolates the periodic trigger.
+        engine
+            .execute_player_controls()
+            .expect("prime refill-object count");
+
+        engine
+            .player_mut(1)
+            .expect("base player")
+            .set_home_base_material_entries(vec![
+                ("LORY".into(), 4),
+                ("FLAG".into(), 2),
+            ]);
+        engine.frame = 34;
+        engine
+            .execute_player_controls()
+            .expect("run pre-periodic player execute");
+        assert_eq!(engine.frame(), 34);
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("buy menu remains open");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| (item.item_id.as_str(), item.count))
+                .collect::<Vec<_>>(),
+            vec![("LORY", 1)],
+            "HomeBaseMaterial changes wait for the common periodic refill"
+        );
+
+        engine.frame = 35;
+        engine
+            .execute_player_controls()
+            .expect("run tick-35 player execute");
+        assert_eq!(engine.frame(), 35);
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("buy menu remains open");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| (item.item_id.as_str(), item.count))
+                .collect::<Vec<_>>(),
+            vec![("LORY", 4), ("FLAG", 2)]
+        );
+    }
+
+    #[test]
     fn contained_buy_menu_preserves_cpp_home_base_list_order_and_zero_rows() {
         let mut engine = Engine::new();
         let (crew, _) = contained_base_fixture(&mut engine, 1);
@@ -12396,6 +12646,233 @@ func ContextMissingCondition(menu) {
                 .collect::<Vec<_>>(),
             ["Missing", "Injected", "Native"]
         );
+    }
+
+    #[test]
+    fn periodic_refill_rechecks_context_conditions_on_tick_35() {
+        // Context rows are reconstructed by the common periodic refill, so
+        // their script conditions run again even when the target's contents
+        // count did not change (C4ObjectMenu.cpp:328-435;
+        // C4Menu.cpp:990-999).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "TARG",
+                    "Target",
+                    r#"
+#strict 2
+local enabled, condition_calls;
+func ContextDynamic(menu) {
+    [Dynamic|Condition=ShowDynamic]
+    return 1;
+}
+func ShowDynamic(menu, image) {
+    condition_calls++;
+    return enabled;
+}
+func Enable() {
+    enabled = true;
+    return true;
+}
+"#,
+                )
+                .expect("target compiles"),
+            )
+            .expect("register target");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("register player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("spawn target");
+
+        let menu = open_native_context(&mut engine, crew, target);
+        assert_eq!(menu.identification, Value::Int(14));
+        assert!(!menu.permanent, "mouse-style Context remains nonpermanent");
+        assert!(menu.items.is_empty());
+        let target_index = engine.find_object_index(target).expect("target exists");
+        assert_eq!(
+            engine.objects[target_index]
+                .state
+                .local_vars
+                .get("condition_calls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "Enable", Vec::new())
+                .expect("enable condition"),
+            Value::Bool(true)
+        );
+
+        for _ in 0..34 {
+            engine.tick().expect("advance before tick-35 refill");
+        }
+        assert_eq!(engine.frame(), 34);
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("context menu remains open");
+        assert!(menu.items.is_empty());
+        let target_index = engine.find_object_index(target).expect("target exists");
+        assert_eq!(
+            engine.objects[target_index]
+                .state
+                .local_vars
+                .get("condition_calls"),
+            Some(&Value::Int(1)),
+            "the condition is not polled on ordinary frames"
+        );
+
+        engine.tick().expect("run tick-35 refill");
+        assert_eq!(engine.frame(), 35);
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("context menu remains open");
+        assert!(!menu.permanent);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["Dynamic"]
+        );
+        let target_index = engine.find_object_index(target).expect("target exists");
+        assert_eq!(
+            engine.objects[target_index]
+                .state
+                .local_vars
+                .get("condition_calls"),
+            Some(&Value::Int(2))
+        );
+    }
+
+    #[test]
+    fn periodic_context_refill_preserves_live_shell_and_callback_selection() {
+        // DoRefillInternal clears only the rows. The old selection and every
+        // other menu property stay live while conditions run; a condition's
+        // own SelectMenuItem then feeds the final AdjustSelection pass
+        // (C4ObjectMenu.cpp:328-435; C4Menu.cpp:947-999).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        let mut target_definition = Definition::from_script(
+            "TARG",
+            "Target",
+            r#"
+#strict 2
+local enabled, condition_calls, seen_selection;
+func ContextDynamic(menu) {
+    [Dynamic|Condition=ShowDynamic]
+    return 1;
+}
+func ShowDynamic(menu, image) {
+    condition_calls++;
+    seen_selection = GetMenuSelection(menu);
+    if (enabled) SelectMenuItem(0, menu);
+    return enabled;
+}
+func Enable() {
+    enabled = true;
+    return true;
+}
+"#,
+        )
+        .expect("target compiles");
+        target_definition.set_category(crate::CATEGORY_STRUCTURE);
+        target_definition.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        engine
+            .register_definition(target_definition)
+            .expect("register target");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("register player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("spawn target");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        engine.objects[target_index].state.base = 1;
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(target))
+            .expect("enter target");
+        let _ = open_native_context(&mut engine, crew, target);
+        let target_index = engine.find_object_index(target).expect("target exists");
+        assert_eq!(
+            engine.objects[target_index]
+                .state
+                .local_vars
+                .get("seen_selection"),
+            Some(&Value::Int(-1)),
+            "SetRefillObject's immediate refill is frozen too"
+        );
+        engine
+            .execute_player_controls()
+            .expect("prime refill-object count");
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let menu = engine.objects[crew_index]
+            .state
+            .menu
+            .as_mut()
+            .expect("context menu exists");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["Contents", "Buy", "Sell", "Exit"]
+        );
+        menu.selection = -1;
+        menu.caption = "Script-mutated caption".to_string();
+        menu.columns = 3;
+        menu.lines = 2;
+        menu.text_progressing = true;
+        let target_index = engine.find_object_index(target).expect("target exists");
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "Enable", Vec::new())
+                .expect("enable condition"),
+            Value::Bool(true)
+        );
+
+        engine.frame = 34;
+        engine
+            .execute_player_controls()
+            .expect("run pre-periodic player execute");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        assert_eq!(
+            engine.objects[target_index]
+                .state
+                .local_vars
+                .get("condition_calls"),
+            Some(&Value::Int(2))
+        );
+
+        engine.frame = 35;
+        engine
+            .execute_player_controls()
+            .expect("run tick-35 player execute");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        let locals = &engine.objects[target_index].state.local_vars;
+        assert_eq!(locals.get("condition_calls"), Some(&Value::Int(3)));
+        assert_eq!(
+            locals.get("seen_selection"),
+            Some(&Value::Int(-1)),
+            "the frozen refill does not auto-select its first native row"
+        );
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("context menu remains open");
+        assert_eq!(menu.selection, 0, "callback selection survives AdjustSelection");
+        assert_eq!(menu.caption, "Script-mutated caption");
+        assert_eq!((menu.columns, menu.lines), (3, 2));
+        assert!(menu.text_progressing);
+        assert!(!menu.permanent);
     }
 
     #[test]
@@ -14648,6 +15125,63 @@ protected func RejectCollect(id definition, object item)
         );
         assert!(engine.pending_menu_requests.is_empty());
         assert_eq!(engine.object_snapshot(crew).expect("crew").container, Some(hut));
+    }
+
+    #[test]
+    fn contents_count_change_refills_sell_menu_before_tick_35() {
+        // C4ObjectMenu::Execute marks every RefillObject menu dirty as soon
+        // as the target's total contents count changes, independently of the
+        // shared 35-tick timer (C4ObjectMenu.cpp:448-459).
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 1);
+        let mut item =
+            Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles");
+        item.set_category(crate::CATEGORY_OBJECT);
+        engine.register_definition(item).expect("register item");
+        engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(hut))
+            .expect("spawn first item");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine
+            .open_base_sell_menu(crew_index, hut_index)
+            .expect("open sell menu");
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("sell menu opens")
+                .items[0]
+                .count,
+            1
+        );
+        // The first ordinary frame observes SetRefillObject's zero-valued
+        // cache. Add the second object only after that count is established.
+        engine.tick().expect("prime refill-object count");
+        assert_eq!(engine.frame(), 1);
+        engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(hut))
+            .expect("spawn second item");
+
+        engine
+            .execute_player_controls()
+            .expect("run same-frame contents-count check");
+        assert_eq!(engine.frame(), 1, "the immediate refill advances no frame");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("sell menu remains open");
+        assert_eq!(menu.identification, Value::Int(5));
+        let item = menu
+            .items
+            .iter()
+            .find(|item| item.item_id == "ITEM")
+            .expect("sale item row survives the separate contained-crew row");
+        assert_eq!(item.count, 2);
+        assert_eq!(
+            menu.refill_object_contents_count, 3,
+            "the cache includes the contained crew and both sale objects"
+        );
     }
 
     #[test]
