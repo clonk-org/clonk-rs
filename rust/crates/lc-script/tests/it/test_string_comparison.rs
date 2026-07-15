@@ -98,3 +98,17 @@ fn textual_ne_compares_nil_as_empty_string() {
         Value::Bool(false)
     );
 }
+
+#[test]
+fn keyword_string_equality_accepts_a_real_host_returned_string() {
+    let mut engine = Engine::new();
+    engine.register_host_function("GetAction", |_| Ok(Value::String("Walk".to_string())));
+    engine
+        .load_script("func Test() { return GetAction() eq \"Walk\"; }")
+        .expect("script loads");
+
+    assert_eq!(
+        engine.call("Test", &[]).expect("comparison succeeds"),
+        Value::Bool(true)
+    );
+}
