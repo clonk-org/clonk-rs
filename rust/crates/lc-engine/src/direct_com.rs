@@ -6940,6 +6940,108 @@ mod tests {
         engine.register_definition(definition).expect("register");
     }
 
+    fn dig_double_linekit_consumption_fixture(
+        swap_contents: bool,
+    ) -> (Engine, ObjectId, ObjectId, ObjectId) {
+        let mut engine = Engine::new();
+        let mut clonk = Definition::from_script(
+            "CLNK",
+            "Clonk",
+            r#"#strict 2
+local own_activations;
+protected func Activate()
+{
+  own_activations++;
+  return(1);
+}
+"#,
+        )
+        .expect("clonk compiles");
+        clonk.configure_actions(Some("Walk".to_owned()), clonk_actions());
+        clonk.set_movement_profile(MovementProfile::default());
+        clonk.set_physical(PhysicalInfo {
+            can_chop: 1,
+            can_construct: 1,
+            ..Default::default()
+        });
+        engine.register_definition(clonk).expect("clonk registers");
+        engine
+            .register_definition(
+                Definition::from_script("LNKT", "Linekit", "#strict 2\n")
+                    .expect("linekit compiles"),
+            )
+            .expect("linekit registers");
+        if swap_contents {
+            engine
+                .register_definition(
+                    Definition::from_script(
+                        "SWAP",
+                        "Swap item",
+                        r#"#strict 2
+public func Activate(object clonk)
+{
+  CreateContents(LNKT, clonk);
+  RemoveObject();
+  return(0);
+}
+"#,
+                    )
+                    .expect("swap item compiles"),
+                )
+                .expect("swap item registers");
+        }
+        let mut tree = Definition::from_script("TREE", "Tree", "#strict 2\n")
+            .expect("tree compiles");
+        tree.set_chopable(true);
+        tree.set_category(crate::CATEGORY_STATIC_BACK);
+        tree.set_shape_rect(Some(crate::DefinitionRect::new(-10, -20, 20, 40)));
+        engine.register_definition(tree).expect("tree registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player registers");
+        let crew = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_position(Vector2::new(100, 100))
+                    .with_action(ActionState::new("Dig")),
+            )
+            .expect("clonk spawns");
+        engine.select_crew(1, [crew]).expect("clonk selected");
+        engine.set_crew_cursor(1, Some(crew)).expect("cursor set");
+        let tree = engine
+            .spawn_object(
+                SpawnConfig::new("TREE")
+                    .with_position(Vector2::new(100, 100))
+                    .with_category(crate::CATEGORY_STATIC_BACK)
+                    .with_loaded(true),
+            )
+            .expect("tree spawns");
+        let initial_contents = engine
+            .spawn_object(
+                SpawnConfig::new(if swap_contents { "SWAP" } else { "LNKT" })
+                    .with_container(crew),
+            )
+            .expect("initial contents spawn");
+        let position = engine
+            .object_snapshot(crew)
+            .expect("clonk remains live")
+            .position;
+        assert!(engine
+            .at_object(position, ocf::CHOP, Some(crew))
+            .is_some_and(|(_, id, object_ocf)| {
+                id == tree && object_ocf & ocf::CHOP != 0
+            }));
+        assert!(
+            engine
+                .at_object(position, ocf::LINE_CONSTRUCT, Some(crew))
+                .is_none(),
+            "line construction must fail while the independent Chop target remains valid"
+        );
+        (engine, crew, tree, initial_contents)
+    }
+
     fn spawn_crew(engine: &mut Engine, def: &str, owner: i32) -> ObjectId {
         let crew = engine
             .spawn_object(
@@ -8378,6 +8480,88 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
             snapshot.damage, 1,
             "the contents object's Activate ran (C4ObjectCom.cpp:537-539)"
         );
+    }
+
+    #[test]
+    fn dig_double_linekit_failure_never_falls_through_to_chop_or_own_activate() {
+        // The carried LNKT branch returns unconditionally after
+        // ObjectComLineConstruction, even when no structure can start a line
+        // and the helper returns false (C4ObjectCom.cpp:542-547).
+        let (mut engine, crew, tree, linekit) =
+            dig_double_linekit_consumption_fixture(false);
+        let crew_index = engine.find_object_index(crew).expect("clonk remains live");
+
+        engine
+            .object_com_dig_double(crew_index)
+            .expect("DigDouble returns normally");
+
+        let crew_index = engine.find_object_index(crew).expect("clonk remains live");
+        let crew_state = &engine.objects[crew_index];
+        assert_eq!(crew_state.state.action.name, "Walk");
+        assert!(crew_state.state.contents.contains(&linekit));
+        assert!(crew_state.commands.is_empty(), "no Chop command queued");
+        assert!(engine.object_snapshot(tree).is_some(), "tree is not chopped");
+
+        let (mut no_tree, crew, tree, _linekit) =
+            dig_double_linekit_consumption_fixture(false);
+        no_tree
+            .assign_object_removal(tree)
+            .expect("remove the independent Chop target");
+        let crew_index = no_tree.find_object_index(crew).expect("clonk remains live");
+        no_tree
+            .object_com_dig_double(crew_index)
+            .expect("DigDouble without a tree returns normally");
+        let crew_index = no_tree.find_object_index(crew).expect("clonk remains live");
+        assert!(
+            no_tree.objects[crew_index]
+                .state
+                .local_vars
+                .get("own_activations")
+                .is_none(),
+            "failed line construction does not fall through to own Activate"
+        );
+    }
+
+    #[test]
+    fn dig_double_rechecks_the_first_content_after_activate_replaces_it_with_linekit() {
+        // The original first content removes itself after creating LNKT in
+        // the Clonk. C++ re-reads Contents.GetObject() before the linekit
+        // branch instead of testing the stale pre-Activate pointer
+        // (C4ObjectCom.cpp:537-547).
+        let (mut engine, crew, _tree, replaced) =
+            dig_double_linekit_consumption_fixture(true);
+        let crew_index = engine.find_object_index(crew).expect("clonk remains live");
+
+        engine
+            .object_com_dig_double(crew_index)
+            .expect("DigDouble returns normally");
+
+        assert!(
+            engine
+                .find_object_index(replaced)
+                .is_none_or(|index| engine.objects[index].destroyed),
+            "the activating content removes itself"
+        );
+        let crew_index = engine.find_object_index(crew).expect("clonk remains live");
+        let crew_state = &engine.objects[crew_index];
+        assert_eq!(
+            crew_state.state.action.name, "Walk",
+            "the freshly created LNKT runs ObjectComLineConstruction's Stand entry"
+        );
+        assert!(crew_state.commands.is_empty(), "no Chop command queued");
+        assert!(
+            crew_state
+                .state
+                .local_vars
+                .get("own_activations")
+                .is_none(),
+            "fresh LNKT consumes DigDouble before own Activate"
+        );
+        assert!(crew_state.state.contents.iter().any(|id| {
+            engine.object_snapshot(*id).is_some_and(|object| {
+                object.definition_id == "LNKT" && object.container == Some(crew)
+            })
+        }));
     }
 
     #[test]
