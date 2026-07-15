@@ -13652,6 +13652,145 @@ protected func RejectEntrance(container)
         engine
     }
 
+    fn spawn_push_direction_case(
+        engine: &mut Engine,
+        target_action: &str,
+    ) -> (ObjectId, ObjectId) {
+        let target_script = r#"#strict
+local turn_starts, turn_start_dir;
+public func ReadDirection() { return GetDir(); }
+protected func TurnStart()
+{
+    turn_starts = turn_starts + 1;
+    turn_start_dir = GetDir();
+    return 1;
+}
+"#;
+        let mut target = Definition::from_script("PCDR", "Direction target", target_script)
+            .expect("direction target compiles");
+        target.set_c4_callback_convention(true);
+        target.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        target.set_grab(1);
+        target.set_mass(200);
+        target.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Drive".to_string(),
+                    ActionSpec::default()
+                        .with_directions(2)
+                        .with_turn_action("Turn"),
+                ),
+                (
+                    "Turn".to_string(),
+                    ActionSpec::default()
+                        .with_directions(2)
+                        .with_start_call("TurnStart"),
+                ),
+            ]),
+        );
+        engine
+            .register_definition(target)
+            .expect("direction target registers");
+
+        let target_id = engine
+            .spawn_object(
+                SpawnConfig::new("PCDR")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(10, 0))
+                    .with_action(ActionState::new(target_action))
+                    .with_direction(Direction::Left)
+                    // Raw positive xdir that still rounds to integer zero:
+                    // Push/SetDir must inspect C4Fixed directly.
+                    .with_fixed_velocity(FixedVec2::new(
+                        C4Fixed::from_raw(12_345),
+                        C4Fixed::ZERO,
+                    ))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("direction target spawns");
+        let mut push = ActionState::new("Push");
+        push.target = Some(target_id);
+        let pusher_id = engine
+            .spawn_object(
+                SpawnConfig::new("PCPS")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::ZERO)
+                    .with_action(push)
+                    .with_command_direction(CommandDirection::Right)
+                    .with_loaded(true),
+            )
+            .expect("direction pusher spawns");
+        (pusher_id, target_id)
+    }
+
+    #[test]
+    fn push_keeps_an_idle_targets_direction() {
+        // C4Object::Push calls SetDir from the target's pre-force raw xdir,
+        // but SetDir rejects ActIdle. The positive xdir still receives the
+        // push force; only Action.Dir remains Left/zero.
+        let mut engine = push_containment_engine(true);
+        let (pusher_id, target_id) = spawn_push_direction_case(&mut engine, "Idle");
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
+
+        engine
+            .apply_physics_at_index(pusher_idx)
+            .expect("idle-target push executes");
+
+        let target_idx = engine.find_object_index(target_id).expect("target remains");
+        assert!(engine.objects[target_idx].fixed_velocity.x.val() > 12_345);
+        assert_eq!(engine.objects[target_idx].state.direction, Direction::Left);
+        assert_eq!(
+            engine
+                .call_object_function(target_idx, "ReadDirection", Vec::new())
+                .expect("GetDir reads the idle target"),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn push_runs_an_active_targets_turn_action_once() {
+        // SetDir validates Drive's two directions, runs TurnAction before
+        // assigning the new direction, then Push continues from the live
+        // post-callback velocity.
+        let mut engine = push_containment_engine(true);
+        let (pusher_id, target_id) = spawn_push_direction_case(&mut engine, "Drive");
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
+
+        engine
+            .apply_physics_at_index(pusher_idx)
+            .expect("active-target push executes");
+
+        let target_idx = engine.find_object_index(target_id).expect("target remains");
+        assert_eq!(engine.objects[target_idx].state.action.name, "Turn");
+        assert_eq!(engine.objects[target_idx].state.direction, Direction::Right);
+        assert_eq!(
+            engine.objects[target_idx].state.local_vars.get("turn_starts"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine.objects[target_idx]
+                .state
+                .local_vars
+                .get("turn_start_dir"),
+            Some(&Value::Int(0)),
+            "TurnAction Start observes the old direction"
+        );
+
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher remains");
+        engine
+            .apply_physics_at_index(pusher_idx)
+            .expect("same-facing push executes");
+        let target_idx = engine.find_object_index(target_id).expect("target remains");
+        assert_eq!(
+            engine.objects[target_idx].state.local_vars.get("turn_starts"),
+            Some(&Value::Int(1)),
+            "the TurnAction runs only for the facing change"
+        );
+    }
+
     #[test]
     fn push_inside_action_target_stops_before_force_and_controller_transfer() {
         // DFA_PUSH checks no target first, then whether the PUSHER is inside

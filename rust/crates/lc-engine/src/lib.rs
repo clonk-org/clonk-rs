@@ -33477,7 +33477,7 @@ impl Engine {
         Ok(())
     }
 
-    /// Exact `C4Object::SetDir` gate for direct command paths
+    /// Exact `C4Object::SetDir` gate for direct command/native paths
     /// (C4Object.cpp:4235-4253). Unlike the legacy ExecAction helper above,
     /// this rejects idle/out-of-range directions and uses non-forced
     /// SetActionByName for TurnAction.
@@ -33487,6 +33487,7 @@ impl Engine {
         definition_id: &DefinitionId,
         direction: Direction,
     ) -> Result<(), EngineError> {
+        let object_id = self.objects[idx].id;
         let Some((current_direction, turn_action)) = self
             .definitions
             .get(definition_id)
@@ -33512,7 +33513,9 @@ impl Engine {
                 self.action_with_calls(idx, definition_id, &turn_action)?;
             }
         }
-        self.objects[idx].state.direction = direction;
+        if let Some(idx) = self.find_object_index(object_id) {
+            self.objects[idx].state.direction = direction;
+        }
         Ok(())
     }
 
@@ -35050,40 +35053,52 @@ impl Engine {
         // dforce divides by the LIVE Mass incl. contents (C4Object::Push
         // C4Object.cpp:1770 uses this->Mass; UpdateMass :497-505).
         let live_mass = self.effective_object_mass(target_idx);
-        let (grab, mass, no_horizontal_move) = self
+        let (grab, mass) = self
             .definitions
             .get(&self.objects[target_idx].definition_id)
-            .map(|definition| {
-                (
-                    definition.grab(),
-                    live_mass,
-                    definition.no_horizontal_move(),
-                )
-            })
-            .unwrap_or((0, 0, 0));
+            .map(|definition| (definition.grab(), live_mass))
+            .unwrap_or((0, 0));
         // Grabbing okay, no pushing (C4Object.cpp:1763).
         if grab == 2 {
             return Ok(true);
         }
         // General pushing force vs. object mass (C4Object.cpp:1770).
         let dforce = dforce * 100 / mass.max(1);
+        let target_id = self.objects[target_idx].id;
+        let target_definition_id = self.objects[target_idx].definition_id.clone();
+        let direction = {
+            let target = &mut self.objects[target_idx];
+            // Mobilization check - pre-mobilization zero
+            // (C4Object.cpp:1765-1768): a resting target starts from clean
+            // dirs and pixel-snapped fix.
+            if !target.state.mobile {
+                target.fixed_velocity = FixedVec2::ZERO;
+                target.fixed_position = FixedVec2::new(
+                    itofix(target.state.position.x),
+                    itofix(target.state.position.y),
+                );
+            }
+            // SetDir reads the raw pre-force xdir. End this borrow before the
+            // callback-capable TurnAction transition.
+            if target.fixed_velocity.x < C4Fixed::ZERO {
+                Some(Direction::Left)
+            } else if target.fixed_velocity.x > C4Fixed::ZERO {
+                Some(Direction::Right)
+            } else {
+                None
+            }
+        };
+        if let Some(direction) = direction {
+            self.set_command_action_direction(
+                target_idx,
+                &target_definition_id,
+                direction,
+            )?;
+        }
+        let Some(target_idx) = self.find_object_index(target_id) else {
+            return Ok(false);
+        };
         let target = &mut self.objects[target_idx];
-        // Mobilization check - pre-mobilization zero (C4Object.cpp:1765-1768):
-        // a resting target starts from clean dirs and pixel-snapped fix.
-        if !target.state.mobile {
-            target.fixed_velocity = FixedVec2::ZERO;
-            target.fixed_position = FixedVec2::new(
-                itofix(target.state.position.x),
-                itofix(target.state.position.y),
-            );
-        }
-        // Set dir by the current motion (C4Object.cpp:1772-1773).
-        if target.fixed_velocity.x < C4Fixed::ZERO {
-            target.state.direction = Direction::Left;
-        }
-        if target.fixed_velocity.x > C4Fixed::ZERO {
-            target.state.direction = Direction::Right;
-        }
         // Work towards txdir (C4Object.cpp:1775-1783).
         let mut xdir = target.fixed_velocity.x;
         math::towards(&mut xdir, txdir, dforce);
@@ -35132,6 +35147,11 @@ impl Engine {
         // fixed speed, not on the velocity reached above. ContactCheck
         // refreshes t_contact and runs directional Contact callbacks before
         // the target message and fail-safe Stuck callback.
+        let no_horizontal_move = self
+            .definitions
+            .get(&self.objects[target_idx].definition_id)
+            .map(Definition::no_horizontal_move)
+            .unwrap_or(0);
         if self.frame % 35 == 0 && txdir.is_nonzero() && no_horizontal_move == 0 {
             let target_id = self.objects[target_idx].id;
             let definition_id = self.objects[target_idx].definition_id.clone();
