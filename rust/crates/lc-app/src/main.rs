@@ -62802,27 +62802,6 @@ mod tests {
             300,
             |app| app_tutorial_message_contains(app, "switch to the clonk on the right hill"),
         );
-        advance_app_until(
-            &mut app,
-            "flung valley WOOD lands on the right hill",
-            300,
-            |app| {
-                app.engine.object_snapshot(wood).is_some_and(|object| {
-                    object.container.is_none()
-                        && !object.mobile
-                        && (460..640).contains(&object.position.x)
-                        && (150..290).contains(&object.position.y)
-                })
-            },
-        );
-        let landed = app
-            .engine
-            .object_snapshot(wood)
-            .expect("flung valley WOOD survives on the right hill");
-        assert!(landed.container.is_none());
-        assert!((460..640).contains(&landed.position.x));
-        assert!((150..290).contains(&landed.position.y));
-        assert!(!landed.mobile, "right-hill WOOD must finish its flight");
 
         // Script64 waits for the physical CursorRight selection, then
         // Script65 waits until that exact flung object enters catapult_clnk
@@ -62854,13 +62833,34 @@ mod tests {
             |app| app_tutorial_message_contains(app, "Collect the material you just flung up"),
         );
 
+        // C++ collection is independent of Mobile. With the rotation walk's
+        // fixed-position remainder preserved, WOOD continues through the
+        // collection corridor instead of first stopping inside it.
+        advance_app_until(
+            &mut app,
+            "flung valley WOOD descends into the right-hill collection corridor",
+            120,
+            |app| {
+                app.engine.object_snapshot(wood).is_some_and(|object| {
+                    object.container.is_none()
+                        && (460..640).contains(&object.position.x)
+                        && object.position.y >= 215
+                })
+            },
+        );
+        let wood_x = app
+            .engine
+            .object_snapshot(wood)
+            .expect("flung valley WOOD survives")
+            .position
+            .x;
         let catapult_clonk_x = app
             .engine
             .object_snapshot(catapult_clonk)
             .expect("right-hill CLNK survives")
             .position
             .x;
-        let collect_key = if landed.position.x < catapult_clonk_x {
+        let collect_key = if wood_x < catapult_clonk_x {
             VirtualKeyCode::Z
         } else {
             VirtualKeyCode::C
@@ -63124,12 +63124,13 @@ mod tests {
         );
         advance_app_until(
             &mut app,
-            "twice-flung WOOD settles on the cabin hill",
-            300,
+            "twice-flung WOOD descends into the cabin-hill collection corridor",
+            120,
             |app| {
-                app.engine
-                    .object_snapshot(wood)
-                    .is_some_and(|object| object.container.is_some() || !object.mobile)
+                app.engine.object_snapshot(wood).is_some_and(|object| {
+                    object.container.is_some()
+                        || ((0..220).contains(&object.position.x) && object.position.y >= 75)
+                })
             },
         );
         if app
@@ -63146,7 +63147,7 @@ mod tests {
             let delivered_x = app
                 .engine
                 .object_snapshot(wood)
-                .expect("delivered WOOD survives landing")
+                .expect("delivered WOOD survives")
                 .position
                 .x;
             let collect_key = if delivered_x < constructor_x {
@@ -67701,10 +67702,13 @@ mod tests {
                     object.definition_id == "WIPF" && object.container == Some(lorry)
                 })
                 .count(),
-            4,
-            "corrected C++ ledger lets three nearby WIPFs enter LORY before the first hand delivery"
+            2,
+            "C++ rotation accumulation lets one nearby WIPF enter LORY before the first hand delivery"
         );
-        for delivery in 5..=6 {
+        // While the helper loads the WIPF labeled as stack entry five, one
+        // last surface WIPF reaches LORY under its own C++ movement. The
+        // deterministic ledger is therefore 2 -> 3 -> 4 -> 6.
+        for (delivery, expected_count) in [(3, 3), (4, 4), (5, 6)] {
             let caught = app_tutorial08_catch_and_load_one_wipf(&mut app, clonk, lorry, delivery);
             assert_eq!(
                 app.engine
@@ -67716,8 +67720,8 @@ mod tests {
             );
             assert_eq!(
                 app_tutorial08_wipfs_in_lorry(&app, lorry),
-                delivery,
-                "physical delivery {delivery} grows LORY's WIPF stack exactly once"
+                expected_count,
+                "physical delivery {delivery} follows the C++ LORY stack ledger"
             );
         }
         assert_eq!(

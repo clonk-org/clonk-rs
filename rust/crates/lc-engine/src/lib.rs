@@ -5816,8 +5816,9 @@ impl Object {
                 self.state.shape_vertices = previous_shape_vertices;
                 self.state.position = previous_position;
                 self.state.shape_attach = previous_attach;
-                self.fixed_position =
-                    FixedVec2::from_ints(previous_position.x, previous_position.y);
+                // The rotation walk only restores Shape/r/fix_r on contact;
+                // fix_x/fix_y retain the preceding translation result
+                // (C4Movement.cpp:392-425).
                 self.fixed_rotation = itofix(previous_rotation);
                 if contact.count() == 1 {
                     redirect_force(&mut self.rotation_velocity, &mut self.fixed_velocity.y, -1);
@@ -5828,7 +5829,8 @@ impl Object {
             }
 
             self.state.position = candidate_position;
-            self.fixed_position = FixedVec2::from_ints(candidate_position.x, candidate_position.y);
+            // Successful attached turns may shift integer x/y, but C++ does
+            // not fold that transient Shape.Attach correction into fix_x/y.
         }
         Ok((any_contact, contact_cnat))
     }

@@ -39974,6 +39974,143 @@ protected func Initialize() {
     }
 
     #[test]
+    fn free_rotation_preserves_fractional_translation_accumulator() {
+        let mut definition = simple_definition("Spinner");
+        definition.set_rotateable(360);
+        definition.set_shape_vertices(vec![ObjectVertex::new(2, 0).with_cnat(CNAT_RIGHT)]);
+
+        let mut engine = Engine::with_seed(53);
+        engine.set_landscape(Landscape::flat(80, 60));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let half_pixel = fixed100(50);
+        let velocity = FixedVec2::new(half_pixel, half_pixel);
+        let spinning_start = FixedVec2::from_ints(10, 10);
+        let spinning_id = engine
+            .spawn_object(
+                SpawnConfig::new("Spinner")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(spinning_start)
+                    .with_fixed_velocity(velocity)
+                    .with_rotation_velocity(itofix(1))
+                    .with_mobile(true),
+            )
+            .expect("spinning object spawns");
+        let control_start = FixedVec2::from_ints(40, 10);
+        let control_id = engine
+            .spawn_object(
+                SpawnConfig::new("Spinner")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(40, 10))
+                    .with_fixed_position(control_start)
+                    .with_fixed_velocity(velocity)
+                    .with_mobile(true),
+            )
+            .expect("control object spawns");
+
+        let mut expected_spinning = spinning_start;
+        let mut expected_control = control_start;
+        for _ in 0..4 {
+            engine.tick().expect("tick succeeds");
+            expected_spinning += velocity;
+            expected_control += velocity;
+        }
+
+        let spinning_idx = engine
+            .find_object_index(spinning_id)
+            .expect("spinning object exists");
+        let control_idx = engine
+            .find_object_index(control_id)
+            .expect("control object exists");
+        assert_ne!(engine.objects[spinning_idx].state.rotation, 0);
+        assert_eq!(engine.objects[spinning_idx].fixed_position, expected_spinning);
+        assert_eq!(engine.objects[control_idx].fixed_position, expected_control);
+        assert_eq!(
+            engine.objects[spinning_idx].fixed_position.x - spinning_start.x,
+            engine.objects[control_idx].fixed_position.x - control_start.x
+        );
+        assert_eq!(
+            engine.objects[spinning_idx].fixed_position.y - spinning_start.y,
+            engine.objects[control_idx].fixed_position.y - control_start.y
+        );
+    }
+
+    #[test]
+    fn attached_rotation_shifts_only_integer_position() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut definition = simple_definition("AttachedSpinner");
+        definition.set_rotateable(360);
+        definition.set_shape_vertices(vec![ObjectVertex::new(-30, 0).with_cnat(CNAT_BOTTOM)]);
+        definition.set_contact_density(50);
+
+        let mut engine = Engine::with_seed(59);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(100, 11, Some(earth)));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let fixed_position = FixedVec2::new(
+            itofix(50) + fixed100(25),
+            itofix(10) + fixed100(25),
+        );
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("AttachedSpinner")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50, 10))
+                    .with_fixed_position(fixed_position)
+                    // DoMovement multiplies rdir by five; 0.2 yields one
+                    // contact-aware integer rotation step.
+                    .with_rotation_velocity(fixed100(20))
+                    .with_mobile(true),
+            )
+            .expect("attached spinner spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].frame_t_attach = CNAT_BOTTOM;
+        let definition_id = engine.objects[idx].definition_id.clone();
+        let actions = engine
+            .definitions
+            .get(&definition_id)
+            .expect("definition exists")
+            .action_library()
+            .clone();
+
+        engine
+            .exec_object_movement(idx, &actions, &definition_id, &[])
+            .expect("attached rotation succeeds");
+        assert_eq!(engine.objects[idx].state.rotation, 1);
+        assert_eq!(engine.objects[idx].state.position, Vector2::new(50, 11));
+        assert_eq!(engine.objects[idx].fixed_position, fixed_position);
+
+        // Without another attachment override, the following frame walks the
+        // integer position back toward fixtoi(fix_y), proving that rotation
+        // did not permanently fold its one-pixel correction into fix_y.
+        engine.objects[idx].frame_t_attach = CNAT_NONE;
+        engine.objects[idx].rotation_velocity = C4Fixed::ZERO;
+        engine
+            .exec_object_movement(idx, &actions, &definition_id, &[])
+            .expect("next movement succeeds");
+        assert_eq!(engine.objects[idx].state.position, Vector2::new(50, 10));
+        assert_eq!(engine.objects[idx].fixed_position, fixed_position);
+    }
+
+    #[test]
     fn rotation_steps_rollback_on_shape_contact() {
         let library = MaterialLibrary::parse(
             r#"
@@ -40004,11 +40141,16 @@ protected func Initialize() {
             .register_definition(definition)
             .expect("definition registers");
 
+        let fixed_position = FixedVec2::new(
+            itofix(4) + fixed100(25),
+            itofix(10) + fixed100(25),
+        );
         let id = engine
             .spawn_object(
                 SpawnConfig::new("Wheel")
                     .with_category(CATEGORY_OBJECT)
-                    .with_position(Vector2::new(4, 10)),
+                    .with_position(Vector2::new(4, 10))
+                    .with_fixed_position(fixed_position),
             )
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
@@ -40023,6 +40165,7 @@ protected func Initialize() {
         assert_eq!(engine.objects[idx].fixed_rotation, itofix(0));
         assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
         assert_eq!(engine.objects[idx].state.vertices[0].x, 2);
+        assert_eq!(engine.objects[idx].fixed_position, fixed_position);
     }
 
     #[test]
