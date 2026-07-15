@@ -3924,7 +3924,6 @@ impl Engine {
             })
             .unwrap_or((None, None, false));
         let container_definition = self.objects[container_index].definition_id.clone();
-        let has_entrance = self.objects[container_index].state.ocf & ocf::ENTRANCE != 0;
         let contents = self.objects[container_index].state.contents.clone();
         let refill_object_contents_count = if continuing_refill {
             self.live_contents_count(&contents)
@@ -3943,7 +3942,11 @@ impl Engine {
                 continue;
             };
             let item = &self.objects[item_index];
+            if item.destroyed || !item.state.status.is_active() {
+                continue;
+            }
             let definition_id = item.definition_id.clone();
+            let carryable = item.state.ocf & ocf::CARRYABLE != 0;
             if self
                 .definitions
                 .get(&definition_id)
@@ -3951,14 +3954,70 @@ impl Engine {
             {
                 continue;
             }
-            let all_count = self.live_contents_definition_count(&contents, &definition_id);
-            let carryable = item.state.ocf & ocf::CARRYABLE != 0;
-            let get = carryable || !has_entrance;
+            let mut get = carryable;
+            if identification == 18 {
+                // C4MN_Contents evaluates both downgrades independently on
+                // every refill row; a missing target Entrance overrides them
+                // back to Get only after the callback (C4ObjectMenu.cpp:
+                // 300-308).
+                let collection_limit_reached =
+                    self.find_object_index(crew_id).is_some_and(|crew_index| {
+                        self.definitions
+                            .get(&self.objects[crew_index].definition_id)
+                            .and_then(crate::Definition::collection_limit)
+                            .is_some_and(|limit| {
+                                let contents_count = self.objects[crew_index]
+                                    .state
+                                    .contents
+                                    .iter()
+                                    .filter_map(|object_id| self.find_object_index(*object_id))
+                                    .filter(|&index| {
+                                        self.objects[index].state.status
+                                            != crate::ObjectStatus::Deleted
+                                    })
+                                    .count();
+                                u64::try_from(contents_count).unwrap_or(u64::MAX)
+                                    >= u64::from(limit)
+                            })
+                    });
+                if collection_limit_reached {
+                    get = false;
+                }
+                let reject_collection = if let Some(crew_index) = self.find_object_index(crew_id) {
+                    tolerate_script_error(self.call_object_function(
+                        crew_index,
+                        "RejectCollect",
+                        vec![
+                            Value::C4Id(definition_id.clone()),
+                            compat::object_reference_value(item_id),
+                        ],
+                    ))?
+                    .is_some_and(|value| compat::value_raw_truthy(&value))
+                } else {
+                    false
+                };
+                if reject_collection {
+                    get = false;
+                }
+            }
+            let has_entrance = self.find_object_index(container_id).is_some_and(|index| {
+                self.objects[index].state.ocf & ocf::ENTRANCE != 0
+            });
+            if !has_entrance {
+                get = true;
+            }
+            let all_count = self
+                .find_object_index(container_id)
+                .map(|index| {
+                    self.live_contents_definition_count(
+                        &self.objects[index].state.contents,
+                        &definition_id,
+                    )
+                })
+                .unwrap_or(0);
             let command_name = if get { "Get" } else { "Activate" };
+            let item_name = self.line_construction_object_name(item_id);
             let item_definition = self.definitions.get(&definition_id);
-            let item_name = item_definition
-                .map(|definition| definition.name())
-                .unwrap_or(definition_id.as_str());
             let info_caption = item_definition
                 .and_then(|definition| definition.description())
                 .map(crate::normalize_menu_info_caption)
@@ -11116,6 +11175,325 @@ public func ContextMagic(object caller)
             .expect("permanent contents menu refills");
         assert_eq!(menu.identification, Value::Int(18));
         assert!(menu.items.is_empty());
+    }
+
+    #[test]
+    fn full_clonk_contents_menu_activates_carryable_rows() {
+        // C4MN_Contents downgrades a carryable row to Activate once the menu
+        // Clonk reaches its definition CollectionLimit. C4MN_Get does not
+        // apply that Contents-only gate (C4ObjectMenu.cpp:300-308).
+        let mut engine = Engine::new();
+        register_clonk(
+            &mut engine,
+            "CLNK",
+            "#strict 2\nlocal reject_calls;\nprotected func RejectCollect() { reject_calls++; return(0); }\n",
+        );
+        engine
+            .definitions
+            .get_mut("CLNK")
+            .expect("clonk definition")
+            .set_collection_limit(Some(1));
+        let mut hut =
+            Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        engine.register_definition(hut).expect("register hut");
+        engine
+            .register_definition(
+                Definition::from_script("FILL", "Filler", "#strict\n")
+                    .expect("filler compiles"),
+            )
+            .expect("register filler");
+        let mut cargo =
+            Definition::from_script("CARG", "Cargo", "#strict\n").expect("cargo compiles");
+        cargo.set_category(crate::CATEGORY_OBJECT);
+        cargo.set_collectible(true);
+        engine.register_definition(cargo).expect("register cargo");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        engine
+            .spawn_object(
+                SpawnConfig::new("FILL")
+                    .with_container(crew)
+                    .with_status(crate::ObjectStatus::Inactive),
+            )
+            .expect("fill the collection limit");
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT3"))
+            .expect("spawn hut");
+        let cargo = engine
+            .spawn_object(SpawnConfig::new("CARG").with_container(hut))
+            .expect("spawn cargo");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.entrance_status = true;
+
+        engine
+            .open_container_contents_menu(crew_index, hut_index, 18)
+            .expect("open Contents menu");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("Contents menu exists");
+        let cargo_row = menu
+            .items
+            .iter()
+            .find(|item| item.item_id == "CARG")
+            .expect("Cargo row");
+        assert_eq!(cargo_row.caption, "Activate Cargo");
+        assert_eq!(
+            cargo_row.command,
+            format!(
+                "SetCommand(this, \"Activate\", Object({})) && ExecuteCommand()",
+                cargo.as_u64()
+            )
+        );
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .local_vars
+                .get("reject_calls"),
+            Some(&Value::Int(1)),
+            "RejectCollect still runs after the limit has already downgraded the row"
+        );
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine
+            .open_container_contents_menu(crew_index, hut_index, 13)
+            .expect("open Get menu");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("Get menu exists");
+        let cargo_row = menu
+            .items
+            .iter()
+            .find(|item| item.item_id == "CARG")
+            .expect("Cargo row");
+        assert_eq!(cargo_row.caption, "Get Cargo");
+        assert!(cargo_row.command.contains("\"Get\""));
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .local_vars
+                .get("reject_calls"),
+            Some(&Value::Int(1)),
+            "C4MN_Get skips the Contents-only callback"
+        );
+
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine
+            .open_container_contents_menu(crew_index, hut_index, 18)
+            .expect("reopen Contents menu");
+        let cargo_selection = engine.objects[crew_index]
+            .state
+            .menu
+            .as_ref()
+            .expect("Contents menu exists")
+            .items
+            .iter()
+            .position(|item| item.item_id == "CARG")
+            .expect("Cargo row");
+        engine.objects[crew_index]
+            .state
+            .menu
+            .as_mut()
+            .expect("Contents menu exists")
+            .selection = i32::try_from(cargo_selection).expect("menu selection fits i32");
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("execute Activate row");
+        let cargo_after = engine.object_snapshot(cargo).expect("cargo survives");
+        assert_eq!(cargo_after.container, Some(hut));
+        assert_eq!(
+            cargo_after.command_stack.command_names(),
+            ["Exit"],
+            "the selected row executes C4CMD_Activate on the contained cargo"
+        );
+        engine.tick().expect("execute cargo Exit command");
+        assert_eq!(
+            engine.object_snapshot(cargo).expect("cargo survives").container,
+            None
+        );
+    }
+
+    #[test]
+    fn contents_refill_calls_reject_collect_once_per_visible_row_and_get_skips_it() {
+        let mut engine = Engine::new();
+        register_clonk(
+            &mut engine,
+            "CLNK",
+            r#"#strict 2
+local reject_calls, matching_args, rock_object, flag_object;
+protected func RejectCollect(id definition, object item)
+{
+  reject_calls++;
+  if (GetID(item) == definition) matching_args++;
+  if (definition == ROCK) rock_object = item;
+  if (definition == FLAG) flag_object = item;
+  return definition == FLAG;
+}
+"#,
+        );
+        let mut hut =
+            Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
+        hut.set_category(crate::CATEGORY_STRUCTURE);
+        hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        engine.register_definition(hut).expect("register hut");
+        let mut box_definition =
+            Definition::from_script("BOX1", "Box", "#strict\n").expect("box compiles");
+        box_definition.set_category(crate::CATEGORY_VEHICLE);
+        box_definition.set_grab_put_get(crate::GRAB_PUT_GET_GET);
+        engine
+            .register_definition(box_definition)
+            .expect("register box");
+        for (id, name) in [("ROCK", "Rock"), ("FLAG", "Flag")] {
+            let mut definition =
+                Definition::from_script(id, name, "#strict\n").expect("item compiles");
+            definition.set_category(crate::CATEGORY_OBJECT);
+            definition.set_collectible(true);
+            engine
+                .register_definition(definition)
+                .expect("register item");
+        }
+        let mut no_get =
+            Definition::from_script("NGET", "Hidden", "#strict\n").expect("NoGet compiles");
+        no_get.set_category(crate::CATEGORY_OBJECT);
+        no_get.set_collectible(true);
+        no_get.set_no_get(true);
+        engine
+            .register_definition(no_get)
+            .expect("register NoGet item");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT3"))
+            .expect("spawn hut");
+        engine
+            .spawn_object(SpawnConfig::new("ROCK").with_container(hut))
+            .expect("spawn first rock");
+        let rock = engine
+            .spawn_object(SpawnConfig::new("ROCK").with_container(hut))
+            .expect("spawn representative rock");
+        engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(hut))
+            .expect("spawn first flag");
+        let flag = engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(hut))
+            .expect("spawn representative flag");
+        engine
+            .spawn_object(SpawnConfig::new("NGET").with_container(hut))
+            .expect("spawn NoGet item");
+        let box_target = engine
+            .spawn_object(SpawnConfig::new("BOX1"))
+            .expect("spawn no-entrance box");
+        let boxed_flag = engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(box_target))
+            .expect("spawn boxed flag");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+
+        engine
+            .open_container_contents_menu(crew_index, hut_index, 18)
+            .expect("open Contents menu");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("Contents menu exists");
+        assert_eq!(menu.items.len(), 2, "NoGet is not an eligible row");
+        let rock_row = menu
+            .items
+            .iter()
+            .find(|item| item.item_id == "ROCK")
+            .expect("Rock row");
+        let flag_row = menu
+            .items
+            .iter()
+            .find(|item| item.item_id == "FLAG")
+            .expect("Flag row");
+        assert_eq!(rock_row.caption, "Get Rock");
+        assert!(rock_row.command2.contains("\"Get\""));
+        assert_eq!(flag_row.caption, "Activate Flag");
+        assert!(flag_row.command2.contains("\"Activate\""));
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let locals = &engine.objects[crew_index].state.local_vars;
+        assert_eq!(locals.get("reject_calls"), Some(&Value::Int(2)));
+        assert_eq!(locals.get("matching_args"), Some(&Value::Int(2)));
+        assert_eq!(
+            locals.get("rock_object"),
+            Some(&compat::object_reference_value(rock))
+        );
+        assert_eq!(
+            locals.get("flag_object"),
+            Some(&compat::object_reference_value(flag))
+        );
+
+        engine
+            .execute_player_controls()
+            .expect("periodic Contents refill");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let locals = &engine.objects[crew_index].state.local_vars;
+        assert_eq!(locals.get("reject_calls"), Some(&Value::Int(4)));
+        assert_eq!(locals.get("matching_args"), Some(&Value::Int(4)));
+
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine
+            .open_container_contents_menu(crew_index, hut_index, 13)
+            .expect("open Get menu");
+        engine.execute_player_controls().expect("periodic Get refill");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .local_vars
+                .get("reject_calls"),
+            Some(&Value::Int(4)),
+            "C4MN_Get never calls RejectCollect"
+        );
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("Get menu exists");
+        assert!(menu.items.iter().all(|item| {
+            item.caption.starts_with("Get ")
+                && item.command.contains("\"Get\"")
+                && item.command2.contains("\"Get\"")
+        }));
+
+        let box_index = engine
+            .find_object_index(box_target)
+            .expect("box remains live");
+        engine
+            .open_container_contents_menu(crew_index, box_index, 18)
+            .expect("open no-entrance Contents menu");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("Contents menu exists");
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(menu.items[0].caption, "Get Flag");
+        assert!(menu.items[0]
+            .command
+            .contains(&format!("\"Get\", Object({})", boxed_flag.as_u64())));
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .local_vars
+                .get("reject_calls"),
+            Some(&Value::Int(5)),
+            "RejectCollect runs before a missing Entrance forces the row back to Get"
+        );
     }
 
     #[test]
