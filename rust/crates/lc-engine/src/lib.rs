@@ -11746,6 +11746,101 @@ impl Definition {
         Ok((matches!(value, Value::Bool(true)), outcome, audio, rng))
     }
 
+    /// Run C4Def::GetValue for C4Command::Buy without exposing the host
+    /// helper to script-name shadowing. CalcDefValue and the base's
+    /// CalcBuyValue still execute in the actor's complete live host context.
+    #[allow(clippy::too_many_arguments)]
+    fn command_buy_value(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        item_definition: &str,
+        base_id: ObjectId,
+        buyer: i32,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<
+        (Option<i32>, compat::EffectContextOutcome, AudioRegistry, LcgRng),
+        EngineError,
+    > {
+        let (value, outcome, audio, rng) = self.exec_in_object_context(
+            state,
+            object_id,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            "GetValue",
+            |_script, _cells, _this| {
+                compat::calculated_definition_value(item_definition, Some(base_id), buyer)
+                    .map(|price| price.map(Value::Int).unwrap_or(Value::Nil))
+                    .map_err(Into::into)
+            },
+        )?;
+        let price = match value {
+            Value::Int(value) => Some(value),
+            _ => None,
+        };
+        Ok((price, outcome, audio, rng))
+    }
+
+    /// Invoke the native FnBuy/C4Player::Buy path directly so a script
+    /// function named Buy cannot shadow the engine operation.
+    #[allow(clippy::too_many_arguments)]
+    fn command_buy_item(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        item_definition: &str,
+        buyer: i32,
+        payer: i32,
+        base_id: ObjectId,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<
+        (bool, compat::EffectContextOutcome, AudioRegistry, LcgRng),
+        EngineError,
+    > {
+        let args = [
+            Value::C4Id(item_definition.to_string()),
+            Value::Int(buyer),
+            Value::Int(payer),
+            compat::object_reference_value(base_id),
+            Value::Bool(false),
+        ];
+        let (value, outcome, audio, rng) = self.exec_in_object_context(
+            state,
+            object_id,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            "Buy",
+            |_script, _cells, _this| compat::buy(&args).map_err(Into::into),
+        )?;
+        Ok((matches!(value, Value::Object(_)), outcome, audio, rng))
+    }
+
     /// The shared object-context execution seam: installs the physics/
     /// environment/random/audio guards and the HostObjectContext, runs
     /// `invoke` on the definition script against LIVE local cells
@@ -23503,6 +23598,12 @@ impl Engine {
                             .home_base_material_entries()
                             .to_vec(),
                         knowledge: player.knowledge().cloned().collect(),
+                        hostile_to: self
+                            .players
+                            .keys()
+                            .copied()
+                            .filter(|opponent| player.is_hostile_towards(*opponent))
+                            .collect(),
                     },
                 )
             })
@@ -23798,6 +23899,12 @@ impl Engine {
                             .home_base_material_entries()
                             .to_vec(),
                         knowledge: player.knowledge().cloned().collect(),
+                        hostile_to: self
+                            .players
+                            .keys()
+                            .copied()
+                            .filter(|opponent| player.is_hostile_towards(*opponent))
+                            .collect(),
                     },
                 )
             })
@@ -35802,6 +35909,128 @@ impl Engine {
         Ok(())
     }
 
+    fn call_command_buy_value(
+        &mut self,
+        actor_id: ObjectId,
+        item_definition: &str,
+        base_id: ObjectId,
+        buyer: i32,
+    ) -> Result<Option<i32>, EngineError> {
+        let idx = self
+            .find_object_index(actor_id)
+            .ok_or(EngineError::UnknownObject(actor_id))?;
+        let (definition_id, state_snapshot) = {
+            let object = &self.objects[idx];
+            (object.definition_id.clone(), object.script_state_snapshot())
+        };
+        let definition = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let action_library = definition.action_library().clone();
+        let call = definition.command_buy_value(
+            &state_snapshot,
+            actor_id,
+            item_definition,
+            base_id,
+            buyer,
+            self.rng.clone(),
+            &self.global_effects.clone(),
+            self.physics,
+            self.environment,
+            self.frame,
+            self.host_world_context(),
+            self.game_over_triggered,
+            self.audio_registry.clone(),
+        );
+        let (price, outcome, audio_state, new_rng) = match call {
+            Ok(ok) => ok,
+            Err(error) => {
+                return Err(self.apply_script_error_recovery(
+                    error,
+                    idx,
+                    &action_library,
+                    actor_id,
+                    &definition_id,
+                    false,
+                ));
+            }
+        };
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        self.apply_callback_outcome(
+            idx,
+            outcome,
+            &action_library,
+            actor_id,
+            &definition_id,
+            false,
+        )?;
+        Ok(price)
+    }
+
+    fn call_command_buy_item(
+        &mut self,
+        actor_id: ObjectId,
+        item_definition: &str,
+        buyer: i32,
+        payer: i32,
+        base_id: ObjectId,
+    ) -> Result<bool, EngineError> {
+        let idx = self
+            .find_object_index(actor_id)
+            .ok_or(EngineError::UnknownObject(actor_id))?;
+        let (definition_id, state_snapshot) = {
+            let object = &self.objects[idx];
+            (object.definition_id.clone(), object.script_state_snapshot())
+        };
+        let definition = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let action_library = definition.action_library().clone();
+        let call = definition.command_buy_item(
+            &state_snapshot,
+            actor_id,
+            item_definition,
+            buyer,
+            payer,
+            base_id,
+            self.rng.clone(),
+            &self.global_effects.clone(),
+            self.physics,
+            self.environment,
+            self.frame,
+            self.host_world_context(),
+            self.game_over_triggered,
+            self.audio_registry.clone(),
+        );
+        let (bought, outcome, audio_state, new_rng) = match call {
+            Ok(ok) => ok,
+            Err(error) => {
+                return Err(self.apply_script_error_recovery(
+                    error,
+                    idx,
+                    &action_library,
+                    actor_id,
+                    &definition_id,
+                    false,
+                ));
+            }
+        };
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        self.apply_callback_outcome(
+            idx,
+            outcome,
+            &action_library,
+            actor_id,
+            &definition_id,
+            false,
+        )?;
+        Ok(bought)
+    }
+
     /// `C4Object::Incinerate` (C4Object.cpp:1257-1268): construct the
     /// priority-100, interval-1 Fire effect through the same live C4Effect
     /// path as AddEffect. That path runs the higher/equal-priority Fx*Effect
@@ -42148,6 +42377,24 @@ impl Engine {
         Ok(true)
     }
 
+    fn resolve_command_buy_attempt(
+        &mut self,
+        actor_id: ObjectId,
+        base_id: ObjectId,
+        definition_id: &str,
+        succeeded: bool,
+    ) -> Result<(), EngineError> {
+        let resolution = self.find_object_index(actor_id).and_then(|index| {
+            self.objects[index]
+                .commands
+                .resolve_pending_buy(base_id, definition_id, succeeded)
+        });
+        if let Some(feedback) = resolution.and_then(|result| result.feedback) {
+            self.execute_command_failure_feedback(actor_id, feedback, None)?;
+        }
+        Ok(())
+    }
+
     fn apply_command_event(&mut self, event: CommandEvent) -> Result<(), EngineError> {
         match event {
             CommandEvent::ApplyObjectUpdate { object_id, update } => {
@@ -42186,6 +42433,123 @@ impl Engine {
                         self.execute_command_failure_feedback(actor_id, feedback, message)?;
                     }
                 }
+            }
+            CommandEvent::EvaluateBuy {
+                actor_id,
+                base_id,
+                definition_id,
+                buyer,
+                payer,
+                count,
+            } => {
+                // The command preflight deliberately prices for the BUYER,
+                // while C4Player::Buy below prices each item for the paying
+                // base owner. This allied-base mismatch is native behavior.
+                let price = tolerate_script_error(self.call_command_buy_value(
+                    actor_id,
+                    &definition_id,
+                    base_id,
+                    buyer,
+                ))?
+                .flatten()
+                .unwrap_or(0);
+                let payer_wealth = self.players.get(&payer).map(|player| player.wealth());
+                if payer_wealth.is_none_or(|wealth| price > wealth) {
+                    self.resolve_command_buy_attempt(
+                        actor_id,
+                        base_id,
+                        &definition_id,
+                        false,
+                    )?;
+                    return Ok(());
+                }
+
+                let contained = self
+                    .find_object_index(actor_id)
+                    .is_some_and(|index| self.objects[index].state.container == Some(base_id));
+                if !contained {
+                    if let Some(actor_index) = self.find_object_index(actor_id) {
+                        self.objects[actor_index]
+                            .commands
+                            .defer_pending_buy_for_enter(base_id, &definition_id);
+                        let _ = self.objects[actor_index].commands.push_front(
+                            CommandRequest::new(CommandId::Enter)
+                                .with_target(Some(base_id))
+                                .with_update_interval(50)
+                                .with_mode(CommandMode::SilentSub),
+                        );
+                    }
+                    return Ok(());
+                }
+
+                let purchase_count = self
+                    .find_object_index(actor_id)
+                    .and_then(|index| {
+                        self.objects[index]
+                            .commands
+                            .normalize_pending_buy_count(base_id, &definition_id)
+                    })
+                    .unwrap_or_else(|| count.max(1));
+
+                for _ in 0..purchase_count {
+                    // Buy2Base repeats these gates for every item, allowing
+                    // earlier Purchase callbacks to invalidate later buys.
+                    let live_parties = self
+                        .find_object_index(actor_id)
+                        .zip(self.find_object_index(base_id))
+                        .map(|(actor_index, base_index)| {
+                            (
+                                self.objects[actor_index].state.owner,
+                                self.objects[base_index].state.base,
+                            )
+                        });
+                    let Some((live_buyer, live_payer)) = live_parties else {
+                        self.resolve_command_buy_attempt(
+                            actor_id,
+                            base_id,
+                            &definition_id,
+                            false,
+                        )?;
+                        return Ok(());
+                    };
+                    if !self.base_buy_enabled
+                        || !self.players.contains_key(&live_buyer)
+                        || !self.players.contains_key(&live_payer)
+                        || self.players_hostile(live_buyer, live_payer)
+                    {
+                        self.resolve_command_buy_attempt(
+                            actor_id,
+                            base_id,
+                            &definition_id,
+                            false,
+                        )?;
+                        return Ok(());
+                    }
+
+                    let bought = tolerate_script_error(self.call_command_buy_item(
+                        actor_id,
+                        &definition_id,
+                        live_buyer,
+                        live_payer,
+                        base_id,
+                    ))?
+                    .unwrap_or(false);
+                    if !bought {
+                        self.resolve_command_buy_attempt(
+                            actor_id,
+                            base_id,
+                            &definition_id,
+                            false,
+                        )?;
+                        return Ok(());
+                    }
+                    if let Some(actor_index) = self.find_object_index(actor_id) {
+                        self.objects[actor_index]
+                            .commands
+                            .record_pending_buy_success(base_id, &definition_id);
+                    }
+                }
+                self.resolve_command_buy_attempt(actor_id, base_id, &definition_id, true)?;
             }
             CommandEvent::ObjectComPut {
                 actor_id,

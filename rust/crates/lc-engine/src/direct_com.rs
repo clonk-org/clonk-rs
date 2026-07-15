@@ -9500,6 +9500,287 @@ protected func ControlCommand(command, target, tx, ty, target2, data, seventh) {
         (crew, hut)
     }
 
+    fn execute_buy_command(
+        engine: &mut Engine,
+        crew: ObjectId,
+        base: ObjectId,
+        definition_id: &str,
+        count: i32,
+    ) {
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].apply_command_operations([CommandOperation::PushFront(
+            CommandRequest::new(CommandId::Buy)
+                .with_target(Some(base))
+                .with_tx(Some(count))
+                .with_data(CommandData::Text(definition_id.to_string())),
+        )]);
+        engine
+            .execute_object_command_now(crew)
+            .expect("execute Buy command");
+    }
+
+    #[test]
+    fn explicit_buy_obeys_the_global_buy_gate() {
+        // C4Command::Buy checks BASEFUNC_Buy before either its implicit or
+        // explicit-target paths. In particular, an explicit target must not
+        // turn an existing target content into a purchase when buying is
+        // globally disabled.
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 1);
+        let mut lorry =
+            Definition::from_script("LORY", "Lorry", "#strict 2\n").expect("lorry compiles");
+        lorry.set_collectible(true);
+        lorry.set_value(25);
+        engine.register_definition(lorry).expect("register lorry");
+        engine.set_player_wealth(1, 25).expect("wealth");
+        engine
+            .set_player_home_base_material(1, HashMap::from([("LORY".to_string(), 1)]))
+            .expect("home-base material");
+        let existing = engine
+            .spawn_object(SpawnConfig::new("LORY").with_container(hut))
+            .expect("spawn existing content");
+        engine.set_base_buy_enabled(false);
+
+        execute_buy_command(&mut engine, crew, hut, "LORY", 1);
+
+        assert!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew survives")
+                .command_stack
+                .is_empty(),
+            "the disabled Buy command fails and leaves the stack"
+        );
+        assert_eq!(engine.player(1).expect("player").wealth(), 25);
+        assert_eq!(
+            engine
+                .player(1)
+                .expect("player")
+                .home_base_material()
+                .get("LORY"),
+            Some(&1)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(existing)
+                .expect("existing content survives")
+                .container,
+            Some(hut),
+            "an explicit target is not a content-transfer shortcut"
+        );
+        assert_eq!(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "LORY" && object.status.is_active())
+                .count(),
+            1,
+            "no purchase object is created"
+        );
+    }
+
+    #[test]
+    fn buy_outside_the_explicit_base_pushes_the_cpp_enter_subcommand() {
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 1);
+        let mut lorry =
+            Definition::from_script("LORY", "Lorry", "#strict 2\n").expect("lorry compiles");
+        lorry.set_value(25);
+        engine.register_definition(lorry).expect("register lorry");
+        engine.set_player_wealth(1, 25).expect("wealth");
+        engine
+            .set_player_home_base_material(1, HashMap::from([("LORY".to_string(), 1)]))
+            .expect("home-base material");
+        engine
+            .apply_object_update(
+                crew,
+                crate::ObjectUpdate::new()
+                    .clear_container()
+                    .with_position(Vector2::new(100, 0)),
+            )
+            .expect("place crew outside the base");
+
+        execute_buy_command(&mut engine, crew, hut, "LORY", 1);
+
+        let stack = engine
+            .object_snapshot(crew)
+            .expect("crew survives")
+            .command_stack;
+        assert_eq!(stack.command_names(), ["Enter", "Buy"]);
+        let views = stack.command_views();
+        assert_eq!(views[0].target, Some(hut));
+        assert_eq!(views[1].target, Some(hut));
+        let serialized = serde_json::to_value(&stack).expect("command stack serializes");
+        let commands = serialized["commands"]
+            .as_array()
+            .expect("serialized command entries");
+        assert_eq!(commands[0]["update_interval"], serde_json::json!(50));
+        assert_eq!(commands[0]["mode"], serde_json::json!("SilentSub"));
+        assert_eq!(engine.player(1).expect("player").wealth(), 25);
+        assert_eq!(
+            engine
+                .player(1)
+                .expect("player")
+                .home_base_material()
+                .get("LORY"),
+            Some(&1),
+            "entering the base precedes all purchase side effects"
+        );
+        assert!(engine
+            .snapshot()
+            .objects
+            .iter()
+            .all(|object| object.definition_id != "LORY"));
+    }
+
+    #[test]
+    fn buy_count_purchases_every_item_in_one_execute_command() {
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 2);
+        let lorry_script = r#"#strict 2
+local purchase_player, purchase_base;
+public func CalcDefValue(object base, int player) { return 25; }
+public func Purchase(int player, object base)
+{
+    purchase_player = player;
+    purchase_base = base;
+    return 1;
+}
+"#;
+        let mut lorry = Definition::from_script("LORY", "Lorry", lorry_script)
+            .expect("lorry compiles");
+        lorry.set_collectible(true);
+        lorry.set_value(99);
+        engine.register_definition(lorry).expect("register lorry");
+        engine.set_player_wealth(2, 100).expect("wealth");
+        engine
+            .set_player_home_base_material(2, HashMap::from([("LORY".to_string(), 4)]))
+            .expect("home-base material");
+        let existing = engine
+            .spawn_object(SpawnConfig::new("LORY").with_container(hut))
+            .expect("spawn pre-existing base content");
+
+        execute_buy_command(&mut engine, crew, hut, "LORY", 3);
+
+        let player = engine.player(2).expect("base owner");
+        assert_eq!(
+            player.wealth(),
+            25,
+            "three purchases use the dynamic value, not the static 99"
+        );
+        assert_eq!(
+            player.home_base_material().get("LORY"),
+            Some(&1),
+            "all three purchases consume stock in the same execution"
+        );
+        assert!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew survives")
+                .command_stack
+                .is_empty(),
+            "Tx=3 completes in one ExecuteCommand"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(existing)
+                .expect("existing content survives")
+                .container,
+            Some(hut),
+            "Buy creates fresh objects instead of transferring base contents"
+        );
+        let bought = engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .filter(|object| {
+                object.id != existing && object.definition_id == "LORY" && object.status.is_active()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(bought.len(), 3);
+        assert!(
+            bought
+                .iter()
+                .all(|object| object.owner == 1 && object.container == Some(hut)),
+            "each purchased object belongs to the buyer and enters the base"
+        );
+        assert!(bought.iter().all(|object| {
+            object.local_vars.get("purchase_player") == Some(&Value::Int(2))
+                && object.local_vars.get("purchase_base")
+                    == Some(&Value::Object(hut.as_u64()))
+        }), "each fresh object receives its Purchase callback");
+    }
+
+    #[test]
+    fn script_execute_buy_is_visible_before_later_set_command() {
+        let mut engine = Engine::new();
+        let clonk_script = r#"#strict 2
+local seen_wealth, seen_stock, seen_command;
+public func BuyThenReplace(object base)
+{
+    SetCommand(this(), "Buy", base, 1, 0, nil, ITEM);
+    ExecuteCommand();
+    seen_wealth = GetWealth(1);
+    seen_stock = GetHomebaseMaterial(1, ITEM);
+    seen_command = GetCommand(this(), 0);
+    return SetCommand(this(), "Wait", nil, 37);
+}
+"#;
+        register_clonk(&mut engine, "CLNK", clonk_script);
+        engine
+            .register_definition(
+                Definition::from_script("HUT1", "Hut", "#strict 2\n")
+                    .expect("hut compiles"),
+            )
+            .expect("register hut");
+        let mut item =
+            Definition::from_script("ITEM", "Item", "#strict 2\n").expect("item compiles");
+        item.set_value(25);
+        engine.register_definition(item).expect("register item");
+        engine
+            .register_player(PlayerConfig::new(1, "Buyer"))
+            .expect("register player");
+        engine.set_player_wealth(1, 100).expect("wealth");
+        engine
+            .set_player_home_base_material(1, HashMap::from([("ITEM".to_string(), 2)]))
+            .expect("home-base material");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 1;
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let result = engine
+            .call_object_function(
+                crew_index,
+                "BuyThenReplace",
+                vec![Value::Object(hut.as_u64())],
+            )
+            .expect("script ExecuteCommand succeeds");
+
+        assert_eq!(result, Value::Bool(true));
+        let crew_index = engine.find_object_index(crew).expect("crew survives");
+        let locals = &engine.objects[crew_index].state.local_vars;
+        assert_eq!(locals.get("seen_wealth"), Some(&Value::Int(75)));
+        assert_eq!(locals.get("seen_stock"), Some(&Value::Int(1)));
+        assert_eq!(locals.get("seen_command"), Some(&Value::Nil));
+        let stack = engine.objects[crew_index].commands.snapshot();
+        assert_eq!(stack.command_names(), ["Wait"]);
+        assert_eq!(stack.command_views()[0].tx, Some(37));
+        assert!(engine.snapshot().objects.iter().any(|object| {
+            object.definition_id == "ITEM"
+                && object.status.is_active()
+                && object.owner == 1
+                && object.container == Some(hut)
+        }));
+    }
+
     #[test]
     fn contained_com_up_opens_the_base_buy_menu() {
         // ContainedControl COM_Up (C4Object.cpp:3269-3274): a valid,

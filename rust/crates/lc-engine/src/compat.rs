@@ -8377,7 +8377,7 @@ fn report_buy_error(
 /// (C4Player.cpp:826-864): synchronously consume the paying player's base
 /// stock and wealth, create the item for another player, call Purchase, then
 /// enter an explicit target or force-position at the calling object.
-fn buy(args: &[Value]) -> Result<Value, RuntimeError> {
+pub(super) fn buy(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 5 {
         return Err(RuntimeError::new(
             "Buy expects at most 5 arguments: definition, for_player, pay_player, target, show_errors",
@@ -9594,7 +9594,7 @@ fn definition_value(args: &[Value]) -> Result<Value, RuntimeError> {
 /// `CalcDefValue(base, player)` override, then the optional base-owned
 /// `CalcBuyValue(definition, value)` adjustment. `None` means the definition
 /// is not loaded, matching FnGetValue's null return for an unknown id.
-fn calculated_definition_value(
+pub(super) fn calculated_definition_value(
     definition: &str,
     base: Option<ObjectId>,
     player: i32,
@@ -27152,6 +27152,169 @@ fn preview_activate_entrance(target: ObjectId, caller: ObjectId) -> bool {
     .as_bool()
 }
 
+fn resolve_preview_buy(
+    actor: ObjectId,
+    base: ObjectId,
+    definition_id: &str,
+    succeeded: bool,
+) -> Result<(), RuntimeError> {
+    let feedback = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        if !context.ensure_object_scope(actor) {
+            return None;
+        }
+        let scope = context.object_scope_mut(actor)?;
+        let resolution = scope
+            .live_commands
+            .resolve_pending_buy(base, definition_id, succeeded)?;
+        scope.command_stack_replaced = true;
+        scope.command_count = scope.live_commands.len();
+        Some(resolution.feedback)
+    });
+    if let Some(feedback) = feedback.flatten() {
+        preview_command_failure_feedback(actor, feedback)?;
+    }
+    Ok(())
+}
+
+/// Synchronous C4Command::Buy continuation for script ExecuteCommand.
+/// The definition/base pricing callbacks, Enter child insertion, repeated
+/// C4Player::Buy calls and command-finished state must all be visible to the
+/// very next VM instruction; deferring this as an engine event would replay
+/// it after the enclosing script's later mutations.
+fn preview_evaluate_buy(
+    actor: ObjectId,
+    base: ObjectId,
+    definition_id: &str,
+    buyer: i32,
+    payer: i32,
+    count: i32,
+) -> Result<(), RuntimeError> {
+    let price = calculated_definition_value(definition_id, Some(base), buyer)?.unwrap_or(0);
+    let enough_wealth = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.player_state(payer))
+            .is_some_and(|player| price <= player.wealth)
+    });
+    if !enough_wealth {
+        return resolve_preview_buy(actor, base, definition_id, false);
+    }
+
+    let contained = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        context
+            .object_scope(actor)
+            .map(ObjectScopeContext::container)
+            .or_else(|| context.get_world_object(actor).map(|object| object.container()))
+            == Some(Some(base))
+    });
+    if !contained {
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            if !context.ensure_object_scope(actor) {
+                return;
+            }
+            let Some(scope) = context.object_scope_mut(actor) else {
+                return;
+            };
+            scope
+                .live_commands
+                .defer_pending_buy_for_enter(base, definition_id);
+            let _ = scope.live_commands.push_front(
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(base))
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::SilentSub),
+            );
+            scope.command_stack_replaced = true;
+            scope.command_count = scope.live_commands.len();
+        });
+        return Ok(());
+    }
+
+    let purchase_count = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return count.max(1);
+        };
+        if !context.ensure_object_scope(actor) {
+            return count.max(1);
+        }
+        let Some(scope) = context.object_scope_mut(actor) else {
+            return count.max(1);
+        };
+        let count = scope
+            .live_commands
+            .normalize_pending_buy_count(base, definition_id)
+            .unwrap_or_else(|| count.max(1));
+        scope.command_stack_replaced = true;
+        scope.command_count = scope.live_commands.len();
+        count
+    });
+
+    for _ in 0..purchase_count {
+        let parties = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            if !context.world.base_buy_enabled {
+                return None;
+            }
+            let live_buyer = context
+                .object_scope(actor)
+                .map(ObjectScopeContext::owner)
+                .or_else(|| context.get_world_object(actor).map(|object| object.owner()))?;
+            let live_payer = context
+                .get_world_object(base)?
+                .full_state()
+                .map(|state| state.base)?;
+            let (buyer_player, payer_player) = (
+                context.player_state(live_buyer)?,
+                context.player_state(live_payer)?,
+            );
+            let hostile = live_buyer != live_payer
+                && (buyer_player.is_hostile_towards(live_payer)
+                    || payer_player.is_hostile_towards(live_buyer));
+            (!hostile).then_some((live_buyer, live_payer))
+        });
+        let Some((live_buyer, live_payer)) = parties else {
+            return resolve_preview_buy(actor, base, definition_id, false);
+        };
+        let bought = buy(&[
+            Value::C4Id(definition_id.to_string()),
+            Value::Int(live_buyer),
+            Value::Int(live_payer),
+            object_reference_value(base),
+            Value::Bool(false),
+        ])?;
+        if !matches!(bought, Value::Object(_)) {
+            return resolve_preview_buy(actor, base, definition_id, false);
+        }
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            let Some(scope) = context.object_scope_mut(actor) else {
+                return;
+            };
+            scope
+                .live_commands
+                .record_pending_buy_success(base, definition_id);
+            scope.command_stack_replaced = true;
+            scope.command_count = scope.live_commands.len();
+        });
+    }
+    resolve_preview_buy(actor, base, definition_id, true)
+}
+
 fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     let active = active_object_id();
     let target = match args.first() {
@@ -27177,6 +27340,7 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     });
     let Some((
         mut finished,
+        buy_attempts,
         grab_attempts,
         drop_attempts,
         entrance_attempts,
@@ -27188,13 +27352,24 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     };
 
-    let had_live_attempt = !grab_attempts.is_empty()
+    let had_live_attempt = !buy_attempts.is_empty()
+        || !grab_attempts.is_empty()
         || !drop_attempts.is_empty()
         || !entrance_attempts.is_empty()
         || !failure_feedback.is_empty()
         || !move_to_stops.is_empty()
         || !build_stops.is_empty()
         || !build_actions.is_empty();
+    for (actor_id, base_id, definition_id, buyer, payer, count) in buy_attempts {
+        preview_evaluate_buy(
+            actor_id,
+            base_id,
+            &definition_id,
+            buyer,
+            payer,
+            count,
+        )?;
+    }
     for actor_id in move_to_stops {
         preview_move_to_stop(actor_id)?;
     }
@@ -37913,6 +38088,13 @@ impl EffectHostContext {
                             .into_iter()
                             .map(|(id, _)| id)
                             .collect(),
+                        hostile_to: state
+                            .exact_hostility_entries()
+                            .into_iter()
+                            .filter_map(|(opponent, hostile)| {
+                                (hostile != 0).then_some(opponent.wrapping_sub(1))
+                            })
+                            .collect(),
                     },
                 )
             })
@@ -37962,6 +38144,7 @@ impl EffectHostContext {
         rng: Option<&RefCell<LcgRng>>,
     ) -> Option<(
         Option<CommandView>,
+        Vec<(ObjectId, ObjectId, DefinitionId, i32, i32, i32)>,
         Vec<(ObjectId, ObjectId)>,
         Vec<(ObjectId, ObjectId)>,
         Vec<(ObjectId, ObjectId, Option<CallResultAction>)>,
@@ -38014,6 +38197,7 @@ impl EffectHostContext {
         };
 
         let mut deferred_events = Vec::new();
+        let mut buy_attempts = Vec::new();
         let mut grab_attempts = Vec::new();
         let mut drop_attempts = Vec::new();
         let mut entrance_attempts = Vec::new();
@@ -38023,6 +38207,21 @@ impl EffectHostContext {
         let mut build_actions = Vec::new();
         for event in events.drain(..) {
             match event {
+                CommandEvent::EvaluateBuy {
+                    actor_id,
+                    base_id,
+                    definition_id,
+                    buyer,
+                    payer,
+                    count,
+                } => buy_attempts.push((
+                    actor_id,
+                    base_id,
+                    definition_id,
+                    buyer,
+                    payer,
+                    count,
+                )),
                 CommandEvent::AttemptGrab {
                     actor_id,
                     target_id,
@@ -38063,6 +38262,7 @@ impl EffectHostContext {
         }
         Some((
             finished,
+            buy_attempts,
             grab_attempts,
             drop_attempts,
             entrance_attempts,

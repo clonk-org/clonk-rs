@@ -142,6 +142,10 @@ pub struct CommandPlayerSnapshot {
     pub home_base_material_entries: Vec<(DefinitionId, i32)>,
     #[serde(default)]
     pub knowledge: Vec<DefinitionId>,
+    /// One-way hostility declarations. C4PlayerList::Hostile treats a
+    /// declaration from either player as hostility in both directions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hostile_to: Vec<i32>,
 }
 
 impl CommandPlayerSnapshot {
@@ -167,6 +171,10 @@ impl CommandPlayerSnapshot {
 
     pub fn knows(&self, definition_id: &DefinitionId) -> bool {
         self.knowledge.iter().any(|entry| entry == definition_id)
+    }
+
+    pub fn is_hostile_towards(&self, player: i32) -> bool {
+        self.hostile_to.contains(&player)
     }
 }
 
@@ -6316,6 +6324,7 @@ mod tests {
                 home_base_material: HashMap::new(),
                 home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
+                hostile_to: Vec::new(),
             },
         )]);
         let definitions = HashMap::new();
@@ -6396,6 +6405,7 @@ mod tests {
                 home_base_material: HashMap::new(),
                 home_base_material_entries: Vec::new(),
                 knowledge: vec![construction_definition.clone()],
+                hostile_to: Vec::new(),
             },
         );
 
@@ -6602,6 +6612,7 @@ mod tests {
                 home_base_material: HashMap::new(),
                 home_base_material_entries: Vec::new(),
                 knowledge: vec![construction_definition.clone()],
+                hostile_to: Vec::new(),
             },
         );
 
@@ -7852,7 +7863,18 @@ mod tests {
                 base(higher_id_earlier, Vector2::new(-10, 4), 1),
             ),
         ]);
-        let players = HashMap::new();
+        let players = HashMap::from([(
+            actor.owner,
+            CommandPlayerSnapshot {
+                status: PlayerStatus::Active,
+                surrendered: false,
+                wealth: 0,
+                home_base_material: HashMap::new(),
+                home_base_material_entries: Vec::new(),
+                knowledge: Vec::new(),
+                hostile_to: Vec::new(),
+            },
+        )]);
         let definitions = HashMap::new();
         let choose = |objects: &HashMap<ObjectId, CommandObjectSnapshot>| {
             let ctx = CommandRuntimeContext {
@@ -7871,7 +7893,7 @@ mod tests {
             };
             let mut sell =
                 SellState::from_request(&CommandRequest::new(CommandId::Sell)).expect("sell state");
-            let buy =
+            let mut buy =
                 BuyState::from_request(&CommandRequest::new(CommandId::Buy)).expect("buy state");
             let mut home =
                 HomeState::from_request(&CommandRequest::new(CommandId::Home)).expect("home state");
@@ -7907,6 +7929,67 @@ mod tests {
                 Some(lower_id_later),
             )
         );
+    }
+
+    #[test]
+    fn buy_implicit_base_skips_hostility_and_accepts_generic_allied_bases() {
+        let actor_id = ObjectId::new(1);
+        let hostile_id = ObjectId::new(2);
+        let allied_id = ObjectId::new(3);
+        let own_id = ObjectId::new(4);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.owner = 1;
+        actor.position = Vector2::ZERO;
+        let base = |id: ObjectId, player: i32, x: i32, order: usize| {
+            let mut snapshot = snapshot_with_id(id.as_u64());
+            snapshot.base = player;
+            snapshot.position = Vector2::new(x, 0);
+            snapshot.master_list_order = order;
+            // FindFriendlyBase does not require Structure, Entrance, object
+            // ownership, or a non-collectible definition.
+            snapshot
+        };
+        let objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (hostile_id, base(hostile_id, 2, 1, 1)),
+            (allied_id, base(allied_id, 3, 5, 2)),
+            (own_id, base(own_id, 1, 10, 3)),
+        ]);
+        let player = |hostile_to| CommandPlayerSnapshot {
+            status: PlayerStatus::Active,
+            surrendered: false,
+            wealth: 0,
+            home_base_material: HashMap::new(),
+            home_base_material_entries: Vec::new(),
+            knowledge: Vec::new(),
+            hostile_to,
+        };
+        let players = HashMap::from([
+            (1, player(vec![2])),
+            (2, player(Vec::new())),
+            (3, player(Vec::new())),
+        ]);
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: actor.position,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut buy =
+            BuyState::from_request(&CommandRequest::new(CommandId::Buy)).expect("buy state");
+
+        assert_eq!(buy.resolve_base(&ctx), Some(allied_id));
+        assert_eq!(buy.target, Some(allied_id));
     }
 
     #[test]
@@ -11585,6 +11668,7 @@ mod tests {
             .push_back(
                 CommandRequest::new(CommandId::Buy)
                     .with_target(Some(base_id))
+                    .with_tx(Some(3))
                     .with_data(CommandData::Text("WOOD".into()))
                     .with_update_interval(25),
             )
@@ -11597,6 +11681,8 @@ mod tests {
             CommandState::Buy(state) => {
                 assert_eq!(state.target, Some(base_id));
                 assert_eq!(state.update_interval, 25);
+                assert_eq!(state.remaining_count, 3);
+                assert!(!state.evaluation_pending);
             }
             other => panic!("expected buy state, got {:?}", other),
         }
@@ -12125,7 +12211,7 @@ mod tests {
     }
 
     #[test]
-    fn buy_spawns_item_and_updates_player_state() {
+    fn buy_emits_a_live_evaluation_instead_of_static_spawn_events() {
         let builder_id = ObjectId::new(1);
         let base_id = ObjectId::new(2);
 
@@ -12159,6 +12245,7 @@ mod tests {
                 home_base_material: home_base,
                 home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
+                hostile_to: Vec::new(),
             },
         );
 
@@ -12197,52 +12284,25 @@ mod tests {
         .expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.status, CommandStatus::Running);
         assert_eq!(result.operations.len(), 0);
         assert!(result.update.is_none());
-
-        assert_eq!(result.events.len(), 3);
-        match &result.events[0] {
-            CommandEvent::AdjustPlayerHomeBaseMaterial {
-                player_id,
-                definition_id,
-                delta,
-            } => {
-                assert_eq!(*player_id, 42);
-                assert_eq!(definition_id, "WOOD");
-                assert_eq!(*delta, -1);
-            }
-            event => panic!("unexpected event: {:?}", event),
-        }
-
-        match &result.events[1] {
-            CommandEvent::AdjustPlayerWealth { player_id, delta } => {
-                assert_eq!(*player_id, 42);
-                assert_eq!(*delta, -25);
-            }
-            event => panic!("unexpected event: {:?}", event),
-        }
-
-        match &result.events[2] {
-            CommandEvent::SpawnObject {
-                definition_id,
-                owner,
-                position,
-                container,
-                construction,
-            } => {
-                assert_eq!(definition_id, "WOOD");
-                assert_eq!(*owner, 42);
-                assert_eq!(*position, base.position);
-                assert_eq!(*container, Some(base_id));
-                assert_eq!(*construction, None);
-            }
-            event => panic!("unexpected event: {:?}", event),
-        }
+        assert_eq!(
+            result.events,
+            vec![CommandEvent::EvaluateBuy {
+                actor_id: builder_id,
+                base_id,
+                definition_id: "WOOD".into(),
+                buyer: 42,
+                payer: 42,
+                count: 0,
+            }]
+        );
+        assert!(state.evaluation_pending);
     }
 
     #[test]
-    fn buy_moves_toward_explicit_target() {
+    fn explicit_buy_obeys_the_global_capability_gate() {
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
         let item_id = ObjectId::new(3);
@@ -12282,6 +12342,7 @@ mod tests {
                 home_base_material: HashMap::new(),
                 home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
+                hostile_to: Vec::new(),
             },
         );
 
@@ -12307,7 +12368,7 @@ mod tests {
             players: &players,
             definitions: &definitions,
             structures_need_energy: false,
-            base_buy_enabled: true,
+            base_buy_enabled: false,
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
@@ -12320,21 +12381,10 @@ mod tests {
         let mut state = BuyState::from_request(&parent_request).expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.status, CommandStatus::Failed);
         assert!(result.update.is_none());
-        assert_eq!(result.operations.len(), 1);
-        match &result.operations[0] {
-            CommandOperation::PushFront(request) => {
-                assert_eq!(request.id, CommandId::MoveTo);
-                assert_eq!(request.target, Some(target_id));
-            }
-            other => panic!("expected move request, got {:?}", other),
-        }
-        assert_silent_child_failure_propagates(
-            parent_request,
-            pushed_request(&result.operations, CommandId::MoveTo),
-            &ctx,
-        );
+        assert!(result.operations.is_empty());
+        assert!(result.events.is_empty());
     }
 
     #[test]
@@ -12387,6 +12437,7 @@ mod tests {
                 home_base_material: HashMap::new(),
                 home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
+                hostile_to: Vec::new(),
             },
         );
 
@@ -12482,6 +12533,7 @@ mod tests {
                 home_base_material: HashMap::new(),
                 home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
+                hostile_to: Vec::new(),
             },
         );
 
@@ -12593,6 +12645,7 @@ mod tests {
                 home_base_material: HashMap::new(),
                 home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
+                hostile_to: Vec::new(),
             },
         );
 
@@ -12625,7 +12678,7 @@ mod tests {
     }
 
     #[test]
-    fn buy_enters_explicit_target_when_adjacent() {
+    fn buy_checks_stock_before_requesting_entry() {
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
         let item_id = ObjectId::new(3);
@@ -12665,6 +12718,7 @@ mod tests {
                 home_base_material: HashMap::new(),
                 home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
+                hostile_to: Vec::new(),
             },
         );
 
@@ -12705,16 +12759,14 @@ mod tests {
         .expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Running);
-        let update = result.update.expect("builder update");
-        assert!(update.command_direction.is_none());
-        assert_eq!(update.container, Some(Some(target_id)));
-        assert_eq!(update.position, Some(Vector2::new(0, 0)));
-        assert_eq!(update.velocity, Some(Vector2::ZERO));
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result.update.is_none());
+        assert!(result.operations.is_empty());
+        assert!(result.events.is_empty());
     }
 
     #[test]
-    fn buy_collects_item_from_explicit_target() {
+    fn buy_does_not_transfer_matching_target_contents() {
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
         let item_id = ObjectId::new(3);
@@ -12755,6 +12807,7 @@ mod tests {
                 home_base_material: HashMap::new(),
                 home_base_material_entries: Vec::new(),
                 knowledge: Vec::new(),
+                hostile_to: Vec::new(),
             },
         );
 
@@ -12795,28 +12848,10 @@ mod tests {
         .expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.status, CommandStatus::Failed);
         assert!(result.operations.is_empty());
         assert!(result.update.is_none());
-
-        assert_eq!(result.events.len(), 2);
-        match &result.events[0] {
-            CommandEvent::AdjustPlayerWealth { player_id, delta } => {
-                assert_eq!(*player_id, 5);
-                assert_eq!(*delta, -15);
-            }
-            other => panic!("unexpected event: {:?}", other),
-        }
-
-        match &result.events[1] {
-            CommandEvent::ApplyObjectUpdate { object_id, update } => {
-                assert_eq!(*object_id, item_id);
-                assert_eq!(update.container, Some(Some(builder_id)));
-                assert_eq!(update.position, Some(builder.position));
-                assert_eq!(update.velocity, Some(Vector2::ZERO));
-            }
-            other => panic!("unexpected event: {:?}", other),
-        }
+        assert!(result.events.is_empty());
     }
 
     #[test]
@@ -13355,6 +13390,18 @@ pub enum CommandEvent {
         actor_id: ObjectId,
         object_id: ObjectId,
     },
+    /// Run Buy's callbackful GetValue preflight and, once contained, the
+    /// complete C4Player::Buy loop against live state. Dynamic pricing may
+    /// mutate stock, wealth, commands, or containment before Buy decides
+    /// whether to push Enter (C4Command.cpp:1987-2041).
+    EvaluateBuy {
+        actor_id: ObjectId,
+        base_id: ObjectId,
+        definition_id: DefinitionId,
+        buyer: i32,
+        payer: i32,
+        count: i32,
+    },
     /// Run ObjectComPut as one live ordered operation. Enter rejection,
     /// collection callbacks, and helper failure must resolve against the
     /// exact Put command that emitted the attempt (C4ObjectCom.cpp:591-622;
@@ -13658,6 +13705,21 @@ impl<'a> CommandRuntimeContext<'a> {
         self.players.get(&id)
     }
 
+    /// C4PlayerList::Hostile: missing or identical players are friendly;
+    /// either player's one-way declaration makes the pair hostile.
+    pub fn players_hostile(&self, first: i32, second: i32) -> bool {
+        if first == second {
+            return false;
+        }
+        let (Some(first_player), Some(second_player)) =
+            (self.player(first), self.player(second))
+        else {
+            return false;
+        };
+        first_player.is_hostile_towards(second)
+            || second_player.is_hostile_towards(first)
+    }
+
     pub fn definition(&self, id: &str) -> Option<&CommandDefinitionSnapshot> {
         self.definitions.get(id)
     }
@@ -13830,6 +13892,11 @@ pub(crate) enum GetAttemptDisposition {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GetAttemptResolution {
+    pub feedback: Option<CommandFailureFeedback>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BuyAttemptResolution {
     pub feedback: Option<CommandFailureFeedback>,
 }
 
@@ -14543,6 +14610,92 @@ impl CommandStack {
         }
 
         Some(GetAttemptResolution { feedback })
+    }
+
+    fn pending_buy_index(&self, base: ObjectId, definition_id: &str) -> Option<usize> {
+        self.entries.iter().position(|entry| {
+            matches!(
+                &entry.state,
+                CommandState::Buy(state)
+                    if state.evaluation_pending
+                        && state.target == Some(base)
+                        && state.definition_id == definition_id
+            )
+        })
+    }
+
+    /// Buy's GetValue preflight completed and the actor must enter the base
+    /// before the same command retries. Callback-installed replacement
+    /// commands do not inherit the old evaluation's pending marker.
+    pub(crate) fn defer_pending_buy_for_enter(
+        &mut self,
+        base: ObjectId,
+        definition_id: &str,
+    ) -> bool {
+        let Some(index) = self.pending_buy_index(base, definition_id) else {
+            return false;
+        };
+        if let CommandState::Buy(state) = &mut self.entries[index].state {
+            state.evaluation_pending = false;
+        }
+        true
+    }
+
+    /// C4Command::Buy normalizes Tx only after its containment check. This
+    /// happens before C4Player::Buy callbacks, so FnGetCommand observes the
+    /// normalized live count during Purchase/Recruitment.
+    pub(crate) fn normalize_pending_buy_count(
+        &mut self,
+        base: ObjectId,
+        definition_id: &str,
+    ) -> Option<i32> {
+        let index = self.pending_buy_index(base, definition_id)?;
+        let CommandState::Buy(state) = &mut self.entries[index].state else {
+            unreachable!("the pending-buy predicate only matches Buy commands");
+        };
+        state.remaining_count = state.remaining_count.max(1);
+        Some(state.remaining_count)
+    }
+
+    /// One synchronous C4Player::Buy iteration succeeded. Native decrements
+    /// Tx after Purchase and Enter, leaving earlier purchases committed if a
+    /// later iteration fails.
+    pub(crate) fn record_pending_buy_success(
+        &mut self,
+        base: ObjectId,
+        definition_id: &str,
+    ) -> bool {
+        let Some(index) = self.pending_buy_index(base, definition_id) else {
+            return false;
+        };
+        let CommandState::Buy(state) = &mut self.entries[index].state else {
+            unreachable!("the pending-buy predicate only matches Buy commands");
+        };
+        state.remaining_count = state.remaining_count.saturating_sub(1);
+        true
+    }
+
+    /// Finish only the Buy command that emitted EvaluateBuy. Pricing and
+    /// Purchase callbacks may have replaced the stack in the meantime.
+    pub(crate) fn resolve_pending_buy(
+        &mut self,
+        base: ObjectId,
+        definition_id: &str,
+        succeeded: bool,
+    ) -> Option<BuyAttemptResolution> {
+        let index = self.pending_buy_index(base, definition_id)?;
+        if let CommandState::Buy(state) = &mut self.entries[index].state {
+            state.evaluation_pending = false;
+        }
+        self.entries[index].finished = Some(if succeeded {
+            CommandStatus::Completed
+        } else {
+            CommandStatus::Failed
+        });
+        let feedback = (!succeeded)
+            .then(|| self.record_failure_at(index))
+            .flatten();
+        Some(BuyAttemptResolution { feedback })
     }
 
     /// Resolve only the Put command which emitted ObjectComPut. Collection
@@ -19471,7 +19624,10 @@ struct BuyState {
     definition_id: DefinitionId,
     target: Option<ObjectId>,
     update_interval: u32,
-    last_move_order: Option<u64>,
+    #[serde(default)]
+    remaining_count: i32,
+    #[serde(default)]
+    evaluation_pending: bool,
 }
 
 impl BuyState {
@@ -19483,145 +19639,25 @@ impl BuyState {
             definition_id,
             target: request.target,
             update_interval: request.update_interval.max(1),
-            last_move_order: None,
+            remaining_count: request.tx.unwrap_or(0),
+            evaluation_pending: false,
         })
     }
 
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
-        }
-    }
-
-    fn try_purchase_from_explicit_target(
-        &mut self,
-        ctx: &CommandRuntimeContext<'_>,
-        target_id: ObjectId,
-        target_snapshot: &CommandObjectSnapshot,
-    ) -> Option<CommandStepResult> {
-        if !target_snapshot.is_status_active() || target_snapshot.collectible {
-            return None;
-        }
-
-        if let Some(container_id) = ctx.object.container {
-            if container_id != target_id {
-                let mut update = ObjectUpdate::new();
-                if let Some(snapshot) = ctx.resolve(container_id) {
-                    update.position = Some(snapshot.position);
-                } else {
-                    update.position = Some(ctx.position);
-                }
-                update.velocity = Some(Vector2::ZERO);
-                update.container = Some(None);
-                return Some(CommandStepResult::running(Some(update)));
-            }
-        }
-
-        let needs_container_change = ctx.object.container != Some(target_id);
-        if needs_container_change {
-            const APPROACH_RANGE: i32 = 12;
-            let dx = target_snapshot.position.x - ctx.position.x;
-            let dy = target_snapshot.position.y - ctx.position.y;
-            if dx.abs() <= APPROACH_RANGE && dy.abs() <= APPROACH_RANGE {
-                if (target_snapshot.ocf & (ocf::ENTRANCE | ocf::GRAB)) == 0 {
-                    return None;
-                }
-                let mut update = ObjectUpdate::new();
-                update.position = Some(target_snapshot.position);
-                update.velocity = Some(Vector2::ZERO);
-                update.container = Some(Some(target_id));
-                return Some(CommandStepResult::running(Some(update)));
-            }
-
-            if self.should_issue_move(ctx.frame) {
-                let request = CommandRequest::new(CommandId::MoveTo)
-                    .with_target(Some(target_id))
-                    .with_update_interval(10);
-                let mut result = CommandStepResult::running(None);
-                result.operations.push(CommandOperation::PushFront(request));
-                return Some(result);
-            }
-
-            return Some(CommandStepResult::running(None));
-        }
-
-        let mut candidate = None;
-        for item_id in &target_snapshot.contents {
-            if let Some(item_snapshot) = ctx.resolve(*item_id) {
-                if item_snapshot.is_status_active()
-                    && item_snapshot.definition_id == self.definition_id
-                    && item_snapshot.collectible
-                    && item_snapshot.construction >= FULL_CON
-                {
-                    candidate = Some(*item_id);
-                    break;
-                }
-            }
-        }
-
-        let item_id = candidate?;
-
-        let buyer_owner = ctx.object.owner;
-        let base_owner = target_snapshot.base;
-        let player = match ctx.player(base_owner) {
-            Some(player) if player.is_active() => player,
-            _ => {
-                return Some(CommandStepResult::failed(None));
-            }
-        };
-
-        let price = ctx
-            .definition(&self.definition_id)
-            .map(|definition| definition.value.max(0))
-            .unwrap_or(0);
-
-        if price > player.wealth {
-            return Some(CommandStepResult::failed(None));
-        }
-
-        let mut events = Vec::new();
-        if price != 0 {
-            events.push(CommandEvent::AdjustPlayerWealth {
-                player_id: base_owner,
-                delta: -price,
-            });
-        }
-
-        let mut transfer_update = ObjectUpdate::new();
-        transfer_update.container = Some(Some(ctx.object.id));
-        transfer_update.position = Some(ctx.position);
-        transfer_update.velocity = Some(Vector2::ZERO);
-        events.push(CommandEvent::ApplyObjectUpdate {
-            object_id: item_id,
-            update: transfer_update,
-        });
-
-        Some(CommandStepResult::completed(None).with_events(events))
-    }
-
-    fn resolve_base(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+    fn resolve_base(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
         if let Some(target) = self.target {
-            if let Some(snapshot) = ctx.resolve(target) {
-                if snapshot.is_status_active() {
-                    return Some(target);
-                }
-            }
+            // Explicit C4Command targets bypass FindFriendlyBase. Data==0
+            // opens the menu before Base/hostility validation.
+            return ctx.resolve(target).map(|_| target);
         }
 
         let buyer_owner = ctx.object.owner;
-        ctx.objects
+        let target = ctx.objects
             .values()
             .filter(|snapshot| {
                 snapshot.is_status_active()
-                    && snapshot.base == buyer_owner
-                    && (snapshot.category & CATEGORY_STRUCTURE) != 0
-                    && (snapshot.ocf & ocf::ENTRANCE) != 0
-                    && !snapshot.collectible
+                    && ctx.player(snapshot.base).is_some()
+                    && !ctx.players_hostile(buyer_owner, snapshot.base)
             })
             .min_by_key(|snapshot| {
                 (
@@ -19635,48 +19671,34 @@ impl BuyState {
                     snapshot.id,
                 )
             })
-            .map(|snapshot| snapshot.id)
+            .map(|snapshot| snapshot.id);
+        self.target = target;
+        target
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.evaluation_pending {
+            return CommandStepResult::running(None);
+        }
+
+        // C4Command::Buy applies the global gate to every path, including
+        // explicit targets and menu commands.
+        if !ctx.base_buy_enabled {
+            return CommandStepResult::failed(None);
+        }
+        let Some(base_id) = self.resolve_base(ctx) else {
+            return CommandStepResult::failed(None);
+        };
+
         if self.definition_id.is_empty() {
-            if !ctx.base_buy_enabled {
-                return CommandStepResult::failed(None);
-            }
-            let Some(base) = self.resolve_base(ctx) else {
-                return CommandStepResult::failed(None);
-            };
             return CommandStepResult::completed(None).with_events(vec![
                 CommandEvent::OpenMenu(MenuRequest {
                     crew_id: ctx.object.id,
                     owner: ctx.object.owner,
-                    kind: MenuRequestKind::Buy { base },
+                    kind: MenuRequestKind::Buy { base: base_id },
                 }),
             ]);
         }
-        if let Some(target_id) = self.target {
-            if let Some(target_snapshot) = ctx.resolve(target_id) {
-                if let Some(result) =
-                    self.try_purchase_from_explicit_target(ctx, target_id, target_snapshot)
-                {
-                    return result;
-                }
-            }
-        }
-
-        if !ctx.base_buy_enabled {
-            return CommandStepResult::failed(None);
-        }
-
-        let buyer_owner = ctx.object.owner;
-        if buyer_owner == OWNER_NONE {
-            return CommandStepResult::failed(None);
-        }
-
-        let base_id = match self.resolve_base(ctx) {
-            Some(id) => id,
-            None => return CommandStepResult::failed(None),
-        };
 
         let base_snapshot = match ctx.resolve(base_id) {
             Some(snapshot) => snapshot,
@@ -19689,45 +19711,33 @@ impl BuyState {
         }
 
         let base_player = match ctx.player(base_owner) {
-            Some(player) if player.is_active() => player,
+            Some(player) => player,
             _ => return CommandStepResult::failed(None),
         };
+
+        let buyer_owner = ctx.object.owner;
+        if ctx.players_hostile(buyer_owner, base_owner) {
+            return CommandStepResult::failed(None);
+        }
+
+        if ctx.definition(&self.definition_id).is_none() {
+            return CommandStepResult::failed(None);
+        }
 
         let available = base_player.material_count(&self.definition_id);
         if available <= 0 {
             return CommandStepResult::failed(None);
         }
 
-        let price = ctx
-            .definition(&self.definition_id)
-            .map(|definition| definition.value.max(0))
-            .unwrap_or(0);
-
-        if price > base_player.wealth {
-            return CommandStepResult::failed(None);
-        }
-
-        let mut events = Vec::new();
-        events.push(CommandEvent::AdjustPlayerHomeBaseMaterial {
-            player_id: base_owner,
+        self.evaluation_pending = true;
+        CommandStepResult::running(None).with_events(vec![CommandEvent::EvaluateBuy {
+            actor_id: ctx.object.id,
+            base_id,
             definition_id: self.definition_id.clone(),
-            delta: -1,
-        });
-        if price != 0 {
-            events.push(CommandEvent::AdjustPlayerWealth {
-                player_id: base_owner,
-                delta: -price,
-            });
-        }
-        events.push(CommandEvent::SpawnObject {
-            definition_id: self.definition_id.clone(),
-            owner: buyer_owner,
-            position: base_snapshot.position,
-            container: Some(base_id),
-            construction: None,
-        });
-
-        CommandStepResult::completed(None).with_events(events)
+            buyer: buyer_owner,
+            payer: base_owner,
+            count: self.remaining_count,
+        }])
     }
 }
 
@@ -20139,6 +20149,10 @@ impl CommandState {
                 if state.put_ty != 0 {
                     view.ty = Some(state.put_ty);
                 }
+            }
+            CommandState::Buy(state) => {
+                view.target = state.target;
+                view.tx = (state.remaining_count != 0).then_some(state.remaining_count);
             }
             _ => {}
         }
