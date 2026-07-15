@@ -50,6 +50,9 @@ pub struct CommandObjectSnapshot {
     /// DefCore NoTransferZones; suppresses transfer-zone edges for this
     /// object's MoveTo path search.
     pub no_transfer_zones: i32,
+    /// DefCore NoPushEnter; any nonzero value makes C4Command::Enter fail
+    /// before its already-contained and geometry checks.
+    pub no_push_enter: i32,
     pub status: ObjectStatus,
     pub destroyed: bool,
     pub category: i32,
@@ -378,6 +381,7 @@ mod tests {
             move_to_range: 0,
             pathfinder: 0,
             no_transfer_zones: 0,
+            no_push_enter: 0,
             status: ObjectStatus::Normal,
             destroyed: false,
             category: 0,
@@ -1760,6 +1764,7 @@ mod tests {
         let mut hut = snapshot_with_id(hut_id.as_u64());
         hut.position = Vector2::new(10, 10);
         hut.shape = DefinitionRect::new(0, 0, 20, 20);
+        hut.entrance = Some(hut.shape);
         hut.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
         hut.entrance_status = true;
         hut.category = CATEGORY_STRUCTURE;
@@ -3876,6 +3881,7 @@ mod tests {
         // C4Command::Enter checks Target->At(cx, cy) — the actor point in
         // the target's absolute shape (C4Command.cpp:586-588).
         target.shape = DefinitionRect::new(target.position.x - 10, target.position.y - 10, 20, 20);
+        target.entrance = Some(target.shape);
         target.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
         target.entrance_status = true;
         target.category = CATEGORY_STRUCTURE;
@@ -3927,6 +3933,86 @@ mod tests {
     }
 
     #[test]
+    fn enter_accepts_inactive_targets_but_not_contained_target_geometry() {
+        let actor_id = ObjectId::new(36);
+        let target_id = ObjectId::new(46);
+        let actor = snapshot_with_id(actor_id.as_u64());
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.status = ObjectStatus::Inactive;
+        target.shape = DefinitionRect::new(-10, -10, 20, 20);
+        target.entrance = Some(DefinitionRect::new(-3, -3, 6, 6));
+        target.ocf = ocf::ENTRANCE;
+        target.entrance_status = true;
+        let mut objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let request = CommandRequest::new(CommandId::Enter).with_target(Some(target_id));
+
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 0);
+        let mut state = EnterState::from_request(&request).expect("Enter state");
+        let inactive = state.step(&ctx);
+        assert_eq!(inactive.status, CommandStatus::Completed);
+        assert!(matches!(
+            inactive.events.as_slice(),
+            [CommandEvent::EnterObject { container_id, .. }] if *container_id == target_id
+        ));
+
+        objects
+            .get_mut(&target_id)
+            .expect("target present")
+            .container = Some(ObjectId::new(99));
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 1);
+        let mut state = EnterState::from_request(&request).expect("Enter state");
+        let contained = state.step(&ctx);
+        assert_eq!(contained.status, CommandStatus::Running);
+        assert!(contained.events.is_empty());
+        assert!(matches!(
+            contained.operations.as_slice(),
+            [CommandOperation::PushFront(request)]
+                if request.id == CommandId::MoveTo
+                    && request.target.is_none()
+                    && request.tx == Some(0)
+                    && request.ty == Some(0)
+        ));
+    }
+
+    #[test]
+    fn enter_nil_and_cleared_targets_fail_on_execution() {
+        let actor_id = ObjectId::new(37);
+        let target_id = ObjectId::new(47);
+        let actor = snapshot_with_id(actor_id.as_u64());
+        let target = snapshot_with_id(target_id.as_u64());
+        let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 0);
+
+        let mut nil_target = CommandStack::new();
+        nil_target
+            .push_front(CommandRequest::new(CommandId::Enter))
+            .expect("C++ queues Enter before its handler rejects nil Target");
+        assert_eq!(
+            nil_target.execute_front(&ctx).map(|result| result.status),
+            Some(CommandStatus::Failed)
+        );
+
+        let mut cleared_target = CommandStack::new();
+        cleared_target
+            .push_front(CommandRequest::new(CommandId::Enter).with_target(Some(target_id)))
+            .expect("Enter queues");
+        assert!(cleared_target.clear_object_reference(target_id));
+        assert_eq!(
+            cleared_target
+                .execute_front(&ctx)
+                .map(|result| result.status),
+            Some(CommandStatus::Failed)
+        );
+    }
+
+    #[test]
     fn enter_rechecks_an_opened_door_before_its_interval_expires() {
         // UpdateInterval is a command lifetime decremented before every
         // execution; it never throttles C4Command::Enter. After the first
@@ -3938,6 +4024,7 @@ mod tests {
         actor.position = Vector2::new(10, 10);
         let mut target = snapshot_with_id(target_id.as_u64());
         target.shape = DefinitionRect::new(0, 0, 20, 20);
+        target.entrance = Some(target.shape);
         target.ocf = ocf::ENTRANCE;
         target.entrance_status = false;
         let mut objects = HashMap::from([(actor_id, actor), (target_id, target)]);
@@ -3988,6 +4075,7 @@ mod tests {
         let actor = snapshot_with_id(actor_id.as_u64());
         let mut target = snapshot_with_id(target_id.as_u64());
         target.shape = DefinitionRect::new(-10, -10, 20, 20);
+        target.entrance = Some(target.shape);
         target.ocf = ocf::ENTRANCE;
         target.entrance_status = false;
         let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
@@ -4033,6 +4121,69 @@ mod tests {
         assert_eq!(expired.status, CommandStatus::Completed);
         assert!(expired.events.is_empty(), "expiry skips the handler");
 
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 1);
+        assert_eq!(snapshot.commands[0].state.id(), Some(CommandId::Wait));
+        assert_eq!(snapshot.commands[0].failures, 0);
+    }
+
+    #[test]
+    fn enter_without_entrance_moves_to_center_and_expires_successfully() {
+        let actor_id = ObjectId::new(35);
+        let target_id = ObjectId::new(45);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.command_direction = CommandDirection::Right;
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(75, 35);
+        target.shape = DefinitionRect::new(65, 25, 20, 20);
+        target.ocf = ocf::AVAILABLE;
+        target.entrance = None;
+        let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
+            .expect("base queues");
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(target_id))
+                    .with_update_interval(2)
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("Enter queues");
+
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 7);
+        let first = stack.step(&ctx).expect("Enter executes");
+        assert_eq!(first.status, CommandStatus::Running);
+        assert!(first.update.is_none(), "far Enter preserves ComDir");
+        assert!(first.events.is_empty());
+        assert!(
+            first.operations.is_empty(),
+            "stack applies child operations"
+        );
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 3);
+        assert_eq!(snapshot.commands[0].state.id(), Some(CommandId::MoveTo));
+        let request = snapshot.commands[0]
+            .request
+            .as_ref()
+            .expect("MoveTo retains its request");
+        assert_eq!(request.id, CommandId::MoveTo);
+        assert!(request.target.is_none());
+        assert_eq!(request.tx, Some(75));
+        assert_eq!(request.ty, Some(35));
+        assert_eq!(request.update_interval, 50);
+        assert!(!request.evaluated);
+
+        assert!(stack.complete_front_if(CommandId::MoveTo));
+        let expired = stack.step(&ctx).expect("Enter expires");
+        assert_eq!(expired.status, CommandStatus::Completed);
+        assert!(expired.events.is_empty());
+        assert!(expired.operations.is_empty());
         let snapshot = stack.snapshot();
         assert_eq!(snapshot.commands.len(), 1);
         assert_eq!(snapshot.commands[0].state.id(), Some(CommandId::Wait));
@@ -4091,6 +4242,7 @@ mod tests {
         let mut entrance = snapshot_with_id(entrance_id.as_u64());
         entrance.position = Vector2::new(100, 0);
         entrance.shape = DefinitionRect::new(90, -10, 20, 20);
+        entrance.entrance = Some(entrance.shape);
         entrance.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
         entrance.entrance_status = false;
         entrance.category = CATEGORY_STRUCTURE;
@@ -4207,6 +4359,9 @@ mod tests {
             outside.operations.as_slice(),
             [CommandOperation::PushFront(request)]
                 if request.id == CommandId::MoveTo
+                    && request.target.is_none()
+                    && request.tx == Some(100)
+                    && request.ty == Some(0)
                     && request.data
                         == CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET)
         ));
@@ -4242,17 +4397,18 @@ mod tests {
     }
 
     #[test]
-    fn enter_requests_move_when_far() {
+    fn enter_inside_shape_outside_entrance_moves_to_entrance_center() {
         let actor_id = ObjectId::new(31);
         let target_id = ObjectId::new(41);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(0, 0);
+        actor.position = Vector2::new(111, 0);
         actor.command_direction = CommandDirection::Left;
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.position = Vector2::new(120, 0);
         target.shape = DefinitionRect::new(target.position.x - 10, target.position.y - 10, 20, 20);
+        target.entrance = Some(DefinitionRect::new(124, -4, 6, 8));
         target.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
         target.category = CATEGORY_STRUCTURE;
 
@@ -4284,16 +4440,17 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
-        let update = result
-            .update
-            .expect("enter should stop actor before requesting movement");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert!(
+            result.update.is_none(),
+            "the far branch does not stop ComDir before MoveTo executes"
+        );
         assert!(result.events.is_empty());
         assert_eq!(result.operations.len(), 1);
         match &result.operations[0] {
             CommandOperation::PushFront(request) => {
                 assert_eq!(request.id, CommandId::MoveTo);
-                assert_eq!(request.target, Some(target_id));
+                assert_eq!(request.target, None);
+                assert_eq!((request.tx, request.ty), (Some(127), Some(0)));
                 assert_eq!(request.update_interval, 50);
                 assert_eq!(
                     request.data,
@@ -4342,6 +4499,7 @@ mod tests {
         let mut target = snapshot_with_id(target_id.as_u64());
         target.position = Vector2::new(120, 0);
         target.shape = DefinitionRect::new(110, -10, 20, 20);
+        target.entrance = Some(target.shape);
         target.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
         let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
         let players = HashMap::new();
@@ -4374,20 +4532,21 @@ mod tests {
 
     #[test]
     fn enter_moves_toward_the_target_while_contained_elsewhere() {
-        // Enter does not stall when the actor is in another structure. Its
-        // far branch queues MoveTo(target entrance), and MoveTo then queues
-        // Exit before steering (C4Command.cpp:586-615,213-217). Workshop
-        // production relies on this after Acquire buys material in HUT3.
+        // Even while its point lies inside the target shape and entrance,
+        // a contained actor may not take the direct-enter branch. It queues
+        // MoveTo, whose own first movement step exits the old container
+        // (C4Command.cpp:586-615,213-217).
         let actor_id = ObjectId::new(51);
         let current_container_id = ObjectId::new(52);
         let target_id = ObjectId::new(53);
         let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(20, 20);
+        actor.position = Vector2::new(120, 20);
         actor.container = Some(current_container_id);
         let current_container = snapshot_with_id(current_container_id.as_u64());
         let mut target = snapshot_with_id(target_id.as_u64());
         target.position = Vector2::new(120, 20);
         target.shape = DefinitionRect::new(110, 10, 20, 20);
+        target.entrance = Some(DefinitionRect::new(115, 15, 10, 10));
         target.ocf = ocf::ENTRANCE;
         target.entrance_status = true;
         let objects = HashMap::from([
@@ -4406,10 +4565,15 @@ mod tests {
         let result = state.step(&ctx);
 
         assert_eq!(result.status, CommandStatus::Running);
+        assert!(
+            result.events.is_empty(),
+            "contained actors never direct-enter"
+        );
         match result.operations.as_slice() {
             [CommandOperation::PushFront(request)] => {
                 assert_eq!(request.id, CommandId::MoveTo);
-                assert_eq!(request.target, Some(target_id));
+                assert_eq!(request.target, None);
+                assert_eq!((request.tx, request.ty), (Some(120), Some(20)));
                 assert_eq!(request.update_interval, 50);
             }
             other => panic!("expected MoveTo target entrance, got {other:?}"),
@@ -9974,11 +10138,12 @@ mod tests {
     }
 
     #[test]
-    fn silent_base_enter_and_get_failures_do_not_pre_stop() {
+    fn silent_base_no_push_enter_and_get_failures_do_not_pre_stop() {
         let actor_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
         let actor = CommandObjectSnapshot {
             command_direction: CommandDirection::Right,
+            no_push_enter: 1,
             ..snapshot_with_id(actor_id.as_u64())
         };
         let players = HashMap::new();
@@ -9998,10 +10163,8 @@ mod tests {
         let result = enter.execute_front(&ctx).expect("Enter fails");
         assert_eq!(result.status, CommandStatus::Failed);
         assert!(result.update.is_none());
-        assert!(result
-            .events
-            .iter()
-            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
+        assert!(result.events.is_empty());
+        assert!(result.operations.is_empty());
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.collectible = false;
@@ -13458,47 +13621,45 @@ impl MoveToState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct EnterState {
-    target: ObjectId,
+    target: Option<ObjectId>,
     push_target: bool,
     update_interval: u32,
 }
 
 impl EnterState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
-        let target = request.target.ok_or(CommandError::Unsupported)?;
         let push_target = matches!(
             request.data,
             CommandData::Integer(flags) if flags & COMMAND_FLAG_ENTER_PUSH_TARGET != 0
         );
         Ok(Self {
-            target,
+            target: request.target,
             push_target,
             update_interval: request.update_interval.max(1),
         })
     }
 
-    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
-        if ctx.object.command_direction != CommandDirection::Stop {
-            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
-        } else {
-            None
-        }
-    }
-
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let Some(target_snapshot) = ctx.resolve(self.target) else {
+        let Some(target) = self.target else {
+            return CommandStepResult::failed(None);
+        };
+        let Some(target_snapshot) = ctx.resolve(target) else {
             return CommandStepResult::failed(None);
         };
 
-        // C4Command::Enter has no aliveness gate on the target — dead
-        // structures are entered fine; only removal clears the pointer
-        // (C4Command.cpp:545-560).
-        if target_snapshot.destroyed || !target_snapshot.status.is_active() {
-            return CommandStepResult::completed(self.update_to_stop(ctx));
+        if ctx.object.no_push_enter != 0 {
+            return CommandStepResult::failed(None);
         }
 
-        if ctx.object.container == Some(self.target) {
-            return CommandStepResult::completed(self.update_to_stop(ctx));
+        // C4Command::Enter has no aliveness gate. Inactive is still a
+        // nonzero C++ Status and remains a valid target; removal clears the
+        // pointer and reaches the ordinary failed !Target finish.
+        if target_snapshot.destroyed || target_snapshot.status == ObjectStatus::Deleted {
+            return CommandStepResult::failed(None);
+        }
+
+        if ctx.object.container == Some(target) {
+            return CommandStepResult::completed(None);
         }
 
         let pushed_target = (ctx.object.action_procedure == ActionProcedure::Push)
@@ -13509,7 +13670,7 @@ impl EnterState {
                 .resolve(pushed_id)
                 .and_then(|snapshot| ctx.definition(snapshot.definition_id.as_str()))
                 .is_some_and(|definition| definition.grab == 2);
-            if grab_only || !self.push_target || pushed_id == self.target {
+            if grab_only || !self.push_target || pushed_id == target {
                 let ungrab = CommandRequest::new(CommandId::UnGrab)
                     .with_update_interval(50)
                     .with_mode(CommandMode::SilentSub);
@@ -13518,31 +13679,37 @@ impl EnterState {
             }
         }
 
-        if target_snapshot.ocf & ocf::ENTRANCE == 0 {
-            return CommandStepResult::failed(None);
-        }
-
         let position = pushed_target
             .and_then(|id| ctx.resolve_position(id))
             .unwrap_or(ctx.position);
-        // "If in entrance range": C4Command::Enter tests the clonk point
-        // (or pushed vehicle point) against the target's shape
-        // (Target->At(cx, cy, ocf), C4Command.cpp:577-588).
-        if target_snapshot.at_point(position.x, position.y) {
+        // Target->At(cx, cy, OCF_Entrance) first tests the target shape and
+        // then narrows the returned OCF to Def->Entrance. The actor itself
+        // must be outside every container; At likewise rejects a contained
+        // target (C4Command.cpp:586-588; C4Object.cpp:1133-1155).
+        let entrance_area = (target_snapshot.ocf & ocf::ENTRANCE != 0)
+            .then_some(target_snapshot.entrance)
+            .flatten();
+        let in_entrance_range = ctx.object.container.is_none()
+            && target_snapshot.container.is_none()
+            && target_snapshot.at_point(position.x, position.y)
+            && entrance_area.is_some_and(|entrance| {
+                entrance.contains_point(position.x, position.y)
+            });
+        if in_entrance_range {
             let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
             if let Some(pushed_id) = pushed_target {
                 let event = CommandEvent::SetObjectCommand {
                     object_id: pushed_id,
                     controller: None,
                     request: CommandRequest::new(CommandId::Enter)
-                        .with_target(Some(self.target))
+                        .with_target(Some(target))
                         .with_mode(CommandMode::Base),
                 };
                 return CommandStepResult::completed(Some(update)).with_events(vec![event]);
             }
             if !target_snapshot.entrance_status {
                 let event = CommandEvent::CallObjectFunction {
-                    object_id: self.target,
+                    object_id: target,
                     function: "ActivateEntrance".into(),
                     caller: ctx.object.id,
                     tx: None,
@@ -13555,17 +13722,30 @@ impl EnterState {
             }
             let event = CommandEvent::EnterObject {
                 object_id: ctx.object.id,
-                container_id: self.target,
+                container_id: target,
             };
             return CommandStepResult::completed(Some(update)).with_events(vec![event]);
         }
 
-        let mut result = CommandStepResult::running(self.update_to_stop(ctx));
+        let mut result = CommandStepResult::running(None);
         // Move to the entrance with the push flag carried through:
         // (Data & C4CMD_Enter_PushTarget) ? C4CMD_MoveTo_PushTarget
         // : 0 (C4Command.cpp:615).
+        // GetEntranceArea returns the Def->Entrance rectangle when the OCF
+        // is present, otherwise a zero-sized area at the object center. The
+        // child has no Target: its explicit coordinates are fixed until
+        // Enter reissues the command (C4Object.cpp:2074-2093).
+        let destination = entrance_area
+            .map(|entrance| {
+                Vector2::new(
+                    entrance.x.saturating_add(entrance.width / 2),
+                    entrance.y.saturating_add(entrance.height / 2),
+                )
+            })
+            .unwrap_or(target_snapshot.position);
         let mut request = CommandRequest::new(CommandId::MoveTo)
-            .with_target(Some(self.target))
+            .with_tx(Some(destination.x))
+            .with_ty(Some(destination.y))
             .with_update_interval(50);
         if self.push_target {
             request = request.with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET));
@@ -17800,6 +17980,9 @@ impl CommandState {
             CommandState::MoveTo(state) => {
                 denumerate_object_reference(&mut state.target, object_numbers);
             }
+            CommandState::Enter(state) => {
+                denumerate_object_reference(&mut state.target, object_numbers);
+            }
             CommandState::Construct(state) => {
                 denumerate_object_reference(&mut state.target, object_numbers);
                 denumerate_object_reference(&mut state.construction_id, object_numbers);
@@ -17857,6 +18040,7 @@ impl CommandState {
         };
         match self {
             CommandState::MoveTo(state) => clear(&mut state.target),
+            CommandState::Enter(state) => clear(&mut state.target),
             CommandState::Grab(state) if state.target == removed => {
                 let changed = !state.target_cleared;
                 state.target_cleared = true;

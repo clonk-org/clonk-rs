@@ -438,6 +438,9 @@ pub struct DefCore {
     /// `NoTransferZones` (C4Def.cpp:415): disables transfer-zone edges in
     /// C4Command::MoveTo path search.
     pub no_transfer_zones: i32,
+    /// `NoPushEnter` (C4Def.cpp:396): any nonzero value prevents this
+    /// definition from executing C4Command::Enter.
+    pub no_push_enter: i32,
     pub picture: Option<PictureRect>,
     pub color_by_owner: bool,
     /// DefCore `AllowPictureStack` exceptions to
@@ -811,6 +814,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut move_to_range: i32 = 0;
     let mut pathfinder: i32 = 0;
     let mut no_transfer_zones: i32 = 0;
+    let mut no_push_enter: i32 = 0;
     let mut picture: Option<PictureRect> = None;
     let mut color_by_owner = false;
     let mut allow_picture_stack: i32 = 0;
@@ -951,6 +955,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "notransferzones" => {
                 no_transfer_zones = parse_i32(value).unwrap_or(0);
+            }
+            "nopushenter" => {
+                no_push_enter = parse_i32(value).unwrap_or(0);
             }
             "category" => {
                 category = parse_category(value)?;
@@ -1250,6 +1257,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         move_to_range,
         pathfinder,
         no_transfer_zones,
+        no_push_enter,
         picture,
         color_by_owner,
         allow_picture_stack,
@@ -2948,6 +2956,18 @@ mod tests {
         let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("defaults parse");
         assert_eq!(defaulted.pathfinder, 0);
         assert_eq!(defaulted.no_transfer_zones, 0);
+    }
+
+    #[test]
+    fn parse_def_core_no_push_enter_preserves_signed_value_and_default() {
+        // C4DefCore::CompileFunc stores NoPushEnter as int32_t with zero as
+        // its default; command code treats either sign as enabled.
+        let parsed = parse_def_core(b"[DefCore]\nid=LOCK\nNoPushEnter=-2\n")
+            .expect("NoPushEnter DefCore parses");
+        assert_eq!(parsed.no_push_enter, -2);
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=OPEN\n").expect("default DefCore parses");
+        assert_eq!(defaulted.no_push_enter, 0);
     }
 
     #[test]

@@ -148,6 +148,7 @@ pub(crate) struct HostWorldObject {
     move_to_range: i32,
     pathfinder: i32,
     no_transfer_zones: i32,
+    no_push_enter: i32,
     pub position: Vector2,
     fixed_position: FixedVec2,
     #[allow(dead_code)]
@@ -212,6 +213,9 @@ pub(crate) struct DefinitionFireMetadata {
     /// Grab (0 none, 1 grab+push, 2 grab-only) — the shockwave check's
     /// vehicle/FLOAT exemption reads it (Explode.c BlastObjectsShockwaveCheck).
     pub grab: i32,
+    /// DefCore NoPushEnter; any nonzero value rejects C4Command::Enter for
+    /// objects of this definition.
+    pub no_push_enter: i32,
     /// DefCore Oversize removes DoCon's upper FullCon clamp.
     pub oversize: bool,
     /// Positive Collection rect enables OCF_Collection when construction,
@@ -707,6 +711,11 @@ impl HostWorldObject {
         self
     }
 
+    pub(crate) fn with_no_push_enter(mut self, no_push_enter: i32) -> Self {
+        self.no_push_enter = no_push_enter;
+        self
+    }
+
     pub(crate) fn with_fixed_motion(
         mut self,
         position: FixedVec2,
@@ -830,6 +839,7 @@ impl HostWorldObject {
             move_to_range: 0,
             pathfinder: 0,
             no_transfer_zones: 0,
+            no_push_enter: 0,
             position,
             fixed_position: FixedVec2::from_ints(position.x, position.y),
             velocity,
@@ -36925,6 +36935,23 @@ impl EffectHostContext {
                 });
                 let owner = scope.map(ObjectScopeContext::owner).unwrap_or(object.owner);
                 let selected = object.selected;
+                let command_ocf = scope
+                    .map(|scope| scope.staged_ocf(object.ocf))
+                    .unwrap_or(object.ocf);
+                let entrance = (command_ocf & ocf::ENTRANCE != 0)
+                    .then(|| {
+                        metadata.and_then(|metadata| metadata.fire.entrance_rect).map(
+                            |rect| {
+                                DefinitionRect::new(
+                                    position.x.saturating_add(rect.x),
+                                    position.y.saturating_add(rect.y),
+                                    rect.width,
+                                    rect.height,
+                                )
+                            },
+                        )
+                    })
+                    .flatten();
                 let snapshot = CommandObjectSnapshot {
                     id,
                     master_list_order,
@@ -36939,6 +36966,9 @@ impl EffectHostContext {
                     move_to_range: object.move_to_range,
                     pathfinder: object.pathfinder,
                     no_transfer_zones: object.no_transfer_zones,
+                    no_push_enter: metadata
+                        .map(|metadata| metadata.fire.no_push_enter)
+                        .unwrap_or(object.no_push_enter),
                     status: scope.map(ObjectScopeContext::status).unwrap_or(object.status),
                     destroyed: scope.is_some_and(|scope| scope.destroy),
                     category: scope
@@ -37002,9 +37032,7 @@ impl EffectHostContext {
                         .unwrap_or(false),
                     contents: object.contents.clone(),
                     line_connect: metadata.map(|metadata| metadata.line_connect).unwrap_or(0),
-                    ocf: scope
-                        .map(|scope| scope.staged_ocf(object.ocf))
-                        .unwrap_or(object.ocf),
+                    ocf: command_ocf,
                     entrance_status: scope
                         .and_then(|scope| scope.pending_update.entrance_status)
                         .or_else(|| object.full_state().map(|state| state.entrance_status))
@@ -37017,7 +37045,7 @@ impl EffectHostContext {
                     shape_top: local_shape.y,
                     shape_height,
                     shape,
-                    entrance: None,
+                    entrance,
                 };
                 Some((id, snapshot))
             })

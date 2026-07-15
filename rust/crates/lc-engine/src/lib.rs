@@ -8512,6 +8512,9 @@ pub struct Definition {
     /// DefCore `NoTransferZones` (C4Def.cpp:415): exclude transfer-zone
     /// edges from this definition's MoveTo path searches.
     no_transfer_zones: i32,
+    /// DefCore `NoPushEnter` (C4Def.cpp:396): any nonzero value prevents
+    /// this definition from executing Enter commands.
+    no_push_enter: i32,
     picture: Option<DefinitionPicture>,
     picture_image: Option<DefinitionPictureImage>,
     /// First def portrait (C4CFN_Portraits, src/C4Components.h:88) — HUD
@@ -8773,6 +8776,7 @@ impl Definition {
             move_to_range: 0,
             pathfinder: 0,
             no_transfer_zones: 0,
+            no_push_enter: 0,
             picture: None,
             picture_image: None,
             portrait_image: None,
@@ -9152,6 +9156,7 @@ impl Definition {
         definition.set_move_to_range(resource.core.move_to_range);
         definition.set_pathfinder(resource.core.pathfinder);
         definition.set_no_transfer_zones(resource.core.no_transfer_zones);
+        definition.set_no_push_enter(resource.core.no_push_enter);
         definition.float_line = resource.core.float_line;
         definition.set_line(resource.core.line);
         definition.set_line_intersect(resource.core.line_intersect);
@@ -9635,6 +9640,14 @@ impl Definition {
 
     pub fn set_no_transfer_zones(&mut self, no_transfer_zones: i32) {
         self.no_transfer_zones = no_transfer_zones;
+    }
+
+    pub fn no_push_enter(&self) -> i32 {
+        self.no_push_enter
+    }
+
+    pub fn set_no_push_enter(&mut self, no_push_enter: i32) {
+        self.no_push_enter = no_push_enter;
     }
 
     /// `Grab` DefCore value (C4Def.h): 0 = not grabbable, 1 = grab and
@@ -18969,6 +18982,7 @@ impl Engine {
                                 contain_blast: definition.contain_blast(),
                                 no_horizontal_move: definition.no_horizontal_move(),
                                 grab: definition.grab(),
+                                no_push_enter: definition.no_push_enter(),
                                 oversize: definition.oversize(),
                                 collection_rect: definition.collection_rect(),
                                 entrance_rect: definition.entrance_rect(),
@@ -19091,6 +19105,7 @@ impl Engine {
                 .with_move_to_range(definition.map_or(0, Definition::move_to_range))
                 .with_pathfinder(definition.map_or(0, Definition::pathfinder))
                 .with_no_transfer_zones(definition.map_or(0, Definition::no_transfer_zones))
+                .with_no_push_enter(definition.map_or(0, Definition::no_push_enter))
                 .with_contact_density(object.state.contact_density)
                 .with_direction(object.state.direction.to_script_value())
                 .with_selected(object.state.selected)
@@ -22867,22 +22882,31 @@ impl Engine {
             .rev()
             .position(|&id| id == object.id)
             .unwrap_or_else(|| self.exec_list.len().saturating_add(index));
-        let (procedure, line_connect, collectible, move_to_range, pathfinder, no_transfer_zones) =
-            self.definitions
-                .get(&object.definition_id)
-                .map(|definition| {
-                    (
-                        definition
-                            .action_library()
-                            .procedure_for_action(&object.state.action.name),
-                        definition.line_connect(),
-                        definition.is_collectible(),
-                        definition.move_to_range(),
-                        definition.pathfinder(),
-                        definition.no_transfer_zones(),
-                    )
-                })
-                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false, 0, 0, 0));
+        let (
+            procedure,
+            line_connect,
+            collectible,
+            move_to_range,
+            pathfinder,
+            no_transfer_zones,
+            no_push_enter,
+        ) = self
+            .definitions
+            .get(&object.definition_id)
+            .map(|definition| {
+                (
+                    definition
+                        .action_library()
+                        .procedure_for_action(&object.state.action.name),
+                    definition.line_connect(),
+                    definition.is_collectible(),
+                    definition.move_to_range(),
+                    definition.pathfinder(),
+                    definition.no_transfer_zones(),
+                    definition.no_push_enter(),
+                )
+            })
+            .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false, 0, 0, 0, 0));
         CommandObjectSnapshot {
             id: object.id,
             master_list_order,
@@ -22893,6 +22917,7 @@ impl Engine {
             move_to_range,
             pathfinder,
             no_transfer_zones,
+            no_push_enter,
             contact: object.frame_t_contact,
             shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
             shape_height: object
@@ -23132,6 +23157,7 @@ impl Engine {
                 move_to_range,
                 pathfinder,
                 no_transfer_zones,
+                no_push_enter,
             ) = self
                 .definitions
                 .get(&object.definition_id)
@@ -23146,9 +23172,10 @@ impl Engine {
                         definition.move_to_range(),
                         definition.pathfinder(),
                         definition.no_transfer_zones(),
+                        definition.no_push_enter(),
                     )
                 })
-                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false, 0, 0, 0));
+                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false, 0, 0, 0, 0));
             // ExecuteCommand reads the CACHED obj->OCF (C4Command.cpp uses
             // Target->OCF etc. straight off the objects).
             let ocf = object.state.ocf;
@@ -23169,6 +23196,7 @@ impl Engine {
                     move_to_range,
                     pathfinder,
                     no_transfer_zones,
+                    no_push_enter,
                     // C4Object::t_contact from the previous movement frame.
                     contact: object.frame_t_contact,
                     action_time: object.state.action.time,
@@ -24377,6 +24405,7 @@ impl Engine {
                 move_to_range,
                 pathfinder,
                 no_transfer_zones,
+                no_push_enter,
             ) = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
@@ -24390,12 +24419,14 @@ impl Engine {
                         definition.move_to_range(),
                         definition.pathfinder(),
                         definition.no_transfer_zones(),
+                        definition.no_push_enter(),
                     )
                 })
                 .unwrap_or((
                     action_library.procedure_for_action(&self.objects[idx].state.action.name),
                     OCF_NORMAL,
                     false,
+                    0,
                     0,
                     0,
                     0,
@@ -24421,6 +24452,7 @@ impl Engine {
                     move_to_range,
                     pathfinder,
                     no_transfer_zones,
+                    no_push_enter,
                     contact: self.objects[idx].frame_t_contact,
                     action_time: self.objects[idx].state.action.time,
                     shape_top: self.objects[idx]
@@ -37173,6 +37205,7 @@ impl Engine {
         definition.set_move_to_range(core.move_to_range);
         definition.set_pathfinder(core.pathfinder);
         definition.set_no_transfer_zones(core.no_transfer_zones);
+        definition.set_no_push_enter(core.no_push_enter);
         definition.float_line = core.float_line;
         definition.set_line(core.line);
         definition.set_line_intersect(core.line_intersect);
@@ -47099,15 +47132,16 @@ mod command_contact_regression {
     }
 
     #[test]
-    fn command_snapshot_keeps_definition_pathfinder_policy() {
-        // C4Command::MoveTo reads both values from cObj->Def at execution
-        // (C4Command.cpp:228-240), so the Rust frame snapshot must preserve
-        // the engine definition rather than infer either value from crew OCF.
+    fn command_snapshot_keeps_definition_command_policies() {
+        // Commands read these policies from cObj->Def at execution, so the
+        // Rust frame snapshot must preserve the raw engine definition values
+        // rather than infer them from crew OCF.
         let mut engine = Engine::with_seed(0);
         let mut definition =
             Definition::from_script("ROUT", "Router", "").expect("definition compiles");
         definition.set_pathfinder(-4);
         definition.set_no_transfer_zones(-3);
+        definition.set_no_push_enter(-2);
         engine
             .register_definition(definition)
             .expect("definition registers");
@@ -47120,6 +47154,7 @@ mod command_contact_regression {
 
         assert_eq!(snapshot.pathfinder, -4);
         assert_eq!(snapshot.no_transfer_zones, -3);
+        assert_eq!(snapshot.no_push_enter, -2);
         assert_eq!(snapshot.ocf & ocf::CREW_MEMBER, 0);
     }
 
