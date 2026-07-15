@@ -5088,6 +5088,36 @@ fn launch_volcano(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(1))
 }
 
+/// FnLaunchEarthquake (C4Script.cpp:3094-3097) discards
+/// C4Weather::LaunchEarthquake's success value. Weather creates creatorless
+/// FXQ1 at the exact requested position and fail-safe-calls Activate with no
+/// arguments (C4Weather.cpp:196-203).
+fn launch_earthquake(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "LaunchEarthquake",
+        "x",
+    )?;
+    let y = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "LaunchEarthquake",
+        "y",
+    )?;
+
+    let created = with_creatorless_object_context(|| {
+        create_object(&[
+            Value::C4Id("FXQ1".to_string()),
+            Value::Int(x),
+            Value::Int(y),
+            Value::Int(OWNER_NONE),
+        ])
+    })??;
+    if let Some(target) = object_id_from_value(&created) {
+        call_object_own_fail_safe(target, "Activate", &[]);
+    }
+    Ok(Value::Nil)
+}
+
 /// FnFrameCounter (C4Script.cpp): Game.FrameCounter — the current
 /// simulation frame.
 fn frame_counter(_args: &[Value]) -> Result<Value, RuntimeError> {
@@ -10872,6 +10902,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("LandscapeHeight", landscape_height);
     script.register_host_function("LaunchLightning", launch_lightning);
     script.register_host_function("LaunchVolcano", launch_volcano);
+    script.register_host_function("LaunchEarthquake", launch_earthquake);
     script.register_host_function("SetSolidMask", set_solid_mask);
     script.register_host_function("ChangeDef", change_def);
     script.register_host_function("GetPlrDownDouble", get_plr_down_double);
@@ -37885,6 +37916,7 @@ mod tests {
         "Kill",
         "LandscapeHeight",
         "LandscapeWidth",
+        "LaunchEarthquake",
         "LaunchLightning",
         "LaunchVolcano",
         "LessThan",

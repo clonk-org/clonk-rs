@@ -19102,6 +19102,134 @@ func Trigger() { return(LaunchVolcano(12)); }
     }
 
     #[test]
+    fn launch_earthquake_script_host_creates_creatorless_fxq1_and_tolerates_activate_error() {
+        // FnLaunchEarthquake forwards only x/y, creates FXQ1 creatorless at
+        // that exact position, fail-safe-calls Activate(), and returns void
+        // regardless of activation success (C4Script.cpp:3094-3097;
+        // C4Weather.cpp:196-203).
+        let caller_script = r#"#strict
+func Trigger() { return(LaunchEarthquake(-7, 83, 999)); }
+"#;
+        let earthquake_script = r#"#strict
+local construction_creator, construction_x, construction_y;
+local activated, activate_argument;
+func Construction(object creator) {
+    construction_creator = creator;
+    construction_x = GetX();
+    construction_y = GetY();
+}
+func Activate(unexpected) {
+    activated = 1;
+    activate_argument = unexpected;
+    MissingEarthquakeCallback();
+    return(1);
+}
+"#;
+
+        let mut engine = Engine::with_seed(9);
+        engine
+            .register_definition(simple_definition("LAYR"))
+            .expect("layer registers");
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("FXQ1", "Earthquake", earthquake_script)
+                    .expect("earthquake compiles"),
+            )
+            .expect("earthquake registers");
+        let layer = engine
+            .spawn_object(SpawnConfig::new("LAYR"))
+            .expect("layer spawns");
+        let caller = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_position(Vector2::new(91, 82))
+                    .with_owner(3)
+                    .with_controller(7)
+                    .with_layer(layer),
+            )
+            .expect("caller spawns");
+        let rng_count_before = engine.debug_rng_clone().count;
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "Trigger", Vec::new())
+                .expect("Activate errors remain fail-safe"),
+            Value::Nil
+        );
+        assert_eq!(engine.debug_rng_clone().count, rng_count_before);
+        assert!(engine.object_snapshot(caller).is_some(), "caller survives");
+
+        let quake = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "FXQ1")
+            .expect("FXQ1 spawns");
+        assert_eq!(quake.state.position, Vector2::new(-7, 83));
+        assert_eq!(quake.state.owner, OWNER_NONE);
+        assert_eq!(quake.state.controller, OWNER_NONE);
+        assert_eq!(quake.state.layer, None);
+        assert_eq!(
+            quake.state.local_vars.get("construction_creator"),
+            Some(&Value::Nil)
+        );
+        assert_eq!(
+            quake.state.local_vars.get("construction_x"),
+            Some(&Value::Int(-7))
+        );
+        assert_eq!(
+            quake.state.local_vars.get("construction_y"),
+            Some(&Value::Int(83))
+        );
+        assert_eq!(
+            quake.state.local_vars.get("activated"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            quake.state.local_vars.get("activate_argument"),
+            Some(&Value::Nil),
+            "native Activate receives no arguments"
+        );
+    }
+
+    #[test]
+    fn launch_earthquake_returns_nil_without_fxq1_and_script_continues() {
+        let caller_script = r#"#strict
+func Trigger() {
+    var result = LaunchEarthquake(60, 140);
+    return([result, 1]);
+}
+"#;
+        let mut engine = Engine::with_seed(9);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("Tutorial06-shaped call compiles"),
+            )
+            .expect("caller registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let rng_count_before = engine.debug_rng_clone().count;
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "Trigger", Vec::new())
+                .expect("missing FXQ1 is a successful void call"),
+            Value::Array(vec![Value::Nil, Value::Int(1)])
+        );
+        assert_eq!(engine.debug_rng_clone().count, rng_count_before);
+        assert_eq!(engine.objects.len(), 1, "missing FXQ1 creates nothing");
+    }
+
+    #[test]
     fn earthquake_event_requires_truthy_activate_like_cpp() {
         // LaunchEarthquake returns true only when FXQ1::Activate returns a
         // truthy C4Value (C4Weather.cpp:196-203). Object creation alone does
