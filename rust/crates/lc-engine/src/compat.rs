@@ -14265,7 +14265,7 @@ impl EffectContextOutcome {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum EffectScope {
-    Object,
+    Object(Option<ObjectId>),
     Global,
 }
 
@@ -14608,6 +14608,18 @@ fn kill_effect_inline(
 /// effect: it asks the selected live list synchronously and returns deny,
 /// zero, or the accepting effect number.
 fn check_effect(args: &[Value]) -> Result<Value, RuntimeError> {
+    check_effect_with_policy(args, true, true)
+}
+
+/// Shared `C4Effect::Check` core. Script CheckEffect/AddEffect calls
+/// propagate checker errors; native constructors such as Incinerate use
+/// C4Effect's default fail-safe policy and already select the target scope
+/// directly instead of resolving a script function named CheckEffect.
+fn check_effect_with_policy(
+    args: &[Value],
+    redirect_foreign: bool,
+    pass_errors: bool,
+) -> Result<Value, RuntimeError> {
     if args.len() > 8 {
         return Err(RuntimeError::new("CheckEffect expects at most 8 arguments"));
     }
@@ -14637,14 +14649,14 @@ fn check_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         if status.is_none_or(|status| status == ObjectStatus::Deleted) {
             return Ok(Value::Nil);
         }
-        if active != Some(target_id) {
+        if redirect_foreign && active != Some(target_id) {
             return call_world_object_function(target_id, "CheckEffect", args)
                 .unwrap_or(Ok(Value::Nil));
         }
     }
 
     let scope = determine_scope_from_state(target_state)?;
-    if matches!(scope, EffectScope::Object)
+    if matches!(scope, EffectScope::Object(_))
         && !matches!(target_state, Value::Object(_) | Value::Proplist(_))
     {
         return Err(RuntimeError::new(format!(
@@ -14668,7 +14680,7 @@ fn check_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     let effects = match snapshot_effects_from_context(scope) {
         Some(effects) => effects,
         None => match scope {
-            EffectScope::Object => extract_effects_from_state(target_state)?,
+            EffectScope::Object(_) => extract_effects_from_state(target_state)?,
             EffectScope::Global => Vec::new(),
         },
     };
@@ -14711,14 +14723,18 @@ fn check_effect(args: &[Value]) -> Result<Value, RuntimeError> {
             Value::Nil,
         ];
         call_args.extend(values.iter().cloned());
-        let result = match dispatch_effect_fx_callback(
-            checker.command_target,
-            checker.command_id.as_deref(),
-            &function,
-            &call_args,
-        ) {
-            None => 0,
-            Some(result) => value_as_i32(&result?),
+        let result = if pass_errors {
+            match dispatch_effect_fx_callback(
+                checker.command_target,
+                checker.command_id.as_deref(),
+                &function,
+                &call_args,
+            ) {
+                None => 0,
+                Some(result) => value_as_i32(&result?),
+            }
+        } else {
+            dispatch_effect_fx_callback_fail_safe(&checker, &function, &call_args)
         };
         match result {
             -1 => return Ok(Value::Int(-1)),
@@ -14807,11 +14823,23 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         return result;
     }
 
+    add_effect_constructor(args, name, true)
+}
+
+/// C4Effect constructor core after the script ABI's foreign-target routing.
+/// Native callers use it directly so a script function named AddEffect
+/// cannot replace the C++ constructor call, and choose the constructor's
+/// `passErrors` policy for the Fx*Effect check chain.
+fn add_effect_constructor(
+    args: &[Value],
+    name: String,
+    check_pass_errors: bool,
+) -> Result<Value, RuntimeError> {
     // An unfilled pTarget slot is nil — a GLOBAL effect (FnAddEffect's
     // C4Object *pTarget = nullptr).
     let target_state = args.get(1).unwrap_or(&Value::Nil);
     let scope = determine_scope_from_state(target_state)?;
-    if matches!(scope, EffectScope::Object) {
+    if matches!(scope, EffectScope::Object(_)) {
         match target_state {
             Value::Object(_) | Value::Proplist(_) => {}
             other => {
@@ -15014,7 +15042,7 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         ];
         check_args.extend(call_vars.iter().cloned());
         check_args.resize(8, Value::Nil);
-        let check_result = match check_effect(&check_args) {
+        let check_result = match check_effect_with_policy(&check_args, false, check_pass_errors) {
             Ok(result) => result,
             Err(error) => {
                 with_context_mut(scope, |ctx| {
@@ -15146,7 +15174,7 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let target_state = args.get(1).unwrap_or(&Value::Nil);
     let scope = determine_scope_from_state(target_state)?;
-    if matches!(scope, EffectScope::Object) {
+    if matches!(scope, EffectScope::Object(_)) {
         match target_state {
             Value::Object(_) | Value::Proplist(_) => {}
             other => {
@@ -15205,7 +15233,7 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(false));
         };
         let target = match scope {
-            EffectScope::Object => target_state.clone(),
+            EffectScope::Object(_) => target_state.clone(),
             EffectScope::Global => Value::Nil,
         };
         kill_effect_inline(scope, &target, &victim)?;
@@ -15217,7 +15245,7 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     })?;
     // Synthetic proplist fixtures have no callback script, but preserve the
     // old engine-Fire projection. fDoNoCalls skips the entire Kill bracket.
-    if matches!(scope, EffectScope::Object)
+    if matches!(scope, EffectScope::Object(_))
         && !no_callbacks
         && removed
             .as_ref()
@@ -15249,7 +15277,7 @@ fn change_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         effect_name_filter("ChangeEffect", args.first().unwrap_or(&Value::Nil))?
             .map(str::to_owned);
     let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
-    if matches!(scope, EffectScope::Object) {
+    if matches!(scope, EffectScope::Object(_)) {
         match args.get(1).unwrap_or(&Value::Nil) {
             Value::Object(_) | Value::Proplist(_) => {}
             other => {
@@ -15294,7 +15322,7 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     let effects = match snapshot_effects_from_context(scope) {
         Some(effects) => effects,
         None => match scope {
-            EffectScope::Object => extract_effects_from_state(&args[1])?,
+            EffectScope::Object(_) => extract_effects_from_state(&args[1])?,
             EffectScope::Global => Vec::new(),
         },
     };
@@ -15378,7 +15406,7 @@ fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
     let effects = match snapshot_effects_from_context(scope) {
         Some(effects) => effects,
         None => match scope {
-            EffectScope::Object => extract_effects_from_state(&args[1])?,
+            EffectScope::Object(_) => extract_effects_from_state(&args[1])?,
             EffectScope::Global => Vec::new(),
         },
     };
@@ -15543,7 +15571,7 @@ fn effect_call(args: &[Value]) -> Result<Value, RuntimeError> {
     let effects = match snapshot_effects_from_context(scope) {
         Some(effects) => effects,
         None => match scope {
-            EffectScope::Object => extract_effects_from_state(target)?,
+            EffectScope::Object(_) => extract_effects_from_state(target)?,
             EffectScope::Global => Vec::new(),
         },
     };
@@ -15556,7 +15584,7 @@ fn effect_call(args: &[Value]) -> Result<Value, RuntimeError> {
     // seven forwarded values.
     let mut call_args = Vec::with_capacity(9);
     call_args.push(match scope {
-        EffectScope::Object => target.clone(),
+        EffectScope::Object(_) => target.clone(),
         EffectScope::Global => Value::Nil,
     });
     call_args.push(Value::Int(number));
@@ -19071,30 +19099,30 @@ fn effective_definition_id(context: &EffectHostContext, target: ObjectId) -> Opt
         })
 }
 
-/// `C4Object::Incinerate(iCausedBy, fBlasted=true)` on the host seam —
-/// the staged mirror of the engine-side `incinerate_object_inner`
-/// (fxFireStart deterministic core, C4Effect.cpp:560-641): same refusal
-/// checks, BurnTurnTo changedef, burning contents ejection, extinguisher
-/// gate, ONE FirePhase = Random(15) draw on the shared ledger, and the
-/// Incineration/IncinerationEx callback — with the fire state bits riding
-/// `ObjectUpdate::fire` to the fold.
+/// `C4Object::Incinerate(iCausedBy, fBlasted=true)` on the host seam for
+/// BlastObject's ignition arm. The shared constructor path below performs
+/// the refusal checks and complete Fire effect negotiation/start sequence.
 fn incinerate_target_blasted(target: ObjectId, caused_by: i32) -> Result<(), RuntimeError> {
-    incinerate_target(target, caused_by, true).map(|_| ())
+    incinerate_target(target, caused_by, true, None).map(|_| ())
 }
 
 /// `C4Object::Incinerate(iCausedBy, fBlasted)` on the host seam
 /// (C4Object.cpp:1257-1266): the refusal checks, the "Fire" C4Effect
-/// entry (:1263-1265), and the synchronous engine FnFxFireStart — a
-/// denied start kills the fresh entry again without a Stop call
-/// (C4Effect ctor, C4Effect.cpp:128-131).
-fn incinerate_target(target: ObjectId, caused_by: i32, blasted: bool) -> Result<bool, RuntimeError> {
-    let fire_number = HOST_CONTEXT.with(|cell| -> Result<Option<i32>, RuntimeError> {
+/// constructor (:1263-1265), including its Fx*Effect check chain and the
+/// script-overridable synchronous FxFireStart.
+pub(crate) fn incinerate_target(
+    target: ObjectId,
+    caused_by: i32,
+    blasted: bool,
+    incinerating: Option<ObjectId>,
+) -> Result<bool, RuntimeError> {
+    let eligible = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return Ok(None);
+            return false;
         };
         if !context.ensure_object_scope(target) {
-            return Ok(None);
+            return false;
         }
         // Already on fire (C4Object.cpp:1259) — a same-call incinerate
         // shows through the staged fire channel.
@@ -19108,7 +19136,7 @@ fn incinerate_target(target: ObjectId, caused_by: i32, blasted: bool) -> Result<
                     .unwrap_or(false)
             });
         if already_burning {
-            return Ok(None);
+            return false;
         }
         // Dead living don't burn (C4Object.cpp:1261).
         let (category, alive) = context
@@ -19116,36 +19144,37 @@ fn incinerate_target(target: ObjectId, caused_by: i32, blasted: bool) -> Result<
             .map(|scope| (scope.current_category, scope.alive()))
             .unwrap_or((0, false));
         if category & crate::CATEGORY_LIVING != 0 && !alive {
-            return Ok(None);
+            return false;
         }
-        // The effect entry exists BEFORE fxFireStart runs (C4Effect ctor,
-        // C4Object.cpp:1263-1265).
-        Ok(context.object_scope_mut(target).map(|scope| {
-            let mut entry = EffectState::new(crate::C4FX_FIRE)
-                .with_priority(crate::C4FX_FIRE_PRIORITY)
-                .with_interval(crate::C4FX_FIRE_TIMER_INTERVAL);
-            entry.start_dispatched = true;
-            scope.effects.add_effect(entry)
-        }))
-    })?;
-    let Some(fire_number) = fire_number else {
-        return Ok(false);
-    };
-    if fire_effect_start_core(target, fire_number, caused_by, blasted, None)? == -1 {
-        // The denied Start kills the fresh entry without a Stop call
-        // (C4Effect ctor, C4Effect.cpp:128-131).
-        HOST_CONTEXT.with(|cell| {
-            if let Some(context) = cell.borrow_mut().as_mut() {
-                if let Some(scope) = context.object_scope_mut(target) {
-                    scope
-                        .effects
-                        .remove_effect(None, fire_number.max(0) as usize, true);
-                }
-            }
-        });
+        true
+    });
+    if !eligible {
         return Ok(false);
     }
-    Ok(true)
+
+    // Reuse the live-object C4Effect constructor path. Besides keeping the
+    // pending node callback-visible, this runs all Fx*Effect checks, honors
+    // annul/merge, brackets Start with upper temp calls, and resolves a
+    // global script FxFireStart before the native engine fallback.
+    let result = add_effect_constructor(
+        &[
+            Value::String(crate::C4FX_FIRE.to_string()),
+            object_reference_value(target),
+            Value::Int(crate::C4FX_FIRE_PRIORITY),
+            Value::Int(crate::C4FX_FIRE_TIMER_INTERVAL),
+            Value::Nil,
+            Value::Nil,
+            Value::Int(caused_by),
+            Value::Bool(blasted),
+            incinerating
+                .map(object_reference_value)
+                .unwrap_or(Value::Nil),
+            Value::Nil,
+        ],
+        crate::C4FX_FIRE.to_string(),
+        false,
+    )?;
+    Ok(matches!(result, Value::Int(number) if number != 0))
 }
 
 /// The engine FnFxFireStart body (C4Effect.cpp:560-641; AddFunc
@@ -19743,7 +19772,9 @@ fn incinerate(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) = target_id.or(active) else {
         return Ok(Value::Bool(false));
     };
-    Ok(Value::Bool(incinerate_target(target, caused_by, false)?))
+    Ok(Value::Bool(incinerate_target(
+        target, caused_by, false, None,
+    )?))
 }
 
 /// FnExtinguish (C4Script.cpp:264-270) → C4Object::Extinguish(0)
@@ -31448,7 +31479,7 @@ fn split_to_components(args: &[Value]) -> Result<Value, RuntimeError> {
                 (burning, owner)
             });
             if burning {
-                let _ = incinerate_target(created, fire_owner, false)?;
+                let _ = incinerate_target(created, fire_owner, false, None)?;
             }
             if let Some(container) = original_container {
                 let _ = enter_object_live(created, container)?;
@@ -34394,7 +34425,8 @@ fn snapshot_effects_from_context(scope: EffectScope) -> Option<Vec<EffectState>>
 
 fn determine_scope_from_state(value: &Value) -> Result<EffectScope, RuntimeError> {
     match value {
-        Value::Object(_) | Value::Proplist(_) => Ok(EffectScope::Object),
+        Value::Object(_) => Ok(EffectScope::Object(object_id_from_value(value))),
+        Value::Proplist(_) => Ok(EffectScope::Object(None)),
         Value::Nil => Ok(EffectScope::Global),
         Value::Int(id) if *id == 0 => Ok(EffectScope::Global),
         other => Err(RuntimeError::new(format!(
@@ -35520,16 +35552,19 @@ impl EffectHostContext {
 
     fn scope_mut(&mut self, scope: EffectScope) -> Result<&mut EffectScopeContext, RuntimeError> {
         match scope {
-            EffectScope::Object => {
-                self.object
-                    .as_mut()
-                    .map(|ctx| &mut ctx.effects)
-                    .ok_or_else(|| {
-                        RuntimeError::new(
-                            "object effect operations require an active engine context",
-                        )
-                    })
-            }
+            EffectScope::Object(Some(target)) => self
+                .object_scope_mut(target)
+                .map(|ctx| &mut ctx.effects)
+                .ok_or_else(|| {
+                    RuntimeError::new("object effect operations require a live target context")
+                }),
+            EffectScope::Object(None) => self
+                .object
+                .as_mut()
+                .map(|ctx| &mut ctx.effects)
+                .ok_or_else(|| {
+                    RuntimeError::new("object effect operations require an active engine context")
+                }),
             EffectScope::Global => self.global.as_mut().ok_or_else(|| {
                 RuntimeError::new("global effect operations require an active engine context")
             }),
@@ -37309,14 +37344,20 @@ impl EffectHostContext {
 
     fn snapshot(&self, scope: EffectScope) -> Option<Vec<EffectState>> {
         match scope {
-            EffectScope::Object => self.object.as_ref().map(|ctx| ctx.effects.snapshot()),
+            EffectScope::Object(Some(target)) => {
+                self.object_scope(target).map(|ctx| ctx.effects.snapshot())
+            }
+            EffectScope::Object(None) => self.object.as_ref().map(|ctx| ctx.effects.snapshot()),
             EffectScope::Global => self.global.as_ref().map(EffectScopeContext::snapshot),
         }
     }
 
     fn effect_list_had_head(&self, scope: EffectScope) -> Option<bool> {
         match scope {
-            EffectScope::Object => self
+            EffectScope::Object(Some(target)) => self
+                .object_scope(target)
+                .map(|ctx| ctx.effects.had_list_head),
+            EffectScope::Object(None) => self
                 .object
                 .as_ref()
                 .map(|ctx| ctx.effects.had_list_head),

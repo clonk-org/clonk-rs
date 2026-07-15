@@ -11355,6 +11355,49 @@ impl Definition {
         )
     }
 
+    /// Run C4Object::Incinerate inside the carrier's live host context so its
+    /// C4Effect constructor shares the canonical AddEffect check/start path.
+    #[allow(clippy::too_many_arguments)]
+    fn incinerate_object(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        caused_by: i32,
+        blasted: bool,
+        incinerating: Option<ObjectId>,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<
+        (bool, compat::EffectContextOutcome, AudioRegistry, LcgRng),
+        EngineError,
+    > {
+        let (value, outcome, audio, rng) = self.exec_in_object_context(
+            state,
+            object_id,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            "Incinerate",
+            |_script, _cells, _this| {
+                compat::incinerate_target(object_id, caused_by, blasted, incinerating)
+                    .map(Value::Bool)
+                    .map_err(Into::into)
+            },
+        )?;
+        Ok((matches!(value, Value::Bool(true)), outcome, audio, rng))
+    }
+
     /// The shared object-context execution seam: installs the physics/
     /// environment/random/audio guards and the HostObjectContext, runs
     /// `invoke` on the definition script against LIVE local cells
@@ -33938,68 +33981,74 @@ impl Engine {
         Ok(())
     }
 
-    /// `C4Object::Incinerate` (C4Object.cpp:1257-1266) + the deterministic
-    /// core of fxFireStart (C4Effect.cpp:560-641): refuse when already
-    /// burning or a dead living; create the "Fire" C4Effect entry
-    /// (C4Fx_FirePriority 100, C4Fx_FireTimer 1); no fire in extinguishing
-    /// material (checked BEFORE the FirePhase draw — the denied Start kills
-    /// the fresh entry, ctor :128-131); otherwise store
-    /// [FireMode, CausedBy, Blasted, IncineratingObj] in the effect vars
-    /// (:628-631), set OnFire, draw `FirePhase = Random(MaxFirePhase)` (one
-    /// synced draw), and run the Incineration script callback. Still open:
-    /// attached-object detach, the check chain of other effects
-    /// (Fx*Effect), a script FxFireStart overload, and sounds.
+    /// `C4Object::Incinerate` (C4Object.cpp:1257-1268): construct the
+    /// priority-100, interval-1 Fire effect through the same live C4Effect
+    /// path as AddEffect. That path runs the higher/equal-priority Fx*Effect
+    /// check chain, annul/merge and temporary upper-effect calls, then lets a
+    /// global script FxFireStart override the native engine start.
     #[doc(hidden)]
     pub fn incinerate_object(
         &mut self,
         idx: usize,
         caused_by: i32,
         blasted: bool,
-        _incinerating: Option<ObjectId>,
-    ) -> Result<bool, EngineError> {
-        // OnFire/Inflammable are SetOCF-owned bits; C++ Incinerate updates
-        // them through SetOCF on the spot.
-        let result = self.incinerate_object_inner(idx, caused_by, blasted, _incinerating);
-        self.refresh_object_ocf(idx);
-        result
-    }
-
-    fn incinerate_object_inner(
-        &mut self,
-        idx: usize,
-        caused_by: i32,
-        blasted: bool,
         incinerating: Option<ObjectId>,
     ) -> Result<bool, EngineError> {
-        {
-            let state = &self.objects[idx].state;
-            // Already on fire (C4Object.cpp:1259)
-            if state.on_fire {
-                return Ok(false);
-            }
-            // Dead living don't burn (C4Object.cpp:1261)
-            if state.category & CATEGORY_LIVING != 0 && !state.alive {
-                return Ok(false);
-            }
-        }
-        // The effect entry exists BEFORE fxFireStart runs (C4Effect ctor,
-        // C4Object.cpp:1263-1265) — number allocation and GetEffect
-        // visibility from the callbacks below match C++.
-        let fire_number = {
-            let mut entry = EffectState::new(C4FX_FIRE)
-                .with_priority(C4FX_FIRE_PRIORITY)
-                .with_interval(C4FX_FIRE_TIMER_INTERVAL);
-            entry.start_dispatched = true;
-            let (inserted, _) = self.objects[idx].insert_effect(entry);
-            inserted.number
+        let (object_id, definition_id, state_snapshot) = {
+            let object = self
+                .objects
+                .get(idx)
+                .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?;
+            (
+                object.id,
+                object.definition_id.clone(),
+                object.script_state_snapshot(),
+            )
         };
-        if !self.fire_effect_start_engine(idx, fire_number, caused_by, blasted, incinerating)? {
-            // the denied Start kills the fresh effect without a Stop call
-            // (C4Effect ctor, C4Effect.cpp:128-131)
-            self.objects[idx].remove_effect_by_number(fire_number);
-            return Ok(false);
-        }
-        Ok(true)
+        let definition = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let action_library = definition.action_library().clone();
+        let call = definition.incinerate_object(
+            &state_snapshot,
+            object_id,
+            caused_by,
+            blasted,
+            incinerating,
+            self.rng.clone(),
+            &self.global_effects.clone(),
+            self.physics,
+            self.environment,
+            self.frame,
+            self.host_world_context(),
+            self.game_over_triggered,
+            self.audio_registry.clone(),
+        );
+        let (incinerated, outcome, audio_state, new_rng) = match call {
+            Ok(ok) => ok,
+            Err(error) => {
+                return Err(self.apply_script_error_recovery(
+                    error,
+                    idx,
+                    &action_library,
+                    object_id,
+                    &definition_id,
+                    false,
+                ));
+            }
+        };
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        self.apply_callback_outcome(
+            idx,
+            outcome,
+            &action_library,
+            object_id,
+            &definition_id,
+            false,
+        )?;
+        Ok(incinerated)
     }
 
     /// The engine FnFxFireStart body (C4Effect.cpp:560-641) against an

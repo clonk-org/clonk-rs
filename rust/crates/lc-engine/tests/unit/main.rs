@@ -2838,8 +2838,10 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
         assert!(!engine.incinerate_object(corpse_idx, 1, false, None)?);
         assert!(!engine.objects[corpse_idx].state.on_fire);
 
-        // submerged in extinguisher material → no fire, no draw
-        // (C4Effect.cpp:574-583)
+        // Submerged in extinguisher material: the constructor still hands
+        // back the allocated number (so Incinerate succeeds), while the
+        // denied Start leaves no live fire state and consumes no draw
+        // (C4Effect.cpp:128-133, 574-583).
         if let Some(landscape) = engine.landscape.as_mut() {
             landscape.set_liquid_column(30, vec![LiquidSegment::with_material(5, 12, Some(water))]);
         }
@@ -2847,7 +2849,7 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
             engine.spawn_object(SpawnConfig::new("Tree").with_position(Vector2::new(30, 8)))?;
         let soaked_idx = engine.find_object_index(soaked).expect("soaked exists");
         let mirror = engine.rng.clone();
-        assert!(!engine.incinerate_object(soaked_idx, 1, false, None)?);
+        assert!(engine.incinerate_object(soaked_idx, 1, false, None)?);
         assert!(!engine.objects[soaked_idx].state.on_fire);
         assert_eq!(engine.rng, mirror, "no draw when extinguished at start");
         Ok(())
@@ -3443,6 +3445,380 @@ func FxFireTimer(pObj, iNumber, iTime)
     }
 
     #[test]
+    fn incinerate_honors_higher_priority_effect_deny() -> Result<(), EngineError> {
+        let script = r#"#strict 2
+func InstallShield() { return AddEffect("Shield", this(), 200, 0, this()); }
+func Ignite() { return Incinerate(); }
+func FxShieldEffect(szNew, pTarget, iNumber, iUnused, iCause, fBlasted, pIncinerating, iUnused2)
+{
+    if (szNew == "Fire") return -1;
+    return 0;
+}
+func Incineration(iCause) { return 1; }
+"#;
+        let call_log: Arc<Mutex<Vec<(String, Vec<Value>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, args| {
+                call_log
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), args.to_vec()));
+            });
+        }
+        let mut definition =
+            Definition::from_script("FIRE_DENY", "Fire deny", script).expect("script compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(73);
+        engine.register_definition(definition)?;
+        let direct = engine.spawn_object(
+            SpawnConfig::new("FIRE_DENY")
+                .with_category(CATEGORY_OBJECT)
+                .with_controller(9),
+        )?;
+        let scripted = engine.spawn_object(
+            SpawnConfig::new("FIRE_DENY")
+                .with_category(CATEGORY_OBJECT)
+                .with_controller(9),
+        )?;
+
+        let mut shield_numbers = HashMap::new();
+        for id in [direct, scripted] {
+            let idx = engine.find_object_index(id).expect("target exists");
+            let result = engine.call_object_function(idx, "InstallShield", Vec::new())?;
+            let Value::Int(number) = result else {
+                panic!("Shield AddEffect returned {result:?}");
+            };
+            assert!(number > 0);
+            shield_numbers.insert(id, number);
+        }
+        call_log.lock().unwrap().clear();
+        let rng_before = engine.rng.clone();
+        let fire_before = [direct, scripted].map(|id| {
+            let idx = engine.find_object_index(id).expect("target exists");
+            (
+                engine.objects[idx].state.fire_phase,
+                engine.objects[idx].state.fire_caused_by,
+            )
+        });
+
+        let direct_idx = engine.find_object_index(direct).expect("direct target exists");
+        assert!(!engine.incinerate_object(direct_idx, 9, false, None)?);
+        let scripted_idx = engine
+            .find_object_index(scripted)
+            .expect("scripted target exists");
+        assert_eq!(
+            engine.call_object_function(scripted_idx, "Ignite", Vec::new())?,
+            Value::Bool(false)
+        );
+
+        assert_eq!(engine.rng, rng_before, "denied fire consumes no RNG");
+        for (slot, id) in [direct, scripted].into_iter().enumerate() {
+            let idx = engine.find_object_index(id).expect("target survives");
+            let object = &engine.objects[idx];
+            assert!(!object.state.on_fire);
+            assert_eq!(
+                (object.state.fire_phase, object.state.fire_caused_by),
+                fire_before[slot]
+            );
+            assert_eq!(object.state.effects.len(), 1);
+            assert_eq!(object.state.effects[0].name, "Shield");
+            assert_eq!(object.state.effects[0].priority, 200);
+            assert_eq!(
+                object.state.effects[0].number,
+                shield_numbers[&id],
+                "the denying effect is unchanged"
+            );
+        }
+
+        let calls: Vec<_> = call_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name.starts_with("Fx") || name == "Incineration")
+            .cloned()
+            .collect();
+        assert_eq!(calls.len(), 2);
+        for ((name, args), id) in calls.iter().zip([direct, scripted]) {
+            assert_eq!(name, "FxShieldEffect");
+            assert_eq!(
+                args,
+                &vec![
+                    Value::String("Fire".to_string()),
+                    Value::Object(id.as_u64()),
+                    Value::Int(shield_numbers[&id]),
+                    Value::Nil,
+                    Value::Int(9),
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Nil,
+                ]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn incinerate_global_fx_fire_start_matches_add_effect() -> Result<(), EngineError> {
+        let mut engine = Engine::with_seed(79);
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/Fire.c".to_string(),
+                "global func FxFireStart(pTarget, iNumber, iTemp, iCause, fBlasted, pIncinerating, iUnused) { return 0; }\n"
+                    .to_string(),
+            )]),
+            1
+        );
+        let script = r#"#strict 2
+func ViaIncinerate() { return Incinerate(); }
+func ViaAddEffect(pIncinerating) { return AddEffect("Fire", this(), 100, 1, nil, nil, 7, true, pIncinerating, nil); }
+func FireMode() { return 3; }
+func Incineration(iCause) { return 1; }
+"#;
+        let call_log: Arc<Mutex<Vec<(String, Vec<Value>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, args| {
+                call_log
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), args.to_vec()));
+            });
+        }
+        let mut definition = Definition::from_script("FIRE_START", "Fire start", script)?;
+        definition.set_c4_callback_convention(true);
+        definition.set_debugger_hooks(hooks);
+        engine.register_definition(definition)?;
+
+        let ids: [ObjectId; 3] = std::array::from_fn(|_| {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("FIRE_START")
+                        .with_category(CATEGORY_OBJECT)
+                        .with_controller(7),
+                )
+                .expect("target spawns")
+        });
+        let rng_before = engine.rng.clone();
+        let fire_before = ids.map(|id| {
+            let idx = engine.find_object_index(id).expect("target exists");
+            (
+                engine.objects[idx].state.fire_phase,
+                engine.objects[idx].state.fire_caused_by,
+            )
+        });
+
+        let source = ids[1];
+        let direct_idx = engine.find_object_index(ids[0]).expect("direct target exists");
+        assert!(engine.incinerate_object(direct_idx, 7, true, Some(source))?);
+        let script_idx = engine.find_object_index(ids[1]).expect("script target exists");
+        assert_eq!(
+            engine.call_object_function(script_idx, "ViaIncinerate", Vec::new())?,
+            Value::Bool(true)
+        );
+        let add_idx = engine.find_object_index(ids[2]).expect("add target exists");
+        assert_eq!(
+            engine.call_object_function(
+                add_idx,
+                "ViaAddEffect",
+                vec![Value::Object(source.as_u64())],
+            )?,
+            Value::Int(1)
+        );
+
+        assert_eq!(engine.rng, rng_before, "the script override consumes no RNG");
+        for (slot, id) in ids.into_iter().enumerate() {
+            let idx = engine.find_object_index(id).expect("target survives");
+            let object = &engine.objects[idx];
+            assert!(!object.state.on_fire, "the native start was replaced");
+            assert_eq!(
+                (object.state.fire_phase, object.state.fire_caused_by),
+                fire_before[slot]
+            );
+            assert_eq!(object.state.effects.len(), 1);
+            let fire = &object.state.effects[0];
+            assert_eq!(fire.name, "Fire");
+            assert_eq!(fire.number, 1);
+            assert_eq!(fire.priority, 100);
+            assert_eq!(fire.interval, 1);
+        }
+
+        let calls: Vec<_> = call_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| {
+                matches!(name.as_str(), "FxFireStart" | "FireMode" | "Incineration")
+            })
+            .cloned()
+            .collect();
+        assert_eq!(calls.len(), 3);
+        let expected_args = [
+            vec![
+                Value::Object(ids[0].as_u64()),
+                Value::Int(1),
+                Value::Nil,
+                Value::Int(7),
+                Value::Bool(true),
+                Value::Object(source.as_u64()),
+                Value::Nil,
+            ],
+            vec![
+                Value::Object(ids[1].as_u64()),
+                Value::Int(1),
+                Value::Nil,
+                Value::Int(7),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+            ],
+            vec![
+                Value::Object(ids[2].as_u64()),
+                Value::Int(1),
+                Value::Nil,
+                Value::Int(7),
+                Value::Bool(true),
+                Value::Object(source.as_u64()),
+                Value::Nil,
+            ],
+        ];
+        for ((name, args), expected) in calls.iter().zip(expected_args) {
+            assert_eq!(name, "FxFireStart");
+            assert_eq!(args, &expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn foreign_incinerate_bypasses_add_effect_script_shadows() -> Result<(), EngineError> {
+        let mut engine = Engine::with_seed(83);
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/AddEffect.c".to_string(),
+                "global func AddEffect() { return 0; }\n".to_string(),
+            )]),
+            1
+        );
+
+        let mut igniter = Definition::from_script(
+            "IGNITER",
+            "Igniter",
+            "#strict 2\nfunc Ignite(pTarget) { return Incinerate(pTarget); }\n",
+        )?;
+        igniter.set_c4_callback_convention(true);
+        let mut local_shadow = Definition::from_script(
+            "LOCAL_SHADOW",
+            "Local shadow",
+            "#strict 2\nfunc AddEffect() { return 0; }\n",
+        )?;
+        local_shadow.set_c4_callback_convention(true);
+        engine.register_definition(igniter)?;
+        engine.register_definition(local_shadow)?;
+        engine.register_definition(simple_definition("PLAIN_TARGET"))?;
+
+        let actor = engine.spawn_object(
+            SpawnConfig::new("IGNITER")
+                .with_category(CATEGORY_OBJECT)
+                .with_controller(7),
+        )?;
+        let local_target = engine.spawn_object(
+            SpawnConfig::new("LOCAL_SHADOW").with_category(CATEGORY_OBJECT),
+        )?;
+        let global_target = engine.spawn_object(
+            SpawnConfig::new("PLAIN_TARGET").with_category(CATEGORY_OBJECT),
+        )?;
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+
+        for target in [local_target, global_target] {
+            assert_eq!(
+                engine.call_object_function(
+                    actor_idx,
+                    "Ignite",
+                    vec![Value::Object(target.as_u64())],
+                )?,
+                Value::Bool(true)
+            );
+            let target_idx = engine.find_object_index(target).expect("target survives");
+            let object = &engine.objects[target_idx];
+            assert!(object.state.on_fire);
+            assert_eq!(object.state.fire_caused_by, 7);
+            assert_eq!(object.state.effects.len(), 1);
+            assert_eq!(object.state.effects[0].name, "Fire");
+            assert_eq!(object.state.effects[0].priority, 100);
+            assert_eq!(object.state.effects[0].interval, 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn incinerate_effect_check_errors_are_fail_safe() -> Result<(), EngineError> {
+        let script = r#"#strict 2
+func InstallBroken() { return AddEffect("Broken", this(), 200, 0, this()); }
+func FxBrokenEffect(szNew, pTarget, iNumber)
+{
+    MissingEffectFunction();
+    return -1;
+}
+func Incineration(iCause) { return 1; }
+"#;
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                if matches!(name, "FxBrokenEffect" | "Incineration") {
+                    call_log.lock().unwrap().push(name.to_string());
+                }
+            });
+        }
+        let mut definition =
+            Definition::from_script("BROKEN_CHECK", "Broken check", script)?;
+        definition.set_c4_callback_convention(true);
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(89);
+        engine.register_definition(definition)?;
+        let target = engine.spawn_object(
+            SpawnConfig::new("BROKEN_CHECK")
+                .with_category(CATEGORY_OBJECT)
+                .with_controller(7),
+        )?;
+        let idx = engine.find_object_index(target).expect("target exists");
+        assert!(matches!(
+            engine.call_object_function(idx, "InstallBroken", Vec::new())?,
+            Value::Int(number) if number > 0
+        ));
+        call_log.lock().unwrap().clear();
+
+        let mut mirror = engine.rng.clone();
+        let expected_phase = mirror.random(15);
+        assert!(engine.incinerate_object(idx, 7, false, None)?);
+        assert_eq!(engine.rng, mirror);
+        let object = &engine.objects[idx];
+        assert!(object.state.on_fire);
+        assert_eq!(object.state.fire_phase, expected_phase);
+        assert_eq!(object.state.fire_caused_by, 7);
+        assert_eq!(
+            object
+                .state
+                .effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Fire", "Broken"]
+        );
+        assert_eq!(
+            call_log.lock().unwrap().as_slice(),
+            ["FxBrokenEffect", "Incineration"]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn bubble_script_function_creates_fxu1_in_liquid_like_cpp() -> Result<(), EngineError> {
         // FnBubble (C4Script.cpp:2188-2192 + AddFunc :6718): the
         // caller-relative point goes to BubbleOut (C4Effect.cpp:847-857) —
@@ -3506,9 +3882,10 @@ func FxFireTimer(pObj, iNumber, iTime)
 
     #[test]
     fn incinerate_in_extinguisher_leaves_no_fire_effect_entry() -> Result<(), EngineError> {
-        // fxFireStart deny (C4Effect.cpp:574-607 + ctor :128-131): in
+        // fxFireStart deny (C4Effect.cpp:574-607 + ctor :128-133): in
         // extinguishing material the Start returns -1 and the freshly
-        // created effect dies without a Stop call — no entry remains.
+        // created effect dies without a Stop call. The constructor still
+        // reports its allocated number, so Incinerate succeeds.
         let library = MaterialLibrary::parse(
             r#"
             [Material Water]
@@ -3530,7 +3907,7 @@ func FxFireTimer(pObj, iNumber, iTime)
         let tree =
             engine.spawn_object(SpawnConfig::new("Tree").with_position(Vector2::new(10, 8)))?;
         let idx = engine.find_object_index(tree).expect("tree exists");
-        assert!(!engine.incinerate_object(idx, 1, false, None)?);
+        assert!(engine.incinerate_object(idx, 1, false, None)?);
         assert!(!engine.objects[idx].state.on_fire);
         assert!(
             engine.objects[idx].state.effects.is_empty(),
