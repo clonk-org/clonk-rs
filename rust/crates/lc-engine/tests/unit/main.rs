@@ -34646,7 +34646,7 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
     }
 
     #[test]
-    fn definition_from_resource_retains_description_for_context_info() -> Result<(), EngineError> {
+    fn definition_from_resource_get_desc_returns_trimmed_description() -> Result<(), EngineError> {
         // C4Def exposes the loaded Desc text through GetDesc
         // (C4Def.h:321,355); Context offers Info only when that text is
         // nonempty (C4ObjectMenu.cpp:410-423).
@@ -34658,14 +34658,27 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
             b"[DefCore]\nid=HUT3\nName=Wooden Hut\n",
         )
         .expect("write DefCore");
-        std::fs::write(def_dir.join("DescUS.txt"), b"A safe home base.\n")
+        std::fs::write(def_dir.join("DescUS.txt"), b"  A safe home base.  \r\n")
             .expect("write description");
+        std::fs::write(
+            def_dir.join("Script.c"),
+            b"#strict 2\npublic func ReadDesc() { return GetDesc(); }\n",
+        )
+        .expect("write definition script");
 
         let group = lc_resources::Group::open(&def_dir).expect("open definition group");
         let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
         let definition = Definition::from_resource(&resource)?;
 
         assert_eq!(definition.description(), Some("A safe home base."));
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(definition)?;
+        let hut = engine.spawn_object(SpawnConfig::new("HUT3"))?;
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        assert_eq!(
+            engine.call_object_function(hut_index, "ReadDesc", Vec::new())?,
+            Value::String("A safe home base.".into())
+        );
         Ok(())
     }
 
