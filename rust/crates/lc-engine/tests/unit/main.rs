@@ -41342,6 +41342,329 @@ func ReadTeam(int player) { return GetPlayerTeam(player); }
     }
 
     #[test]
+    fn remove_player_notifies_owned_objects_before_crew_removal_and_validation(
+    ) -> Result<(), EngineError> {
+        // NotifyOwnedObjects resolves the exact private native
+        // "~OnOwnerRemoved" fallback. That fallback calls SetOwner, whose
+        // ordinary OnOwnerChanged hook gives us an observable order ledger.
+        const OWNED_SCRIPT: &str = r#"#strict 2
+local callback_order, callback_crew, callback_owner, removed_hook;
+
+func OnOwnerRemoved()
+{
+    removed_hook = true;
+}
+
+func OnOwnerChanged(int new_owner, int old_owner)
+{
+    callback_order = GetGravity();
+    callback_crew = GetCrewCount(old_owner);
+    callback_owner = GetOwner();
+    SetGravity(callback_order + 1);
+    return true;
+}
+"#;
+        const SCENARIO_SCRIPT: &str = r#"#strict
+func RemovePlayer(int player, int team)
+{
+    SetGravity(40);
+    MissingAfterRemovePlayer();
+}
+"#;
+
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(7, "Ordered", 0).with_player_ids(vec![33, 22, 11])
+        ]);
+        engine.register_player(
+            PlayerConfig::new(1, "Departing")
+                .with_player_info_id(11)
+                .with_team(Some(7))
+                .with_color(Some(RgbColor::new(0xff, 0, 0))),
+        )?;
+        engine.register_player(
+            PlayerConfig::new(2, "Second")
+                .with_player_info_id(22)
+                .with_team(Some(7))
+                .with_color(Some(RgbColor::new(0, 0xff, 0))),
+        )?;
+        engine.register_player(
+            PlayerConfig::new(3, "First by team order")
+                .with_player_info_id(33)
+                .with_team(Some(7))
+                .with_color(Some(RgbColor::new(0, 0, 0xff))),
+        )?;
+
+        let mut movable = Definition::from_script("MOVE", "Movable", OWNED_SCRIPT)?;
+        movable.set_category(CATEGORY_OBJECT);
+        movable.set_color_by_owner(true);
+        engine.register_definition(movable)?;
+        let mut flag = Definition::from_script("FLAG", "Flag", OWNED_SCRIPT)?;
+        flag.set_category(CATEGORY_STATIC_BACK);
+        engine.register_definition(flag)?;
+        let mut background = Definition::from_script("BACK", "Background", OWNED_SCRIPT)?;
+        background.set_category(CATEGORY_STATIC_BACK);
+        engine.register_definition(background)?;
+        let mut crew_definition = Definition::from_script("CREW", "Crew", OWNED_SCRIPT)?;
+        crew_definition.set_category(CATEGORY_OBJECT);
+        crew_definition.set_crew_member(true);
+        engine.register_definition(crew_definition)?;
+
+        let movable_a = engine.spawn_object(SpawnConfig::new("MOVE").with_owner(1))?;
+        let movable_b = engine.spawn_object(SpawnConfig::new("MOVE").with_owner(1))?;
+        let inactive = engine.spawn_object(
+            SpawnConfig::new("MOVE")
+                .with_owner(1)
+                .with_status(ObjectStatus::Inactive),
+        )?;
+        let flag = engine.spawn_object(SpawnConfig::new("FLAG").with_owner(1))?;
+        let background = engine.spawn_object(SpawnConfig::new("BACK").with_owner(1))?;
+        let active_crew = engine.spawn_object(
+            SpawnConfig::new("CREW")
+                .with_owner(1)
+                .with_crew_member(true),
+        )?;
+        let inactive_crew = engine.spawn_object(
+            SpawnConfig::new("CREW")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_status(ObjectStatus::Inactive),
+        )?;
+        engine.load_scenario_script_with_convention(
+            "Script.c",
+            SCENARIO_SCRIPT,
+            true,
+        )?;
+
+        let transferable = HashSet::from([movable_a, movable_b, inactive, flag]);
+        let exec_order = engine.debug_exec_order();
+        let mut expected_callback_order = Vec::new();
+        for status in [ObjectStatus::Normal, ObjectStatus::Inactive] {
+            expected_callback_order.extend(exec_order.iter().rev().copied().filter(|object| {
+                transferable.contains(object)
+                    && engine
+                        .object_snapshot(*object)
+                        .is_some_and(|snapshot| snapshot.status == status)
+            }));
+        }
+        assert_eq!(expected_callback_order.len(), 4);
+        assert_eq!(
+            expected_callback_order.iter().copied().collect::<HashSet<_>>(),
+            transferable
+        );
+
+        let _ = engine.remove_player(1)?;
+
+        for (position, object) in expected_callback_order.iter().enumerate() {
+            let snapshot = engine.object_snapshot(*object).expect("owned object remains");
+            assert_eq!((snapshot.owner, snapshot.controller), (3, 3));
+            assert_eq!(
+                snapshot.local_vars.get("callback_order"),
+                Some(&Value::Int(40 + position as i32)),
+                "main-list objects precede inactive-list objects"
+            );
+            assert_eq!(
+                snapshot.local_vars.get("callback_crew"),
+                Some(&Value::Int(2)),
+                "the departing player and complete Crew list are still live"
+            );
+            assert_eq!(
+                snapshot.local_vars.get("callback_owner"),
+                Some(&Value::Int(3)),
+                "SetOwner writes owner before OnOwnerChanged"
+            );
+            assert!(matches!(
+                snapshot.local_vars.get("removed_hook"),
+                None | Some(Value::Nil)
+            ));
+        }
+        for object in [movable_a, movable_b, inactive] {
+            assert_eq!(
+                engine.object_snapshot(object).map(|snapshot| snapshot.color),
+                Some(0x0000_00ff),
+                "ColorByOwner follows the first ordered teammate"
+            );
+        }
+        assert_eq!(
+            engine
+                .object_snapshot(flag)
+                .map(|snapshot| (snapshot.owner, snapshot.controller)),
+            Some((3, 3)),
+            "FLAG transfers despite its StaticBack category"
+        );
+        let background = engine
+            .object_snapshot(background)
+            .expect("StaticBack object remains");
+        assert_eq!(
+            (background.owner, background.controller),
+            (OWNER_NONE, OWNER_NONE),
+            "StaticBack skips the fallback and is orphaned by validation"
+        );
+        assert!(matches!(
+            background.local_vars.get("callback_order"),
+            None | Some(Value::Nil)
+        ));
+        for crew in [active_crew, inactive_crew] {
+            let crew = engine.object_snapshot(crew).expect("crew record remains");
+            assert_eq!(crew.status, ObjectStatus::Deleted);
+            assert!(matches!(
+                crew.local_vars.get("callback_order"),
+                None | Some(Value::Nil)
+            ));
+        }
+        assert_eq!(
+            engine.physics().gravity,
+            40 + expected_callback_order.len() as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remove_player_uses_inactive_list_reinsertion_order() -> Result<(), EngineError> {
+        // StatusDeactivate removes from Game.Objects and inserts into the
+        // independent InactiveObjects stMain list. For one definition, the
+        // most recently deactivated object is the forward-list first entry.
+        const SCRIPT: &str = r#"#strict 2
+local callback_order;
+func OnOwnerChanged()
+{
+    callback_order = GetGravity();
+    SetGravity(callback_order + 1);
+}
+"#;
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(7, "Team", 0).with_player_ids(vec![22, 11])
+        ]);
+        engine.register_player(
+            PlayerConfig::new(1, "Departing")
+                .with_player_info_id(11)
+                .with_team(Some(7)),
+        )?;
+        engine.register_player(
+            PlayerConfig::new(2, "Retained")
+                .with_player_info_id(22)
+                .with_team(Some(7)),
+        )?;
+        let mut definition = Definition::from_script("MOVE", "Movable", SCRIPT)?;
+        definition.set_category(CATEGORY_OBJECT);
+        engine.register_definition(definition)?;
+        let a = engine.spawn_object(SpawnConfig::new("MOVE").with_owner(1))?;
+        let b = engine.spawn_object(SpawnConfig::new("MOVE").with_owner(1))?;
+
+        // B enters first; A enters second and therefore precedes B in the
+        // C++ inactive forward list, regardless of their former main order.
+        engine.apply_object_update(b, ObjectUpdate::new().with_status(ObjectStatus::Inactive))?;
+        engine.apply_object_update(a, ObjectUpdate::new().with_status(ObjectStatus::Inactive))?;
+        let mut physics = engine.physics();
+        physics.gravity = 70;
+        engine.set_physics(physics);
+        let state = engine.capture_state();
+        engine.restore_state(&state)?;
+
+        let _ = engine.remove_player(1)?;
+
+        assert_eq!(
+            engine
+                .object_snapshot(a)
+                .and_then(|snapshot| snapshot.local_vars.get("callback_order").cloned()),
+            Some(Value::Int(70))
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(b)
+                .and_then(|snapshot| snapshot.local_vars.get("callback_order").cloned()),
+            Some(Value::Int(71))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remove_player_uses_main_list_reactivation_order() -> Result<(), EngineError> {
+        // StatusActivate re-adds the object through Game.Objects.Add(stMain).
+        // Reactivating A therefore places it before same-definition B in the
+        // forward main list instead of restoring A's stale former position.
+        const SCRIPT: &str = r#"#strict 2
+local callback_order;
+func OnOwnerChanged()
+{
+    callback_order = GetGravity();
+    SetGravity(callback_order + 1);
+}
+"#;
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(7, "Team", 0).with_player_ids(vec![22, 11])
+        ]);
+        engine.register_player(
+            PlayerConfig::new(1, "Departing")
+                .with_player_info_id(11)
+                .with_team(Some(7)),
+        )?;
+        engine.register_player(
+            PlayerConfig::new(2, "Retained")
+                .with_player_info_id(22)
+                .with_team(Some(7)),
+        )?;
+        let mut definition = Definition::from_script("MOVE", "Movable", SCRIPT)?;
+        definition.set_category(CATEGORY_OBJECT);
+        engine.register_definition(definition)?;
+        let a = engine.spawn_object(SpawnConfig::new("MOVE").with_owner(1))?;
+        let b = engine.spawn_object(SpawnConfig::new("MOVE").with_owner(1))?;
+        engine.apply_object_update(a, ObjectUpdate::new().with_status(ObjectStatus::Inactive))?;
+        engine.apply_object_update(a, ObjectUpdate::new().with_status(ObjectStatus::Normal))?;
+        let mut physics = engine.physics();
+        physics.gravity = 80;
+        engine.set_physics(physics);
+
+        let _ = engine.remove_player(1)?;
+
+        assert_eq!(
+            engine
+                .object_snapshot(a)
+                .and_then(|snapshot| snapshot.local_vars.get("callback_order").cloned()),
+            Some(Value::Int(80))
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(b)
+                .and_then(|snapshot| snapshot.local_vars.get("callback_order").cloned()),
+            Some(Value::Int(81))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remove_player_uses_last_eligible_non_hostile_fallback_owner(
+    ) -> Result<(), EngineError> {
+        // FnOnOwnerRemoved's teamless fallback scans the whole player list
+        // without a break. Eliminated/surrendered and hostile players skip;
+        // the last remaining candidate wins (C4Script.cpp:5863-5872).
+        let mut engine = Engine::new();
+        let mut definition = simple_definition("MOVE");
+        definition.set_category(CATEGORY_OBJECT);
+        engine.register_definition(definition)?;
+        engine.register_player(PlayerConfig::new(1, "Departing"))?;
+        engine.register_player(PlayerConfig::new(2, "Eligible first"))?;
+        engine.register_player(PlayerConfig::new(3, "Eligible last"))?;
+        engine.register_player(
+            PlayerConfig::new(4, "Eliminated").with_status(PlayerStatus::Eliminated),
+        )?;
+        engine.register_player(PlayerConfig::new(5, "Hostile"))?;
+        engine.register_player(
+            PlayerConfig::new(6, "Surrendered").with_status(PlayerStatus::Surrendered),
+        )?;
+        engine.set_hostility(5, 1, true)?;
+        let object = engine.spawn_object(SpawnConfig::new("MOVE").with_owner(1))?;
+
+        let _ = engine.remove_player(1)?;
+
+        let object = engine.object_snapshot(object).expect("object remains");
+        assert_eq!((object.owner, object.controller), (3, 3));
+        Ok(())
+    }
+
+    #[test]
     fn remove_player_clears_invalid_static_back_owner_and_controller() -> Result<(), EngineError> {
         // StaticBack objects skip the OnOwnerRemoved fallback, but the final
         // C4ObjectList::ValidateOwners pass still clears their now-invalid

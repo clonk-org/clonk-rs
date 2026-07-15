@@ -7529,6 +7529,9 @@ pub struct EngineState {
     /// Kept separate so comparator snapshots may retain their normalized order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub object_order: Vec<ObjectId>,
+    /// Inactive object-list order in the same reversed representation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inactive_object_order: Vec<ObjectId>,
     #[serde(default)]
     pub particles: Vec<ParticleSnapshot>,
     #[serde(default)]
@@ -7697,6 +7700,7 @@ impl EngineState {
             scenario_values: None,
             objects,
             object_order: snapshot.render_order.clone(),
+            inactive_object_order: Vec::new(),
             particles: snapshot.particles.clone(),
             players,
             player_crew_rosters_authoritative: true,
@@ -12846,6 +12850,12 @@ pub struct Engine {
     /// semantics) on spawn and pruned of removed ids each tick. Enter/Exit
     /// never touch it (C4Object.cpp:1513-1615 only move Contents).
     #[doc(hidden)] pub exec_list: Vec<ObjectId>,
+    /// `C4GameObjects::InactiveObjects`, also stored in reverse C++ list
+    /// order so the same stMain insertion rules as `exec_list` apply.
+    /// Unlike the retained execution ledger above, this list is updated on
+    /// every modeled status transition and is authoritative for callbacks
+    /// that explicitly walk InactiveObjects.
+    inactive_exec_list: Vec<ObjectId>,
     /// Deferred category resorts plus FnSetObjectOrder requests. Category
     /// work runs first; relative requests execute newest-first afterward.
     #[doc(hidden)] pub pending_object_order_commands: Vec<ObjectOrderCommand>,
@@ -14689,6 +14699,7 @@ impl Engine {
             local_players: None,
             active_message_board_input: None,
             exec_list: Vec::new(),
+            inactive_exec_list: Vec::new(),
             pending_object_order_commands: Vec::new(),
             exec_cursor: None,
             frame: 0,
@@ -16688,6 +16699,193 @@ impl Engine {
         self.remove_player_internal(id, true)
     }
 
+    /// `C4Player::NotifyOwnedObjects`: visit the live main object list first,
+    /// then the inactive list, and run the engine's private
+    /// `~OnOwnerRemoved` fallback for each object still owned by the
+    /// departing player (C4Player.cpp:1807-1822).
+    fn notify_owned_objects(&mut self, departing_player: i32) -> Result<(), EngineError> {
+        self.notify_owned_objects_with_status(departing_player, ObjectStatus::Normal)?;
+        // Build this pass only after the main-list callbacks have completed:
+        // an earlier OnOwnerChanged may have moved a later object between
+        // the two C++ lists.
+        self.reconcile_inactive_list();
+        self.notify_owned_objects_with_status(departing_player, ObjectStatus::Inactive)
+    }
+
+    fn notify_owned_objects_with_status(
+        &mut self,
+        departing_player: i32,
+        status: ObjectStatus,
+    ) -> Result<(), EngineError> {
+        // Both ledgers store their C++ list order reversed. Use the distinct
+        // InactiveObjects ledger for that pass: deactivation order can differ
+        // from the object's former position in Game.Objects.
+        let order = if status == ObjectStatus::Inactive {
+            &self.inactive_exec_list
+        } else {
+            &self.exec_list
+        };
+        let object_ids = order
+            .iter()
+            .rev()
+            .copied()
+            .filter(|&object_id| {
+                self.find_object_index(object_id).is_some_and(|index| {
+                    let object = &self.objects[index];
+                    !object.destroyed && object.state.status == status
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for object_id in object_ids {
+            // The C++ walk observes live state at every link. In particular,
+            // an earlier OnOwnerChanged can reassign or remove a later object.
+            let still_owned = self.find_object_index(object_id).is_some_and(|index| {
+                let object = &self.objects[index];
+                !object.destroyed
+                    && object.state.status == status
+                    && object.state.owner == departing_player
+            });
+            if still_owned {
+                self.on_owner_removed_fallback(object_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Native `FnOnOwnerRemoved`, registered by C++ under the literal private
+    /// name `~OnOwnerRemoved` (C4Script.cpp:5834-5878). Ordinary definition
+    /// functions named `OnOwnerRemoved` are deliberately not dispatched by
+    /// this path: `GetFuncRecursive` performs exact-name lookup here.
+    fn on_owner_removed_fallback(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        let object = &self.objects[index];
+        let owner = object.state.owner;
+        let category = object.state.category;
+        let is_flag = object.definition_id.as_str() == "FLAG";
+        let Some(owner_player) = self.players.get(&owner) else {
+            return Ok(());
+        };
+        if owner_player.crew().contains(&object_id) {
+            // Stored crew is removed only after the player has been unlinked.
+            return Ok(());
+        }
+        if category & CATEGORY_STATIC_BACK != 0 && !is_flag {
+            // Internal StaticBack objects retain their owner until the final
+            // ValidateOwners pass. Flags are the explicit C++ exception.
+            return Ok(());
+        }
+
+        let owner_info_id = owner_player.player_info_id();
+        let owner_team = owner_player.team().filter(|team| *team != 0);
+        let mut new_owner = owner_team
+            .and_then(|team| {
+                self.runtime_team_members_in_order(team)
+                    .into_iter()
+                    .find(|&candidate| {
+                        candidate != owner
+                            && self.players.get(&candidate).is_some_and(|player| {
+                                let info_id = player.player_info_id();
+                                info_id != 0 && info_id != owner_info_id
+                            })
+                    })
+            })
+            .unwrap_or(OWNER_NONE);
+
+        if new_owner == OWNER_NONE {
+            // C4PlayerList is modeled throughout the engine in ascending
+            // runtime-player number. The native loop has no break, so the
+            // last eligible non-hostile player becomes the fallback owner.
+            let mut player_ids = self.players.keys().copied().collect::<Vec<_>>();
+            player_ids.sort_unstable();
+            for candidate in player_ids {
+                let eligible = candidate != owner
+                    && self.players.get(&candidate).is_some_and(|player| {
+                        !matches!(
+                            player.status(),
+                            PlayerStatus::Eliminated | PlayerStatus::Surrendered
+                        )
+                    })
+                    && !self.players_hostile(candidate, owner);
+                if eligible {
+                    new_owner = candidate;
+                }
+            }
+        }
+
+        self.set_owner_from_owner_removed(object_id, new_owner)
+    }
+
+    /// The `C4Object::SetOwner` portion reached by the native removal
+    /// fallback: owner color, owner/controller write, FLAG base propagation,
+    /// and the synchronous ordinary `OnOwnerChanged(new, old)` callback.
+    fn set_owner_from_owner_removed(
+        &mut self,
+        object_id: ObjectId,
+        new_owner: i32,
+    ) -> Result<(), EngineError> {
+        if new_owner != OWNER_NONE && !self.players.contains_key(&new_owner) {
+            return Ok(());
+        }
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        let definition_id = self.objects[index].definition_id.clone();
+        let color_by_owner = self
+            .definitions
+            .get(&definition_id)
+            .is_some_and(Definition::color_by_owner);
+        let owner_color = (new_owner != OWNER_NONE && color_by_owner)
+            .then(|| self.players.get(&new_owner).and_then(Player::color))
+            .flatten()
+            .map(|color| {
+                u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
+            });
+
+        let (old_owner, flag_base_target) = {
+            let object = &mut self.objects[index];
+            if let Some(color) = owner_color {
+                // C++ refreshes ColorByOwner even when the owner is unchanged.
+                object.state.color = color;
+            }
+            let old_owner = object.state.owner;
+            if old_owner == new_owner {
+                return Ok(());
+            }
+            object.state.owner = new_owner;
+            object.state.controller = new_owner;
+            let flag_base_target = (definition_id.as_str() == "FLAG"
+                && object.state.action.name == "FlyBase")
+                .then_some(object.state.action.target)
+                .flatten();
+            (old_owner, flag_base_target)
+        };
+
+        if let Some(target) = flag_base_target {
+            if let Some(target_index) = self.find_object_index(target) {
+                let target = &mut self.objects[target_index];
+                if !target.destroyed
+                    && target.state.status != ObjectStatus::Deleted
+                    && target.state.base == old_owner
+                {
+                    target.state.base = new_owner;
+                }
+            }
+        }
+
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        let _ = tolerate_script_error(self.call_object_function(
+            index,
+            "OnOwnerChanged",
+            vec![Value::Int(new_owner), Value::Int(old_owner)],
+        ))?;
+        Ok(())
+    }
+
     fn remove_player_internal(
         &mut self,
         id: i32,
@@ -16700,7 +16898,15 @@ impl Engine {
         let mut args = Vec::with_capacity(2);
         args.push(Value::Int(id));
         args.push(team.map(Value::Int).unwrap_or(Value::Nil));
-        self.broadcast_scenario_function("RemovePlayer", args)?;
+        // GRBroadcast uses fail-safe execution here: partial mutations from
+        // a failing RemovePlayer callback remain, but the native ownership
+        // notification still follows (C4PlayerList.cpp:219-224).
+        tolerate_script_error(self.broadcast_scenario_function("RemovePlayer", args))?;
+
+        // C4PlayerList::Remove performs this native callback sweep after the
+        // RemovePlayer broadcast but while the player and Crew list are still
+        // live (C4PlayerList.cpp:219-261).
+        self.notify_owned_objects(id)?;
 
         // C4PlayerList unlinks the departing player before walking its stored
         // Crew list and assigning every member removal. Preserve that roster
@@ -16727,7 +16933,7 @@ impl Engine {
         }
         for crew in departing_crew {
             if self.find_object_index(crew).is_some_and(|index| {
-                self.objects[index].state.status.is_active()
+                self.objects[index].state.status != ObjectStatus::Deleted
                     && !self.objects[index].destroyed
             }) {
                 self.apply_object_update(
@@ -21969,7 +22175,15 @@ impl Engine {
                 queue_events,
                 container_updates,
                 command_events,
-                (object_id, previous_owner, previous_crew, new_owner, new_crew),
+                (
+                    object_id,
+                    previous_owner,
+                    previous_crew,
+                    new_owner,
+                    new_crew,
+                    previous_status,
+                    new_status,
+                ),
             ) = {
                 let object = &mut self.objects[idx];
                 let object_id = object.id;
@@ -22006,6 +22220,7 @@ impl Engine {
                 }
                 let previous_owner = object.state.owner;
                 let previous_crew = object.state.crew_member;
+                let previous_status = object.state.status;
                 let outcome = object.execute_command_queue(
                     &self.physics,
                     &self.materials,
@@ -22014,6 +22229,7 @@ impl Engine {
                 );
                 let new_owner = object.state.owner;
                 let new_crew = object.state.crew_member;
+                let new_status = object.state.status;
                 (
                     outcome.spawns,
                     outcome.destroy,
@@ -22026,10 +22242,17 @@ impl Engine {
                         previous_crew,
                         new_owner,
                         new_crew,
+                        previous_status,
+                        new_status,
                     ),
                 )
             };
             self.landscape = landscape_slot;
+            self.update_inactive_list_for_status_change(
+                object_id,
+                previous_status,
+                new_status,
+            );
             self.update_selection_for_state_change(
                 object_id,
                 previous_owner,
@@ -22668,11 +22891,14 @@ impl Engine {
                 previous_crew,
                 new_owner,
                 new_crew,
+                previous_status,
+                new_status,
                 container_change,
             ) = {
                 let object = &mut self.objects[idx];
                 let previous_owner = object.state.owner;
                 let previous_crew = object.state.crew_member;
+                let previous_status = object.state.status;
                 let mut container_change = None;
                 let callbacks_dispatched = delta
                     .action
@@ -22711,9 +22937,16 @@ impl Engine {
                     previous_crew,
                     object.state.owner,
                     object.state.crew_member,
+                    previous_status,
+                    object.state.status,
                     container_change,
                 )
             };
+            self.update_inactive_list_for_status_change(
+                object_id,
+                previous_status,
+                new_status,
+            );
             self.update_sector_for_index(idx);
             if !audio.is_empty() {
                 self.pending_audio.extend(audio);
@@ -23032,6 +23265,7 @@ impl Engine {
             .iter()
             .position(|object| object.id == id)
             .ok_or(EngineError::UnknownObject(id))?;
+        let previous_status = self.objects[index].state.status;
 
         let ObjectUpdate {
             custom_name,
@@ -23395,6 +23629,13 @@ impl Engine {
                 container_change,
             )
         };
+
+        let current_status = self.objects[index].state.status;
+        self.update_inactive_list_for_status_change(
+            object_id,
+            previous_status,
+            current_status,
+        );
 
         if solid_mask_refresh {
             // SetSolidMask and SetGraphics reflow the bake immediately
@@ -23941,12 +24182,13 @@ impl Engine {
 
         let mut command_operations = command_operations;
 
-        let (previous_owner, previous_crew_member, previous_base_graphics) = {
+        let (previous_owner, previous_crew_member, previous_base_graphics, previous_status) = {
             let object = &self.objects[index];
             (
                 object.state.owner,
                 object.state.crew_member,
                 object.state.base_graphics.clone(),
+                object.state.status,
             )
         };
         let solid_mask_changed = object_update
@@ -24188,6 +24430,12 @@ impl Engine {
             self.objects[index].state.ocf = ocf;
         }
 
+        self.update_inactive_list_for_status_change(
+            object_id,
+            previous_status,
+            self.objects[index].state.status,
+        );
+
         Ok(())
     }
 
@@ -24228,12 +24476,13 @@ impl Engine {
 
             let mut effect_events = Vec::new();
             let mut container_changes = Vec::new();
-            let (previous_owner, previous_crew_member, previous_base_graphics) = {
+            let (previous_owner, previous_crew_member, previous_base_graphics, previous_status) = {
                 let object = &self.objects[index];
                 (
                     object.state.owner,
                     object.state.crew_member,
                     object.state.base_graphics.clone(),
+                    object.state.status,
                 )
             };
             let solid_mask_changed = outcome
@@ -24476,6 +24725,14 @@ impl Engine {
                 if let Some(refresh_index) = self.find_object_index(object_id) {
                     self.refresh_object_ocf(refresh_index);
                 }
+            }
+            if let Some(status_index) = self.find_object_index(object_id) {
+                let current_status = self.objects[status_index].state.status;
+                self.update_inactive_list_for_status_change(
+                    object_id,
+                    previous_status,
+                    current_status,
+                );
             }
         }
         Ok(retained)
@@ -24939,6 +25196,7 @@ impl Engine {
             scenario_values: Some(self.scenario_values.as_ref().clone()),
             objects,
             object_order: self.exec_list.clone(),
+            inactive_object_order: self.inactive_exec_list.clone(),
             particles,
             players,
             player_crew_rosters_authoritative: true,
@@ -25018,6 +25276,7 @@ impl Engine {
         self.rng = state.rng.clone();
         self.objects.clear();
         self.exec_list.clear();
+        self.inactive_exec_list.clear();
         self.pending_object_order_commands.clear();
         self.exec_cursor = None;
         self.note_objects_changed();
@@ -25260,6 +25519,9 @@ impl Engine {
             // State restores rebuild the list verbatim like a compiled
             // load (C4ObjectList::CompileFunc, C4ObjectList.cpp:508-530).
             self.insert_into_exec_list(restored_id, true);
+            if snapshot.status == ObjectStatus::Inactive {
+                self.insert_into_inactive_list(restored_id, true);
+            }
             if let Some(container) = snapshot.container {
                 container_assignments.push((snapshot.id, container));
             }
@@ -25360,6 +25622,23 @@ impl Engine {
                     .filter(|id| seen.insert(*id)),
             );
             self.exec_list = restored_order;
+        }
+        if !state.inactive_object_order.is_empty() {
+            let live: HashSet<ObjectId> = self.inactive_exec_list.iter().copied().collect();
+            let mut seen = HashSet::with_capacity(live.len());
+            let mut restored_order = state
+                .inactive_object_order
+                .iter()
+                .copied()
+                .filter(|id| live.contains(id) && seen.insert(*id))
+                .collect::<Vec<_>>();
+            restored_order.extend(
+                self.inactive_exec_list
+                    .iter()
+                    .copied()
+                    .filter(|id| seen.insert(*id)),
+            );
+            self.inactive_exec_list = restored_order;
         }
         self.reset_sectors_from_landscape();
 
@@ -34925,6 +35204,118 @@ impl Engine {
         }
     }
 
+    /// C4ObjectList::Add(stMain) for `Game.Objects.InactiveObjects`, stored
+    /// in the same reversed representation as `exec_list`.
+    fn insert_into_inactive_list(&mut self, id: ObjectId, loaded: bool) {
+        self.inactive_exec_list.retain(|other| *other != id);
+        if loaded {
+            self.inactive_exec_list.push(id);
+            return;
+        }
+        let Some(index) = self.find_object_index(id) else {
+            return;
+        };
+        let is_line = |engine: &Self, idx: usize| {
+            engine
+                .definitions
+                .get(&engine.objects[idx].definition_id)
+                .map(|definition| definition.line() != 0)
+                .unwrap_or(false)
+        };
+        if is_line(self, index) {
+            self.inactive_exec_list.insert(0, id);
+            return;
+        }
+        let category = self.objects[index].state.category;
+        let sort_category = category & CATEGORY_SORT_LIMIT;
+        let definition_id = self.objects[index].definition_id.clone();
+        if category & CATEGORY_STATIC_BACK == 0 {
+            if let Some(position) = self.inactive_exec_list.iter().rposition(|&other| {
+                self.find_object_index(other).is_some_and(|other_index| {
+                    let object = &self.objects[other_index];
+                    !object.destroyed
+                        && object.state.status == ObjectStatus::Inactive
+                        && object.state.category & CATEGORY_SORT_LIMIT == sort_category
+                        && object.definition_id == definition_id
+                })
+            }) {
+                self.inactive_exec_list.insert(position + 1, id);
+                return;
+            }
+        }
+        let bracket_position = self.inactive_exec_list.iter().rposition(|&other| {
+            self.find_object_index(other).is_some_and(|other_index| {
+                let object = &self.objects[other_index];
+                !object.destroyed
+                    && object.state.status == ObjectStatus::Inactive
+                    && object.state.category & CATEGORY_SORT_LIMIT <= sort_category
+            })
+        });
+        match bracket_position {
+            Some(position) => self.inactive_exec_list.insert(position + 1, id),
+            None => self.inactive_exec_list.insert(0, id),
+        }
+    }
+
+    fn update_inactive_list_for_status_change(
+        &mut self,
+        id: ObjectId,
+        previous: ObjectStatus,
+        current: ObjectStatus,
+    ) {
+        if previous == current {
+            return;
+        }
+        if previous == ObjectStatus::Inactive {
+            self.inactive_exec_list.retain(|other| *other != id);
+        }
+        if previous == ObjectStatus::Inactive && current == ObjectStatus::Normal {
+            // StatusActivate calls Game.Objects.Add(this), so it receives a
+            // fresh stMain position rather than recovering its old slot.
+            if let Some(position) = self.exec_list.iter().position(|other| *other == id) {
+                self.exec_list.remove(position);
+                if let Some(cursor) = self.exec_cursor {
+                    if position < cursor {
+                        self.exec_cursor = Some(cursor - 1);
+                    }
+                }
+            }
+            self.insert_into_exec_list(id, false);
+        }
+        if current == ObjectStatus::Inactive {
+            self.insert_into_inactive_list(id, false);
+        }
+    }
+
+    /// Repair imported/legacy state that predates the dedicated inactive
+    /// ordering ledger. Normal runtime transitions update the list eagerly;
+    /// this fallback only inserts missing live inactive objects.
+    fn reconcile_inactive_list(&mut self) {
+        let previous = std::mem::take(&mut self.inactive_exec_list);
+        self.inactive_exec_list = previous
+            .into_iter()
+            .filter(|&id| {
+                self.find_object_index(id).is_some_and(|index| {
+                    let object = &self.objects[index];
+                    !object.destroyed && object.state.status == ObjectStatus::Inactive
+                })
+            })
+            .collect();
+        let missing = self
+            .objects
+            .iter()
+            .filter(|object| {
+                !object.destroyed
+                    && object.state.status == ObjectStatus::Inactive
+                    && !self.inactive_exec_list.contains(&object.id)
+            })
+            .map(|object| object.id)
+            .collect::<Vec<_>>();
+        for id in missing {
+            self.insert_into_inactive_list(id, false);
+        }
+    }
+
     fn insert_into_exec_list(&mut self, id: ObjectId, loaded: bool) {
         self.insert_into_exec_list_ignoring(id, loaded, None);
     }
@@ -34963,6 +35354,10 @@ impl Engine {
             (other != id && ignored.is_none_or(|ignored| !ignored.contains(&other)))
                 .then(|| engine.find_object_index(other))
                 .flatten()
+                .filter(|&other_index| {
+                    let object = &engine.objects[other_index];
+                    !object.destroyed && object.state.status == ObjectStatus::Normal
+                })
         };
         if category & CATEGORY_STATIC_BACK == 0 {
             let cluster_position = self.exec_list.iter().rposition(|&other| {
@@ -40354,6 +40749,11 @@ impl Engine {
         self.objects.push(object);
         self.note_objects_changed();
         self.insert_into_exec_list(new_id, loaded);
+        if self.find_object_index(new_id).is_some_and(|index| {
+            self.objects[index].state.status == ObjectStatus::Inactive
+        }) {
+            self.insert_into_inactive_list(new_id, loaded);
+        }
         // Legacy Rust SpawnConfig carries a membership bit directly. Fold
         // that one-time creation intent into the authoritative player list;
         // steady-state refresh must never recreate a link removed by death
