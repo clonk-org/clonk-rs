@@ -239,6 +239,38 @@ pub const VIS_GOD: i32 = 32;
 pub const VIS_LAYER_TOGGLE: i32 = 64;
 pub const VIS_OVERLAY_ONLY: i32 = 128;
 
+/// Active process-global `LoadResStr` entries used by
+/// C4Object::GetNeededMatStr. Headless engines default to the shipped US
+/// text; the app overwrites these from its frozen installed language table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NeededMaterialStrings {
+    need: String,
+    none: String,
+}
+
+impl NeededMaterialStrings {
+    fn new(need: impl Into<String>, none: impl Into<String>) -> Self {
+        Self {
+            need: need.into(),
+            none: none.into(),
+        }
+    }
+
+    fn format_need(&self, object_name: &str) -> String {
+        self.need.replacen("%s", object_name, 1)
+    }
+
+    fn format_none(&self, object_name: &str) -> String {
+        self.none.replacen("%s", object_name, 1)
+    }
+}
+
+impl Default for NeededMaterialStrings {
+    fn default() -> Self {
+        Self::new("%s|needs", "%s needs|no more material.")
+    }
+}
+
 /// The `C4Object::DoCon` gate for its expensive mass/face/component refresh
 /// (C4Object.cpp:1439-1447). Construction still changes between percent
 /// boundaries, but the component list only follows these refresh points.
@@ -254,21 +286,19 @@ pub(crate) fn docon_refreshes_construction(before: i32, after: i32) -> bool {
 /// C++ iterates the object's existing component entries; it never inserts a
 /// definition component that the object no longer carries.
 pub(crate) fn docon_component_counts(
-    current: &HashMap<DefinitionId, u32>,
+    current: &HashMap<DefinitionId, i32>,
     order: &[DefinitionId],
-    definition: &[(DefinitionId, u32)],
+    definition: &[(DefinitionId, i32)],
     construction: i32,
     change: i32,
-) -> HashMap<DefinitionId, u32> {
+) -> HashMap<DefinitionId, i32> {
     let mut updated = current.clone();
     for (index, id) in order.iter().enumerate() {
         if let Some(count) = current.get(id) {
             // C4Object::ComponentConGain/Cutoff index Def->Component by the
             // object's C4IDList position, not by ID (C4Object.cpp:510-526).
             let definition_count = definition.get(index).map_or(0, |(_, count)| *count);
-            let scaled = (u64::from(definition_count)
-                * construction.clamp(0, FULL_CON) as u64
-                / FULL_CON as u64) as u32;
+            let scaled = scaled_definition_component_count(definition_count, construction);
             let count = if change < 0 {
                 (*count).min(scaled)
             } else {
@@ -281,7 +311,7 @@ pub(crate) fn docon_component_counts(
 }
 
 fn normalized_component_order(
-    components: &HashMap<DefinitionId, u32>,
+    components: &HashMap<DefinitionId, i32>,
     order: Vec<DefinitionId>,
     definition_order: &[DefinitionId],
 ) -> Vec<DefinitionId> {
@@ -308,17 +338,36 @@ fn normalized_component_order(
 }
 
 fn definition_component_counts(
-    definition: &[(DefinitionId, u32)],
+    definition: &[(DefinitionId, i32)],
     construction: i32,
-) -> HashMap<DefinitionId, u32> {
-    let construction = construction.clamp(0, FULL_CON) as u64;
+) -> HashMap<DefinitionId, i32> {
     let mut counts = HashMap::new();
     for (id, count) in definition {
-        counts.entry(id.clone()).or_insert_with(|| {
-            (u64::from(*count) * construction / FULL_CON as u64) as u32
-        });
+        counts
+            .entry(id.clone())
+            .or_insert_with(|| fresh_definition_component_count(*count, construction));
     }
     counts
+}
+
+/// Component state around `C4Game::NewObject`'s initial construction pass.
+/// At Con=0, scripts observe Init's raw copy after ComponentConCutoff; at a
+/// nonzero initial Con, the following ComponentConGain has already produced
+/// the signed, scaled count (C4Object.cpp:197-199,510-526;
+/// C4Game.cpp:1129-1142).
+fn fresh_definition_component_count(count: i32, construction: i32) -> i32 {
+    let construction = construction.clamp(0, FULL_CON);
+    let after_init_cutoff = count.min(0);
+    if construction == 0 || !docon_refreshes_construction(0, construction) {
+        after_init_cutoff
+    } else {
+        after_init_cutoff.max(scaled_definition_component_count(count, construction))
+    }
+}
+
+fn scaled_definition_component_count(count: i32, construction: i32) -> i32 {
+    let product = i64::from(count) * i64::from(construction.clamp(0, FULL_CON));
+    (product / i64::from(FULL_CON)) as i32
 }
 
 /// Energy-loss cause types (C4Effects.h:59-67), passed to Fx*Damage.
@@ -2695,7 +2744,7 @@ impl ObjectMenuExtra {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectMenuComponent {
     pub definition_id: String,
-    pub count: u32,
+    pub count: i32,
 }
 
 /// Presentation source selected by `C4MN_Add_Img*` while AddMenuItem builds
@@ -3134,7 +3183,7 @@ pub struct ObjectState {
     #[serde(default)]
     pub contents: Vec<ObjectId>,
     #[serde(default)]
-    pub components: HashMap<DefinitionId, u32>,
+    pub components: HashMap<DefinitionId, i32>,
     /// C4Object::Component is a C4IDList: indexed access follows insertion
     /// order independently of the count map, and zero-count entries remain
     /// present (C4IDList.cpp:38-45,85-103).
@@ -3423,7 +3472,7 @@ pub(crate) fn preview_spawn_state_with_components(
     construction: i32,
     contact_density: i32,
     vertices: Vec<ObjectVertex>,
-    definition_components: &[(DefinitionId, u32)],
+    definition_components: &[(DefinitionId, i32)],
 ) -> ObjectState {
     let mut state = preview_spawn_state(
         position,
@@ -3755,7 +3804,7 @@ struct ObjectDelta {
     graphics_overlays: Option<Vec<ObjectGraphicsOverlay>>,
     draw_transform: Option<Option<DrawTransform>>,
     base_graphics: Option<Option<ObjectBaseGraphics>>,
-    components: Option<HashMap<DefinitionId, u32>>,
+    components: Option<HashMap<DefinitionId, i32>>,
     component_order: Option<Vec<DefinitionId>>,
     local_vars: Option<HashMap<String, Value>>,
     physicals: Option<PhysicalsUpdate>,
@@ -4208,7 +4257,7 @@ pub struct ObjectUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_graphics: Option<Option<ObjectBaseGraphics>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub components: Option<HashMap<DefinitionId, u32>>,
+    pub components: Option<HashMap<DefinitionId, i32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_order: Option<Vec<DefinitionId>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6424,7 +6473,7 @@ pub struct SpawnConfig {
     /// entries compile this verbatim (C4Object.cpp:2811); fresh objects use
     /// their definition components scaled to initial Con when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub components: Option<HashMap<DefinitionId, u32>>,
+    pub components: Option<HashMap<DefinitionId, i32>>,
     /// Explicit C4IDList order for loaded/runtime component lists. None uses
     /// definition order for fresh objects and a deterministic key fallback
     /// for legacy Rust states.
@@ -6725,7 +6774,7 @@ impl SpawnConfig {
         self
     }
 
-    pub fn with_components(mut self, components: HashMap<DefinitionId, u32>) -> Self {
+    pub fn with_components(mut self, components: HashMap<DefinitionId, i32>) -> Self {
         self.components = Some(components);
         // A map has no C4IDList ordering. Spawn resolves known entries in
         // definition order and appends only unknown extras deterministically.
@@ -6735,7 +6784,7 @@ impl SpawnConfig {
 
     pub fn with_ordered_components(
         mut self,
-        components: Vec<(DefinitionId, u32)>,
+        components: Vec<(DefinitionId, i32)>,
     ) -> Self {
         let mut counts = HashMap::new();
         let mut order = Vec::new();
@@ -6903,7 +6952,7 @@ pub struct ObjectSnapshot {
     #[serde(default)]
     pub contents: Vec<ObjectId>,
     #[serde(default)]
-    pub components: HashMap<DefinitionId, u32>,
+    pub components: HashMap<DefinitionId, i32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub component_order: Vec<DefinitionId>,
     #[serde(default)]
@@ -7998,7 +8047,7 @@ pub struct DefinitionActionGraphics {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefinitionComponent {
     pub id: DefinitionId,
-    pub count: u32,
+    pub count: i32,
 }
 
 #[derive(Clone)]
@@ -12825,6 +12874,7 @@ pub struct Engine {
     /// This is independent of C4Object::Owner and crew-list membership.
     crew_info_links: Rc<HashMap<ObjectId, CrewInfoLink>>,
     team_home_base_rule: bool,
+    needed_material_strings: Rc<NeededMaterialStrings>,
     construction_needs_material: bool,
     structures_need_energy: bool,
     structures_snow_in: bool,
@@ -14607,6 +14657,7 @@ impl Engine {
             crew_ranks: Rc::new(HashMap::new()),
             crew_info_links: Rc::new(HashMap::new()),
             team_home_base_rule: false,
+            needed_material_strings: Rc::new(NeededMaterialStrings::default()),
             construction_needs_material: false,
             structures_need_energy: false,
             structures_snow_in: false,
@@ -16977,6 +17028,15 @@ impl Engine {
         self.objective_check_counter = GAME_OVER_CHECK_INTERVAL.saturating_sub(1);
     }
 
+    #[doc(hidden)]
+    pub fn set_needed_material_resource_strings(
+        &mut self,
+        need: impl Into<String>,
+        none: impl Into<String>,
+    ) {
+        self.needed_material_strings = Rc::new(NeededMaterialStrings::new(need, none));
+    }
+
     pub fn set_landscape(&mut self, mut landscape: Landscape) {
         let default = self.materials.default_ground_material();
         if default.is_some() {
@@ -17724,6 +17784,7 @@ impl Engine {
             self.next_object_id,
             self.team_home_base_rule,
         )
+        .with_needed_material_strings(Rc::clone(&self.needed_material_strings))
         .with_solid_mask_metadata(solid_mask_metadata)
         .with_scenario_values(Rc::clone(&self.scenario_values))
         .with_scenario_sections(
@@ -29102,10 +29163,6 @@ impl Engine {
         // construction's container
         // (C4Object.cpp:1694-1723).
         for component in required {
-            if component.count == 0 {
-                continue;
-            }
-
             let mut inserted = self.objects[target_idx]
                 .state
                 .components
@@ -29113,19 +29170,11 @@ impl Engine {
                 .copied()
                 .unwrap_or(0);
 
-            if inserted > component.count {
-                inserted = component.count;
-                self.objects[target_idx]
-                    .state
-                    .components
-                    .insert(component.id.clone(), inserted);
-            }
-
             if inserted < component.count {
                 let consumed = self.consume_component_from_contents(builder_idx, &component.id)
                     || self.consume_component_from_container_of(target_idx, &component.id);
                 if consumed {
-                    inserted += 1;
+                    inserted = inserted.wrapping_add(1);
                     let target_state = &mut self.objects[target_idx].state;
                     if !target_state.components.contains_key(&component.id) {
                         target_state.component_order.push(component.id.clone());
@@ -39444,7 +39493,6 @@ impl Engine {
             }
             None if loaded => (HashMap::new(), Vec::new()),
             None => {
-                let construction = construction.clamp(0, FULL_CON) as u64;
                 let order = definition_components
                     .iter()
                     .map(|component| component.id.clone())
@@ -39452,7 +39500,7 @@ impl Engine {
                 let mut components = HashMap::new();
                 for component in &definition_components {
                     components.entry(component.id.clone()).or_insert_with(|| {
-                        (u64::from(component.count) * construction / FULL_CON as u64) as u32
+                        fresh_definition_component_count(component.count, construction)
                     });
                 }
                 (components, order)
@@ -42408,10 +42456,16 @@ mod component_con_regression {
         let mut engine = Engine::new();
         let mut definition =
             Definition::from_script("PART", "Partial", "#strict\n").expect("definition compiles");
-        definition.set_components(vec![DefinitionComponent {
-            id: "ROCK".to_owned(),
-            count: 4,
-        }]);
+        definition.set_components(vec![
+            DefinitionComponent {
+                id: "ROCK".to_owned(),
+                count: 4,
+            },
+            DefinitionComponent {
+                id: "NEGA".to_owned(),
+                count: -3,
+            },
+        ]);
         engine
             .register_definition(definition)
             .expect("definition registers");
@@ -42419,6 +42473,14 @@ mod component_con_regression {
             .spawn_object(SpawnConfig::new("PART").with_construction(0))
             .expect("zero-con object spawns");
         let index = engine.find_object_index(object).expect("object exists");
+
+        assert_eq!(
+            engine
+                .object_snapshot(object)
+                .and_then(|snapshot| snapshot.components.get("NEGA").copied()),
+            Some(-3),
+            "initial ComponentConCutoff keeps min(-3, 0)"
+        );
 
         engine.do_initial_con(index, FULL_CON / 2);
 
@@ -42428,6 +42490,98 @@ mod component_con_regression {
                 .and_then(|snapshot| snapshot.components.get("ROCK").copied()),
             Some(2)
         );
+        assert_eq!(
+            engine
+                .object_snapshot(object)
+                .and_then(|snapshot| snapshot.components.get("NEGA").copied()),
+            Some(-1),
+            "growth uses max(-3, trunc(-3 * 50%))"
+        );
+
+        let partial = engine
+            .spawn_object(SpawnConfig::new("PART").with_construction(FULL_CON / 2))
+            .expect("partial-con object spawns");
+        let partial = engine.object_snapshot(partial).expect("partial object exists");
+        assert_eq!(partial.components.get("ROCK"), Some(&2));
+        assert_eq!(
+            partial.components.get("NEGA"),
+            Some(&-1),
+            "fresh partial Con includes the initial ComponentConGain"
+        );
+
+        let below_first_step = engine
+            .spawn_object(
+                SpawnConfig::new("PART").with_construction(FULL_CON / 100 - 1),
+            )
+            .expect("sub-step object spawns");
+        let below_first_step = engine
+            .object_snapshot(below_first_step)
+            .expect("sub-step object exists");
+        assert_eq!(below_first_step.components.get("ROCK"), Some(&0));
+        assert_eq!(
+            below_first_step.components.get("NEGA"),
+            Some(&-3),
+            "initial DoCon does not refresh components below its first one-percent step"
+        );
+    }
+
+    #[test]
+    fn zero_requirement_still_consumes_toward_a_negative_live_count() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("ZERO", "Zero", "").expect("component compiles"),
+            )
+            .expect("component registers");
+        engine
+            .register_definition(
+                Definition::from_script("BLDR", "Builder", "").expect("builder compiles"),
+            )
+            .expect("builder registers");
+        let mut target =
+            Definition::from_script("SITE", "Site", "").expect("site compiles");
+        target.set_components(vec![DefinitionComponent {
+            id: "ZERO".to_owned(),
+            count: 0,
+        }]);
+        engine.register_definition(target).expect("site registers");
+
+        let builder = engine
+            .spawn_object(SpawnConfig::new("BLDR"))
+            .expect("builder spawns");
+        let site = engine
+            .spawn_object(
+                SpawnConfig::new("SITE")
+                    .with_ordered_components(vec![("ZERO".to_owned(), -1)]),
+            )
+            .expect("site spawns");
+        engine
+            .spawn_object(SpawnConfig::new("ZERO").with_container(builder))
+            .expect("material spawns");
+        let builder_idx = engine.find_object_index(builder).expect("builder exists");
+        let site_idx = engine.find_object_index(site).expect("site exists");
+        let required = engine
+            .definitions
+            .get("SITE")
+            .expect("site definition exists")
+            .components()
+            .to_vec();
+
+        assert_eq!(
+            engine.ensure_build_components(builder_idx, site_idx, FULL_CON / 2, &required),
+            None
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(site)
+                .and_then(|snapshot| snapshot.components.get("ZERO").copied()),
+            Some(0)
+        );
+        assert!(engine
+            .object_snapshot(builder)
+            .expect("builder remains")
+            .contents
+            .is_empty());
     }
 }
 

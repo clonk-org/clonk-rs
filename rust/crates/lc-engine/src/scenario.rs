@@ -9230,7 +9230,7 @@ struct LegacyObjectRecord {
     /// C4Object::PictureRect (`Picture=`, C4Object.cpp:2798).
     picture_rect: Option<DefinitionRect>,
     /// Saved C4Object::Component (`Component=WOOD=5;METL=1;`).
-    components: Option<Vec<(DefinitionId, u32)>>,
+    components: Option<Vec<(DefinitionId, i32)>>,
     contained: Option<u64>,
     contents: Vec<u64>,
 }
@@ -10495,7 +10495,7 @@ fn parse_i32_list(value: &str, line: usize, key: &str) -> Result<Vec<i32>, Scena
 fn parse_legacy_object_components(
     value: &str,
     line: usize,
-) -> Result<Vec<(DefinitionId, u32)>, ScenarioError> {
+) -> Result<Vec<(DefinitionId, i32)>, ScenarioError> {
     value
         .split(';')
         .map(str::trim)
@@ -10522,7 +10522,7 @@ fn parse_legacy_object_components(
                     err
                 ))
             })?;
-            Ok((DefinitionId::from(id), count.max(0) as u32))
+            Ok((DefinitionId::from(id), count))
         })
         .collect()
 }
@@ -19761,6 +19761,19 @@ public func ActualizePhase(pClonk)
         );
         assert_eq!(parse_c4fixed("F78643").expect("parses").val(), 78643);
         assert_eq!(parse_c4fixed("123").expect("parses").val(), 123);
+    }
+
+    #[test]
+    fn legacy_object_components_preserve_bare_zero_and_negative_counts() {
+        assert_eq!(
+            parse_legacy_object_components("WOOD;ZERO=0;NEGA=-3", 7)
+                .expect("component list parses"),
+            vec![
+                ("WOOD".to_owned(), 0),
+                ("ZERO".to_owned(), 0),
+                ("NEGA".to_owned(), -3),
+            ]
+        );
     }
 
     #[test]

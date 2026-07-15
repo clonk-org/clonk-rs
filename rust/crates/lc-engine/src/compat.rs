@@ -245,7 +245,7 @@ pub(crate) struct DefinitionMetadata {
     pub physical: PhysicalInfo,
     /// DefCore `Components` in list order (C4IDList; GetComponent's
     /// count/index forms, C4Script.cpp:2685-2709).
-    pub components: Vec<(String, u32)>,
+    pub components: Vec<(String, i32)>,
     /// Raw DefCore `CollectionLimit` reflected by GetDefCoreVal. Zero is
     /// the C++ unlimited/default value, not a missing value.
     pub collection_limit: i32,
@@ -1091,6 +1091,7 @@ pub struct HostWorldContext {
     crew_selection: Rc<HashMap<i32, CrewSelectionState>>,
     next_object_id: u64,
     team_home_base_rule: bool,
+    needed_material_strings: Rc<crate::NeededMaterialStrings>,
     /// `C4GameParameters::isLeague`: league games forbid every scripted
     /// team switch, including an otherwise successful same-team no-op.
     league_game: bool,
@@ -1201,6 +1202,7 @@ impl Default for HostWorldContext {
             definition_crew_names: Rc::new(HashMap::new()),
             crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
             team_home_base_rule: false,
+            needed_material_strings: Rc::new(crate::NeededMaterialStrings::default()),
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
             scenario_script: None,
@@ -1223,6 +1225,14 @@ impl Default for HostWorldContext {
 }
 
 impl HostWorldContext {
+    pub(crate) fn with_needed_material_strings(
+        mut self,
+        strings: Rc<crate::NeededMaterialStrings>,
+    ) -> Self {
+        self.needed_material_strings = strings;
+        self
+    }
+
     pub(crate) fn with_command_settings(
         mut self,
         frame: u64,
@@ -1392,6 +1402,7 @@ impl HostWorldContext {
             crew_selection: Rc::new(crew_selection),
             next_object_id,
             team_home_base_rule,
+            needed_material_strings: Rc::new(crate::NeededMaterialStrings::default()),
             league_game: false,
             team_configuration: TeamConfiguration::default(),
             network_game: false,
@@ -4231,7 +4242,7 @@ fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
-        let indexed = |components: &[(String, u32)], index: i32| -> Value {
+        let indexed = |components: &[(String, i32)], index: i32| -> Value {
             usize::try_from(index)
                 .ok()
                 .and_then(|index| components.get(index))
@@ -4250,7 +4261,7 @@ fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
                     .components
                     .iter()
                     .find(|(id, _)| id.eq_ignore_ascii_case(&component))
-                    .map(|(_, count)| *count as i32)
+                    .map(|(_, count)| *count)
                     .unwrap_or(0);
                 return Ok(Value::Int(count));
             }
@@ -4288,13 +4299,13 @@ fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
                 components
                     .iter()
                     .find(|(id, _)| id.as_str().eq_ignore_ascii_case(&component))
-                    .map(|(_, count)| *count as i32)
+                    .map(|(_, count)| *count)
                     .unwrap_or(0)
             } else {
                 def_order
                     .iter()
                     .find(|(id, _)| id.eq_ignore_ascii_case(&component))
-                    .map(|(_, count)| *count as i32)
+                    .map(|(_, count)| *count)
                     .unwrap_or(0)
             };
             return Ok(Value::Int(count));
@@ -4318,9 +4329,126 @@ fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetNeededMatStr (C4Script.cpp:4494-4499;
+/// C4Object.cpp:6234-6265): format the target's outstanding definition
+/// components against its invested `Component` ledger. `Contents` are not
+/// counted. The executing object is both the omitted target and the builder
+/// passed to a definition's GetCustomComponents callback; arrow dispatch
+/// swaps that context to the receiver before reaching this host.
+fn get_needed_mat_str(args: &[Value]) -> Result<Value, RuntimeError> {
+    if matches!(args.first(), Some(Value::Proplist(_))) {
+        return Err(RuntimeError::new(
+            "GetNeededMatStr: expected object, nil, or 0 for target, got proplist",
+        ));
+    }
+    let explicit_target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "GetNeededMatStr",
+        "target",
+    )?;
+    // Capture Def before GetCustomComponents runs. The callback may mutate
+    // the live object, but C++ has already selected `pObj->Def` for the
+    // component query at that point.
+    let target_and_recipe = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let target = explicit_target.or(context.script_object_context)?;
+        let definition = context.object_effective_definition_id(target)?;
+        Some((target, context.script_object_context, definition))
+    });
+    let Some((target, builder, recipe_definition)) = target_and_recipe else {
+        return Ok(Value::Nil);
+    };
+
+    let needed_components = resolve_component_list(&recipe_definition, None, builder)?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        // Re-read live state after GetCustomComponents: synchronous callback
+        // writes are already visible to the following C++ subtraction/name.
+        let current_components = context
+            .object_scope(target)
+            .and_then(|scope| scope.pending_update.components.clone())
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .and_then(|object| object.full_state().map(|state| state.components.clone()))
+            })
+            .unwrap_or_default();
+        let target_name = context
+            .object_custom_name(target)
+            .or_else(|| match context.object_scope(target) {
+                Some(scope)
+                    if !scope.destroy && !matches!(scope.status(), ObjectStatus::Deleted) =>
+                {
+                    scope.info_core().map(|info| info.name.clone())
+                }
+                Some(_) => None,
+                None => context
+                    .world
+                    .crew_infos
+                    .get(&target)
+                    .map(|info| info.name.clone()),
+            })
+            .or_else(|| {
+                context
+                    .object_effective_definition_id(target)
+                    .and_then(|definition| {
+                        context
+                            .definition_metadata(&definition)
+                            .map(|metadata| metadata.name.clone())
+                    })
+            })
+            .unwrap_or_else(|| recipe_definition.clone());
+        let display_name = |id: &str| {
+            context
+                .definition_metadata(id)
+                .map(|metadata| metadata.name.as_str())
+                .unwrap_or(id)
+                .to_owned()
+        };
+
+        let mut missing = String::new();
+        for (component, required) in needed_components {
+            if required == 0 {
+                continue;
+            }
+            let current = current_components
+                .iter()
+                .find(|(id, _)| id.as_str().eq_ignore_ascii_case(&component))
+                .map(|(_, count)| *count)
+                .unwrap_or(0);
+            let deficit = required.wrapping_sub(current);
+            if deficit > 0 {
+                missing.push_str(&format!("|{deficit}x {}", display_name(&component)));
+            }
+        }
+
+        if missing.is_empty() {
+            Ok(Value::String(
+                context
+                    .world
+                    .needed_material_strings
+                    .format_none(&target_name),
+            ))
+        } else {
+            Ok(Value::String(format!(
+                "{}{missing}",
+                context
+                    .world
+                    .needed_material_strings
+                    .format_need(&target_name)
+            )))
+        }
+    })
+}
+
 /// FnComponentAll (C4Script.cpp:1873-1883): the explicit object is required;
 /// every positive-count component other than `component` makes the result
-/// false. Zero-count C4IDList entries are ignored.
+/// false. Non-positive C4IDList entries are ignored.
 fn component_all(args: &[Value]) -> Result<Value, RuntimeError> {
     let target = parse_object_reference_argument(
         args.first().unwrap_or(&Value::Nil),
@@ -4361,7 +4489,7 @@ fn component_all(args: &[Value]) -> Result<Value, RuntimeError> {
                     .unwrap_or_default()
             });
         Ok(Value::Bool(components.iter().all(|(id, count)| {
-            *count == 0
+            *count <= 0
                 || component
                     .as_deref()
                     .is_some_and(|component| id.as_str().eq_ignore_ascii_case(component))
@@ -5467,8 +5595,8 @@ fn sprintf_menu_command(format: &str, parameter: &str, click: i32) -> String {
 fn menu_components_from_custom(values: Vec<Value>) -> Vec<crate::ObjectMenuComponent> {
     let mut components = Vec::<crate::ObjectMenuComponent>::new();
     let mut current_id: Option<String> = None;
-    let mut current_count = 0_u32;
-    let store = |components: &mut Vec<crate::ObjectMenuComponent>, id: String, count: u32| {
+    let mut current_count = 0_i32;
+    let store = |components: &mut Vec<crate::ObjectMenuComponent>, id: String, count: i32| {
         if let Some(component) = components
             .iter_mut()
             .find(|component| component.definition_id == id)
@@ -5510,12 +5638,12 @@ fn menu_components_from_custom(values: Vec<Value>) -> Vec<crate::ObjectMenuCompo
 /// (C4Def.cpp:1322-1355). The engine expects equal ids to be contiguous;
 /// a later non-contiguous run overwrites the earlier count while retaining
 /// the id's original list position through `SetIDCount(..., true)`.
-fn component_list_from_custom_array(values: &[Value]) -> Vec<(String, u32)> {
-    let mut components = Vec::<(String, u32)>::new();
+fn component_list_from_custom_array(values: &[Value]) -> Vec<(String, i32)> {
+    let mut components = Vec::<(String, i32)>::new();
     let mut last_id = String::new();
-    let mut count = 0_u32;
+    let mut count = 0_i32;
 
-    let store = |components: &mut Vec<(String, u32)>, id: &str, count: u32| {
+    let store = |components: &mut Vec<(String, i32)>, id: &str, count: i32| {
         if id.is_empty() || count == 0 {
             return;
         }
@@ -5532,6 +5660,13 @@ fn component_list_from_custom_array(values: &[Value]) -> Vec<(String, u32)> {
             Value::Int(raw @ 1..=9999) => format!("{raw:04}"),
             _ => continue,
         };
+        // C4Def::GetComponents keys this flush off the ORIGINAL array
+        // index. If the first valid ID follows an invalid slot it inserts a
+        // leading C4ID_None entry; GetNeededMatStr/ComposeContents/Split then
+        // stop at that sentinel before observing any later requirements.
+        if index != 0 && last_id.is_empty() && count == 0 {
+            return Vec::new();
+        }
         if index != 0 && current_id != last_id {
             store(&mut components, &last_id, count);
             count = 0;
@@ -8319,7 +8454,7 @@ fn set_component(args: &[Value]) -> Result<Value, RuntimeError> {
         if !order.contains(&component) {
             order.push(component.clone());
         }
-        map.insert(component, count.max(0) as u32);
+        map.insert(component, count);
         object.pending_update.components = Some(map);
         object.pending_update.component_order = Some(order);
         Ok(Value::Bool(true))
@@ -10674,6 +10809,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Collect", collect);
     script.register_host_function("Exit", exit_container);
     script.register_host_function("GetComponent", get_component);
+    script.register_host_function("GetNeededMatStr", get_needed_mat_str);
     script.register_host_function("ComponentAll", component_all);
     script.register_host_function("GrabContents", grab_contents);
     script.register_host_function("InLiquid", in_liquid);
@@ -29429,7 +29565,7 @@ fn resolve_component_list(
     definition: &str,
     instance: Option<ObjectId>,
     builder: Option<ObjectId>,
-) -> Result<Vec<(String, u32)>, RuntimeError> {
+) -> Result<Vec<(String, i32)>, RuntimeError> {
     let (script, static_components) = HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -29589,9 +29725,10 @@ fn compose_contents(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let components = resolve_component_list(&definition, None, Some(container))?;
-    let mut missing = Vec::<(String, u32)>::new();
+    let mut missing = Vec::<(String, i32)>::new();
     for (component, needed) in &components {
-        let available = live_contents_matching(container, component).len() as u32;
+        let available =
+            i32::try_from(live_contents_matching(container, component).len()).unwrap_or(i32::MAX);
         if *needed > available {
             missing.push((component.clone(), needed - available));
         }
@@ -29600,7 +29737,7 @@ fn compose_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         let handled = call_object_own_fail_safe(
             container,
             "BuildNeedsMaterial",
-            &[Value::C4Id(first_id.clone()), Value::Int(*first_count as i32)],
+            &[Value::C4Id(first_id.clone()), Value::Int(*first_count)],
         )
         .as_bool();
         if !handled {
@@ -30554,7 +30691,7 @@ fn reflect_object_values(
             );
             reflection.push(
                 &object_path("Component"),
-                Value::Int(components.get(id).copied().unwrap_or(0) as i32),
+                Value::Int(components.get(id).copied().unwrap_or(0)),
             );
         }
     }
@@ -37623,6 +37760,7 @@ mod tests {
         "GetMenuSelection",
         "GetMissionAccess",
         "GetName",
+        "GetNeededMatStr",
         "GetOCF",
         "GetObjHeight",
         "GetObjWidth",
@@ -43998,7 +44136,7 @@ func ProbeBadIndex(id) {
         // any component OTHER than the requested id has a positive count.
         // The real sawmill applies that predicate at Script.c:166-197,
         // especially the fSawable expression on line 176.
-        let object = |id, definition: &str, components: &[(&str, u32)]| {
+        let object = |id, definition: &str, components: &[(&str, i32)]| {
             let mut state = crate::preview_spawn_state(
                 Vector2::ZERO,
                 OWNER_NONE,

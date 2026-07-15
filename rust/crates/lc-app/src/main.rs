@@ -2072,6 +2072,17 @@ fn load_runtime_help_language_table(paths: Option<&AppPaths>) -> Result<HashMap<
     Ok(load_runtime_language_table(paths)?.entries)
 }
 
+fn needed_material_resource_strings(table: &RuntimeLanguageTable) -> (String, String) {
+    let get = |key: &str| {
+        table
+            .entries
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| format!("[Undefined: {key}]"))
+    };
+    (get("IDS_CON_BUILDMATNEED"), get("IDS_CON_BUILDMATNONE"))
+}
+
 fn runtime_help_default_key_name(name: &str, index: usize) -> &'static str {
     match (name, index) {
         ("ToggleShowHelp", 0) => "F1",
@@ -6632,6 +6643,11 @@ struct GameApp {
     /// System.c4g Names.txt, used when fresh crew files have no definition-
     /// specific ClonkNames list (C4Game::InitScriptEngine).
     standard_names: Option<String>,
+    /// Process-global Application.ResStrTable entries used by
+    /// GetNeededMatStr. Frozen from the installed language table at startup
+    /// and reinstalled on every fresh Engine.
+    needed_material_need: String,
+    needed_material_none: String,
     input: InputDispatcher,
     bindings: KeyboardBindings,
     gamepad_bindings: GamepadBindings,
@@ -13130,6 +13146,19 @@ impl GameApp {
             }
         };
         let runtime_language_table = load_runtime_language_table(paths);
+        let (needed_material_need, needed_material_none) = runtime_language_table
+            .as_ref()
+            .map(|table| needed_material_resource_strings(table))
+            .unwrap_or_else(|_| {
+                (
+                    "%s|needs".to_owned(),
+                    "%s needs|no more material.".to_owned(),
+                )
+            });
+        engine.set_needed_material_resource_strings(
+            needed_material_need.clone(),
+            needed_material_none.clone(),
+        );
         let runtime_help_text_cache = OnceLock::new();
         let _ = runtime_help_text_cache.set(match &runtime_language_table {
             Ok(table) => {
@@ -13151,6 +13180,8 @@ impl GameApp {
             material_render_info: Arc::new(HashMap::new()),
             system_scripts,
             standard_names,
+            needed_material_need,
+            needed_material_none,
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
             gamepad_bindings: GamepadBindings::load(paths),
@@ -13608,6 +13639,10 @@ impl GameApp {
     fn apply_material_library(&mut self) {
         self.engine
             .set_control_host(!matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))));
+        self.engine.set_needed_material_resource_strings(
+            self.needed_material_need.clone(),
+            self.needed_material_none.clone(),
+        );
         if let Some(materials) = self.material_library.as_ref() {
             self.engine.set_materials((**materials).clone());
         } else {
@@ -13618,6 +13653,10 @@ impl GameApp {
     fn apply_material_library_to(&self, engine: &mut Engine) {
         engine
             .set_control_host(!matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))));
+        engine.set_needed_material_resource_strings(
+            self.needed_material_need.clone(),
+            self.needed_material_none.clone(),
+        );
         if let Some(materials) = self.material_library.as_ref() {
             engine.set_materials((**materials).clone());
         } else {
@@ -72652,9 +72691,12 @@ mod tests {
         fs::write(paths.config_file(), "[General]\nLanguageEx=ZZ,DE\n")
             .expect("write fixture language config");
 
-        let table = load_runtime_help_language_table(Some(&paths))
+        let table = load_runtime_language_table(Some(&paths))
             .expect("empty ZZ falls through to mixed-case DE");
-        let columns = build_runtime_help_columns(&table).expect("build German help");
+        let (need, none) = needed_material_resource_strings(&table);
+        assert_eq!(need, "%s|braucht noch");
+        assert_eq!(none, "%s braucht kein|weiteres Baumaterial.");
+        let columns = build_runtime_help_columns(&table.entries).expect("build German help");
         assert!(columns.left.starts_with("[Spielfunktionen]\n"));
         assert!(columns.left.contains("F1</c> - Hilfe"));
     }
@@ -72685,6 +72727,8 @@ mod tests {
             .expect("read process-global cached columns");
         assert!(columns.left.starts_with("[Game Functions]\n"));
         assert!(!columns.left.contains("Spielfunktionen"));
+        assert_eq!(app.needed_material_need, "%s|needs");
+        assert_eq!(app.needed_material_none, "%s needs|no more material.");
     }
 
     #[test]

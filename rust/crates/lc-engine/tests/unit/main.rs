@@ -14130,7 +14130,7 @@ func Trigger() {
                              id: &str,
                              script: &str,
                              component: &str,
-                             count: u32,
+                             count: i32,
                              description: &str| {
             let mut item = Definition::from_script(id, id, script).expect("item compiles");
             item.set_components(vec![DefinitionComponent {

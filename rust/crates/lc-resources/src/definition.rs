@@ -409,7 +409,7 @@ impl PhysicalInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefComponent {
     pub id: String,
-    pub count: u32,
+    pub count: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -1306,11 +1306,15 @@ fn parse_components(value: &str) -> Vec<DefComponent> {
                 return None;
             }
             let id = id_part.to_ascii_uppercase();
-            let count = count_part
-                .and_then(|raw| raw.parse::<i32>().ok())
-                .unwrap_or(1)
-                .max(0) as u32;
-            let count = if count == 0 { 1 } else { count };
+            // C4IDList::Entry starts at zero. Its compiler reads the count
+            // only when an '=' separator is present, and stores the signed
+            // int32 verbatim (C4IDList.cpp:239-253). Retain the historical
+            // lenient fallback for an explicitly malformed count without
+            // conflating that case with a bare ID.
+            let count = match count_part {
+                Some(raw) => raw.parse::<i32>().unwrap_or(1),
+                None => 0,
+            };
             Some(DefComponent { id, count })
         })
         .collect()
@@ -3697,10 +3701,10 @@ Attach=1
         let data = br#"
             [DefCore]
             id=HUTS
-            Components=WOOD:2,Metal=1; rock
+            Components=WOOD:2,Metal=1; rock; ZERO=0; NEGA=-3
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(parsed.components.len(), 3);
+        assert_eq!(parsed.components.len(), 5);
         assert_eq!(
             parsed.components[0],
             DefComponent {
@@ -3719,7 +3723,21 @@ Attach=1
             parsed.components[2],
             DefComponent {
                 id: "ROCK".to_string(),
-                count: 1
+                count: 0
+            }
+        );
+        assert_eq!(
+            parsed.components[3],
+            DefComponent {
+                id: "ZERO".to_string(),
+                count: 0
+            }
+        );
+        assert_eq!(
+            parsed.components[4],
+            DefComponent {
+                id: "NEGA".to_string(),
+                count: -3
             }
         );
     }
