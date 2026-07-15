@@ -8151,7 +8151,7 @@ mod tests {
     }
 
     #[test]
-    fn home_completes_when_already_in_owner_base() {
+    fn home_completes_when_container_base_matches_despite_foreign_owner() {
         let builder_id = ObjectId::new(510);
         let base_id = ObjectId::new(520);
 
@@ -8161,10 +8161,8 @@ mod tests {
         builder.command_direction = CommandDirection::Right;
 
         let mut base = snapshot_with_id(base_id.as_u64());
-        base.owner = 7;
-        base.category = CATEGORY_STRUCTURE;
-        base.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
-        base.collectible = false;
+        base.owner = 99;
+        base.base = 7;
 
         let mut objects = HashMap::new();
         objects.insert(builder.id, builder.clone());
@@ -8209,11 +8207,10 @@ mod tests {
         builder.command_direction = CommandDirection::Right;
 
         let mut base = snapshot_with_id(base_id.as_u64());
-        base.owner = 11;
-        base.category = CATEGORY_STRUCTURE;
-        base.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
+        base.owner = 99;
+        base.base = 11;
+        base.alive = false;
         base.position = Vector2::new(100, 0);
-        base.collectible = false;
 
         let mut objects = HashMap::new();
         objects.insert(builder.id, builder.clone());
@@ -8248,9 +8245,17 @@ mod tests {
             CommandOperation::PushFront(request) => {
                 assert_eq!(request.id, CommandId::Enter);
                 assert_eq!(request.target, Some(base_id));
+                assert_eq!(request.update_interval, 0);
+                assert_eq!(request.mode, CommandMode::SilentSub);
             }
             other => panic!("unexpected operation: {:?}", other),
         }
+        let repeated = state.step(&ctx);
+        assert_eq!(repeated.status, CommandStatus::Running);
+        assert_eq!(
+            repeated.operations, result.operations,
+            "Home has no invented same-frame Enter cooldown"
+        );
     }
 
     #[test]
@@ -8302,13 +8307,9 @@ mod tests {
             let mut snapshot = snapshot_with_id(id.as_u64());
             snapshot.master_list_order = master_list_order;
             snapshot.position = position;
-            // Sell/Buy currently model C4Object::Base; Home currently models
-            // the object owner. Set both so this test isolates scan order.
+            // All three commands select bases through C4Object::Base.
             snapshot.base = actor.owner;
-            snapshot.owner = actor.owner;
-            snapshot.category = CATEGORY_STRUCTURE;
-            snapshot.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
-            snapshot.collectible = false;
+            snapshot.owner = 99;
             snapshot
         };
 
@@ -20858,7 +20859,6 @@ impl BuyState {
 struct HomeState {
     target: Option<ObjectId>,
     update_interval: u32,
-    last_enter_request: Option<u64>,
 }
 
 impl HomeState {
@@ -20866,23 +20866,18 @@ impl HomeState {
         Ok(Self {
             target: request.target,
             update_interval: request.update_interval.max(1),
-            last_enter_request: None,
         })
     }
 
     fn is_base(snapshot: &CommandObjectSnapshot, owner: i32) -> bool {
-        snapshot.is_active()
-            && snapshot.owner == owner
-            && (snapshot.category & CATEGORY_STRUCTURE) != 0
-            && (snapshot.ocf & ocf::ENTRANCE) != 0
-            && !snapshot.collectible
+        snapshot.is_status_active() && snapshot.base == owner
     }
 
     fn is_home(&self, ctx: &CommandRuntimeContext<'_>) -> bool {
         match ctx.object.container {
             Some(container_id) => ctx
                 .resolve(container_id)
-                .map(|snapshot| Self::is_base(snapshot, ctx.object.owner))
+                .map(|snapshot| snapshot.base == ctx.object.owner)
                 .unwrap_or(false),
             None => false,
         }
@@ -20891,16 +20886,13 @@ impl HomeState {
     fn resolve_base(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
         let owner = ctx.object.owner;
         if let Some(target_id) = self.target {
-            if let Some(snapshot) = ctx.resolve(target_id) {
-                if Self::is_base(snapshot, owner) {
-                    return Some(target_id);
-                }
-            }
+            // Explicit C4Command targets bypass FindBase entirely.
+            return ctx.resolve(target_id).map(|_| target_id);
         }
 
         ctx.objects
             .values()
-            .filter(|snapshot| snapshot.id != ctx.object.id && Self::is_base(snapshot, owner))
+            .filter(|snapshot| Self::is_base(snapshot, owner))
             .min_by_key(|snapshot| {
                 (
                     c4_distance(
@@ -20916,14 +20908,6 @@ impl HomeState {
             .map(|snapshot| snapshot.id)
     }
 
-    fn should_issue_enter(&self, frame: u64) -> bool {
-        const ENTER_COOLDOWN: u64 = 12;
-        match self.last_enter_request {
-            Some(last) => frame.saturating_sub(last) >= ENTER_COOLDOWN,
-            None => true,
-        }
-    }
-
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         if self.is_home(ctx) {
             return CommandStepResult::completed(None);
@@ -20937,17 +20921,9 @@ impl HomeState {
             None => return CommandStepResult::failed(None),
         };
 
-        if self.should_issue_enter(ctx.frame) {
-            self.last_enter_request = Some(ctx.frame);
-            let request = CommandRequest::new(CommandId::Enter)
-                .with_target(Some(base_id))
-                .with_update_interval(25)
-                .with_mode(CommandMode::SilentSub);
-            return CommandStepResult::running(None)
-                .with_operations(vec![CommandOperation::PushFront(request)]);
-        }
-
+        let request = CommandRequest::new(CommandId::Enter).with_target(Some(base_id));
         CommandStepResult::running(None)
+            .with_operations(vec![CommandOperation::PushFront(request)])
     }
 }
 
