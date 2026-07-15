@@ -35868,7 +35868,9 @@ func FxProbeTimer(pThis, iNumber) {
         // C4Fx_Execute_Kill (-1, C4Effects.h:40) kills the effect; an
         // effect whose interval elapses with NO timer function is killed
         // too (the else arm :358-360); a zero interval never reaches it.
-        let script = r#"
+        let script = r#"#strict 3
+        static normal_stop_reason;
+
         global func Initialize(state, random) {
             return { effects = [
                 { op = "add", name = "Doomed", interval = 2 },
@@ -35884,7 +35886,10 @@ func FxProbeTimer(pThis, iNumber) {
             return nil;
         }
 
-        global func FxDoomedStop(state, effect, reason) {
+        global func FxDoomedStop(state, effect, int reason) {
+            if (reason == 0) {
+                normal_stop_reason = 1;
+            }
             return nil;
         }
 
@@ -35942,6 +35947,97 @@ func FxProbeTimer(pThis, iNumber) {
             stop_calls, 2,
             "one temp stop from Mute's kill bracket, one real stop from \
              Doomed's own kill"
+        );
+        assert_eq!(
+            engine
+                .snapshot()
+                .script_globals
+                .named
+                .get("normal_stop_reason"),
+            Some(&Value::Int(1)),
+            "C4Effect::Kill omits iReason, and a strict-3 typed integer \
+             parameter observes that missing slot as C4FxCall_Normal (0)"
+        );
+    }
+
+    #[test]
+    fn effect_death_stop_receives_reason_four_and_can_revive_target() {
+        // AssignDeath clears effects with C4FxCall_RemoveDeath (4). Like
+        // C4Effect::ClearAll, a Stop callback returning C4Fx_Stop_Deny (-1)
+        // restores that effect; if the callback also revives the target,
+        // ordinary death aborts (C4Object.cpp:1162-1170;
+        // C4Effect.cpp:407-424).
+        let script = r#"#strict 3
+        func FxReprieveStop(target, number, int reason) {
+            if (reason == 4) {
+                SetAlive(true);
+                return -1;
+            }
+            return 0;
+        }
+        "#;
+
+        let mut definition =
+            Definition::from_script("LIVG", "Living effect target", script)
+                .expect("script compiles");
+        let call_log: Arc<Mutex<Vec<(String, Vec<Value>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, args| {
+                call_log
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), args.to_vec()));
+            });
+        }
+        definition.set_debugger_hooks(hooks);
+        definition.set_c4_callback_convention(true);
+        definition.set_category(CATEGORY_OBJECT | CATEGORY_LIVING);
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                ("Dead".to_string(), ActionSpec::default()),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("LIVG")
+                    .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                    .with_alive(true)
+                    .add_effect(EffectState::new("Reprieve").with_priority(100)),
+            )
+            .expect("living target spawns");
+        let idx = engine.find_object_index(id).expect("target exists");
+
+        engine.assign_death(idx, false).expect("death callbacks run");
+
+        let object = engine.object_snapshot(id).expect("revived target remains");
+        assert!(object.alive, "SetAlive in Fx*Stop aborts ordinary death");
+        let calls = call_log.lock().unwrap();
+        let stop_args = calls
+            .iter()
+            .find_map(|(name, args)| (name == "FxReprieveStop").then_some(args))
+            .expect("death dispatch calls FxReprieveStop");
+        assert_eq!(
+            stop_args.get(2),
+            Some(&Value::Int(4)),
+            "Fx*Stop receives C4FxCall_RemoveDeath"
+        );
+        assert_eq!(
+            object
+                .effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Reprieve"],
+            "returning -1 restores the death-cleared effect"
         );
     }
 
@@ -37089,7 +37185,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // runs the victim's Fx*Stop, then reactivates the uppers
         // (C4Effect.cpp:404) — same bracket as the ctor, without an
         // Fx*Stop requirement on the victim.
-        let script = r#"
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Upper", priority = 200, interval = 0 } ] };
         }
@@ -37098,11 +37194,11 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             return nil;
         }
 
-        global func FxUpperStop(state, effect, reason, temp) {
+        global func FxUpperStop(state, effect, int reason, temp) {
             return nil;
         }
 
-        global func FxLowerStop(state, effect, reason) {
+        global func FxLowerStop(state, effect, int reason) {
             return nil;
         }
 
@@ -37170,6 +37266,11 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         );
         let (_, temp_stop_args) = &calls[0];
         assert_eq!(
+            temp_stop_args.get(2),
+            Some(&Value::Int(1)),
+            "the bracket stop receives C4FxCall_Temp"
+        );
+        assert_eq!(
             temp_stop_args.get(3),
             Some(&Value::Bool(true)),
             "the bracket stop is temporary (fTemp, C4Effect.cpp:489)"
@@ -37177,8 +37278,9 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         let (_, kill_stop_args) = &calls[1];
         assert_eq!(
             kill_stop_args.get(2),
-            Some(&Value::Nil),
-            "C4Effect::Kill omits the normal-removal reason parameter"
+            Some(&Value::Int(0)),
+            "C4Effect::Kill omits the raw reason slot; strict-3 typed int \
+             conversion exposes it as C4FxCall_Normal (0)"
         );
     }
 
@@ -38469,6 +38571,54 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         );
         assert_eq!(globals.get("iTimer"), Some(&Value::Nil));
         assert_eq!(globals.get("iStep"), Some(&Value::Nil));
+    }
+
+    #[test]
+    fn out_of_bounds_assign_removal_passes_clear_reason_to_effect_stop() {
+        // A non-living object skips AssignDeath and reaches
+        // AssignRemoval's ClearAll directly. C++ supplies
+        // C4FxCall_RemoveClear (3) while the target is still live, before
+        // setting Status=0 (C4Movement.cpp:613-614; C4Object.cpp:257-269).
+        let script = r#"#strict 3
+            static stop_reason;
+            func FxWitnessStop(target, number, int reason) {
+                stop_reason = reason;
+                return 0;
+            }
+        "#;
+        let mut definition =
+            Definition::from_script("CLER", "Clear reason target", script)
+                .expect("script compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_category(CATEGORY_OBJECT);
+
+        let mut engine = Engine::with_seed(43);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 0, 0));
+        let mut landscape = Landscape::flat(16, 20);
+        landscape.set_world_height(20);
+        landscape.set_border_open(0, 0, true, true);
+        engine.set_landscape(landscape);
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new("CLER")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(-1, 8))
+                    .with_mobile(true)
+                    .add_effect(EffectState::new("Witness").with_priority(100)),
+            )
+            .expect("object spawns");
+
+        engine.tick().expect("out-of-bounds removal succeeds");
+
+        assert!(engine.object_snapshot(object).is_none());
+        assert_eq!(
+            engine.snapshot().script_globals.named.get("stop_reason"),
+            Some(&Value::Int(3)),
+            "AssignRemoval's Fx*Stop receives C4FxCall_RemoveClear"
+        );
     }
 
     #[test]

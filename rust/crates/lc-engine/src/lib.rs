@@ -42925,7 +42925,8 @@ fn effect_stop_reason_value(reason: EffectStopReason) -> Value {
     match reason {
         // C4Effect::Kill omits the third parameter. An explicit nil is the
         // same ten-slot C4AulParSet value and, unlike integer zero, stays nil
-        // for pre-strict-3 callbacks after parameter conversion.
+        // for untyped callbacks after parameter conversion; a strict-3 `int`
+        // parameter converts the missing slot to C4FxCall_Normal (0).
         EffectStopReason::Removed | EffectStopReason::Replaced => Value::Nil,
         // C4Effect::ClearAll uses C4FxCall_RemoveClear.
         EffectStopReason::Cleared | EffectStopReason::Destroyed => Value::Int(3),
