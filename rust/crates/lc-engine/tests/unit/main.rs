@@ -45883,6 +45883,112 @@ protected func Initialize() {
         assert_eq!(engine.objects[idx].fixed_position, fixed_position);
     }
 
+    fn rotation_redirect_fixture(ydir: C4Fixed, rdir: C4Fixed) -> (Engine, ObjectId) {
+        let mut definition = simple_definition("RedirectWheel");
+        definition.set_rotateable(360);
+        definition
+            .set_shape_vertices(vec![ObjectVertex::new(40, 0).with_cnat(CNAT_TOP)]);
+        definition.set_contact_density(50);
+        definition.set_no_stabilize(true);
+
+        let mut landscape = vehicle_grid_landscape(100, 30);
+        landscape.set_world_height(30);
+        for x in 0..100 {
+            landscape.grid_write_byte(x, 10, 1);
+        }
+
+        let mut engine = Engine::with_seed(61);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("redirect wheel registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("RedirectWheel")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(30, 11))
+                    .with_fixed_position(FixedVec2::from_ints(30, 11))
+                    .with_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, ydir))
+                    .with_rotation_velocity(rdir)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("redirect wheel spawns");
+        let idx = engine.find_object_index(id).expect("redirect wheel exists");
+        assert!(!engine.objects[idx].state.alive);
+        assert_ne!(engine.objects[idx].state.ocf & ocf::ROTATE, 0);
+        (engine, id)
+    }
+
+    fn exec_redirect_wheel_movement(engine: &mut Engine, id: ObjectId) {
+        let idx = engine.find_object_index(id).expect("redirect wheel exists");
+        let definition_id = engine.objects[idx].definition_id.clone();
+        let actions = engine
+            .definitions
+            .get(&definition_id)
+            .expect("redirect wheel definition exists")
+            .action_library()
+            .clone();
+        engine
+            .exec_object_movement(idx, &actions, &definition_id, &[])
+            .expect("redirect wheel movement succeeds");
+    }
+
+    #[test]
+    fn vertical_redirect_suppresses_same_movement_rotation_redirect() {
+        // The upward step puts the sole x=40 vertex into the solid row with
+        // both neighboring pixels blocked. Starting at +0.25 rdir, C++
+        // transfers 0.5 from -1.0 ydir to produce -0.25 rdir and latches
+        // fRedirectYR. The ensuing -1-degree rotation contacts the same row;
+        // that contact zeros rdir without restoring it to ydir
+        // (C4Movement.cpp:311-316,422-425).
+        let (mut engine, id) = rotation_redirect_fixture(-itofix(1), fixed100(25));
+
+        exec_redirect_wheel_movement(&mut engine, id);
+
+        let idx = engine.find_object_index(id).expect("redirect wheel exists");
+        let object = &engine.objects[idx];
+        assert_eq!(object.state.position, Vector2::new(30, 11));
+        assert_eq!(object.state.rotation, 0, "contact rolls rotation back");
+        assert_eq!(object.fixed_rotation, C4Fixed::ZERO);
+        assert_eq!(object.fixed_velocity.y, C4Fixed::ZERO);
+        assert_eq!(object.rotation_velocity, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn rotation_contact_without_vertical_redirect_transfers_rdir_to_ydir() {
+        let (mut engine, id) = rotation_redirect_fixture(C4Fixed::ZERO, -fixed100(50));
+
+        exec_redirect_wheel_movement(&mut engine, id);
+
+        let idx = engine.find_object_index(id).expect("redirect wheel exists");
+        let object = &engine.objects[idx];
+        assert_eq!(object.state.rotation, 0);
+        assert_eq!(object.fixed_rotation, C4Fixed::ZERO);
+        assert_eq!(object.fixed_velocity.y, -fixed100(50));
+        assert_eq!(object.rotation_velocity, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn vertical_rotation_redirect_guard_resets_each_movement() {
+        let (mut engine, id) = rotation_redirect_fixture(-itofix(1), fixed100(25));
+        exec_redirect_wheel_movement(&mut engine, id);
+        let idx = engine.find_object_index(id).expect("redirect wheel exists");
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
+
+        // A fresh DoMovement has no vertical step. Its identical rotation
+        // contact must therefore perform the normal rdir -> ydir transfer;
+        // fRedirectYR is a local, not persistent object state.
+        engine.objects[idx].rotation_velocity = -fixed100(50);
+        exec_redirect_wheel_movement(&mut engine, id);
+
+        let idx = engine.find_object_index(id).expect("redirect wheel exists");
+        assert_eq!(engine.objects[idx].fixed_velocity.y, -fixed100(50));
+        assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
+    }
+
     #[test]
     fn rotation_steps_rollback_on_shape_contact() {
         let library = MaterialLibrary::parse(

@@ -5398,6 +5398,7 @@ impl Object {
             self.advance_fixed_position();
             return Ok(MovementStepOutcome {
                 no_attach: false,
+                redirect_yr: false,
                 any_contact: false,
                 contact_cnat: 0,
                 solid_mask_removed: self.state.position != previous_position,
@@ -5530,6 +5531,9 @@ impl Object {
                             &mut self.rotation_velocity,
                             -contact.first_weight(),
                         );
+                        // C++ fRedirectYR remembers this arm for the rest of
+                        // this DoMovement, even when no force was transferred.
+                        outcome.redirect_yr = true;
                     }
                     self.fixed_velocity.y = C4Fixed::ZERO;
                 }
@@ -5702,6 +5706,7 @@ impl Object {
         self.state.velocity = self.velocity_pixels();
         Ok(MovementStepOutcome {
             no_attach,
+            redirect_yr: false,
             any_contact,
             contact_cnat,
             solid_mask_removed,
@@ -5860,6 +5865,7 @@ impl Object {
         materials: &MaterialSet,
         movement: MovementContactConfig<'_>,
         no_attach: bool,
+        redirect_yr: bool,
         solid_mask_removed: bool,
         mut on_contact: impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
     ) -> Result<(bool, u32), EngineError> {
@@ -5895,6 +5901,7 @@ impl Object {
                     materials,
                     movement,
                     no_attach,
+                    redirect_yr,
                     solid_mask_removed,
                     &mut on_contact,
                 )?;
@@ -5926,6 +5933,7 @@ impl Object {
         materials: &MaterialSet,
         movement: MovementContactConfig<'_>,
         no_attach: bool,
+        redirect_yr: bool,
         solid_mask_removed: bool,
         on_contact: &mut impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
     ) -> Result<(bool, u32), EngineError> {
@@ -5994,7 +6002,7 @@ impl Object {
                 // fix_x/fix_y retain the preceding translation result
                 // (C4Movement.cpp:392-425).
                 self.fixed_rotation = itofix(previous_rotation);
-                if contact.count() == 1 {
+                if contact.count() == 1 && !redirect_yr {
                     redirect_force(&mut self.rotation_velocity, &mut self.fixed_velocity.y, -1);
                 }
                 self.rotation_velocity = C4Fixed::ZERO;
@@ -13539,6 +13547,10 @@ impl SolidMaskRect {
 #[derive(Debug, Default, Clone, Copy)]
 struct MovementStepOutcome {
     no_attach: bool,
+    /// C++ DoMovement-local fRedirectYR: the vertical both-sides arm already
+    /// transferred ydir into rdir, so a later rotation contact must not send
+    /// rdir back into ydir during this invocation.
+    redirect_yr: bool,
     any_contact: bool,
     /// The frame's accumulated contact CNAT bits (C++ `iContacts`,
     /// C4Movement.cpp:358) — ContactAction dispatches on them.
@@ -28801,6 +28813,7 @@ impl Engine {
                 materials,
                 movement,
                 outcome.no_attach,
+                outcome.redirect_yr,
                 outcome.solid_mask_removed,
                 &mut run_contact_callback,
             )?;
