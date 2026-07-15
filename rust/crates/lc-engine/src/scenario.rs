@@ -15438,6 +15438,7 @@ global func Step(state, frame, random)
                     in_action: false,
                     in_action_time: 0,
                     has_died: false,
+                    extra_data: Vec::new(),
                 }],
                 startup_player_count: 1,
                 control_style: false,

@@ -4369,6 +4369,41 @@ fn get_plr_extra_data(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// `FnGetCrewExtraData` (C4Script.cpp:4786-4800): read one exact-case
+/// `C4ObjectInfoCore::ExtraData` slot. A nil crew defaults to the caller;
+/// objects without Info and unknown names return nil.
+fn get_crew_extra_data(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "GetCrewExtraData",
+        "crew",
+    )?;
+    let Some(Value::String(name)) = args.get(1) else {
+        return Ok(Value::Nil);
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(target) = target.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Nil);
+        };
+        // An existing scope is authoritative even when its Info was cleared
+        // during this call; never fall back to the callback-entry world copy.
+        let info = match context.object_scope(target) {
+            Some(scope) => scope.info_core(),
+            None => context.world.crew_infos.get(&target),
+        };
+        Ok(info
+            .and_then(|info| info.extra_data.iter().find(|(slot, _)| slot == name))
+            .map(|(_, value)| value.clone())
+            .unwrap_or(Value::Nil))
+    })
+}
+
 /// `FnSetPlrExtraData` (C4Script.cpp:4692-4732): validates the name
 /// (IsIdentifier) and the payload type (nil/int/bool/id only), stores the
 /// slot and returns the stored value; every failure yields nil.
@@ -12017,10 +12052,11 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetHostility", set_hostility);
     script.register_host_function("SetFoW", set_fow);
     script.register_host_function("SetScoreboardData", set_scoreboard_data);
-    // Fn[Get/Set]PlrExtraData (C4Script.cpp:4692-4747, AddFunc
-    // :6666-6667) — MagiClonk's Recruitment combo preference.
+    // Player and crew C4ValueMapData readers (C4Script.cpp:4692-4800,
+    // AddFunc :6660-6663). The crew setter lands in its own queue item.
     script.register_host_function("GetPlrExtraData", get_plr_extra_data);
     script.register_host_function("SetPlrExtraData", set_plr_extra_data);
+    script.register_host_function("GetCrewExtraData", get_crew_extra_data);
     script.register_host_function("GetScenarioVal", get_scenario_val);
     script.register_host_function("LoadScenarioSection", load_scenario_section);
     script.register_host_function("GetLeague", get_league);
@@ -17422,6 +17458,7 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                             birthday: 0,
                             age: 0,
                             in_action_time: 0,
+                            extra_data: Vec::new(),
                         })
                     }),
                     scope.info_link(),
@@ -17662,6 +17699,7 @@ fn recruit_or_create_crew_info(
             birthday: entry.birthday,
             age: entry.age,
             in_action_time: entry.in_action_time,
+            extra_data: entry.extra_data.clone(),
         };
         return Ok(Some((link, info, None, entry.physical)));
     }
@@ -17740,6 +17778,7 @@ fn recruit_or_create_crew_info(
             in_action: false,
             in_action_time: 0,
             has_died: false,
+            extra_data: Vec::new(),
         };
         state.entries.insert(link, entry.clone());
         state.order.entry(player).or_default().insert(0, link);
@@ -17755,6 +17794,7 @@ fn recruit_or_create_crew_info(
         birthday: entry.birthday,
         age: entry.age,
         in_action_time: entry.in_action_time,
+        extra_data: entry.extra_data.clone(),
     };
     if let Some(player) = context.player_state_mut(player) {
         player.crew_created = player.crew_created.wrapping_add(1);
@@ -43474,6 +43514,7 @@ mod tests {
         "GetCrew",
         "GetCrewCount",
         "GetCrewEnabled",
+        "GetCrewExtraData",
         "GetCursor",
         "GetDamage",
         "GetDefBottom",
@@ -45948,6 +45989,7 @@ func RenameInfo(object target, string name, bool make_valid)
             in_action: false,
             in_action_time: 0,
             has_died: false,
+            extra_data: Vec::new(),
         };
         engine
             .join_player(crate::JoinPlayerConfig {
@@ -50461,6 +50503,112 @@ public func Probe()
             outcome.player_commands.as_slice(),
             [PlayerCommand::SetExtraData { player_id: 3, .. }]
         ));
+    }
+
+    #[test]
+    fn crew_extra_data_getter_reads_persistent_values_and_nil_defaults_like_cpp() {
+        // FnGetCrewExtraData (C4Script.cpp:4786-4800) defaults a nil crew to
+        // the caller, reads exact-case named values from C4ObjectInfo, and
+        // returns nil for an unknown name or an object without Info. The
+        // getter may return a pre-existing string even though C++'s separate
+        // SetCrewExtraData builtin rejects new string writes.
+        let script = r#"#strict 2
+func Probe(object crew, object info_less)
+{
+    return [GetCrewExtraData(0, "missing"),
+            GetCrewExtraData(0, "number"),
+            GetCrewExtraData(nil, "text"),
+            GetCrewExtraData(crew, "id"),
+            GetCrewExtraData(crew, "NUMBER"),
+            GetCrewExtraData(info_less, "number")];
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        let mut definition = crate::Definition::from_script("CREW", "Crew", script)
+            .expect("crew extra-data fixture compiles");
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("crew extra-data fixture registers");
+
+        let mut start = crate::scenario::PlayerStart::default();
+        start.ready_crew = vec![("CREW".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        let extra_data = vec![
+            ("number".to_string(), Value::Int(17)),
+            ("text".to_string(), Value::String("persisted".into())),
+            ("id".to_string(), Value::C4Id("ROCK".into())),
+        ];
+        engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Extra data owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![crate::player_file::CrewInfo {
+                    id: "CREW".to_string(),
+                    name: "Ada".to_string(),
+                    rank: 0,
+                    experience: 0,
+                    physical: crate::PhysicalInfo::default(),
+                    death_count: 0,
+                    total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
+                    participation: 1,
+                    in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                    extra_data: extra_data.clone(),
+                }],
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("extra data owner joins");
+
+        let crew = engine.player(0).expect("player exists").crew()[0];
+        let info_less = engine
+            .spawn_object(crate::SpawnConfig::new("CREW"))
+            .expect("info-less comparison object spawns");
+        let expected = Value::Array(vec![
+            Value::Nil,
+            Value::Int(17),
+            Value::String("persisted".into()),
+            Value::C4Id("ROCK".into()),
+            Value::Nil,
+            Value::Nil,
+        ]);
+        let probe = |engine: &mut crate::Engine| {
+            let index = engine.find_object_index(crew).expect("crew remains live");
+            engine
+                .call_object_function(
+                    index,
+                    "Probe",
+                    vec![
+                        Value::Object(crew.as_u64()),
+                        Value::Object(info_less.as_u64()),
+                    ],
+                )
+                .expect("GetCrewExtraData probe runs")
+        };
+        assert_eq!(probe(&mut engine), expected);
+        assert_eq!(
+            engine
+                .crew_object_info(crew)
+                .expect("crew retains live info")
+                .extra_data,
+            extra_data
+        );
+
+        let json = serde_json::to_string(&engine.capture_state()).expect("state serializes");
+        let state: crate::EngineState = serde_json::from_str(&json).expect("state deserializes");
+        engine.restore_state(&state).expect("state restores");
+        assert_eq!(probe(&mut engine), expected);
     }
 
     #[test]

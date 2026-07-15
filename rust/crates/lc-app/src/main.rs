@@ -36920,6 +36920,7 @@ mod tests {
                     in_action: false,
                     in_action_time: 0,
                     has_died: false,
+                    extra_data: Vec::new(),
                 }],
             });
             // Their movement timings predate live Game.Parameters and were

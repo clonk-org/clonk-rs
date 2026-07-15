@@ -2353,6 +2353,7 @@ mod tests {
             in_action: false,
             in_action_time: 0,
             has_died: false,
+            extra_data: Vec::new(),
         }];
         let file = PlayerFile {
             name: "File Tyler".to_string(),

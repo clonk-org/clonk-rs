@@ -251,6 +251,7 @@ impl ReplayCrewInfoV1 {
             in_action: self.in_action,
             in_action_time: 0,
             has_died: self.has_died,
+            extra_data: Vec::new(),
         }
     }
 }

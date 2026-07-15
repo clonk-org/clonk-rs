@@ -1851,6 +1851,7 @@ func Ejection(object item)
                 in_action: false,
                 in_action_time: 0,
                 has_died: false,
+                extra_data: Vec::new(),
             }],
         ))?;
         let crew = engine.player(0).expect("player joins").crew()[0];
@@ -1947,6 +1948,7 @@ func Recruit() { return MakeCrewMember(this(), 0); }
             in_action: false,
             in_action_time: 0,
             has_died: false,
+            extra_data: Vec::new(),
         };
         let mut engine = Engine::with_seed(155);
         engine.register_definition(definition)?;
@@ -15768,6 +15770,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                     in_action: false,
                     in_action_time: 0,
                     has_died: false,
+                    extra_data: Vec::new(),
                 }],
                 control_style: false,
                 auto_context_menu: false,
@@ -17193,6 +17196,7 @@ public func RemoveCaptain(int player)
                     in_action: false,
                     in_action_time: 0,
                     has_died: false,
+                    extra_data: Vec::new(),
                 },
                 player_file::CrewInfo {
                     id: "CREW".to_string(),
@@ -17208,6 +17212,7 @@ public func RemoveCaptain(int player)
                     in_action: false,
                     in_action_time: 0,
                     has_died: false,
+                    extra_data: Vec::new(),
                 },
             ],
             control_style: false,
@@ -27587,6 +27592,7 @@ public func TrainTemporaryScale()
                     in_action: false,
                     in_action_time: 0,
                     has_died: false,
+                    extra_data: Vec::new(),
                 }],
                 startup_player_count: 1,
                 control_style: false,
@@ -27809,6 +27815,7 @@ public func TrainTemporaryScale()
                     in_action: false,
                     in_action_time: 0,
                     has_died: false,
+                    extra_data: Vec::new(),
                 }],
                 startup_player_count: 1,
                 control_style: false,
@@ -27896,6 +27903,7 @@ public func TrainTemporaryScale()
                     in_action: false,
                     in_action_time: 0,
                     has_died: false,
+                    extra_data: Vec::new(),
                 }],
                 startup_player_count: 1,
                 control_style: false,
@@ -28916,6 +28924,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
                 in_action: false,
                 in_action_time: 0,
                 has_died: false,
+                extra_data: Vec::new(),
             }],
             control_style: false,
             auto_context_menu: false,
@@ -31443,6 +31452,7 @@ global func InitializePlayer(int player)
                 in_action: false,
                 in_action_time: 0,
                 has_died: false,
+                extra_data: Vec::new(),
             };
             let player = engine
                 .join_player(lifecycle_join_config(
@@ -31797,6 +31807,7 @@ func ControlUpSingle()
             in_action: false,
             in_action_time: 0,
             has_died: false,
+            extra_data: Vec::new(),
         };
         let mut reused = Engine::with_seed(1);
         setup(&mut reused)?;
@@ -41648,6 +41659,7 @@ func RemoveAndRecruit(object target) {
                         in_action: false,
                         in_action_time: 0,
                         has_died: false,
+                        extra_data: Vec::new(),
                     },
                     player_file::CrewInfo {
                         id: "CREW".to_string(),
@@ -41663,6 +41675,7 @@ func RemoveAndRecruit(object target) {
                         in_action: false,
                         in_action_time: 0,
                         has_died: false,
+                        extra_data: Vec::new(),
                     },
                 ],
                 control_style: false,
@@ -41871,6 +41884,7 @@ func RemoveAndRecruit(object target) {
                     in_action: false,
                     in_action_time: 0,
                     has_died: false,
+                    extra_data: Vec::new(),
                 }],
                 control_style: false,
                 auto_context_menu: false,
@@ -41964,6 +41978,7 @@ func AwardSelf(int amount) {
                     in_action: false,
                     in_action_time: 0,
                     has_died: false,
+                    extra_data: Vec::new(),
                 }],
                 control_style: false,
                 auto_context_menu: false,
@@ -42474,6 +42489,7 @@ func RemoveAndGrabSelf() {
                     in_action: false,
                     in_action_time: 0,
                     has_died: false,
+                    extra_data: Vec::new(),
                 }],
                 control_style: false,
                 auto_context_menu: false,

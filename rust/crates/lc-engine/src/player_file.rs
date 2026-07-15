@@ -48,6 +48,11 @@ pub struct CrewInfo {
     pub in_action_time: i32,
     /// Died this round (C4ObjectInfo::HasDied).
     pub has_died: bool,
+    /// `C4ObjectInfoCore::ExtraData`: ordered named C4Value slots persisted
+    /// with this crew entry. GetCrewExtraData returns any stored value;
+    /// SetCrewExtraData limits newly written types separately.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_data: Vec<(String, lc_script::Value)>,
 }
 
 impl CrewInfo {
@@ -113,6 +118,7 @@ impl CrewInfo {
             in_action: false,
             in_action_time: 0,
             has_died: false,
+            extra_data: Vec::new(),
         }
     }
 }

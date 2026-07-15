@@ -1480,6 +1480,10 @@ pub struct CrewObjectInfo {
     /// this data with its owning roster entry in C++.
     #[serde(default)]
     pub in_action_time: i32,
+    /// Ordered `C4ObjectInfoCore::ExtraData` slots. This live projection is
+    /// mirrored from the owning roster entry and follows GrabObjectInfo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_data: Vec<(String, lc_script::Value)>,
 }
 
 /// Stable identity of one C4ObjectInfo inside a player's CrewInfoList.
@@ -17610,6 +17614,7 @@ impl Engine {
                 birthday: info.birthday,
                 age: info.age,
                 in_action_time: info.in_action_time,
+                extra_data: info.extra_data.clone(),
             },
         );
         Rc::make_mut(&mut self.crew_info_links).insert(
@@ -17813,6 +17818,7 @@ impl Engine {
             in_action: false,
             in_action_time: 0,
             has_died: false,
+            extra_data: Vec::new(),
         });
         let index = roster.len() - 1;
         self.crew_info_order
@@ -27645,6 +27651,7 @@ impl Engine {
                 info.birthday = entry.birthday;
                 info.age = entry.age;
                 info.in_action_time = entry.in_action_time;
+                info.extra_data = entry.extra_data.clone();
             }
         }
         self.crew_info_control_counts.clear();
@@ -29592,6 +29599,7 @@ impl Engine {
                         birthday: entry.birthday,
                         age: entry.age,
                         in_action_time: entry.in_action_time,
+                        extra_data: entry.extra_data.clone(),
                     };
                     let promoted = adjust_crew_experience(&mut info, change);
                     entry.rank = info.rank;
@@ -29864,6 +29872,7 @@ impl Engine {
                             info.birthday = entry.birthday;
                             info.age = entry.age;
                             info.in_action_time = entry.in_action_time;
+                            info.extra_data = entry.extra_data.clone();
                         }
                         Rc::make_mut(&mut self.crew_info_links).insert(object_id, link);
                     } else {
