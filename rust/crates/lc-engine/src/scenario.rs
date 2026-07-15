@@ -258,6 +258,8 @@ pub struct Scenario {
     base_buy_enabled: bool,
     base_sell_enabled: bool,
     base_auto_sell_enabled: bool,
+    base_regenerate_energy_enabled: bool,
+    base_regenerate_energy_price: i32,
     landscape_insert_thrust: bool,
     /// `[Head] DisableMouse`: prevents every joined player from receiving
     /// mouse control (`C4Player::InitControl`, C4Player.cpp:1907-1912).
@@ -2285,6 +2287,10 @@ impl Scenario {
             base_auto_sell_enabled: (manifest.core.game.realism.base_functionality
                 & BASEFUNC_AUTO_SELL_CONTENTS)
                 != 0,
+            base_regenerate_energy_enabled: (manifest.core.game.realism.base_functionality
+                & BASEFUNC_REGENERATE_ENERGY)
+                != 0,
+            base_regenerate_energy_price: manifest.core.game.realism.base_regenerate_energy_price,
             landscape_insert_thrust: manifest.core.game.realism.landscape_insert_thrust != 0,
             disable_mouse: manifest.core.head.disable_mouse != 0,
             forced_auto_context_menu: (manifest.core.head.forced_auto_context_menu >= 0)
@@ -2576,6 +2582,8 @@ impl Scenario {
         engine.set_base_buy_enabled(self.base_buy_enabled);
         engine.set_base_sell_enabled(self.base_sell_enabled);
         engine.set_base_auto_sell_enabled(self.base_auto_sell_enabled);
+        engine.set_base_regenerate_energy_enabled(self.base_regenerate_energy_enabled);
+        engine.set_base_regenerate_energy_price(self.base_regenerate_energy_price);
         engine.set_landscape_insert_thrust(self.landscape_insert_thrust);
 
         for step in &self.definition_load_steps {
@@ -3261,6 +3269,8 @@ impl Scenario {
             base_buy_enabled: false,
             base_sell_enabled: false,
             base_auto_sell_enabled: false,
+            base_regenerate_energy_enabled: true,
+            base_regenerate_energy_price: BASE_REGENERATE_ENERGY_PRICE,
             landscape_insert_thrust: false,
             disable_mouse: false,
             forced_auto_context_menu: None,
@@ -14719,6 +14729,8 @@ global func Step(state, frame, random)
             base_buy_enabled: true,
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
+            base_regenerate_energy_enabled: false,
+            base_regenerate_energy_price: 12,
             landscape_insert_thrust: false,
             disable_mouse: false,
             forced_auto_context_menu: None,
@@ -14737,6 +14749,8 @@ global func Step(state, frame, random)
         let mut engine = Engine::with_seed(11);
         let created = scenario.apply(&mut engine).expect("scenario applies");
         assert_eq!(created.len(), 2);
+        assert!(!engine.base_regenerate_energy_enabled);
+        assert_eq!(engine.base_regenerate_energy_price, 12);
 
         let mut energies: Vec<i32> = created
             .iter()
@@ -14834,6 +14848,8 @@ global func Step(state, frame, random)
             base_buy_enabled: true,
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
+            base_regenerate_energy_enabled: true,
+            base_regenerate_energy_price: BASE_REGENERATE_ENERGY_PRICE,
             landscape_insert_thrust: false,
             disable_mouse: false,
             forced_auto_context_menu: None,
@@ -15205,6 +15221,8 @@ global func Step(state, frame, random)
                     experience: 120,
                     death_count: 0,
                     total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
                     participation: 1,
                     in_action: false,
                     in_action_time: 0,

@@ -1597,6 +1597,8 @@ func Ejection(object item)
                 experience: 0,
                 death_count: 4,
                 total_playing_time: 17,
+                birthday: 0,
+                age: 0,
                 participation: 1,
                 in_action: false,
                 in_action_time: 0,
@@ -1690,6 +1692,8 @@ func Recruit() { return MakeCrewMember(this(), 0); }
             experience: 0,
             death_count: 0,
             total_playing_time: 0,
+            birthday: 0,
+            age: 0,
             participation: 1,
             in_action: false,
             in_action_time: 0,
@@ -13882,6 +13886,7 @@ protected func GrabLost()
             Definition::from_script("CREW", "Crew", "").expect("crew definition compiles");
         fighter_definition.set_crew_member(true);
         fighter_definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        fighter_definition.set_line_connect(LINE_CONNECT_ENERGY_HOLDER);
         fighter_definition.configure_actions(
             Some("Fight".to_string()),
             HashMap::from([(
@@ -13941,6 +13946,8 @@ protected func GrabLost()
                     experience: 998,
                     death_count: 0,
                     total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
                     participation: 1,
                     in_action: false,
                     in_action_time: 0,
@@ -15363,6 +15370,8 @@ public func RemoveCaptain(int player)
                     experience: 1_000,
                     death_count: 0,
                     total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
                     participation: 1,
                     in_action: false,
                     in_action_time: 0,
@@ -15375,6 +15384,8 @@ public func RemoveCaptain(int player)
                     experience: 5_000,
                     death_count: 0,
                     total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
                     participation: 1,
                     in_action: false,
                     in_action_time: 0,
@@ -25029,6 +25040,7 @@ func Stuck()
         let materials = MaterialSet::from_resource_library(&library);
 
         let mut definition = Definition::from_script("Diver", "Diver", script).unwrap();
+        definition.set_category(CATEGORY_LIVING);
         definition.set_physical(PhysicalInfo {
             breath: 50_000,
             energy: 50_000,
@@ -25227,6 +25239,620 @@ func Stuck()
             engine.tick().expect("tick succeeds");
         }
         assert_eq!(engine.objects[idx].state.breath, 50_000);
+    }
+
+    fn exec_life_material_landscape(
+        width: u32,
+        height: u32,
+        material: &str,
+        points: &[(u32, u32)],
+    ) -> Landscape {
+        let mut pixels = vec![0_u8; (width * height) as usize];
+        for &(x, y) in points {
+            pixels[(y * width + x) as usize] = 10;
+        }
+        let mut densities = vec![0_i32; 128];
+        densities[10] = 0;
+        let mut names = vec![None; 128];
+        names[10] = Some(material.to_string());
+        let grid =
+            landscape::PixelGrid::new(width, height, pixels, densities, names, vec![None; 128]);
+        let mut landscape = Landscape::new(width, vec![height as i32; width as usize]).unwrap();
+        landscape.set_pixel_grid(grid);
+        landscape
+    }
+
+    #[test]
+    fn exec_life_periodic_base_energy_buys_and_transfers_exact_units() -> Result<(), EngineError> {
+        let mut base = Definition::from_script(
+            "BASE",
+            "Base",
+            r#"
+local debit_by;
+func FxOwnerSwapDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
+    if (iChange < 0) {
+        debit_by = iCausePlr;
+        SetOwner(2);
+    }
+    return(iChange);
+}
+"#,
+        )?;
+        base.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+        let mut crew = Definition::from_script(
+            "CREW",
+            "Crew",
+            r#"
+local credit_by;
+func FxCreditProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
+    if (iChange > 0) credit_by = iCausePlr;
+    return(iChange);
+}
+"#,
+        )?;
+        crew.set_category(CATEGORY_LIVING);
+        crew.set_no_breath(true);
+        crew.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(1);
+        engine.register_definition(base)?;
+        engine.register_definition(crew)?;
+        engine.register_player(PlayerConfig::new(1, "Home").with_wealth(12))?;
+        engine.register_player(PlayerConfig::new(2, "New base owner"))?;
+        engine.set_base_regenerate_energy_price(7);
+        let base_id = engine.spawn_object(
+            SpawnConfig::new("BASE")
+                .with_owner(1)
+                .with_alive(true)
+                .with_energy(0),
+        )?;
+        let base_idx = engine.find_object_index(base_id).unwrap();
+        engine.objects[base_idx].state.effects.push(
+            EffectState::new("OwnerSwap").with_command_target(Some(base_id.as_u64() as i32)),
+        );
+        engine.objects[base_idx].state.base = 1;
+        let crew_id = engine.spawn_object(
+            SpawnConfig::new("CREW")
+                .with_owner(1)
+                .with_alive(true)
+                .with_energy(10_000)
+                .with_container(base_id),
+        )?;
+        let crew_idx = engine.find_object_index(crew_id).unwrap();
+        engine.objects[crew_idx].state.effects.push(
+            EffectState::new("CreditProbe").with_command_target(Some(crew_id.as_u64() as i32)),
+        );
+
+        engine.tick()?;
+        engine.tick()?;
+        assert_eq!(engine.object_snapshot(crew_id).unwrap().energy, 10_000);
+        engine.tick()?;
+        assert_eq!(engine.object_snapshot(crew_id).unwrap().energy, 12_000);
+        assert_eq!(engine.object_snapshot(base_id).unwrap().energy, 48_000);
+        assert_eq!(engine.player(1).unwrap().wealth(), 5);
+        assert_eq!(
+            engine.objects[base_idx].state.local_vars.get("debit_by"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine.objects[crew_idx].state.local_vars.get("credit_by"),
+            Some(&Value::Int(2)),
+            "the credit re-reads Contained->Owner after donor callbacks"
+        );
+
+        engine.objects[base_idx].state.energy = 1_200;
+        engine.objects[crew_idx].state.energy = 49_500;
+        for _ in 0..3 {
+            engine.tick()?;
+        }
+        assert_eq!(engine.object_snapshot(crew_id).unwrap().energy, 50_000);
+        assert_eq!(engine.object_snapshot(base_id).unwrap().energy, 700);
+
+        engine.objects[crew_idx].state.energy = 48_000;
+        for _ in 0..3 {
+            engine.tick()?;
+        }
+        assert_eq!(engine.object_snapshot(crew_id).unwrap().energy, 48_700);
+        assert_eq!(engine.object_snapshot(base_id).unwrap().energy, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn exec_life_periodic_magic_uses_global_debit_gate_and_whole_points() -> Result<(), EngineError>
+    {
+        fn run(override_source: &str) -> Result<(i32, i32), EngineError> {
+            let mut donor = Definition::from_script("DONR", "Donor", override_source)?;
+            donor.set_physical(PhysicalInfo {
+                magic: 50_000,
+                ..PhysicalInfo::default()
+            });
+            let mut recipient = Definition::from_script("RCPT", "Recipient", "")?;
+            recipient.set_category(CATEGORY_LIVING);
+            recipient.set_no_breath(true);
+            recipient.set_physical(PhysicalInfo {
+                magic: 50_000,
+                ..PhysicalInfo::default()
+            });
+            let mut engine = Engine::with_seed(2);
+            engine.register_definition(donor)?;
+            engine.register_definition(recipient)?;
+            let donor_id = engine.spawn_object(
+                SpawnConfig::new("DONR")
+                    .with_owner(1)
+                    .with_magic_energy(1_500),
+            )?;
+            let recipient_id = engine.spawn_object(
+                SpawnConfig::new("RCPT")
+                    .with_owner(1)
+                    .with_alive(true)
+                    .with_magic_energy(0)
+                    .with_container(donor_id),
+            )?;
+            for _ in 0..3 {
+                engine.tick()?;
+            }
+            Ok((
+                engine.object_snapshot(donor_id).unwrap().magic_energy,
+                engine.object_snapshot(recipient_id).unwrap().magic_energy,
+            ))
+        }
+
+        assert_eq!(run("")?, (500, 1_000));
+        assert_eq!(
+            run("func DoMagicEnergy(int change, object target) { return(false); }")?,
+            (500, 1_000),
+            "an object-local function does not shadow the engine-global debit"
+        );
+        assert_eq!(
+            run("global func DoMagicEnergy(int change, object target) { return(change >= 0); }")?,
+            (1_500, 0),
+            "a false engine-global debit suppresses the credit"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exec_life_periodic_corrosion_and_closed_container_use_cached_in_mat(
+    ) -> Result<(), EngineError> {
+        let library =
+            MaterialLibrary::parse("[Material Acid]\nName=Acid\nDensity=0\nCorrosive=31\n")
+                .unwrap();
+        let mut engine = Engine::with_seed(3);
+        engine.set_materials(MaterialSet::from_resource_library(&library));
+        let points = (0..4)
+            .flat_map(|y| (0..4).map(move |x| (x, y)))
+            .collect::<Vec<_>>();
+        engine.set_landscape(exec_life_material_landscape(4, 4, "Acid", &points));
+        engine.set_physics(PhysicsSettings::new(0, 200, -200));
+
+        let mut victim = Definition::from_script(
+            "VCTM",
+            "Victim",
+            r#"
+local corrosion_change, corrosion_cause, corrosion_by;
+func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
+    corrosion_change = iChange;
+    corrosion_cause = iCause;
+    corrosion_by = iCausePlr;
+    return(iChange);
+}
+"#,
+        )?;
+        victim.set_category(CATEGORY_LIVING);
+        victim.set_no_breath(true);
+        victim.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+        let mut resistant = Definition::from_script("RSST", "Resistant", "")?;
+        resistant.set_category(CATEGORY_LIVING);
+        resistant.set_no_breath(true);
+        resistant.set_physical(PhysicalInfo {
+            energy: 50_000,
+            corrosion_resist: 1,
+            ..PhysicalInfo::default()
+        });
+        let open = Definition::from_script("OPEN", "Open", "")?;
+        let mut closed = Definition::from_script("CLSD", "Closed", "")?;
+        closed.set_closed_container(2);
+        engine.register_definition(victim)?;
+        engine.register_definition(resistant)?;
+        engine.register_definition(open)?;
+        engine.register_definition(closed)?;
+
+        let direct = engine.spawn_object(
+            SpawnConfig::new("VCTM")
+                .with_position(Vector2::new(1, 1))
+                .with_alive(true)
+                .with_energy(50_000),
+        )?;
+        let direct_idx = engine.find_object_index(direct).unwrap();
+        engine.objects[direct_idx].state.effects.push(
+            EffectState::new("CorrosionProbe")
+                .with_command_target(Some(direct.as_u64() as i32)),
+        );
+        engine.objects[direct_idx].last_energy_loss_cause = 7;
+        let resist = engine.spawn_object(
+            SpawnConfig::new("RSST")
+                .with_position(Vector2::new(1, 1))
+                .with_alive(true)
+                .with_energy(50_000),
+        )?;
+        let open_id =
+            engine.spawn_object(SpawnConfig::new("OPEN").with_position(Vector2::new(1, 1)))?;
+        let closed_id =
+            engine.spawn_object(SpawnConfig::new("CLSD").with_position(Vector2::new(1, 1)))?;
+        let open_child = engine.spawn_object(
+            SpawnConfig::new("VCTM")
+                .with_alive(true)
+                .with_energy(50_000)
+                .with_container(open_id),
+        )?;
+        let closed_child = engine.spawn_object(
+            SpawnConfig::new("VCTM")
+                .with_alive(true)
+                .with_energy(50_000)
+                .with_container(closed_id),
+        )?;
+
+        for _ in 0..9 {
+            engine.tick()?;
+        }
+        assert_eq!(engine.object_snapshot(direct).unwrap().energy, 50_000);
+        engine.tick()?;
+        assert_eq!(engine.object_snapshot(direct).unwrap().energy, 48_000);
+        assert_eq!(engine.objects[direct_idx].last_energy_loss_cause, 7);
+        assert_eq!(
+            engine.objects[direct_idx]
+                .state
+                .local_vars
+                .get("corrosion_change"),
+            Some(&Value::Int(-2_000))
+        );
+        assert_eq!(
+            engine.objects[direct_idx]
+                .state
+                .local_vars
+                .get("corrosion_cause"),
+            Some(&Value::Int(C4FX_CALL_ENG_CORROSION))
+        );
+        assert_eq!(
+            engine.objects[direct_idx]
+                .state
+                .local_vars
+                .get("corrosion_by"),
+            Some(&Value::Int(7))
+        );
+        assert_eq!(engine.object_snapshot(resist).unwrap().energy, 50_000);
+        assert_eq!(engine.object_snapshot(open_child).unwrap().energy, 48_000);
+        assert_eq!(engine.object_snapshot(closed_child).unwrap().energy, 50_000);
+
+        let mild_library =
+            MaterialLibrary::parse("[Material Mild]\nName=Mild\nDensity=0\nCorrosive=14\n")
+                .unwrap();
+        let mut mild_engine = Engine::with_seed(33);
+        mild_engine.set_materials(MaterialSet::from_resource_library(&mild_library));
+        mild_engine.set_landscape(exec_life_material_landscape(3, 3, "Mild", &[(1, 1)]));
+        let mut mild_definition = Definition::from_script(
+            "MILD",
+            "Mild corrosion probe",
+            r#"
+local corrosion_change, corrosion_cause, corrosion_by;
+func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
+    corrosion_change = iChange + 1;
+    corrosion_cause = iCause;
+    corrosion_by = iCausePlr;
+    return(-1000);
+}
+"#,
+        )?;
+        mild_definition.set_category(CATEGORY_LIVING);
+        mild_definition.set_no_breath(true);
+        mild_definition.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+        mild_engine.register_definition(mild_definition)?;
+        let mild = mild_engine.spawn_object(
+            SpawnConfig::new("MILD")
+                .with_position(Vector2::new(1, 1))
+                .with_category(CATEGORY_LIVING)
+                .with_alive(true)
+                .with_energy(50_000),
+        )?;
+        let mild_idx = mild_engine.find_object_index(mild).unwrap();
+        mild_engine.objects[mild_idx].state.effects.push(
+            EffectState::new("CorrosionProbe")
+                .with_command_target(Some(mild.as_u64() as i32)),
+        );
+        mild_engine.objects[mild_idx].last_energy_loss_cause = 9;
+        mild_engine.frame = 9;
+        mild_engine.tick()?;
+        assert_eq!(mild_engine.object_snapshot(mild).unwrap().energy, 49_000);
+        assert_eq!(
+            mild_engine.objects[mild_idx]
+                .state
+                .local_vars
+                .get("corrosion_change"),
+            Some(&Value::Int(1)),
+            "Corrosive < 15 still visits the head damage effect with zero"
+        );
+        assert_eq!(
+            mild_engine.objects[mild_idx]
+                .state
+                .local_vars
+                .get("corrosion_cause"),
+            Some(&Value::Int(C4FX_CALL_ENG_CORROSION))
+        );
+        assert_eq!(
+            mild_engine.objects[mild_idx]
+                .state
+                .local_vars
+                .get("corrosion_by"),
+            Some(&Value::Int(9))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exec_life_periodic_lava_uses_pre_movement_cache_and_standard_fire_draw(
+    ) -> Result<(), EngineError> {
+        let library =
+            MaterialLibrary::parse("[Material Lava]\nName=Lava\nDensity=0\nIncindiary=1\n")
+                .unwrap();
+        let mut engine = Engine::with_seed(4);
+        engine.set_materials(MaterialSet::from_resource_library(&library));
+        engine.set_landscape(exec_life_material_landscape(20, 3, "Lava", &[(1, 1)]));
+        engine.set_physics(PhysicsSettings::new(0, 200, -200));
+        let mut definition = Definition::from_script(
+            "FIRE",
+            "Fire target",
+            "local cause; func Incineration(int by) { cause = by; return(1); }",
+        )?;
+        definition.set_category(CATEGORY_OBJECT);
+        definition.set_fire_properties(37, true, true);
+        engine.register_definition(definition)?;
+        let id = engine.spawn_object(
+            SpawnConfig::new("FIRE")
+                .with_position(Vector2::new(1, 1))
+                .with_velocity(Vector2::new(10, 0))
+                .with_mobile(true)
+                .with_alive(false),
+        )?;
+        let idx = engine.find_object_index(id).unwrap();
+        engine.objects[idx].last_energy_loss_cause = 7;
+        engine.frame = 9;
+        let mut expected_rng = engine.rng.clone();
+        let expected_phase = expected_rng.random(MAX_FIRE_PHASE);
+        if expected_rng.random(60) == 0 {
+            let _ = expected_rng.random(100);
+        }
+        if expected_rng.random(35) == 0 {
+            let _ = expected_rng.random(100);
+        }
+        if expected_rng.random(50) == 0 {
+            let _ = expected_rng.random(100);
+        }
+        if expected_rng.random(60) == 0 {
+            let _ = expected_rng.random(100);
+        }
+        engine.tick()?;
+
+        let state = engine.object_snapshot(id).unwrap();
+        assert_ne!(state.position.x, 1, "movement left the lava pixel");
+        assert!(state.on_fire, "cached frame-start Lava still ignites");
+        assert_eq!(state.fire_phase, expected_phase);
+        assert_eq!(state.local_vars.get("cause"), Some(&Value::Int(7)));
+        assert_eq!(engine.rng.count, expected_rng.count);
+        assert_eq!(engine.rng.hold, expected_rng.hold);
+        Ok(())
+    }
+
+    #[test]
+    fn exec_life_periodic_nonlife_decay_respects_base_and_energy_holder() -> Result<(), EngineError>
+    {
+        let mut normal = Definition::from_script("NORM", "Normal", "")?;
+        normal.set_physical(PhysicalInfo {
+            energy: 10_000,
+            ..PhysicalInfo::default()
+        });
+        let mut holder = Definition::from_script("HOLD", "Holder", "")?;
+        holder.set_physical(PhysicalInfo {
+            energy: 10_000,
+            ..PhysicalInfo::default()
+        });
+        holder.set_line_connect(LINE_CONNECT_ENERGY_HOLDER);
+        let mut engine = Engine::with_seed(5);
+        engine.register_definition(normal)?;
+        engine.register_definition(holder)?;
+        engine.register_player(PlayerConfig::new(1, "Base owner"))?;
+        let ordinary = engine.spawn_object(
+            SpawnConfig::new("NORM")
+                .with_alive(false)
+                .with_energy(5_000),
+        )?;
+        let held = engine.spawn_object(
+            SpawnConfig::new("HOLD")
+                .with_alive(false)
+                .with_energy(5_000),
+        )?;
+        let protected = engine.spawn_object(
+            SpawnConfig::new("NORM")
+                .with_alive(false)
+                .with_energy(5_000),
+        )?;
+        let protected_idx = engine.find_object_index(protected).unwrap();
+        engine.objects[protected_idx].state.base = 1;
+
+        for _ in 0..10 {
+            engine.tick()?;
+        }
+        assert_eq!(engine.object_snapshot(ordinary).unwrap().energy, 4_000);
+        assert_eq!(engine.object_snapshot(held).unwrap().energy, 5_000);
+        assert_eq!(engine.object_snapshot(protected).unwrap().energy, 5_000);
+
+        engine.set_base_regenerate_energy_enabled(false);
+        for _ in 0..10 {
+            engine.tick()?;
+        }
+        assert_eq!(engine.object_snapshot(protected).unwrap().energy, 4_000);
+        Ok(())
+    }
+
+    #[test]
+    fn exec_life_periodic_growth_stays_suppressed_while_on_fire() -> Result<(), EngineError> {
+        let mut definition = Definition::from_script("TREE", "Tree", "")?;
+        definition.set_category(CATEGORY_STATIC_BACK);
+        definition.set_growth(4);
+        let mut engine = Engine::with_seed(6);
+        engine.register_definition(definition)?;
+        let id = engine.spawn_object(
+            SpawnConfig::new("TREE")
+                .with_construction(50_000)
+                .with_alive(false),
+        )?;
+        let idx = engine.find_object_index(id).unwrap();
+        engine.objects[idx].state.on_fire = true;
+        engine.frame = 34;
+        engine.tick()?;
+        assert_eq!(engine.object_snapshot(id).unwrap().construction, 50_000);
+        Ok(())
+    }
+
+    #[test]
+    fn exec_life_periodic_birthday_updates_info_and_presents_once() -> Result<(), EngineError> {
+        let mut crew = Definition::from_script("BDAY", "Birthday crew", "")?;
+        crew.set_crew_member(true);
+        crew.set_category(CATEGORY_LIVING);
+        crew.set_no_breath(true);
+        let mut engine = Engine::with_seed(7);
+        engine.register_definition(crew)?;
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("BDAY".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine.join_player(JoinPlayerConfig {
+            name: "Birthday player".to_string(),
+            player_info_id: 1,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0xff0000,
+            pref_color: 0,
+            pref_position: 0,
+            crew: vec![player_file::CrewInfo {
+                id: "BDAY".to_string(),
+                name: "Rookie".to_string(),
+                rank: 0,
+                experience: 0,
+                death_count: 0,
+                total_playing_time: 17_999,
+                birthday: 123,
+                age: 0,
+                participation: 1,
+                in_action: false,
+                in_action_time: 0,
+                has_died: false,
+            }],
+            control_style: false,
+            auto_context_menu: false,
+            startup_player_count: 1,
+        })?;
+        let crew_id = *engine.player(0).unwrap().crew().first().unwrap();
+        let linked_state = engine.capture_state();
+        let link = linked_state.crew_info_links[&crew_id];
+        let roster_entry = &linked_state.crew_info_rosters[&link.player_id][link.roster_index];
+        let expected_info_fields = (
+            roster_entry.total_playing_time,
+            roster_entry.birthday,
+            roster_entry.age,
+            roster_entry.in_action_time,
+        );
+
+        let mut stale_info = linked_state.crew_object_infos[&crew_id].clone();
+        stale_info.total_playing_time = -1;
+        stale_info.birthday = -2;
+        stale_info.age = -3;
+        stale_info.in_action_time = -4;
+        engine.apply_player_commands(vec![PlayerCommand::LinkCrewInfo {
+            object_id: crew_id,
+            link: Some(link),
+            info: stale_info,
+            created_entry: None,
+            recruit: false,
+            has_died: false,
+        }])?;
+        let live_info = engine.crew_object_info(crew_id).unwrap();
+        assert_eq!(
+            (
+                live_info.total_playing_time,
+                live_info.birthday,
+                live_info.age,
+                live_info.in_action_time,
+            ),
+            expected_info_fields,
+            "LinkCrewInfo refreshes the live projection from its roster node"
+        );
+
+        let mut legacy_state = engine.capture_state();
+        let legacy_info = legacy_state.crew_object_infos.get_mut(&crew_id).unwrap();
+        legacy_info.total_playing_time = -5;
+        legacy_info.birthday = -6;
+        legacy_info.age = -7;
+        legacy_info.in_action_time = -8;
+        engine.restore_state(&legacy_state)?;
+        let restored_info = engine.crew_object_info(crew_id).unwrap();
+        assert_eq!(
+            (
+                restored_info.total_playing_time,
+                restored_info.birthday,
+                restored_info.age,
+                restored_info.in_action_time,
+            ),
+            expected_info_fields,
+            "restore reconciles legacy duplicated live fields from the roster node"
+        );
+
+        engine.game_time = 1;
+        engine.frame = 254;
+        let snapshot = engine.tick()?;
+        let info_state = engine.capture_state();
+        let link = info_state.crew_info_links[&crew_id];
+        assert_eq!(
+            info_state.crew_info_rosters[&link.player_id][link.roster_index].age,
+            1
+        );
+        assert!(snapshot.hud.messages.iter().any(|message| {
+            message.target == Some(crew_id)
+                && message.lines == ["Rookie becomes 1!", "Happy birthday!"]
+        }));
+        assert_eq!(
+            snapshot.audio,
+            vec![AudioCommand::PlaySound {
+                name: "Trumpet".to_string(),
+                target: Some(crew_id),
+                volume: 100,
+                looped: false,
+                multiple: false,
+                custom_falloff: None,
+            }]
+        );
+
+        engine.frame = 509;
+        let repeat = engine.tick()?;
+        assert!(
+            !repeat.audio.iter().any(|command| {
+                matches!(command, AudioCommand::PlaySound { name, .. } if name == "Trumpet")
+            }),
+            "unchanged age has no second trumpet: {:?}",
+            repeat.audio
+        );
+        Ok(())
     }
 
     #[test]
@@ -27652,6 +28278,8 @@ global func InitializePlayer(int player)
                 experience: 0,
                 death_count: 0,
                 total_playing_time: 0,
+                birthday: 0,
+                age: 0,
                 participation: 1,
                 in_action: false,
                 in_action_time: 0,
@@ -28003,6 +28631,8 @@ func ControlUpSingle()
             experience: 0,
             death_count: 0,
             total_playing_time: 0,
+            birthday: 0,
+            age: 0,
             participation: 1,
             in_action: false,
             in_action_time: 0,
@@ -29288,6 +29918,7 @@ public func ReadIDs(int first, int second)
         let mut engine = Engine::with_seed(0);
         let mut definition = build_definition();
         definition.set_crew_member(true);
+        definition.set_category(CATEGORY_LIVING);
         engine
             .register_definition(definition)
             .expect("definition registers");
@@ -29342,6 +29973,7 @@ public func ReadIDs(int first, int second)
         let mut engine = Engine::with_seed(0);
         let mut definition = build_definition();
         definition.set_crew_member(true);
+        definition.set_category(CATEGORY_LIVING);
         engine
             .register_definition(definition)
             .expect("definition registers");
@@ -29445,6 +30077,7 @@ public func ReadIDs(int first, int second)
         let mut engine = Engine::with_seed(0);
         let mut definition = build_definition();
         definition.set_crew_member(true);
+        definition.set_category(CATEGORY_LIVING);
         engine
             .register_definition(definition)
             .expect("definition registers");
@@ -29485,6 +30118,7 @@ public func ReadIDs(int first, int second)
         let mut restored = Engine::with_seed(5);
         let mut definition = build_definition();
         definition.set_crew_member(true);
+        definition.set_category(CATEGORY_LIVING);
         restored
             .register_definition(definition)
             .expect("definition registers");
@@ -37811,6 +38445,8 @@ func RemoveAndRecruit(object target) {
                         experience: 900,
                         death_count: 0,
                         total_playing_time: 0,
+                        birthday: 0,
+                        age: 0,
                         participation: 1,
                         in_action: false,
                         in_action_time: 0,
@@ -37823,6 +38459,8 @@ func RemoveAndRecruit(object target) {
                         experience: 900,
                         death_count: 0,
                         total_playing_time: 0,
+                        birthday: 0,
+                        age: 0,
                         participation: 1,
                         in_action: false,
                         in_action_time: 0,
@@ -38028,6 +38666,8 @@ func RemoveAndRecruit(object target) {
                     experience: 0,
                     death_count: 0,
                     total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
                     participation: 1,
                     in_action: false,
                     in_action_time: 0,
@@ -38118,6 +38758,8 @@ func AwardSelf(int amount) {
                     experience: 0,
                     death_count: 0,
                     total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
                     participation: 1,
                     in_action: false,
                     in_action_time: 0,
@@ -38625,6 +39267,8 @@ func RemoveAndGrabSelf() {
                     experience: 8_000,
                     death_count: 0,
                     total_playing_time: 17,
+                    birthday: 0,
+                    age: 0,
                     participation: 3,
                     in_action: false,
                     in_action_time: 0,

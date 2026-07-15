@@ -393,7 +393,10 @@ pub const C4FX_CALL_ENG_SCRIPT: i32 = 32;
 pub const C4FX_CALL_ENG_BLAST: i32 = 33;
 pub const C4FX_CALL_ENG_OBJ_HIT: i32 = 34;
 pub const C4FX_CALL_ENG_FIRE: i32 = 35;
+pub const C4FX_CALL_ENG_BASE_REFRESH: i32 = 36;
 pub const C4FX_CALL_ENG_ASPHYXIATION: i32 = 37;
+pub const C4FX_CALL_ENG_CORROSION: i32 = 38;
+pub const C4FX_CALL_ENG_STRUCT: i32 = 39;
 pub const C4FX_CALL_ENG_GET_PUNCHED: i32 = 40;
 const GAME_OVER_CHECK_INTERVAL: u8 = 35;
 #[doc(hidden)]
@@ -1342,6 +1345,16 @@ pub struct CrewObjectInfo {
     /// Persistent C4ObjectInfoCore death tally.
     #[serde(default)]
     pub death_count: i32,
+    #[serde(default)]
+    pub total_playing_time: i32,
+    #[serde(default)]
+    pub birthday: i32,
+    #[serde(default)]
+    pub age: i32,
+    /// Runtime `C4ObjectInfo::InActionTime`; the object-info pointer shares
+    /// this data with its owning roster entry in C++.
+    #[serde(default)]
+    pub in_action_time: i32,
 }
 
 /// Stable identity of one C4ObjectInfo inside a player's CrewInfoList.
@@ -4992,6 +5005,9 @@ pub struct Object {
     /// Last energy-loss causing player (C4Object::LastEnergyLossCausePlayer,
     /// read by AssignDeath for kill attribution).
     #[doc(hidden)] pub last_energy_loss_cause: i32,
+    /// Transient C4Object::InMat cache. SetOCF/UpdateOCF sample it; ExecLife
+    /// deliberately reads that cached, normally pre-movement material.
+    in_mat: Option<MaterialId>,
     command_queue: VecDeque<QueuedCommand>,
     #[doc(hidden)] pub commands: CommandStack,
     pending_action_events: VecDeque<ActionTransitionEvent>,
@@ -5120,6 +5136,7 @@ impl Object {
             upright_t_attach: 0,
             last_attach_movement_frame: None,
             last_energy_loss_cause: OWNER_NONE,
+            in_mat: None,
             command_queue: VecDeque::new(),
             commands: CommandStack::new(),
             pending_action_events: VecDeque::new(),
@@ -8610,6 +8627,9 @@ pub struct Definition {
     /// ContainBlast=1: shields contents from explosions (the DoExplosion
     /// container walk, C4Effect.cpp:884).
     contain_blast: i32,
+    /// Any nonzero `ClosedContainer` prevents contained objects from
+    /// inheriting this object's cached `InMat`.
+    closed_container: i32,
     /// HorizontalFix=1 (C4Def::NoHorizontalMove, C4Def.cpp:383): exempt
     /// from shockwave flings.
     no_horizontal_move: i32,
@@ -8829,6 +8849,7 @@ impl Definition {
             contact_incinerate: 0,
             blast_incinerate: 0,
             contain_blast: 0,
+            closed_container: 0,
             no_horizontal_move: 0,
             no_burn_decay: false,
             no_breath: false,
@@ -9164,6 +9185,7 @@ impl Definition {
         );
         definition.set_blast_incinerate(resource.core.blast_incinerate);
         definition.set_contain_blast(resource.core.contain_blast);
+        definition.set_closed_container(resource.core.closed_container);
         definition.set_no_horizontal_move(resource.core.no_horizontal_move);
         definition.set_burn_turn_to(resource.core.burn_turn_to.clone());
         definition.set_build_turn_to(resource.core.build_turn_to.clone());
@@ -10100,6 +10122,14 @@ impl Definition {
 
     pub fn set_contain_blast(&mut self, contain_blast: i32) {
         self.contain_blast = contain_blast;
+    }
+
+    pub fn closed_container(&self) -> i32 {
+        self.closed_container
+    }
+
+    pub fn set_closed_container(&mut self, closed_container: i32) {
+        self.closed_container = closed_container;
     }
 
     pub fn no_horizontal_move(&self) -> i32 {
@@ -13581,6 +13611,8 @@ pub struct Engine {
     base_buy_enabled: bool,
     base_sell_enabled: bool,
     base_auto_sell_enabled: bool,
+    base_regenerate_energy_enabled: bool,
+    base_regenerate_energy_price: i32,
     landscape_insert_thrust: bool,
     known_crew_owners: HashSet<i32>,
     eliminated_crew_owners: HashSet<i32>,
@@ -15543,6 +15575,8 @@ impl Engine {
             base_buy_enabled: true,
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
+            base_regenerate_energy_enabled: true,
+            base_regenerate_energy_price: 5,
             landscape_insert_thrust: false,
             known_crew_owners: HashSet::new(),
             eliminated_crew_owners: HashSet::new(),
@@ -15637,6 +15671,14 @@ impl Engine {
 
     pub fn set_base_auto_sell_enabled(&mut self, enabled: bool) {
         self.base_auto_sell_enabled = enabled;
+    }
+
+    pub fn set_base_regenerate_energy_enabled(&mut self, enabled: bool) {
+        self.base_regenerate_energy_enabled = enabled;
+    }
+
+    pub fn set_base_regenerate_energy_price(&mut self, price: i32) {
+        self.base_regenerate_energy_price = price;
     }
 
     pub fn set_landscape_insert_thrust(&mut self, enabled: bool) {
@@ -17139,6 +17181,10 @@ impl Engine {
                 rank: info.rank,
                 experience: info.experience,
                 death_count: info.death_count,
+                total_playing_time: info.total_playing_time,
+                birthday: info.birthday,
+                age: info.age,
+                in_action_time: info.in_action_time,
             },
         );
         Rc::make_mut(&mut self.crew_info_links).insert(
@@ -17343,6 +17389,8 @@ impl Engine {
             experience: 0,
             death_count: 0,
             total_playing_time: 0,
+            birthday: 0,
+            age: 0,
             participation: 1,
             in_action: false,
             in_action_time: 0,
@@ -18792,6 +18840,44 @@ impl Engine {
         )
     }
 
+    /// `Game.ScriptEngine.GetFuncRecursive(...)->Exec(nullptr, args)`: call
+    /// strictly in engine-global scope (script globals before the native host
+    /// function), with no object `this`. This is observably different from
+    /// `C4Object::Call`, where a same-named local definition function wins.
+    fn call_engine_global_function(
+        &mut self,
+        function: &str,
+        args: &[Value],
+    ) -> Result<Value, EngineError> {
+        let script = self.script_control_global_host();
+        let world = self.host_world_context();
+        let (value, _final_args, batch, audio_state, rng, script_error) =
+            ScenarioScript::call_value_for_script(
+                "Game.ScriptEngine",
+                &script,
+                None,
+                function,
+                args,
+                world,
+                self.rng.clone(),
+                self.frame,
+                &self.global_effects.clone(),
+                self.physics,
+                self.environment,
+                self.audio_registry.clone(),
+                self.game_over_triggered,
+            );
+        self.rng = rng;
+        self.audio_registry = audio_state;
+        self.apply_scenario_batch(batch)?;
+        if let Some(error) = script_error {
+            if !matches!(error, EngineError::Script { .. }) {
+                return Err(error);
+            }
+        }
+        Ok(value.unwrap_or(Value::Nil))
+    }
+
     fn direct_exec_script_control_host(
         &mut self,
         script_name: &str,
@@ -18993,6 +19079,7 @@ impl Engine {
                                 no_burn_damage: definition.no_burn_damage(),
                                 contact_incinerate: definition.contact_incinerate(),
                                 contain_blast: definition.contain_blast(),
+                                closed_container: definition.closed_container(),
                                 no_horizontal_move: definition.no_horizontal_move(),
                                 grab: definition.grab(),
                                 no_push_enter: definition.no_push_enter(),
@@ -26788,6 +26875,25 @@ impl Engine {
             .retain(|player_id, _| self.crew_rosters.contains_key(player_id));
         self.crew_object_infos = Rc::new(state.crew_object_infos.clone());
         self.crew_info_links = Rc::new(state.crew_info_links.clone());
+        // Older Rust states already persisted these fields in the roster,
+        // but their duplicated live Info projection predates them. The C++
+        // object pointer and roster node are one structure, so reconcile the
+        // new projection from its linked authoritative node on load.
+        for (&object_id, &link) in self.crew_info_links.iter() {
+            let Some(entry) = self
+                .crew_rosters
+                .get(&link.player_id)
+                .and_then(|roster| roster.get(link.roster_index))
+            else {
+                continue;
+            };
+            if let Some(info) = Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id) {
+                info.total_playing_time = entry.total_playing_time;
+                info.birthday = entry.birthday;
+                info.age = entry.age;
+                info.in_action_time = entry.in_action_time;
+            }
+        }
         self.crew_info_control_counts.clear();
         self.crew_ranks = Rc::new(
             state
@@ -28694,6 +28800,10 @@ impl Engine {
                         rank: entry.rank,
                         experience: entry.experience,
                         death_count: entry.death_count,
+                        total_playing_time: entry.total_playing_time,
+                        birthday: entry.birthday,
+                        age: entry.age,
+                        in_action_time: entry.in_action_time,
                     };
                     let promoted = adjust_crew_experience(&mut info, change);
                     entry.rank = info.rank;
@@ -28912,7 +29022,7 @@ impl Engine {
                 PlayerCommand::LinkCrewInfo {
                     object_id,
                     link,
-                    info,
+                    mut info,
                     created_entry,
                     recruit,
                     has_died,
@@ -28944,6 +29054,15 @@ impl Engine {
                                 entry.in_action = true;
                                 entry.in_action_time = self.game_time;
                             }
+                            info.definition_id = DefinitionId::from(entry.id.as_str());
+                            info.name = entry.name.clone();
+                            info.rank = entry.rank;
+                            info.experience = entry.experience;
+                            info.death_count = entry.death_count;
+                            info.total_playing_time = entry.total_playing_time;
+                            info.birthday = entry.birthday;
+                            info.age = entry.age;
+                            info.in_action_time = entry.in_action_time;
                         }
                         Rc::make_mut(&mut self.crew_info_links).insert(object_id, link);
                     } else {
@@ -35623,7 +35742,33 @@ impl Engine {
         Ok(())
     }
 
-    /// InMat-incineration/base/birthday arms (need InMat and base models).
+    /// `C4Object::BuyEnergy` (C4Object.cpp:814-823): buy one hundred
+    /// percent-points for the base object, charging its assigned player.
+    fn buy_object_energy(&mut self, idx: usize) -> Result<bool, EngineError> {
+        let (base_player, owner) = {
+            let object = &self.objects[idx];
+            (object.state.base, object.state.owner)
+        };
+        if self.object_physical(idx).energy == 0 {
+            return Ok(false);
+        }
+        let Some(player) = self.players.get(&base_player) else {
+            return Ok(false);
+        };
+        if matches!(
+            player.status(),
+            PlayerStatus::Eliminated | PlayerStatus::Surrendered
+        ) || player.wealth() < self.base_regenerate_energy_price
+        {
+            return Ok(false);
+        }
+        self.adjust_player_wealth(base_player, -self.base_regenerate_energy_price)?;
+        self.change_object_energy(idx, 100, C4FX_CALL_ENG_BASE_REFRESH, owner)?;
+        Ok(true)
+    }
+
+    /// All periodic arms of `C4Object::ExecLife` in native order
+    /// (C4Object.cpp:825-967).
     fn exec_object_life(&mut self, idx: usize, frame: u64) -> Result<(), EngineError> {
         // Growth (C4Object.cpp:824-837): every Tick35, Def Growth on an
         // incomplete, unburning alive Living or StaticBack gains
@@ -35643,96 +35788,312 @@ impl Engine {
                 self.do_con(idx, growth * 100)?;
             }
         }
-        // Tick5, alive, breathing definitions only (C4Object.cpp:879-880).
-        if frame % 5 != 0 || !self.objects[idx].state.alive {
-            return Ok(());
+
+        // Energy reload in a friendly assigned base (C4Object.cpp:839-856).
+        if frame % 3 == 0 && self.objects[idx].state.alive {
+            let recipient_owner = self.objects[idx].state.owner;
+            let recipient_energy = self.objects[idx].state.energy;
+            let recipient_max = self.object_physical(idx).energy;
+            if let Some(container_id) = self.objects[idx].state.container {
+                if let Some(container_idx) = self.find_object_index(container_id) {
+                    let base_player = self.objects[container_idx].state.base;
+                    if self.players.contains_key(&base_player)
+                        && !self.players_hostile(recipient_owner, base_player)
+                        && recipient_energy < recipient_max
+                        && self.base_regenerate_energy_enabled
+                    {
+                        if self.objects[container_idx].state.energy <= 0 {
+                            let _ = self.buy_object_energy(container_idx)?;
+                        }
+                        // BuyEnergy's DoEnergy callbacks can mutate either
+                        // object's physicals or even its Contained pointer.
+                        // C++ re-evaluates both before calculating transfer.
+                        if let Some(current_container_idx) = self.objects[idx]
+                            .state
+                            .container
+                            .and_then(|current| self.find_object_index(current))
+                        {
+                            let recipient_max_after_buy = self.object_physical(idx).energy;
+                            let transfer = (2 * C4_MAX_PHYSICAL / 100)
+                                .min(self.objects[current_container_idx].state.energy)
+                                .min(recipient_max_after_buy - self.objects[idx].state.energy);
+                            if transfer != 0 {
+                                let debit_caused_by =
+                                    self.objects[current_container_idx].state.owner;
+                                self.change_object_energy_exact(
+                                    current_container_idx,
+                                    -transfer,
+                                    C4FX_CALL_ENG_BASE_REFRESH,
+                                    debit_caused_by,
+                                )?;
+                                // `Contained->Owner` is evaluated again for
+                                // the second call after donor damage callbacks.
+                                let credit_caused_by = self.objects[idx]
+                                    .state
+                                    .container
+                                    .and_then(|current| self.find_object_index(current))
+                                    .map(|current_idx| self.objects[current_idx].state.owner)
+                                    .unwrap_or(OWNER_NONE);
+                                self.change_object_energy_exact(
+                                    idx,
+                                    transfer,
+                                    C4FX_CALL_ENG_BASE_REFRESH,
+                                    credit_caused_by,
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
         }
+
+        // Magic reload uses the ENGINE-global DoMagicEnergy overload so the
+        // No-Magic-Energy rule can veto the debit (C4Object.cpp:858-878).
+        if frame % 3 == 0 && self.objects[idx].state.alive {
+            let recipient_owner = self.objects[idx].state.owner;
+            let recipient_magic = self.objects[idx].state.magic_energy;
+            let recipient_max = self.object_physical(idx).magic;
+            if let Some(container_id) = self.objects[idx].state.container {
+                if let Some(container_idx) = self.find_object_index(container_id) {
+                    let container_owner = self.objects[container_idx].state.owner;
+                    if !self.players_hostile(recipient_owner, container_owner)
+                        && recipient_magic < recipient_max
+                    {
+                        const MAGIC_PHYSICAL_FACTOR: i32 = 1000;
+                        let transfer = (2 * MAGIC_PHYSICAL_FACTOR)
+                            .min(self.objects[container_idx].state.magic_energy)
+                            .min(recipient_max - recipient_magic)
+                            / MAGIC_PHYSICAL_FACTOR;
+                        if transfer != 0 {
+                            let debited = self.call_engine_global_function(
+                                "DoMagicEnergy",
+                                &[
+                                    Value::Int(-transfer),
+                                    compat::object_reference_value(container_id),
+                                ],
+                            )?;
+                            if compat::value_raw_truthy(&debited) {
+                                let recipient_id = self.objects[idx].id;
+                                let _ = self.call_engine_global_function(
+                                    "DoMagicEnergy",
+                                    &[
+                                        Value::Int(transfer),
+                                        compat::object_reference_value(recipient_id),
+                                    ],
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Breathing is one arm, not an early return: later Tick10/Tick255
+        // arms must run for NoBreath and nonliving objects too.
         let no_breath = self
             .definitions
             .get(&self.objects[idx].definition_id)
             .map(|definition| definition.no_breath())
             .unwrap_or(false);
-        if no_breath {
-            return Ok(());
-        }
-        let physical = self.object_physical(idx);
-        let position = self.objects[idx].state.position;
-        let shape_top = self.objects[idx]
-            .current_shape_rect()
-            .map(|rect| rect.y)
-            .unwrap_or(0);
-        let mouth_y = position.y + shape_top / 2;
-        // Supply check (C4Object.cpp:882-897).
-        let vehicle_at_mouth = self.materials.id_of("Vehicle").is_some_and(|vehicle| {
-            self.landscape
-                .as_ref()
-                .and_then(|landscape| landscape.material_at(position.x, mouth_y))
-                == Some(vehicle)
-        });
-        let breathe = if vehicle_at_mouth || self.objects[idx].state.container.is_some() {
-            true
-        } else if physical.breathe_water != 0 {
-            let water = self.materials.id_of("Water");
-            water.is_some()
-                && self
+        if frame % 5 == 0 && self.objects[idx].state.alive && !no_breath {
+            let physical = self.object_physical(idx);
+            let position = self.objects[idx].state.position;
+            let shape_top = self.objects[idx]
+                .current_shape_rect()
+                .map(|rect| rect.y)
+                .unwrap_or(0);
+            let mouth_y = position.y + shape_top / 2;
+            let vehicle_at_mouth = self.materials.id_of("Vehicle").is_some_and(|vehicle| {
+                self.landscape
+                    .as_ref()
+                    .and_then(|landscape| landscape.material_at(position.x, mouth_y))
+                    == Some(vehicle)
+            });
+            let breathe = if vehicle_at_mouth || self.objects[idx].state.container.is_some() {
+                true
+            } else if physical.breathe_water != 0 {
+                let water = self.materials.id_of("Water");
+                water.is_some()
+                    && self
+                        .landscape
+                        .as_ref()
+                        .and_then(|landscape| landscape.material_at(position.x, position.y))
+                        == water
+            } else {
+                !self
                     .landscape
                     .as_ref()
-                    .and_then(|landscape| landscape.material_at(position.x, position.y))
-                    == water
-        } else {
-            !self
-                .landscape
-                .as_ref()
-                .map(|landscape| {
-                    landscape.is_solid_at(position.x, mouth_y)
-                        || landscape.is_liquid_at(position.x, mouth_y)
-                })
-                .unwrap_or(false)
-        };
-        if !breathe {
-            // Reduce breath, then energy by the asphyxiation cause
-            // (C4Object.cpp:899-904).
-            if self.objects[idx].state.breath > 0 {
-                let breath = &mut self.objects[idx].state.breath;
-                *breath = (*breath - 2 * C4_MAX_PHYSICAL / 100).max(0);
-            } else {
-                let cause = self.objects[idx].last_energy_loss_cause;
-                self.change_object_energy(idx, -1, C4FX_CALL_ENG_ASPHYXIATION, cause)?;
-            }
-            // BubbleOut(x + Random(5) - 2, y + Shape.y/2)
-            // (C4Object.cpp:906).
-            let bubble_dx = self.rng.random(5) - 2;
-            let (bubble_x, bubble_y) = {
-                let state = &self.objects[idx].state;
-                let shape_top = self
-                    .definitions
-                    .get(&self.objects[idx].definition_id)
-                    .and_then(|definition| definition.shape_rect())
-                    .map(|rect| rect.y)
-                    .unwrap_or(0);
-                (state.position.x + bubble_dx, state.position.y + shape_top / 2)
+                    .map(|landscape| {
+                        landscape.is_solid_at(position.x, mouth_y)
+                            || landscape.is_liquid_at(position.x, mouth_y)
+                    })
+                    .unwrap_or(false)
             };
-            if let Err(error) = self.bubble_out(bubble_x, bubble_y) {
-                match error {
-                    boundary @ EngineError::RuntimeFlashProducerBoundary { .. } => {
-                        return Err(boundary);
-                    }
-                    other => tracing::warn!(%other, "BubbleOut failed; continuing"),
+            if !breathe {
+                if self.objects[idx].state.breath > 0 {
+                    let breath = &mut self.objects[idx].state.breath;
+                    *breath = (*breath - 2 * C4_MAX_PHYSICAL / 100).max(0);
+                } else {
+                    let cause = self.objects[idx].last_energy_loss_cause;
+                    self.change_object_energy(idx, -1, C4FX_CALL_ENG_ASPHYXIATION, cause)?;
                 }
+                let bubble_dx = self.rng.random(5) - 2;
+                let (bubble_x, bubble_y) = {
+                    let state = &self.objects[idx].state;
+                    let shape_top = self
+                        .definitions
+                        .get(&self.objects[idx].definition_id)
+                        .and_then(|definition| definition.shape_rect())
+                        .map(|rect| rect.y)
+                        .unwrap_or(0);
+                    (
+                        state.position.x + bubble_dx,
+                        state.position.y + shape_top / 2,
+                    )
+                };
+                if let Err(error) = self.bubble_out(bubble_x, bubble_y) {
+                    match error {
+                        boundary @ EngineError::RuntimeFlashProducerBoundary { .. } => {
+                            return Err(boundary);
+                        }
+                        other => tracing::warn!(%other, "BubbleOut failed; continuing"),
+                    }
+                }
+                self.train_physical(idx, "Breath", 2, C4_MAX_PHYSICAL);
+            } else {
+                let take = physical.breath - self.objects[idx].state.breath;
+                if take > physical.breath / 2 {
+                    let _ = tolerate_script_error(self.call_object_function(
+                        idx,
+                        "DeepBreath",
+                        Vec::new(),
+                    ))?;
+                }
+                self.objects[idx].state.breath += take;
             }
-            // Physical training (C4Object.cpp:908).
-            self.train_physical(idx, "Breath", 2, C4_MAX_PHYSICAL);
-        } else {
-            // Take breath (C4Object.cpp:913-917).
-            let take = physical.breath - self.objects[idx].state.breath;
-            if take > physical.breath / 2 {
-                let _ = tolerate_script_error(self.call_object_function(
+        }
+
+        // Corrosion reads the cached (normally pre-movement) InMat.
+        if frame % 10 == 0 && self.objects[idx].state.alive {
+            let corrosive = self.objects[idx]
+                .in_mat
+                .and_then(|material| self.materials.get_by_id(material))
+                .map(|material| material.corrosive())
+                .unwrap_or(0);
+            if corrosive != 0 && self.object_physical(idx).corrosion_resist == 0 {
+                let caused_by = self.objects[idx].last_energy_loss_cause;
+                self.change_object_energy(
                     idx,
-                    "DeepBreath",
-                    Vec::new(),
-                ))?;
+                    corrosive.wrapping_neg() / 15,
+                    C4FX_CALL_ENG_CORROSION,
+                    caused_by,
+                )?;
             }
-            self.objects[idx].state.breath += take;
+        }
+
+        // Lava/material fire has no Alive gate and ignores the magnitude of
+        // either property (C4Object.cpp:932-938).
+        if frame % 10 == 0 {
+            let incindiary = self.objects[idx]
+                .in_mat
+                .and_then(|material| self.materials.get_by_id(material))
+                .map(|material| material.incindiary())
+                .unwrap_or(0);
+            let contact_incinerate = self
+                .definitions
+                .get(&self.objects[idx].definition_id)
+                .map(|definition| definition.contact_incinerate())
+                .unwrap_or(0);
+            if incindiary != 0 && contact_incinerate != 0 {
+                let caused_by = self.objects[idx].last_energy_loss_cause;
+                let _ = self.incinerate_object(idx, caused_by, false, None)?;
+            }
+        }
+
+        // Ordinary energy on nonliving structures drains unless a valid base
+        // assignment protects it or the definition is an EnergyHolder.
+        if frame % 10 == 0 && self.objects[idx].state.energy != 0 {
+            let object = &self.objects[idx];
+            let valid_base = self.players.contains_key(&object.state.base);
+            let nonliving = object.state.category & CATEGORY_LIVING == 0;
+            let energy_holder =
+                self.definitions
+                    .get(&object.definition_id)
+                    .is_some_and(|definition| {
+                        definition.line_connect() & LINE_CONNECT_ENERGY_HOLDER != 0
+                    });
+            if nonliving && (!valid_base || !self.base_regenerate_energy_enabled) && !energy_holder
+            {
+                self.change_object_energy(idx, -1, C4FX_CALL_ENG_STRUCT, OWNER_NONE)?;
+            }
+        }
+
+        // Five-playing-hour birthday age cache and presentation.
+        if frame % 255 == 0 && self.objects[idx].state.alive {
+            let object_id = self.objects[idx].id;
+            let link = self.crew_info_links.get(&object_id).copied();
+            let mut changed = None;
+            if let Some(link) = link {
+                if let Some(info) = self
+                    .crew_rosters
+                    .get_mut(&link.player_id)
+                    .and_then(|roster| roster.get_mut(link.roster_index))
+                {
+                    let playing = info
+                        .total_playing_time
+                        .wrapping_add(self.game_time.wrapping_sub(info.in_action_time));
+                    let new_age = playing / 3600 / 5;
+                    if info.age != new_age {
+                        changed = Some((info.name.clone(), new_age));
+                    }
+                    info.age = new_age;
+                    if let Some(live) =
+                        Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id)
+                    {
+                        live.age = new_age;
+                        live.total_playing_time = info.total_playing_time;
+                        live.in_action_time = info.in_action_time;
+                    }
+                }
+            } else if let Some(info) = Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id)
+            {
+                let playing = info
+                    .total_playing_time
+                    .wrapping_add(self.game_time.wrapping_sub(info.in_action_time));
+                let new_age = playing / 3600 / 5;
+                if info.age != new_age {
+                    changed = Some((info.name.clone(), new_age));
+                }
+                info.age = new_age;
+            }
+            if let Some((info_name, age)) = changed {
+                let object_name = self.objects[idx]
+                    .state
+                    .custom_name
+                    .clone()
+                    .unwrap_or(info_name);
+                self.messages.add_message(MessageSpec {
+                    kind: message::MessageKind::Target,
+                    text: format!("{object_name} becomes {age}!|Happy birthday!"),
+                    target: Some(object_id),
+                    player: None,
+                    offset: Vector2::ZERO,
+                    color: 0xffff_ffff,
+                    flags: 0,
+                    width: None,
+                    decoration: None,
+                    frame_decoration: None,
+                    portrait: None,
+                });
+                self.pending_audio.push(AudioCommand::PlaySound {
+                    name: "Trumpet".to_string(),
+                    target: Some(object_id),
+                    volume: 100,
+                    looped: false,
+                    multiple: false,
+                    custom_falloff: None,
+                });
+            }
         }
         Ok(())
     }
@@ -36142,10 +36503,14 @@ impl Engine {
         }
         let object_id = self.objects[idx].id;
         let host_definition_id = self.objects[idx].definition_id.clone();
+        let mut first_effect = true;
         for effect in effects {
-            if change == 0 {
+            // C4Effect::DoDamage is a do/while: even an initial zero visits
+            // the head node once, then zero stops the suffix.
+            if change == 0 && !first_effect {
                 break;
             }
+            first_effect = false;
             if effect.priority == 0 {
                 continue;
             }
@@ -36270,6 +36635,28 @@ impl Engine {
         caused_by: i32,
     ) -> Result<(), EngineError> {
         let change = change.saturating_mul(C4_MAX_PHYSICAL / 100);
+        self.change_object_energy_raw(idx, change, cause, caused_by)
+    }
+
+    /// `DoEnergy(..., fExact=true)`: base transfers already carry raw
+    /// physical units and therefore bypass the percent-to-physical scale.
+    fn change_object_energy_exact(
+        &mut self,
+        idx: usize,
+        change: i32,
+        cause: i32,
+        caused_by: i32,
+    ) -> Result<(), EngineError> {
+        self.change_object_energy_raw(idx, change, cause, caused_by)
+    }
+
+    fn change_object_energy_raw(
+        &mut self,
+        idx: usize,
+        change: i32,
+        cause: i32,
+        caused_by: i32,
+    ) -> Result<(), EngineError> {
         // Mark the damage-causing player first (C4Object.cpp:1351-1353).
         if change < 0 || cause == C4FX_CALL_ENG_OBJ_HIT {
             self.update_last_energy_loss_cause(idx, caused_by);
@@ -36368,7 +36755,7 @@ impl Engine {
         self.objects[idx].commands.clear();
         // Info->HasDied=true; ++Info->DeathCount; Info->Retire(), but the
         // pointer remains on the dead object (C4Object.cpp:1185-1190).
-        let mut death_count = None;
+        let mut info_update = None;
         if let Some(link) = self.crew_info_links.get(&object_id).copied() {
             if let Some(info) = self
                 .crew_rosters
@@ -36377,18 +36764,26 @@ impl Engine {
             {
                 info.has_died = true;
                 info.death_count = info.death_count.wrapping_add(1);
-                death_count = Some(info.death_count);
                 if info.in_action {
                     info.total_playing_time = info
                         .total_playing_time
                         .wrapping_add(self.game_time.wrapping_sub(info.in_action_time));
                     info.in_action = false;
                 }
+                info_update = Some((
+                    info.death_count,
+                    info.total_playing_time,
+                    info.in_action_time,
+                    info.age,
+                ));
             }
         }
-        if let Some(death_count) = death_count {
+        if let Some((death_count, total_playing_time, in_action_time, age)) = info_update {
             if let Some(info) = Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id) {
                 info.death_count = death_count;
+                info.total_playing_time = total_playing_time;
+                info.in_action_time = in_action_time;
+                info.age = age;
             }
         }
         // Lose contents by repeatedly exiting the current live list head
@@ -37424,6 +37819,7 @@ impl Engine {
         );
         definition.set_blast_incinerate(core.blast_incinerate);
         definition.set_contain_blast(core.contain_blast);
+        definition.set_closed_container(core.closed_container);
         definition.set_no_horizontal_move(core.no_horizontal_move);
         definition.set_burn_turn_to(core.burn_turn_to.clone());
         definition.set_build_turn_to(core.build_turn_to.clone());
@@ -39539,6 +39935,30 @@ impl Engine {
     /// The SetOCF/UpdateOCF analogue: recompute and store the cache.
     #[doc(hidden)]
     pub fn refresh_object_ocf(&mut self, index: usize) {
+        // Both SetOCF and UpdateOCF update InMat before touching OCF
+        // (C4Object.cpp:545-548,687-690). Contained objects inherit the
+        // container's CACHE, not a fresh landscape sample; any nonzero
+        // ClosedContainer shields them.
+        let (container, position) = {
+            let object = &self.objects[index];
+            (object.state.container, object.state.position)
+        };
+        let in_mat = if let Some(container_id) = container {
+            self.find_object_index(container_id)
+                .and_then(|container_index| {
+                    let container = &self.objects[container_index];
+                    let closed = self
+                        .definitions
+                        .get(&container.definition_id)
+                        .is_some_and(|definition| definition.closed_container() != 0);
+                    (!closed).then_some(container.in_mat).flatten()
+                })
+        } else {
+            self.landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(position.x, position.y))
+        };
+        self.objects[index].in_mat = in_mat;
         let ocf = self.compute_object_ocf(index);
         self.objects[index].state.ocf = ocf;
     }

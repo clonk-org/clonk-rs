@@ -5695,6 +5695,8 @@ mod tests {
             experience,
             death_count: 0,
             total_playing_time: 0,
+            birthday: 0,
+            age: 0,
             participation: 1,
             in_action: true,
             in_action_time: 0,
@@ -5716,6 +5718,10 @@ mod tests {
                     rank: 0,
                     experience,
                     death_count: 0,
+                    total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
+                    in_action_time: 0,
                 },
             );
             Rc::make_mut(&mut engine.crew_info_links).insert(

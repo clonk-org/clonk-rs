@@ -478,6 +478,11 @@ pub struct DefCore {
     /// ContainBlast=1: this container shields its contents from explosions
     /// (the DoExplosion container walk, C4Effect.cpp:884; C4Def.cpp:380).
     pub contain_blast: i32,
+    /// `ClosedContainer` (C4Def.cpp:403): any nonzero value shields
+    /// contained objects from the container's cached material. Value 1 also
+    /// blocks the contained object's view while value 2 does not, so retain
+    /// the signed integer rather than collapsing it to a bool.
+    pub closed_container: i32,
     /// HorizontalFix=1 (C4Def::NoHorizontalMove, C4Def.cpp:383): exempt
     /// from shockwave flings (Game::BlastObjects, C4Game.cpp:1272).
     pub no_horizontal_move: i32,
@@ -840,6 +845,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut contact_incinerate: i32 = 0;
     let mut blast_incinerate: i32 = 0;
     let mut contain_blast: i32 = 0;
+    let mut closed_container: i32 = 0;
     let mut no_horizontal_move: i32 = 0;
     let mut no_burn_decay = false;
     let mut no_breath = false;
@@ -1068,6 +1074,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "containblast" => {
                 contain_blast = parse_i32(value).unwrap_or(0);
             }
+            "closedcontainer" => {
+                closed_container = parse_i32(value).unwrap_or(0);
+            }
             "horizontalfix" => {
                 no_horizontal_move = parse_i32(value).unwrap_or(0);
             }
@@ -1289,6 +1298,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         contact_incinerate,
         blast_incinerate,
         contain_blast,
+        closed_container,
         no_horizontal_move,
         no_burn_decay,
         no_breath,
@@ -3247,6 +3257,22 @@ NextAction=Dup
         assert!(!parsed.no_burn_decay);
         assert!(!parsed.no_breath, "default: breathing");
         assert!(!parsed.no_burn_damage);
+    }
+
+    #[test]
+    fn parse_def_core_closed_container_retains_mode() {
+        let parsed = parse_def_core(
+            br#"
+                [DefCore]
+                id=SAFE
+                ClosedContainer=2
+            "#,
+        )
+        .expect("closed container parses");
+        assert_eq!(parsed.closed_container, 2);
+
+        let open = parse_def_core(b"[DefCore]\nid=OPEN\n").expect("default parses");
+        assert_eq!(open.closed_container, 0);
     }
 
     #[test]

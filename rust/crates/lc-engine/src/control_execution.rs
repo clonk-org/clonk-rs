@@ -2346,6 +2346,8 @@ mod tests {
             experience: 50,
             death_count: 0,
             total_playing_time: 0,
+            birthday: 0,
+            age: 0,
             participation: 1,
             in_action: false,
             in_action_time: 0,

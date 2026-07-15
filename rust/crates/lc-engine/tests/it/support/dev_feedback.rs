@@ -244,6 +244,8 @@ impl ReplayCrewInfoV1 {
             experience: self.experience,
             death_count: 0,
             total_playing_time: 0,
+            birthday: 0,
+            age: 0,
             participation: self.participation,
             in_action: self.in_action,
             in_action_time: 0,

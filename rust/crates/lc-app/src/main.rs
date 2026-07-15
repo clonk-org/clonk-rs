@@ -36719,6 +36719,8 @@ mod tests {
                     experience: 0,
                     death_count: 0,
                     total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
                     participation: 1,
                     in_action: false,
                     in_action_time: 0,
@@ -66785,9 +66787,11 @@ protected func InputCallback(string answer, int player)
             elevator_case,
             hut,
             "first GOLD-carrying CLNK",
-            Some(5),
+            None,
         );
-        for target_wealth in [10, 15, 20] {
+        // ExecLife buys the empty base's first 100 energy for five wealth.
+        // The first sale therefore funds the base rather than BALN.
+        for target_wealth in [5, 10, 15, 20] {
             app_tutorial07_exit_hut_and_descend_to_gold(&mut app, clonk, elevator_case, hut);
             hold_app_key_until(
                 &mut app,
@@ -66826,14 +66830,14 @@ protected func InputCallback(string answer, int player)
                 .expect("funded Tutorial07 player")
                 .wealth(),
             20,
-            "four exact GOLD sales fund BALN production"
+            "five exact GOLD sales fund base energy and BALN production"
         );
 
         let workshop =
             app_object_with_definition(&app, "WRKS").expect("Tutorial07 creates the player's WRKS");
         advance_app_until(
             &mut app,
-            "HUT3 restores after fourth GOLD sale",
+            "HUT3 restores after fifth GOLD sale",
             30,
             |app| {
                 app.engine
@@ -67016,10 +67020,15 @@ protected func InputCallback(string answer, int player)
         AppVirtualKeyboard::new(&mut app)
             .press(VirtualKeyCode::S)
             .expect("held physical S climbs in BALN");
+        // The 50px BALN must clear Landscape.bmp's rough crystal shelf near
+        // y=130 before Stop/ClearDir's downward coast. The pushing CLNK rides
+        // about 12px below BALN's origin, so y=80 retains a safe margin.
         advance_app_until(&mut app, "BALN climbs to CRYS flight level", 180, |app| {
-            app.engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.position.y <= 115)
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push"
+                    && object.action.target == Some(balloon)
+                    && object.position.y <= 80
+            })
         });
         AppVirtualKeyboard::new(&mut app)
             .release(VirtualKeyCode::S)
@@ -67196,17 +67205,17 @@ protected func InputCallback(string answer, int player)
             240,
             |app| app_tutorial_message_contains(app, "Dig through the earth"),
         );
-
-        // D followed by held X/Z follows the shipped diagonal dig route into
-        // SLBS's cave. The stepped recovery below reacts only to visible
-        // Walk/Scale transitions, as a player does at the irregular tunnel
-        // lips; no object position or terrain state is written by the test.
+        // Starting DownLeft at the irregular crest can clear the Clonk's
+        // bottom attachment against a one-pixel seam. Cut left while the
+        // shelf still supports DFA_DIG, then add Down after the seam. These
+        // are the same balanced AutoStop key edges a live player uses; no
+        // object position or terrain state is written by the test.
         AppVirtualKeyboard::new(&mut app)
             .tap(VirtualKeyCode::D)
-            .expect("physical D arms CRYS-side digging");
+            .expect("physical D arms the sailboat tunnel");
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::X)
-            .expect("held physical X aims the first tunnel segment down");
+            .press(VirtualKeyCode::Z)
+            .expect("held physical Z starts the sailboat tunnel left");
         advance_app_until(
             &mut app,
             "CRYS-carrying CLNK starts the sailboat tunnel",
@@ -67217,28 +67226,46 @@ protected func InputCallback(string answer, int player)
                     .is_some_and(|object| object.action.name == "Dig")
             },
         );
+        advance_app_until(
+            &mut app,
+            "horizontal tunnel clears the irregular crest seam",
+            120,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.action.name == "Dig" && object.position.x <= 635
+                })
+            },
+        );
         AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::Z)
-            .expect("held physical Z aims the first tunnel segment left");
+            .press(VirtualKeyCode::X)
+            .expect("held physical X turns the sailboat tunnel down-left");
         advance_app_until(
             &mut app,
             "diagonal tunnel opens toward the sailboat cave",
             260,
             |app| {
-                app.engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.action.name == "Walk" && object.position.x <= 575)
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.position.y >= 290
+                        || (object.action.name == "Walk" && object.position.x <= 575)
+                })
             },
         );
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
-                .release(VirtualKeyCode::Z)
-                .expect("release physical Z at the first tunnel exit");
-            keyboard
                 .release(VirtualKeyCode::X)
                 .expect("release physical X at the first tunnel exit");
+            keyboard
+                .release(VirtualKeyCode::Z)
+                .expect("release physical Z at the first tunnel exit");
         }
+        assert!(
+            app.engine.object_snapshot(clonk).is_some_and(|object| {
+                object.position.x <= 575 || object.position.y >= 290
+            }),
+            "physical digging opens the diagonal tunnel toward SLBS; clonk={:?}",
+            app.engine.object_snapshot(clonk)
+        );
 
         let sailboat = app_object_with_definition(&app, "SLBS")
             .or_else(|| app_object_with_definition(&app, "SLBT"))
@@ -67248,10 +67275,37 @@ protected func InputCallback(string answer, int player)
                 .engine
                 .object_snapshot(clonk)
                 .expect("CRYS-carrying CLNK survives above SLBS");
-            if clonk_now.position.y >= 290 {
+            let sailboat_x = app
+                .engine
+                .object_snapshot(sailboat)
+                .expect("SLBS survives the cave-lip descent")
+                .position
+                .x;
+            if clonk_now.position.y >= 290 || clonk_now.position.x <= sailboat_x {
                 break;
             }
-            if clonk_now.action.name.starts_with("Scale") {
+            if clonk_now.action.name == "Jump" {
+                let toward_sailboat = if clonk_now.position.x < sailboat_x {
+                    VirtualKeyCode::C
+                } else {
+                    VirtualKeyCode::Z
+                };
+                hold_app_key_until(
+                    &mut app,
+                    toward_sailboat,
+                    &format!("CRYS-carrying CLNK steers across cave lip {lip}"),
+                    180,
+                    |app| {
+                        app.engine.object_snapshot(clonk).is_some_and(|object| {
+                            object.position.y >= 290
+                                || matches!(
+                                    object.action.name.as_str(),
+                                    "Walk" | "Scale" | "ScaleDown"
+                                )
+                        })
+                    },
+                );
+            } else if clonk_now.action.name.starts_with("Scale") {
                 hold_app_key_until(
                     &mut app,
                     VirtualKeyCode::X,
@@ -67271,7 +67325,10 @@ protected func InputCallback(string answer, int player)
                     120,
                     |app| {
                         app.engine.object_snapshot(clonk).is_some_and(|object| {
-                            object.position.y >= 290 || object.action.name.starts_with("Scale")
+                            object.position.y >= 290
+                                || object.position.x <= sailboat_x
+                                || object.action.name.starts_with("Scale")
+                                || object.action.name == "Jump"
                         })
                     },
                 );
@@ -67378,16 +67435,24 @@ protected func InputCallback(string answer, int player)
                         30,
                         |app| {
                             app.engine.object_snapshot(clonk).is_some_and(|object| {
-                                object.position.y >= 290 || object.action.name == "Scale"
+                                object.position.y >= 290
+                                    || object.action.name == "Scale"
+                                    || (object.action.name == "Walk"
+                                        && object.position.y > step_start_y)
                             })
                         },
                     );
-                    if app
+                    let after_lip = app
                         .engine
                         .object_snapshot(clonk)
-                        .is_some_and(|object| object.position.y >= 290)
-                    {
+                        .expect("CLNK survives the tunnel lip");
+                    if after_lip.position.y >= 290 {
                         break;
+                    }
+                    if after_lip.action.name == "Walk"
+                        && after_lip.position.y > step_start_y
+                    {
+                        continue;
                     }
                     AppVirtualKeyboard::new(&mut app)
                         .press(VirtualKeyCode::X)
@@ -67467,8 +67532,14 @@ protected func InputCallback(string answer, int player)
                 continue;
             }
             if clonk_now.action.name == "Jump" {
-                advance_app_until(
+                let toward_sailboat = if clonk_now.position.x < sailboat_now.position.x {
+                    VirtualKeyCode::C
+                } else {
+                    VirtualKeyCode::Z
+                };
+                hold_app_key_until(
                     &mut app,
+                    toward_sailboat,
                     &format!("CLNK lands during SLBS approach {approach}"),
                     120,
                     |app| {

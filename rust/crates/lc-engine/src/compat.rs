@@ -208,6 +208,8 @@ pub(crate) struct DefinitionFireMetadata {
     pub contact_incinerate: i32,
     /// ContainBlast=1 shields contents from explosions (C4Effect.cpp:884).
     pub contain_blast: i32,
+    /// ClosedContainer mode (0 open, 1 closed/no view, 2 closed/view).
+    pub closed_container: i32,
     /// HorizontalFix (C4Def::NoHorizontalMove): no shockwave flings.
     pub no_horizontal_move: i32,
     /// Grab (0 none, 1 grab+push, 2 grab-only) — the shockwave check's
@@ -9701,6 +9703,7 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "Grab" => Value::Int(metadata.fire.grab),
             "HorizontalFix" => Value::Int(metadata.fire.no_horizontal_move),
             "ContainBlast" => Value::Int(metadata.fire.contain_blast),
+            "ClosedContainer" => Value::Int(metadata.fire.closed_container),
             "BlastIncinerate" => Value::Int(metadata.fire.blast_incinerate),
             "ContactIncinerate" => Value::Int(metadata.fire.contact_incinerate),
             other => {
@@ -17187,6 +17190,10 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                             rank,
                             experience: 0,
                             death_count: 0,
+                            total_playing_time: 0,
+                            birthday: 0,
+                            age: 0,
+                            in_action_time: 0,
                         })
                     }),
                     scope.info_link(),
@@ -17420,6 +17427,10 @@ fn recruit_or_create_crew_info(
             rank: entry.rank,
             experience: entry.experience,
             death_count: entry.death_count,
+            total_playing_time: entry.total_playing_time,
+            birthday: entry.birthday,
+            age: entry.age,
+            in_action_time: entry.in_action_time,
         };
         return Ok(Some((link, info, None)));
     }
@@ -17487,6 +17498,8 @@ fn recruit_or_create_crew_info(
             experience: 0,
             death_count: 0,
             total_playing_time: 0,
+            birthday: 0,
+            age: 0,
             participation: 1,
             in_action: false,
             in_action_time: 0,
@@ -17502,6 +17515,10 @@ fn recruit_or_create_crew_info(
         rank: entry.rank,
         experience: entry.experience,
         death_count: entry.death_count,
+        total_playing_time: entry.total_playing_time,
+        birthday: entry.birthday,
+        age: entry.age,
+        in_action_time: entry.in_action_time,
     };
     if let Some(player) = context.player_state_mut(player) {
         player.crew_created = player.crew_created.wrapping_add(1);
@@ -33232,6 +33249,9 @@ fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "Rank" => Value::Int(info.rank),
             "Experience" => Value::Int(info.experience),
             "DeathCount" => Value::Int(info.death_count),
+            "Birthday" => Value::Int(info.birthday),
+            "TotalPlayingTime" => Value::Int(info.total_playing_time),
+            "Age" => Value::Int(info.age),
             other => {
                 tracing::debug!(entry = other, "GetObjectInfoCoreVal entry not modeled; nil");
                 Value::Nil
@@ -43551,6 +43571,8 @@ func RenameInfo(object target, string name, bool make_valid)
             experience,
             death_count: 0,
             total_playing_time: 0,
+            birthday: 0,
+            age: 0,
             participation: 1,
             in_action: false,
             in_action_time: 0,

@@ -929,9 +929,12 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         hut,
         owner,
         "the GOLD-carrying Clonk",
-        Some(5),
+        None,
     )?;
-    for target_wealth in [10, 15, 20] {
+    // C4Object::ExecLife buys the empty base's first 100 energy for five
+    // wealth before subsequent GOLD sales can accumulate. The old driver
+    // predated that arm and expected the first five wealth to remain.
+    for target_wealth in [5, 10, 15, 20] {
         return_from_hut_and_collect_gold(&mut player, clonk, elevator_case, hut, owner)?;
         return_to_hut(
             &mut player,
@@ -947,7 +950,7 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     let workshop = object_with_definition(player.engine(), "WRKS")
         .expect("Tutorial07 creates the player's workshop");
     player.wait_until(
-        "HUT3 restores context after the fourth GOLD sale",
+        "HUT3 restores context after the fifth GOLD sale",
         30,
         |engine| object_menu_identification(engine, owner) == Some(lc_script::Value::Int(14)),
     )?;
@@ -1118,21 +1121,25 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         })
     })?;
     player.press(COM_UP)?;
+    // Landscape.bmp's rough crystal shelf rises to about y=130 near x=560.
+    // The Push-attached CLNK rides 12px below BALN's origin; rising to y=80
+    // leaves roughly 25px clearance after Stop/ClearDir's downward coast.
     player.wait_until(
         "the BALN climbs to the crystal flight level",
         180,
         |engine| {
-            engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.position.y <= 115)
+            engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Push"
+                    && object.action.target == Some(balloon)
+                    && object.position.y <= 80
+            })
         },
     )?;
     player.release(COM_UP)?;
     player.tap(COM_DOWN)?;
     player.ticks(11)?;
-    // BALN/CLNK stop at x=565 against the near face of the crystal cliff;
-    // requiring the object anchor to cross x=570 made arrival depend on a
-    // favorable wind impulse rather than the physical collision milestone.
+    // At this clearance the scenario wind carries BALN to the objective
+    // cliff; x=565 is the physical arrival milestone for its object anchor.
     const CRYSTAL_CLIFF_X: i32 = 565;
     player.wait_until("the BALN reaches the opposite cliff", 900, |engine| {
         engine.object_snapshot(clonk).is_some_and(|object| {

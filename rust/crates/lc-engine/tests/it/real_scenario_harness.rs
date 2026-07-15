@@ -4530,6 +4530,8 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
             experience: 0,
             death_count: 0,
             total_playing_time: 0,
+            birthday: 0,
+            age: 0,
             participation: 1,
             in_action: false,
             in_action_time: 0,

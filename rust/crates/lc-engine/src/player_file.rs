@@ -29,6 +29,12 @@ pub struct CrewInfo {
     /// Persistent active-play seconds (C4ObjectInfoCore::TotalPlayingTime).
     #[serde(default)]
     pub total_playing_time: i32,
+    /// Persistent Unix-time birthday (`C4ObjectInfoCore::Birthday`).
+    #[serde(default)]
+    pub birthday: i32,
+    /// Cached five-playing-hour age used by `C4Object::ExecLife`.
+    #[serde(default)]
+    pub age: i32,
     /// `Participation` (default 1) — GetIdle requires 1.
     pub participation: i32,
     /// Recruited this round (C4ObjectInfo::InAction).
@@ -65,6 +71,8 @@ impl CrewInfo {
             experience: int("ObjectInfo", "Experience", 0),
             death_count: int("ObjectInfo", "DeathCount", 0),
             total_playing_time: int("ObjectInfo", "TotalPlayingTime", 0),
+            birthday: int("ObjectInfo", "Birthday", 0),
+            age: int("ObjectInfo", "Age", 0),
             participation: int("ObjectInfo", "Participation", 1),
             in_action: false,
             in_action_time: 0,
@@ -339,7 +347,7 @@ mod tests {
         std::fs::create_dir_all(&first).expect("info dir");
         std::fs::write(
             first.join("ObjectInfo.txt"),
-            "[ObjectInfo]\nid=COWB\nName=Wipf\nRank=2\nExperience=900\nDeathCount=7\nParticipation=1\n\n[Physical]\nWalk=80000\n",
+            "[ObjectInfo]\nid=COWB\nName=Wipf\nRank=2\nExperience=900\nDeathCount=7\nTotalPlayingTime=17999\nBirthday=123\nAge=7\nParticipation=1\n\n[Physical]\nWalk=80000\n",
         )
         .expect("write info");
 
@@ -377,6 +385,9 @@ mod tests {
         assert_eq!(wipf.rank, 2);
         assert_eq!(wipf.experience, 900);
         assert_eq!(wipf.death_count, 7);
+        assert_eq!(wipf.total_playing_time, 17_999);
+        assert_eq!(wipf.birthday, 123);
+        assert_eq!(wipf.age, 7);
         assert_eq!(wipf.participation, 1);
         assert!(!wipf.in_action);
         assert!(!wipf.has_died);
@@ -388,6 +399,7 @@ mod tests {
         assert_eq!(zorro.id, "TRPR");
         assert_eq!(zorro.rank, 0, "Rank defaults to 0");
         assert_eq!(zorro.death_count, 0, "DeathCount defaults to 0");
+        assert_eq!((zorro.birthday, zorro.age), (0, 0));
         assert_eq!(zorro.participation, 1, "Participation defaults to 1");
     }
 
