@@ -28477,27 +28477,31 @@ fn contents(args: &[Value]) -> Result<Value, RuntimeError> {
             _ => return Ok(Value::Nil),
         };
 
+        // C4ObjectList::GetObject applies the Status filter before indexing.
+        // FnContents then advances that raw index only while the selected
+        // entry uses DFA_ATTACH. Filtering attached entries up front would
+        // shift every later index and lose C++'s duplicate-return quirk.
         let mut entries = Vec::new();
         for child_id in container.contents() {
             if let Some(child) = context.get_world_object(*child_id) {
                 if !child.is_present() {
                     continue;
                 }
-                if !include_attached {
-                    if let Some(procedure) = child.procedure_name() {
-                        if procedure.eq_ignore_ascii_case("attach") {
-                            continue;
-                        }
-                    }
-                }
-                entries.push(child.id);
+                entries.push(child);
             }
         }
 
-        let Some(selected) = entries.get(index as usize) else {
-            return Ok(Value::Nil);
-        };
-        Ok(object_reference_value(*selected))
+        let mut raw_index = index as usize;
+        while let Some(selected) = entries.get(raw_index) {
+            let attached = selected
+                .procedure_name()
+                .is_some_and(|procedure| procedure.eq_ignore_ascii_case("attach"));
+            if include_attached || !attached {
+                return Ok(object_reference_value(selected.id));
+            }
+            raw_index += 1;
+        }
+        Ok(Value::Nil)
     })
 }
 
@@ -56597,10 +56601,12 @@ protected func Construction()
     }
 
     #[test]
-    fn contents_skips_attached_by_default() {
+    fn contents_uses_raw_status_index_before_skipping_attached() {
         let container_id = ObjectId::new(100);
         let attached_id = ObjectId::new(101);
-        let item_id = ObjectId::new(102);
+        let first_item_id = ObjectId::new(102);
+        let deleted_id = ObjectId::new(103);
+        let second_item_id = ObjectId::new(104);
 
         let container = HostWorldObject::new(
             container_id,
@@ -56620,7 +56626,7 @@ protected func Construction()
             0,
             None,
         )
-        .with_contents(vec![attached_id, item_id]);
+        .with_contents(vec![attached_id, deleted_id, first_item_id, second_item_id]);
 
         let attached = HostWorldObject::new(
             attached_id,
@@ -56641,9 +56647,9 @@ protected func Construction()
             Some(container_id),
         );
 
-        let item = HostWorldObject::new(
-            item_id,
-            "Gem",
+        let first_item = HostWorldObject::new(
+            first_item_id,
+            "FirstGem",
             ObjectStatus::Normal,
             "Idle",
             None,
@@ -56660,7 +56666,51 @@ protected func Construction()
             Some(container_id),
         );
 
-        let world = HostWorldContext::from_objects(vec![container, attached, item]);
+        let deleted = HostWorldObject::new(
+            deleted_id,
+            "DeletedGem",
+            ObjectStatus::Deleted,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            Some(container_id),
+        );
+
+        let second_item = HostWorldObject::new(
+            second_item_id,
+            "SecondGem",
+            ObjectStatus::Inactive,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            Some(container_id),
+        );
+
+        let world = HostWorldContext::from_objects(vec![
+            container,
+            attached,
+            first_item,
+            deleted,
+            second_item,
+        ]);
         let context = HostObjectContext::new(
             container_id,
             None,
@@ -56683,9 +56733,33 @@ protected func Construction()
             crate::FULL_CON,
         );
 
-        let (result, _) = with_effect_context(Some(context), &[], world, 200, || contents(&[]));
-        let value = result.expect("Contents succeeds");
-        assert_eq!(value, object_reference_value(item_id));
+        let call_contents = |index, include_attached| {
+            let args = [
+                Value::Int(index),
+                Value::Nil,
+                Value::Bool(include_attached),
+            ];
+            let (result, _) = with_effect_context(
+                Some(context.clone()),
+                &[],
+                world.clone(),
+                200,
+                || contents(&args),
+            );
+            result.expect("Contents succeeds")
+        };
+
+        // C++ first indexes [attached, first, second] after filtering only
+        // Status==0, then advances if that selected raw slot is attached.
+        assert_eq!(call_contents(0, false), object_reference_value(first_item_id));
+        assert_eq!(call_contents(1, false), object_reference_value(first_item_id));
+        assert_eq!(call_contents(2, false), object_reference_value(second_item_id));
+        assert_eq!(call_contents(3, false), Value::Nil);
+
+        assert_eq!(call_contents(0, true), object_reference_value(attached_id));
+        assert_eq!(call_contents(1, true), object_reference_value(first_item_id));
+        assert_eq!(call_contents(2, true), object_reference_value(second_item_id));
+        assert_eq!(call_contents(-1, false), Value::Nil);
     }
 
     #[test]
