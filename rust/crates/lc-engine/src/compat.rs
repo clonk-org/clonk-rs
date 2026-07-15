@@ -10430,6 +10430,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Format", format_string);
     script.register_host_function("GetType", get_type);
     script.register_host_function("CreateArray", create_array);
+    script.register_host_reference_function("Set", [0], set_reference);
     script.register_host_reference_function("SetLength", [0], set_length);
     script.register_host_function("GetLength", get_length);
     script.register_host_function("GetIndexOf", get_index_of);
@@ -11465,6 +11466,29 @@ fn create_array(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let values = vec![Value::Nil; size as usize];
     Ok(Value::Array(values))
+}
+
+/// FnSet (C4Script.cpp:3764-3768): assign through the first native
+/// `C4Value *` parameter and return the value stored in that lvalue.
+fn set_reference(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
+    let target = args.first().ok_or_else(|| {
+        RuntimeError::new("call to \"Set\" parameter 1: got \"nil\", but expected \"&\"!")
+    })?;
+    if !target.is_reference() {
+        return Err(RuntimeError::new(format!(
+            "call to \"Set\" parameter 1: got \"{}\", but expected \"&\"!",
+            target.read()?.type_name()
+        )));
+    }
+    let value = args
+        .get(1)
+        .map(HostCallArg::read)
+        .transpose()?
+        .unwrap_or(Value::Nil);
+    if !target.write(value)? {
+        return Err(RuntimeError::new("Set: variable reference expected"));
+    }
+    target.read()
 }
 
 fn set_length(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
@@ -37290,6 +37314,7 @@ mod tests {
         "SelectCrew",
         "SelectMenuItem",
         "Sell",
+        "Set",
         "SetAction",
         "SetActionData",
         "SetActionTargets",
