@@ -4301,6 +4301,77 @@ mod tests {
     }
 
     #[test]
+    fn construct_spawned_site_scan_uses_cpp_master_list_order() {
+        let builder_id = ObjectId::new(1);
+        let lower_id_later = ObjectId::new(2);
+        let higher_id_earlier = ObjectId::new(99);
+        let inactive_first = ObjectId::new(100);
+        let definition_id = "STRT";
+        let site = Vector2::new(10, 20);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.owner = 7;
+
+        let matching_site = |id: ObjectId, master_list_order: usize| {
+            let mut snapshot = snapshot_with_id(id.as_u64());
+            snapshot.master_list_order = master_list_order;
+            snapshot.definition_id = definition_id.into();
+            snapshot.owner = builder.owner;
+            snapshot.position = site;
+            snapshot.construction = 1;
+            snapshot
+        };
+
+        let mut inactive = matching_site(inactive_first, 0);
+        inactive.status = ObjectStatus::Deleted;
+        let mut objects = HashMap::from([
+            (builder_id, builder.clone()),
+            (lower_id_later, matching_site(lower_id_later, 2)),
+            (higher_id_earlier, matching_site(higher_id_earlier, 1)),
+            (inactive_first, inactive),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let state = ConstructState::from_request(
+            &CommandRequest::new(CommandId::Construct)
+                .with_data(CommandData::Text(definition_id.into()))
+                .with_tx(Some(site.x))
+                .with_ty(Some(site.y)),
+        );
+        let choose = |objects: &HashMap<ObjectId, CommandObjectSnapshot>| {
+            let ctx = CommandRuntimeContext {
+                landscape: None,
+                frame: 0,
+                position: builder.position,
+                object: &builder,
+                objects,
+                players: &players,
+                definitions: &definitions,
+                structures_need_energy: false,
+                base_buy_enabled: true,
+                base_sell_enabled: true,
+                transfer_zones: &EMPTY_TRANSFER_ZONES,
+                rng: None,
+            };
+            state.find_spawned_construction(&ctx, definition_id, site)
+        };
+
+        assert_eq!(choose(&objects), Some(higher_id_earlier));
+
+        // Mutating only the modeled master-list ranks must flip the result;
+        // HashMap bucket order and ObjectId order remain unchanged.
+        objects
+            .get_mut(&lower_id_later)
+            .expect("later site present")
+            .master_list_order = 1;
+        objects
+            .get_mut(&higher_id_earlier)
+            .expect("earlier site present")
+            .master_list_order = 2;
+        assert_eq!(choose(&objects), Some(lower_id_later));
+    }
+
+    #[test]
     fn construct_requests_acquire_when_missing_conkit() {
         let builder_id = ObjectId::new(5);
         let construction_definition = "STRT".to_string();
@@ -5412,6 +5483,97 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Failed);
+    }
+
+    #[test]
+    fn base_scans_break_distance_ties_by_cpp_master_list_order() {
+        let actor_id = ObjectId::new(1);
+        let lower_id_later = ObjectId::new(2);
+        let higher_id_earlier = ObjectId::new(99);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.owner = 7;
+        actor.position = Vector2::ZERO;
+
+        let base = |id: ObjectId, position: Vector2, master_list_order: usize| {
+            let mut snapshot = snapshot_with_id(id.as_u64());
+            snapshot.master_list_order = master_list_order;
+            snapshot.position = position;
+            // Sell/Buy currently model C4Object::Base; Home currently models
+            // the object owner. Set both so this test isolates scan order.
+            snapshot.base = actor.owner;
+            snapshot.owner = actor.owner;
+            snapshot.category = CATEGORY_STRUCTURE;
+            snapshot.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
+            snapshot.collectible = false;
+            snapshot
+        };
+
+        let mut objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (lower_id_later, base(lower_id_later, Vector2::new(10, 0), 2)),
+            (
+                higher_id_earlier,
+                // d²=116 and d²=100 both truncate to C++ Distance 10;
+                // strict improvement therefore retains the earlier base.
+                base(higher_id_earlier, Vector2::new(-10, 4), 1),
+            ),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let choose = |objects: &HashMap<ObjectId, CommandObjectSnapshot>| {
+            let ctx = CommandRuntimeContext {
+                landscape: None,
+                frame: 0,
+                position: actor.position,
+                object: &actor,
+                objects,
+                players: &players,
+                definitions: &definitions,
+                structures_need_energy: false,
+                base_buy_enabled: true,
+                base_sell_enabled: true,
+                transfer_zones: &EMPTY_TRANSFER_ZONES,
+                rng: None,
+            };
+            let mut sell =
+                SellState::from_request(&CommandRequest::new(CommandId::Sell)).expect("sell state");
+            let buy =
+                BuyState::from_request(&CommandRequest::new(CommandId::Buy)).expect("buy state");
+            let mut home =
+                HomeState::from_request(&CommandRequest::new(CommandId::Home)).expect("home state");
+            (
+                sell.resolve_base(&ctx),
+                buy.resolve_base(&ctx),
+                home.resolve_base(&ctx),
+            )
+        };
+
+        assert_eq!(
+            choose(&objects),
+            (
+                Some(higher_id_earlier),
+                Some(higher_id_earlier),
+                Some(higher_id_earlier),
+            )
+        );
+
+        objects
+            .get_mut(&lower_id_later)
+            .expect("later base present")
+            .master_list_order = 1;
+        objects
+            .get_mut(&higher_id_earlier)
+            .expect("earlier base present")
+            .master_list_order = 2;
+        assert_eq!(
+            choose(&objects),
+            (
+                Some(lower_id_later),
+                Some(lower_id_later),
+                Some(lower_id_later),
+            )
+        );
     }
 
     #[test]
@@ -7003,6 +7165,140 @@ mod tests {
                 && *from == supply_id
                 && *to == linekit_id
         )));
+    }
+
+    #[test]
+    fn energy_source_scan_breaks_distance_ties_by_cpp_master_list_order() {
+        let actor_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+        let lower_id_later = ObjectId::new(3);
+        let higher_id_earlier = ObjectId::new(99);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.owner = 7;
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::ZERO;
+        target.line_connect = LINE_CONNECT_POWER_INPUT;
+
+        let supply = |id: ObjectId, x: i32, master_list_order: usize| {
+            let mut snapshot = snapshot_with_id(id.as_u64());
+            snapshot.master_list_order = master_list_order;
+            snapshot.position = Vector2::new(x, 0);
+            snapshot.ocf |= ocf::POWER_SUPPLY;
+            snapshot.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+            snapshot
+        };
+        let mut objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (target_id, target),
+            (lower_id_later, supply(lower_id_later, 10, 2)),
+            (higher_id_earlier, supply(higher_id_earlier, -10, 1)),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let choose = |objects: &HashMap<ObjectId, CommandObjectSnapshot>| {
+            let ctx = CommandRuntimeContext {
+                landscape: None,
+                frame: 0,
+                position: actor.position,
+                object: &actor,
+                objects,
+                players: &players,
+                definitions: &definitions,
+                structures_need_energy: true,
+                base_buy_enabled: true,
+                base_sell_enabled: true,
+                transfer_zones: &EMPTY_TRANSFER_ZONES,
+                rng: None,
+            };
+            let mut state = EnergyState::from_request(
+                &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
+            )
+            .expect("energy state");
+            state.resolve_source(&ctx)
+        };
+
+        assert_eq!(choose(&objects), Some(higher_id_earlier));
+
+        objects
+            .get_mut(&lower_id_later)
+            .expect("later supply present")
+            .master_list_order = 1;
+        objects
+            .get_mut(&higher_id_earlier)
+            .expect("earlier supply present")
+            .master_list_order = 2;
+        assert_eq!(choose(&objects), Some(lower_id_later));
+    }
+
+    #[test]
+    fn energy_spawned_line_uses_cpp_master_list_order_and_both_endpoints() {
+        let actor_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+        let source_id = ObjectId::new(3);
+        let selected_kit_id = ObjectId::new(4);
+        let other_kit_id = ObjectId::new(5);
+        let newborn_line_id = ObjectId::new(6);
+        let older_selected_line_id = ObjectId::new(90);
+        let later_other_line_id = ObjectId::new(99);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.owner = 7;
+        let target = snapshot_with_id(target_id.as_u64());
+        let source = snapshot_with_id(source_id.as_u64());
+        let selected_kit = snapshot_with_id(selected_kit_id.as_u64());
+        let other_kit = snapshot_with_id(other_kit_id.as_u64());
+        let line = |id: ObjectId, kit: ObjectId, master_list_order: usize| {
+            let mut snapshot = snapshot_with_id(id.as_u64());
+            snapshot.master_list_order = master_list_order;
+            snapshot.definition_id = POWERLINE_DEFINITION.into();
+            snapshot.owner = actor.owner;
+            snapshot.action_target = Some(source_id);
+            snapshot.action_target2 = Some(kit);
+            snapshot
+        };
+
+        let objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (target_id, target),
+            (source_id, source.clone()),
+            (selected_kit_id, selected_kit),
+            (other_kit_id, other_kit),
+            (newborn_line_id, line(newborn_line_id, selected_kit_id, 9)),
+            (
+                older_selected_line_id,
+                line(older_selected_line_id, selected_kit_id, 4),
+            ),
+            (
+                later_other_line_id,
+                line(later_other_line_id, other_kit_id, 10),
+            ),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: actor.position,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: true,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let state = EnergyState::from_request(
+            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
+        )
+        .expect("energy state");
+
+        assert_eq!(
+            state.spawned_line(&ctx, &source, selected_kit_id),
+            Some(newborn_line_id)
+        );
     }
 
     #[test]
@@ -11777,6 +12073,7 @@ impl ConstructState {
             .values()
             .filter(|snapshot| {
                 snapshot.id != ctx.object.id
+                    && snapshot.is_status_active()
                     && snapshot.definition_id == definition_id
                     && snapshot.owner == ctx.object.owner
                     && snapshot.construction < FULL_CON
@@ -11787,8 +12084,12 @@ impl ConstructState {
                 let dy = (snapshot.position.y - site.y).abs();
                 dx <= 4 && dy <= 4
             })
+            // CreateObjectConstruction inserts the newborn before the
+            // existing same-definition cluster in C++ Game.Objects. The
+            // asynchronous Rust recovery therefore takes the first matching
+            // master-list entry, never HashMap iteration order.
+            .min_by_key(|snapshot| (snapshot.master_list_order, snapshot.id))
             .map(|snapshot| snapshot.id)
-            .next()
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -14599,7 +14900,7 @@ impl AcquireState {
 
     fn find_candidate(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
         let mut best: Option<(ObjectId, i64, usize)> = None;
-        for (id, snapshot) in ctx.objects.iter() {
+        for snapshot in ctx.objects.values() {
             if !self.candidate_is_valid(snapshot, ctx) {
                 continue;
             }
@@ -14609,10 +14910,11 @@ impl AcquireState {
                 continue;
             }
             let distance = dx * dx + dy * dy;
-            if best.is_none_or(|(_, best_distance, best_order)| {
-                (distance, snapshot.master_list_order) < (best_distance, best_order)
+            if best.is_none_or(|(best_id, best_distance, best_order)| {
+                (distance, snapshot.master_list_order, snapshot.id)
+                    < (best_distance, best_order, best_id)
             }) {
-                best = Some((*id, distance, snapshot.master_list_order));
+                best = Some((snapshot.id, distance, snapshot.master_list_order));
             }
         }
         best.map(|(id, _, _)| id)
@@ -14763,9 +15065,16 @@ impl SellState {
             .values()
             .filter(|snapshot| snapshot.id != ctx.object.id && Self::is_base(snapshot, owner))
             .min_by_key(|snapshot| {
-                let dx = i64::from(snapshot.position.x - ctx.position.x);
-                let dy = i64::from(snapshot.position.y - ctx.position.y);
-                dx * dx + dy * dy
+                (
+                    c4_distance(
+                        snapshot.position.x,
+                        snapshot.position.y,
+                        ctx.position.x,
+                        ctx.position.y,
+                    ),
+                    snapshot.master_list_order,
+                    snapshot.id,
+                )
             })
             .map(|snapshot| {
                 let id = snapshot.id;
@@ -15093,9 +15402,16 @@ impl BuyState {
                     && !snapshot.collectible
             })
             .min_by_key(|snapshot| {
-                let dx = i64::from(snapshot.position.x - ctx.position.x);
-                let dy = i64::from(snapshot.position.y - ctx.position.y);
-                dx * dx + dy * dy
+                (
+                    c4_distance(
+                        snapshot.position.x,
+                        snapshot.position.y,
+                        ctx.position.x,
+                        ctx.position.y,
+                    ),
+                    snapshot.master_list_order,
+                    snapshot.id,
+                )
             })
             .map(|snapshot| snapshot.id)
     }
@@ -15252,9 +15568,16 @@ impl HomeState {
             .values()
             .filter(|snapshot| snapshot.id != ctx.object.id && Self::is_base(snapshot, owner))
             .min_by_key(|snapshot| {
-                let dx = i64::from(snapshot.position.x - ctx.position.x);
-                let dy = i64::from(snapshot.position.y - ctx.position.y);
-                dx * dx + dy * dy
+                (
+                    c4_distance(
+                        snapshot.position.x,
+                        snapshot.position.y,
+                        ctx.position.x,
+                        ctx.position.y,
+                    ),
+                    snapshot.master_list_order,
+                    snapshot.id,
+                )
             })
             .map(|snapshot| snapshot.id)
     }
@@ -15353,7 +15676,11 @@ impl EnergyState {
             .min_by_key(|snapshot| {
                 let dx = i64::from(snapshot.position.x - target.position.x);
                 let dy = i64::from(snapshot.position.y - target.position.y);
-                (dx * dx + dy * dy, snapshot.id)
+                (
+                    dx * dx + dy * dy,
+                    snapshot.master_list_order,
+                    snapshot.id,
+                )
             })?
             .id;
         self.source = Some(source);
@@ -15364,6 +15691,7 @@ impl EnergyState {
         &self,
         ctx: &CommandRuntimeContext<'_>,
         source: &CommandObjectSnapshot,
+        linekit_id: ObjectId,
     ) -> Option<ObjectId> {
         ctx.objects
             .values()
@@ -15372,10 +15700,13 @@ impl EnergyState {
                     && snapshot.is_status_active()
                     && snapshot.owner == ctx.object.owner
                     && snapshot.action_target == Some(source.id)
+                    && snapshot.action_target2 == Some(linekit_id)
             })
-            // The just-created line follows older lines from the same
-            // supply in C4ObjectList order; ObjectId is monotonic here.
-            .max_by_key(|snapshot| snapshot.id)
+            // Line definitions append at C++ Objects.Last, so the line just
+            // returned by CreateLine has the greatest forward master rank.
+            // Include both endpoints so a later line from the same supply
+            // cannot be mistaken for this command's synchronous result.
+            .max_by_key(|snapshot| (snapshot.master_list_order, snapshot.id))
             .map(|snapshot| snapshot.id)
     }
 
@@ -15439,7 +15770,7 @@ impl EnergyState {
 
         if self.line.is_none() {
             if self.line_spawn_requested {
-                let Some(line_id) = self.spawned_line(ctx, source_snapshot) else {
+                let Some(line_id) = self.spawned_line(ctx, source_snapshot, linekit_id) else {
                     return CommandStepResult::running(update_to_stop());
                 };
                 self.line = Some(line_id);
