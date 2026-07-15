@@ -54,6 +54,14 @@ fn bool_coerces_in_bitwise_and_multiply() {
 }
 
 #[test]
+fn bitwise_or_and_xor_share_left_associative_precedence() {
+    // C4ScriptOpMap gives | and ^ the same priority, so mixed chains fold
+    // from the left in either order.
+    assert_eq!(eval("func Test() { return 1 | 1 ^ 1; }"), Value::Int(0));
+    assert_eq!(eval("func Test() { return 1 ^ 1 | 1; }"), Value::Int(1));
+}
+
+#[test]
 fn unary_minus_coerces_like_cpp() {
     // C4AulExec.cpp:468-470 AB_Neg: SetInt(-_getInt())
     assert_eq!(eval("func Test() { return -nil; }"), Value::Int(0));

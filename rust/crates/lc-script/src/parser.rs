@@ -1533,20 +1533,19 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
+    /// C4Script gives `|` and `^` the same precedence, unlike C/Rust.
     fn parse_bit_or(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_bit_xor()?;
-        while self.consume_if_symbol(Symbol::Pipe)?.is_some() {
-            let right = self.parse_bit_xor()?;
-            expr = Expr::Binary(Box::new(expr), BinaryOp::BitOr, Box::new(right));
-        }
-        Ok(expr)
-    }
-
-    fn parse_bit_xor(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_bit_and()?;
-        while self.consume_if_symbol(Symbol::Caret)?.is_some() {
+        loop {
+            let operation = if self.consume_if_symbol(Symbol::Pipe)?.is_some() {
+                BinaryOp::BitOr
+            } else if self.consume_if_symbol(Symbol::Caret)?.is_some() {
+                BinaryOp::BitXor
+            } else {
+                break;
+            };
             let right = self.parse_bit_and()?;
-            expr = Expr::Binary(Box::new(expr), BinaryOp::BitXor, Box::new(right));
+            expr = Expr::Binary(Box::new(expr), operation, Box::new(right));
         }
         Ok(expr)
     }
