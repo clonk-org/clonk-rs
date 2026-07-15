@@ -39151,6 +39151,9 @@ impl EffectHostContext {
                         .unwrap_or(false),
                     selected,
                     alive: scope.map(ObjectScopeContext::alive).unwrap_or(object.alive),
+                    need_energy: scope
+                        .map(ObjectScopeContext::need_energy)
+                        .unwrap_or(object.need_energy),
                     on_fire: scope
                         .and_then(|scope| scope.pending_update.staged_on_fire())
                         .or_else(|| object.full_state().map(|state| state.on_fire))

@@ -79,6 +79,9 @@ pub struct CommandObjectSnapshot {
     pub crew_member: bool,
     pub selected: bool,
     pub alive: bool,
+    /// Live C4Object::NeedEnergy marker used by C4Command::Energy's
+    /// already-supplied completion check.
+    pub need_energy: bool,
     /// Raw C4Object::OnFire, which Acquire reads independently of cached OCF.
     pub on_fire: bool,
     pub contents: Vec<ObjectId>,
@@ -435,6 +438,7 @@ mod tests {
             crew_member: false,
             selected: false,
             alive: true,
+            need_energy: false,
             on_fire: false,
             contents: Vec::new(),
             commands: Vec::new(),
@@ -10533,6 +10537,381 @@ mod tests {
     }
 
     #[test]
+    fn energy_rejects_non_input_before_disabled_rule_completion() {
+        let builder = snapshot_with_id(10);
+        let target_id = ObjectId::new(20);
+        let target = snapshot_with_id(target_id.as_u64());
+        let objects = HashMap::from([(target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        let mut state = EnergyState::from_request(
+            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
+        )
+        .expect("energy state");
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result.operations.is_empty());
+        assert!(result.events.is_empty());
+    }
+
+    #[test]
+    fn energy_completes_when_connected_target_does_not_need_energy() {
+        let builder_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+        let supply_id = ObjectId::new(30);
+        let linekit_id = ObjectId::new(40);
+        let line_id = ObjectId::new(50);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.owner = 1;
+        builder.contents.push(linekit_id);
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.line_connect = LINE_CONNECT_POWER_INPUT;
+        target.need_energy = false;
+        let mut supply = snapshot_with_id(supply_id.as_u64());
+        supply.ocf |= ocf::POWER_SUPPLY;
+        supply.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+        let mut linekit = snapshot_with_id(linekit_id.as_u64());
+        linekit.definition_id = LINEKIT_DEFINITION.into();
+        linekit.container = Some(builder_id);
+        let mut line = snapshot_with_id(line_id.as_u64());
+        line.definition_id = POWERLINE_DEFINITION.into();
+        line.action_name = CONNECT_ACTION.into();
+        line.action_target = Some(supply_id);
+        line.action_target2 = Some(target_id);
+
+        let mut objects = HashMap::from([
+            (target_id, target.clone()),
+            (supply_id, supply),
+            (linekit_id, linekit),
+            (line_id, line),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut state = EnergyState::from_request(
+            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
+        )
+        .expect("energy state");
+        let result = {
+            let mut ctx =
+                move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+            ctx.structures_need_energy = true;
+            state.step(&ctx)
+        };
+
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.update.is_none());
+        assert!(result.operations.is_empty());
+        assert!(result.events.is_empty(), "the carried linekit is untouched");
+        assert_eq!(state.linekit, None);
+
+        objects
+            .get_mut(&target_id)
+            .expect("target present")
+            .need_energy = true;
+        let mut needs_energy_state = EnergyState::from_request(
+            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
+        )
+        .expect("energy state");
+        let continued = {
+            let mut ctx =
+                move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 1);
+            ctx.structures_need_energy = true;
+            needs_energy_state.step(&ctx)
+        };
+        assert_eq!(continued.status, CommandStatus::Running);
+        assert!(continued.events.iter().any(|event| matches!(
+            event,
+            CommandEvent::CreateLine { from, to, .. }
+                if *from == supply_id && *to == linekit_id
+        )));
+    }
+
+    #[test]
+    fn energy_does_not_skip_closest_non_output_supply() {
+        let builder = snapshot_with_id(10);
+        let target_id = ObjectId::new(20);
+        let closest_id = ObjectId::new(30);
+        let farther_id = ObjectId::new(40);
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.line_connect = LINE_CONNECT_POWER_INPUT;
+        let mut closest = snapshot_with_id(closest_id.as_u64());
+        closest.position = Vector2::new(10, 0);
+        closest.ocf |= ocf::POWER_SUPPLY;
+        let mut farther = snapshot_with_id(farther_id.as_u64());
+        farther.position = Vector2::new(20, 0);
+        farther.ocf |= ocf::POWER_SUPPLY;
+        farther.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+        let objects = HashMap::from([
+            (target_id, target),
+            (closest_id, closest),
+            (farther_id, farther),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        ctx.structures_need_energy = true;
+        let mut state = EnergyState::from_request(
+            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
+        )
+        .expect("energy state");
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert_eq!(state.source, Some(closest_id));
+        assert!(result.operations.is_empty());
+        assert!(result.events.is_empty());
+    }
+
+    #[test]
+    fn energy_range_uses_cpp_integer_distance() {
+        let builder = snapshot_with_id(10);
+        let target_id = ObjectId::new(20);
+        let supply_id = ObjectId::new(30);
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.line_connect = LINE_CONNECT_POWER_INPUT;
+        let mut supply = snapshot_with_id(supply_id.as_u64());
+        supply.position = Vector2::new(650, 1);
+        supply.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+        let objects = HashMap::from([(target_id, target), (supply_id, supply)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        ctx.structures_need_energy = true;
+        let mut state = EnergyState::from_request(
+            &CommandRequest::new(CommandId::Energy)
+                .with_target(Some(target_id))
+                .with_target2(Some(supply_id)),
+        )
+        .expect("energy state");
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            pushed_request(&result.operations, CommandId::Acquire).data,
+            CommandData::Integer(
+                definition_id_to_c4id(LINEKIT_DEFINITION).expect("linekit C4ID")
+            )
+        );
+    }
+
+    #[test]
+    fn energy_reuses_carried_line_and_retargets_to_far_endpoint() {
+        let builder_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+        let selected_supply_id = ObjectId::new(30);
+        let plain_kit_id = ObjectId::new(40);
+        let attached_kit_id = ObjectId::new(41);
+        let later_kit_id = ObjectId::new(42);
+        let line_id = ObjectId::new(50);
+        let later_same_kit_line_id = ObjectId::new(51);
+        let earlier_other_kit_line_id = ObjectId::new(52);
+        let far_endpoint_id = ObjectId::new(60);
+        let ignored_far_endpoint_id = ObjectId::new(61);
+        let other_kit_far_endpoint_id = ObjectId::new(62);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.owner = 1;
+        builder.command_direction = CommandDirection::Right;
+        builder.contents = vec![plain_kit_id, attached_kit_id, later_kit_id];
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.line_connect = LINE_CONNECT_POWER_INPUT;
+        let mut selected_supply = snapshot_with_id(selected_supply_id.as_u64());
+        selected_supply.position = Vector2::new(100, 0);
+        selected_supply.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+        let mut plain_kit = snapshot_with_id(plain_kit_id.as_u64());
+        plain_kit.definition_id = LINEKIT_DEFINITION.into();
+        plain_kit.container = Some(builder_id);
+        let mut attached_kit = snapshot_with_id(attached_kit_id.as_u64());
+        attached_kit.definition_id = LINEKIT_DEFINITION.into();
+        attached_kit.container = Some(builder_id);
+        let mut later_kit = snapshot_with_id(later_kit_id.as_u64());
+        later_kit.definition_id = LINEKIT_DEFINITION.into();
+        later_kit.container = Some(builder_id);
+        let mut line = snapshot_with_id(line_id.as_u64());
+        line.master_list_order = 2;
+        line.definition_id = POWERLINE_DEFINITION.into();
+        line.action_name = CONNECT_ACTION.into();
+        line.action_target = Some(far_endpoint_id);
+        line.action_target2 = Some(attached_kit_id);
+        let mut later_same_kit_line = line.clone();
+        later_same_kit_line.id = later_same_kit_line_id;
+        later_same_kit_line.master_list_order = 3;
+        later_same_kit_line.action_target = Some(attached_kit_id);
+        later_same_kit_line.action_target2 = Some(ignored_far_endpoint_id);
+        let mut earlier_other_kit_line = line.clone();
+        earlier_other_kit_line.id = earlier_other_kit_line_id;
+        earlier_other_kit_line.master_list_order = 1;
+        earlier_other_kit_line.action_target = Some(later_kit_id);
+        earlier_other_kit_line.action_target2 = Some(other_kit_far_endpoint_id);
+        let mut far_endpoint = snapshot_with_id(far_endpoint_id.as_u64());
+        far_endpoint.position = Vector2::new(100, 0);
+        far_endpoint.shape = DefinitionRect::new(92, -10, 16, 20);
+        far_endpoint.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+        let ignored_far_endpoint = snapshot_with_id(ignored_far_endpoint_id.as_u64());
+        let other_kit_far_endpoint = snapshot_with_id(other_kit_far_endpoint_id.as_u64());
+        let mut objects = HashMap::from([
+            (target_id, target),
+            (selected_supply_id, selected_supply),
+            (plain_kit_id, plain_kit),
+            (attached_kit_id, attached_kit),
+            (later_kit_id, later_kit),
+            (line_id, line),
+            (later_same_kit_line_id, later_same_kit_line),
+            (earlier_other_kit_line_id, earlier_other_kit_line),
+            (far_endpoint_id, far_endpoint),
+            (ignored_far_endpoint_id, ignored_far_endpoint),
+            (other_kit_far_endpoint_id, other_kit_far_endpoint),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        ctx.structures_need_energy = true;
+        let mut state = EnergyState::from_request(
+            &CommandRequest::new(CommandId::Energy)
+                .with_target(Some(target_id))
+                .with_target2(Some(selected_supply_id)),
+        )
+        .expect("energy state");
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(state.source, Some(far_endpoint_id));
+        assert_eq!(state.linekit, Some(attached_kit_id));
+        assert_eq!(state.line, Some(line_id));
+        let line_update = result
+            .events
+            .iter()
+            .find_map(|event| match event {
+                CommandEvent::ApplyObjectUpdate { object_id, update }
+                    if *object_id == line_id =>
+                {
+                    Some(update)
+                }
+                _ => None,
+            })
+            .expect("existing line is retargeted");
+        let action = line_update.action.as_ref().expect("Connect action update");
+        assert_eq!(action.name.as_deref(), Some(CONNECT_ACTION));
+        assert_eq!(action.target, Some(Some(far_endpoint_id)));
+        assert_eq!(action.target2, Some(Some(target_id)));
+        let removed: Vec<_> = result
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                CommandEvent::ApplyObjectUpdate { object_id, update }
+                    if update.status == Some(ObjectStatus::Deleted) =>
+                {
+                    Some(*object_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(removed, vec![attached_kit_id]);
+
+        let mut moving_builder = builder.clone();
+        moving_builder.position = Vector2::new(100, 0);
+        let mut moving_state = EnergyState::from_request(
+            &CommandRequest::new(CommandId::Energy)
+                .with_target(Some(target_id))
+                .with_target2(Some(selected_supply_id)),
+        )
+        .expect("energy state");
+        let moving = {
+            let mut ctx = move_to_ctx_at_frame(
+                &moving_builder,
+                &objects,
+                &players,
+                &definitions,
+                1,
+            );
+            ctx.structures_need_energy = true;
+            moving_state.step(&ctx)
+        };
+        assert_eq!(moving.status, CommandStatus::Running);
+        assert_eq!(
+            pushed_request(&moving.operations, CommandId::MoveTo).target,
+            Some(target_id)
+        );
+        assert_eq!(moving_state.line, Some(line_id));
+
+        for stale_line in [
+            line_id,
+            later_same_kit_line_id,
+            earlier_other_kit_line_id,
+        ] {
+            objects
+                .get_mut(&stale_line)
+                .expect("line present")
+                .action_name = "Idle".into();
+        }
+        let resumed = {
+            let mut ctx =
+                move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 2);
+            ctx.structures_need_energy = true;
+            moving_state.step(&ctx)
+        };
+        assert_eq!(resumed.status, CommandStatus::Running);
+        assert_eq!(moving_state.line, None);
+        assert!(resumed.events.is_empty(), "the disconnected kit is retained");
+        assert_eq!(
+            pushed_request(&resumed.operations, CommandId::MoveTo).target,
+            Some(far_endpoint_id),
+            "Energy returns to the live source instead of using the stale line"
+        );
+
+        let malformed_line_id = ObjectId::new(53);
+        let mut malformed_line = snapshot_with_id(malformed_line_id.as_u64());
+        malformed_line.master_list_order = 0;
+        malformed_line.definition_id = POWERLINE_DEFINITION.into();
+        malformed_line.action_name = CONNECT_ACTION.into();
+        malformed_line.action_target = Some(plain_kit_id);
+        malformed_line.action_target2 = None;
+        objects.insert(malformed_line_id, malformed_line);
+        let mut malformed_state = EnergyState::from_request(
+            &CommandRequest::new(CommandId::Energy)
+                .with_target(Some(target_id))
+                .with_target2(Some(selected_supply_id)),
+        )
+        .expect("energy state");
+        let malformed = {
+            let mut ctx =
+                move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 3);
+            ctx.structures_need_energy = true;
+            malformed_state.step(&ctx)
+        };
+        assert_eq!(malformed.status, CommandStatus::Completed);
+        assert_eq!(malformed_state.source, None);
+        assert_eq!(malformed_state.line, Some(malformed_line_id));
+        let malformed_action = malformed
+            .events
+            .iter()
+            .find_map(|event| match event {
+                CommandEvent::ApplyObjectUpdate { object_id, update }
+                    if *object_id == malformed_line_id =>
+                {
+                    update.action.as_ref()
+                }
+                _ => None,
+            })
+            .expect("malformed line is still selected");
+        assert_eq!(malformed_action.target, None);
+        assert_eq!(malformed_action.target2, Some(Some(target_id)));
+        assert!(malformed.events.iter().any(|event| matches!(
+            event,
+            CommandEvent::ApplyObjectUpdate { object_id, update }
+                if *object_id == plain_kit_id
+                    && update.status == Some(ObjectStatus::Deleted)
+        )));
+    }
+
+    #[test]
     fn energy_starts_a_power_line_at_the_nearby_supply() {
         // C4Command::Energy keeps running after it has a line kit: at the
         // supply it creates PWRL from the supply to that kit
@@ -10606,6 +10985,7 @@ mod tests {
         let mut line = snapshot_with_id(line_id.as_u64());
         line.definition_id = POWERLINE_DEFINITION.into();
         line.owner = 1;
+        line.action_name = CONNECT_ACTION.into();
         line.action_target = Some(supply_id);
         line.action_target2 = Some(linekit_id);
         let mut connected_objects = objects.clone();
@@ -20964,13 +21344,59 @@ impl EnergyState {
             .map(|snapshot| snapshot.id)
     }
 
+    fn target_has_power_line(&self, ctx: &CommandRuntimeContext<'_>) -> bool {
+        ctx.objects.values().any(|snapshot| {
+            snapshot.definition_id == POWERLINE_DEFINITION
+                && snapshot.is_status_active()
+                && snapshot.ocf != 0
+                && !snapshot.action_idle
+                && snapshot.action_name == CONNECT_ACTION
+                && (snapshot.action_target == Some(self.target)
+                    || snapshot.action_target2 == Some(self.target))
+        })
+    }
+
+    fn carried_line(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> Option<(ObjectId, ObjectId, Option<ObjectId>)> {
+        for kit_id in &ctx.object.contents {
+            let Some(kit) = ctx.resolve(*kit_id) else {
+                continue;
+            };
+            if kit.definition_id != LINEKIT_DEFINITION {
+                continue;
+            }
+
+            let Some(line) = ctx
+                .objects
+                .values()
+                .filter(|snapshot| {
+                    snapshot.definition_id == POWERLINE_DEFINITION
+                        && snapshot.is_status_active()
+                        && snapshot.ocf != 0
+                        && !snapshot.action_idle
+                        && snapshot.action_name == CONNECT_ACTION
+                        && (snapshot.action_target == Some(*kit_id)
+                            || snapshot.action_target2 == Some(*kit_id))
+                })
+                .min_by_key(|snapshot| (snapshot.master_list_order, snapshot.id))
+            else {
+                continue;
+            };
+            let far_endpoint = if line.action_target == Some(*kit_id) {
+                line.action_target2
+            } else {
+                line.action_target
+            };
+            return Some((*kit_id, line.id, far_endpoint));
+        }
+        None
+    }
+
     fn resolve_source(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
         if let Some(source) = self.source {
-            return ctx.resolve(source).and_then(|snapshot| {
-                (snapshot.is_status_active()
-                    && snapshot.line_connect & crate::LINE_CONNECT_POWER_OUTPUT != 0)
-                    .then_some(source)
-            });
+            return ctx.resolve(source).map(|_| source);
         }
         let target = ctx.resolve(self.target)?;
         let source = ctx
@@ -20980,7 +21406,6 @@ impl EnergyState {
                 snapshot.id != self.target
                     && snapshot.is_status_active()
                     && snapshot.ocf & ocf::POWER_SUPPLY != 0
-                    && snapshot.line_connect & crate::LINE_CONNECT_POWER_OUTPUT != 0
             })
             .min_by_key(|snapshot| {
                 let dx = i64::from(snapshot.position.x - target.position.x);
@@ -21028,11 +21453,13 @@ impl EnergyState {
             return CommandStepResult::failed(None);
         }
 
-        if !ctx.structures_need_energy {
-            return CommandStepResult::completed(None);
-        }
         if (target_snapshot.line_connect & LINE_CONNECT_POWER_INPUT) == 0 {
             return CommandStepResult::failed(None);
+        }
+        if !ctx.structures_need_energy
+            || (!target_snapshot.need_energy && self.target_has_power_line(ctx))
+        {
+            return CommandStepResult::completed(None);
         }
 
         let Some(source_id) = self.resolve_source(ctx) else {
@@ -21041,9 +21468,16 @@ impl EnergyState {
         let Some(source_snapshot) = ctx.resolve(source_id) else {
             return CommandStepResult::failed(None);
         };
-        let dx = i64::from(ctx.position.x - source_snapshot.position.x);
-        let dy = i64::from(ctx.position.y - source_snapshot.position.y);
-        if dx * dx + dy * dy > 650_i64.pow(2) {
+        if c4_distance(
+            ctx.position.x,
+            ctx.position.y,
+            source_snapshot.position.x,
+            source_snapshot.position.y,
+        ) > 650
+        {
+            return CommandStepResult::failed(None);
+        }
+        if (source_snapshot.line_connect & crate::LINE_CONNECT_POWER_OUTPUT) == 0 {
             return CommandStepResult::failed(None);
         }
 
@@ -21051,7 +21485,7 @@ impl EnergyState {
             .linekit
             .filter(|id| ctx.object.contents.contains(id))
             .or_else(|| self.builder_linekit(ctx));
-        let Some(linekit_id) = linekit_id else {
+        let Some(mut linekit_id) = linekit_id else {
             if self.acquire_requested {
                 return CommandStepResult::running(None);
             }
@@ -21069,32 +21503,49 @@ impl EnergyState {
         self.linekit = Some(linekit_id);
         self.acquire_requested = false;
 
-        if self.line.is_none() {
+        let mut connection_source_id = Some(source_id);
+        if let Some((connected_kit_id, line_id, far_endpoint)) = self.carried_line(ctx) {
+            linekit_id = connected_kit_id;
+            self.linekit = Some(connected_kit_id);
+            self.line = Some(line_id);
+            self.source = far_endpoint;
+            self.line_spawn_requested = false;
+            connection_source_id = far_endpoint;
+        } else {
+            // C++ keeps pLine local and repeats the carried-kit scan on every
+            // Energy execution. Retain state only while waiting for the
+            // deferred CreateLine event to materialize.
+            self.line = None;
             if self.line_spawn_requested {
-                let Some(line_id) = self.spawned_line(ctx, source_snapshot, linekit_id) else {
+                if self
+                    .spawned_line(ctx, source_snapshot, linekit_id)
+                    .is_none()
+                {
                     return CommandStepResult::running(None);
-                };
-                self.line = Some(line_id);
-            } else {
-                if !source_snapshot.at_point(ctx.position.x, ctx.position.y) {
-                    let request = CommandRequest::new(CommandId::MoveTo)
-                        .with_target(Some(source_id))
-                        .with_update_interval(50)
-                        .with_mode(CommandMode::SilentSub);
-                    return CommandStepResult::running(None)
-                        .with_operations(vec![CommandOperation::PushFront(request)]);
                 }
-
-                self.line_spawn_requested = true;
-                return CommandStepResult::running(None).with_events(vec![
-                    CommandEvent::CreateLine {
-                        definition_id: POWERLINE_DEFINITION.into(),
-                        owner: ctx.object.owner,
-                        from: source_id,
-                        to: linekit_id,
-                    },
-                ]);
+                self.line_spawn_requested = false;
             }
+        }
+
+        if self.line.is_none() {
+            if !source_snapshot.at_point(ctx.position.x, ctx.position.y) {
+                let request = CommandRequest::new(CommandId::MoveTo)
+                    .with_target(Some(source_id))
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::SilentSub);
+                return CommandStepResult::running(None)
+                    .with_operations(vec![CommandOperation::PushFront(request)]);
+            }
+
+            self.line_spawn_requested = true;
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::CreateLine {
+                    definition_id: POWERLINE_DEFINITION.into(),
+                    owner: ctx.object.owner,
+                    from: source_id,
+                    to: linekit_id,
+                },
+            ]);
         }
 
         if !target_snapshot.at_point(ctx.position.x, ctx.position.y) {
@@ -21107,13 +21558,14 @@ impl EnergyState {
         }
 
         let line_id = self.line.expect("line is present");
-        let line_update = ObjectUpdate::new().with_action_update(
-            ActionUpdate::default()
-                .with_name("Connect")
-                .with_force(true)
-                .with_target(Some(source_id))
-                .with_target2(Some(self.target)),
-        );
+        let mut action_update = ActionUpdate::default()
+            .with_name(CONNECT_ACTION)
+            .with_force(true)
+            .with_target2(Some(self.target));
+        if let Some(connection_source_id) = connection_source_id {
+            action_update = action_update.with_target(Some(connection_source_id));
+        }
+        let line_update = ObjectUpdate::new().with_action_update(action_update);
         let linekit_update = ObjectUpdate::new()
             .clear_container()
             .with_status(ObjectStatus::Deleted)
