@@ -31404,16 +31404,18 @@ impl Engine {
             return Ok(true);
         }
 
+        // A false helper result is a native `return` from ExecAction. Signal
+        // the outer object loop to skip the captured action's phase tail.
         if matches!(procedure, ActionProcedure::Fight)
             && !self.apply_fight_procedure(idx)?
         {
-            return Ok(false);
+            return Ok(true);
         }
 
         if matches!(procedure, ActionProcedure::Attach)
             && !self.apply_attach_procedure(idx, &definition_id)?
         {
-            return Ok(false);
+            return Ok(true);
         }
 
         let mut push_handled = false;
@@ -31425,7 +31427,7 @@ impl Engine {
                 &definition_id,
             )?
             {
-                return Ok(false);
+                return Ok(true);
             }
             push_handled = true;
         }
@@ -31439,7 +31441,7 @@ impl Engine {
                 &definition_id,
             )?
             {
-                return Ok(false);
+                return Ok(true);
             }
             pull_handled = true;
         }

@@ -13716,7 +13716,7 @@ protected func RejectEntrance(container)
                 ),
                 (
                     "Push".to_string(),
-                    ActionSpec::default().with_procedure("push"),
+                    ActionSpec::default().with_procedure("push").with_delay(2),
                 ),
             ]),
         );
@@ -13737,6 +13737,13 @@ protected func RejectEntrance(container)
 
         let object = engine.object_snapshot(id).expect("pusher survives");
         assert_eq!(object.action.name, "Walk");
+        assert_eq!(
+            (object.action.phase, object.action.ticks, object.action.time),
+            (0, 0, 0),
+            "the failed Push return skips its stale phase tail"
+        );
+        assert_eq!(object.velocity, Vector2::ZERO);
+        assert_eq!(object.position, Vector2::ZERO);
         assert_eq!(object.command_direction, CommandDirection::Stop);
         let index = engine.find_object_index(id).expect("pusher exists");
         assert_eq!(
@@ -13988,7 +13995,7 @@ protected func TurnStart()
             .expect("tail command queues");
 
         assert!(
-            !engine
+            engine
                 .apply_physics_at_index(pusher_idx)
                 .expect("inside-target Push resolves")
         );
@@ -14049,7 +14056,7 @@ protected func TurnStart()
         engine.objects[pusher_idx].state.action.target = Some(target_id);
 
         assert!(
-            !engine
+            engine
                 .apply_physics_at_index(pusher_idx)
                 .expect("contained-target Push resolves")
         );
@@ -14275,9 +14282,11 @@ protected func TurnStart()
             .push_back(CommandRequest::new(CommandId::MoveTo).with_tx(Some(20)))
             .expect("tail command queues");
 
-        let _ = engine
-            .apply_physics_at_index(index)
-            .expect("targetless Pull resolves");
+        assert!(
+            engine
+                .apply_physics_at_index(index)
+                .expect("targetless Pull resolves")
+        );
 
         let index = engine.find_object_index(id).expect("puller remains");
         let object = &engine.objects[index];
@@ -14572,7 +14581,7 @@ protected func GrabLost()
             .expect("tail Wait queues");
 
         assert!(
-            !engine
+            engine
                 .apply_physics_at_index(horse_index)
                 .expect("horse loses the distant wagon")
         );
@@ -14841,9 +14850,11 @@ protected func GrabLost()
         let fighter = l073_spawn_fighter(&mut engine, None, None);
         let index = engine.find_object_index(fighter).expect("fighter exists");
 
-        let _ = engine
-            .apply_physics_at_index(index)
-            .expect("targetless Fight resolves");
+        assert!(
+            engine
+                .apply_physics_at_index(index)
+                .expect("targetless Fight resolves")
+        );
 
         assert_l073_fighter_stands(&engine, fighter, "no target");
     }
@@ -15113,9 +15124,11 @@ protected func AttachTargetLost()
             .expect("actor spawns");
         let index = engine.find_object_index(actor).expect("actor exists");
 
-        let _ = engine
-            .apply_physics_at_index(index)
-            .expect("lost Attach target resolves");
+        assert!(
+            engine
+                .apply_physics_at_index(index)
+                .expect("lost Attach target resolves")
+        );
 
         let index = engine.find_object_index(actor).expect("actor remains");
         let object = &engine.objects[index];
@@ -26769,7 +26782,7 @@ func Death(by) { death_by = by; return 1; }
             .expect("pusher exists");
 
         assert!(
-            !engine
+            engine
                 .apply_physics_at_index(pusher_idx)
                 .expect("out-of-range push resolves")
         );
