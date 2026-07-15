@@ -2732,6 +2732,67 @@ mod tests {
     }
 
     #[test]
+    fn get_interval_expires_successfully_after_exact_execution_count() {
+        // C4Command::Execute decrements UpdateInterval before dispatching
+        // Get. The unreachable handler therefore runs 39 times, re-adding
+        // MoveTo whenever it regains the front, and execution 40 succeeds
+        // without running Get again (C4Command.cpp:1545-1552).
+        let actor_id = ObjectId::new(102);
+        let target_id = ObjectId::new(202);
+        let actor = snapshot_with_id(actor_id.as_u64());
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(300, 0);
+        target.collectible = true;
+        target.construction = FULL_CON;
+        let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
+            .expect("base queues");
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Get)
+                    .with_target(Some(target_id))
+                    .with_update_interval(40)
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("Get queues");
+
+        for execution in 1..=39 {
+            let actor = objects.get(&actor_id).expect("actor present");
+            let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 7);
+            let result = stack.step(&ctx).expect("Get executes");
+            assert_eq!(result.status, CommandStatus::Running);
+            assert_eq!(
+                stack.command_names(),
+                vec!["MoveTo", "Get", "Wait"],
+                "handler execution {execution} re-adds its pursuit MoveTo"
+            );
+            let snapshot = stack.snapshot();
+            assert_eq!(
+                snapshot.commands[1].update_interval,
+                Some(40 - execution),
+                "shared lifetime decrements once per Get execution"
+            );
+            assert!(stack.complete_front_if(CommandId::MoveTo));
+        }
+
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 7);
+        let expired = stack.step(&ctx).expect("Get expires");
+        assert_eq!(expired.status, CommandStatus::Completed);
+        assert!(expired.events.is_empty());
+        assert!(expired.operations.is_empty());
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 1);
+        assert_eq!(snapshot.commands[0].state.id(), Some(CommandId::Wait));
+        assert_eq!(snapshot.commands[0].failures, 0);
+    }
+
+    #[test]
     fn get_resolves_nonliving_item_by_container_and_definition() {
         // C4Command::Get resolves Target2->Contents.Find(Data) without an
         // Alive check, then collects the carryable target from the actor's
