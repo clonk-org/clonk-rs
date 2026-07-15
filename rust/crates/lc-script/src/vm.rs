@@ -1796,7 +1796,9 @@ impl<'a> Vm<'a> {
                                     Some(expr) => self.evaluate_tracked(expr, env, depth)?,
                                     None => TrackedValue::runtime(Value::Nil),
                                 };
-                                env.define_tracked(name, tracked);
+                                if env.assign_tracked(name, tracked.clone()).is_err() {
+                                    env.define_tracked(name, tracked);
+                                }
                             }
                         }
                         ForInit::Expr(expr) => {
