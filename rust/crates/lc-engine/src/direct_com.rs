@@ -20,8 +20,10 @@ use crate::control::{
 use crate::math::{self, itofix};
 use crate::player::CountedControlType;
 use crate::{
-    ocf, tolerate_script_error, C4Fixed, CommandDirection, Direction, Engine, EngineError,
-    FixedVec2, MouseDragSource, ObjectId, Value, Vector2, CATEGORY_MOUSE_SELECT,
+    message, ocf, tolerate_script_error, C4Fixed, CommandDirection, Direction, Engine,
+    EngineError, FixedVec2, MessageSpec, MouseDragSource, ObjectEnterOutcome, ObjectId,
+    PhysicalInfo, Value, Vector2,
+    CATEGORY_MOUSE_SELECT,
 };
 #[cfg(test)]
 use crate::Landscape;
@@ -43,6 +45,17 @@ const C4P_COMMAND_SET: i32 = 1;
 const C4P_COMMAND_ADD: i32 = 2;
 const C4P_COMMAND_APPEND: i32 = 4;
 const C4P_COMMAND_RANGE: i32 = 8;
+
+/// Backing selected by the one `C4Object::GetPhysical()` call at
+/// ObjectComDigDouble entry. C++ retains this pointer across Activate:
+/// mutations of that storage remain visible, while switching temporary
+/// mode or changing definition does not retarget it.
+#[derive(Clone)]
+enum DigDoublePhysicalBacking {
+    Temporary,
+    Info(PhysicalInfo),
+    Definition(String),
+}
 
 /// `ComName(byCom)` (C4ObjectCom.cpp:800-852) for raw com bytes; feeds the
 /// `Control{}`/`Contained{}` script callback names.
@@ -3531,6 +3544,11 @@ impl Engine {
         function: &str,
         args: &[Value],
     ) -> Result<Value, EngineError> {
+        if self.objects[index].destroyed
+            || self.objects[index].state.status == crate::ObjectStatus::Deleted
+        {
+            return Ok(Value::Nil);
+        }
         let definition_id = self.objects[index].definition_id.clone();
         let Some(library) = self
             .definitions
@@ -3809,13 +3827,65 @@ impl Engine {
         Ok(true)
     }
 
+    /// First nonzero-Status entry returned by `Contents.GetObject()`.
+    fn first_live_content_id(&self, index: usize) -> Option<ObjectId> {
+        self.objects[index]
+            .state
+            .contents
+            .iter()
+            .copied()
+            .find(|object_id| {
+                self.find_object_index(*object_id).is_some_and(|index| {
+                    !self.objects[index].destroyed
+                        && self.objects[index].state.status != crate::ObjectStatus::Deleted
+                })
+            })
+    }
+
+    fn dig_double_physical_backing(&self, index: usize) -> DigDoublePhysicalBacking {
+        let object = &self.objects[index];
+        if object.state.temporary_physical.is_some() {
+            DigDoublePhysicalBacking::Temporary
+        } else if object.state.info_physical.is_some() || object.state.crew_member {
+            DigDoublePhysicalBacking::Info(self.object_physical(index))
+        } else {
+            DigDoublePhysicalBacking::Definition(object.definition_id.clone())
+        }
+    }
+
+    fn physical_from_dig_double_backing(
+        &self,
+        index: usize,
+        backing: &DigDoublePhysicalBacking,
+    ) -> PhysicalInfo {
+        match backing {
+            DigDoublePhysicalBacking::Temporary => self.objects[index]
+                .state
+                .temporary_physical
+                .unwrap_or_default(),
+            DigDoublePhysicalBacking::Info(initial) => {
+                self.objects[index]
+                    .state
+                    .info_physical
+                    .or(self.objects[index].retired_info_physical)
+                    .unwrap_or(*initial)
+            }
+            DigDoublePhysicalBacking::Definition(definition_id) => self
+                .definitions
+                .get(definition_id)
+                .map(|definition| *definition.physical())
+                .unwrap_or_default(),
+        }
+    }
+
     /// `ObjectComDigDouble` (C4ObjectCom.cpp:531-571) — "activation":
-    /// contents Activate, linekit construction, chop, then own Activate.
+    /// contents Activate, linekit construction, chop, line pickup, then own
+    /// Activate.
     fn object_com_dig_double(&mut self, index: usize) -> Result<(), EngineError> {
-        let owner = self.objects[index].state.owner;
         let self_id = self.objects[index].id;
+        let physical_backing = self.dig_double_physical_backing(index);
         // Contents activation — first contents object only (:537-539).
-        if let Some(contents_id) = self.objects[index].state.contents.first().copied() {
+        if let Some(contents_id) = self.first_live_content_id(index) {
             if let Some(contents_index) = self.find_object_index(contents_id) {
                 let clonk_ref = compat::object_reference_value(self_id);
                 let value = self.contained_call(contents_index, "Activate", &[clonk_ref])?;
@@ -3823,71 +3893,320 @@ impl Engine {
                     return Ok(());
                 }
             }
-            // LNKT's script may decline activation; C++ then performs its
-            // engine-side ObjectComLineConstruction fallback (:542-547).
-            if self
-                .find_object_index(contents_id)
-                .is_some_and(|contents_index| {
-                    self.objects[contents_index].definition_id == "LNKT"
-                })
-                && self.object_com_line_construction(index, contents_id)?
-            {
-                return Ok(());
-            }
         }
+
+        let Some(index) = self.find_object_index(self_id) else {
+            return Ok(());
+        };
+        // Re-read the first content after Activate. A leading LNKT always
+        // consumes DigDouble even when line construction fails (:542-547).
+        let first_contents = self.first_live_content_id(index);
+        if first_contents.is_some_and(|contents_id| {
+            self.find_object_index(contents_id).is_some_and(|contents_index| {
+                self.objects[contents_index].definition_id == "LNKT"
+            })
+        }) {
+            let _ = self.object_com_line_construction(index)?;
+            return Ok(());
+        }
+
         // Chop (:549-558).
-        let physical = self.object_physical(index);
+        let physical = self.physical_from_dig_double_backing(index, &physical_backing);
         if physical.can_chop != 0 && self.object_procedure(index) != ActionProcedure::Swim {
             let position = self.objects[index].state.position;
             if let Some((_, target_id, target_ocf)) =
                 self.at_object(position, ocf::CHOP, Some(self_id))
             {
                 if target_ocf & ocf::CHOP != 0 {
+                    let owner = self.objects[index].state.owner;
                     self.player_object_command(owner, CommandId::Chop, Some(target_id), 0, 0)?;
                     return Ok(());
                 }
             }
         }
+
+        // Empty-hand line pickup follows Chop and has an outer physical/
+        // structure precheck before the helper repeats its live gate
+        // (C4ObjectCom.cpp:559-567).
+        if self
+            .physical_from_dig_double_backing(index, &physical_backing)
+            .can_construct
+            != 0
+            && self.first_live_content_id(index).is_none()
+        {
+            let position = self.objects[index].state.position;
+            if self
+                .at_object(position, ocf::LINE_CONSTRUCT, Some(self_id))
+                .is_some_and(|(_, _, object_ocf)| object_ocf & ocf::LINE_CONSTRUCT != 0)
+                && self.object_com_line_construction(index)?
+            {
+                return Ok(());
+            }
+        }
+
         // Own activation call (:569-570).
         let self_ref = compat::object_reference_value(self_id);
-        self.contained_call(index, "Activate", &[self_ref])?;
+        if let Some(index) = self.find_object_index(self_id) {
+            self.contained_call(index, "Activate", &[self_ref])?;
+        }
         Ok(())
     }
 
-    /// Carried-LNKT half of `ObjectComLineConstruction`
-    /// (C4ObjectCom.cpp:429-528): finish a live line attached to the kit,
-    /// or choose and create a new line at the full-con structure under the
-    /// Clonk. The no-kit line-pickup half (:392-427) remains separate work.
+    /// First C++ master-list object whose live `Connect` action targets the
+    /// supplied endpoint (`C4Game::FindObject`, C4Game.cpp:1391-1419).
+    fn find_connect_line_index(
+        &self,
+        target: ObjectId,
+        definition_id: Option<&str>,
+    ) -> Option<usize> {
+        self.exec_list.iter().rev().find_map(|object_id| {
+            let index = self.find_object_index(*object_id)?;
+            let object = &self.objects[index];
+            (!object.destroyed
+                && object.state.status.is_active()
+                && self.object_ocf_at_index(index) != 0
+                && definition_id.is_none_or(|id| object.definition_id == id)
+                && object.state.action.name == "Connect"
+                && (object.state.action.target == Some(target)
+                    || object.state.action.target2 == Some(target)))
+            .then_some(index)
+        })
+    }
+
+    fn play_line_construction_sound(&mut self, name: &str, clonk_id: ObjectId) {
+        self.pending_audio.push(crate::AudioCommand::PlaySound {
+            name: name.to_owned(),
+            target: Some(clonk_id),
+            volume: 100,
+            looped: false,
+            multiple: false,
+            custom_falloff: None,
+        });
+    }
+
+    fn line_construction_object_name(&self, object_id: ObjectId) -> String {
+        self.find_object_index(object_id)
+            .map(|index| &self.objects[index])
+            .and_then(|object| {
+                object
+                    .state
+                    .custom_name
+                    .clone()
+                    .or_else(|| {
+                        self.crew_object_infos
+                            .get(&object_id)
+                            .map(|info| info.name.clone())
+                    })
+                    .or_else(|| {
+                        self.definitions
+                            .get(&object.definition_id)
+                            .map(|definition| definition.name().to_owned())
+                    })
+            })
+            .unwrap_or_default()
+    }
+
+    /// `GameMsgObject` with the shipped US `LoadResStr` result. The engine's
+    /// process-global language table is not generalized yet, but ordering,
+    /// target replacement, and the classic text are still simulation-visible.
+    fn line_construction_message(&mut self, target: ObjectId, text: String) {
+        // C4GameMessageList::New replaces prior messages before its deleted
+        // target guard, so a failed GameMsgObject still performs the clear.
+        self.messages.clear_for_object(target);
+        let target_live = self.find_object_index(target).is_some_and(|index| {
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != crate::ObjectStatus::Deleted
+        });
+        if !target_live {
+            return;
+        }
+        self.messages.add_message(MessageSpec {
+            kind: message::MessageKind::Target,
+            text,
+            target: Some(target),
+            player: None,
+            offset: Vector2::ZERO,
+            color: 0xffff_ffff,
+            flags: 0,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        });
+    }
+
+    /// `ObjectComLineConstruction` (C4ObjectCom.cpp:379-529): stand and
+    /// physical gate, pickup without a kit, finish an attached line, or
+    /// create a new one.
     fn object_com_line_construction(
         &mut self,
         clonk_index: usize,
-        linekit_id: ObjectId,
     ) -> Result<bool, EngineError> {
-        let Some(linekit_index) = self.find_object_index(linekit_id) else {
+        // ObjectComLineConstruction enters Stand even when the following
+        // physical gate rejects construction (C4ObjectCom.cpp:384-390).
+        let clonk_id = self.objects[clonk_index].id;
+        let clonk_definition = self.objects[clonk_index].definition_id.clone();
+        self.objects[clonk_index].state.command_direction = CommandDirection::Stop;
+        if self.action_with_calls(clonk_index, &clonk_definition, "Walk")? {
+            if let Some(clonk_index) = self.find_object_index(clonk_id) {
+                let clonk = &mut self.objects[clonk_index];
+                clonk.fixed_velocity = FixedVec2::ZERO;
+                clonk.state.velocity = Vector2::ZERO;
+            }
+        }
+        let Some(clonk_index) = self.find_object_index(clonk_id) else {
             return Ok(false);
         };
-        if self.objects[linekit_index].definition_id != "LNKT"
-            || self.objects[linekit_index].destroyed
-        {
+        if self.object_physical(clonk_index).can_construct == 0 {
+            let clonk_name = self.line_construction_object_name(clonk_id);
+            self.line_construction_message(
+                clonk_id,
+                format!("{clonk_name} cannot create lines."),
+            );
             return Ok(false);
         }
 
-        let clonk_id = self.objects[clonk_index].id;
         let position = self.objects[clonk_index].state.position;
-        let active_line = self.objects.iter().position(|object| {
-            !object.destroyed
-                && object.state.status.is_active()
-                && object.state.action.name == "Connect"
-                && (object.state.action.target == Some(linekit_id)
-                    || object.state.action.target2 == Some(linekit_id))
-        });
+        let linekit_id = self.objects[clonk_index]
+            .state
+            .contents
+            .iter()
+            .copied()
+            .find(|linekit_id| {
+                self.find_object_index(*linekit_id).is_some_and(|index| {
+                    let linekit = &self.objects[index];
+                    !linekit.destroyed
+                        && linekit.state.status != crate::ObjectStatus::Deleted
+                        && self.object_ocf_at_index(index) != 0
+                        && linekit.definition_id == "LNKT"
+                })
+            });
+
+        // Line pickup (:392-427).
+        let Some(linekit_id) = linekit_id else {
+            let collection_limit = self
+                .definitions
+                .get(&self.objects[clonk_index].definition_id)
+                .and_then(crate::Definition::collection_limit);
+            if collection_limit.is_some_and(|limit| {
+                self.objects[clonk_index]
+                    .state
+                    .contents
+                    .iter()
+                    .filter(|object_id| {
+                        self.find_object_index(**object_id).is_some_and(|index| {
+                            !self.objects[index].destroyed
+                                && self.objects[index].state.status
+                                    != crate::ObjectStatus::Deleted
+                        })
+                    })
+                    .count()
+                    >= limit as usize
+            }) {
+                return Ok(false);
+            }
+
+            let Some((_, structure_id, structure_ocf)) =
+                self.at_object(position, ocf::LINE_CONSTRUCT, Some(clonk_id))
+            else {
+                return Ok(false);
+            };
+            if structure_ocf & ocf::LINE_CONSTRUCT == 0 {
+                return Ok(false);
+            }
+            let Some(line_index) = self.find_connect_line_index(structure_id, None) else {
+                return Ok(false);
+            };
+            let first = self.objects[line_index].state.action.target;
+            let second = self.objects[line_index].state.action.target2;
+            let endpoint_is_linekit = |engine: &Self, endpoint: Option<ObjectId>| {
+                endpoint
+                    .and_then(|endpoint| engine.find_object_index(endpoint))
+                    .is_some_and(|index| engine.objects[index].definition_id == "LNKT")
+            };
+            if endpoint_is_linekit(self, first) || endpoint_is_linekit(self, second) {
+                self.play_line_construction_sound("Error", clonk_id);
+                let line_name = self.line_construction_object_name(self.objects[line_index].id);
+                self.line_construction_message(
+                    clonk_id,
+                    format!("{line_name} is not fixed at the other end."),
+                );
+                return Ok(false);
+            }
+            if !self.definitions.contains_key("LNKT") {
+                return Ok(false);
+            }
+
+            let line_id = self.objects[line_index].id;
+            let line_owner = self.objects[line_index].state.owner;
+            let clonk_layer = self.objects[clonk_index].state.layer;
+            let mut linekit_config = crate::SpawnConfig::new("LNKT")
+                .with_position(Vector2::new(50, 50))
+                .with_owner(line_owner);
+            if let Some(layer) = clonk_layer {
+                linekit_config = linekit_config.with_layer(layer);
+            }
+            let linekit_id = self.spawn_object_with_initial_lifecycle(
+                linekit_config,
+                Some(clonk_id),
+            )?;
+            let Some(linekit_id) = linekit_id else {
+                return Ok(false);
+            };
+            if self.try_object_enter_with_reject_collect(linekit_id, clonk_id, true)?
+                != ObjectEnterOutcome::Entered
+            {
+                let _ = self.assign_object_removal(linekit_id)?;
+                return Ok(false);
+            }
+
+            self.play_line_construction_sound("Connect", clonk_id);
+            if let Some(line_index) = self.find_object_index(line_id) {
+                if self.objects[line_index].state.action.target == Some(structure_id) {
+                    self.objects[line_index].state.action.target = Some(linekit_id);
+                }
+                if self.objects[line_index].state.action.target2 == Some(structure_id) {
+                    self.objects[line_index].state.action.target2 = Some(linekit_id);
+                }
+            }
+            let line_name = self.line_construction_object_name(line_id);
+            let structure_name = self.line_construction_object_name(structure_id);
+            self.line_construction_message(
+                structure_id,
+                format!("{line_name} disconnected|from {structure_name}."),
+            );
+            return Ok(true);
+        };
+        let Some(linekit_index) = self.find_object_index(linekit_id) else {
+            return Ok(false);
+        };
+
+        let active_line = self.find_connect_line_index(linekit_id, None);
 
         let Some((structure_index, structure_id, structure_ocf)) =
             self.at_object(position, ocf::LINE_CONSTRUCT, Some(clonk_id))
         else {
+            self.play_line_construction_sound("Error", clonk_id);
+            self.line_construction_message(
+                clonk_id,
+                if active_line.is_some() {
+                    "Connection not possible.".to_owned()
+                } else {
+                    "Cannot create a new line here.".to_owned()
+                },
+            );
             return Ok(false);
         };
         if structure_ocf & ocf::LINE_CONSTRUCT == 0 {
+            self.play_line_construction_sound("Error", clonk_id);
+            self.line_construction_message(
+                clonk_id,
+                if active_line.is_some() {
+                    "Connection not possible.".to_owned()
+                } else {
+                    "Cannot create a new line here.".to_owned()
+                },
+            );
             return Ok(false);
         }
 
@@ -3895,9 +4214,14 @@ impl Engine {
             let first = self.objects[line_index].state.action.target;
             let second = self.objects[line_index].state.action.target2;
             if first == Some(structure_id) || second == Some(structure_id) {
-                let _ = self.objects[line_index].mark_destroyed();
-                self.update_sector_for_index(line_index);
-                self.note_objects_changed();
+                self.play_line_construction_sound("Connect", clonk_id);
+                let line_id = self.objects[line_index].id;
+                let line_name = self.line_construction_object_name(line_id);
+                self.line_construction_message(
+                    structure_id,
+                    format!("{line_name} disconnected."),
+                );
+                let _ = self.assign_object_removal(line_id)?;
                 return Ok(true);
             }
 
@@ -3919,26 +4243,44 @@ impl Engine {
                 }
                 2 => line_connect & crate::LINE_CONNECT_LIQUID_OUTPUT != 0,
                 3 => line_connect & crate::LINE_CONNECT_LIQUID_INPUT != 0,
-                _ => false,
+                _ => return Ok(false),
             };
             if !connect_ok {
+                self.play_line_construction_sound("Error", clonk_id);
+                let line_name =
+                    self.line_construction_object_name(self.objects[line_index].id);
+                let structure_name = self.line_construction_object_name(structure_id);
+                self.line_construction_message(
+                    structure_id,
+                    format!("{line_name} cannot be connected|to {structure_name}."),
+                );
                 return Ok(false);
             }
 
+            self.play_line_construction_sound("Connect", clonk_id);
             if first == Some(linekit_id) {
                 self.objects[line_index].state.action.target = Some(structure_id);
             }
             if second == Some(linekit_id) {
                 self.objects[line_index].state.action.target2 = Some(structure_id);
             }
-            self.objects[clonk_index]
-                .state
-                .contents
-                .retain(|&id| id != linekit_id);
-            self.objects[linekit_index].state.container = None;
-            let _ = self.objects[linekit_index].mark_destroyed();
-            self.update_sector_for_index(linekit_index);
-            self.note_objects_changed();
+            // Bare Exit() uses the default zero position/motion. Its return
+            // is ignored; AssignRemoval still follows even if a callback
+            // re-enters the kit (C4ObjectCom.cpp:479-480).
+            if let Some(previous) = self.objects[linekit_index].state.container {
+                let _ = self.exit_object_at_position_with_zero_motion(
+                    linekit_id,
+                    previous,
+                    Vector2::ZERO,
+                )?;
+            }
+            let _ = self.assign_object_removal(linekit_id)?;
+            let line_name = self.line_construction_object_name(self.objects[line_index].id);
+            let structure_name = self.line_construction_object_name(structure_id);
+            self.line_construction_message(
+                structure_id,
+                format!("{line_name} conntected|to {structure_name}"),
+            );
             return Ok(true);
         }
 
@@ -3948,12 +4290,9 @@ impl Engine {
             .map(|definition| definition.line_connect())
             .unwrap_or_default();
         let has_connected_line = |engine: &Self, definition_id: &str| {
-            engine.objects.iter().any(|object| {
-                !object.destroyed
-                    && object.definition_id == definition_id
-                    && object.state.action.name == "Connect"
-                    && object.state.action.target == Some(structure_id)
-            })
+            engine
+                .find_connect_line_index(structure_id, Some(definition_id))
+                .is_some()
         };
         let line_definition = if line_connect & crate::LINE_CONNECT_LIQUID_PUMP != 0
             && !has_connected_line(self, "SPIP")
@@ -3969,31 +4308,29 @@ impl Engine {
             None
         };
         let Some(line_definition) = line_definition else {
+            self.play_line_construction_sound("Error", clonk_id);
+            self.line_construction_message(
+                clonk_id,
+                "Cannot create a new line here.".to_owned(),
+            );
             return Ok(false);
         };
-        if !self.definitions.contains_key(line_definition) {
-            return Ok(false);
-        }
-
         let owner = self.objects[clonk_index].state.owner;
-        let line_position = self.objects[structure_index].state.position;
-        let line_id = self.spawn_object_with_initial_lifecycle(
-            crate::SpawnConfig::new(line_definition)
-                .with_position(line_position)
-                .with_owner(owner),
-            Some(structure_id),
+        let created = self.create_line_object(
+            line_definition,
+            owner,
+            structure_id,
+            linekit_id,
         )?;
-        let Some(line_index) = line_id.and_then(|id| self.find_object_index(id)) else {
-            return Ok(false);
-        };
-        let line = &mut self.objects[line_index];
-        line.state.action.name = "Connect".to_owned();
-        line.state.action.phase = 0;
-        line.state.action.ticks = 0;
-        line.state.action.time = 0;
-        line.state.action.target = Some(structure_id);
-        line.state.action.target2 = Some(linekit_id);
-        Ok(true)
+        if let Some(line_id) = created {
+            self.play_line_construction_sound("Connect", clonk_id);
+            let line_name = self.line_construction_object_name(line_id);
+            self.line_construction_message(
+                structure_id,
+                format!("New|{line_name}."),
+            );
+        }
+        Ok(created.is_some())
     }
 
     /// `ObjectComDownDouble` (C4ObjectCom.cpp:573-589): build or grab what
@@ -5155,6 +5492,21 @@ mod tests {
         engine.register_definition(definition).expect("register");
     }
 
+    fn register_builder_clonk(engine: &mut Engine, id: &str, script: &str) {
+        let mut definition = Definition::from_script(id, id, script).expect("script compiles");
+        definition.configure_actions(Some("Walk".to_string()), clonk_actions());
+        definition.set_movement_profile(MovementProfile::default());
+        definition.set_physical(PhysicalInfo {
+            walk: 70_000,
+            jump: 40_000,
+            dig: 40_000,
+            can_dig: 1,
+            can_construct: 1,
+            ..Default::default()
+        });
+        engine.register_definition(definition).expect("register");
+    }
+
     fn spawn_crew(engine: &mut Engine, def: &str, owner: i32) -> ObjectId {
         let crew = engine
             .spawn_object(
@@ -5167,6 +5519,127 @@ mod tests {
         engine.select_crew(owner, vec![crew]).expect("select");
         engine.set_crew_cursor(owner, Some(crew)).expect("cursor");
         crew
+    }
+
+    fn line_pickup_gate_fixture(
+        collection_limit: Option<u32>,
+        actor_has_rock: bool,
+        other_endpoint_is_kit: bool,
+    ) -> (Engine, ObjectId, ObjectId, ObjectId, ObjectId) {
+        line_pickup_gate_fixture_with_linekit(
+            collection_limit,
+            actor_has_rock,
+            other_endpoint_is_kit,
+            "#strict\n",
+            "#strict\n",
+        )
+    }
+
+    fn line_pickup_gate_fixture_with_linekit(
+        collection_limit: Option<u32>,
+        actor_has_rock: bool,
+        other_endpoint_is_kit: bool,
+        clonk_script: &str,
+        linekit_script: &str,
+    ) -> (Engine, ObjectId, ObjectId, ObjectId, ObjectId) {
+        let mut engine = Engine::new();
+        let mut clonk =
+            Definition::from_script("CLNK", "Clonk", clonk_script).expect("clonk compiles");
+        clonk.configure_actions(Some("Walk".to_owned()), clonk_actions());
+        clonk.set_movement_profile(MovementProfile::default());
+        clonk.set_physical(PhysicalInfo {
+            can_construct: 1,
+            ..Default::default()
+        });
+        clonk.set_collection_limit(collection_limit);
+        engine.register_definition(clonk).expect("clonk registers");
+        engine
+            .register_definition(
+                Definition::from_script("LNKT", "Linekit", linekit_script)
+                    .expect("linekit compiles"),
+            )
+            .expect("linekit registers");
+        if actor_has_rock {
+            engine
+                .register_definition(
+                    Definition::from_script("ROCK", "Rock", "#strict\n")
+                        .expect("rock compiles"),
+                )
+                .expect("rock registers");
+        }
+
+        let mut structure =
+            Definition::from_script("POWR", "Generator", "#strict\n")
+                .expect("structure compiles");
+        structure.set_shape_rect(Some(crate::DefinitionRect::new(-20, -20, 40, 40)));
+        structure.set_line_connect(crate::LINE_CONNECT_POWER_OUTPUT);
+        engine
+            .register_definition(structure)
+            .expect("structure registers");
+        let mut endpoint =
+            Definition::from_script("CONS", "Consumer", "#strict\n")
+                .expect("endpoint compiles");
+        endpoint.set_shape_rect(Some(crate::DefinitionRect::new(-20, -20, 40, 40)));
+        endpoint.set_line_connect(crate::LINE_CONNECT_POWER_INPUT);
+        engine
+            .register_definition(endpoint)
+            .expect("endpoint registers");
+        let mut line = Definition::from_script(
+            "PWRL",
+            "Power line",
+            "#strict\npublic func Initialize() { SetAction(\"Connect\"); return(1); }\n",
+        )
+        .expect("line compiles");
+        line.set_line(1);
+        line.set_shape_vertices(vec![
+            crate::ObjectVertex::default(),
+            crate::ObjectVertex::default(),
+        ]);
+        line.configure_actions(
+            Some("Connect".to_owned()),
+            HashMap::from([(
+                "Connect".to_owned(),
+                ActionSpec::default().with_procedure("connect"),
+            )]),
+        );
+        engine.register_definition(line).expect("line registers");
+
+        let structure = engine
+            .spawn_object(SpawnConfig::new("POWR").with_position(Vector2::new(100, 120)))
+            .expect("structure spawns");
+        let endpoint = if other_endpoint_is_kit {
+            engine
+                .spawn_object(SpawnConfig::new("LNKT").with_position(Vector2::new(200, 100)))
+                .expect("endpoint kit spawns")
+        } else {
+            engine
+                .spawn_object(SpawnConfig::new("CONS").with_position(Vector2::new(200, 120)))
+                .expect("endpoint spawns")
+        };
+        let crew = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_position(Vector2::new(100, 100))
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("crew spawns");
+        if actor_has_rock {
+            engine
+                .spawn_object(SpawnConfig::new("ROCK").with_container(crew))
+                .expect("rock spawns");
+        }
+        let mut connect_action = ActionState::new("Connect");
+        connect_action.target = Some(structure);
+        connect_action.target2 = Some(endpoint);
+        let line = engine
+            .spawn_object(
+                SpawnConfig::new("PWRL")
+                    .with_owner(2)
+                    .with_action(connect_action),
+            )
+            .expect("line spawns");
+        (engine, crew, line, structure, endpoint)
     }
 
     fn engine_with_counted_crew() -> (Engine, ObjectId, ObjectId) {
@@ -6267,16 +6740,270 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
     }
 
     #[test]
+    fn dig_double_keeps_the_entry_physical_backing_across_activate() {
+        fn run_case(
+            definition_can_chop: i32,
+            temporary_can_chop: Option<i32>,
+            activate_mode: i32,
+            activate_can_chop: i32,
+            actor_is_crew: bool,
+            remove_actor: bool,
+        ) -> Vec<String> {
+            let mut engine = Engine::new();
+            let mut clonk = Definition::from_script(
+                "CLNK",
+                "Clonk",
+                "#strict\n",
+            )
+            .expect("clonk compiles");
+            clonk.configure_actions(Some("Walk".to_owned()), clonk_actions());
+            clonk.set_physical(PhysicalInfo {
+                can_chop: definition_can_chop,
+                ..Default::default()
+            });
+            engine.register_definition(clonk).expect("clonk registers");
+
+            let removal_target = if remove_actor { "clonk" } else { "this()" };
+            let item_script = format!(
+                r#"#strict 2
+public func Activate(object clonk)
+{{
+  SetPhysical("CanChop", {activate_can_chop}, {activate_mode}, clonk);
+  RemoveObject({removal_target});
+  return(0);
+}}
+"#
+            );
+            engine
+                .register_definition(
+                    Definition::from_script("ITEM", "Item", &item_script)
+                        .expect("item compiles"),
+                )
+                .expect("item registers");
+            let mut tree = Definition::from_script("TREE", "Tree", "#strict\n")
+                .expect("tree compiles");
+            tree.set_chopable(true);
+            tree.set_category(crate::CATEGORY_STATIC_BACK);
+            tree.set_shape_rect(Some(crate::DefinitionRect::new(-10, -20, 20, 40)));
+            engine.register_definition(tree).expect("tree registers");
+            engine
+                .register_player(PlayerConfig::new(1, "Test"))
+                .expect("player registers");
+
+            let command_crew = engine
+                .spawn_object(
+                    SpawnConfig::new("CLNK")
+                        .with_owner(1)
+                        .with_crew_member(true)
+                        .with_position(Vector2::new(20, 20))
+                        .with_action(ActionState::new("Walk")),
+                )
+                .expect("command crew spawns");
+            engine
+                .select_crew(1, [command_crew])
+                .expect("command crew selected");
+            engine
+                .set_crew_cursor(1, Some(command_crew))
+                .expect("command cursor set");
+            let actor = engine
+                .spawn_object(
+                    SpawnConfig::new("CLNK")
+                        .with_owner(1)
+                        .with_crew_member(actor_is_crew)
+                        .with_position(Vector2::new(100, 100))
+                        .with_action(ActionState::new("Walk"))
+                        .with_loaded(true),
+                )
+                .expect("clonk spawns");
+            if actor_is_crew {
+                let actor_index = engine.find_object_index(actor).expect("actor remains live");
+                engine.objects[actor_index].state.info_physical = Some(PhysicalInfo {
+                    can_chop: definition_can_chop,
+                    ..Default::default()
+                });
+            }
+            let tree = engine
+                .spawn_object(
+                    SpawnConfig::new("TREE")
+                        .with_position(Vector2::new(100, 100))
+                        .with_category(crate::CATEGORY_STATIC_BACK)
+                        .with_loaded(true),
+                )
+                .expect("tree spawns");
+            engine
+                .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+                .expect("item spawns");
+            if let Some(can_chop) = temporary_can_chop {
+                let actor_index = engine.find_object_index(actor).expect("actor remains live");
+                engine.objects[actor_index].state.temporary_physical = Some(PhysicalInfo {
+                    can_chop,
+                    ..Default::default()
+                });
+            }
+
+            let actor_index = engine.find_object_index(actor).expect("actor remains live");
+            engine
+                .object_com_dig_double(actor_index)
+                .expect("DigDouble returns normally");
+            assert_ne!(
+                engine
+                    .object_snapshot(tree)
+                    .expect("tree remains live")
+                    .ocf
+                    & ocf::CHOP,
+                0
+            );
+            engine
+                .object_snapshot(command_crew)
+                .expect("command crew remains live")
+                .command_stack
+                .command_names()
+        }
+
+        assert_eq!(
+            run_case(0, Some(0), 0, 1, false, false),
+            vec!["Chop"],
+            "PHYS_Current mutates the temporary backing captured at entry"
+        );
+        assert_eq!(
+            run_case(1, None, 2, 0, false, false),
+            vec!["Chop"],
+            "enabling temporary physicals does not retarget the captured definition pointer"
+        );
+        assert_eq!(
+            run_case(0, None, 0, 1, true, true),
+            vec!["Chop"],
+            "a captured Info physical remains valid after AssignRemoval retires its object"
+        );
+    }
+
+    #[test]
+    fn dig_double_does_not_call_activate_on_a_deleted_clonk() {
+        let mut engine = Engine::new();
+        register_clonk(
+            &mut engine,
+            "CLNK",
+            "#strict\npublic func Activate() { DoDamage(1); return(1); }\n",
+        );
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "ITEM",
+                    "Item",
+                    r#"#strict 2
+public func Activate(object clonk)
+{
+  RemoveObject(clonk);
+  return(0);
+}
+"#,
+                )
+                .expect("item compiles"),
+            )
+            .expect("item registers");
+        let crew = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("clonk spawns");
+        engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(crew))
+            .expect("item spawns");
+
+        let crew_index = engine.find_object_index(crew).expect("clonk starts live");
+        engine
+            .object_com_dig_double(crew_index)
+            .expect("DigDouble returns normally");
+
+        let crew_index = engine.find_object_index(crew).expect("tombstone remains linked");
+        assert!(engine.objects[crew_index].destroyed);
+        assert_eq!(
+            engine.objects[crew_index].state.damage, 0,
+            "C4Object::Call returns nil without running scripts once Status is zero"
+        );
+    }
+
+    #[test]
+    fn line_message_to_deleted_target_only_clears_the_old_message() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("TARG", "Target", "#strict\n")
+                    .expect("target compiles"),
+            )
+            .expect("target registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+        engine.line_construction_message(target, "old".to_owned());
+        assert_eq!(
+            engine
+                .messages
+                .snapshot()
+                .iter()
+                .filter(|message| message.target == Some(target))
+                .count(),
+            1
+        );
+        let target_index = engine.find_object_index(target).expect("target remains linked");
+        let _ = engine.objects[target_index].mark_destroyed();
+
+        engine.line_construction_message(target, "new".to_owned());
+
+        assert!(engine
+            .messages
+            .snapshot()
+            .iter()
+            .all(|message| message.target != Some(target)));
+    }
+
+    #[test]
     fn dig_double_with_linekit_starts_and_connects_power_line() {
         // When LNKT's script Activate does not consume DigDouble, C++ falls
         // through to ObjectComLineConstruction: a full-con structure under
         // the Clonk with C4D_Power_Output starts PWRL from that structure to
         // the carried kit (C4ObjectCom.cpp:542-547,487-528).
         let mut engine = Engine::new();
-        register_clonk(&mut engine, "CLNK", "#strict\n");
+        register_builder_clonk(
+            &mut engine,
+            "CLNK",
+            r#"#strict 2
+local line_events;
+public func NoteLineEvent(int event)
+{
+  line_events = line_events * 10 + event;
+  return(1);
+}
+protected func Ejection(object item)
+{
+  NoteLineEvent(1);
+  return(1);
+}
+"#,
+        );
 
-        let linekit = Definition::from_script("LNKT", "Linekit", "#strict\n")
-            .expect("linekit compiles");
+        let mut linekit = Definition::from_script(
+            "LNKT",
+            "Linekit",
+            r#"#strict 2
+local removal_observer;
+protected func Departure(object parent)
+{
+  removal_observer = parent;
+  parent->NoteLineEvent(2);
+  return(1);
+}
+protected func Destruction()
+{
+  removal_observer->NoteLineEvent(3);
+  return(1);
+}
+"#,
+        )
+        .expect("linekit compiles");
+        linekit.set_shape_rect(Some(crate::DefinitionRect::new(-3, -12, 6, 28)));
         engine
             .register_definition(linekit)
             .expect("linekit registers");
@@ -6296,21 +7023,49 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
             .register_definition(consumer)
             .expect("consumer registers");
 
-        let mut line = Definition::from_script("PWRL", "Power line", "#strict\n")
-            .expect("line compiles");
+        let mut line = Definition::from_script(
+            "PWRL",
+            "Power line",
+            r#"#strict 2
+static construction_vertex_count;
+static construction_vertex_x;
+static construction_vertex_y;
+static construction_width;
+static construction_height;
+public func Construction()
+{
+  construction_vertex_count = GetVertexNum();
+  construction_vertex_x = GetVertex(0, VTX_X);
+  construction_vertex_y = GetVertex(0, VTX_Y);
+  construction_width = GetObjWidth();
+  construction_height = GetObjHeight();
+  while (GetVertexNum()) RemoveVertex(0);
+  return(1);
+}
+public func Initialize() { SetAction("Connect"); return(1); }
+"#,
+        )
+        .expect("line compiles");
         line.set_line(1);
+        line.set_shape_rect(Some(crate::DefinitionRect::new(-4, -6, 8, 12)));
         line.set_shape_vertices(vec![
             crate::ObjectVertex {
-                x: 0,
-                y: 0,
-                cnat: 0,
-                friction: 0,
+                x: 11,
+                y: 12,
+                cnat: crate::CNAT_LEFT,
+                friction: 3,
             },
             crate::ObjectVertex {
-                x: 0,
-                y: 0,
-                cnat: 0,
-                friction: 0,
+                x: 21,
+                y: 22,
+                cnat: crate::CNAT_RIGHT,
+                friction: 4,
+            },
+            crate::ObjectVertex {
+                x: 777,
+                y: 888,
+                cnat: crate::CNAT_BOTTOM,
+                friction: 9,
             },
         ]);
         line.configure_actions(
@@ -6382,10 +7137,43 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
         assert_eq!(power_line.action.name, "Connect");
         assert_eq!(power_line.action.target, Some(generator));
         assert_eq!(power_line.action.target2, Some(kit));
+        assert_eq!(
+            power_line
+                .vertices
+                .iter()
+                .map(|vertex| (vertex.x, vertex.y, vertex.cnat, vertex.friction))
+                .collect::<Vec<_>>(),
+            vec![
+                (100, 110, crate::CNAT_LEFT, 3),
+                (100, 107, crate::CNAT_RIGHT, 4),
+            ],
+            "CreateLine installs exactly two endpoint positions while retaining dormant slot metadata"
+        );
+        let globals = &engine.snapshot().script_globals.named;
+        assert_eq!(globals.get("construction_vertex_count"), Some(&Value::Int(3)));
+        assert_eq!(globals.get("construction_vertex_x"), Some(&Value::Int(11)));
+        assert_eq!(globals.get("construction_vertex_y"), Some(&Value::Int(12)));
+        assert_eq!(globals.get("construction_width"), Some(&Value::Int(8)));
+        assert_eq!(globals.get("construction_height"), Some(&Value::Int(12)));
+        assert!(engine.messages.snapshot().iter().any(|message| {
+            message.target == Some(generator)
+                && message.lines == ["New".to_owned(), "Power line.".to_owned()]
+        }));
 
         // At the other endpoint, the same real DigDouble accepts PWRL on a
         // C4D_Power_Input structure, swaps the kit endpoint, exits the kit,
         // and removes it (C4ObjectCom.cpp:429-484).
+        engine
+            .apply_object_update(
+                kit,
+                crate::ObjectUpdate::new().with_status(crate::ObjectStatus::Inactive),
+            )
+            .expect("carried kit deactivates");
+        assert_eq!(
+            engine.object_snapshot(kit).expect("kit remains linked").status,
+            crate::ObjectStatus::Inactive,
+            "the completion path must find an inactive carried linekit"
+        );
         engine
             .player_in_com(1, COM_DIG + COM_RELEASE_OFFSET, 0)
             .expect("release first double");
@@ -6414,6 +7202,626 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
             .expect("crew remains live")
             .contents
             .contains(&kit));
+        let crew_index = engine.find_object_index(crew).expect("crew remains live");
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .local_vars
+                .get("line_events"),
+            Some(&Value::Int(123)),
+            "Exit calls Ejection then Departure before AssignRemoval calls Destruction"
+        );
+        assert!(engine.messages.snapshot().iter().any(|message| {
+            message.target == Some(consumer)
+                && message.lines
+                    == [
+                        "Power line conntected".to_owned(),
+                        "to Consumer".to_owned(),
+                    ]
+        }));
+    }
+
+    #[test]
+    fn line_construction_stands_before_can_construct_failure() {
+        // ObjectComLineConstruction always calls ObjectActionStand before
+        // checking CanConstruct (C4ObjectCom.cpp:384-390).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        engine
+            .register_definition(
+                Definition::from_script("LNKT", "Linekit", "#strict\n")
+                    .expect("linekit compiles"),
+            )
+            .expect("linekit registers");
+        let mut structure =
+            Definition::from_script("POWR", "Generator", "#strict\n")
+                .expect("structure compiles");
+        structure.set_shape_rect(Some(crate::DefinitionRect::new(-20, -20, 40, 40)));
+        structure.set_line_connect(crate::LINE_CONNECT_POWER_OUTPUT);
+        engine
+            .register_definition(structure)
+            .expect("structure registers");
+        let mut line = Definition::from_script("PWRL", "Power line", "#strict\n")
+            .expect("line compiles");
+        line.set_line(1);
+        line.configure_actions(
+            Some("Connect".to_owned()),
+            HashMap::from([(
+                "Connect".to_owned(),
+                ActionSpec::default().with_procedure("connect"),
+            )]),
+        );
+        engine.register_definition(line).expect("line registers");
+
+        let crew = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_position(Vector2::new(100, 100))
+                    .with_action(ActionState::new("Jump"))
+                    .with_command_direction(CommandDirection::Right)
+                    .with_velocity(Vector2::new(7, -3)),
+            )
+            .expect("crew spawns");
+        let kit = engine
+            .spawn_object(SpawnConfig::new("LNKT").with_container(crew))
+            .expect("kit spawns");
+        let structure = engine
+            .spawn_object(SpawnConfig::new("POWR").with_position(Vector2::new(100, 120)))
+            .expect("structure spawns");
+        let crew_index = engine.find_object_index(crew).expect("crew remains live");
+        assert!(engine
+            .at_object(
+                Vector2::new(100, 100),
+                ocf::LINE_CONSTRUCT,
+                Some(crew),
+            )
+            .is_some_and(|(_, id, object_ocf)| {
+                id == structure && object_ocf & ocf::LINE_CONSTRUCT != 0
+            }));
+
+        assert!(!engine
+            .object_com_line_construction(crew_index)
+            .expect("line construction returns normally"));
+
+        let crew = engine.object_snapshot(crew).expect("crew remains live");
+        assert_eq!(crew.action.name, "Walk");
+        assert_eq!(crew.command_direction, CommandDirection::Stop);
+        assert_eq!(crew.velocity, Vector2::ZERO);
+        assert!(crew.contents.contains(&kit));
+        assert!(engine
+            .objects
+            .iter()
+            .all(|object| object.definition_id != "PWRL"));
+        assert!(engine.messages.snapshot().iter().any(|message| {
+            message.target == Some(crew.id)
+                && message.lines == ["CLNK cannot create lines.".to_owned()]
+        }));
+    }
+
+    #[test]
+    fn line_short_circuit_calls_destruction() {
+        // Reconnecting a carried line to its existing structure removes the
+        // line through AssignRemoval, including Destruction
+        // (C4ObjectCom.cpp:445-453).
+        let mut engine = Engine::new();
+        register_builder_clonk(
+            &mut engine,
+            "CLNK",
+            r#"#strict 2
+local line_destructions;
+local destroyed_line;
+local destruction_saw_line;
+public func NoteLineDestruction(object line)
+{
+  line_destructions++;
+  if (line) destruction_saw_line = 1;
+  destroyed_line = line;
+  return(1);
+}
+"#,
+        );
+        engine
+            .register_definition(
+                Definition::from_script("LNKT", "Linekit", "#strict\n")
+                    .expect("linekit compiles"),
+            )
+            .expect("linekit registers");
+
+        let mut structure =
+            Definition::from_script("POWR", "Generator", "#strict\n")
+                .expect("structure compiles");
+        structure.set_shape_rect(Some(crate::DefinitionRect::new(-20, -20, 40, 40)));
+        structure.set_line_connect(crate::LINE_CONNECT_POWER_OUTPUT);
+        engine
+            .register_definition(structure)
+            .expect("structure registers");
+
+        let mut line = Definition::from_script(
+            "PWRL",
+            "Power line",
+            r#"#strict 2
+local observer;
+local stop_order;
+local lower_saw_upper;
+local abort_saw_late;
+local late_stops;
+public func Arm(object target)
+{
+  observer = target;
+  AddEffect("Lower", this(), 100, 0, this());
+  AddEffect("Upper", this(), 200, 0, this());
+  return(1);
+}
+protected func FxUpperStop(object target, int number, int reason)
+{
+  stop_order = stop_order * 10 + 2;
+  return(-1);
+}
+protected func FxLowerStop(object target, int number, int reason)
+{
+  stop_order = stop_order * 10 + 1;
+  lower_saw_upper = !!GetEffect("Upper", target);
+  AddEffect("Late", target, 1, 0, target);
+  return(0);
+}
+protected func FxLateStop()
+{
+  late_stops++;
+  return(0);
+}
+protected func RemovedAbort()
+{
+  stop_order = stop_order * 10 + 3;
+  abort_saw_late = !!GetEffect("Late", this());
+  return(1);
+}
+protected func Destruction()
+{
+  observer->NoteLineDestruction(this());
+  return(1);
+}
+"#,
+        )
+        .expect("line compiles");
+        line.set_c4_callback_convention(true);
+        line.set_line(1);
+        line.set_shape_vertices(vec![
+            crate::ObjectVertex {
+                x: 0,
+                y: 0,
+                cnat: 0,
+                friction: 0,
+            },
+            crate::ObjectVertex {
+                x: 0,
+                y: 0,
+                cnat: 0,
+                friction: 0,
+            },
+        ]);
+        line.configure_actions(
+            Some("Connect".to_owned()),
+            HashMap::from([(
+                "Connect".to_owned(),
+                ActionSpec::default()
+                    .with_procedure("connect")
+                    .with_abort_call("RemovedAbort"),
+            )]),
+        );
+        engine.register_definition(line).expect("line registers");
+
+        let structure = engine
+            .spawn_object(SpawnConfig::new("POWR").with_position(Vector2::new(100, 120)))
+            .expect("structure spawns");
+        let crew = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_position(Vector2::new(100, 100))
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("crew spawns");
+        let kit = engine
+            .spawn_object(SpawnConfig::new("LNKT").with_container(crew))
+            .expect("kit spawns");
+        let mut connect_action = ActionState::new("Connect");
+        connect_action.target = Some(structure);
+        connect_action.target2 = Some(kit);
+        let line = engine
+            .spawn_object(
+                SpawnConfig::new("PWRL")
+                    .with_owner(1)
+                    .with_action(connect_action),
+            )
+            .expect("line spawns");
+        let line_index = engine.find_object_index(line).expect("line remains live");
+        engine
+            .call_object_function(
+                line_index,
+                "Arm",
+                vec![compat::object_reference_value(crew)],
+            )
+            .expect("line observer arms");
+        assert_eq!(
+            engine.objects[line_index]
+                .state
+                .effects
+                .iter()
+                .map(|effect| (effect.name.as_str(), effect.command_target))
+                .collect::<Vec<_>>(),
+            vec![("Lower", Some(line.as_u64() as i32)), ("Upper", Some(line.as_u64() as i32))]
+        );
+
+        let crew_index = engine.find_object_index(crew).expect("crew remains live");
+        assert!(engine
+            .object_com_line_construction(crew_index)
+            .expect("short circuit completes"));
+
+        assert!(engine
+            .find_object_index(line)
+            .is_none_or(|index| engine.objects[index].destroyed));
+        let crew_index = engine.find_object_index(crew).expect("crew remains live");
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .local_vars
+                .get("line_destructions"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .local_vars
+                .get("destroyed_line"),
+            Some(&Value::Nil),
+            "AssignRemoval clears C4Value references to the removed line synchronously"
+        );
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .local_vars
+                .get("destruction_saw_line"),
+            Some(&Value::Int(1)),
+            "Destruction must observe its live argument before AssignRemoval clears it"
+        );
+        let line_index = engine.find_object_index(line).expect("line tombstone remains linked");
+        let line_locals = &engine.objects[line_index].state.local_vars;
+        assert_eq!(line_locals.get("stop_order"), Some(&Value::Int(213)));
+        assert_eq!(
+            line_locals.get("lower_saw_upper"),
+            Some(&Value::Bool(true)),
+            "tail-first ClearAll keeps a denied later effect visible to the earlier Stop"
+        );
+        assert_eq!(
+            line_locals.get("abort_saw_late"),
+            Some(&Value::Bool(false)),
+            "effects added by Stop are deleted before SetAction(Idle) runs AbortCall"
+        );
+        assert_eq!(
+            line_locals.get("late_stops"),
+            Some(&Value::Nil),
+            "the post-ClearAll list deletion emits no second Stop callback"
+        );
+        assert!(engine.objects[crew_index].state.contents.contains(&kit));
+        assert!(engine.messages.snapshot().iter().any(|message| {
+            message.target == Some(structure)
+                && message.lines == ["Power line disconnected.".to_owned()]
+        }));
+    }
+
+    #[test]
+    fn dig_double_without_kit_picks_up_connected_line() {
+        // With empty contents, DigDouble over a line-connect structure calls
+        // ObjectComLineConstruction's pickup half: create a kit owned by the
+        // line owner, collect it, and retarget the structure endpoint
+        // (C4ObjectCom.cpp:559-567,392-427).
+        let (mut engine, crew, line, _structure, endpoint) =
+            line_pickup_gate_fixture(None, false, false);
+
+        let crew_index = engine.find_object_index(crew).expect("crew remains live");
+        engine
+            .object_com_dig_double(crew_index)
+            .expect("DigDouble returns normally");
+
+        let crew_snapshot = engine.object_snapshot(crew).expect("crew remains live");
+        let kits = crew_snapshot
+            .contents
+            .iter()
+            .filter_map(|id| engine.object_snapshot(*id))
+            .filter(|object| object.definition_id == "LNKT")
+            .collect::<Vec<_>>();
+        assert_eq!(kits.len(), 1, "pickup creates and collects one linekit");
+        assert_eq!(kits[0].owner, 2, "the line owner owns the new kit");
+        assert_eq!(kits[0].container, Some(crew));
+        let line = engine.object_snapshot(line).expect("line remains live");
+        assert_eq!(line.action.target, Some(kits[0].id));
+        assert_eq!(line.action.target2, Some(endpoint));
+        assert!(engine.messages.snapshot().iter().any(|message| {
+            message.target == Some(_structure)
+                && message.lines
+                    == [
+                        "Power line disconnected".to_owned(),
+                        "from Generator.".to_owned(),
+                    ]
+        }));
+    }
+
+    #[test]
+    fn line_pickup_enters_an_inactive_kit_in_cpp_callback_order() {
+        let clonk_script = r#"#strict 2
+protected func RejectCollect(id, object item)
+{
+  item->NoteEnter(2);
+  return(0);
+}
+protected func Collection2(object item)
+{
+  item->NoteEnter(3);
+  return(1);
+}
+"#;
+        let linekit_script = r#"#strict 2
+local enter_order;
+public func Construction()
+{
+  CreateMenu(LNKT, this(), this(), 0, "Kit");
+  SetObjectStatus(2);
+  return(1);
+}
+public func NoteEnter(int digit)
+{
+  enter_order = enter_order * 10 + digit;
+  return(1);
+}
+protected func RejectEntrance()
+{
+  NoteEnter(1);
+  return(0);
+}
+protected func Entrance()
+{
+  NoteEnter(4);
+  return(1);
+}
+"#;
+        let (mut engine, crew, line, structure, endpoint) =
+            line_pickup_gate_fixture_with_linekit(
+                None,
+                false,
+                false,
+                clonk_script,
+                linekit_script,
+            );
+        let linekit_definition = engine
+            .definitions
+            .get_mut("LNKT")
+            .expect("linekit definition remains registered");
+        linekit_definition.set_shape_rect(Some(crate::DefinitionRect::new(-2, -2, 4, 4)));
+        linekit_definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(
+            0, 0, 4, 4, 0, 0,
+        )));
+        let densities = vec![0, 100, 100];
+        let names = vec![None, Some("Earth".to_owned()), Some("Vehicle".to_owned())];
+        let grid = crate::landscape::PixelGrid::new(
+            256,
+            256,
+            vec![0; 256 * 256],
+            densities,
+            names,
+            vec![None; 3],
+        );
+        let mut landscape = Landscape::new(256, vec![256; 256]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+
+        let crew_index = engine.find_object_index(crew).expect("clonk remains live");
+        assert!(engine
+            .object_com_line_construction(crew_index)
+            .expect("inactive pickup returns normally"));
+
+        let kit = engine
+            .object_snapshot(crew)
+            .expect("clonk remains live")
+            .contents
+            .into_iter()
+            .find(|object_id| {
+                engine
+                    .object_snapshot(*object_id)
+                    .is_some_and(|object| object.definition_id == "LNKT")
+            })
+            .expect("pickup collects the new kit");
+        let kit_index = engine.find_object_index(kit).expect("kit remains linked");
+        assert_eq!(engine.objects[kit_index].state.status, crate::ObjectStatus::Inactive);
+        assert_eq!(engine.objects[kit_index].state.container, Some(crew));
+        assert_eq!(
+            engine.objects[kit_index].state.local_vars.get("enter_order"),
+            Some(&Value::Int(1234)),
+            "RejectEntrance, RejectCollect, Collection2, and Entrance keep C++ order"
+        );
+        assert!(
+            engine.objects[kit_index].state.menu.is_none(),
+            "Enter forcibly closes the entering object's menu before linking"
+        );
+        assert!(
+            engine.objects[kit_index].solid_mask_bake.is_none(),
+            "Enter removes the old-position solid mask before CopyMotion"
+        );
+        let line = engine.object_snapshot(line).expect("line remains live");
+        assert_eq!(line.action.target, Some(kit));
+        assert_eq!(line.action.target2, Some(endpoint));
+        assert_ne!(line.action.target, Some(structure));
+    }
+
+    #[test]
+    fn line_pickup_respects_collection_limit_before_creating_a_kit() {
+        // The nonzero CollectionLimit gate precedes AtObject, line lookup,
+        // and linekit creation (C4ObjectCom.cpp:394-395).
+        let (mut engine, crew, line, structure, endpoint) =
+            line_pickup_gate_fixture(Some(1), true, false);
+        let crew_index = engine.find_object_index(crew).expect("crew remains live");
+
+        assert!(!engine
+            .object_com_line_construction(crew_index)
+            .expect("collection-limit rejection returns normally"));
+
+        let line = engine.object_snapshot(line).expect("line remains live");
+        assert_eq!(line.action.target, Some(structure));
+        assert_eq!(line.action.target2, Some(endpoint));
+        assert!(engine
+            .objects
+            .iter()
+            .all(|object| object.definition_id != "LNKT"));
+    }
+
+    #[test]
+    fn line_pickup_rejects_a_line_already_ending_in_a_kit() {
+        // A kit at either endpoint prevents a second pickup kit
+        // (C4ObjectCom.cpp:404-410).
+        let (mut engine, crew, line, structure, endpoint_kit) =
+            line_pickup_gate_fixture(None, false, true);
+        let crew_index = engine.find_object_index(crew).expect("crew remains live");
+
+        assert!(!engine
+            .object_com_line_construction(crew_index)
+            .expect("double-kit rejection returns normally"));
+
+        let line = engine.object_snapshot(line).expect("line remains live");
+        assert_eq!(line.action.target, Some(structure));
+        assert_eq!(line.action.target2, Some(endpoint_kit));
+        assert_eq!(
+            engine
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "LNKT" && !object.destroyed)
+                .count(),
+            1,
+            "no second linekit is created"
+        );
+        assert!(engine.messages.snapshot().iter().any(|message| {
+            message.target == Some(crew)
+                && message.lines
+                    == ["Power line is not fixed at the other end.".to_owned()]
+        }));
+    }
+
+    #[test]
+    fn rejected_linekit_pickup_destroys_the_uncollected_kit() {
+        // Enter receives a RejectCollect result pointer. A collector veto
+        // aborts pickup and the freshly-created kit is AssignRemoval'd before
+        // the line can be retargeted (C4ObjectCom.cpp:412-418).
+        let mut engine = Engine::new();
+        register_builder_clonk(
+            &mut engine,
+            "CLNK",
+            r#"#strict 2
+local rejected_kit_destructions;
+protected func RejectCollect(id, object item)
+{
+  item->Arm(this());
+  return(1);
+}
+public func NoteRejectedKitDestruction()
+{
+  rejected_kit_destructions++;
+  return(1);
+}
+"#,
+        );
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "LNKT",
+                    "Linekit",
+                    r#"#strict 2
+local observer;
+public func Arm(object target)
+{
+  observer = target;
+  return(1);
+}
+protected func Destruction()
+{
+  observer->NoteRejectedKitDestruction();
+  return(1);
+}
+"#,
+                )
+                .expect("linekit compiles"),
+            )
+            .expect("linekit registers");
+
+        let mut structure =
+            Definition::from_script("POWR", "Generator", "#strict\n")
+                .expect("structure compiles");
+        structure.set_shape_rect(Some(crate::DefinitionRect::new(-20, -20, 40, 40)));
+        structure.set_line_connect(crate::LINE_CONNECT_POWER_OUTPUT);
+        engine
+            .register_definition(structure)
+            .expect("structure registers");
+        let mut endpoint =
+            Definition::from_script("CONS", "Consumer", "#strict\n")
+                .expect("endpoint compiles");
+        endpoint.set_shape_rect(Some(crate::DefinitionRect::new(-20, -20, 40, 40)));
+        engine
+            .register_definition(endpoint)
+            .expect("endpoint registers");
+        let mut line = Definition::from_script("PWRL", "Power line", "#strict\n")
+            .expect("line compiles");
+        line.set_line(1);
+        line.configure_actions(
+            Some("Connect".to_owned()),
+            HashMap::from([(
+                "Connect".to_owned(),
+                ActionSpec::default().with_procedure("connect"),
+            )]),
+        );
+        engine.register_definition(line).expect("line registers");
+
+        let structure = engine
+            .spawn_object(SpawnConfig::new("POWR").with_position(Vector2::new(100, 120)))
+            .expect("structure spawns");
+        let endpoint = engine
+            .spawn_object(SpawnConfig::new("CONS").with_position(Vector2::new(200, 120)))
+            .expect("endpoint spawns");
+        let crew = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_position(Vector2::new(100, 100))
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("crew spawns");
+        let mut connect_action = ActionState::new("Connect");
+        connect_action.target = Some(structure);
+        connect_action.target2 = Some(endpoint);
+        let line = engine
+            .spawn_object(
+                SpawnConfig::new("PWRL")
+                    .with_owner(2)
+                    .with_action(connect_action),
+            )
+            .expect("line spawns");
+
+        let crew_index = engine.find_object_index(crew).expect("crew remains live");
+        assert!(!engine
+            .object_com_line_construction(crew_index)
+            .expect("pickup rejection returns normally"));
+
+        let line = engine.object_snapshot(line).expect("line remains live");
+        assert_eq!(line.action.target, Some(structure));
+        assert_eq!(line.action.target2, Some(endpoint));
+        let crew_index = engine.find_object_index(crew).expect("crew remains live");
+        assert!(engine.objects[crew_index].state.contents.is_empty());
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .local_vars
+                .get("rejected_kit_destructions"),
+            Some(&Value::Int(1))
+        );
+        assert!(engine.objects.iter().all(|object| {
+            object.definition_id != "LNKT" || object.destroyed
+        }));
     }
 
     #[test]

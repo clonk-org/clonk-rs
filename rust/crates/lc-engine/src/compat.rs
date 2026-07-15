@@ -36664,7 +36664,7 @@ impl EffectHostContext {
             state.action.target2,
             state.shape_vertices.clone(),
             metadata.ocf_base,
-            metadata.crew_member,
+            state.crew_member,
             state.plr_view_range,
             state.graphics_overlays.clone(),
             state.base_graphics.clone(),

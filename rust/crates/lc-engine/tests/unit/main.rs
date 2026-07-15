@@ -42600,9 +42600,10 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         // Engine callbacks are fail-safe, so a Death error must still permit
         // Destruction and removal.
         let script = r#"
-            static iOrder, iTimer, iStep, iEffectOrder;
+            static iOrder, iTimer, iStep, iEffectOrder, iDeathEffectOrder;
             func Death() {
                 iOrder = 1;
+                iDeathEffectOrder = iEffectOrder;
                 iEffectOrder = 0;
                 MissingDeathFunction();
             }
@@ -42658,9 +42659,14 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         let globals = engine.snapshot().script_globals.named;
         assert_eq!(globals.get("iOrder"), Some(&Value::Int(12)));
         assert_eq!(
-            globals.get("iEffectOrder"),
+            globals.get("iDeathEffectOrder"),
             Some(&Value::Int(21)),
-            "AssignRemoval clears effects from high to low list order"
+            "AssignDeath clears effects from high to low before Death"
+        );
+        assert_eq!(
+            globals.get("iEffectOrder"),
+            Some(&Value::Nil),
+            "AssignRemoval skips the already-dead effect nodes after Death"
         );
         assert_eq!(globals.get("iTimer"), Some(&Value::Nil));
         assert_eq!(globals.get("iStep"), Some(&Value::Nil));

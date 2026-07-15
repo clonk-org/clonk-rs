@@ -4914,6 +4914,10 @@ pub struct Object {
     /// frame (`C4Movement.cpp:376`).
     #[doc(hidden)] pub rotation_velocity: C4Fixed,
     #[doc(hidden)] pub destroyed: bool,
+    /// Last `Info->Physical` storage after AssignRemoval clears the object's
+    /// Info pointer. A native caller may still hold the original C++ pointer
+    /// for the remainder of the stack frame (ObjectComDigDouble does).
+    retired_info_physical: Option<PhysicalInfo>,
     /// The baked solid mask (grid worlds only; C4Object::pSolidMaskData).
     #[doc(hidden)] pub solid_mask_bake: Option<SolidMaskBake>,
     /// This frame's latched Action.t_attach (C4Object.cpp:4692 + the
@@ -5057,6 +5061,7 @@ impl Object {
             fixed_rotation,
             rotation_velocity: C4Fixed::ZERO,
             destroyed: matches!(state.status, ObjectStatus::Deleted),
+            retired_info_physical: None,
             frame_t_attach: 0,
             frame_t_contact: 0,
             solid_mask_bake: None,
@@ -5135,6 +5140,9 @@ impl Object {
     }
 
     fn unrotated_shape_vertices(&self) -> Vec<ObjectVertex> {
+        if self.shape_template.line != 0 {
+            return self.state.shape_vertices.active_vec();
+        }
         transformed_shape_vertices(
             self.shape_base_vertices(),
             self.state.construction,
@@ -5146,6 +5154,9 @@ impl Object {
 
     #[doc(hidden)]
     pub fn current_shape_rect(&self) -> Option<DefinitionRect> {
+        if self.shape_template.line != 0 {
+            return self.state.shape_override.or(self.shape_template.rect);
+        }
         self.state.shape_override.or_else(|| {
             transformed_shape_rect(
                 self.shape_template.rect,
@@ -21715,6 +21726,72 @@ impl Engine {
         Ok(self.object_survives_creation(index).then_some(object_id))
     }
 
+    /// Shared `CreateLine` helper (C4ObjectCom.cpp:364-377). Object creation
+    /// and callbacks finish first; only then are the two live endpoint
+    /// vertices and action targets overwritten from the endpoints' current
+    /// state.
+    fn create_line_object(
+        &mut self,
+        definition_id: &str,
+        owner: i32,
+        from: ObjectId,
+        to: ObjectId,
+    ) -> Result<Option<ObjectId>, EngineError> {
+        if !self.definitions.contains_key(definition_id) {
+            return Ok(None);
+        }
+        let Some(from_index) = self.find_object_index(from) else {
+            return Ok(None);
+        };
+        if self.find_object_index(to).is_none() {
+            return Ok(None);
+        }
+
+        let mut config = SpawnConfig::new(definition_id)
+            .with_position(Vector2::ZERO)
+            .with_owner(owner)
+            .with_action(ActionState::new("Idle"));
+        if let Some(layer) = self.objects[from_index].state.layer {
+            config = config.with_layer(layer);
+        }
+        let Some(line_id) = self.spawn_object_with_initial_lifecycle(config, Some(from))? else {
+            return Ok(None);
+        };
+
+        let endpoint = |engine: &Self, object_id: ObjectId| {
+            engine.find_object_index(object_id).map(|index| {
+                let object = &engine.objects[index];
+                let height = object
+                    .current_shape_rect()
+                    .map(|shape| shape.height)
+                    .unwrap_or(0);
+                Vector2::new(
+                    object.state.position.x,
+                    object.state.position.y.wrapping_add(height / 4),
+                )
+            })
+        };
+        let (Some(from_point), Some(to_point)) = (endpoint(self, from), endpoint(self, to)) else {
+            return Ok(None);
+        };
+        let Some(line_index) = self.find_object_index(line_id) else {
+            return Ok(None);
+        };
+        // C++ writes only VtxNum and the first two X/Y slots. Construction
+        // may have reduced the active prefix, but dormant CNAT/friction
+        // bytes in the fixed C4Shape buffer survive and become active again.
+        let mut vertices = self.objects[line_index].state.shape_vertices.clone();
+        vertices.count = 2;
+        vertices.slots[0].x = from_point.x;
+        vertices.slots[0].y = from_point.y;
+        vertices.slots[1].x = to_point.x;
+        vertices.slots[1].y = to_point.y;
+        self.objects[line_index].set_shape_vertex_buffer(vertices);
+        self.objects[line_index].state.action.target = Some(from);
+        self.objects[line_index].state.action.target2 = Some(to);
+        Ok(Some(line_id))
+    }
+
     fn object_survives_creation(&self, index: usize) -> bool {
         self.objects.get(index).is_some_and(|object| {
             !object.destroyed && !matches!(object.state.status, ObjectStatus::Deleted)
@@ -25025,6 +25102,8 @@ impl Engine {
             // synchronously and emit no-callback removals. Fold those before
             // the status write so mark_destroyed cannot stop them twice.
             if destroy_object {
+                object.retired_info_physical = object.state.info_physical;
+                object.state.info_physical = None;
                 effect_events.extend(object.mark_destroyed());
             }
 
@@ -25352,6 +25431,8 @@ impl Engine {
                 // fold those before mark_destroyed so it cannot emit a
                 // second deferred Stop for the same effects.
                 if outcome.destroy {
+                    object.retired_info_physical = object.state.info_physical;
+                    object.state.info_physical = None;
                     effect_events.extend(object.mark_destroyed());
                 }
             }
@@ -27023,11 +27104,19 @@ impl Engine {
                     continue;
                 }
             }
+            let clear_all_stop = matches!(
+                event.kind,
+                EffectEventKind::Stopped(
+                    EffectStopReason::Cleared
+                        | EffectStopReason::Death
+                        | EffectStopReason::Destroyed
+                )
+            );
             let death_stop = matches!(
                 event.kind,
                 EffectEventKind::Stopped(EffectStopReason::Death)
             );
-            if death_stop {
+            if clear_all_stop {
                 // ClearAll calls SetDead immediately before Fx*Stop, but
                 // keeps the node linked so GetEffect(number, include-dead)
                 // and the unique-number allocator still see it
@@ -27092,10 +27181,11 @@ impl Engine {
                 // throughout Fx*Stop (C4Effect.cpp:365-424). EffectVar and
                 // GetEffect must therefore still resolve the victim even
                 // though the Rust command fold already removed it.
-                insert_effect_into_stack(
-                    &mut snapshot_for_call.effects,
-                    event.effect.clone(),
-                );
+                let mut linked = event.effect.clone();
+                if clear_all_stop {
+                    linked.priority = 0;
+                }
+                insert_effect_into_stack(&mut snapshot_for_call.effects, linked);
             }
             let dispatch_definition =
                 resolve_effect_dispatch_definition(
@@ -27213,7 +27303,10 @@ impl Engine {
                         // object going away.
                         stop_denied = matches!(
                             reason,
-                            EffectStopReason::Removed | EffectStopReason::Death
+                            EffectStopReason::Removed
+                                | EffectStopReason::Cleared
+                                | EffectStopReason::Death
+                                | EffectStopReason::Destroyed
                         )
                             && matches!(stop_result, Some(Value::Int(-1)));
                         (outcome, audio_state, new_rng)
@@ -27520,6 +27613,8 @@ impl Engine {
                 // enqueue duplicate RemoveClear Stops against Deleted state.
                 // This mirrors apply_callback_outcome's fold order.
                 solid_mask_changed = true;
+                object.retired_info_physical = object.state.info_physical;
+                object.state.info_physical = None;
                 let mut generated = object.mark_destroyed();
                 if !generated.is_empty() {
                     queue.extend(generated.drain(..));
@@ -35242,6 +35337,200 @@ impl Engine {
         !horizontal_parallax && x < -width
     }
 
+    /// Engine-owned `C4Object::AssignRemoval(false)`: callbacks and effect
+    /// cleanup run while the object is live, Status becomes Deleted before
+    /// recursively removing contents, and the container link is removed
+    /// last (C4Object.cpp:240-309).
+    fn assign_object_removal(&mut self, object_id: ObjectId) -> Result<bool, EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        if self.objects[index].destroyed
+            || self.objects[index].state.status == ObjectStatus::Deleted
+        {
+            return Ok(false);
+        }
+
+        if let Some(container_index) = self.objects[index]
+            .state
+            .container
+            .and_then(|container| self.find_object_index(container))
+            .filter(|&container_index| {
+                !self.objects[container_index].destroyed
+                    && self.objects[container_index].state.status != ObjectStatus::Deleted
+            })
+        {
+            let _ = tolerate_script_error(self.call_object_function(
+                container_index,
+                "ContentsDestruction",
+                vec![object_reference_value(object_id)],
+            ))?;
+        }
+
+        let Some(index) = self.find_object_index(object_id).filter(|&index| {
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != ObjectStatus::Deleted
+        }) else {
+            return Ok(true);
+        };
+        let _ = tolerate_script_error(self.call_object_function(
+            index,
+            "Destruction",
+            Vec::new(),
+        ))?;
+
+        let Some(index) = self.find_object_index(object_id).filter(|&index| {
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != ObjectStatus::Deleted
+        }) else {
+            return Ok(true);
+        };
+        let definition_id = self.objects[index].definition_id.clone();
+        // ClearAll recurses through the original list tail-to-head. Each
+        // victim is marked dead but remains linked during FxStop, so earlier
+        // callbacks can still inspect later effects (including a denied Stop
+        // that restored its priority). Callback-added effects are outside
+        // the captured traversal and receive no RemoveClear callback.
+        let original_effects = self.objects[index]
+            .state
+            .effects
+            .iter()
+            .filter(|effect| effect.priority != 0)
+            .map(|effect| effect.number)
+            .collect::<Vec<_>>();
+        for number in original_effects.into_iter().rev() {
+            let Some(index) = self.find_object_index(object_id).filter(|&index| {
+                !self.objects[index].destroyed
+                    && self.objects[index].state.status != ObjectStatus::Deleted
+            }) else {
+                return Ok(true);
+            };
+            let Some(effect_index) = self.objects[index]
+                .state
+                .effects
+                .iter()
+                .position(|effect| effect.number == number && effect.priority != 0)
+            else {
+                continue;
+            };
+            let effect = self.objects[index].state.effects[effect_index].clone();
+            self.objects[index].state.effects[effect_index].priority = 0;
+            self.dispatch_object_effect_events(
+                index,
+                &definition_id,
+                vec![EffectEvent::stopped(effect, EffectStopReason::Cleared)],
+            )?;
+        }
+
+        let Some(index) = self.find_object_index(object_id).filter(|&index| {
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != ObjectStatus::Deleted
+        }) else {
+            return Ok(true);
+        };
+        // `delete pEffects` follows ClearAll unconditionally: denied
+        // originals and callback-added effects vanish without another Stop,
+        // before particles and SetAction(Idle).
+        self.objects[index].state.effects.clear();
+        self.apply_particle_commands(vec![ParticleCommand::Clear {
+            definition_id: None,
+            scope: ParticleScope::Object(object_id),
+        }]);
+        let Some(index) = self.find_object_index(object_id).filter(|&index| {
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != ObjectStatus::Deleted
+        }) else {
+            return Ok(true);
+        };
+        let definition_id = self.objects[index].definition_id.clone();
+        let _ = self.action_with_calls(index, &definition_id, "Idle")?;
+
+        let Some(index) = self.find_object_index(object_id).filter(|&index| {
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != ObjectStatus::Deleted
+        }) else {
+            return Ok(true);
+        };
+        let previous_status = self.objects[index].state.status;
+        let _ = self.objects[index].mark_destroyed();
+        self.update_inactive_list_for_status_change(
+            object_id,
+            previous_status,
+            ObjectStatus::Deleted,
+        );
+        self.update_sector_for_index(index);
+
+        // Status is already zero while each child is destroyed. As in C++,
+        // remove the list link first but leave the child's Contained pointer
+        // available to its Destruction callback until its own removal tail.
+        loop {
+            let child = self
+                .find_object_index(object_id)
+                .and_then(|index| self.objects[index].state.contents.first().copied());
+            let Some(child) = child else { break };
+            if let Some(index) = self.find_object_index(object_id) {
+                self.objects[index]
+                    .state
+                    .contents
+                    .retain(|&candidate| candidate != child);
+            }
+            if self.find_object_index(child).is_some() {
+                let _ = self.assign_object_removal(child)?;
+            }
+        }
+
+        let container = self
+            .find_object_index(object_id)
+            .and_then(|index| self.objects[index].state.container);
+        if let Some(container) = container {
+            if let Some(container_index) = self.find_object_index(container) {
+                self.objects[container_index]
+                    .state
+                    .contents
+                    .retain(|&child| child != object_id);
+                self.refresh_object_ocf(container_index);
+            }
+            if let Some(index) = self.find_object_index(object_id) {
+                self.objects[index].state.container = None;
+            }
+        }
+
+        // Info->Retire and Info=null happen before C4Value/Game pointer
+        // clearing (C4Object.cpp:297-304).
+        if let Some(link) = self.crew_info_links.get(&object_id).copied() {
+            if let Some(info) = self
+                .crew_rosters
+                .get_mut(&link.player_id)
+                .and_then(|roster| roster.get_mut(link.roster_index))
+            {
+                if info.in_action {
+                    info.total_playing_time = info
+                        .total_playing_time
+                        .wrapping_add(self.game_time.wrapping_sub(info.in_action_time));
+                    info.in_action = false;
+                }
+            }
+        }
+        Rc::make_mut(&mut self.crew_info_links).remove(&object_id);
+        Rc::make_mut(&mut self.crew_object_infos).remove(&object_id);
+        Rc::make_mut(&mut self.crew_ranks).remove(&object_id.as_u64());
+        if let Some(index) = self.find_object_index(object_id) {
+            self.objects[index].retired_info_physical =
+                self.objects[index].state.info_physical;
+            self.objects[index].state.info_physical = None;
+        }
+
+        self.clear_object_references_for_removal(object_id)?;
+        if let Some(index) = self.find_object_index(object_id) {
+            self.objects[index].command_queue.clear();
+            self.objects[index].commands.clear();
+            self.remove_solid_mask(index);
+            self.update_sector_for_index(index);
+        }
+        self.note_objects_changed();
+        Ok(true)
+    }
+
     /// `AssignDeath(true); AssignRemoval()` from the movement tail
     /// (src/C4Movement.cpp:613-614). Rust's object store has no two-frame
     /// `RemovalDelay` tombstone yet, so the normal end-of-frame destroyed
@@ -35251,33 +35540,7 @@ impl Engine {
             return Ok(());
         };
         tolerate_script_error(self.assign_death(idx, true))?;
-        let Some(idx) = self.find_object_index(object_id) else {
-            return Ok(());
-        };
-        if self.objects[idx].destroyed {
-            return Ok(());
-        }
-        tolerate_script_error(self.call_object_function(idx, "Destruction", Vec::new()))?;
-        let Some(idx) = self.find_object_index(object_id) else {
-            return Ok(());
-        };
-        if self.objects[idx].destroyed {
-            return Ok(());
-        }
-        let definition_id = self.objects[idx].definition_id.clone();
-        // AssignRemoval clears effects while Status is still normal
-        // (src/C4Object.cpp:257-269); callbacks therefore observe a live
-        // removal target, and cannot veto a ClearAll removal.
-        let events = self.objects[idx].drain_effects_with_reason(EffectStopReason::Cleared);
-        if !events.is_empty() {
-            self.dispatch_object_effect_events(idx, &definition_id, events)?;
-        }
-        let Some(idx) = self.find_object_index(object_id) else {
-            return Ok(());
-        };
-        if !self.objects[idx].destroyed {
-            let _ = self.objects[idx].mark_destroyed();
-        }
+        let _ = self.assign_object_removal(object_id)?;
         Ok(())
     }
 
@@ -37892,6 +38155,10 @@ impl Engine {
                     // The COLLECT path (fCopyMotion=false, C4Object.cpp:
                     // 5698) re-applies its explicit position/velocity
                     // AFTER this change.
+                    // Enter installs Contained first, then removes the old
+                    // solid mask before CopyMotion. Containment prevents
+                    // UpdateSolidMask from putting it back at either site.
+                    self.remove_solid_mask(object_index);
                     if previous.is_some() {
                         let entering = &mut self.objects[object_index].state;
                         entering.mobile = true;
@@ -37996,7 +38263,45 @@ impl Engine {
         };
         let position = object.state.position;
 
-        self.apply_container_change(object_id, Some(previous), None, false)?;
+        self.exit_object_at_position_with_zero_motion(object_id, previous, position)
+    }
+
+    /// Engine-owned `C4Object::Exit(x, y, 0, 0, 0, 0)`. The caller supplies
+    /// the already-resolved previous container so the relation cannot drift
+    /// between the precondition and the live unlink.
+    fn exit_object_at_position_with_zero_motion(
+        &mut self,
+        object_id: ObjectId,
+        previous: ObjectId,
+        position: Vector2,
+    ) -> Result<bool, EngineError> {
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        if self.objects[object_index].destroyed
+            || self.objects[object_index].state.status == ObjectStatus::Deleted
+            || self.objects[object_index].state.container != Some(previous)
+        {
+            return Ok(false);
+        }
+
+        // Raw first half of Exit: only the old container's list/OCF is
+        // updated before BoundsCheck. The moving object's cached OCF, menu,
+        // motion and liquid/mobile flags remain callback-visible until the
+        // requested target has been clamped (C4Object.cpp:1519-1531).
+        if let Some(previous_index) = self.find_object_index(previous) {
+            self.objects[previous_index]
+                .state
+                .contents
+                .retain(|&child| child != object_id);
+            self.refresh_object_ocf(previous_index);
+        }
+        if let Some(object_index) = self.find_object_index(object_id) {
+            self.objects[object_index].state.container = None;
+        }
+
+        let mut position = position;
+        self.bounds_check_for_change_def_exit(object_id, &mut position)?;
         if let Some(object_index) = self.find_object_index(object_id) {
             let object = &mut self.objects[object_index];
             let previous_rect = object.current_shape_rect();
@@ -38318,7 +38623,10 @@ impl Engine {
         object_id: ObjectId,
         target_id: ObjectId,
     ) -> Result<(), EngineError> {
-        if let Some(target_index) = self.find_object_index(target_id) {
+        if let Some(target_index) = self.find_object_index(target_id).filter(|&index| {
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != ObjectStatus::Deleted
+        }) {
             let _ = tolerate_script_error(self.call_object_function(
                 target_index,
                 "Collection2",
@@ -38330,11 +38638,13 @@ impl Engine {
             .and_then(|index| self.objects[index].state.container);
         let current_container_live = current_container.is_some_and(|container_id| {
             self.find_object_index(container_id).is_some_and(|index| {
-                !self.objects[index].destroyed && self.objects[index].state.status.is_active()
+                !self.objects[index].destroyed
+                    && self.objects[index].state.status != ObjectStatus::Deleted
             })
         });
         let target_live = self.find_object_index(target_id).is_some_and(|index| {
-            !self.objects[index].destroyed && self.objects[index].state.status.is_active()
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != ObjectStatus::Deleted
         });
         if current_container_live && target_live {
             if let (Some(object_index), Some(container_id)) =
@@ -38397,22 +38707,21 @@ impl Engine {
         let Some(target_index) = self.find_object_index(target_id) else {
             return Ok(ObjectEnterOutcome::Failed);
         };
-        if self.objects[object_index].destroyed
-            || !self.objects[object_index].state.status.is_active()
-            || self.objects[target_index].destroyed
-            || !self.objects[target_index].state.status.is_active()
-        {
-            return Ok(ObjectEnterOutcome::Failed);
-        }
 
         // RejectEntrance belongs to the ENTERING object and runs before
         // cycle detection or Exit (C4Object.cpp:1575-1581).
-        let rejected = tolerate_script_error(self.call_object_function(
-            object_index,
-            "RejectEntrance",
-            vec![object_reference_value(target_id)],
-        ))?
-        .is_some_and(|value| value.as_bool());
+        let rejected = if self.objects[object_index].destroyed
+            || self.objects[object_index].state.status == ObjectStatus::Deleted
+        {
+            false
+        } else {
+            tolerate_script_error(self.call_object_function(
+                object_index,
+                "RejectEntrance",
+                vec![object_reference_value(target_id)],
+            ))?
+            .is_some_and(|value| value.as_bool())
+        };
         if rejected {
             return Ok(ObjectEnterOutcome::RejectedEntrance);
         }
@@ -38423,16 +38732,6 @@ impl Engine {
         let Some(target_index) = self.find_object_index(target_id) else {
             return Ok(ObjectEnterOutcome::Failed);
         };
-        if self.objects[object_index].destroyed
-            || !self.objects[object_index].state.status.is_active()
-        {
-            return Ok(ObjectEnterOutcome::Removed);
-        }
-        if self.objects[target_index].destroyed
-            || !self.objects[target_index].state.status.is_active()
-        {
-            return Ok(ObjectEnterOutcome::Failed);
-        }
         let mut container = self.objects[target_index].state.container;
         let mut seen = HashSet::new();
         while let Some(container_id) = container {
@@ -38450,35 +38749,29 @@ impl Engine {
             // object), before Exit or any containment mutation
             // (C4Object.cpp:1582-1591).
             let definition_id = self.objects[object_index].definition_id.clone();
-            let rejected = tolerate_script_error(self.call_object_function(
-                target_index,
-                "RejectCollect",
-                vec![
-                    Value::C4Id(definition_id.as_str().to_string()),
-                    object_reference_value(object_id),
-                ],
-            ))?
-            .is_some_and(|value| value.as_bool());
-            let Some(object_index) = self.find_object_index(object_id) else {
-                return Ok(ObjectEnterOutcome::Removed);
-            };
-            let Some(target_index) = self.find_object_index(target_id) else {
-                return Ok(ObjectEnterOutcome::Failed);
-            };
-            if self.objects[object_index].destroyed
-                || !self.objects[object_index].state.status.is_active()
+            let rejected = if self.objects[target_index].destroyed
+                || self.objects[target_index].state.status == ObjectStatus::Deleted
             {
-                return Ok(ObjectEnterOutcome::Removed);
-            }
-            if self.objects[target_index].destroyed
-                || !self.objects[target_index].state.status.is_active()
-            {
-                return Ok(ObjectEnterOutcome::Failed);
-            }
+                false
+            } else {
+                tolerate_script_error(self.call_object_function(
+                    target_index,
+                    "RejectCollect",
+                    vec![
+                        Value::C4Id(definition_id.as_str().to_string()),
+                        object_reference_value(object_id),
+                    ],
+                ))?
+                .is_some_and(|value| value.as_bool())
+            };
             if rejected {
                 return Ok(ObjectEnterOutcome::RejectedCollect);
             }
         }
+
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(ObjectEnterOutcome::Removed);
+        };
 
         // A transfer is an actual Exit first. Ejection precedes Departure;
         // either callback may re-enter, in which case Exit reports false and
@@ -38500,13 +38793,16 @@ impl Engine {
         };
         if self.objects[object_index].state.container.is_some()
             || self.objects[object_index].destroyed
-            || !self.objects[object_index].state.status.is_active()
+            || self.objects[object_index].state.status == ObjectStatus::Deleted
             || self.objects[target_index].destroyed
-            || !self.objects[target_index].state.status.is_active()
+            || self.objects[target_index].state.status == ObjectStatus::Deleted
         {
             return Ok(ObjectEnterOutcome::Failed);
         }
 
+        // Forced CloseMenu runs after the final status gate and before the
+        // new contents link (C4Object.cpp:1596).
+        self.objects[object_index].state.menu = None;
         self.apply_container_change(object_id, None, Some(target_id), false)?;
         if f_calls {
             self.run_object_enter_callbacks(object_id, target_id)?;
@@ -38517,7 +38813,8 @@ impl Engine {
         // pTarget to be live, and only then performs the synchronous base
         // auto-sale (C4Object.cpp:1625-1634).
         let target_live = self.find_object_index(target_id).is_some_and(|index| {
-            !self.objects[index].destroyed && self.objects[index].state.status.is_active()
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != ObjectStatus::Deleted
         });
         if self.base_auto_sell_enabled && target_live {
             let active_container = self
@@ -38526,7 +38823,7 @@ impl Engine {
                 .and_then(|container_id| self.find_object_index(container_id))
                 .filter(|&index| {
                     !self.objects[index].destroyed
-                        && self.objects[index].state.status.is_active()
+                        && self.objects[index].state.status != ObjectStatus::Deleted
                 })
                 .map(|index| (index, self.objects[index].state.base));
             if let Some((container_index, base_owner)) = active_container {
@@ -39050,25 +39347,7 @@ impl Engine {
                 from,
                 to,
             } => {
-                if !self.definitions.contains_key(definition_id.as_str()) {
-                    return Err(EngineError::UnknownDefinition(definition_id));
-                }
-                let Some(from_index) = self.find_object_index(from) else {
-                    return Ok(());
-                };
-                if self.find_object_index(to).is_none() {
-                    return Ok(());
-                }
-                let position = self.objects[from_index].state.position;
-                let mut action = ActionState::new("Connect");
-                action.target = Some(from);
-                action.target2 = Some(to);
-                let _ = self.spawn_object(
-                    SpawnConfig::new(definition_id)
-                        .with_position(position)
-                        .with_owner(owner)
-                        .with_action(action),
-                )?;
+                let _ = self.create_line_object(&definition_id, owner, from, to)?;
             }
             CommandEvent::CallObjectFunction {
                 object_id,
@@ -39652,6 +39931,151 @@ impl Engine {
                 effect.command_target = None;
             }
         }
+    }
+
+    /// Synchronous `FirstRef->Set0(); Game.ClearPointers(this)` tail of
+    /// AssignRemoval (C4Object.cpp:302-304; C4Game.cpp:1018-1031).
+    fn clear_object_references_for_removal(
+        &mut self,
+        target: ObjectId,
+    ) -> Result<(), EngineError> {
+        let remaining_numbers = self
+            .objects
+            .iter()
+            .filter(|object| object.id != target)
+            .map(|object| object.id.as_u64())
+            .collect::<HashSet<_>>();
+
+        for object in &mut self.objects {
+            if object.state.action.target == Some(target) {
+                object.state.action.target = None;
+            }
+            if object.state.action.target2 == Some(target) {
+                object.state.action.target2 = None;
+            }
+            if object.state.layer == Some(target) {
+                object.state.layer = None;
+            }
+            object.commands.clear_object_reference(target);
+            for value in object.state.local_vars.values_mut() {
+                *value = denumerate_script_value(value, &remaining_numbers);
+            }
+            for effect in &mut object.state.effects {
+                denumerate_effect(effect, &remaining_numbers);
+            }
+            object
+                .state
+                .graphics_overlays
+                .retain(|overlay| overlay.overlay_object != Some(target));
+            if let Some(menu) = object.state.menu.as_mut() {
+                if menu.command_object == Some(target) {
+                    menu.command_object = None;
+                }
+                if menu.refill_object == Some(target) {
+                    menu.refill_object = None;
+                }
+                menu.identification =
+                    denumerate_script_value(&menu.identification, &remaining_numbers);
+                for item in &mut menu.items {
+                    if item.picture_object == Some(target) {
+                        item.picture_object = None;
+                    }
+                    if matches!(
+                        item.image,
+                        ObjectMenuImage::Object { object }
+                            | ObjectMenuImage::ObjectRank { object }
+                            if object == target
+                    ) {
+                        item.image = ObjectMenuImage::None;
+                    }
+                }
+            }
+        }
+        for effect in &mut self.global_effects {
+            denumerate_effect(effect, &remaining_numbers);
+        }
+
+        let named_cells = self
+            .script_globals
+            .borrow()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let constant_cells = self
+            .script_global_consts
+            .borrow()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let numbered_cells = self
+            .script_global_slots
+            .borrow()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for cell in named_cells
+            .into_iter()
+            .chain(constant_cells)
+            .chain(numbered_cells)
+        {
+            let value = cell.borrow().clone();
+            *cell.borrow_mut() = denumerate_script_value(&value, &remaining_numbers);
+        }
+
+        self.messages.clear_for_object(target);
+        if self
+            .active_message_board_input
+            .as_ref()
+            .is_some_and(|input| input.target == Some(target))
+        {
+            self.active_message_board_input = None;
+        }
+        self.transfer_zones.clear(target);
+        self.pending_audio.retain(|command| match command {
+            AudioCommand::PlaySound { target: audio_target, .. }
+            | AudioCommand::StopSound { target: audio_target, .. }
+            | AudioCommand::SetSoundVolume { target: audio_target, .. } => {
+                *audio_target != Some(target)
+            }
+            AudioCommand::PlayMusic { .. }
+            | AudioCommand::StopMusic
+            | AudioCommand::SetMusicLevel { .. } => true,
+        });
+        self.clear_effect_command_target(target);
+
+        let active = self
+            .objects
+            .iter()
+            .filter(|object| {
+                object.id != target
+                    && !object.destroyed
+                    && object.state.status != ObjectStatus::Deleted
+            })
+            .map(|object| object.id)
+            .collect::<HashSet<_>>();
+        let owners = self.players.keys().copied().collect::<Vec<_>>();
+        for owner in owners {
+            let removed_cursor = self.crew_cursor(owner) == Some(target);
+            if let Some(selection) = self.crew_selection.get_mut(&owner) {
+                selection.prune(&active);
+                if removed_cursor {
+                    selection.set_cursor(None);
+                }
+            }
+            if let Some(player) = self.players.get_mut(&owner) {
+                player.clear_object_pointers(target);
+            }
+            self.remove_from_roles(owner, target);
+            if removed_cursor {
+                self.player_adjust_cursor_command(owner)?;
+            }
+        }
+        self.crew_selection.retain(|_, selection| !selection.is_empty());
+        self.sync_all_player_cursors();
+        if let Some(index) = self.find_object_index(target) {
+            self.objects[index].state.crew_member = false;
+        }
+        Ok(())
     }
 
     fn apply_global_effect_commands(&mut self, commands: &[EffectCommand]) {
@@ -42311,13 +42735,20 @@ impl Engine {
             } else {
                 definition_vertices
             };
-            let initial_vertices = transformed_shape_vertices(
-                &shape_base_vertices,
-                construction,
-                shape_template.stretch_growth,
-                shape_template.rotateable,
-                rotation,
-            );
+            let initial_vertices = if definition_line != 0 {
+                // C4Object::UpdateShape returns immediately for line
+                // definitions, so their Init-time Def->Shape survives raw
+                // Con=0 and is visible to Construction unchanged.
+                shape_base_vertices.clone()
+            } else {
+                transformed_shape_vertices(
+                    &shape_base_vertices,
+                    construction,
+                    shape_template.stretch_growth,
+                    shape_template.rotateable,
+                    rotation,
+                )
+            };
             (
                 initial_vertices,
                 owns_vertices.then_some(shape_base_vertices),
