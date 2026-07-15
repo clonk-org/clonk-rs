@@ -21431,6 +21431,7 @@ impl Engine {
         if after <= 0 {
             self.remove_solid_mask(index);
             self.objects[index].mark_destroyed();
+            self.clear_destroyed_object_layers();
             self.update_sector_for_index(index);
         }
 
@@ -22435,16 +22436,30 @@ impl Engine {
             }
         }
         self.exec_cursor = Some(0);
+        let mut previous_exec_object = None;
         while self
             .exec_cursor
             .is_some_and(|cursor| cursor < self.exec_list.len())
         {
+            // Native removal paths can leave through many early-continue
+            // arms. Clear their layer pointers before the next object gets
+            // a callback-visible world snapshot; the post-loop sweep handles
+            // a removal by the final object.
+            if previous_exec_object.take().is_some_and(|id| {
+                self.find_object_index(id).is_some_and(|index| {
+                    self.objects[index].destroyed
+                        || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
+                })
+            }) {
+                self.clear_destroyed_object_layers();
+            }
             if command_snapshot_exec_insert_generation != self.exec_list_insert_generation {
                 Self::refresh_command_master_list_order(&self.exec_list, &mut command_snapshots);
                 command_snapshot_exec_insert_generation = self.exec_list_insert_generation;
             }
             let cursor = self.exec_cursor.unwrap_or_default();
             let current_id = self.exec_list[cursor];
+            previous_exec_object = Some(current_id);
             self.exec_cursor = Some(cursor + 1);
             let Some(idx) = self.find_object_index(current_id) else {
                 continue;
@@ -23538,6 +23553,12 @@ impl Engine {
         // for CrossCheck, world systems, and especially Players.Execute's
         // Tick35 CrewCnt snapshot.
         self.process_spawn_queue(spawn_requests)?;
+
+        // AssignRemoval calls Game.ClearPointers before returning. Native
+        // engine-owned removal paths do not pass through the synchronous
+        // script host, so clear their pLayer references at the last common
+        // seam before this frame's CrossCheck.
+        self.clear_destroyed_object_layers();
 
         // C4GameObjects::CrossCheck runs once per frame after object        // execution (C4Game.cpp ExecObjects → Objects.CrossCheck()).
         self.cross_check(frame)?;
@@ -30398,6 +30419,7 @@ impl Engine {
                 .retain(|&id| id != object_id);
             self.objects[child_index].state.container = None;
             self.objects[child_index].mark_destroyed();
+            self.clear_destroyed_object_layers();
             return true;
         }
         false
@@ -38953,7 +38975,35 @@ impl Engine {
         })
     }
 
+    /// C4Game::ClearObjectPtrs -> C4Object::ClearPointers pLayer sweep for
+    /// engine-owned removal paths. Script RemoveObject stages the same clear
+    /// synchronously in compat; this idempotent fallback also covers direct
+    /// status updates and queued/native destruction.
+    fn clear_destroyed_object_layers(&mut self) {
+        let destroyed = self
+            .objects
+            .iter()
+            .filter(|object| {
+                object.destroyed || matches!(object.state.status, ObjectStatus::Deleted)
+            })
+            .map(|object| object.id)
+            .collect::<HashSet<_>>();
+        if destroyed.is_empty() {
+            return;
+        }
+        for object in &mut self.objects {
+            if object
+                .state
+                .layer
+                .is_some_and(|layer| destroyed.contains(&layer))
+            {
+                object.state.layer = None;
+            }
+        }
+    }
+
     fn detach_destroyed_objects(&mut self) -> Result<(), EngineError> {
+        self.clear_destroyed_object_layers();
         let mut updates = Vec::new();
         let destroyed: Vec<ObjectId> = self
             .objects
@@ -42520,6 +42570,7 @@ impl Engine {
         }
         if destroy_requested {
             self.objects[index].mark_destroyed();
+            self.clear_destroyed_object_layers();
         }
         self.refresh_object_ocf(index);
         // Loaded objects restore their action WITHOUT callbacks. Native

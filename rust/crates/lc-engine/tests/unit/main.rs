@@ -29610,6 +29610,228 @@ func Trigger(object pLayered) {
     }
 
     #[test]
+    fn removing_layer_clears_members_before_same_frame_cross_check() -> Result<(), EngineError> {
+        // AssignRemoval calls Game.ClearPointers before RemoveObject returns.
+        // Former layer members therefore expose nil immediately and join the
+        // nil-layer CrossCheck group later in this same frame.
+        let remover_script = r#"#strict
+local doomed, member, cleared_immediately, nil_layer_count;
+func Cull()
+{
+    RemoveObject(doomed);
+    cleared_immediately = !GetObjectLayer(member);
+    nil_layer_count = GetLength(FindObjects([C4FO_Layer]));
+    return(1);
+}
+"#;
+        let mut remover = Definition::from_script("RMVR", "Remover", remover_script)?;
+        remover.set_timer(3);
+        remover.set_timer_call(Some("Cull".to_string()));
+        let mut collector = simple_definition("COLL");
+        collector.set_shape_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+        collector.set_collection_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+        let mut item = simple_definition("ITEM");
+        item.set_category(CATEGORY_OBJECT);
+        item.set_collectible(true);
+
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(simple_definition("LAYR"))?;
+        engine.register_definition(remover)?;
+        engine.register_definition(collector)?;
+        engine.register_definition(item)?;
+
+        let layer = engine.spawn_object(
+            SpawnConfig::new("LAYR").with_position(Vector2::new(5, 5)),
+        )?;
+        let collector = engine.spawn_object(
+            SpawnConfig::new("COLL")
+                .with_category(CATEGORY_LIVING)
+                .with_alive(true)
+                .with_position(Vector2::new(50, 60))
+                .with_layer(layer),
+        )?;
+        let item = engine.spawn_object(
+            SpawnConfig::new("ITEM").with_position(Vector2::new(50, 50)),
+        )?;
+        let remover = engine.spawn_object(
+            SpawnConfig::new("RMVR")
+                .with_position(Vector2::new(5, 5))
+                .with_local_vars(HashMap::from([
+                    ("doomed".to_string(), Value::Object(layer.as_u64())),
+                    ("member".to_string(), Value::Object(collector.as_u64())),
+                ])),
+        )?;
+
+        engine.cross_check(3)?;
+        assert_eq!(
+            engine.object_snapshot(item).expect("item remains").container,
+            None,
+            "the layer mismatch blocks a collection-eligible CrossCheck"
+        );
+        for _ in 0..2 {
+            engine.tick()?;
+            assert_eq!(
+                engine.object_snapshot(item).expect("item remains").container,
+                None,
+                "different layers cannot collect before removal"
+            );
+        }
+        assert_eq!(
+            engine
+                .object_snapshot(collector)
+                .expect("collector remains")
+                .layer,
+            Some(layer)
+        );
+
+        engine.tick()?;
+
+        assert!(engine.object_snapshot(layer).is_none(), "layer was removed");
+        let remover_index = engine.find_object_index(remover).expect("remover remains");
+        assert_eq!(
+            engine.objects[remover_index]
+                .state
+                .local_vars
+                .get("cleared_immediately"),
+            Some(&Value::Bool(true)),
+            "GetObjectLayer is nil before RemoveObject returns to the script"
+        );
+        assert_eq!(
+            engine.objects[remover_index]
+                .state
+                .local_vars
+                .get("nil_layer_count"),
+            Some(&Value::Int(3)),
+            "same-call Find_Layer(nil) includes the former layer member"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(collector)
+                .expect("collector remains")
+                .layer,
+            None,
+            "the live object snapshot cannot retain the dead layer id"
+        );
+        assert_eq!(
+            engine
+                .snapshot()
+                .object(collector)
+                .expect("collector is serialized")
+                .layer,
+            None,
+            "the simulation snapshot serializes the cleared layer without a reload"
+        );
+        assert_eq!(
+            engine.object_snapshot(item).expect("item remains").container,
+            Some(collector),
+            "the frame-3 CrossCheck pairs both now-unlayered objects"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn queued_layer_destruction_clears_members_before_cross_check() -> Result<(), EngineError> {
+        // Engine-owned removals do not enter the compat RemoveObject host.
+        // Their common pre-CrossCheck fallback must perform the same
+        // C4Game::ClearPointers pLayer sweep in the destruction frame.
+        let mut collector = simple_definition("COLL");
+        collector.set_shape_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+        collector.set_collection_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+        let mut item = simple_definition("ITEM");
+        item.set_category(CATEGORY_OBJECT);
+        item.set_collectible(true);
+        let observer_script = r#"#strict
+local member, cleared_before_callback;
+func Probe() { cleared_before_callback = !GetObjectLayer(member); }
+"#;
+        let mut observer = Definition::from_script("OBSV", "Observer", observer_script)?;
+        observer.set_category(CATEGORY_OBJECT);
+        observer.set_timer(3);
+        observer.set_timer_call(Some("Probe".to_string()));
+
+        let mut engine = Engine::with_seed(0);
+        let mut layer_definition = simple_definition("LAYR");
+        layer_definition.set_category(CATEGORY_OBJECT);
+        engine.register_definition(layer_definition)?;
+        engine.register_definition(collector)?;
+        engine.register_definition(item)?;
+        engine.register_definition(observer)?;
+
+        let layer = engine.spawn_object(
+            SpawnConfig::new("LAYR").with_position(Vector2::new(5, 5)),
+        )?;
+        let collector = engine.spawn_object(
+            SpawnConfig::new("COLL")
+                .with_category(CATEGORY_LIVING)
+                .with_alive(true)
+                .with_position(Vector2::new(50, 60))
+                .with_layer(layer),
+        )?;
+        let item = engine.spawn_object(
+            SpawnConfig::new("ITEM").with_position(Vector2::new(50, 50)),
+        )?;
+        let observer = engine.spawn_object(
+            SpawnConfig::new("OBSV")
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(5, 5))
+                .with_local_vars(HashMap::from([(
+                    "member".to_string(),
+                    Value::Object(collector.as_u64()),
+                )])),
+        )?;
+        let order = engine.debug_exec_order();
+        let layer_position = order
+            .iter()
+            .position(|id| *id == layer)
+            .expect("layer is executable");
+        let observer_position = order
+            .iter()
+            .position(|id| *id == observer)
+            .expect("observer is executable");
+        assert!(
+            layer_position < observer_position,
+            "the native removal executes before the observer callback"
+        );
+
+        for _ in 0..2 {
+            engine.tick()?;
+            assert_eq!(
+                engine.object_snapshot(item).expect("item remains").container,
+                None
+            );
+        }
+        engine.queue_object_command(
+            layer,
+            QueuedCommand::immediate(ObjectUpdate::new()).with_destroy(true),
+        )?;
+
+        engine.tick()?;
+
+        let observer_index = engine.find_object_index(observer).expect("observer remains");
+        assert_eq!(
+            engine.objects[observer_index]
+                .state
+                .local_vars
+                .get("cleared_before_callback"),
+            Some(&Value::Bool(true)),
+            "native ClearPointers is visible to later object callbacks, not just CrossCheck"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(collector)
+                .expect("collector remains")
+                .layer,
+            None
+        );
+        assert_eq!(
+            engine.object_snapshot(item).expect("item remains").container,
+            Some(collector),
+            "native destruction clears the layer before frame-3 CrossCheck"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn set_object_layer_self_foreign_and_clear_are_live_and_persisted() {
         // FnSetObjectLayer writes pLayer immediately, defaults its target to
         // the caller and accepts nil/0 to clear (C4Script.cpp:5168-5180).

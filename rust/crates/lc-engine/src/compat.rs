@@ -35702,6 +35702,11 @@ impl EffectHostContext {
             object.damage = scope.current_damage;
             object.need_energy = scope.need_energy();
             object.category = scope.category();
+            if let Some(layer) = scope.pending_update.layer {
+                if let Some(state) = object.state.as_mut() {
+                    Rc::make_mut(state).layer = layer;
+                }
+            }
             object.selected = scope.selected();
             object.crew_disabled = scope
                 .pending_update
@@ -36220,7 +36225,8 @@ impl EffectHostContext {
     /// C4Game::ClearObjectPtrs -> C4Object::ClearPointers for the pointer
     /// kinds modeled by ObjectScopeContext. Unlike object removal, status
     /// deactivation must leave ordinary script values that reference the
-    /// inactive object intact.
+    /// inactive object intact. pLayer is an engine pointer, so it is cleared
+    /// here even though ordinary script values are handled separately.
     fn clear_object_action_and_command_pointers(&mut self, target: ObjectId) {
         let target_number = i32::try_from(target.as_u64()).ok();
         let mut object_ids = self.world.object_ids().to_vec();
@@ -36230,6 +36236,7 @@ impl EffectHostContext {
             }
         }
         for id in object_ids {
+            let clears_layer = self.object_layer(id) == Some(target);
             let references_target = self
                 .object_scope(id)
                 .is_some_and(|scope| scope.references_object_pointer(target))
@@ -36248,9 +36255,29 @@ impl EffectHostContext {
                             })
                         })
                 });
-            if references_target && self.ensure_object_scope(id) {
+            if (references_target || clears_layer) && self.ensure_object_scope(id) {
                 if let Some(scope) = self.object_scope_mut(id) {
-                    scope.clear_object_pointer(target);
+                    if references_target {
+                        scope.clear_object_pointer(target);
+                    }
+                    if clears_layer {
+                        scope.pending_update.layer = Some(None);
+                    }
+                }
+            }
+        }
+        // Same-call creations may not have a materializable ObjectScope yet.
+        // Keep both their eventual SpawnConfig and callback-visible preview
+        // in sync with the pointer sweep.
+        for spawn in &mut self.pending_spawns {
+            if spawn.layer == Some(target) {
+                spawn.layer = None;
+            }
+        }
+        for object in self.pending_objects.values_mut() {
+            if let Some(state) = object.state.as_mut() {
+                if state.layer == Some(target) {
+                    Rc::make_mut(state).layer = None;
                 }
             }
         }
@@ -54554,6 +54581,7 @@ public func Probe(object carrier)
             Vec::new(),
         );
         holder_state.action.target = Some(target_id);
+        holder_state.layer = Some(target_id);
         let mut holder_commands = CommandStack::new();
         holder_commands
             .push_back(CommandRequest::new(CommandId::Follow).with_target(Some(target_id)))
@@ -54618,7 +54646,8 @@ public func Probe(object carrier)
                 ])?,
                 get_object_status(std::slice::from_ref(&target))?,
                 get_action_target(&[Value::Int(0), holder.clone()])?,
-                get_command(&[holder, Value::Int(1)])?,
+                get_command(&[holder.clone(), Value::Int(1)])?,
+                get_object_layer(&[holder])?,
             ]))
         });
 
@@ -54627,6 +54656,7 @@ public func Probe(object carrier)
             Value::Array(vec![
                 Value::Bool(true),
                 Value::Int(ObjectStatus::Inactive.to_script_value()),
+                object_reference_value(target_id),
                 object_reference_value(target_id),
                 object_reference_value(target_id),
             ])
@@ -54658,13 +54688,15 @@ public func Probe(object carrier)
             Ok(Value::Array(vec![
                 get_action_target(&[Value::Int(0), holder.clone()])?,
                 get_command(&[holder.clone(), Value::Int(1)])?,
+                get_object_layer(std::slice::from_ref(&holder))?,
                 set_object_status(&[
                     Value::Int(ObjectStatus::Inactive.to_script_value()),
                     target.clone(),
                     Value::Bool(true),
                 ])?,
                 get_action_target(&[Value::Int(0), holder.clone()])?,
-                get_command(&[holder, Value::Int(1)])?,
+                get_command(&[holder.clone(), Value::Int(1)])?,
+                get_object_layer(&[holder])?,
                 get_object_status(&[target])?,
             ]))
         });
@@ -54674,7 +54706,9 @@ public func Probe(object carrier)
             Value::Array(vec![
                 object_reference_value(target_id),
                 object_reference_value(target_id),
+                object_reference_value(target_id),
                 Value::Bool(true),
+                Value::Nil,
                 Value::Nil,
                 Value::Nil,
                 Value::Int(ObjectStatus::Inactive.to_script_value()),
@@ -54707,9 +54741,16 @@ public func Probe(object carrier)
         let holder_update = holder_outcome
             .update
             .as_ref()
-            .and_then(|update| update.action.as_ref())
-            .expect("holder action target clear recorded");
-        assert_eq!(holder_update.target, Some(None));
+            .expect("holder pointer clears recorded");
+        assert_eq!(
+            holder_update
+                .action
+                .as_ref()
+                .expect("holder action target clear recorded")
+                .target,
+            Some(None)
+        );
+        assert_eq!(holder_update.layer, Some(None));
         match holder_outcome.command_operations.as_slice() {
             [CommandOperation::Restore(snapshot)] => assert_eq!(
                 snapshot
