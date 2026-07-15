@@ -4648,7 +4648,7 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
             .expect("lance survives its hit")
             .local_vars
             .get("speed_x"),
-        Some(&Value::Int(0))
+        Some(&Value::Nil)
     );
     assert_eq!(engine.debug_rng_clone(), expected_rng);
 

@@ -91,7 +91,7 @@ fn shipped_sub_airlock_toggles_once_per_transition() {
         engine
             .call_object_function(sub_index, "OpenAirlock", Vec::new())
             .expect("second OpenAirlock runs"),
-        Value::Int(0)
+        Value::Nil
     );
     assert!(entrance_status(&engine, sub));
     assert_eq!(
@@ -105,7 +105,7 @@ fn shipped_sub_airlock_toggles_once_per_transition() {
         engine
             .call_object_function(sub_index, "CloseAirlock", Vec::new())
             .expect("second CloseAirlock runs"),
-        Value::Int(0)
+        Value::Nil
     );
     assert!(!entrance_status(&engine, sub));
 

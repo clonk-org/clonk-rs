@@ -20300,24 +20300,17 @@ fn get_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let index_value = value_to_i32(&args[0], "GetVertex", "index")?;
-    let mut arg_index = 1;
-    let mut attribute = 1;
-
-    if let Some(arg) = args.get(arg_index) {
-        match arg {
-            Value::Int(value) => {
-                attribute = *value;
-                arg_index += 1;
-            }
-            Value::Nil => {
-                arg_index += 1;
-            }
-            _ => {}
-        }
-    }
+    // FnGetVertex's fixed C4ValueInt slot converts both an omitted value and
+    // a legacy zero literal (nil) to VTX_X == 0.
+    let attribute = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GetVertex",
+        "attribute",
+    )?;
 
     let mut target_id: Option<ObjectId> = None;
-    if let Some(arg) = args.get(arg_index) {
+    let mut arg_index = 2;
+    if let Some(arg) = args.get(2) {
         target_id = parse_object_reference_argument(arg, "GetVertex", "object")?;
         arg_index += 1;
     }
@@ -41170,7 +41163,7 @@ public func CheckGoals()
             engine
                 .call_object_function(goal_index, "CheckGoals", Vec::new())
                 .expect("fulfilled Goal.c4d-style loop continues"),
-            Value::Int(0),
+            Value::Nil,
             "the caller reaches its game-over return"
         );
         for password in ["pw", "PW", "goal-pass", "GOAL-PASS"] {
@@ -49443,9 +49436,26 @@ func Probe(state) {
             &[],
             HostWorldContext::default(),
             1,
-            || get_vertex(&[Value::Int(0), Value::Int(0)]),
+            || {
+                Ok::<Value, RuntimeError>(Value::Array(vec![
+                    get_vertex(&[Value::Int(0), Value::Int(0)])?,
+                    get_vertex(&[Value::Int(0), Value::Nil])?,
+                    get_vertex(&[Value::Int(0)])?,
+                    get_vertex(&[Value::Int(0), Value::Bool(false)])?,
+                    get_vertex(&[Value::Int(0), Value::Bool(true)])?,
+                ]))
+            },
         );
-        assert_eq!(x.expect("x succeeds"), Value::Int(2));
+        assert_eq!(
+            x.expect("x succeeds"),
+            Value::Array(vec![
+                Value::Int(2),
+                Value::Int(2),
+                Value::Int(2),
+                Value::Int(2),
+                Value::Int(-3),
+            ])
+        );
         let (y, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),

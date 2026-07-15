@@ -235,7 +235,7 @@ func FxStartDeniedStop() { ++iDeniedStops; }
     );
     assert_eq!(
         start_denied.local_vars.get("iDeniedStops"),
-        Some(&Value::Int(0)),
+        Some(&Value::Nil),
         "a Start-denied effect dies without Stop"
     );
 }

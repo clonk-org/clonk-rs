@@ -21,7 +21,7 @@ fn legacy_adjacent_return_parentheses_returns_first_and_evaluates_the_rest() {
 
     assert_eq!(
         engine.call("Probe", &[]).expect("Probe executes"),
-        Value::Int(0),
+        Value::Nil,
         "pre-#strict-2 return(first, unused...) returns its first value"
     );
     assert_eq!(
@@ -65,7 +65,7 @@ fn legacy_spaced_return_parentheses_returns_first_and_evaluates_the_rest() {
     evaluation_order.lock().expect("order lock").clear();
     assert_eq!(
         engine.call("Zero", &[]).expect("Zero executes"),
-        Value::Int(0),
+        Value::Nil,
         "the first falsy value remains the return value"
     );
     assert_eq!(

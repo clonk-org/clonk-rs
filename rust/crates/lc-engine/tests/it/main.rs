@@ -27,6 +27,7 @@ mod get_inventory;
 mod hangle_movement;
 mod is_newgfx;
 mod legacy_scenario_loading;
+mod literal_zero_strictness;
 mod load_scenario_section;
 mod manifest_definitions;
 mod message_board_queries;

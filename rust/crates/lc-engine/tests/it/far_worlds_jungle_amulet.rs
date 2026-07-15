@@ -58,7 +58,7 @@ fn jungle_amulet_upgrade_initializes_the_new_definition_inline() {
                 amulet.action.name, action,
                 "{upgraded} Initialize must run against the new ActMap"
             );
-            assert_eq!(amulet.local_vars.get("iSelection"), Some(&Value::Int(0)));
+            assert_eq!(amulet.local_vars.get("iSelection"), Some(&Value::Nil));
         }
 
         let clonk = engine

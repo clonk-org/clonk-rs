@@ -235,6 +235,7 @@ fn non_nil_effectvar_coalescing_assignment_skips_rhs_and_write() {
     engine.add_script(
         Script::compile(
             r#"
+                #strict 3
                 func Test() {
                     return EffectVar(0, 0, 0) ??= MarkRhs();
                 }

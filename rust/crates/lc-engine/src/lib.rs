@@ -41409,6 +41409,9 @@ fn value_to_vector(definition: &str, function: &str, value: Value) -> Result<Vec
         Value::Array(values) if values.len() == 2 => {
             let x = match &values[0] {
                 Value::Int(v) => *v,
+                // Legacy zero literals arrive as nil; this typed Rust
+                // command-delta field consumes them through C4Value::getInt.
+                Value::Nil => 0,
                 other => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
@@ -41419,6 +41422,7 @@ fn value_to_vector(definition: &str, function: &str, value: Value) -> Result<Vec
             };
             let y = match &values[1] {
                 Value::Int(v) => *v,
+                Value::Nil => 0,
                 other => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
@@ -41494,6 +41498,9 @@ fn value_to_physics_delta(
 fn value_to_int(definition: &str, function: &str, value: Value) -> Result<i32, EngineError> {
     match value {
         Value::Int(v) => Ok(v),
+        // Numeric consumers use the C4Value integer conversion: a legacy
+        // zero literal was emitted as nil, then converts back to integer 0.
+        Value::Nil => Ok(0),
         other => Err(EngineError::InvalidScriptOutput {
             definition: definition.to_string(),
             function: function.to_string(),
@@ -41570,6 +41577,9 @@ fn value_to_object_reference(
 fn value_to_bool(definition: &str, function: &str, value: Value) -> Result<bool, EngineError> {
     match value {
         Value::Bool(v) => Ok(v),
+        // A false literal below strict 3 is nil before this explicitly
+        // boolean command-delta field consumes it.
+        Value::Nil => Ok(false),
         other => Err(EngineError::InvalidScriptOutput {
             definition: definition.to_string(),
             function: function.to_string(),

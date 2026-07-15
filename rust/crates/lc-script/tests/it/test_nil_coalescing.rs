@@ -15,6 +15,7 @@ fn run(source: &str, function: &str) -> Value {
 #[test]
 fn nil_coalescing_keeps_falsy_non_nil_values() {
     let source = r#"
+        #strict 3
         global func KeepZero() { return 0 ?? 7; }
         global func KeepFalse() { return false ?? 7; }
         global func TakeRight() { var a; return a ?? 7; }
@@ -61,6 +62,7 @@ fn nil_coalescing_binds_looser_than_or() {
 #[test]
 fn nil_coalescing_assignment_sets_only_when_nil() {
     let source = r#"
+        #strict 3
         global func FillsNil() { var a; a ??= 5; return a; }
         global func KeepsZero() { var a = 0; a ??= 5; return a; }
         global func KeepsValue() { var a = 3; a ??= 5; return a; }

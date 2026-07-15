@@ -16708,7 +16708,7 @@ public func ActualizePhase(pClonk)
                 .map(|cell| cell.borrow().clone())
         };
         assert_eq!(global("preinit_count"), Some(lc_script::Value::Int(1)));
-        assert_eq!(global("init_count"), Some(lc_script::Value::Int(0)));
+        assert_eq!(global("init_count"), Some(lc_script::Value::Nil));
     }
 
     #[test]
@@ -16774,7 +16774,7 @@ public func ActualizePhase(pClonk)
                 .borrow()
                 .get("init_count")
                 .map(|cell| cell.borrow().clone()),
-            Some(lc_script::Value::Int(0))
+            Some(lc_script::Value::Nil)
         );
     }
 

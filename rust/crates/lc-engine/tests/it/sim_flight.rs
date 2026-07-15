@@ -384,19 +384,19 @@ fn sim_flight_failure_is_atomic() {
                 Value::Int(2),
                 Value::Int(2),
                 Value::Int(10),
-                Value::Int(0),
+                Value::Nil,
             ]),
             Value::Array(vec![
                 Value::Bool(false),
                 Value::Int(9),
                 Value::Int(2),
                 Value::Int(20),
-                Value::Int(0),
+                Value::Nil,
             ]),
             Value::Int(2),
             Value::Int(2),
             Value::Int(10),
-            Value::Int(0),
+            Value::Nil,
         ])
     );
 }

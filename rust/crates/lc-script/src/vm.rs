@@ -2353,7 +2353,7 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<Value, RuntimeError> {
         match expr {
-            Expr::Literal(literal) => Ok(self.literal_value(literal)),
+            Expr::Literal(literal) => Ok(self.literal_value(literal, env.strict_level)),
             // `this` yields the object context the call runs on (host-provided),
             // mirroring C4Script's `this` (C4V_C4Object); Nil for global calls.
             Expr::This => Ok(self.this_value.clone()),
@@ -2361,12 +2361,22 @@ impl<'a> Vm<'a> {
                 Some(value) => Ok(value),
                 // Engine-global statics (GlobalNamed) resolve next; script
                 // constants last ("global constants have lowest priority",
-                // C4AulParse.cpp:2836-2839).
-                None => self
-                    .global_variable(name)
-                    .or_else(|| self.constants.and_then(|constants| constants.get(name).cloned()))
-                    .or_else(|| self.global_constant(name))
-                    .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'"))),
+                // C4AulParse.cpp:2836-2839). C++ emits a constant's value
+                // through AddBCC, so zero-valued constants fold like literals.
+                None => {
+                    if let Some(value) = self.global_variable(name) {
+                        return Ok(value);
+                    }
+                    if let Some(value) = self
+                        .constants
+                        .and_then(|constants| constants.get(name).cloned())
+                    {
+                        return Ok(Self::fold_legacy_zero(value, env.strict_level));
+                    }
+                    self.global_constant(name)
+                        .map(|value| Self::fold_legacy_zero(value, env.strict_level))
+                        .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'")))
+                }
             },
             Expr::Unary(op, expr) => {
                 let value = self.evaluate(expr, env, depth)?;
@@ -2773,7 +2783,7 @@ impl<'a> Vm<'a> {
                                             "parameters not allowed in functional usage of constants",
                                         ));
                                     }
-                                    return Ok(value);
+                                    return Ok(Self::fold_legacy_zero(value, env.strict_level));
                                 }
                             }
                             let function = if env.engine_scope {
@@ -2929,21 +2939,29 @@ impl<'a> Vm<'a> {
     ) -> Result<TrackedValue, RuntimeError> {
         match expr {
             Expr::Literal(literal) => {
-                Ok(TrackedValue::literal(self.literal_value(literal), literal))
+                Ok(TrackedValue::literal(
+                    self.literal_value(literal, env.strict_level),
+                    literal,
+                ))
             }
             Expr::Variable(name) => match env.get_tracked(name)? {
                 Some(tracked) => Ok(tracked),
                 None => {
-                    if let Some(cell) = self
-                        .global_variable_cell(name)
-                        .or_else(|| self.global_constant_cell(name))
-                    {
+                    if let Some(cell) = self.global_variable_cell(name) {
                         Ok(self.read_tracked_named_cell(name, &cell))
+                    } else if let Some(cell) = self.global_constant_cell(name) {
+                        Ok(Self::fold_legacy_zero_tracked(
+                            self.read_tracked_named_cell(name, &cell),
+                            env.strict_level,
+                        ))
                     } else if let Some(value) = self
                         .constants
                         .and_then(|constants| constants.get(name).cloned())
                     {
-                        Ok(self.tracked_constant(name, value))
+                        Ok(Self::fold_legacy_zero_tracked(
+                            self.tracked_constant(name, value),
+                            env.strict_level,
+                        ))
                     } else {
                         self.evaluate(expr, env, depth).map(TrackedValue::runtime)
                     }
@@ -3106,13 +3124,19 @@ impl<'a> Vm<'a> {
                         && args.is_empty()
                     {
                         if let Some(cell) = self.global_constant_cell(name) {
-                            return Ok(self.read_tracked_named_cell(name, &cell));
+                            return Ok(Self::fold_legacy_zero_tracked(
+                                self.read_tracked_named_cell(name, &cell),
+                                env.strict_level,
+                            ));
                         }
                         if let Some(value) = self
                             .constants
                             .and_then(|constants| constants.get(name).cloned())
                         {
-                            return Ok(self.tracked_constant(name, value));
+                            return Ok(Self::fold_legacy_zero_tracked(
+                                self.tracked_constant(name, value),
+                                env.strict_level,
+                            ));
                         }
                     }
                     let builtin_reference = matches!(name.as_str(), "Var" | "Local")
@@ -3390,15 +3414,34 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn literal_value(&self, literal: &Literal) -> Value {
-        match literal {
+    fn fold_legacy_zero(value: Value, strict_level: Option<u8>) -> Value {
+        match value {
+            Value::Int(0) | Value::Bool(false) if strict_level.unwrap_or(0) < 3 => Value::Nil,
+            value => value,
+        }
+    }
+
+    fn fold_legacy_zero_tracked(
+        mut value: TrackedValue,
+        strict_level: Option<u8>,
+    ) -> TrackedValue {
+        value.value = Self::fold_legacy_zero(value.value, strict_level);
+        value
+    }
+
+    fn literal_value(&self, literal: &Literal, strict_level: Option<u8>) -> Value {
+        let value = match literal {
             Literal::Int(i) => Value::Int(*i),
             Literal::Bool(b) => Value::Bool(*b),
             Literal::String(s) => Value::String(s.clone()),
             Literal::C4Id(id) if crate::value::c4_id_raw(id) == 0 => Value::Nil,
             Literal::C4Id(id) => Value::C4Id(id.clone()),
             Literal::Nil => Value::Nil,
-        }
+        };
+        // AddBCC rewrites emitted zero-valued AB_INT/AB_BOOL operands to a
+        // default (nil) stack slot below STRICT3. Only literals and expanded
+        // constants pass through this path; computed zero values remain typed.
+        Self::fold_legacy_zero(value, strict_level)
     }
 
     fn eval_unary(&self, op: &UnaryOp, value: Value) -> Result<Value, RuntimeError> {
@@ -5672,6 +5715,6 @@ mod tests {
         let result1 = execute_script(source, "Test", &[Value::Int(15)]).unwrap();
         assert_eq!(result1, Value::Int(1));
         let result2 = execute_script(source, "Test", &[Value::Int(5)]).unwrap();
-        assert_eq!(result2, Value::Int(0));
+        assert_eq!(result2, Value::Nil);
     }
 }

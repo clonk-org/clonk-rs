@@ -44,7 +44,7 @@ fn not_of_empty_string_is_false() {
 #[test]
 fn nil_remains_falsy() {
     assert_eq!(
-        eval("func Test() { if (nil) { return 1; } return 0; }"),
+        eval("#strict 3\nfunc Test() { if (nil) { return 1; } return 0; }"),
         Value::Int(0)
     );
 }
@@ -52,7 +52,7 @@ fn nil_remains_falsy() {
 #[test]
 fn zero_int_remains_falsy() {
     assert_eq!(
-        eval("func Test() { if (0) { return 1; } return 0; }"),
+        eval("#strict 3\nfunc Test() { if (0) { return 1; } return 0; }"),
         Value::Int(0)
     );
 }

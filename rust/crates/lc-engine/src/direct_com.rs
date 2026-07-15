@@ -4874,7 +4874,7 @@ mod tests {
         let index = engine.find_object_index(crew).expect("crew survives");
         assert_eq!(
             engine.objects[index].state.local_vars.get("selection_calls"),
-            Some(&Value::Int(0)),
+            Some(&Value::Nil),
             "an empty menu must not run OnMenuSelection"
         );
     }

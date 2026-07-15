@@ -241,3 +241,85 @@ fn constant_calls_reject_parameters_like_cpp() {
         "unexpected error: {error}"
     );
 }
+
+#[test]
+fn zero_valued_registered_constants_fold_at_each_use_site() {
+    for strict_level in [1, 2, 3] {
+        let mut engine = Engine::new();
+        engine.register_constant("ZERO_VALUE", Value::Int(0));
+        engine.register_constant("FALSE_VALUE", Value::Bool(false));
+        engine
+            .load_script(&format!(
+                "#strict {strict_level}\n\
+                 func Direct() {{ return ZERO_VALUE; }}\n\
+                 func Probe() {{ return [ZERO_VALUE, FALSE_VALUE]; }}"
+            ))
+            .expect("constant strictness probe compiles");
+
+        let expected_zero = if strict_level < 3 {
+            Value::Nil
+        } else {
+            Value::Int(0)
+        };
+        let expected_false = if strict_level < 3 {
+            Value::Nil
+        } else {
+            Value::Bool(false)
+        };
+        assert_eq!(engine.call("Direct", &[]).unwrap(), expected_zero.clone());
+        assert_eq!(
+            engine.call("Probe", &[]).unwrap(),
+            Value::Array(vec![expected_zero, expected_false])
+        );
+    }
+}
+
+#[test]
+fn zero_valued_script_constants_fold_but_runtime_statics_do_not() {
+    for strict_level in [1, 2, 3] {
+        let globals = lc_script::new_global_variables();
+        let constants = lc_script::new_global_variables();
+        let mut engine = Engine::new();
+        engine.set_global_variables(globals);
+        engine.set_global_constants(constants);
+        let old_style_call = if strict_level == 1 {
+            "func Called() { return [ZERO_VALUE(), FALSE_VALUE()]; }\n"
+        } else {
+            ""
+        };
+        engine.add_script(
+            Script::compile(&format!(
+                "#strict {strict_level}\n\
+                 static const ZERO_VALUE = 0;\n\
+                 static const FALSE_VALUE = false;\n\
+                 static slot;\n\
+                 func Direct() {{ return ZERO_VALUE; }}\n\
+                 {old_style_call}\
+                 func Probe() {{ slot = 1 - 1; return [ZERO_VALUE, FALSE_VALUE, slot]; }}"
+            ))
+            .expect("script constant strictness probe compiles"),
+        );
+        engine.adopt_statics_into_globals();
+
+        let (expected_zero, expected_false) = if strict_level < 3 {
+            (Value::Nil, Value::Nil)
+        } else {
+            (Value::Int(0), Value::Bool(false))
+        };
+        assert_eq!(engine.call("Direct", &[]).unwrap(), expected_zero.clone());
+        assert_eq!(
+            engine.call("Probe", &[]).unwrap(),
+            Value::Array(vec![
+                expected_zero.clone(),
+                expected_false.clone(),
+                Value::Int(0),
+            ])
+        );
+        if strict_level == 1 {
+            assert_eq!(
+                engine.call("Called", &[]).unwrap(),
+                Value::Array(vec![expected_zero, expected_false])
+            );
+        }
+    }
+}

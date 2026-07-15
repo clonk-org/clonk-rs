@@ -23,8 +23,8 @@ fn and_returns_right_operand_when_left_truthy() {
 
 #[test]
 fn and_returns_left_operand_when_left_falsy() {
-    // 0 && 3 -> 0 (left falsy: short-circuit, leave left)
-    assert_eq!(eval("#strict 2\nfunc Test() { return 0 && 3; }"), Value::Int(0));
+    // Below strict 3 the literal 0 is nil; short-circuiting leaves that nil.
+    assert_eq!(eval("#strict 2\nfunc Test() { return 0 && 3; }"), Value::Nil);
 }
 
 #[test]

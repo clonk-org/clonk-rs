@@ -13227,7 +13227,7 @@ func Trigger() {
             .is_hostile_towards(3));
         assert_eq!(
             call_team_switch_fixture(&mut engine, rule, "Seen", Vec::new()),
-            Value::Array(vec![Value::Int(1), Value::Int(0), Value::Nil])
+            Value::Array(vec![Value::Int(1), Value::Nil, Value::Nil])
         );
 
         assert_eq!(
@@ -13420,7 +13420,7 @@ func Trigger() {
         );
         assert_eq!(
             call_team_switch_fixture(&mut same_team, rule, "Seen", Vec::new()),
-            Value::Array(vec![Value::Int(0), Value::Int(0), Value::Nil])
+            Value::Array(vec![Value::Nil, Value::Nil, Value::Nil])
         );
         assert_eq!(same_team.player(1).expect("Alice exists").team(), Some(1));
 
@@ -13444,7 +13444,7 @@ func Trigger() {
         assert_eq!(league.player(1).expect("Alice exists").team(), Some(2));
         assert_eq!(
             call_team_switch_fixture(&mut league, rule, "Seen", Vec::new()),
-            Value::Array(vec![Value::Int(0), Value::Int(0), Value::Nil])
+            Value::Array(vec![Value::Nil, Value::Nil, Value::Nil])
         );
         assert_eq!(
             league
@@ -13488,7 +13488,7 @@ func Trigger() {
         assert_eq!(engine.player(1).expect("Alice exists").team(), Some(1));
         assert_eq!(
             call_team_switch_fixture(&mut engine, rule, "Seen", Vec::new()),
-            Value::Array(vec![Value::Int(0), Value::Int(0), Value::Nil])
+            Value::Array(vec![Value::Nil, Value::Nil, Value::Nil])
         );
 
         let alice = engine.player(1).expect("Alice exists");
@@ -20029,7 +20029,7 @@ func CrewSelection(fUnselect, fCursor)
                 .state
                 .local_vars
                 .get("iSelectCallbacks"),
-            Some(&Value::Int(0)),
+            Some(&Value::Nil),
             "the silent Select clear did not emit a noncursor callback"
         );
         assert_eq!(
@@ -22516,7 +22516,7 @@ public func ReadIDs(int first, int second)
             if (frame == 1) {
                 return {
                     spawn = [
-                        { definition = "Test", position = [state.position[0] + 5, state.position[1]], velocity = [0, 0], energy = 10 }
+                        { definition = "Test", position = [state.position[0] + 5, state.position[1]], velocity = [0, 0], energy = 10, crew_member = false }
                     ]
                 };
             }
@@ -22546,6 +22546,7 @@ public func ReadIDs(int first, int second)
             .expect("child object present");
         assert_eq!(spawned.position, Vector2::new(5, 0));
         assert_eq!(spawned.energy, 42);
+        assert!(!spawned.crew_member);
     }
 
     #[test]

@@ -37,6 +37,7 @@ mod test_inherited;
 mod test_int_coercion;
 mod test_keyword_parameter_names;
 mod test_keyword_var_names;
+mod test_literal_zero_strictness;
 mod test_localn_cross_object;
 mod test_localn_named_locals;
 mod test_localn_two_args;

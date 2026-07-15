@@ -189,7 +189,7 @@ fn nested_array_append_target_errors_before_evaluating_rhs() {
         .expect_err("nested access into the new nil slot fails");
     assert_eq!(
         engine.call("Inspect", &[]).expect("state remains readable"),
-        Value::Array(vec![Value::Int(0), Value::Array(vec![Value::Nil])])
+        Value::Array(vec![Value::Nil, Value::Array(vec![Value::Nil])])
     );
 }
 
