@@ -28911,6 +28911,13 @@ impl Engine {
             .filter(|id| preserved.contains(id))
             .collect::<Vec<_>>();
 
+        // C4Landscape::Init brackets section landscape creation with two
+        // unconditional FixRandom calls. RuntimeScenarioSection landscapes
+        // are built eagerly with the persistent initial MapSeed, so the
+        // prepared-landscape swap below is the corresponding creation span
+        // (C4Landscape.cpp:564,579,735; C4Game.cpp:2642-2657).
+        self.fix_random();
+        state.rng = self.rng.clone();
         state.landscape = target.landscape.clone();
         state.scenario_values = Some(target.scenario_values.clone());
         state.environment = target.environment;
@@ -28932,6 +28939,10 @@ impl Engine {
         state.object_order.extend(retained_order);
 
         self.restore_state(&state)?;
+        // Objects.Load follows Landscape.Init's second FixRandom. Keep the
+        // same boundary before fresh section objects run Construction or
+        // Initialize callbacks.
+        self.fix_random();
         if load_initial_objects {
             self.spawn_scenario_section_objects(target.initial_objects)?;
         }
@@ -37967,6 +37978,14 @@ impl Engine {
         }
     }
 
+    /// `C4Game::FixRandom`: reset the synced LCG to the game parameter seed
+    /// and rebuild FRndBuf3. This leaves RandomCount at 500 and FRndPtr3 at
+    /// zero (C4Game.cpp:3554-3558; C4Random.cpp:29-33).
+    fn fix_random(&mut self) {
+        self.rng = LcgRng::seed_from_u64(self.random_seed);
+        self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
+    }
+
     /// `C4Game::Synchronize` (`C4Game.cpp:3682-3715`). This deliberately
     /// does not perform `SyncClearance`; `C4ControlSynchronize::Execute`
     /// invokes clearance only when its `SyncClear` flag is set, and does so
@@ -37977,8 +37996,7 @@ impl Engine {
         // C4GameObjects.cpp:250-260).
         self.resort_all_unsorted();
         self.execute_object_order_commands();
-        self.rng = LcgRng::seed_from_u64(self.random_seed);
-        self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
+        self.fix_random();
         // C4Landscape::Synchronize resets the progressive material-scan
         // cursor before synchronized play resumes (C4Landscape.cpp:1662-1667).
         if let Some(landscape) = self.landscape.as_mut() {
@@ -50016,6 +50034,59 @@ protected func Entrance(pTarget)
                 .snapshot()
                 .is_empty(),
             "helper failure finishes Put and must not queue Ty-UnGrab"
+        );
+    }
+}
+
+#[cfg(test)]
+mod scenario_section_random_regression {
+    use super::*;
+
+    fn section(name: &str, width: u32) -> scenario::ScenarioSectionSpec {
+        scenario::ScenarioSectionSpec {
+            name: name.to_string(),
+            landscape: Some(Landscape::flat(width, 40)),
+            objects: Vec::new(),
+            scenario_values: scenario::ScenarioValueStore::default(),
+            environment: EnvironmentSettings::default(),
+        }
+    }
+
+    #[test]
+    fn section_landscape_init_refixes_the_exact_synced_rng_ledger() {
+        let seed = 7;
+        let mut engine = Engine::with_seed(seed);
+        engine.configure_scenario_sections(&[section("main", 100), section("next", 240)]);
+        engine.set_landscape(Landscape::flat(100, 40));
+
+        engine.rng.random(31);
+        engine.rng.rnd3();
+        let unknown_before = engine.rng.clone();
+        assert!(!engine
+            .load_scenario_section("missing", 0, Vec::new())
+            .expect("unknown section is not an engine error"));
+        assert_eq!(
+            engine.rng, unknown_before,
+            "the known-section gate precedes FixRandom"
+        );
+
+        engine.rng.random(17);
+        engine.rng.rnd3();
+        assert!(engine
+            .load_scenario_section("next", 0, Vec::new())
+            .expect("known section loads"));
+        assert_eq!(
+            engine.landscape().expect("section landscape").width(),
+            240
+        );
+
+        let mut expected = LcgRng::seed_from_u64(seed);
+        expected.trace = engine.rng.trace;
+        assert_eq!(engine.rng.count, 500);
+        assert_eq!(engine.rng.rnd3_ptr(), 0);
+        assert_eq!(
+            engine.rng, expected,
+            "post-landscape FixRandom restores hold, count, FRndBuf3, and FRndPtr3"
         );
     }
 }
