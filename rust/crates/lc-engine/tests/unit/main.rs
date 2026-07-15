@@ -39370,6 +39370,80 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
     }
 
     #[test]
+    fn effect_stop_deny_preserves_vars_and_equal_priority_position() {
+        // C4Effect::Kill leaves the victim linked while Fx*Stop runs. If
+        // Stop denies removal, Kill restores only iPriority on that same
+        // node: EffectVar writes and its position among equal-priority
+        // peers therefore both survive (C4Effect.cpp:389-402).
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [
+                { op = "add", name = "Older", priority = 100, interval = 0 },
+                { op = "add", name = "Peer", priority = 100, interval = 0 }
+            ] };
+        }
+
+        global func FxOlderStop(state, number, reason) {
+            EffectVar(0, state, number) = 77;
+            return -1;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [ { op = "remove", name = "Older" } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        assert_eq!(
+            engine
+                .object_snapshot(id)
+                .expect("object present")
+                .effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Peer", "Older"],
+            "new equal-priority effects insert before older peers"
+        );
+
+        engine.tick().expect("first tick succeeds");
+        engine.tick().expect("second tick succeeds");
+        let third = engine.tick().expect("third tick succeeds");
+        let object = third.object(id).expect("denied target remains present");
+        assert_eq!(
+            object
+                .effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Peer", "Older"],
+            "denial restores the existing node without moving it before its equal-priority peer"
+        );
+        let older = object
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Older")
+            .expect("denied effect remains present");
+        assert_eq!(
+            older.vars().first(),
+            Some(&EffectVarValue::Int(77)),
+            "EffectVar writes made by the denying Stop survive recovery"
+        );
+    }
+
+    #[test]
     fn remove_effect_no_calls_skips_stop_callback() {
         let script = r#"
         global func Initialize(state, random)

@@ -6276,10 +6276,19 @@ impl Object {
                 .saturating_add(1)
                 .max(1);
         }
+        // Equal-priority nodes are newest-first. A fresh max+1 number still
+        // inserts at the front, while a carried number (for example a denied
+        // Kill victim) returns to its original position among its peers.
+        let priority = effect.priority.unsigned_abs();
         let mut insert_pos = 0;
-        while insert_pos < self.state.effects.len()
-            && self.state.effects[insert_pos].priority.abs() < effect.priority.abs()
-        {
+        while insert_pos < self.state.effects.len() {
+            let existing = &self.state.effects[insert_pos];
+            let existing_priority = existing.priority.unsigned_abs();
+            if existing_priority > priority
+                || (existing_priority == priority && existing.number < effect.number)
+            {
+                break;
+            }
             insert_pos += 1;
         }
         let inserted = effect.clone();
@@ -43366,8 +43375,18 @@ fn insert_effect_into_stack(stack: &mut Vec<EffectState>, mut effect: EffectStat
             .max(1);
     }
 
+    // Preserve C++'s newest-first order for carried equal-priority nodes;
+    // fresh effects have max+1 and therefore still insert before all equals.
+    let priority = effect.priority.unsigned_abs();
     let mut insert_pos = 0;
-    while insert_pos < stack.len() && stack[insert_pos].priority.abs() < effect.priority.abs() {
+    while insert_pos < stack.len() {
+        let existing = &stack[insert_pos];
+        let existing_priority = existing.priority.unsigned_abs();
+        if existing_priority > priority
+            || (existing_priority == priority && existing.number < effect.number)
+        {
+            break;
+        }
         insert_pos += 1;
     }
 
