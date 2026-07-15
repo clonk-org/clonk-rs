@@ -6396,8 +6396,13 @@ impl Engine {
         let Some(target_index) = target_index else {
             return Ok(false);
         };
-        // Def NoPushEnter (:321) is not parsed yet; standard vehicles allow
-        // push-enter.
+        if self
+            .definitions
+            .get(&self.objects[target_index].definition_id)
+            .is_some_and(|definition| definition.no_push_enter() != 0)
+        {
+            return Ok(false);
+        }
         let position = self.objects[target_index].state.position;
         let target_id = self.objects[target_index].id;
         if let Some((_, entrance_id, entrance_ocf)) =
@@ -8352,6 +8357,94 @@ protected func ControlLeft(pByClonk) { DoDamage(1); return(1); }
             1,
             "the old target still receives ControlLeft after movement"
         );
+    }
+
+    #[test]
+    fn pushed_no_push_enter_vehicle_straightens_instead_of_entering() {
+        // ObjectComEnter checks the pushed target's raw signed NoPushEnter
+        // before looking for an entrance (C4ObjectCom.cpp:316-332). A false
+        // result leaves DFA_PUSH/COM_Up to straighten the pusher upward
+        // (C4Object.cpp:3544-3550).
+        for control_style in [false, true] {
+            for no_push_enter in [0, 1, -2] {
+                let mut engine = Engine::new();
+                register_clonk(
+                    &mut engine,
+                    "CLNK",
+                    r#"#strict
+public func ReadNoPushEnter()
+{
+  return GetDefCoreVal("NoPushEnter", "DefCore", LORY);
+}
+"#,
+                );
+                let mut lorry = Definition::from_script("LORY", "Lorry", "#strict\n")
+                    .expect("lorry compiles");
+                lorry.set_no_push_enter(no_push_enter);
+                engine.register_definition(lorry).expect("register lorry");
+                let mut entrance = Definition::from_script("HUTX", "Hut", "#strict\n")
+                    .expect("hut compiles");
+                entrance.set_category(crate::CATEGORY_STRUCTURE);
+                entrance.set_shape_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+                entrance.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+                engine
+                    .register_definition(entrance)
+                    .expect("register entrance");
+                engine
+                    .register_player(PlayerConfig::new(1, "Test"))
+                    .expect("register player");
+                engine
+                    .players
+                    .get_mut(&1)
+                    .expect("player exists")
+                    .control
+                    .control_style = control_style;
+                let crew = spawn_crew(&mut engine, "CLNK", 1);
+                let lorry = engine
+                    .spawn_object(
+                        SpawnConfig::new("LORY").with_position(Vector2::new(100, 100)),
+                    )
+                    .expect("spawn lorry");
+                let entrance = engine
+                    .spawn_object(
+                        SpawnConfig::new("HUTX")
+                            .with_position(Vector2::new(100, 100))
+                            .with_entrance_status(true)
+                            .with_loaded(true),
+                    )
+                    .expect("spawn entrance");
+                assert!(engine
+                    .at_object(Vector2::new(100, 100), ocf::ENTRANCE, Some(lorry))
+                    .is_some_and(|(_, object, object_ocf)| {
+                        object == entrance && object_ocf & ocf::ENTRANCE != 0
+                    }));
+                let crew_index = engine.find_object_index(crew).expect("crew exists");
+                engine.objects[crew_index].state.action.name = "Push".to_string();
+                engine.objects[crew_index].state.action.target = Some(lorry);
+
+                assert_eq!(
+                    engine
+                        .call_object_function(crew_index, "ReadNoPushEnter", Vec::new())
+                        .expect("GetDefCoreVal succeeds"),
+                    Value::Int(no_push_enter),
+                    "GetDefCoreVal preserves the raw signed field"
+                );
+                engine.player_in_com(1, COM_UP, 0).expect("push Up");
+
+                let crew = engine.object_snapshot(crew).expect("crew survives");
+                let lorry = engine.object_snapshot(lorry).expect("lorry survives");
+                if no_push_enter == 0 {
+                    assert_eq!(crew.command_direction, CommandDirection::Stop);
+                    let commands = lorry.command_stack.command_views();
+                    assert_eq!(commands.len(), 1);
+                    assert_eq!(commands[0].name, "Enter");
+                    assert_eq!(commands[0].target, Some(entrance));
+                } else {
+                    assert_eq!(crew.command_direction, CommandDirection::Up);
+                    assert!(lorry.command_stack.command_names().is_empty());
+                }
+            }
+        }
     }
 
     #[test]

@@ -9905,6 +9905,7 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
             // wrappers (GetDefGrab/GetDefHorizontalFix/GetDefContainBlast,
             // BlastObjectsShockwaveCheck + DoExplosion).
             "Grab" => Value::Int(metadata.fire.grab),
+            "NoPushEnter" => Value::Int(metadata.fire.no_push_enter),
             "HorizontalFix" => Value::Int(metadata.fire.no_horizontal_move),
             "ContainBlast" => Value::Int(metadata.fire.contain_blast),
             "ClosedContainer" => Value::Int(metadata.fire.closed_container),
