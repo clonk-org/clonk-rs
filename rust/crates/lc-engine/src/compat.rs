@@ -2496,12 +2496,16 @@ fn parse_player_type_filter(value: Option<&Value>, function: &str) -> Result<i32
     }
 }
 
-fn player_type_matches(_player: &PlayerState, filter: i32) -> bool {
-    match filter {
-        0 => true,
-        1 => true,
-        _ => false,
-    }
+fn player_type(player: &PlayerState) -> i32 {
+    i32::from(if player.script_player {
+        crate::PLAYER_INFO_TYPE_SCRIPT
+    } else {
+        crate::PLAYER_INFO_TYPE_USER
+    })
+}
+
+fn player_type_matches(player: &PlayerState, filter: i32) -> bool {
+    filter == 0 || filter == player_type(player)
 }
 
 fn script_player_extra_data(value: Option<&Value>) -> Result<[u8; 4], RuntimeError> {
@@ -3519,11 +3523,9 @@ fn get_player_type(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
-        if context.player_state(player_id).is_some() {
-            Ok(Value::Int(1))
-        } else {
-            Ok(Value::Nil)
-        }
+        Ok(context
+            .player_state(player_id)
+            .map_or(Value::Nil, |player| Value::Int(player_type(player))))
     })
 }
 

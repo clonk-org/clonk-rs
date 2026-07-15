@@ -39308,6 +39308,106 @@ protected func Initialize() {
     }
 
     #[test]
+    fn script_player_type_queries_follow_joined_player_info() -> Result<(), EngineError> {
+        const PROBE: &str = r#"#strict
+public func QueryTypes(int user_player, int script_player)
+{
+    return [
+        GetPlayerType(user_player),
+        GetPlayerType(script_player),
+        GetPlayerCount(),
+        GetPlayerCount(1),
+        GetPlayerCount(2),
+        GetPlayerByIndex(0, 1),
+        GetPlayerByIndex(0, 2),
+        GetPlayerByIndex(1, 2)
+    ];
+}
+"#;
+
+        let mut engine = Engine::new();
+        engine.set_landscape(Landscape::flat(64, 48));
+        engine.register_definition(Definition::from_script("PROB", "Probe", PROBE)?)?;
+        let probe = engine.spawn_object(SpawnConfig::new("PROB").with_loaded(true))?;
+        let probe_index = engine.find_object_index(probe).expect("probe exists");
+
+        let user = engine
+            .join_player(JoinPlayerConfig {
+                name: "User".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x00ff_0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 2,
+            })?
+            .number();
+        assert_eq!(
+            engine.call_object_function(
+                probe_index,
+                "QueryTypes",
+                vec![Value::Int(user), Value::Int(99)],
+            )?,
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Nil,
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(0),
+                Value::Int(user),
+                Value::Int(OWNER_NONE),
+                Value::Int(OWNER_NONE),
+            ]),
+            "a user-only player list has no type-2 entry"
+        );
+
+        let info = ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(b"Bot".to_vec()).expect("valid name"),
+            id: 2,
+            player_type: PLAYER_INFO_TYPE_SCRIPT,
+            color: 0x0000_ff00,
+            original_color: 0x0000_ff00,
+            ..Default::default()
+        };
+        let join = JoinPlayerControlData {
+            info_id: info.id,
+            ..Default::default()
+        };
+        let config = prepare_join_player_config(JoinPlayerPreparation {
+            join: &join,
+            info: &info,
+            player_file: None,
+            startup_player_count: 2,
+        })
+        .expect("script player config prepares");
+        let script_player = engine.join_player_with_info(config, &info)?.number();
+
+        assert_eq!(
+            engine.call_object_function(
+                probe_index,
+                "QueryTypes",
+                vec![Value::Int(user), Value::Int(script_player)],
+            )?,
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(2),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(user),
+                Value::Int(script_player),
+                Value::Int(OWNER_NONE),
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
     fn scenario_scoreboard_writes_preserve_cpp_row_column_order_and_header_keys(
     ) -> Result<(), EngineError> {
         // FnSetScoreboardData receives (row, col) but forwards (col, row),
