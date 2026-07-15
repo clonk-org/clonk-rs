@@ -3229,11 +3229,210 @@ mod tests {
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty());
-        let update = result.update.expect("grab should update action");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
-        let action = update.action.expect("grab should set push action");
-        assert_eq!(action.name.as_deref(), Some("Push"));
-        assert_eq!(action.target, Some(Some(target_id)));
+        assert!(
+            result.update.is_none(),
+            "RejectGrabbed must run before Stop or Push"
+        );
+        assert_eq!(
+            result.events,
+            vec![CommandEvent::AttemptGrab {
+                actor_id,
+                target_id,
+            }]
+        );
+    }
+
+    #[test]
+    fn reject_grab_finishes_direct_command_as_silent_base() {
+        let target = ObjectId::new(321);
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::Grab).with_target(Some(target)))
+            .expect("Grab queues");
+        let Some(CommandState::Grab(state)) =
+            stack.entries.front_mut().map(|entry| &mut entry.state)
+        else {
+            panic!("Grab is front");
+        };
+        state.reject_pending = true;
+
+        assert_eq!(stack.resolve_grab_attempt(target, true), Some(true));
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands[0].mode, CommandMode::SilentBase);
+        assert_eq!(
+            snapshot.commands[0].finished,
+            Some(CommandStatus::Failed)
+        );
+        assert_eq!(snapshot.commands[0].failures, 0);
+    }
+
+    #[test]
+    fn reject_grab_propagates_sub_failure_to_first_unfinished_command() {
+        let target = ObjectId::new(322);
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(CommandRequest::new(CommandId::Wait))
+            .expect("base queues");
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Grab)
+                    .with_target(Some(target))
+                    .with_mode(CommandMode::Sub),
+            )
+            .expect("Grab queues");
+        let Some(CommandState::Grab(state)) =
+            stack.entries.front_mut().map(|entry| &mut entry.state)
+        else {
+            panic!("Grab is front");
+        };
+        state.reject_pending = true;
+
+        assert_eq!(stack.resolve_grab_attempt(target, true), Some(true));
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands[0].mode, CommandMode::Sub);
+        assert_eq!(
+            snapshot.commands[0].finished,
+            Some(CommandStatus::Failed)
+        );
+        assert_eq!(snapshot.commands[1].failures, 1);
+    }
+
+    #[test]
+    fn reject_grab_resolves_marked_command_below_callback_added_front() {
+        let target = ObjectId::new(323);
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::Grab).with_target(Some(target)))
+            .expect("Grab queues");
+        let Some(CommandState::Grab(state)) =
+            stack.entries.front_mut().map(|entry| &mut entry.state)
+        else {
+            panic!("Grab is front");
+        };
+        state.reject_pending = true;
+        stack
+            .push_front(CommandRequest::new(CommandId::Wait))
+            .expect("callback command queues");
+
+        assert_eq!(stack.resolve_grab_attempt(target, true), Some(true));
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands[0].state.id(), Some(CommandId::Wait));
+        assert_eq!(snapshot.commands[0].finished, None);
+        assert_eq!(snapshot.commands[1].state.id(), Some(CommandId::Grab));
+        assert_eq!(
+            snapshot.commands[1].finished,
+            Some(CommandStatus::Failed)
+        );
+        assert_eq!(snapshot.commands[1].mode, CommandMode::SilentBase);
+    }
+
+    #[test]
+    fn reject_grab_does_not_finish_same_target_replacement() {
+        let target = ObjectId::new(324);
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::Grab).with_target(Some(target)))
+            .expect("Grab queues");
+        let Some(CommandState::Grab(state)) =
+            stack.entries.front_mut().map(|entry| &mut entry.state)
+        else {
+            panic!("Grab is front");
+        };
+        state.reject_pending = true;
+
+        stack.clear();
+        stack
+            .push_front(CommandRequest::new(CommandId::Grab).with_target(Some(target)))
+            .expect("replacement Grab queues");
+        assert_eq!(stack.resolve_grab_attempt(target, true), Some(true));
+        assert_eq!(stack.snapshot().commands[0].finished, None);
+    }
+
+    #[test]
+    fn detached_grab_preserves_clear_pointer_order() {
+        fn marked_grab(target: ObjectId) -> CommandStack {
+            let mut stack = CommandStack::new();
+            stack
+                .push_front(CommandRequest::new(CommandId::Grab).with_target(Some(target)))
+                .expect("Grab queues");
+            let CommandState::Grab(state) = &mut stack.entries[0].state else {
+                panic!("Grab is front");
+            };
+            state.reject_pending = true;
+            stack
+        }
+
+        let target = ObjectId::new(326);
+        let mut cleared_first = marked_grab(target);
+        assert!(cleared_first.clear_object_reference(target));
+        cleared_first.clear();
+        cleared_first
+            .push_front(CommandRequest::new(CommandId::Grab).with_target(Some(target)))
+            .expect("replacement queues");
+        assert_eq!(
+            cleared_first.resolve_grab_attempt(target, false),
+            Some(false)
+        );
+        assert_eq!(cleared_first.snapshot().commands[0].finished, None);
+
+        let mut replaced_first = marked_grab(target);
+        replaced_first.clear();
+        replaced_first
+            .push_front(CommandRequest::new(CommandId::Grab).with_target(Some(target)))
+            .expect("replacement queues");
+        assert!(replaced_first.clear_object_reference(target));
+        assert_eq!(
+            replaced_first.resolve_grab_attempt(target, false),
+            Some(true)
+        );
+        assert_eq!(replaced_first.snapshot().commands[0].finished, None);
+    }
+
+    #[test]
+    fn detached_same_target_attempts_resolve_lifo() {
+        let target = ObjectId::new(327);
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::Grab).with_target(Some(target)))
+            .expect("outer Grab queues");
+        let CommandState::Grab(outer) = &mut stack.entries[0].state else {
+            panic!("outer Grab is front");
+        };
+        outer.reject_pending = true;
+        outer.target_cleared = true;
+        stack
+            .push_front(CommandRequest::new(CommandId::Grab).with_target(Some(target)))
+            .expect("nested Grab queues");
+        let CommandState::Grab(nested) = &mut stack.entries[0].state else {
+            panic!("nested Grab is front");
+        };
+        nested.reject_pending = true;
+
+        stack.clear();
+        assert_eq!(stack.resolve_grab_attempt(target, false), Some(true));
+        assert_eq!(stack.resolve_grab_attempt(target, false), Some(false));
+    }
+
+    #[test]
+    fn grab_attempt_tracks_cleared_target_without_legacy_request() {
+        let target = ObjectId::new(325);
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::Grab).with_target(Some(target)))
+            .expect("Grab queues");
+        stack.entries[0].request = None;
+        let CommandState::Grab(state) = &mut stack.entries[0].state else {
+            panic!("Grab is front");
+        };
+        state.reject_pending = true;
+        assert_eq!(stack.resolve_grab_attempt(target, false), Some(true));
+
+        let CommandState::Grab(state) = &mut stack.entries[0].state else {
+            panic!("Grab is front");
+        };
+        state.reject_pending = true;
+        assert!(stack.clear_object_reference(target));
+        assert_eq!(stack.resolve_grab_attempt(target, false), Some(false));
     }
 
     #[test]
@@ -8754,6 +8953,13 @@ pub enum CommandEvent {
         object_id: ObjectId,
         tx: i32,
     },
+    /// Run C4Command::Grab's live at-target sequence. Scale/hangle let-go
+    /// and the target's RejectGrabbed callback must both finish before the
+    /// actor enters Push (C4Command.cpp:689-706).
+    AttemptGrab {
+        actor_id: ObjectId,
+        target_id: ObjectId,
+    },
     /// Assign a fresh command stack to another object. C4CMD_Activate
     /// uses `Target->SetCommand(C4CMD_Exit)` rather than exiting the
     /// target inline (C4Command.cpp:1335-1362).
@@ -9039,6 +9245,8 @@ impl CommandView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct CommandStackSnapshot {
     commands: Vec<CommandSnapshot>,
+    #[serde(skip)]
+    detached_grab_attempts: Vec<DetachedGrabAttempt>,
 }
 
 impl CommandStackSnapshot {
@@ -9086,6 +9294,13 @@ impl CommandStackSnapshot {
 #[derive(Debug, Clone)]
 pub struct CommandStack {
     entries: VecDeque<ActiveCommand>,
+    detached_grab_attempts: Vec<DetachedGrabAttempt>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DetachedGrabAttempt {
+    target: ObjectId,
+    target_retained: bool,
 }
 
 impl Default for CommandStack {
@@ -9101,7 +9316,37 @@ impl CommandStack {
     pub fn new() -> Self {
         Self {
             entries: VecDeque::new(),
+            detached_grab_attempts: Vec::new(),
         }
+    }
+
+    fn pending_grab_attempt(entry: &ActiveCommand) -> Option<DetachedGrabAttempt> {
+        let CommandState::Grab(state) = &entry.state else {
+            return None;
+        };
+        if !state.reject_pending {
+            return None;
+        }
+        let request_retained = entry
+            .request
+            .as_ref()
+            .map_or(true, |request| request.target == Some(state.target));
+        Some(DetachedGrabAttempt {
+            target: state.target,
+            target_retained: !state.target_cleared && request_retained,
+        })
+    }
+
+    fn remember_detached_grab(&mut self, entry: &ActiveCommand) {
+        if let Some(attempt) = Self::pending_grab_attempt(entry) {
+            self.detached_grab_attempts.push(attempt);
+        }
+    }
+
+    fn pop_front(&mut self) -> Option<ActiveCommand> {
+        let entry = self.entries.pop_front()?;
+        self.remember_detached_grab(&entry);
+        Some(entry)
     }
 
     pub fn len(&self) -> usize {
@@ -9159,16 +9404,24 @@ impl CommandStack {
 
     /// Drops the front command (ClearCommand on the stack top).
     pub fn clear_front(&mut self) {
-        self.entries.pop_front();
+        self.pop_front();
     }
 
     pub fn clear(&mut self) {
+        let attempts = self
+            .entries
+            .iter()
+            .rev()
+            .filter_map(Self::pending_grab_attempt)
+            .collect::<Vec<_>>();
+        self.detached_grab_attempts.extend(attempts);
         self.entries.clear();
     }
 
     pub fn snapshot(&self) -> CommandStackSnapshot {
         CommandStackSnapshot {
             commands: self.entries.iter().map(CommandSnapshot::new).collect(),
+            detached_grab_attempts: self.detached_grab_attempts.clone(),
         }
     }
 
@@ -9179,6 +9432,7 @@ impl CommandStack {
             .cloned()
             .map(ActiveCommand::from_snapshot)
             .collect();
+        self.detached_grab_attempts = snapshot.detached_grab_attempts.clone();
     }
 
     /// C4Command::DenumeratePointers resolves the saved Target/Target2
@@ -9236,7 +9490,7 @@ impl CommandStack {
 
         for operation in std::mem::take(&mut result.operations) {
             match operation {
-                CommandOperation::Clear => self.entries.clear(),
+                CommandOperation::Clear => self.clear(),
                 CommandOperation::PushFront(request) => {
                     let _ = self.push_front(request);
                 }
@@ -9281,7 +9535,7 @@ impl CommandStack {
             .front()
             .is_some_and(|entry| entry.finished.is_some())
         {
-            self.entries.pop_front();
+            self.pop_front();
         }
     }
 
@@ -9306,7 +9560,7 @@ impl CommandStack {
     pub fn complete_front_if(&mut self, id: CommandId) -> bool {
         if let Some(front) = self.entries.front() {
             if front.id() == Some(id) {
-                self.entries.pop_front();
+                self.pop_front();
                 return true;
             }
         }
@@ -9334,6 +9588,77 @@ impl CommandStack {
             }
         }
         false
+    }
+
+    /// RejectGrabbed's truthy result calls Finish(false) immediately. A
+    /// direct command has no unfinished command behind it and is made a
+    /// SilentBase first so the expected veto does not report a failure
+    /// (C4Command.cpp:697-703).
+    /// Returns whether the marked command still retains its target pointer;
+    /// `None` means callback-side command replacement removed the attempt.
+    pub fn resolve_grab_attempt(&mut self, target: ObjectId, rejected: bool) -> Option<bool> {
+        let Some(index) = self.entries.iter().position(|entry| {
+            matches!(
+                &entry.state,
+                CommandState::Grab(state)
+                    if state.target == target && state.reject_pending
+            )
+        }) else {
+            if let Some(index) = self
+                .detached_grab_attempts
+                .iter()
+                .rposition(|attempt| attempt.target == target)
+            {
+                return Some(
+                    self.detached_grab_attempts
+                        .remove(index)
+                        .target_retained,
+                );
+            }
+            return None;
+        };
+        let state_retained = matches!(
+            &self.entries[index].state,
+            CommandState::Grab(state) if !state.target_cleared
+        );
+        let request_retained = self.entries[index]
+            .request
+            .as_ref()
+            .map_or(true, |request| request.target == Some(target));
+        let target_retained = state_retained && request_retained;
+        if !rejected {
+            if let CommandState::Grab(state) = &mut self.entries[index].state {
+                state.reject_pending = false;
+            }
+            return Some(target_retained);
+        }
+        let direct = self
+            .entries
+            .iter()
+            .skip(index + 1)
+            .all(|entry| entry.finished.is_some());
+        let mode = {
+            let command = &mut self.entries[index];
+            if direct {
+                command.mode = CommandMode::SilentBase;
+            }
+            if let CommandState::Grab(state) = &mut command.state {
+                state.reject_pending = false;
+            }
+            command.finished = Some(CommandStatus::Failed);
+            command.mode
+        };
+        if !direct && matches!(mode, CommandMode::SilentSub | CommandMode::Sub) {
+            if let Some(base) = self
+                .entries
+                .iter_mut()
+                .skip(index + 1)
+                .find(|entry| entry.finished.is_none())
+            {
+                base.failures = base.failures.saturating_add(1);
+            }
+        }
+        Some(target_retained)
     }
 
     pub fn set_acquire_script_result(&mut self, result: AcquireScriptResult) -> bool {
@@ -11405,6 +11730,10 @@ struct GrabState {
     last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
     ungrab_requested: bool,
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    reject_pending: bool,
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    target_cleared: bool,
 }
 
 impl GrabState {
@@ -11418,6 +11747,8 @@ impl GrabState {
             last_evaluated: None,
             last_move_order: None,
             ungrab_requested: false,
+            reject_pending: false,
+            target_cleared: false,
         })
     }
 
@@ -11449,10 +11780,17 @@ impl GrabState {
         }
         self.last_evaluated = Some(ctx.frame);
 
+        let target = (!self.target_cleared).then_some(self.target);
         if ctx.object.action_procedure == ActionProcedure::Push
-            && ctx.object.action_target == Some(self.target)
+            && ctx.object.action_target == target
         {
             return CommandStepResult::completed(self.update_to_stop(ctx));
+        }
+
+        if self.target_cleared {
+            return CommandStepResult::failed(Some(
+                ObjectUpdate::new().with_command_direction(CommandDirection::Stop),
+            ));
         }
 
         let target_snapshot = match ctx.resolve(self.target) {
@@ -11512,15 +11850,15 @@ impl GrabState {
             && (target_snapshot.ocf & ocf::GRAB) != 0;
 
         if can_grab_here {
-            let mut update = pending_update.unwrap_or_default();
-            let action_update = ActionUpdate::default()
-                .with_name("Push")
-                .with_target(Some(self.target))
-                .with_force(true)
-                .with_phase(0)
-                .with_ticks(0);
-            update = update.with_action_update(action_update);
-            return CommandStepResult::running(Some(update));
+            // Stop/Push must not be staged ahead of RejectGrabbed. The live
+            // event also performs Scale/Hangle's earlier let-go operation.
+            self.reject_pending = true;
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::AttemptGrab {
+                    actor_id: ctx.object.id,
+                    target_id: self.target,
+                },
+            ]);
         }
 
         if self.should_issue_move(ctx.frame) {
@@ -14971,6 +15309,11 @@ impl CommandState {
         };
         match self {
             CommandState::MoveTo(state) => clear(&mut state.target),
+            CommandState::Grab(state) if state.target == removed => {
+                let changed = !state.target_cleared;
+                state.target_cleared = true;
+                changed
+            }
             CommandState::Construct(state) => {
                 clear(&mut state.target) | clear(&mut state.construction_id)
             }

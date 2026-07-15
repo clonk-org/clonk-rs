@@ -26,7 +26,7 @@
 #[allow(unused_imports)]
 pub use lc_engine::*;
 #[allow(unused_imports)]
-pub use lc_engine::command::{CommandData, CommandId};
+pub use lc_engine::command::{CommandData, CommandId, CommandRequest};
 #[allow(unused_imports)]
 pub use lc_engine::compat::{LandscapeOperation, ObjectOrderCommand, PlayerCommand};
 #[allow(unused_imports)]
@@ -16317,6 +16317,473 @@ func Trigger() {
                 .command_stack,
             before,
             "strict-3 Call rejection must happen before the Set path"
+        );
+    }
+
+    fn reject_grabbed_test_engine() -> Engine {
+        let actor_script = r#"#strict
+local order, seen_action, seen_target, finished;
+local after_execute, after_action;
+local remove_on_jump;
+
+public func ResetGrabProbe()
+{
+  order = 0;
+  seen_action = nil;
+  seen_target = nil;
+  finished = nil;
+  after_execute = nil;
+  after_action = nil;
+  remove_on_jump = false;
+  return true;
+}
+
+public func RemoveOnJump()
+{
+  remove_on_jump = true;
+  return true;
+}
+
+public func NoteReject(target)
+{
+  order = order * 10 + 1;
+  seen_action = GetAction();
+  seen_target = target;
+  return true;
+}
+
+public func RunGrab(target)
+{
+  ResetGrabProbe();
+  SetCommand(this(), "Grab", target);
+  ExecuteCommand();
+  after_execute = order;
+  after_action = GetAction();
+  return order;
+}
+
+protected func PushStart()
+{
+  order = order * 10 + 2;
+  return true;
+}
+
+protected func JumpStart()
+{
+  order = order * 10 + 3;
+  return true;
+}
+
+protected func OnActionJump(xdir, ydir, by_com)
+{
+  if (!remove_on_jump) return false;
+  RemoveObject(this());
+  return true;
+}
+
+protected func ControlCommandFinished(command)
+{
+  finished = command;
+  return true;
+}
+"#;
+        let mut actor =
+            Definition::from_script("RGAC", "Grab actor", actor_script).expect("actor compiles");
+        actor.set_c4_callback_convention(true);
+        actor.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        actor.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Push".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("PUSH")
+                        .with_start_call("PushStart"),
+                ),
+                (
+                    "Scale".to_string(),
+                    ActionSpec::default().with_procedure("SCALE"),
+                ),
+                (
+                    "Hangle".to_string(),
+                    ActionSpec::default().with_procedure("HANGLE"),
+                ),
+                (
+                    "Jump".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_start_call("JumpStart"),
+                ),
+            ]),
+        );
+
+        let veto_script = r#"#strict
+protected func RejectGrabbed(clonk)
+{
+  clonk->NoteReject(this());
+  return true;
+}
+"#;
+        let pass_script = r#"#strict
+protected func RejectGrabbed(clonk)
+{
+  clonk->NoteReject(this());
+  return false;
+}
+"#;
+        let add_command_script = r#"#strict
+protected func RejectGrabbed(clonk)
+{
+  clonk->NoteReject(this());
+  AddCommand(clonk, "Wait", 0, 0, 0, 0, 1);
+  return true;
+}
+"#;
+        let zero_id_script = r#"#strict
+protected func RejectGrabbed(clonk)
+{
+  clonk->NoteReject(this());
+  return NONE;
+}
+"#;
+        let clear_target_script = r#"#strict
+protected func RejectGrabbed(clonk)
+{
+  clonk->NoteReject(this());
+  SetObjectStatus(2, this(), true);
+  return false;
+}
+"#;
+        let clear_then_replace_script = r#"#strict
+protected func RejectGrabbed(clonk)
+{
+  clonk->NoteReject(this());
+  SetObjectStatus(2, this(), true);
+  SetCommand(clonk, "Wait", 0, 1);
+  return false;
+}
+"#;
+        let replace_then_clear_script = r#"#strict
+protected func RejectGrabbed(clonk)
+{
+  clonk->NoteReject(this());
+  SetCommand(clonk, "Wait", 0, 1);
+  SetObjectStatus(2, this(), true);
+  return false;
+}
+"#;
+        let removed_actor_script = r#"#strict
+local reject_calls;
+protected func RejectGrabbed(clonk)
+{
+  reject_calls = 1;
+  return true;
+}
+"#;
+
+        let mut engine = Engine::with_seed(15);
+        engine
+            .register_definition(actor)
+            .expect("actor definition registers");
+        for (id, name, script) in [
+            ("RGVT", "Veto target", veto_script),
+            ("RGPS", "Pass target", pass_script),
+            ("RGPL", "Plain target", "#strict\n"),
+            ("RGAD", "Command-adding target", add_command_script),
+            ("RGNO", "Zero-ID target", zero_id_script),
+            ("RGCP", "Pointer-clearing target", clear_target_script),
+            (
+                "RGCR",
+                "Clear-then-replace target",
+                clear_then_replace_script,
+            ),
+            (
+                "RGRC",
+                "Replace-then-clear target",
+                replace_then_clear_script,
+            ),
+            ("RGRM", "Removed-actor target", removed_actor_script),
+        ] {
+            let mut target = Definition::from_script(id, name, script).expect("target compiles");
+            target.set_c4_callback_convention(true);
+            target.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+            target.set_grab(1);
+            engine
+                .register_definition(target)
+                .expect("target definition registers");
+        }
+        engine
+    }
+
+    fn spawn_grab_probe(
+        engine: &mut Engine,
+        target_definition: &str,
+        action: &str,
+        x: i32,
+    ) -> (ObjectId, ObjectId) {
+        let position = Vector2::new(x, 100);
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("RGAC")
+                    .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                    .with_position(position)
+                    .with_action(ActionState::new(action))
+                    .with_command_direction(CommandDirection::Right)
+                    .with_alive(true),
+            )
+            .expect("actor spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new(target_definition)
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(position),
+            )
+            .expect("target spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_index, "ResetGrabProbe", Vec::new())
+            .expect("probe resets");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::Grab).with_target(Some(target)))
+            .expect("Grab queues");
+        (actor, target)
+    }
+
+    #[test]
+    fn grab_calls_reject_grabbed_before_push_and_honors_veto() {
+        let mut engine = reject_grabbed_test_engine();
+        let (veto_actor, veto_target) = spawn_grab_probe(&mut engine, "RGVT", "Walk", 0);
+        let (pass_actor, pass_target) = spawn_grab_probe(&mut engine, "RGPS", "Walk", 100);
+        let (plain_actor, plain_target) = spawn_grab_probe(&mut engine, "RGPL", "Walk", 200);
+        let (scale_actor, _) = spawn_grab_probe(&mut engine, "RGVT", "Scale", 300);
+        let (hangle_actor, _) = spawn_grab_probe(&mut engine, "RGVT", "Hangle", 400);
+        let (mutating_actor, _) = spawn_grab_probe(&mut engine, "RGAD", "Walk", 500);
+        let (zero_id_actor, zero_id_target) =
+            spawn_grab_probe(&mut engine, "RGNO", "Walk", 600);
+        let (clear_target_actor, _) = spawn_grab_probe(&mut engine, "RGCP", "Walk", 700);
+        let (clear_then_replace_actor, _) =
+            spawn_grab_probe(&mut engine, "RGCR", "Walk", 800);
+        let (replace_then_clear_actor, replace_then_clear_target) =
+            spawn_grab_probe(&mut engine, "RGRC", "Walk", 900);
+        let (removed_actor, removed_actor_target) =
+            spawn_grab_probe(&mut engine, "RGRM", "Scale", 1000);
+        let removed_actor_index = engine
+            .find_object_index(removed_actor)
+            .expect("removal actor exists");
+        engine
+            .call_object_function(removed_actor_index, "RemoveOnJump", Vec::new())
+            .expect("jump removal arms");
+
+        engine.tick().expect("Grab commands execute");
+
+        let veto = engine.object_snapshot(veto_actor).expect("veto actor remains");
+        assert_eq!(veto.action.name, "Walk");
+        assert_eq!(veto.command_direction, CommandDirection::Right);
+        assert_eq!(veto.local_vars.get("order"), Some(&Value::Int(1)));
+        assert_eq!(
+            veto.local_vars.get("seen_action"),
+            Some(&Value::String("Walk".to_string()))
+        );
+        assert_eq!(
+            veto.local_vars.get("seen_target"),
+            Some(&object_reference_value(veto_target))
+        );
+        assert_eq!(
+            veto.local_vars.get("finished"),
+            Some(&Value::String("Grab".to_string()))
+        );
+        assert!(veto.command_stack.is_empty(), "vetoed Grab finishes now");
+
+        let pass = engine.object_snapshot(pass_actor).expect("pass actor remains");
+        assert_eq!(pass.action.name, "Push");
+        assert_eq!(pass.action.target, Some(pass_target));
+        assert_eq!(pass.command_direction, CommandDirection::Stop);
+        assert_eq!(pass.local_vars.get("order"), Some(&Value::Int(12)));
+        assert_eq!(
+            pass.command_stack.command_names(),
+            vec!["Grab".to_string()]
+        );
+
+        let plain = engine
+            .object_snapshot(plain_actor)
+            .expect("plain actor remains");
+        assert_eq!(plain.action.name, "Push");
+        assert_eq!(plain.action.target, Some(plain_target));
+        assert_eq!(plain.local_vars.get("order"), Some(&Value::Int(2)));
+
+        let zero_id = engine
+            .object_snapshot(zero_id_actor)
+            .expect("zero-ID actor remains");
+        assert_eq!(zero_id.action.name, "Push");
+        assert_eq!(zero_id.action.target, Some(zero_id_target));
+        assert_eq!(zero_id.local_vars.get("order"), Some(&Value::Int(12)));
+
+        let clear_target = engine
+            .object_snapshot(clear_target_actor)
+            .expect("pointer-cleared actor remains");
+        assert_eq!(clear_target.action.name, "Walk");
+        assert_eq!(clear_target.command_direction, CommandDirection::Stop);
+        assert_eq!(clear_target.local_vars.get("order"), Some(&Value::Int(1)));
+
+        let clear_then_replace = engine
+            .object_snapshot(clear_then_replace_actor)
+            .expect("clear-then-replace actor remains");
+        assert_eq!(clear_then_replace.action.name, "Walk");
+        assert_eq!(
+            clear_then_replace.command_stack.command_names(),
+            vec!["Wait".to_string()]
+        );
+
+        let replace_then_clear = engine
+            .object_snapshot(replace_then_clear_actor)
+            .expect("replace-then-clear actor remains");
+        assert_eq!(replace_then_clear.action.name, "Push");
+        assert_eq!(
+            replace_then_clear.action.target,
+            Some(replace_then_clear_target)
+        );
+        assert_eq!(
+            replace_then_clear.command_stack.command_names(),
+            vec!["Wait".to_string()]
+        );
+
+        let removed_target = engine
+            .object_snapshot(removed_actor_target)
+            .expect("removed actor's target remains");
+        assert_eq!(
+            removed_target.local_vars.get("reject_calls"),
+            Some(&Value::Int(1)),
+            "RejectGrabbed still runs after scale let-go removes the actor"
+        );
+
+        for actor in [scale_actor, hangle_actor] {
+            let actor = engine.object_snapshot(actor).expect("climber remains");
+            assert_eq!(actor.local_vars.get("order"), Some(&Value::Int(31)));
+            assert_eq!(
+                actor.local_vars.get("seen_action"),
+                Some(&Value::String("Jump".to_string())),
+                "let-go and its Jump StartCall precede RejectGrabbed"
+            );
+            assert_ne!(actor.action.name, "Push", "the veto prevents grabbing");
+        }
+
+        let mutating = engine
+            .object_snapshot(mutating_actor)
+            .expect("command-mutating actor remains");
+        assert_eq!(mutating.action.name, "Walk");
+        assert_eq!(
+            mutating.command_stack.command_names(),
+            vec!["Wait".to_string(), "Grab".to_string()]
+        );
+        engine.tick().expect("callback-added Wait completes");
+        let mutating = engine
+            .object_snapshot(mutating_actor)
+            .expect("command-mutating actor remains");
+        assert!(
+            mutating.command_stack.is_empty(),
+            "the finished original Grab must not resume below the callback-added command"
+        );
+        assert_eq!(mutating.action.name, "Walk");
+        assert!(
+            engine
+                .object_snapshot(clear_target_actor)
+                .expect("pointer-cleared actor remains")
+                .command_stack
+                .is_empty(),
+            "the next Grab execute observes its cleared target and fails"
+        );
+    }
+
+    #[test]
+    fn execute_command_runs_reject_grabbed_before_returning_to_script() {
+        let mut engine = reject_grabbed_test_engine();
+        let (veto_actor, veto_target) = spawn_grab_probe(&mut engine, "RGVT", "Walk", 0);
+        let (pass_actor, pass_target) = spawn_grab_probe(&mut engine, "RGPS", "Walk", 100);
+        let (scale_actor, scale_target) = spawn_grab_probe(&mut engine, "RGVT", "Scale", 200);
+        let (mutating_actor, mutating_target) =
+            spawn_grab_probe(&mut engine, "RGAD", "Walk", 300);
+        let (zero_id_actor, zero_id_target) =
+            spawn_grab_probe(&mut engine, "RGNO", "Walk", 400);
+        let (clear_target_actor, clear_target) =
+            spawn_grab_probe(&mut engine, "RGCP", "Walk", 500);
+
+        for (actor, target, expected_order, expected_action, expected_commands) in [
+            (veto_actor, veto_target, 1, "Walk", Vec::new()),
+            (
+                pass_actor,
+                pass_target,
+                12,
+                "Push",
+                vec!["Grab".to_string()],
+            ),
+            (scale_actor, scale_target, 31, "Jump", Vec::new()),
+            (
+                mutating_actor,
+                mutating_target,
+                1,
+                "Walk",
+                vec!["Wait".to_string(), "Grab".to_string()],
+            ),
+            (
+                zero_id_actor,
+                zero_id_target,
+                12,
+                "Push",
+                vec!["Grab".to_string()],
+            ),
+            (
+                clear_target_actor,
+                clear_target,
+                1,
+                "Walk",
+                vec!["Grab".to_string()],
+            ),
+        ] {
+            let actor_index = engine.find_object_index(actor).expect("actor exists");
+            assert_eq!(
+                engine
+                    .call_object_function(
+                        actor_index,
+                        "RunGrab",
+                        vec![object_reference_value(target)],
+                    )
+                    .expect("RunGrab executes"),
+                Value::Int(expected_order)
+            );
+            let actor = engine.object_snapshot(actor).expect("actor remains");
+            assert_eq!(
+                actor.local_vars.get("after_execute"),
+                Some(&Value::Int(expected_order))
+            );
+            assert_eq!(
+                actor.local_vars.get("after_action"),
+                Some(&Value::String(expected_action.to_string()))
+            );
+            assert_eq!(actor.command_stack.command_names(), expected_commands);
+        }
+
+        engine.tick().expect("callback-added Wait completes");
+        assert!(
+            engine
+                .object_snapshot(mutating_actor)
+                .expect("command-mutating actor remains")
+                .command_stack
+                .is_empty(),
+            "ExecuteCommand must finish the original Grab below the callback-added command"
+        );
+        assert!(
+            engine
+                .object_snapshot(clear_target_actor)
+                .expect("pointer-cleared actor remains")
+                .command_stack
+                .is_empty(),
+            "ExecuteCommand must preserve the cleared target for the next failure"
         );
     }
 

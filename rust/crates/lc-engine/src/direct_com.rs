@@ -5,7 +5,7 @@
 //! (C4ObjectCom.cpp). Coms are the raw C4Constants.h bytes (COM_Left=1 …)
 //! with the COM_Single/COM_Double/release modifiers.
 
-use crate::action::ActionProcedure;
+use crate::action::{ActionProcedure, ActionUpdate};
 use crate::command::{CommandId, CommandMode, CommandOperation, CommandRequest};
 use crate::compat;
 use crate::control::{
@@ -3946,6 +3946,87 @@ impl Engine {
     /// `ObjectComLetGo` (C4ObjectCom.cpp:310-314): jump off a wall/ceiling.
     fn object_com_let_go(&mut self, index: usize, xdirf: i32) -> Result<bool, EngineError> {
         self.object_action_jump_com(index, itofix(xdirf), crate::C4Fixed::from_raw(0), true)
+    }
+
+    /// C4Command::Grab's at-target sequence (C4Command.cpp:689-706).
+    /// Keep this live because ObjectComLetGo and RejectGrabbed may both run
+    /// synchronous script callbacks before ObjectComGrab changes the action.
+    pub(crate) fn execute_grab_command(
+        &mut self,
+        actor_id: ObjectId,
+        target_id: ObjectId,
+    ) -> Result<(), EngineError> {
+        let Some(actor_index) = self.find_object_index(actor_id) else {
+            return Ok(());
+        };
+        if self.objects[actor_index].destroyed
+            || self.objects[actor_index].state.status == crate::ObjectStatus::Deleted
+        {
+            return Ok(());
+        }
+
+        if matches!(
+            self.object_procedure(actor_index),
+            ActionProcedure::Scale | ActionProcedure::Hang
+        ) {
+            let xdirf = if self.objects[actor_index].state.direction == Direction::Left {
+                1
+            } else {
+                -1
+            };
+            let _ = self.object_com_let_go(actor_index, xdirf)?;
+        }
+
+        let rejected = match self.find_object_index(target_id).filter(|&index| {
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != crate::ObjectStatus::Deleted
+        }) {
+            Some(target_index) => {
+                tolerate_script_error(self.call_object_function(
+                    target_index,
+                    "RejectGrabbed",
+                    vec![compat::object_reference_value(actor_id)],
+                ))?
+                .is_some_and(|value| value.as_bool())
+            }
+            None => false,
+        };
+
+        let Some(actor_index) = self.find_object_index(actor_id).filter(|&index| {
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != crate::ObjectStatus::Deleted
+        }) else {
+            return Ok(());
+        };
+        let target_retained = self.objects[actor_index]
+            .commands
+            .resolve_grab_attempt(target_id, rejected)
+            .unwrap_or(true);
+        if rejected {
+            return Ok(());
+        }
+
+        // ObjectComGrab's remaining callbacks/controller semantics are a
+        // separate parity slice. Preserve the command's existing Stop+Push
+        // transition, but apply it only after RejectGrabbed permits it.
+        let mut update =
+            crate::ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
+        if target_retained
+            && self.find_object_index(target_id).is_some_and(|index| {
+                !self.objects[index].destroyed
+                    && self.objects[index].state.status != crate::ObjectStatus::Deleted
+            })
+        {
+            update = update.with_action_update(
+                ActionUpdate::default()
+                    .with_name("Push")
+                    .with_target(Some(target_id))
+                    .with_force(true)
+                    .with_phase(0)
+                    .with_ticks(0),
+            );
+        }
+        self.apply_object_update(actor_id, update)
     }
 
     /// `C4Command::Jump` followed by `ObjectComJump` (C4Command.cpp:

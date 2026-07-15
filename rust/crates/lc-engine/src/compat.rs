@@ -6759,6 +6759,23 @@ fn object_is_present(target: ObjectId) -> bool {
     })
 }
 
+/// Presence check for ordered command previews: once a same-call scope
+/// exists, its removal state supersedes the immutable frame snapshot.
+fn preview_object_is_present(target: ObjectId) -> bool {
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        match context.object_scope(target) {
+            Some(scope) => !scope.destroy && scope.status() != ObjectStatus::Deleted,
+            None => context
+                .get_world_object(target)
+                .is_some_and(|object| object.is_present()),
+        }
+    })
+}
+
 fn refresh_container_collection_ocf(context: &mut EffectHostContext, container: ObjectId) {
     let available = context.get_world_object(container).is_some_and(|object| {
         object.collection_enabled
@@ -24818,6 +24835,116 @@ fn command_data_value(data: &CommandData) -> Value {
     }
 }
 
+/// Host-preview form of ObjectActionJump used by C4Command::Grab's
+/// scale/hangle let-go. ExecuteCommand runs inside the VM, so both the
+/// OnActionJump hook and Jump action callbacks must complete before the
+/// caller's next script instruction (C4ObjectCom.cpp:48-61,310-314).
+fn preview_object_action_jump(
+    target: ObjectId,
+    velocity: FixedVec2,
+) -> Result<bool, RuntimeError> {
+    let handled = call_object_own_fail_safe(
+        target,
+        "OnActionJump",
+        &[
+            Value::Int(fixtoi_prec(velocity.x, 100)),
+            Value::Int(fixtoi_prec(velocity.y, 100)),
+            Value::Bool(true),
+        ],
+    );
+    if value_raw_truthy(&handled) {
+        return Ok(true);
+    }
+    if !native_set_action_by_name(target, "Jump")? {
+        return Ok(false);
+    }
+    HOST_CONTEXT.with(|cell| {
+        if let Some(object) = cell
+            .borrow_mut()
+            .as_mut()
+            .and_then(|context| context.object_scope_mut(target))
+        {
+            object.set_fixed_velocity(velocity);
+            object.set_mobile(true);
+            object.set_t_attach(object.t_attach() & !CNAT_BOTTOM);
+        }
+    });
+    Ok(true)
+}
+
+/// Synchronous host preview for CommandEvent::AttemptGrab. The regular
+/// engine applies the same event before its command-finished tail; this
+/// form preserves that ordering inside script-level ExecuteCommand too.
+fn preview_grab_attempt(actor: ObjectId, target: ObjectId) -> Result<(), RuntimeError> {
+    let let_go_xdir = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        if !context.ensure_object_scope(actor) {
+            return None;
+        }
+        let object = context.object_scope(actor)?;
+        matches!(
+            object.effective_action_procedure(),
+            ActionProcedure::Scale | ActionProcedure::Hang
+        )
+        .then_some(if object.direction() == Direction::Left {
+            1
+        } else {
+            -1
+        })
+    });
+    if let Some(xdir) = let_go_xdir {
+        let _ = preview_object_action_jump(
+            actor,
+            FixedVec2::new(itofix(xdir), C4Fixed::ZERO),
+        )?;
+    }
+
+    let rejected = preview_object_is_present(target)
+        && call_object_own_fail_safe(
+            target,
+            "RejectGrabbed",
+            &[object_reference_value(actor)],
+        )
+        .as_bool();
+    if !preview_object_is_present(actor) {
+        return Ok(());
+    }
+    let target_retained = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return true;
+        };
+        if let Some(object) = context.object_scope_mut(actor) {
+            let resolution = object
+                .live_commands
+                .resolve_grab_attempt(target, rejected);
+            if resolution.is_some() {
+                object.command_stack_replaced = true;
+                object.command_count = object.live_commands.len();
+            }
+            if rejected {
+                return resolution.unwrap_or(true);
+            }
+            object.set_command_direction(CommandDirection::Stop);
+            return resolution.unwrap_or(true);
+        }
+        true
+    });
+    if rejected {
+        return Ok(());
+    }
+    if target_retained && preview_object_is_present(target) {
+        let _ = set_action(&[
+            Value::String("Push".to_string()),
+            object_reference_value(target),
+            Value::Nil,
+            Value::Bool(true),
+        ])?;
+    }
+    Ok(())
+}
+
 fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     let active = active_object_id();
     let target = match args.first() {
@@ -24836,14 +24963,27 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let random = RANDOM_CONTEXT.with(|cell| cell.borrow().clone());
-    let finished = HOST_CONTEXT.with(|cell| {
+    let preview = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut().as_mut().and_then(|context| {
             context.execute_command_preview(target, random.as_ref().map(|rng| &rng.rng))
         })
     });
-    let Some(finished) = finished else {
+    let Some((mut finished, grab_attempts)) = preview else {
         return Ok(Value::Bool(false));
     };
+
+    let had_grab_attempt = !grab_attempts.is_empty();
+    for (actor_id, target_id) in grab_attempts {
+        preview_grab_attempt(actor_id, target_id)?;
+    }
+    if had_grab_attempt {
+        finished = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.object_scope(target))
+                .and_then(|scope| scope.live_commands.finished_front_view())
+        });
+    }
 
     if let Some(command) = finished {
         let callback_args = [
@@ -34839,7 +34979,7 @@ impl EffectHostContext {
         &mut self,
         target: ObjectId,
         rng: Option<&RefCell<LcgRng>>,
-    ) -> Option<Option<CommandView>> {
+    ) -> Option<(Option<CommandView>, Vec<(ObjectId, ObjectId)>)> {
         let (objects, players, definitions, transfers) = self.command_runtime_data();
         let object_snapshot = objects.get(&target)?;
         let landscape = self.world.landscape.clone();
@@ -34876,8 +35016,13 @@ impl EffectHostContext {
         };
 
         let mut deferred_events = Vec::new();
+        let mut grab_attempts = Vec::new();
         for event in events.drain(..) {
             match event {
+                CommandEvent::AttemptGrab {
+                    actor_id,
+                    target_id,
+                } => grab_attempts.push((actor_id, target_id)),
                 CommandEvent::OpenMenu(request) => self.pending_menu_requests.push(request),
                 other => deferred_events.push(other),
             }
@@ -34889,7 +35034,7 @@ impl EffectHostContext {
             );
             self.pending_command_events.extend(deferred_events);
         }
-        Some(finished)
+        Some((finished, grab_attempts))
     }
 
     fn clear_finished_command_fronts(&mut self, target: ObjectId) {

@@ -37016,6 +37016,12 @@ impl Engine {
             CommandEvent::ObjectComJump { object_id, tx } => {
                 self.execute_jump_command(object_id, tx)?;
             }
+            CommandEvent::AttemptGrab {
+                actor_id,
+                target_id,
+            } => {
+                self.execute_grab_command(actor_id, target_id)?;
+            }
             CommandEvent::SetObjectCommand {
                 object_id,
                 controller,
