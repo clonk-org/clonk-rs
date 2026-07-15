@@ -54,6 +54,7 @@ mod test_script_constants;
 mod test_setlocal_cross_object;
 mod test_statics;
 mod test_strict_equality;
+mod test_strict3_nil_operands;
 mod test_string_comparison;
 mod test_swt_issue;
 mod test_this_context;

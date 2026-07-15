@@ -2942,6 +2942,33 @@ impl<'a> Vm<'a> {
         strict: Option<u8>,
     ) -> Result<Value, RuntimeError> {
         use BinaryOp::*;
+        // Binary integer operators instantiate CheckOpPars with both
+        // allowAny flags false (C4AulExec.cpp:490-593, 710-730). At strict 3
+        // that rejects nil before the opcode reads its integer payload. Keep
+        // the coercive Value::as_c4_int behavior for older strict levels and
+        // for unrelated call sites such as array indices.
+        if let Some(symbol) = match op {
+            Add => Some("+"),
+            Sub => Some("-"),
+            Mul => Some("*"),
+            Div => Some("/"),
+            Mod => Some("%"),
+            Pow => Some("**"),
+            Less => Some("<"),
+            LessEqual => Some("<="),
+            Greater => Some(">"),
+            GreaterEqual => Some(">="),
+            BitAnd => Some("&"),
+            BitOr => Some("|"),
+            BitXor => Some("^"),
+            LeftShift => Some("<<"),
+            RightShift => Some(">>"),
+            _ => None,
+        } {
+            Self::reject_strict3_nil_operand(&left, strict, symbol, " left side")?;
+            Self::reject_strict3_nil_operand(&right, strict, symbol, " right side")?;
+        }
+
         match op {
             Add => self.eval_add(left, right),
             Concat => self.eval_concat(left, right),
@@ -3035,6 +3062,20 @@ impl<'a> Vm<'a> {
             StringGreater => self.eval_display_string_cmp(left, right, |a, b| a > b),
             StringGreaterEqual => self.eval_display_string_cmp(left, right, |a, b| a >= b),
         }
+    }
+
+    fn reject_strict3_nil_operand(
+        value: &Value,
+        strict: Option<u8>,
+        symbol: &str,
+        side: &str,
+    ) -> Result<(), RuntimeError> {
+        if strict.unwrap_or(0) >= 3 && matches!(value, Value::Nil) {
+            return Err(RuntimeError::new(format!(
+                "operator \"{symbol}\"{side}: got nil, but expected \"int\"!"
+            )));
+        }
+        Ok(())
     }
 
     /// `..` concatenation (C4Script AB_Concat, C4AulExec.cpp:594-657): array .. array
