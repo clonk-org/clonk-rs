@@ -14590,10 +14590,17 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                 SpawnConfig::new("Fighter")
                     .with_position(Vector2::new(0, 0))
                     .with_vertices(vertices)
-                    .with_action(fight_state)
-                    .with_crew_member(true),
+                    .with_action(fight_state),
             )
             .expect("fighter spawns");
+        let fighter_idx = engine
+            .find_object_index(fighter_id)
+            .expect("fighter exists");
+        engine.objects[fighter_idx].state.temporary_physical = Some(PhysicalInfo {
+            walk: 35_000,
+            fight: 20_000,
+            ..PhysicalInfo::default()
+        });
         engine
             .apply_object_update(
                 opponent_id,
@@ -14604,23 +14611,25 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
 
         // C4Object.cpp:5214-5216: `if (!Tick5) TrainPhysical(Fight, 1,
         // C4MaxPhysical)` — the gate fires on frames divisible by 5 only;
-        // only the crew info physicals train (C4Object.cpp:2136-2146).
+        // temporary physicals train whenever they exist (C4Object.cpp:2136-2146).
         for _ in 0..4 {
             engine.tick().expect("tick succeeds");
         }
-        let fighter_idx = engine
-            .find_object_index(fighter_id)
-            .expect("fighter exists");
         assert_eq!(
-            engine.objects[fighter_idx].state.info_physical, None,
+            engine.objects[fighter_idx]
+                .state
+                .temporary_physical
+                .expect("temporary physicals remain installed")
+                .fight,
+            20_000,
             "no training before the first Tick5 frame"
         );
 
         engine.tick().expect("tick succeeds");
         let trained = engine.objects[fighter_idx]
             .state
-            .info_physical
-            .expect("Tick5 training clones the definition physicals");
+            .temporary_physical
+            .expect("Tick5 training updates the temporary physicals");
         assert_eq!(trained.fight, 20_001);
         assert_eq!(trained.walk, 35_000, "other physicals copied untouched");
     }
@@ -24057,12 +24066,15 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         let id = engine
             .spawn_object(
                 SpawnConfig::new("Climber")
-                    .with_crew_member(true)
                     .with_position(Vector2::new(0, 0))
                     .with_command_direction(CommandDirection::Up),
             )
             .expect("climber spawns");
         let idx = engine.find_object_index(id).expect("climber exists");
+        engine.objects[idx].state.temporary_physical = Some(PhysicalInfo {
+            scale: 30_000,
+            ..PhysicalInfo::default()
+        });
 
         // DFA_SCALE (C4Object.cpp:4805-4837): ydir -= WalkAccel (raw 32768),
         // clamped to lLimit = ValByPhysical(200, 30000)
@@ -24080,8 +24092,8 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         engine.tick().expect("tick succeeds");
         let trained = engine.objects[idx]
             .state
-            .info_physical
-            .expect("at-limit Tick5 training clones the physicals");
+            .temporary_physical
+            .expect("at-limit Tick5 trains the temporary physicals");
         assert_eq!(trained.scale, 30_001);
     }
 
@@ -24205,12 +24217,15 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         let id = engine
             .spawn_object(
                 SpawnConfig::new("Hangler")
-                    .with_crew_member(true)
                     .with_position(Vector2::new(0, 0))
                     .with_command_direction(CommandDirection::Right),
             )
             .expect("hangler spawns");
         let idx = engine.find_object_index(id).expect("hangler exists");
+        engine.objects[idx].state.temporary_physical = Some(PhysicalInfo {
+            hangle: 40_000,
+            ..PhysicalInfo::default()
+        });
 
         // DFA_HANGLE (C4Object.cpp:4840-4872): xdir += WalkAccel (raw 32768),
         // clamped to lLimit = ValByPhysical(160, 40000)
@@ -24229,8 +24244,8 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         engine.tick().expect("tick succeeds");
         let trained = engine.objects[idx]
             .state
-            .info_physical
-            .expect("at-limit Tick5 training clones the physicals");
+            .temporary_physical
+            .expect("at-limit Tick5 trains the temporary physicals");
         assert_eq!(trained.hangle, 40_001);
     }
 
@@ -24520,12 +24535,15 @@ protected func Activity() { SetActionTargets(); return(1); }
         let id = engine
             .spawn_object(
                 SpawnConfig::new("Swimmer")
-                    .with_crew_member(true)
                     .with_position(Vector2::new(0, 0))
                     .with_command_direction(CommandDirection::Right),
             )
             .expect("swimmer spawns");
         let idx = engine.find_object_index(id).expect("swimmer exists");
+        engine.objects[idx].state.temporary_physical = Some(PhysicalInfo {
+            swim: 50_000,
+            ..PhysicalInfo::default()
+        });
 
         // DFA_SWIM (C4Object.cpp:4920-4960): xdir += SwimAccel = FIXED100(20)
         // (C4Movement.cpp:34) = raw 13107, clamped to
@@ -24555,8 +24573,8 @@ protected func Activity() { SetActionTargets(); return(1); }
         }
         let trained = engine.objects[idx]
             .state
-            .info_physical
-            .expect("at-limit Tick10 training clones the physicals");
+            .temporary_physical
+            .expect("at-limit Tick10 trains the temporary physicals");
         assert_eq!(trained.swim, 50_001);
     }
 
@@ -25857,6 +25875,177 @@ func Stuck()
         }
     }
 
+    fn train_physical_crew_fixture(use_fair_crew: bool) -> (Engine, ObjectId, usize) {
+        let mut definition = Definition::from_script(
+            "TRNR",
+            "Training crew",
+            r#"#strict
+public func TrainScale()
+{
+    return([TrainPhysical("Scale", 5, 100000), GetPhysical("Scale"), GetPhysical("Scale", 1)]);
+}
+
+public func TrainTemporaryScale()
+{
+    SetPhysical("Scale", 50000, 3);
+    return([TrainPhysical("Scale", 5, 100000), GetPhysical("Scale"), GetPhysical("Scale", 2)]);
+}
+"#,
+        )
+        .expect("training crew script compiles");
+        definition.set_crew_member(true);
+        definition.set_physical(PhysicalInfo {
+            scale: 30_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("training crew definition registers");
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("TRNR".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine.set_use_fair_crew(use_fair_crew);
+        engine
+            .join_player(JoinPlayerConfig {
+                name: "Training owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![player_file::CrewInfo {
+                    id: "TRNR".to_string(),
+                    name: "Trainee".to_string(),
+                    rank: 0,
+                    experience: 0,
+                    physical: PhysicalInfo {
+                        scale: 80_000,
+                        ..PhysicalInfo::default()
+                    },
+                    death_count: 0,
+                    total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
+                    participation: 1,
+                    in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                }],
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("training player joins");
+        let crew = engine.player(0).expect("training player exists").crew()[0];
+        let crew_index = engine
+            .find_object_index(crew)
+            .expect("training crew exists");
+        (engine, crew, crew_index)
+    }
+
+    fn persisted_crew_scale(engine: &Engine, crew: ObjectId) -> i32 {
+        let state = engine.capture_state();
+        let link = state
+            .crew_info_links
+            .get(&crew)
+            .expect("crew retains its exact roster link");
+        state
+            .crew_info_rosters
+            .get(&link.player_id)
+            .and_then(|roster| roster.get(link.roster_index))
+            .expect("linked persistent crew info exists")
+            .physical
+            .scale
+    }
+
+    #[test]
+    fn train_physical_under_fair_crew_persists_without_changing_live_physicals() {
+        let (mut engine, crew, crew_index) = train_physical_crew_fixture(true);
+        assert_eq!(engine.object_physical(crew_index).scale, 33_500);
+
+        assert_eq!(
+            engine
+                .call_object_function(crew_index, "TrainScale", Vec::new())
+                .expect("script trains the raw info physical"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(33_500),
+                Value::Int(33_500),
+            ]),
+            "both current and permanent reads stay on the fair projection"
+        );
+        assert_eq!(engine.object_physical(crew_index).scale, 33_500);
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .info_physical
+                .expect("crew carries raw info physicals")
+                .scale,
+            80_005
+        );
+        assert_eq!(persisted_crew_scale(&engine, crew), 80_005);
+
+        engine.set_use_fair_crew(false);
+        assert_eq!(
+            engine.object_physical(crew_index).scale,
+            80_005,
+            "disabling fair crew reveals the training instead of losing it"
+        );
+    }
+
+    #[test]
+    fn train_physical_trains_temporary_and_stacked_values_under_fair_crew() {
+        let (mut engine, crew, crew_index) = train_physical_crew_fixture(true);
+
+        assert_eq!(
+            engine
+                .call_object_function(crew_index, "TrainTemporaryScale", Vec::new())
+                .expect("script trains temporary and raw physicals"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(50_005),
+                Value::Int(50_005),
+            ])
+        );
+        assert_eq!(engine.object_physical(crew_index).scale, 50_005);
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .temporary_physical
+                .expect("temporary mode stays active")
+                .scale,
+            50_005
+        );
+        assert_eq!(
+            engine.objects[crew_index].state.physical_changes,
+            vec![("Scale".to_string(), 33_505)],
+            "TrainPhysical also trains every stacked previous value"
+        );
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .info_physical
+                .expect("raw info is trained alongside temporary state")
+                .scale,
+            80_005
+        );
+        assert_eq!(persisted_crew_scale(&engine, crew), 80_005);
+    }
+
+    #[test]
+    fn train_physical_is_live_and_persistent_when_fair_crew_is_off() {
+        let (mut engine, crew, crew_index) = train_physical_crew_fixture(false);
+
+        assert_eq!(engine.object_physical(crew_index).scale, 80_000);
+        assert!(engine.train_physical(crew_index, "Scale", 5, C4_MAX_PHYSICAL));
+        assert_eq!(engine.object_physical(crew_index).scale, 80_005);
+        assert_eq!(persisted_crew_scale(&engine, crew), 80_005);
+    }
+
     #[test]
     fn train_physical_requires_info_or_temporary_physicals() {
         // C4Object::TrainPhysical (C4Object.cpp:2136-2146) trains the
@@ -25889,20 +26078,30 @@ func Stuck()
         assert_eq!(engine.objects[sheep_idx].state.info_physical, None);
         assert_eq!(engine.objects[sheep_idx].state.temporary_physical, None);
 
-        // Crew members carry an info (surrogate: crew_member flag) whose
-        // physicals clone the definition's on first training.
+        // Crew membership alone is not C4Object::Info. Script-created crew
+        // can exist without a persistent object-info pointer.
         let crew_id = engine
             .spawn_object(SpawnConfig::new("Sheep").with_crew_member(true))
             .expect("crew spawns");
         let crew_idx = engine.find_object_index(crew_id).expect("crew exists");
+        assert!(!engine.train_physical(crew_idx, "Fight", 1, C4_MAX_PHYSICAL));
+        assert_eq!(engine.objects[crew_idx].state.info_physical, None);
+
+        // A temporary set is independently trainable even without Info.
+        engine.objects[crew_idx].state.temporary_physical = Some(PhysicalInfo {
+            fight: 100,
+            ..PhysicalInfo::default()
+        });
         assert!(engine.train_physical(crew_idx, "Fight", 1, C4_MAX_PHYSICAL));
-        // The zero fight value stays untrained (TrainValue only-nonzero) but
-        // the info set now exists, cloned from the definition.
         assert_eq!(
-            engine.objects[crew_idx].state.info_physical,
-            Some(PhysicalInfo::default())
+            engine.objects[crew_idx]
+                .state
+                .temporary_physical
+                .expect("temporary set remains active")
+                .fight,
+            101
         );
-        assert_eq!(engine.objects[crew_idx].state.temporary_physical, None);
+        assert_eq!(engine.objects[crew_idx].state.info_physical, None);
     }
 
     #[test]

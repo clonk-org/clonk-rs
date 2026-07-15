@@ -492,6 +492,13 @@ pub enum PlayerCommand {
         link: Option<CrewInfoLink>,
         name: String,
     },
+    /// Persist one `C4ObjectInfo::Physical` training write through the exact
+    /// owning roster pointer. The object-scope copy is carried separately by
+    /// `ObjectUpdate::physicals`.
+    SetCrewInfoPhysical {
+        link: CrewInfoLink,
+        physical: PhysicalInfo,
+    },
     /// Engine-global `C4Game::LoadScenarioSection` request. This uses the
     /// player-command outcome channel only as the existing synchronous
     /// script-to-engine transport; it is not scoped to any player.
@@ -18682,12 +18689,39 @@ fn train_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
             return Ok(Value::Bool(false));
         }
-        let Some(object) = context.object_scope_mut(target) else {
-            return Ok(Value::Bool(false));
+        let (trained, info_writeback) = {
+            let Some(object) = context.object_scope_mut(target) else {
+                return Ok(Value::Bool(false));
+            };
+            let has_info = object.has_physical_info();
+            let trained = object.train_physical(&name, train_by, max_train);
+            let info_writeback = (has_info && trained)
+                .then(|| object.info_link().zip(object.info_physical))
+                .flatten();
+            (trained, info_writeback)
         };
-        Ok(Value::Bool(
-            object.train_physical(&name, train_by, max_train),
-        ))
+        if let Some((link, physical)) = info_writeback {
+            // The host mirrors the exact roster node so a later Retire,
+            // GrabObjectInfo or MakeCrewMember in this same VM call sees the
+            // trained values before the copied outcome reaches Engine.
+            let mut state = context.world.crew_info_state.borrow_mut();
+            if let Some(entry) = state.entries.get_mut(&link) {
+                entry.physical = physical;
+            }
+            for entries in state.idle.values_mut() {
+                for (candidate, entry) in entries {
+                    if *candidate == link {
+                        entry.physical = physical;
+                    }
+                }
+            }
+            drop(state);
+            context.record_player_command(PlayerCommand::SetCrewInfoPhysical {
+                link,
+                physical,
+            });
+        }
+        Ok(Value::Bool(trained))
     })
 }
 
@@ -40231,8 +40265,10 @@ impl ObjectScopeContext {
             }
             trained = true;
         }
-        if self.crew_member {
-            let definition_physical = self.definition_physical;
+        if self.has_physical_info() {
+            let definition_physical = self
+                .info_definition_physical
+                .unwrap_or(self.definition_physical);
             let info = self.info_physical.get_or_insert(definition_physical);
             if let Some(value) = info.value_mut_by_name(name) {
                 PhysicalInfo::train_value(value, train_by, max_train);

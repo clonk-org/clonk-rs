@@ -29224,6 +29224,16 @@ impl Engine {
         });
     }
 
+    fn set_linked_crew_info_physical(&mut self, link: CrewInfoLink, physical: PhysicalInfo) {
+        if let Some(entry) = self
+            .crew_rosters
+            .get_mut(&link.player_id)
+            .and_then(|roster| roster.get_mut(link.roster_index))
+        {
+            entry.physical = physical;
+        }
+    }
+
     #[doc(hidden)]
     pub fn apply_player_commands(&mut self, commands: Vec<PlayerCommand>) -> Result<(), EngineError> {
         for command in commands {
@@ -29256,6 +29266,9 @@ impl Engine {
                     {
                         info.name = name;
                     }
+                }
+                PlayerCommand::SetCrewInfoPhysical { link, physical } => {
+                    self.set_linked_crew_info_physical(link, physical);
                 }
                 PlayerCommand::LoadScenarioSection {
                     name,
@@ -36913,36 +36926,48 @@ impl Engine {
     /// `C4Object::TrainPhysical` (C4Object.cpp:2136-2146): trains the
     /// temporary set when active — including the stacked previous values for
     /// the same physical (C4InfoCore.cpp:309-317) — and the info physicals
-    /// when the object carries an info (crew surrogate; cloned lazily from
-    /// the definition). Returns false when the object has neither.
+    /// when the object carries an actual info pointer, seeded lazily from
+    /// `Info->pDef`. Returns false when the object has neither.
     #[doc(hidden)]
     pub fn train_physical(&mut self, idx: usize, name: &str, train_by: i32, max_train: i32) -> bool {
-        let definition_physical = self.definition_physical(idx);
-        let object = &mut self.objects[idx];
-        let mut trained = false;
-        if let Some(temporary) = object.state.temporary_physical.as_mut() {
-            if let Some(value) = temporary.value_mut_by_name(name) {
-                PhysicalInfo::train_value(value, train_by, max_train);
+        let object_id = self.objects[idx].id;
+        let info_definition_physical = self.info_definition_physical(idx);
+        let (trained, info_writeback) = {
+            let object = &mut self.objects[idx];
+            let mut trained = false;
+            if let Some(temporary) = object.state.temporary_physical.as_mut() {
+                if let Some(value) = temporary.value_mut_by_name(name) {
+                    PhysicalInfo::train_value(value, train_by, max_train);
+                }
+                for (_, previous) in object
+                    .state
+                    .physical_changes
+                    .iter_mut()
+                    .filter(|(changed, _)| changed.eq_ignore_ascii_case(name))
+                {
+                    PhysicalInfo::train_value(previous, train_by, max_train);
+                }
+                trained = true;
             }
-            for (_, previous) in object
-                .state
-                .physical_changes
-                .iter_mut()
-                .filter(|(changed, _)| changed.eq_ignore_ascii_case(name))
-            {
-                PhysicalInfo::train_value(previous, train_by, max_train);
+            let mut info_writeback = None;
+            if let Some(definition_physical) = info_definition_physical {
+                let info = object
+                    .state
+                    .info_physical
+                    .get_or_insert(definition_physical);
+                if let Some(value) = info.value_mut_by_name(name) {
+                    PhysicalInfo::train_value(value, train_by, max_train);
+                }
+                info_writeback = Some(*info);
+                trained = true;
             }
-            trained = true;
-        }
-        if object.state.crew_member {
-            let info = object
-                .state
-                .info_physical
-                .get_or_insert(definition_physical);
-            if let Some(value) = info.value_mut_by_name(name) {
-                PhysicalInfo::train_value(value, train_by, max_train);
-            }
-            trained = true;
+            (trained, info_writeback)
+        };
+        if let (Some(link), Some(physical)) = (
+            self.crew_info_links.get(&object_id).copied(),
+            info_writeback,
+        ) {
+            self.set_linked_crew_info_physical(link, physical);
         }
         trained
     }
