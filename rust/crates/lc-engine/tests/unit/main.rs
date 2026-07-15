@@ -14935,6 +14935,80 @@ protected func GrabLost()
         }
     }
 
+    #[test]
+    fn l078_fight_continues_through_open_container_mismatches() {
+        #[derive(Clone, Copy)]
+        enum ContainerCase {
+            FighterInside,
+            TargetInside,
+            BothInsideDifferent,
+            BothInsideSameClosed,
+        }
+
+        for (label, case) in [
+            ("fighter inside an open container", ContainerCase::FighterInside),
+            ("target inside an open container", ContainerCase::TargetInside),
+            (
+                "fighters inside different open containers",
+                ContainerCase::BothInsideDifferent,
+            ),
+            (
+                "fighters inside the same closed container",
+                ContainerCase::BothInsideSameClosed,
+            ),
+        ] {
+            let mut engine = l073_fight_failure_engine();
+            let spawn_container = |engine: &mut Engine, entrance_status| {
+                engine
+                    .spawn_object(
+                        SpawnConfig::new("L73D")
+                            .with_position(Vector2::ZERO)
+                            .with_entrance_status(entrance_status),
+                    )
+                    .expect("container spawns")
+            };
+            let (fighter_container, target_container) = match case {
+                ContainerCase::FighterInside => {
+                    (Some(spawn_container(&mut engine, true)), None)
+                }
+                ContainerCase::TargetInside => {
+                    (None, Some(spawn_container(&mut engine, true)))
+                }
+                ContainerCase::BothInsideDifferent => (
+                    Some(spawn_container(&mut engine, true)),
+                    Some(spawn_container(&mut engine, true)),
+                ),
+                ContainerCase::BothInsideSameClosed => {
+                    let container = spawn_container(&mut engine, false);
+                    (Some(container), Some(container))
+                }
+            };
+
+            let mut target_config = SpawnConfig::new("L73O")
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(10, 0))
+                .with_action(ActionState::new("Fight"));
+            if let Some(container) = target_container {
+                target_config = target_config.with_container(container);
+            }
+            let target = engine
+                .spawn_object(target_config)
+                .expect("fight target spawns");
+            let fighter = l073_spawn_fighter(&mut engine, Some(target), fighter_container);
+            let index = engine.find_object_index(fighter).expect("fighter exists");
+
+            assert!(
+                !engine
+                    .apply_physics_at_index(index)
+                    .unwrap_or_else(|error| panic!("{label}: Fight failed: {error}")),
+                "a continuing Fight must reach the normal ExecAction phase tail: {label}"
+            );
+
+            let fighter = &engine.objects[index];
+            assert_eq!(fighter.state.action.name, "Fight", "{label}");
+        }
+    }
+
     fn l074_wide_vertex_fight_pair(separation: i32) -> (Engine, ObjectId, ObjectId) {
         let mut engine = l073_fight_failure_engine();
         // Deliberately disagree with the 16px shape rect. DFA_FIGHT uses the

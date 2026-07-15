@@ -34943,7 +34943,19 @@ impl Engine {
 
         let fighter_container = self.objects[idx].state.container;
         let target_container = self.objects[target_idx].state.container;
-        if fighter_container != target_container {
+        let fighter_container_is_closed = fighter_container
+            .and_then(|container_id| self.find_object_index(container_id))
+            .is_some_and(|container_idx| {
+                !self.objects[container_idx].state.entrance_status
+            });
+        let target_container_is_closed = target_container
+            .and_then(|container_id| self.find_object_index(container_id))
+            .is_some_and(|container_idx| {
+                !self.objects[container_idx].state.entrance_status
+            });
+        if fighter_container != target_container
+            && (fighter_container_is_closed || target_container_is_closed)
+        {
             let _ = self.object_action_stand_live(fighter_id)?;
             return Ok(false);
         }
