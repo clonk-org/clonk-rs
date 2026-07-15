@@ -67,7 +67,8 @@ pub use control::{
     InitScenarioPlayerControlData,
     JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore,
     PlayerCommandControlData, PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest,
-    SurrenderPlayerControlData, SyncCheckPacket, SynchronizeControlData, VoteControlData,
+    ScriptControlData, ScriptStrictness, SurrenderPlayerControlData, SyncCheckPacket,
+    SynchronizeControlData, VoteControlData,
     CLIENT_UPDATE_ACTIVATE,
     CLIENT_UPDATE_SET_OBSERVER,
     CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
@@ -83,6 +84,7 @@ pub use control::{
     PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK, PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
     PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_FLAG_SAVEGAME_JOIN, PLAYER_INFO_FLAG_VOTED_OUT,
     PLAYER_INFO_FLAG_WON, PLAYER_INFO_TYPE_NONE, PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
+    SCRIPT_SCOPE_CONSOLE, SCRIPT_SCOPE_GLOBAL,
     VOTE_TYPE_CANCEL, VOTE_TYPE_KICK, VOTE_TYPE_NONE, VOTE_TYPE_PAUSE,
 };
 pub use control_execution::{
@@ -11573,6 +11575,48 @@ impl Definition {
         )
     }
 
+    /// Synchronized-control DirectExec variant. Unlike object-menu commands,
+    /// the temporary expression script carries strictness on the packet.
+    #[allow(clippy::too_many_arguments)]
+    fn direct_exec_object_expression_at_strict(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        source: &str,
+        label: &str,
+        strict_level: Option<u8>,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<(Value, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
+        self.exec_in_object_context(
+            state,
+            object_id,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            label,
+            |script, cells, this| {
+                script.direct_exec_with_cells_and_this_at_strict(
+                    source,
+                    cells,
+                    this,
+                    strict_level,
+                )
+            },
+        )
+    }
+
     fn call_menu_callback(
         &self,
         state: &ObjectState,
@@ -12708,14 +12752,106 @@ impl ScenarioScript {
         LcgRng,
         Option<EngineError>,
     ) {
+        Self::execute_value_for_script(
+            script_name,
+            definition_context,
+            function,
+            args,
+            world,
+            rng,
+            env_frame,
+            global_effects,
+            physics,
+            environment,
+            audio,
+            game_over_triggered,
+            || script.call_with_ref_args(function, args),
+        )
+    }
+
+    /// DirectExec counterpart of [`Self::call_value_for_script`]. The
+    /// expression has no object context and uses the synchronized packet's
+    /// strictness instead of the destination host's source strictness.
+    #[allow(clippy::too_many_arguments)]
+    fn direct_exec_value_for_script(
+        script_name: &str,
+        script: &ScriptEngine,
+        source: &str,
+        strict_level: Option<u8>,
+        world: HostWorldContext,
+        rng: LcgRng,
+        env_frame: u64,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        audio: AudioRegistry,
+        game_over_triggered: bool,
+    ) -> (
+        Option<Value>,
+        ScenarioBatch,
+        AudioRegistry,
+        LcgRng,
+        Option<EngineError>,
+    ) {
+        let local_vars = HashMap::new();
+        let (value, _finals, batch, audio, rng, error) = Self::execute_value_for_script(
+            script_name,
+            None,
+            "console script",
+            &[],
+            world,
+            rng,
+            env_frame,
+            global_effects,
+            physics,
+            environment,
+            audio,
+            game_over_triggered,
+            || {
+                script
+                    .direct_exec_with_locals_and_this_at_strict(
+                        source,
+                        &local_vars,
+                        Value::Nil,
+                        strict_level,
+                    )
+                    .map(|(value, _locals)| (value, Vec::new()))
+            },
+        );
+        (value, batch, audio, rng, error)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_value_for_script<F>(
+        script_name: &str,
+        definition_context: Option<DefinitionId>,
+        function: &str,
+        fallback_args: &[Value],
+        world: HostWorldContext,
+        rng: LcgRng,
+        env_frame: u64,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        audio: AudioRegistry,
+        game_over_triggered: bool,
+        call: F,
+    ) -> (
+        Option<Value>,
+        Vec<Value>,
+        ScenarioBatch,
+        AudioRegistry,
+        LcgRng,
+        Option<EngineError>,
+    )
+    where
+        F: FnOnce() -> Result<(Value, Vec<Value>), ScriptError>,
+    {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
-        // Arguments go in as reference cells (the C4AulParSet GetRef pattern,
-        // C4Material.cpp:814-815) so callee `&` params can write back.
-        let call = || script.call_with_ref_args(function, args);
         let (result, host_effects) = match definition_context {
             Some(definition) => compat::with_definition_effect_context_with_state(
                 definition,
@@ -12757,7 +12893,7 @@ impl ScenarioScript {
                 // The unwound call loses the cells; C++ would keep par
                 // mutations made before the error — narrow documented
                 // divergence, the original values stand in.
-                (None, args.to_vec(), Some(error))
+                (None, fallback_args.to_vec(), Some(error))
             }
         };
 
@@ -12978,6 +13114,35 @@ impl NetworkControlTiming {
             start_control_tick,
             control_rate,
         })
+    }
+}
+
+/// Process-local gates consulted while executing a synchronized script
+/// control. Sender identity remains part of the packet; these flags describe
+/// whether this execution is live or replayed and whether the corresponding
+/// non-host escape hatch is enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScriptControlPolicy {
+    pub is_replay: bool,
+    pub console_active: bool,
+    pub allow_scripting_in_replays: bool,
+}
+
+impl ScriptControlPolicy {
+    pub const fn live(console_active: bool) -> Self {
+        Self {
+            is_replay: false,
+            console_active,
+            allow_scripting_in_replays: false,
+        }
+    }
+
+    pub const fn replay(allow_scripting_in_replays: bool) -> Self {
+        Self {
+            is_replay: true,
+            console_active: false,
+            allow_scripting_in_replays,
+        }
     }
 }
 
@@ -18037,6 +18202,138 @@ impl Engine {
         }
     }
 
+    /// Execute one synchronized `CID_Script` packet. `Ok(None)` denotes a
+    /// packet rejected by the league/sender policy; an allowed packet always
+    /// returns a value, with parse or fail-safe runtime errors represented as
+    /// script `nil` after committing any side effects made before the error.
+    pub fn execute_script_control(
+        &mut self,
+        control: &ScriptControlData,
+        policy: ScriptControlPolicy,
+    ) -> Result<Option<Value>, EngineError> {
+        if self.league_game {
+            return Ok(None);
+        }
+        if control.by_client != 0 {
+            let permitted = if policy.is_replay {
+                policy.allow_scripting_in_replays
+            } else {
+                policy.console_active
+            };
+            if !permitted {
+                return Ok(None);
+            }
+        }
+
+        let source = lc_resources::decode_legacy_script_text(control.script.as_bytes());
+        let strict_level = control.strictness.level();
+
+        if control.target_object == SCRIPT_SCOPE_CONSOLE {
+            return self
+                .direct_exec_script_control_console(&source, strict_level)
+                .map(Some);
+        }
+
+        let object_index = u64::try_from(control.target_object)
+            .ok()
+            .and_then(|number| self.find_object_index(ObjectId::new(number)))
+            .filter(|&index| self.objects[index].state.status != ObjectStatus::Deleted);
+        if let Some(index) = object_index {
+            let value = tolerate_script_error(self.direct_exec_on_object_at_strict(
+                index,
+                &source,
+                "console script",
+                strict_level,
+            ))?
+            .unwrap_or(Value::Nil);
+            return Ok(Some(value));
+        }
+
+        self.direct_exec_script_control_global(&source, strict_level)
+            .map(Some)
+    }
+
+    /// Build the script-engine scope used by `SCOPE_Global`. It deliberately
+    /// has no scenario/definition-local functions, but shares every engine
+    /// global cell and function and carries the normal native host surface.
+    fn script_control_global_host(&self) -> ScriptEngine {
+        let mut script = ScriptEngine::new();
+        script.set_global_variables(self.script_globals.clone());
+        script.set_global_slots(self.script_global_slots.clone());
+        script.set_global_constants(self.script_global_consts.clone());
+        script.set_global_functions(self.global_script_functions.clone());
+        compat::register_host_functions(&mut script);
+        script
+    }
+
+    fn direct_exec_script_control_console(
+        &mut self,
+        source: &str,
+        strict_level: Option<u8>,
+    ) -> Result<Value, EngineError> {
+        let Some((name, script)) = self
+            .scenario_script
+            .as_ref()
+            .map(|scenario| (scenario.name.clone(), scenario.script_arc()))
+        else {
+            // Game.Script exists even when the scenario supplied no Script.c;
+            // its empty host still resolves through Game.ScriptEngine.
+            return self.direct_exec_script_control_global(source, strict_level);
+        };
+        self.direct_exec_script_control_host(&name, script.as_ref(), source, strict_level)
+    }
+
+    fn direct_exec_script_control_global(
+        &mut self,
+        source: &str,
+        strict_level: Option<u8>,
+    ) -> Result<Value, EngineError> {
+        let script = self.script_control_global_host();
+        self.direct_exec_script_control_host(
+            "Game.ScriptEngine",
+            &script,
+            source,
+            strict_level,
+        )
+    }
+
+    fn direct_exec_script_control_host(
+        &mut self,
+        script_name: &str,
+        script: &ScriptEngine,
+        source: &str,
+        strict_level: Option<u8>,
+    ) -> Result<Value, EngineError> {
+        let world = self.host_world_context();
+        let (value, batch, audio_state, rng, script_error) =
+            ScenarioScript::direct_exec_value_for_script(
+                script_name,
+                script,
+                source,
+                strict_level,
+                world,
+                self.rng.clone(),
+                self.frame,
+                &self.global_effects.clone(),
+                self.physics,
+                self.environment,
+                self.audio_registry.clone(),
+                self.game_over_triggered,
+            );
+        self.rng = rng;
+        self.audio_registry = audio_state;
+        self.apply_scenario_batch(batch)?;
+        if let Some(error) = script_error {
+            // The raw-value seam records ordinary script failures here after
+            // preserving their staged side effects. Fatal engine errors are
+            // still surfaced rather than being converted to `nil`.
+            if !matches!(error, EngineError::Script { .. }) {
+                return Err(error);
+            }
+        }
+        Ok(value.unwrap_or(Value::Nil))
+    }
+
     pub fn set_control_host(&mut self, control_host: bool) {
         self.control_host = control_host;
     }
@@ -19794,6 +20091,26 @@ impl Engine {
         source: &str,
         label: &str,
     ) -> Result<Value, EngineError> {
+        self.direct_exec_on_object_impl(index, source, label, None)
+    }
+
+    fn direct_exec_on_object_at_strict(
+        &mut self,
+        index: usize,
+        source: &str,
+        label: &str,
+        strict_level: Option<u8>,
+    ) -> Result<Value, EngineError> {
+        self.direct_exec_on_object_impl(index, source, label, Some(strict_level))
+    }
+
+    fn direct_exec_on_object_impl(
+        &mut self,
+        index: usize,
+        source: &str,
+        label: &str,
+        strict_level: Option<Option<u8>>,
+    ) -> Result<Value, EngineError> {
         let (object_id, definition_id, state_snapshot) = {
             let object = self
                 .objects
@@ -19813,20 +20130,37 @@ impl Engine {
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
-        let call = definition.direct_exec_object_expression(
-            &state_snapshot,
-            object_id,
-            source,
-            label,
-            rng_state,
-            &global_view,
-            self.physics,
-            self.environment,
-            self.frame,
-            world,
-            self.game_over_triggered,
-            self.audio_registry.clone(),
-        );
+        let call = match strict_level {
+            Some(strict_level) => definition.direct_exec_object_expression_at_strict(
+                &state_snapshot,
+                object_id,
+                source,
+                label,
+                strict_level,
+                rng_state,
+                &global_view,
+                self.physics,
+                self.environment,
+                self.frame,
+                world,
+                self.game_over_triggered,
+                self.audio_registry.clone(),
+            ),
+            None => definition.direct_exec_object_expression(
+                &state_snapshot,
+                object_id,
+                source,
+                label,
+                rng_state,
+                &global_view,
+                self.physics,
+                self.environment,
+                self.frame,
+                world,
+                self.game_over_triggered,
+                self.audio_registry.clone(),
+            ),
+        };
         let (value, outcome, audio_state, new_rng) = match call {
             Ok(ok) => ok,
             // Pre-error mutations persist (C++ mutated the live objects).
@@ -45863,6 +46197,342 @@ mod script_relink_regression {
                 .expect("child definition")
                 .clonk_names(),
             Some("Append")
+        );
+    }
+}
+
+#[cfg(test)]
+mod script_control_execution_tests {
+    use super::*;
+
+    fn control(
+        target_object: i32,
+        strictness: ScriptStrictness,
+        source: &str,
+        by_client: i32,
+    ) -> ScriptControlData {
+        ScriptControlData {
+            target_object,
+            strictness,
+            script: LegacyCString::from_bytes(source.as_bytes().to_vec())
+                .expect("fixture script contains no NUL"),
+            by_client,
+        }
+    }
+
+    fn engine_with_probe() -> Engine {
+        let mut engine = Engine::with_seed(7);
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "ControlProbe.c".to_string(),
+                "static ControlProbe;\n\
+                 global func GlobalOnly() { return 37; }"
+                    .to_string(),
+            )]),
+            1
+        );
+        engine
+    }
+
+    fn global_value(engine: &Engine, name: &str) -> Value {
+        let cell = engine
+            .script_globals
+            .borrow()
+            .get(name)
+            .cloned()
+            .expect("fixture global is registered");
+        let value = cell.borrow().clone();
+        value
+    }
+
+    fn run_gate_case(
+        league: bool,
+        by_client: i32,
+        policy: ScriptControlPolicy,
+    ) -> (Option<Value>, Value) {
+        let mut engine = engine_with_probe();
+        engine.set_league_game(league);
+        let result = engine
+            .execute_script_control(
+                &control(
+                    SCRIPT_SCOPE_GLOBAL,
+                    ScriptStrictness::Strict3,
+                    "ControlProbe = 17",
+                    by_client,
+                ),
+                policy,
+            )
+            .expect("script-control gate is not an engine error");
+        (result, global_value(&engine, "ControlProbe"))
+    }
+
+    #[test]
+    fn script_control_gate_matches_league_host_console_and_replay_policy() {
+        assert_eq!(
+            run_gate_case(true, 0, ScriptControlPolicy::live(true)),
+            (None, Value::Nil),
+            "league blocks even a host with an active console"
+        );
+        assert_eq!(
+            run_gate_case(false, 4, ScriptControlPolicy::live(false)),
+            (None, Value::Nil),
+            "a live non-host needs an active console"
+        );
+        assert_eq!(
+            run_gate_case(
+                false,
+                4,
+                ScriptControlPolicy {
+                    is_replay: true,
+                    console_active: true,
+                    allow_scripting_in_replays: false,
+                },
+            ),
+            (None, Value::Nil),
+            "replay permission does not fall back to Console.Active"
+        );
+
+        for (by_client, policy, label) in [
+            (0, ScriptControlPolicy::live(false), "live host"),
+            (0, ScriptControlPolicy::replay(false), "replayed host"),
+            (4, ScriptControlPolicy::live(true), "live console peer"),
+            (
+                4,
+                ScriptControlPolicy::replay(true),
+                "permitted replay peer",
+            ),
+        ] {
+            assert_eq!(
+                run_gate_case(false, by_client, policy),
+                (Some(Value::Int(17)), Value::Int(17)),
+                "{label} executes"
+            );
+        }
+    }
+
+    #[test]
+    fn script_control_uses_packet_strictness_for_direct_exec() {
+        for (strictness, expected) in [
+            (ScriptStrictness::NonStrict, Value::Nil),
+            (ScriptStrictness::Strict1, Value::Nil),
+            (ScriptStrictness::Strict2, Value::Nil),
+            (ScriptStrictness::Strict3, Value::Int(0)),
+        ] {
+            let mut engine = Engine::with_seed(1);
+            assert_eq!(
+                engine
+                    .execute_script_control(
+                        &control(SCRIPT_SCOPE_GLOBAL, strictness, "0", 0),
+                        ScriptControlPolicy::live(false),
+                    )
+                    .expect("strict expression executes"),
+                Some(expected),
+            );
+        }
+
+        let mut engine = Engine::with_seed(1);
+        engine
+            .register_definition(
+                Definition::from_script("STC3", "Strict target", "#strict 3")
+                    .expect("strict target compiles"),
+            )
+            .expect("strict target registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("STC3"))
+            .expect("strict target spawns");
+        assert_eq!(
+            engine
+                .execute_script_control(
+                    &control(
+                        i32::try_from(object.as_u64()).expect("fixture id fits i32"),
+                        ScriptStrictness::NonStrict,
+                        "0",
+                        0,
+                    ),
+                    ScriptControlPolicy::live(false),
+                )
+                .expect("object expression executes"),
+            Some(Value::Nil),
+            "packet NONSTRICT overrides the destination definition's strict 3"
+        );
+    }
+
+    #[test]
+    fn script_control_distinguishes_console_global_and_safe_object_scopes() {
+        let mut engine = engine_with_probe();
+        engine
+            .install_scenario_script(
+                "Scenario",
+                "#strict 3\nfunc ScenarioOnly() { return 41; }",
+            )
+            .expect("scenario script installs");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "TARG",
+                    "Target",
+                    "#strict 3\nlocal Marker;\nfunc ReadMarker() { return Marker; }",
+                )
+                .expect("target definition compiles"),
+            )
+            .expect("target definition registers");
+
+        let normal = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("normal object spawns");
+        let inactive = engine
+            .spawn_object(SpawnConfig::new("TARG").with_status(ObjectStatus::Inactive))
+            .expect("inactive object spawns");
+        let deleted = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("deleted fixture initially spawns");
+        let deleted_index = engine.find_object_index(deleted).expect("object exists");
+        engine.objects[deleted_index].mark_destroyed();
+
+        assert_eq!(
+            engine
+                .execute_script_control(
+                    &control(
+                        SCRIPT_SCOPE_CONSOLE,
+                        ScriptStrictness::Strict3,
+                        "ScenarioOnly()",
+                        0,
+                    ),
+                    ScriptControlPolicy::live(false),
+                )
+                .expect("console scope executes"),
+            Some(Value::Int(41)),
+            "console scope is the scenario-script host"
+        );
+        assert_eq!(
+            engine
+                .execute_script_control(
+                    &control(
+                        SCRIPT_SCOPE_GLOBAL,
+                        ScriptStrictness::Strict3,
+                        "ScenarioOnly()",
+                        0,
+                    ),
+                    ScriptControlPolicy::live(false),
+                )
+                .expect("missing global function is fail-safe"),
+            Some(Value::Nil),
+            "global scope must not see scenario-local functions"
+        );
+        assert_eq!(
+            engine
+                .execute_script_control(
+                    &control(
+                        SCRIPT_SCOPE_GLOBAL,
+                        ScriptStrictness::Strict3,
+                        "GlobalOnly()",
+                        0,
+                    ),
+                    ScriptControlPolicy::live(false),
+                )
+                .expect("global function executes"),
+            Some(Value::Int(37)),
+            "global scope is wired to the engine-global function table"
+        );
+
+        for (object, marker) in [(normal, 11), (inactive, 12)] {
+            assert_eq!(
+                engine
+                    .execute_script_control(
+                        &control(
+                            i32::try_from(object.as_u64()).expect("fixture id fits i32"),
+                            ScriptStrictness::Strict3,
+                            &format!("Marker = {marker}"),
+                            0,
+                        ),
+                        ScriptControlPolicy::live(false),
+                    )
+                    .expect("object scope executes"),
+                Some(Value::Int(marker)),
+            );
+            let index = engine.find_object_index(object).expect("object remains present");
+            assert_eq!(
+                engine
+                    .call_object_function(index, "ReadMarker", Vec::new())
+                    .expect("object local can be read"),
+                Value::Int(marker),
+                "normal and inactive objects retain object-context writes"
+            );
+        }
+
+        for (target, value) in [
+            (999_999, 21),
+            (
+                i32::try_from(deleted.as_u64()).expect("fixture id fits i32"),
+                22,
+            ),
+        ] {
+            assert_eq!(
+                engine
+                    .execute_script_control(
+                        &control(
+                            target,
+                            ScriptStrictness::Strict3,
+                            &format!("ControlProbe = {value}"),
+                            0,
+                        ),
+                        ScriptControlPolicy::live(false),
+                    )
+                    .expect("missing/deleted scope falls back"),
+                Some(Value::Int(value)),
+            );
+            assert_eq!(global_value(&engine, "ControlProbe"), Value::Int(value));
+        }
+    }
+
+    #[test]
+    fn script_control_matches_cpp_global_and_object_state_differential() {
+        // Frozen C++ differential for two CID_Script controls: global
+        // `SetGravity(77)` leaves gravity at 77, then object-scoped
+        // `SetPosition(12,34)` moves only the addressed object. Running the
+        // identical expressions through Rust pins both scope and host-effect
+        // folding without modifying the read-only C++ oracle.
+        let mut engine = Engine::with_seed(1);
+        engine
+            .register_definition(
+                Definition::from_script("DIFF", "Differential target", "#strict 3")
+                    .expect("target definition compiles"),
+            )
+            .expect("target definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("DIFF").with_position(Vector2::new(1, 2)))
+            .expect("target object spawns");
+
+        engine
+            .execute_script_control(
+                &control(
+                    SCRIPT_SCOPE_GLOBAL,
+                    ScriptStrictness::Strict3,
+                    "SetGravity(77)",
+                    0,
+                ),
+                ScriptControlPolicy::live(false),
+            )
+            .expect("global control executes");
+        engine
+            .execute_script_control(
+                &control(
+                    i32::try_from(object.as_u64()).expect("fixture id fits i32"),
+                    ScriptStrictness::Strict3,
+                    "SetPosition(12,34)",
+                    0,
+                ),
+                ScriptControlPolicy::live(false),
+            )
+            .expect("object control executes");
+
+        assert_eq!(engine.physics().gravity, 77);
+        assert_eq!(
+            engine
+                .object_snapshot(object)
+                .expect("target remains")
+                .position,
+            Vector2::new(12, 34)
         );
     }
 }

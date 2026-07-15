@@ -5,8 +5,8 @@ use lc_engine::{
     ControlPacket as EngineControlPacket, ControlPacketId, ControlPlayerInfoEntry,
     InitScenarioPlayerControlData, JoinPlayerControlData, JoinPlayerSource, LegacyCString,
     NetworkResourceCore, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
-    PlayerInfoUpdateRequest, SurrenderPlayerControlData, SyncCheckPacket, SynchronizeControlData,
-    VoteControlData,
+    PlayerInfoUpdateRequest, ScriptControlData, ScriptStrictness, SurrenderPlayerControlData,
+    SyncCheckPacket, SynchronizeControlData, VoteControlData,
     CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
@@ -39,6 +39,7 @@ const CID_SURRENDER_PLAYER: u8 = 0x80 | 0x55;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
 const CID_SYNCHRONIZE: u8 = 0x80 | 0x06;
 const CID_SET: u8 = 0x80 | 0x07;
+const CID_SCRIPT: u8 = 0x80 | 0x08;
 const MAX_VARINT_BYTES: usize = 5;
 const MAX_PLAYER_INFO_COUNT: i32 = 5_000;
 const PLAYER_INFO_SYNC_FLAGS: u16 = 0x7fcd;
@@ -53,6 +54,8 @@ pub enum LegacyControlError {
     VarintOverflow,
     #[error("control packet {0:#x} is not supported yet")]
     UnsupportedPacket(u8),
+    #[error("script strictness {0} is outside the C++ range 0..=3")]
+    InvalidScriptStrictness(u8),
     #[error("resource SHA contains an invalid hexadecimal byte")]
     InvalidResourceSha,
     #[error("JoinData C4ID is not exactly four uppercase letters, digits or underscores")]
@@ -631,6 +634,7 @@ fn decode_control(
         CID_SYNC_CHECK => decode_sync_check(reader),
         CID_SYNCHRONIZE => decode_synchronize(reader),
         CID_SET => decode_control_set(reader),
+        CID_SCRIPT => decode_script(reader),
         other => Err(LegacyControlError::UnsupportedPacket(other)),
     }
 }
@@ -660,6 +664,23 @@ fn decode_control_set(reader: &mut Reader<'_>) -> Result<EngineControlPacket, Le
         by_client: reader.read_int32()?,
     }
     .into_control_packet())
+}
+
+fn decode_script(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    let target_object = reader.read_raw_i32()?;
+    let strictness = reader.read_u8()?;
+    // C4ControlScript::CheckStrictness runs immediately after compiling the
+    // strictness byte, before the following script string is read.
+    let strictness = ScriptStrictness::try_from(strictness)
+        .map_err(LegacyControlError::InvalidScriptStrictness)?;
+    let script = reader.read_c_string()?;
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::Script(ScriptControlData {
+        target_object,
+        strictness,
+        script,
+        by_client,
+    }))
 }
 
 fn decode_client_remove(
@@ -1487,6 +1508,14 @@ fn encode_control_set(buffer: &mut Vec<u8>, data: LegacyControlSet) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_script(buffer: &mut Vec<u8>, data: &ScriptControlData) {
+    buffer.push(CID_SCRIPT);
+    append_raw_i32(buffer, data.target_object);
+    buffer.push(data.strictness.raw());
+    append_c_string(buffer, &data.script);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_controls(
     controls: &[EngineControlPacket],
     buffer: &mut Vec<u8>,
@@ -1555,6 +1584,10 @@ fn encode_control(
         }
         EngineControlPacket::Synchronize(data) => {
             encode_synchronize(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::Script(data) => {
+            encode_script(buffer, data);
             Ok(())
         }
         EngineControlPacket::Unknown { .. } => {
@@ -1758,6 +1791,46 @@ mod tests {
 
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
         assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+    }
+
+    #[test]
+    fn script_entry_matches_cpp_raw_fields_and_packed_author() {
+        // C4ControlScript writes native int32 TargetObj, raw uint8 Strict,
+        // a NUL-terminated byte string, then inherited packed ByClient
+        // (src/C4Control.cpp:315-326,53-57).
+        let expected = EngineControlPacket::Script(ScriptControlData {
+            target_object: -2,
+            strictness: ScriptStrictness::Strict3,
+            script: lc_engine::LegacyCString::from_bytes(b"1+2\x80".to_vec())
+                .expect("fixture is NUL-free"),
+            by_client: 130,
+        });
+        let encoded = [
+            0x88, 0xfe, 0xff, 0xff, 0xff, 0x03, b'1', b'+', b'2', 0x80, 0x00, 0x82, 0x01,
+        ];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+    }
+
+    #[test]
+    fn script_entry_rejects_invalid_strictness_before_reading_script() {
+        // CheckStrictness runs before C++ compiles Script, so an invalid byte
+        // is reported even when the packet ends immediately afterwards.
+        let encoded = [0x88, 0xff, 0xff, 0xff, 0xff, 0x04];
+        assert_eq!(
+            decode_control_entry_payload(&encoded),
+            Err(LegacyControlError::InvalidScriptStrictness(4))
+        );
+    }
+
+    #[test]
+    fn script_entry_rejects_unterminated_script() {
+        let encoded = [0x88, 0xff, 0xff, 0xff, 0xff, 0x03, b'1', b'+', b'2'];
+        assert_eq!(
+            decode_control_entry_payload(&encoded),
+            Err(LegacyControlError::UnexpectedEof)
+        );
     }
 
     #[test]
@@ -2462,7 +2535,7 @@ mod tests {
             ControlPacket::builder(client_id, 9).payload(payload)
         };
         let host_body = [0x89, 0x31];
-        let client_body = [0x88, 0x41, 0x42];
+        let client_body = [0x8a, 0x41, 0x42];
 
         let complete = aggregate_control_packets_for_tick(
             9,
@@ -2488,7 +2561,7 @@ mod tests {
 
     #[test]
     fn envelope_validator_rejects_a_missing_final_list_terminator() {
-        let payload = vec![0x88, 0x7f];
+        let payload = vec![0x8a, 0x7f];
         let packet = ControlPacket::builder(3, 4).payload(payload);
 
         assert!(matches!(

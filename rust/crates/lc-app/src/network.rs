@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use lc_engine::{
     CommandKind, ControlButton, ControlCommand, ControlEvent,
     JoinPlayerControlData, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
-    SyncCheckPacket,
+    ScriptControlData, SyncCheckPacket,
     COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG,
     COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER,
     COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT, COM_MENU_SHOW_TEXT,
@@ -426,6 +426,16 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_scripts(&mut self) -> Vec<(Tick, ScriptControlData)> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitScript { tick, script } = command {
+                submitted.push((tick, script));
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn take_player_info_updates(&mut self) -> Vec<lc_network::PlayerInfoUpdateRequest> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -711,6 +721,7 @@ pub enum NetworkControl {
     VoteEnd(lc_engine::VoteControlData),
     PlayerControl(PlayerControlData),
     PlayerCommand(PlayerCommandControlData),
+    Script(ScriptControlData),
     Player { owner: i32, event: ControlEvent },
     InitScenarioPlayer(lc_engine::InitScenarioPlayerControlData),
     Synchronize(lc_engine::SynchronizeControlData),
@@ -756,6 +767,10 @@ enum NetworkCommand {
     SubmitPlayerCommand {
         tick: Tick,
         command: PlayerCommandControlData,
+    },
+    SubmitScript {
+        tick: Tick,
+        script: ScriptControlData,
     },
     SubmitSyncCheck {
         tick: Tick,
@@ -930,6 +945,14 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitPlayerCommand { tick, command })
             .map_err(|_| anyhow!("network worker is not accepting player commands"))
+    }
+
+    pub fn submit_script_control(&self, tick: Tick, mut script: ScriptControlData) -> Result<()> {
+        script.by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the script-control wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitScript { tick, script })
+            .map_err(|_| anyhow!("network worker is not accepting script controls"))
     }
 
     pub fn broadcast_lobby_countdown(
@@ -1636,6 +1659,13 @@ async fn run_host_worker(
                             current_millis(),
                         );
                     }
+                    NetworkCommand::SubmitScript { tick, script } => {
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::Script(script),
+                            current_millis(),
+                        );
+                    }
                     NetworkCommand::SubmitSyncCheck { tick, check } => {
                         frame_builder.record_control(
                             tick,
@@ -1990,6 +2020,14 @@ async fn run_client_worker(
                         frame_builder.record_control(
                             tick,
                             lc_engine::ControlPacket::PlayerCommand(command),
+                            current_millis(),
+                        );
+                    }
+                    NetworkCommand::SubmitScript { tick, script } => {
+                        client_activation.refresh_frame(frame_tick_to_i32(tick));
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::Script(script),
                             current_millis(),
                         );
                     }
@@ -2370,6 +2408,7 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         // C++ packet layer counts them before InCom narrows Command to a byte.
         lc_engine::ControlPacket::PlayerControl(data) => Some(NetworkControl::PlayerControl(data)),
         lc_engine::ControlPacket::PlayerCommand(data) => Some(NetworkControl::PlayerCommand(data)),
+        lc_engine::ControlPacket::Script(data) => Some(NetworkControl::Script(data)),
         lc_engine::ControlPacket::Synchronize(data) => Some(NetworkControl::Synchronize(data)),
         lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
         lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
@@ -2729,6 +2768,34 @@ mod tests {
                 PlayerCommandControlData {
                     by_client: 7,
                     ..command
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn manager_queues_script_control_with_authenticated_local_author() {
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let script = ScriptControlData {
+            target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+            strictness: lc_engine::ScriptStrictness::Strict3,
+            script: lc_engine::LegacyCString::from_bytes(b"SetGravity(77)".to_vec())
+                .expect("script is NUL-free"),
+            by_client: -1,
+        };
+
+        manager
+            .submit_script_control(12, script.clone())
+            .expect("queue script control");
+
+        assert_eq!(
+            commands.take_submitted_scripts(),
+            vec![(
+                12,
+                ScriptControlData {
+                    by_client: 7,
+                    ..script
                 }
             )]
         );
@@ -4333,6 +4400,44 @@ mod tests {
             network_control_for_packet(lc_engine::ControlPacket::PlayerCommand(command)),
             Some(NetworkControl::PlayerCommand(command))
         );
+    }
+
+    #[test]
+    fn decoded_script_is_retained_for_scheduled_execution() {
+        let script = ScriptControlData {
+            target_object: lc_engine::SCRIPT_SCOPE_CONSOLE,
+            strictness: lc_engine::ScriptStrictness::Strict2,
+            script: lc_engine::LegacyCString::from_bytes(b"1+2".to_vec())
+                .expect("script is NUL-free"),
+            by_client: 4,
+        };
+        assert_eq!(
+            network_control_for_packet(lc_engine::ControlPacket::Script(script.clone())),
+            Some(NetworkControl::Script(script))
+        );
+    }
+
+    #[test]
+    fn script_frame_roundtrips_through_the_tick_accumulator() {
+        let script = ScriptControlData {
+            target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+            strictness: lc_engine::ScriptStrictness::Strict3,
+            script: lc_engine::LegacyCString::from_bytes(b"SetGravity(77)".to_vec())
+                .expect("script is NUL-free"),
+            by_client: 4,
+        };
+        let mut accumulator = ControlFrameAccumulator::new(4);
+        accumulator.record_control(12, lc_engine::ControlPacket::Script(script.clone()), 100);
+        let frame = accumulator
+            .finalize_tick(12)
+            .expect("script control produces a control frame");
+
+        let encoded = encode_control_packet(&frame).expect("encode accumulated frame");
+        assert_eq!(
+            decode_control_packet(&encoded).expect("decode accumulated frame"),
+            frame
+        );
+        assert_eq!(frame.controls, vec![lc_engine::ControlPacket::Script(script)]);
     }
 
     #[test]

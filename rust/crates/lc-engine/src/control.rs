@@ -34,6 +34,9 @@ pub enum ControlPacket {
     /// The authoritative league vote result (`CID_VoteEnd`,
     /// C4Control.cpp:1517-1520).
     VoteEnd(VoteControlData),
+    /// Synchronized console/global/object-scoped script execution
+    /// (`CID_Script`, C4Control.cpp:258-326).
+    Script(ScriptControlData),
     /// Player control command (`CID_PlrControl`).
     PlayerControl(PlayerControlData),
     /// Mouse/object command (`CID_PlrCommand`, C4Control.cpp:405-439).
@@ -75,6 +78,70 @@ pub const VOTE_TYPE_NONE: u8 = u8::MAX;
 pub const VOTE_TYPE_CANCEL: u8 = 0;
 pub const VOTE_TYPE_KICK: u8 = 1;
 pub const VOTE_TYPE_PAUSE: u8 = 2;
+
+/// Special `C4ControlScript` target values (`src/C4Control.h:134`).
+pub const SCRIPT_SCOPE_CONSOLE: i32 = -2;
+pub const SCRIPT_SCOPE_GLOBAL: i32 = -1;
+
+/// Valid `C4AulScriptStrict` values carried by `C4ControlScript`.
+///
+/// The binary compiler writes the scoped enum through its raw `uint8_t`
+/// representation, then rejects values outside this range while decoding
+/// (`src/C4Control.cpp:317-326,1708-1714`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ScriptStrictness {
+    NonStrict = 0,
+    Strict1 = 1,
+    Strict2 = 2,
+    #[default]
+    Strict3 = 3,
+}
+
+impl ScriptStrictness {
+    pub const fn raw(self) -> u8 {
+        self as u8
+    }
+
+    /// Strictness representation used by `lc-script`: non-strict has no
+    /// strict level, while the three strict modes carry levels 1 through 3.
+    pub const fn level(self) -> Option<u8> {
+        match self {
+            Self::NonStrict => None,
+            Self::Strict1 => Some(1),
+            Self::Strict2 => Some(2),
+            Self::Strict3 => Some(3),
+        }
+    }
+}
+
+impl TryFrom<u8> for ScriptStrictness {
+    type Error = u8;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::NonStrict),
+            1 => Ok(Self::Strict1),
+            2 => Ok(Self::Strict2),
+            3 => Ok(Self::Strict3),
+            other => Err(other),
+        }
+    }
+}
+
+impl TryFrom<i32> for ScriptStrictness {
+    type Error = i32;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::NonStrict),
+            1 => Ok(Self::Strict1),
+            2 => Ok(Self::Strict2),
+            3 => Ok(Self::Strict3),
+            other => Err(other),
+        }
+    }
+}
 
 /// Binary `C4ClientCore` fields carried by `C4ControlClientJoin`
 /// (`src/C4Client.cpp:75-83`).
@@ -123,6 +190,29 @@ pub struct ClientRemoveControlData {
     pub client_id: i32,
     pub reason: LegacyCString,
     pub by_client: i32,
+}
+
+/// Body of `C4ControlScript` (`CID_Script`).
+///
+/// Script bytes remain NUL-free legacy bytes so binary controls round-trip
+/// without requiring UTF-8, just like `StdStrBuf` on the C++ wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptControlData {
+    pub target_object: i32,
+    pub strictness: ScriptStrictness,
+    pub script: LegacyCString,
+    pub by_client: i32,
+}
+
+impl Default for ScriptControlData {
+    fn default() -> Self {
+        Self {
+            target_object: SCRIPT_SCOPE_GLOBAL,
+            strictness: ScriptStrictness::Strict3,
+            script: LegacyCString::default(),
+            by_client: -1,
+        }
+    }
 }
 
 /// Body of a `PlayerControl` packet describing one direct input command.
@@ -734,6 +824,7 @@ impl RawPacket {
         // a small subset so far; everything else is recorded as `Unknown`.
         // C4PacketType::PID_None (src/C4PacketBase.h).
         const PID_NONE: u8 = 0xff;
+        const CID_SCRIPT: u8 = 0x88;
         const CID_PLR_CONTROL: u8 = 0xA1;
         const CID_PLR_COMMAND: u8 = 0xA2;
 
@@ -743,6 +834,35 @@ impl RawPacket {
 
         const CID_JOIN_PLR: u8 = 0x91; // CID_First|0x11 (C4PacketBase.h:160)
         const CID_PLR_INFO: u8 = 0x90; // CID_First|0x10 (C4PacketBase.h:159)
+
+        if id == CID_SCRIPT {
+            // C4ControlScript::CompileFunc names the raw target object, raw
+            // uint8 strictness, script string, and inherited packed author in
+            // this order. The INI writer may omit all four defaults.
+            let target_object =
+                parse_int_field_or(&self.fields, "TargetObj", SCRIPT_SCOPE_GLOBAL)?;
+            let strictness_value = parse_int_field_or(
+                &self.fields,
+                "Strict",
+                i32::from(ScriptStrictness::Strict3.raw()),
+            )?;
+            let strictness = ScriptStrictness::try_from(strictness_value).map_err(|value| {
+                ControlParseError::InvalidScriptStrictness { value }
+            })?;
+            let script = self.fields.get("Script").cloned().unwrap_or_default();
+            let script = LegacyCString::from_bytes(script.into_bytes()).ok_or(
+                ControlParseError::InteriorNulString {
+                    field: "Script".to_string(),
+                },
+            )?;
+            let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
+            return Ok(Some(ControlPacket::Script(ScriptControlData {
+                target_object,
+                strictness,
+                script,
+                by_client,
+            })));
+        }
 
         if id == CID_JOIN_PLR {
             // C4ControlJoinPlayer::CompileFunc (C4Control.cpp:852-863).
@@ -907,6 +1027,8 @@ pub enum ControlParseError {
     InvalidIntegerField { field: String, value: String },
     #[error("field `{field}` contained an interior NUL byte")]
     InteriorNulString { field: String },
+    #[error("script strictness {value} is outside the C++ range 0..=3")]
+    InvalidScriptStrictness { value: i32 },
     #[error("resource-backed JoinPlayer INI parsing is not implemented")]
     UnsupportedResourceJoin,
 }
@@ -1299,6 +1421,54 @@ mod tests {
                 by_client: -1,
             })]
         );
+    }
+
+    #[test]
+    fn parses_script_packet_and_omitted_defaults() {
+        // C4ControlScript::CompileFunc writes TargetObj/Strict/Script then
+        // inherited ByClient. A second packet exercises every omitted INI
+        // default from the same compiler.
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=136\n\
+    [Script]\n\
+      TargetObj=-2\n\
+      Strict=2\n\
+      Script=\"SetGravity(17);\"\n\
+      ByClient=7\n\
+  [IDPacket]\n\
+    ID=136\n\
+    [Script]\n";
+
+        assert_eq!(
+            parse_control_ini(input).expect("parse script controls"),
+            vec![
+                ControlPacket::Script(ScriptControlData {
+                    target_object: SCRIPT_SCOPE_CONSOLE,
+                    strictness: ScriptStrictness::Strict2,
+                    script: LegacyCString::from_bytes(b"SetGravity(17);".to_vec())
+                        .expect("fixture is NUL-free"),
+                    by_client: 7,
+                }),
+                ControlPacket::Script(ScriptControlData::default()),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_script_strictness_outside_cpp_range() {
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=136\n\
+    [Script]\n\
+      Strict=4\n";
+
+        assert!(matches!(
+            parse_control_ini(input),
+            Err(ControlParseError::InvalidScriptStrictness { value: 4 })
+        ));
     }
 
     #[test]

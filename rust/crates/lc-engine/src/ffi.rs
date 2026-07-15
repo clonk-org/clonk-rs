@@ -9,8 +9,8 @@ use crate::{
     DrawTransform, EffectState, Engine, EngineState, EnvironmentFrame, FloatVector2,
     HudPlayerSnapshot, HudSnapshot, Landscape, NetworkPacketDirection, NetworkPacketSnapshot,
     ObjectBaseGraphics, ObjectId, ObjectSnapshot, ObjectStatus, ObjectVertex, ParticleLayer,
-    ParticleSnapshot, Playback, Recorder, Recording, Scenario, SimulationSnapshot, SurfaceSnapshot,
-    Vector2,
+    ParticleSnapshot, Playback, Recorder, Recording, Scenario, ScriptControlPolicy,
+    SimulationSnapshot, SurfaceSnapshot, Vector2,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
@@ -432,6 +432,11 @@ impl RuntimeHandle {
                 ControlPacket::PlayerCommand(data) => {
                     self.apply_player_command(&data)
                         .map_err(|error| format!("{error} (player {})", data.player))?;
+                }
+                ControlPacket::Script(data) => {
+                    self.engine
+                        .execute_script_control(&data, ScriptControlPolicy::replay(false))
+                        .map_err(|error| error.to_string())?;
                 }
                 ControlPacket::PlayerInfo(info) => {
                     // C4ControlPlayerInfo::Execute adds the infos to
@@ -2091,6 +2096,7 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                     .map(|packet| match packet {
                         ControlPacket::PlayerControl(_) => "PlayerControl",
                         ControlPacket::PlayerCommand(_) => "PlayerCommand",
+                        ControlPacket::Script(_) => "Script",
                         ControlPacket::InitScenarioPlayer(_) => "InitScenarioPlayer",
                         ControlPacket::SurrenderPlayer(_) => "SurrenderPlayer",
                         ControlPacket::SyncCheck(_) => "SyncCheck",
@@ -4796,6 +4802,28 @@ global func Step(state, frame, random)
         assert_eq!(commands[0].data, crate::command::CommandData::Integer(23));
         let player = runtime.engine.player(0).expect("player exists");
         assert_eq!((player.control_count(), player.action_count()), (1, 1));
+    }
+
+    #[test]
+    fn host_script_ffi_packet_mutates_the_replay_engine() {
+        let mut runtime = RuntimeHandle::new();
+        assert_ne!(runtime.engine.physics().gravity, 77);
+        runtime.control_packets.insert(
+            1,
+            vec![ControlPacket::Script(crate::ScriptControlData {
+                target_object: crate::SCRIPT_SCOPE_GLOBAL,
+                strictness: crate::ScriptStrictness::Strict3,
+                script: LegacyCString::from_bytes(b"SetGravity(77)".to_vec())
+                    .expect("script is NUL-free"),
+                by_client: 0,
+            })],
+        );
+
+        runtime
+            .apply_control_packets_for_frame(1)
+            .expect("script control applies");
+
+        assert_eq!(runtime.engine.physics().gravity, 77);
     }
 
     #[test]

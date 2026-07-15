@@ -858,6 +858,24 @@ impl Engine {
         local_vars: &std::collections::HashMap<String, Value>,
         this: Value,
     ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
+        self.direct_exec_with_locals_and_this_at_strict(
+            source,
+            local_vars,
+            this,
+            self.script_strict_level(),
+        )
+    }
+
+    /// Explicit-strictness counterpart used by synchronized DirectExec
+    /// controls. The control packet's strictness belongs to the temporary
+    /// expression script and must not be inferred from the destination host.
+    pub fn direct_exec_with_locals_and_this_at_strict(
+        &self,
+        source: &str,
+        local_vars: &std::collections::HashMap<String, Value>,
+        this: Value,
+        strict_level: Option<u8>,
+    ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
         let vm = Vm::new(
             &self.functions,
             &self.host_functions,
@@ -875,7 +893,7 @@ impl Engine {
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_this(this);
-        vm.direct_exec_with_locals(source, local_vars, self.script_strict_level())
+        vm.direct_exec_with_locals(source, local_vars, strict_level)
             .map_err(ScriptError::from)
     }
 
@@ -890,6 +908,24 @@ impl Engine {
         source: &str,
         cells: &crate::vm::LocalCells,
         this: Value,
+    ) -> Result<Value, ScriptError> {
+        self.direct_exec_with_cells_and_this_at_strict(
+            source,
+            cells,
+            this,
+            self.script_strict_level(),
+        )
+    }
+
+    /// Shared-cell DirectExec with packet-supplied strictness. This is kept
+    /// separate from the object-menu API above so existing callers retain the
+    /// destination script's strictness.
+    pub fn direct_exec_with_cells_and_this_at_strict(
+        &self,
+        source: &str,
+        cells: &crate::vm::LocalCells,
+        this: Value,
+        strict_level: Option<u8>,
     ) -> Result<Value, ScriptError> {
         let vm = Vm::new(
             &self.functions,
@@ -908,7 +944,7 @@ impl Engine {
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_this(this);
-        vm.direct_exec_with_cells(source, cells, self.script_strict_level())
+        vm.direct_exec_with_cells(source, cells, strict_level)
             .map_err(ScriptError::from)
     }
 

@@ -83,8 +83,8 @@ use lc_engine::{
     MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MouseDragSource,
     MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData, PlayerConfig,
     Recorder, Recording, RgbColor, Scenario, ScenarioError, ScoreboardPresentationRequest,
-    SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, TeamConfiguration, Vector2,
-    FLAG_ALIGN_CENTER,
+    ScriptControlPolicy, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket,
+    TeamConfiguration, Vector2, FLAG_ALIGN_CENTER,
     FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK,
     FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
@@ -25078,6 +25078,10 @@ impl GameApp {
                 NetworkControl::PlayerCommand(data) => {
                     self.execute_player_command_failsafe(data)
                 }
+                NetworkControl::Script(data) => self
+                    .engine
+                    .execute_script_control(&data, ScriptControlPolicy::live(false))
+                    .map(|_| ()),
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
@@ -57436,6 +57440,27 @@ mod tests {
         assert_eq!(commands[0].data, CommandData::Integer(23));
         let player = app.engine.player(owner).expect("local player remains");
         assert_eq!((player.control_count(), player.action_count()), (1, 1));
+        assert_eq!(app.executing_ready_tick, None);
+    }
+
+    #[test]
+    fn synchronized_host_script_control_executes_at_the_ready_tick() {
+        let mut app = new_running_sandbox_app();
+        assert_ne!(app.engine.physics().gravity, 77);
+
+        app.apply_ready_controls(
+            12,
+            vec![NetworkControl::Script(lc_engine::ScriptControlData {
+                target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+                strictness: lc_engine::ScriptStrictness::Strict3,
+                script: lc_engine::LegacyCString::from_bytes(b"SetGravity(77)".to_vec())
+                    .expect("script is NUL-free"),
+                by_client: 0,
+            })],
+        )
+        .expect("host-authored script control executes");
+
+        assert_eq!(app.engine.physics().gravity, 77);
         assert_eq!(app.executing_ready_tick, None);
     }
 

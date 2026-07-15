@@ -3201,7 +3201,7 @@ async fn ingest_control(
             .await;
         return;
     }
-    if let Err(error) = validate_queued_control_set_authors(&packet) {
+    if let Err(error) = validate_queued_control_authors(&packet) {
         let _ = state
             .event_tx
             .send(HostEvent::TransportError {
@@ -3239,14 +3239,14 @@ async fn ingest_control(
     }
 }
 
-/// Authenticate the inner author on every CID_Set in a queued contribution.
+/// Authenticate security-sensitive inner authors in a queued contribution.
 ///
 /// Complete packets deliberately remain opaque when they contain an
 /// unsupported control type, because the host must still aggregate legacy
 /// controls it does not execute. Such a packet cannot become a typed
 /// `ReadyTick` in the current app decoder. Every fully decodable frame that
 /// can reach that path is checked here before the coordinator consumes it.
-fn validate_queued_control_set_authors(packet: &ControlPacket) -> Result<(), String> {
+fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String> {
     let frame = match crate::decode_control_packet(packet) {
         Ok(frame) => frame,
         Err(crate::LegacyControlError::UnsupportedPacket(_)) => return Ok(()),
@@ -3259,13 +3259,18 @@ fn validate_queued_control_set_authors(packet: &ControlPacket) -> Result<(), Str
         )
     })?;
     for control in &frame.controls {
-        let Some(set) = crate::LegacyControlSet::from_control_packet(control) else {
-            continue;
+        let (name, author) = match control {
+            lc_engine::ControlPacket::Script(script) => ("CID_Script", script.by_client),
+            control => {
+                let Some(set) = crate::LegacyControlSet::from_control_packet(control) else {
+                    continue;
+                };
+                ("CID_Set", set.by_client)
+            }
         };
-        if set.by_client != expected_author {
+        if author != expected_author {
             return Err(format!(
-                "queued CID_Set claimed author {}, but authenticated author is {expected_author}",
-                set.by_client
+                "queued {name} claimed author {author}, but authenticated author is {expected_author}"
             ));
         }
     }
@@ -3495,6 +3500,7 @@ fn authenticated_single_control(
         lc_engine::ControlPacket::ClientRemove(data) => data.by_client,
         lc_engine::ControlPacket::PlayerControl(data) => data.by_client,
         lc_engine::ControlPacket::PlayerCommand(data) => data.by_client,
+        lc_engine::ControlPacket::Script(data) => data.by_client,
         lc_engine::ControlPacket::InitScenarioPlayer(data) => data.by_client,
         lc_engine::ControlPacket::SurrenderPlayer(data) => data.by_client,
         lc_engine::ControlPacket::Synchronize(data) => data.by_client,
@@ -7070,9 +7076,56 @@ mod tests {
             .expect("encode queued CID_Set")
         };
 
-        validate_queued_control_set_authors(&packet(7)).expect("matching queued author");
-        let error = validate_queued_control_set_authors(&packet(0))
+        validate_queued_control_authors(&packet(7)).expect("matching queued author");
+        let error = validate_queued_control_authors(&packet(0))
             .expect_err("queued client may not forge host CID_Set");
+        assert!(error.contains("claimed author 0"));
+        assert!(error.contains("authenticated author is 7"));
+    }
+
+    #[test]
+    fn single_script_control_authenticates_embedded_author() {
+        let control = EngineControlPacket::Script(lc_engine::ScriptControlData {
+            target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+            strictness: lc_engine::ScriptStrictness::Strict3,
+            script: lc_engine::LegacyCString::from_bytes(b"1+2".to_vec())
+                .expect("fixture is NUL-free"),
+            by_client: 7,
+        });
+        let payload = encode_control_entry_payload(&control).expect("encode CID_Script");
+
+        assert_eq!(
+            authenticated_single_control(&payload, 7).expect("matching author"),
+            control
+        );
+        let error = authenticated_single_control(&payload, 8)
+            .expect_err("reject spoofed script author");
+        assert!(error.contains("claimed author 7"));
+        assert!(error.contains("authenticated author is 8"));
+    }
+
+    #[test]
+    fn queued_script_control_cannot_forge_host_author() {
+        let packet = |by_client| {
+            encode_control_packet(&LegacyControlFrame {
+                client_id: 7,
+                tick: 12,
+                timestamp_ms: 0,
+                controls: vec![EngineControlPacket::Script(lc_engine::ScriptControlData {
+                    target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+                    strictness: lc_engine::ScriptStrictness::Strict3,
+                    script: lc_engine::LegacyCString::from_bytes(b"1+2".to_vec())
+                        .expect("fixture is NUL-free"),
+                    by_client,
+                })],
+            })
+            .expect("encode queued CID_Script")
+        };
+
+        validate_queued_control_authors(&packet(7)).expect("matching queued author");
+        let error = validate_queued_control_authors(&packet(0))
+            .expect_err("queued client may not forge host CID_Script");
+        assert!(error.contains("queued CID_Script"));
         assert!(error.contains("claimed author 0"));
         assert!(error.contains("authenticated author is 7"));
     }
