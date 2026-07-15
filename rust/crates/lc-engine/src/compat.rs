@@ -4,9 +4,10 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 use crate::command::{
-    definition_id_to_c4id, CommandData, CommandDefinitionSnapshot, CommandEvent, CommandId,
-    CommandMode, CommandObjectSnapshot, CommandOperation, CommandPlayerSnapshot, CommandRequest,
-    CommandRuntimeContext, CommandStack, CommandStackSnapshot, CommandView, MAX_COMMAND_STACK,
+    definition_id_to_c4id, CommandData, CommandDefinitionSnapshot, CommandEvent,
+    CommandFailureFeedback, CommandId, CommandMode, CommandObjectSnapshot, CommandOperation,
+    CommandPlayerSnapshot, CommandRequest, CommandRuntimeContext, CommandStack,
+    CommandStackSnapshot, CommandView, MAX_COMMAND_STACK,
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::material::MaterialSet;
@@ -229,6 +230,9 @@ pub(crate) struct DefinitionMetadata {
     pub blit_mode: u32,
     pub ocf_base: u32,
     pub crew_member: bool,
+    /// DefCore `SilentCommands`, read after a failed-command script callback
+    /// from the actor's current definition.
+    pub silent_commands: bool,
     /// ActMap for building nested object scopes (Find_Func targets).
     pub action_library: ActionLibrary,
     /// Presentation facets used by FrameDecoration::SetByDef.
@@ -25406,6 +25410,143 @@ fn command_data_value(data: &CommandData) -> Value {
     }
 }
 
+/// Host-preview twin of C4Command::Fail's ExecFail tail. ExecuteCommand runs
+/// inside a script VM call, so CallFailed/BuildNeedsMaterial and the ComDir
+/// stop must be visible before the next script instruction and before
+/// ControlCommandFinished.
+fn preview_command_failure_feedback(
+    actor: ObjectId,
+    feedback: CommandFailureFeedback,
+) -> Result<(), RuntimeError> {
+    let crew = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        context
+            .object_scope(actor)
+            .map(|scope| scope.ocf() & ocf::CREW_MEMBER != 0)
+            .or_else(|| {
+                context
+                    .get_world_object(actor)
+                    .map(|object| object.ocf & ocf::CREW_MEMBER != 0)
+            })
+            .unwrap_or(false)
+    });
+    if !crew {
+        return Ok(());
+    }
+
+    let command = feedback.command;
+    match command.name.as_str() {
+        "Call" => {
+            if let (Some(target), CommandData::Text(text)) =
+                (command.target, &command.data)
+            {
+                if !text.is_empty() {
+                    let args = [
+                        object_reference_value(actor),
+                        command
+                            .tx_definition
+                            .clone()
+                            .map(Value::C4Id)
+                            .or_else(|| command.tx.map(Value::Int))
+                            .unwrap_or(Value::Nil),
+                        Value::Int(command.ty.unwrap_or(0)),
+                        command
+                            .target2
+                            .map(object_reference_value)
+                            .unwrap_or(Value::Nil),
+                    ];
+                    let handled = call_object_own_fail_safe(
+                        target,
+                        &format!("{text}Failed"),
+                        &args,
+                    )
+                    .as_bool();
+                    if handled {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        "Build" => {
+            if let Some(target) = command.target {
+                let (component, count) = HOST_CONTEXT.with(|cell| {
+                    let borrow = cell.borrow();
+                    let Some(context) = borrow.as_ref() else {
+                        return (None, 0);
+                    };
+                    let scope = context.object_scope(target);
+                    let state = context
+                        .get_world_object(target)
+                        .and_then(|object| object.full_state().cloned());
+                    let components = scope
+                        .and_then(|scope| scope.pending_update.components.as_ref())
+                        .or_else(|| state.as_deref().map(|state| &state.components));
+                    let order = scope
+                        .and_then(|scope| scope.pending_update.component_order.as_ref())
+                        .or_else(|| state.as_deref().map(|state| &state.component_order));
+                    let Some(id) = order.and_then(|order| order.first()).cloned() else {
+                        return (None, 0);
+                    };
+                    let count = components
+                        .and_then(|components| components.get(&id))
+                        .copied()
+                        .unwrap_or(0);
+                    (Some(id), count)
+                });
+                // A truthy result suppresses only the generated material
+                // message; the common Stop still runs.
+                let handled = call_object_own_fail_safe(
+                    actor,
+                    "BuildNeedsMaterial",
+                    &[
+                        component.map(Value::C4Id).unwrap_or(Value::Nil),
+                        Value::Int(count),
+                    ],
+                )
+                .as_bool();
+                if !handled {
+                    // Even when presentation is deferred, constructing the
+                    // message runs target GetCustomComponents synchronously.
+                    let _ = get_needed_mat_str(&[object_reference_value(target)])?;
+                }
+            }
+        }
+        _ => {}
+    }
+
+    if !object_has_status(actor) {
+        return Ok(());
+    }
+    let silent_commands = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        context
+            .object_effective_definition_id(actor)
+            .and_then(|id| context.definition_metadata(&id))
+            .is_some_and(|metadata| metadata.silent_commands)
+    });
+    if silent_commands {
+        return Ok(());
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        if context.ensure_object_scope(actor) {
+            if let Some(scope) = context.object_scope_mut(actor) {
+                scope.set_command_direction(CommandDirection::Stop);
+            }
+        }
+    });
+    Ok(())
+}
+
 /// Host-preview form of ObjectActionJump used by C4Command::Grab's
 /// scale/hangle let-go. ExecuteCommand runs inside the VM, so both the
 /// OnActionJump hook and Jump action callbacks must complete before the
@@ -25912,13 +26053,23 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
             context.execute_command_preview(target, random.as_ref().map(|rng| &rng.rng))
         })
     });
-    let Some((mut finished, grab_attempts, drop_attempts)) = preview else {
+    let Some((mut finished, grab_attempts, drop_attempts, failure_feedback)) = preview else {
         return Ok(Value::Bool(false));
     };
 
-    let had_live_attempt = !grab_attempts.is_empty() || !drop_attempts.is_empty();
+    let had_live_attempt = !grab_attempts.is_empty()
+        || !drop_attempts.is_empty()
+        || !failure_feedback.is_empty();
     for (actor_id, target_id) in grab_attempts {
         preview_grab_attempt(actor_id, target_id)?;
+        while let Some(feedback) = HOST_CONTEXT.with(|cell| {
+            cell.borrow_mut()
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(actor_id))
+                .and_then(|scope| scope.live_commands.take_failure_feedback())
+        }) {
+            preview_command_failure_feedback(actor_id, feedback)?;
+        }
     }
     for (actor_id, object_id) in drop_attempts {
         let _ = preview_object_com_drop(actor_id, object_id)?;
@@ -25926,8 +26077,11 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
             cell.borrow_mut()
                 .as_mut()
                 .and_then(|context| context.object_scope_mut(actor_id))
-                .map(|scope| scope.live_commands.finish_pending_drop())
+            .map(|scope| scope.live_commands.finish_pending_drop())
         });
+    }
+    for (actor_id, feedback) in failure_feedback {
+        preview_command_failure_feedback(actor_id, feedback)?;
     }
     if had_live_attempt {
         finished = HOST_CONTEXT.with(|cell| {
@@ -27427,6 +27581,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
+                silent_commands: false,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -27843,8 +27998,9 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     contact_function_calls: false,
                     blit_mode: 0,
                     ocf_base: ocf::NORMAL,
-                    crew_member: false,
-                    action_library: ActionLibrary::default(),
+                crew_member: false,
+                silent_commands: false,
+                action_library: ActionLibrary::default(),
                     action_graphics: HashMap::new(),
                     value: 0,
                     mass: 0,
@@ -28920,6 +29076,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
+                silent_commands: false,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -36013,6 +36170,7 @@ impl EffectHostContext {
         Option<CommandView>,
         Vec<(ObjectId, ObjectId)>,
         Vec<(ObjectId, ObjectId)>,
+        Vec<(ObjectId, CommandFailureFeedback)>,
     )> {
         let (objects, players, definitions, transfers) = self.command_runtime_data();
         let object_snapshot = objects.get(&target)?;
@@ -36060,6 +36218,7 @@ impl EffectHostContext {
         let mut deferred_events = Vec::new();
         let mut grab_attempts = Vec::new();
         let mut drop_attempts = Vec::new();
+        let mut failure_feedback = Vec::new();
         for event in events.drain(..) {
             match event {
                 CommandEvent::AttemptGrab {
@@ -36070,6 +36229,9 @@ impl EffectHostContext {
                     actor_id,
                     object_id,
                 } => drop_attempts.push((actor_id, object_id)),
+                CommandEvent::FailureFeedback { actor_id, feedback } => {
+                    failure_feedback.push((actor_id, feedback));
+                }
                 CommandEvent::OpenMenu(request) => self.pending_menu_requests.push(request),
                 other => deferred_events.push(other),
             }
@@ -36081,7 +36243,12 @@ impl EffectHostContext {
             );
             self.pending_command_events.extend(deferred_events);
         }
-        Some((finished, grab_attempts, drop_attempts))
+        Some((
+            finished,
+            grab_attempts,
+            drop_attempts,
+            failure_feedback,
+        ))
     }
 
     fn clear_finished_command_fronts(&mut self, target: ObjectId) {
@@ -46344,6 +46511,7 @@ func ProbeBadIndex(id) {
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
+                silent_commands: false,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -46401,8 +46569,9 @@ func ProbeBadIndex(id) {
                     contact_function_calls: false,
                     blit_mode: 0,
                     ocf_base: 0,
-                    crew_member: false,
-                    action_library: ActionLibrary::default(),
+                crew_member: false,
+                silent_commands: false,
+                action_library: ActionLibrary::default(),
                     action_graphics: HashMap::new(),
                     value: 0,
                     mass: 0,
@@ -46437,8 +46606,9 @@ func ProbeBadIndex(id) {
                     contact_function_calls: false,
                     blit_mode: 0,
                     ocf_base: 0,
-                    crew_member: false,
-                    action_library: ActionLibrary::default(),
+                crew_member: false,
+                silent_commands: false,
+                action_library: ActionLibrary::default(),
                     action_graphics: HashMap::new(),
                     value: 0,
                     mass: 0,
@@ -46498,6 +46668,7 @@ func ProbeBadIndex(id) {
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
+                silent_commands: false,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -46570,6 +46741,7 @@ func ProbeBadIndex(id) {
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
+                silent_commands: false,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -46651,8 +46823,9 @@ func ProbeBadIndex(id) {
             contact_function_calls: false,
             blit_mode: 0,
             ocf_base: 0,
-            crew_member: false,
-            action_library: ActionLibrary::default(),
+                crew_member: false,
+                silent_commands: false,
+                action_library: ActionLibrary::default(),
             action_graphics: HashMap::new(),
             value: 0,
             mass: 0,
@@ -47773,6 +47946,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
+                silent_commands: false,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -47922,6 +48096,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
+                silent_commands: false,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -47995,6 +48170,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
+                silent_commands: false,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -57917,6 +58093,7 @@ public func SeedFull()
                 blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
+                silent_commands: false,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -58134,8 +58311,9 @@ protected func Construction()
             contact_function_calls: false,
             blit_mode: 0,
             ocf_base: ocf::NORMAL,
-            crew_member: false,
-            action_library: ActionLibrary::default(),
+                crew_member: false,
+                silent_commands: false,
+                action_library: ActionLibrary::default(),
             action_graphics: HashMap::new(),
             value: 0,
             mass: 100,

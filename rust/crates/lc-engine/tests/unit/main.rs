@@ -26,7 +26,7 @@
 #[allow(unused_imports)]
 pub use lc_engine::*;
 #[allow(unused_imports)]
-pub use lc_engine::command::{CommandData, CommandId, CommandRequest};
+pub use lc_engine::command::{CommandData, CommandId, CommandMode, CommandRequest};
 #[allow(unused_imports)]
 pub use lc_engine::compat::{LandscapeOperation, ObjectOrderCommand, PlayerCommand};
 #[allow(unused_imports)]
@@ -18995,6 +18995,376 @@ protected func Grabbed(clonk, grab)
             run_grab(&mut engine, rotated_actor, rotated_target),
             Value::Int(1234),
             "At uses the target's rotated live shape"
+        );
+    }
+
+    #[test]
+    fn failed_call_feedback_observes_old_comdir_and_honors_live_tail_gates() {
+        let actor_script = r#"#strict
+local finished_calls, finished_dir;
+
+public func RunNow() { return ExecuteCommand(); }
+
+protected func ControlCommandFinished()
+{
+  finished_calls++;
+  finished_dir = GetComDir();
+}
+"#;
+        let target_script = |handled: &str| {
+            format!(
+                r#"#strict
+local calls, caller_seen, tx_seen, ty_seen, target2_seen, pre_dir;
+
+protected func WorkFailed(caller, tx, ty, other)
+{{
+  calls++;
+  caller_seen = caller;
+  tx_seen = tx;
+  ty_seen = ty;
+  target2_seen = other;
+  pre_dir = GetComDir(caller);
+  return {handled};
+}}
+"#
+            )
+        };
+
+        let mut engine = Engine::with_seed(311);
+        for (id, silent, crew) in [
+            ("AEXE", false, true),
+            ("ACRW", false, true),
+            ("ASLT", true, true),
+            ("ANCR", false, false),
+        ] {
+            let mut definition =
+                Definition::from_script(id, id, actor_script).expect("actor script compiles");
+            definition.set_crew_member(crew);
+            definition.set_silent_commands(silent);
+            engine
+                .register_definition(definition)
+                .expect("actor definition registers");
+        }
+        engine
+            .register_definition(
+                Definition::from_script("TGTF", "Falsy target", &target_script("0"))
+                    .expect("falsy target compiles"),
+            )
+            .expect("falsy target registers");
+        engine
+            .register_definition(
+                Definition::from_script("TGTT", "Truthy target", &target_script("WOOD"))
+                    .expect("truthy target compiles"),
+            )
+            .expect("truthy target registers");
+        engine
+            .register_definition(
+                Definition::from_script("MARK", "Marker", "#strict").expect("marker compiles"),
+            )
+            .expect("marker registers");
+
+        let falsy_target = engine
+            .spawn_object(SpawnConfig::new("TGTF"))
+            .expect("falsy target spawns");
+        let truthy_target = engine
+            .spawn_object(SpawnConfig::new("TGTT"))
+            .expect("truthy target spawns");
+        let marker = engine
+            .spawn_object(SpawnConfig::new("MARK"))
+            .expect("marker spawns");
+
+        let queue_failed_call = |engine: &mut Engine, actor: ObjectId, target: ObjectId| {
+            let index = engine.find_object_index(actor).expect("actor exists");
+            engine.objects[index]
+                .commands
+                .push_front(
+                    CommandRequest::new(CommandId::Call)
+                        .with_target(Some(target))
+                        .with_target2(Some(marker))
+                        .with_tx_definition("WOOD".into())
+                        .with_ty(Some(17))
+                        .with_data(CommandData::Text("Work".into()))
+                        .with_mode(CommandMode::Base),
+                )
+                .expect("Call queues");
+            assert!(engine.objects[index]
+                .commands
+                .fail_front_if(CommandId::Call));
+            engine.refresh_object_ocf(index);
+        };
+
+        // Script ExecuteCommand must run the tail inside the current VM call.
+        let execute_actor = engine
+            .spawn_object(
+                SpawnConfig::new("AEXE")
+                    .with_alive(true)
+                    .with_crew_member(true)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("ExecuteCommand actor spawns");
+        queue_failed_call(&mut engine, execute_actor, falsy_target);
+        let execute_index = engine
+            .find_object_index(execute_actor)
+            .expect("ExecuteCommand actor exists");
+        assert_eq!(
+            engine
+                .call_object_function(execute_index, "RunNow", Vec::new())
+                .expect("ExecuteCommand succeeds"),
+            Value::Bool(true)
+        );
+        let execute = engine
+            .object_snapshot(execute_actor)
+            .expect("ExecuteCommand actor remains");
+        assert_eq!(execute.command_direction, CommandDirection::Stop);
+        assert_eq!(
+            execute.local_vars.get("finished_calls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            execute.local_vars.get("finished_dir"),
+            Some(&Value::Int(CommandDirection::Stop.to_script_value()))
+        );
+        let falsy = engine
+            .object_snapshot(falsy_target)
+            .expect("falsy target remains");
+        assert_eq!(falsy.local_vars.get("calls"), Some(&Value::Int(1)));
+        assert_eq!(
+            falsy.local_vars.get("caller_seen"),
+            Some(&Value::Object(execute_actor.as_u64()))
+        );
+        assert_eq!(
+            falsy.local_vars.get("tx_seen"),
+            Some(&Value::C4Id("WOOD".into()))
+        );
+        assert_eq!(falsy.local_vars.get("ty_seen"), Some(&Value::Int(17)));
+        assert_eq!(
+            falsy.local_vars.get("target2_seen"),
+            Some(&Value::Object(marker.as_u64()))
+        );
+        assert_eq!(
+            falsy.local_vars.get("pre_dir"),
+            Some(&Value::Int(CommandDirection::Right.to_script_value())),
+            "CallFailed runs before the common ComDir stop"
+        );
+
+        let normal_actor = engine
+            .spawn_object(
+                SpawnConfig::new("ACRW")
+                    .with_alive(true)
+                    .with_crew_member(true)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("normal actor spawns");
+        let silent_actor = engine
+            .spawn_object(
+                SpawnConfig::new("ASLT")
+                    .with_alive(true)
+                    .with_crew_member(true)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("silent actor spawns");
+        let noncrew_actor = engine
+            .spawn_object(
+                SpawnConfig::new("ANCR")
+                    .with_alive(true)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("noncrew actor spawns");
+        queue_failed_call(&mut engine, normal_actor, truthy_target);
+        queue_failed_call(&mut engine, silent_actor, falsy_target);
+        queue_failed_call(&mut engine, noncrew_actor, falsy_target);
+
+        engine.tick().expect("failure-tail tick succeeds");
+
+        let normal = engine
+            .object_snapshot(normal_actor)
+            .expect("normal actor remains");
+        assert_eq!(
+            normal.command_direction,
+            CommandDirection::Right,
+            "truthy CallFailed suppresses the entire common tail"
+        );
+        assert_eq!(
+            normal.local_vars.get("finished_dir"),
+            Some(&Value::Int(CommandDirection::Right.to_script_value()))
+        );
+        let silent = engine
+            .object_snapshot(silent_actor)
+            .expect("silent actor remains");
+        assert_eq!(
+            silent.command_direction,
+            CommandDirection::Right,
+            "SilentCommands suppresses only the common tail"
+        );
+        let noncrew = engine
+            .object_snapshot(noncrew_actor)
+            .expect("noncrew actor remains");
+        assert_eq!(noncrew.command_direction, CommandDirection::Right);
+
+        let falsy = engine
+            .object_snapshot(falsy_target)
+            .expect("falsy target remains");
+        assert_eq!(
+            falsy.local_vars.get("calls"),
+            Some(&Value::Int(2)),
+            "silent crew still gets CallFailed; the noncrew does not"
+        );
+        let truthy = engine
+            .object_snapshot(truthy_target)
+            .expect("truthy target remains");
+        assert_eq!(truthy.local_vars.get("calls"), Some(&Value::Int(1)));
+    }
+
+    #[test]
+    fn failed_build_feedback_uses_live_component_zero_and_truthy_still_stops() {
+        let actor_script = r#"#strict 3
+local needed_id, needed_count, needed_id_is_nil, needed_count_is_int;
+local pre_dir, finished_dir;
+
+public func RunNow() { return ExecuteCommand(); }
+
+protected func BuildNeedsMaterial(id, count)
+{
+  needed_id = id;
+  needed_count = count;
+  needed_id_is_nil = GetType(id) == 0;
+  needed_count_is_int = GetType(count) == C4V_Int;
+  pre_dir = GetComDir();
+  return 1;
+}
+
+protected func ControlCommandFinished() { finished_dir = GetComDir(); }
+"#;
+        let mut builder =
+            Definition::from_script("BLDR", "Builder", actor_script).expect("builder compiles");
+        builder.set_crew_member(true);
+        let mut site = Definition::from_script("SITE", "Site", "#strict").expect("site compiles");
+        // Deliberately differs from the live object Component list below.
+        site.set_components(vec![DefinitionComponent {
+            id: "WOOD".into(),
+            count: 99,
+        }]);
+
+        let mut engine = Engine::with_seed(312);
+        engine
+            .register_definition(builder)
+            .expect("builder registers");
+        engine.register_definition(site).expect("site registers");
+        engine
+            .register_definition(
+                Definition::from_script("WOOD", "Wood", "#strict").expect("wood compiles"),
+            )
+            .expect("wood registers");
+        engine
+            .register_definition(
+                Definition::from_script("METL", "Metal", "#strict").expect("metal compiles"),
+            )
+            .expect("metal registers");
+
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("SITE")
+                    .with_ordered_components(vec![("METL".into(), 3), ("WOOD".into(), 8)]),
+            )
+            .expect("site spawns");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("BLDR")
+                    .with_alive(true)
+                    .with_crew_member(true)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("builder spawns");
+        let actor_index = engine.find_object_index(actor).expect("builder exists");
+        engine.objects[actor_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Build)
+                    .with_target(Some(target))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("Build queues");
+        assert!(engine.objects[actor_index]
+            .commands
+            .fail_front_if(CommandId::Build));
+        engine.refresh_object_ocf(actor_index);
+
+        engine.tick().expect("Build failure tick succeeds");
+
+        let actor = engine.object_snapshot(actor).expect("builder remains");
+        assert_eq!(
+            actor.local_vars.get("needed_id"),
+            Some(&Value::C4Id("METL".into()))
+        );
+        assert_eq!(actor.local_vars.get("needed_count"), Some(&Value::Int(3)));
+        assert_eq!(
+            actor.local_vars.get("pre_dir"),
+            Some(&Value::Int(CommandDirection::Right.to_script_value()))
+        );
+        assert_eq!(actor.command_direction, CommandDirection::Stop);
+        assert_eq!(
+            actor.local_vars.get("finished_dir"),
+            Some(&Value::Int(CommandDirection::Stop.to_script_value()))
+        );
+
+        let empty_target = engine
+            .spawn_object(
+                SpawnConfig::new("SITE")
+                    .with_ordered_components(Vec::<(String, i32)>::new()),
+            )
+            .expect("component-free site spawns");
+        let empty_actor = engine
+            .spawn_object(
+                SpawnConfig::new("BLDR")
+                    .with_alive(true)
+                    .with_crew_member(true)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("component-free builder spawns");
+        let empty_actor_index = engine
+            .find_object_index(empty_actor)
+            .expect("component-free builder exists");
+        engine.objects[empty_actor_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Build)
+                    .with_target(Some(empty_target))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("component-free Build queues");
+        assert!(engine.objects[empty_actor_index]
+            .commands
+            .fail_front_if(CommandId::Build));
+        engine.refresh_object_ocf(empty_actor_index);
+        assert_eq!(
+            engine
+                .call_object_function(empty_actor_index, "RunNow", Vec::new())
+                .expect("component-free Build failure succeeds"),
+            Value::Bool(true)
+        );
+
+        let empty_actor = engine
+            .object_snapshot(empty_actor)
+            .expect("component-free builder remains");
+        assert_eq!(
+            empty_actor.local_vars.get("pre_dir"),
+            Some(&Value::Int(CommandDirection::Right.to_script_value())),
+            "BuildNeedsMaterial must run even when Component[0] is empty: {:?}",
+            empty_actor.local_vars
+        );
+        assert_eq!(empty_actor.command_direction, CommandDirection::Stop);
+        assert_eq!(empty_actor.local_vars.get("needed_id"), Some(&Value::Nil));
+        assert_eq!(
+            empty_actor.local_vars.get("needed_count"),
+            Some(&Value::Int(0))
+        );
+        assert_eq!(
+            empty_actor.local_vars.get("needed_id_is_nil"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            empty_actor.local_vars.get("needed_count_is_int"),
+            Some(&Value::Bool(true))
         );
     }
 

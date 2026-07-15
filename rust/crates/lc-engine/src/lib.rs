@@ -177,9 +177,9 @@ pub(crate) struct ScriptContextFunction {
 
 use command::{
     definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandData,
-    CommandDefinitionSnapshot, CommandEvent, CommandId, CommandObjectSnapshot, CommandOperation,
-    CommandMode, CommandPlayerSnapshot, CommandRequest, CommandRuntimeContext, CommandStack,
-    CommandStepResult, GetAttemptDisposition,
+    CommandDefinitionSnapshot, CommandEvent, CommandFailureFeedback, CommandId,
+    CommandObjectSnapshot, CommandOperation, CommandMode, CommandPlayerSnapshot, CommandRequest,
+    CommandRuntimeContext, CommandStack, CommandStepResult, GetAttemptDisposition,
 };
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
@@ -8400,6 +8400,9 @@ pub struct Definition {
     action_library: ActionLibrary,
     action_graphics: HashMap<String, DefinitionActionGraphics>,
     crew_member: bool,
+    /// DefCore `SilentCommands`: suppresses C4Command::Fail's common
+    /// message/sound/ComDir-stop tail, but not command-specific callbacks.
+    silent_commands: bool,
     /// DefCore `CanBeBase` (C4Def.cpp; FirstBase detection in
     /// PlaceReadyBase, C4Player.cpp:596-599).
     can_be_base: bool,
@@ -8670,6 +8673,7 @@ impl Definition {
             action_library: ActionLibrary::default(),
             action_graphics: HashMap::new(),
             crew_member: false,
+            silent_commands: false,
             can_be_base: false,
             clonk_names: None,
             clonk_names_owned: false,
@@ -8963,6 +8967,7 @@ impl Definition {
         }
 
         definition.set_crew_member(resource.core.crew_member);
+        definition.set_silent_commands(resource.core.silent_commands);
         definition.set_category(resource.core.category);
         definition.set_blit_mode(resource.core.blit_mode);
         definition.set_color_by_owner(resource.core.color_by_owner);
@@ -9254,6 +9259,14 @@ impl Definition {
 
     pub fn set_crew_member(&mut self, crew_member: bool) {
         self.crew_member = crew_member;
+    }
+
+    pub fn silent_commands(&self) -> bool {
+        self.silent_commands
+    }
+
+    pub fn set_silent_commands(&mut self, silent_commands: bool) {
+        self.silent_commands = silent_commands;
     }
 
     pub fn movement_profile(&self) -> MovementProfile {
@@ -18453,6 +18466,7 @@ impl Engine {
                             blit_mode: definition.blit_mode(),
                             ocf_base: definition.ocf_base(),
                             crew_member: definition.is_crew(),
+                            silent_commands: definition.silent_commands(),
                             action_library: definition.action_library().clone(),
                             action_graphics: definition.action_graphics().clone(),
                             value: definition.value(),
@@ -35906,6 +35920,7 @@ impl Engine {
     ) {
         definition.set_version(core.version);
         definition.set_crew_member(core.crew_member);
+        definition.set_silent_commands(core.silent_commands);
         definition.set_category(core.category);
         definition.set_blit_mode(core.blit_mode);
         definition.set_color_by_owner(core.color_by_owner);
@@ -38932,30 +38947,11 @@ impl Engine {
                     GetEnterOutcome::Failed => (GetAttemptDisposition::Fail, None),
                 };
                 if let Some(actor_index) = self.find_object_index(actor_id) {
-                    let show_message = self.objects[actor_index].state.crew_member;
                     let resolution = self.objects[actor_index]
                         .commands
                         .resolve_get_attempt(disposition);
-                    if show_message
-                        && resolution.is_some_and(|result| result.execute_failure_tail)
-                    {
-                        if let Some(message) = message {
-                            // SilentCommands is not represented yet; the
-                            // command mode/retry gates match C4Command::Fail.
-                            self.messages.add_message(MessageSpec {
-                                kind: message::MessageKind::Target,
-                                text: message,
-                                target: Some(actor_id),
-                                player: None,
-                                offset: Vector2::ZERO,
-                                color: 0xffff_ffff,
-                                flags: message::FLAG_MULTIPLE,
-                                width: None,
-                                decoration: None,
-                                frame_decoration: None,
-                                portrait: None,
-                            });
-                        }
+                    if let Some(feedback) = resolution.and_then(|result| result.feedback) {
+                        self.execute_command_failure_feedback(actor_id, feedback, message)?;
                     }
                 }
             }
@@ -38986,6 +38982,12 @@ impl Engine {
                 target_id,
             } => {
                 self.execute_grab_command(actor_id, target_id)?;
+                let feedback = self
+                    .find_object_index(actor_id)
+                    .and_then(|index| self.objects[index].commands.take_failure_feedback());
+                if let Some(feedback) = feedback {
+                    self.execute_command_failure_feedback(actor_id, feedback, None)?;
+                }
             }
             CommandEvent::SetObjectCommand {
                 object_id,
@@ -39097,6 +39099,9 @@ impl Engine {
                 if let Some(action) = on_result {
                     self.apply_call_result(action, caller, value.as_bool())?;
                 }
+            }
+            CommandEvent::FailureFeedback { actor_id, feedback } => {
+                self.execute_command_failure_feedback(actor_id, feedback, None)?;
             }
             CommandEvent::OpenMenu(request) => {
                 let Some(crew_index) = self.find_object_index(request.crew_id) else {
@@ -39243,6 +39248,135 @@ impl Engine {
         if let Some(index) = self.find_object_index(object_id) {
             self.objects[index].commands.clear_finished_fronts();
         }
+        Ok(())
+    }
+
+    /// C4Command::Fail's mode-gated ExecFail tail. CommandStack decides the
+    /// mode/base/retry gate while the failed command is still linked; this
+    /// live half performs callbacks before the common ComDir stop and before
+    /// ControlCommandFinished (C4Command.cpp:2139-2242,2428-2439).
+    pub(crate) fn execute_command_failure_feedback(
+        &mut self,
+        actor_id: ObjectId,
+        feedback: CommandFailureFeedback,
+        fail_message: Option<String>,
+    ) -> Result<(), EngineError> {
+        let mut fail_message = fail_message;
+        let Some(actor_index) = self.find_object_index(actor_id) else {
+            return Ok(());
+        };
+        // C++ reads the cached OCF at Fail entry. Inactive objects still have
+        // a nonzero Status and remain eligible for the later common tail.
+        if self.objects[actor_index].state.ocf & ocf::CREW_MEMBER == 0 {
+            return Ok(());
+        }
+
+        let command = feedback.command;
+        match command.name.as_str() {
+            "Call" => {
+                if let (Some(target), CommandData::Text(text)) =
+                    (command.target, &command.data)
+                {
+                    if !text.is_empty() {
+                        if let Some(target_index) = self.find_object_index(target) {
+                            let args = vec![
+                                object_reference_value(actor_id),
+                                command
+                                    .tx_definition
+                                    .clone()
+                                    .map(Value::C4Id)
+                                    .or_else(|| command.tx.map(Value::Int))
+                                    .unwrap_or(Value::Nil),
+                                Value::Int(command.ty.unwrap_or(0)),
+                                command
+                                    .target2
+                                    .map(object_reference_value)
+                                    .unwrap_or(Value::Nil),
+                            ];
+                            let function = format!("{text}Failed");
+                            let handled = tolerate_script_error(
+                                self.call_object_function(target_index, &function, args),
+                            )?
+                            .is_some_and(|value| value.as_bool());
+                            // C++ reads the raw value union through _getInt;
+                            // raw truthiness preserves nonzero IDs/pointers.
+                            if handled {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+            "Build" => {
+                if let Some(target) = command.target {
+                    let (component, count) = self
+                        .find_object_index(target)
+                        .and_then(|target_index| {
+                            let state = &self.objects[target_index].state;
+                            state.component_order.first().map(|id| {
+                                (Some(id.clone()), state.components.get(id).copied().unwrap_or(0))
+                            })
+                        })
+                        .unwrap_or_default();
+                    if let Some(builder_index) = self.find_object_index(actor_id) {
+                        // A truthy result suppresses only the generated
+                        // material message in C++; sound/Stop still follow.
+                        let handled = tolerate_script_error(self.call_object_function(
+                            builder_index,
+                            "BuildNeedsMaterial",
+                            vec![component.map(Value::C4Id).unwrap_or(Value::Nil), Value::Int(count)],
+                        ))?
+                        .is_some_and(|value| value.as_bool());
+                        if !handled && fail_message.is_none() {
+                            // Message construction is not presentation-only:
+                            // GetNeededMatStr may synchronously invoke the
+                            // target definition's GetCustomComponents.
+                            let expression = format!("GetNeededMatStr(Object({target}))");
+                            fail_message = tolerate_script_error(self.direct_exec_on_object(
+                                builder_index,
+                                &expression,
+                                "CommandFail:GetNeededMatStr",
+                            ))?
+                            .and_then(|value| match value {
+                                Value::String(text) => Some(text),
+                                _ => None,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let Some(actor_index) = self.find_object_index(actor_id) else {
+            return Ok(());
+        };
+        if self.objects[actor_index].state.status == ObjectStatus::Deleted {
+            return Ok(());
+        }
+        let silent_commands = self
+            .definitions
+            .get(&self.objects[actor_index].definition_id)
+            .is_some_and(Definition::silent_commands);
+        if silent_commands {
+            return Ok(());
+        }
+        if let Some(text) = fail_message {
+            self.messages.add_message(MessageSpec {
+                kind: message::MessageKind::Target,
+                text,
+                target: Some(actor_id),
+                player: None,
+                offset: Vector2::ZERO,
+                color: 0xffff_ffff,
+                flags: message::FLAG_MULTIPLE,
+                width: None,
+                decoration: None,
+                frame_decoration: None,
+                portrait: None,
+            });
+        }
+        self.objects[actor_index].state.command_direction = CommandDirection::Stop;
         Ok(())
     }
 
@@ -43410,6 +43544,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     blit_mode: 0,
                     ocf_base: OCF_NORMAL,
                     crew_member: false,
+                    silent_commands: false,
                     action_library: ActionLibrary::default(),
                     action_graphics: HashMap::new(),
                     value: 0,

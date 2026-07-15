@@ -530,6 +530,9 @@ pub struct DefCore {
     /// `AutoContextMenu` (C4Def.cpp:416, default 0): entering this container
     /// may automatically open its context menu (C4Object.cpp:2049-2056).
     pub auto_context_menu: bool,
+    /// `SilentCommands` (C4Def.cpp:404, default 0): suppresses the common
+    /// command-failure message, sound, and ComDir stop tail.
+    pub silent_commands: bool,
     /// `NoComponentMass` (C4Def compile): contents mass does not add to
     /// the live Mass (C4Object::UpdateMass, C4Object.cpp:497-501).
     pub no_component_mass: bool,
@@ -850,6 +853,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut rotated_solid_masks = false;
     // AutoContextMenu (C4Def.cpp:416, default 0).
     let mut auto_context_menu = false;
+    // SilentCommands (C4Def.cpp:404, default 0).
+    let mut silent_commands = false;
     let mut no_component_mass = false;
     // NoStabilize (C4Def.cpp:402, default 0): opts out of C4Object::Stabilize.
     let mut no_stabilize = false;
@@ -1134,6 +1139,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "autocontextmenu" => {
                 auto_context_menu = parse_bool(value);
             }
+            "silentcommands" => {
+                silent_commands = parse_bool(value);
+            }
             "nocomponentmass" => {
                 no_component_mass = parse_bool(value);
             }
@@ -1269,6 +1277,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         upright_attach,
         rotated_solid_masks,
         auto_context_menu,
+        silent_commands,
         no_component_mass,
         no_stabilize,
         timer,
@@ -3585,6 +3594,18 @@ Attach=1
         let parsed = parse_def_core(b"[DefCore]\nid=CLNK\n").expect("defcore parsed");
 
         assert!(!parsed.auto_context_menu);
+    }
+
+    #[test]
+    fn parse_def_core_silent_commands_flag_and_default_like_cpp() {
+        // C4Def::CompileFunc reads SilentCommands with a zero default
+        // (src/C4Def.cpp:404), using the compiler's case-insensitive keys.
+        let enabled = parse_def_core(b"[DefCore]\nid=CLNK\nsIlEnTcOmMaNdS=yes\n")
+            .expect("defcore parsed");
+        assert!(enabled.silent_commands);
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=ROCK\n").expect("defcore parsed");
+        assert!(!defaulted.silent_commands);
     }
 
     #[test]

@@ -6935,10 +6935,7 @@ mod tests {
         let result = state.step(&ctx);
 
         assert_eq!(result.status, CommandStatus::Running);
-        let update = result.update.expect("closed-door Exit stops the actor");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
-        assert!(update.container.is_none(), "the actor remains contained");
-        assert!(update.position.is_none(), "the actor is not ejected yet");
+        assert!(result.update.is_none(), "walking Exit does not pre-stop");
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
             CommandEvent::CallObjectFunction {
@@ -7453,10 +7450,7 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Failed);
-        let update = result
-            .update
-            .expect("take2 should request crew to stop even on failure");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert!(result.update.is_none());
         assert!(result.events.is_empty());
 
         let second = state.step(&ctx);
@@ -9862,6 +9856,224 @@ mod tests {
     }
 
     #[test]
+    fn command_failure_feedback_mode_matrix_matches_cpp_fail() {
+        fn run(
+            mode: CommandMode,
+            base_retries: Option<i32>,
+        ) -> (Option<CommandFailureFeedback>, i32) {
+            let mut stack = CommandStack::new();
+            if let Some(retries) = base_retries {
+                stack
+                    .push_back(
+                        CommandRequest::new(CommandId::Wait)
+                            .with_retries(retries)
+                            .with_mode(CommandMode::Base),
+                    )
+                    .expect("base queues");
+            }
+            stack
+                .push_front(CommandRequest::new(CommandId::Wait).with_mode(mode))
+                .expect("failed command queues");
+            stack.entries[0].finished = Some(CommandStatus::Failed);
+
+            let feedback = stack.record_failure_at(0);
+            let base_failures = base_retries.map_or(0, |_| stack.entries[1].failures);
+            (feedback, base_failures)
+        }
+
+        assert!(run(CommandMode::SilentSub, None).0.is_some());
+        assert_eq!(run(CommandMode::SilentSub, Some(0)), (None, 1));
+
+        let (feedback, failures) = run(CommandMode::Sub, Some(0));
+        assert!(feedback.is_some());
+        assert_eq!(failures, 1);
+        assert_eq!(run(CommandMode::Sub, Some(1)), (None, 1));
+        assert!(run(CommandMode::Sub, None).0.is_some());
+
+        let (feedback, failures) = run(CommandMode::Base, Some(1));
+        assert!(feedback.is_some());
+        assert_eq!(failures, 0);
+        assert_eq!(run(CommandMode::SilentBase, Some(0)), (None, 0));
+    }
+
+    #[test]
+    fn terminal_call_failure_emits_frozen_feedback_without_pre_stop() {
+        let actor_id = ObjectId::new(1);
+        let missing_target = ObjectId::new(2);
+        let target2 = ObjectId::new(3);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.command_direction = CommandDirection::Right;
+        let objects = HashMap::from([(actor_id, actor.clone())]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Call)
+                    .with_target(Some(missing_target))
+                    .with_target2(Some(target2))
+                    .with_tx_definition("WOOD".into())
+                    .with_ty(Some(17))
+                    .with_data(CommandData::Text("Work".into()))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("Call queues");
+
+        let result = stack.execute_front(&ctx).expect("Call fails");
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result.update.is_none(), "CallFailed must observe the old ComDir");
+        let Some(CommandEvent::FailureFeedback {
+            actor_id: event_actor,
+            feedback,
+        }) = result.events.last()
+        else {
+            panic!("failure feedback must be the final command event");
+        };
+        assert_eq!(*event_actor, actor_id);
+        assert_eq!(feedback.command.name, "Call");
+        assert_eq!(feedback.command.target, Some(missing_target));
+        assert_eq!(feedback.command.target2, Some(target2));
+        assert_eq!(feedback.command.tx_definition.as_deref(), Some("WOOD"));
+        assert_eq!(feedback.command.ty, Some(17));
+
+        let encoded = serde_json::to_value(feedback).expect("feedback serializes");
+        let decoded: CommandFailureFeedback =
+            serde_json::from_value(encoded).expect("feedback deserializes");
+        assert_eq!(decoded, *feedback);
+    }
+
+    #[test]
+    fn missing_build_target_leaves_stop_to_mode_gated_failure_tail() {
+        let actor_id = ObjectId::new(1);
+        let actor = CommandObjectSnapshot {
+            command_direction: CommandDirection::Right,
+            ..snapshot_with_id(actor_id.as_u64())
+        };
+        let objects = HashMap::from([(actor_id, actor.clone())]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Build)
+                    .with_target(Some(ObjectId::new(99)))
+                    .with_mode(CommandMode::SilentBase),
+            )
+            .expect("Build queues");
+        let result = stack.execute_front(&ctx).expect("Build fails");
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result.update.is_none());
+        assert!(result
+            .events
+            .iter()
+            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
+    }
+
+    #[test]
+    fn silent_base_enter_and_get_failures_do_not_pre_stop() {
+        let actor_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+        let actor = CommandObjectSnapshot {
+            command_direction: CommandDirection::Right,
+            ..snapshot_with_id(actor_id.as_u64())
+        };
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let target = snapshot_with_id(target_id.as_u64());
+        let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let mut enter = CommandStack::new();
+        enter
+            .push_front(
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(target_id))
+                    .with_mode(CommandMode::SilentBase),
+            )
+            .expect("Enter queues");
+        let result = enter.execute_front(&ctx).expect("Enter fails");
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result.update.is_none());
+        assert!(result
+            .events
+            .iter()
+            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.collectible = false;
+        let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let mut get = CommandStack::new();
+        get.push_front(
+            CommandRequest::new(CommandId::Get)
+                .with_target(Some(target_id))
+                .with_mode(CommandMode::SilentBase),
+        )
+        .expect("Get queues");
+        let result = get.execute_front(&ctx).expect("Get fails");
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result.update.is_none());
+        assert!(result
+            .events
+            .iter()
+            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
+    }
+
+    #[test]
+    fn async_get_and_cleared_grab_surface_failure_feedback() {
+        let target = ObjectId::new(99);
+
+        let mut get_stack = CommandStack::new();
+        get_stack
+            .push_front(
+                CommandRequest::new(CommandId::Get)
+                    .with_target(Some(target))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("Get queues");
+        let CommandState::Get(get) = &mut get_stack.entries[0].state else {
+            panic!("Get is front");
+        };
+        get.enter_pending = true;
+        let get_resolution = get_stack
+            .resolve_get_attempt(GetAttemptDisposition::Fail)
+            .expect("pending Get resolves");
+        assert_eq!(
+            get_resolution
+                .feedback
+                .as_ref()
+                .map(|feedback| feedback.command.name.as_str()),
+            Some("Get")
+        );
+
+        let mut grab_stack = CommandStack::new();
+        grab_stack
+            .push_front(
+                CommandRequest::new(CommandId::Grab)
+                    .with_target(Some(target))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("Grab queues");
+        let CommandState::Grab(grab) = &mut grab_stack.entries[0].state else {
+            panic!("Grab is front");
+        };
+        grab.reject_pending = true;
+        assert!(grab_stack.clear_object_reference(target));
+        assert!(grab_stack.fail_pending_grab_if_target_cleared(target));
+        assert_eq!(
+            grab_stack
+                .take_failure_feedback()
+                .map(|feedback| feedback.command.name),
+            Some("Grab".into())
+        );
+        assert!(grab_stack.take_failure_feedback().is_none());
+    }
+
+    #[test]
     fn failing_subcommand_increments_base_failures_and_schedules_retry() {
         let actor_id = ObjectId::new(1);
         let mut actor = snapshot_with_id(actor_id.as_u64());
@@ -9922,6 +10134,7 @@ mod tests {
 
         let second = stack.step(&ctx).expect("wait should evaluate");
         assert_eq!(second.status, CommandStatus::Running);
+        assert!(second.update.is_none(), "delegated retries do not pre-stop");
 
         let post_snapshot = stack.snapshot();
         assert_eq!(post_snapshot.commands.len(), 2);
@@ -11466,6 +11679,14 @@ pub enum CommandEvent {
         #[serde(default)]
         on_result: Option<CallResultAction>,
     },
+    /// C4Command::Fail's mode/retry-gated tail. The engine executes this
+    /// synchronously after the command handler's own events and before
+    /// `~ControlCommandFinished`, because CallFailed may replace the stack
+    /// (C4Command.cpp:2139-2242,2428-2439).
+    FailureFeedback {
+        actor_id: ObjectId,
+        feedback: CommandFailureFeedback,
+    },
     AdjustPlayerHomeBaseMaterial {
         player_id: i32,
         definition_id: DefinitionId,
@@ -11679,7 +11900,7 @@ impl CommandSnapshot {
 /// rewrites the fields (MoveTo's target absorption C4Command.cpp:1637,
 /// Acquire's 500/250 range defaults :1666-1670, Construct's found site
 /// :1757-1766) override it with their live values.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandView {
     pub name: String,
     pub target: Option<ObjectId>,
@@ -11688,6 +11909,14 @@ pub struct CommandView {
     pub ty: Option<i32>,
     pub target2: Option<ObjectId>,
     pub data: CommandData,
+}
+
+/// The failed command fields frozen before its script feedback can mutate
+/// or clear the live stack. Command-specific feedback (notably CallFailed)
+/// must use these exact live values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandFailureFeedback {
+    pub command: CommandView,
 }
 
 impl CommandView {
@@ -11761,6 +11990,11 @@ impl CommandStackSnapshot {
 pub struct CommandStack {
     entries: VecDeque<ActiveCommand>,
     detached_grab_attempts: Vec<DetachedGrabAttempt>,
+    /// Live Grab callbacks resolve inside engine/compat event handling, so
+    /// their failure feedback cannot travel on the original CommandEvent.
+    /// Keep it transient and let that synchronous caller drain it before
+    /// `ControlCommandFinished` runs.
+    pending_failure_feedback: VecDeque<CommandFailureFeedback>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11770,9 +12004,9 @@ pub(crate) enum GetAttemptDisposition {
     Fail,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GetAttemptResolution {
-    pub execute_failure_tail: bool,
+    pub feedback: Option<CommandFailureFeedback>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11795,6 +12029,7 @@ impl CommandStack {
         Self {
             entries: VecDeque::new(),
             detached_grab_attempts: Vec::new(),
+            pending_failure_feedback: VecDeque::new(),
         }
     }
 
@@ -11992,12 +12227,11 @@ impl CommandStack {
     ) -> Option<CommandStepResult> {
         let next_is_move_to = self.entries.get(1).and_then(ActiveCommand::id)
             == Some(CommandId::MoveTo);
-        let (mode, mut result) = {
+        let mut result = {
             let front = self.entries.front_mut()?;
             if front.finished.is_some() {
                 return None;
             }
-            let mode = front.mode;
             let result = front.step(ctx, gravity, next_is_move_to);
             if matches!(
                 result.status,
@@ -12005,11 +12239,18 @@ impl CommandStack {
             ) {
                 front.finished = Some(result.status);
             }
-            (mode, result)
+            result
         };
 
         if result.status == CommandStatus::Failed {
-            self.record_failure(mode);
+            if let Some(feedback) = self.record_failure_at(0) {
+                // C4Command::Fail runs after the command handler has
+                // returned, so preserve all handler-emitted event order.
+                result.events.push(CommandEvent::FailureFeedback {
+                    actor_id: ctx.object.id,
+                    feedback,
+                });
+            }
         }
 
         for operation in std::mem::take(&mut result.operations) {
@@ -12182,7 +12423,7 @@ impl CommandStack {
             .iter()
             .skip(index + 1)
             .all(|entry| entry.finished.is_some());
-        let mode = {
+        {
             let command = &mut self.entries[index];
             if direct {
                 command.mode = CommandMode::SilentBase;
@@ -12191,17 +12432,9 @@ impl CommandStack {
                 state.reject_pending = false;
             }
             command.finished = Some(CommandStatus::Failed);
-            command.mode
-        };
-        if !direct && matches!(mode, CommandMode::SilentSub | CommandMode::Sub) {
-            if let Some(base) = self
-                .entries
-                .iter_mut()
-                .skip(index + 1)
-                .find(|entry| entry.finished.is_none())
-            {
-                base.failures = base.failures.saturating_add(1);
-            }
+        }
+        if let Some(feedback) = self.record_failure_at(index) {
+            self.pending_failure_feedback.push_back(feedback);
         }
         Some(target_retained)
     }
@@ -12256,23 +12489,15 @@ impl CommandStack {
             return false;
         }
 
-        let mode = {
+        {
             let command = &mut self.entries[index];
             if let CommandState::Grab(state) = &mut command.state {
                 state.reject_pending = false;
             }
             command.finished = Some(CommandStatus::Failed);
-            command.mode
-        };
-        if matches!(mode, CommandMode::SilentSub | CommandMode::Sub) {
-            if let Some(base) = self
-                .entries
-                .iter_mut()
-                .skip(index + 1)
-                .find(|entry| entry.finished.is_none())
-            {
-                base.failures = base.failures.saturating_add(1);
-            }
+        }
+        if let Some(feedback) = self.record_failure_at(index) {
+            self.pending_failure_feedback.push_back(feedback);
         }
         true
     }
@@ -12287,27 +12512,11 @@ impl CommandStack {
         let index = self.entries.iter().position(|entry| {
             matches!(&entry.state, CommandState::Get(state) if state.enter_pending)
         })?;
-        let mode = self.entries[index].mode;
-        let base_index = self
-            .entries
-            .iter()
-            .enumerate()
-            .skip(index + 1)
-            .find(|(_, entry)| entry.finished.is_none())
-            .map(|(index, _)| index);
-        let execute_failure_tail = match mode {
-            CommandMode::SilentSub => base_index.is_none(),
-            CommandMode::Sub => base_index
-                .and_then(|base| self.entries.get(base))
-                .is_none_or(|base| base.retries == 0),
-            CommandMode::Base => true,
-            CommandMode::SilentBase => false,
-        };
-
         if let CommandState::Get(state) = &mut self.entries[index].state {
             state.enter_pending = false;
         }
 
+        let mut feedback = None;
         match disposition {
             GetAttemptDisposition::Continue => {}
             GetAttemptDisposition::Complete => {
@@ -12315,18 +12524,11 @@ impl CommandStack {
             }
             GetAttemptDisposition::Fail => {
                 self.entries[index].finished = Some(CommandStatus::Failed);
-                if matches!(mode, CommandMode::SilentSub | CommandMode::Sub) {
-                    if let Some(base) = base_index.and_then(|index| self.entries.get_mut(index)) {
-                        base.failures = base.failures.saturating_add(1);
-                    }
-                }
+                feedback = self.record_failure_at(index);
             }
         }
 
-        Some(GetAttemptResolution {
-            execute_failure_tail: disposition == GetAttemptDisposition::Fail
-                && execute_failure_tail,
-        })
+        Some(GetAttemptResolution { feedback })
     }
 
     pub fn set_acquire_script_result(&mut self, result: AcquireScriptResult) -> bool {
@@ -12370,21 +12572,64 @@ impl CommandStack {
         }
     }
 
-    fn record_failure(&mut self, mode: CommandMode) {
-        match mode {
-            CommandMode::SilentSub | CommandMode::Sub => {
-                if let Some(base) = self
-                    .entries
-                    .iter_mut()
-                    .skip(1)
-                    .find(|entry| entry.finished.is_none())
-                {
+    /// Drain one feedback item produced by a live callback resolution.
+    /// Callers must do this synchronously, before the finished-command
+    /// callback can clear or replace the stack.
+    pub(crate) fn take_failure_feedback(&mut self) -> Option<CommandFailureFeedback> {
+        self.pending_failure_feedback.pop_front()
+    }
+
+    /// C4Command::Fail's exact BaseMode/GetBaseCommand gate. The failed
+    /// entry must already have `Finished=true`, just as C++ Finish does
+    /// before calling Fail (C4Command.cpp:1575-1582,2139-2174).
+    fn record_failure_at(&mut self, index: usize) -> Option<CommandFailureFeedback> {
+        let mode = self.entries.get(index)?.mode;
+        let base_index = self
+            .entries
+            .iter()
+            .enumerate()
+            .skip(index + 1)
+            .find(|(_, entry)| entry.finished.is_none())
+            .map(|(base_index, _)| base_index);
+
+        let execute_feedback = match mode {
+            CommandMode::SilentSub => {
+                if let Some(base_index) = base_index {
+                    let base = &mut self.entries[base_index];
                     base.failures = base.failures.saturating_add(1);
+                    false
+                } else {
+                    true
                 }
             }
-            CommandMode::SilentBase => {}
-            CommandMode::Base => {}
-        }
+            CommandMode::Sub => {
+                if let Some(base_index) = base_index {
+                    let base = &mut self.entries[base_index];
+                    base.failures = base.failures.saturating_add(1);
+                    base.retries == 0
+                } else {
+                    true
+                }
+            }
+            CommandMode::Base => true,
+            CommandMode::SilentBase => false,
+        };
+
+        execute_feedback.then(|| {
+            let entry = &self.entries[index];
+            CommandFailureFeedback {
+                command: CommandView::from_entry(
+                    entry
+                        .state
+                        .id()
+                        .map(CommandId::to_name)
+                        .unwrap_or("None")
+                        .to_string(),
+                    entry.request.as_ref(),
+                    &entry.state,
+                ),
+            }
+        })
     }
 }
 
@@ -12724,10 +12969,7 @@ impl MoveToState {
         }
         let target = match self.resolve_target_position(ctx) {
             Some(position) => position,
-            None => {
-                let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
-                return CommandStepResult::failed(Some(update));
-            }
+            None => return CommandStepResult::failed(None),
         };
 
         // C4Command::MoveTo path phase (C4Command.cpp:225-255): crew and
@@ -13245,7 +13487,7 @@ impl EnterState {
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         let Some(target_snapshot) = ctx.resolve(self.target) else {
-            return CommandStepResult::failed(self.update_to_stop(ctx));
+            return CommandStepResult::failed(None);
         };
 
         // C4Command::Enter has no aliveness gate on the target — dead
@@ -13277,7 +13519,7 @@ impl EnterState {
         }
 
         if target_snapshot.ocf & ocf::ENTRANCE == 0 {
-            return CommandStepResult::failed(self.update_to_stop(ctx));
+            return CommandStepResult::failed(None);
         }
 
         let position = pushed_target
@@ -13354,7 +13596,13 @@ impl ExitState {
     }
 
     fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> ObjectUpdate {
-        self.update_to_stop(ctx).unwrap_or_default()
+        if ctx.object.action_procedure != ActionProcedure::Build {
+            return ObjectUpdate::new();
+        }
+        let mut update = self.update_to_stop(ctx).unwrap_or_default();
+        let action_update = ActionUpdate::default().with_name("Idle").with_force(true);
+        update = update.with_action_update(action_update);
+        update
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -13364,16 +13612,14 @@ impl ExitState {
 
         let mut update = self.prepare_update(ctx);
 
-        if ctx.object.action_procedure == ActionProcedure::Build {
-            let action_update = ActionUpdate::default().with_name("Idle").with_force(true);
-            update = update.with_action_update(action_update);
-        }
-
         let container_snapshot = match ctx.resolve(container_id) {
             // C4Command::Exit only needs the live Contained pointer;
             // structures are nonliving but valid containers.
             Some(snapshot) if snapshot.is_status_active() => snapshot,
             _ => {
+                if ctx.object.command_direction != CommandDirection::Stop {
+                    update.command_direction = Some(CommandDirection::Stop);
+                }
                 update.container = Some(None);
                 update.position = Some(ctx.position);
                 update.velocity = Some(Vector2::ZERO);
@@ -13397,9 +13643,13 @@ impl ExitState {
                     command: CommandId::Exit,
                 }),
             };
-            return CommandStepResult::running(Some(update)).with_events(vec![event]);
+            let update = (!update.is_empty()).then_some(update);
+            return CommandStepResult::running(update).with_events(vec![event]);
         }
 
+        if ctx.object.command_direction != CommandDirection::Stop {
+            update.command_direction = Some(CommandDirection::Stop);
+        }
         update.velocity = Some(Vector2::ZERO);
 
         if let Some(parent_id) = container_snapshot.container {
@@ -13467,14 +13717,8 @@ impl BuildState {
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         let builder = ctx.object;
         let Some(target_snapshot) = ctx.resolve(self.target) else {
-            let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
-            return CommandStepResult::failed(Some(update));
+            return CommandStepResult::failed(None);
         };
-
-        if !target_snapshot.is_status_active() {
-            let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
-            return CommandStepResult::failed(Some(update));
-        }
 
         if target_snapshot.construction >= FULL_CON {
             let mut operations = Vec::new();
@@ -13511,8 +13755,7 @@ impl BuildState {
         let target_position = match self.target_position(ctx) {
             Some(position) => position,
             None => {
-                let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
-                return CommandStepResult::failed(Some(update));
+                return CommandStepResult::failed(None);
             }
         };
 
@@ -13544,8 +13787,10 @@ impl BuildState {
 
         let is_structure = (builder.category & (CATEGORY_STRUCTURE | CATEGORY_STATIC_BACK)) != 0;
         if is_structure && !close_enough {
-            let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
-            return CommandStepResult::failed(Some(update));
+            let update = (builder.action_procedure == ActionProcedure::Dig
+                && builder.command_direction != CommandDirection::Stop)
+                .then(|| ObjectUpdate::new().with_command_direction(CommandDirection::Stop));
+            return CommandStepResult::failed(update);
         }
 
         let mut operations = Vec::new();
@@ -13689,34 +13934,34 @@ impl ConstructState {
             ]);
         };
 
-        let update_to_stop = self.update_to_stop(ctx);
-
         if self.target.is_some() {
-            return CommandStepResult::failed(update_to_stop);
+            return CommandStepResult::failed(None);
         }
 
         let owner = ctx.object.owner;
         if owner == OWNER_NONE {
-            return CommandStepResult::failed(update_to_stop);
+            return CommandStepResult::failed(None);
         }
 
         let definition = match ctx.definition(&definition_id) {
             Some(definition) => definition,
-            None => return CommandStepResult::failed(update_to_stop),
+            None => return CommandStepResult::failed(None),
         };
 
         if !definition.constructable {
-            return CommandStepResult::failed(update_to_stop);
+            return CommandStepResult::failed(None);
         }
 
         let player = match ctx.player(owner) {
             Some(player) if player.is_active() => player,
-            _ => return CommandStepResult::failed(update_to_stop),
+            _ => return CommandStepResult::failed(None),
         };
 
         if !player.knows(&definition_id) {
-            return CommandStepResult::failed(update_to_stop);
+            return CommandStepResult::failed(None);
         }
+
+        let update_to_stop = self.update_to_stop(ctx);
 
         if ctx.object.container.is_some() {
             if !self.exit_requested {
@@ -13748,7 +13993,7 @@ impl ConstructState {
 
         let site = match self.site {
             Some(site) => site,
-            None => return CommandStepResult::failed(update_to_stop),
+            None => return CommandStepResult::failed(None),
         };
 
         if matches!(
@@ -13776,7 +14021,7 @@ impl ConstructState {
                             self.acquire_requested = true;
                             return result;
                         }
-                        return CommandStepResult::failed(update_to_stop);
+                        return CommandStepResult::failed(None);
                     }
                     return CommandStepResult::running(update_to_stop);
                 }
@@ -14006,13 +14251,13 @@ impl TransferState {
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         let Some(target_snapshot) = ctx.resolve(self.target) else {
-            return CommandStepResult::failed(self.update_to_stop(ctx));
+            return CommandStepResult::failed(None);
         };
         if !target_snapshot.is_active() {
-            return CommandStepResult::failed(self.update_to_stop(ctx));
+            return CommandStepResult::failed(None);
         }
         let Some(zone) = ctx.transfer_zone(self.target) else {
-            return CommandStepResult::failed(self.update_to_stop(ctx));
+            return CommandStepResult::failed(None);
         };
 
         let update = self.update_to_stop(ctx);
@@ -14020,7 +14265,7 @@ impl TransferState {
         if !self.within_zone(ctx, zone) {
             if self.should_issue_move(ctx.frame) {
                 let Some(entry) = self.entry_point(ctx, zone, ctx.position) else {
-                    return CommandStepResult::failed(update);
+                    return CommandStepResult::failed(None);
                 };
                 let request = CommandRequest::new(CommandId::MoveTo)
                     .with_tx(Some(entry.x))
@@ -14084,19 +14329,19 @@ impl ChopState {
         match ctx.definition(&ctx.object.definition_id) {
             Some(definition) if definition.can_chop => {}
             _ => {
-                return CommandStepResult::failed(self.update_to_stop(ctx));
+                return CommandStepResult::failed(None);
             }
         }
 
         let target_snapshot = match ctx.resolve(self.target) {
             Some(snapshot) => snapshot,
             None => {
-                return CommandStepResult::failed(self.update_to_stop(ctx));
+                return CommandStepResult::failed(None);
             }
         };
 
         if !target_snapshot.is_status_active() {
-            return CommandStepResult::failed(self.update_to_stop(ctx));
+            return CommandStepResult::failed(None);
         }
 
         if target_snapshot.ocf & ocf::CHOP == 0 {
@@ -14499,23 +14744,17 @@ impl ActivateState {
     }
 
     fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
-        let mut update = None;
-        if ctx.object.command_direction != CommandDirection::Stop {
-            let mut object_update = ObjectUpdate::new();
-            object_update.command_direction = Some(CommandDirection::Stop);
-            update = Some(object_update);
+        if ctx.object.action_procedure != ActionProcedure::Dig {
+            return None;
         }
-        if ctx.object.action_procedure == ActionProcedure::Dig {
-            let mut object_update = update.unwrap_or_else(ObjectUpdate::new);
-            let action_update = ActionUpdate::default()
-                .with_name("Idle")
-                .with_force(true)
-                .with_phase(0)
-                .with_ticks(0);
-            object_update = object_update.with_action_update(action_update);
-            update = Some(object_update);
-        }
-        update
+        let mut update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
+        let action_update = ActionUpdate::default()
+            .with_name("Idle")
+            .with_force(true)
+            .with_phase(0)
+            .with_ticks(0);
+        update = update.with_action_update(action_update);
+        Some(update)
     }
 
     fn resolve_container(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
@@ -14610,21 +14849,21 @@ impl ActivateState {
             ]);
         }
 
-        let update = self.prepare_update(ctx);
-
         if let Some(target_id) = self.target {
             match ctx.resolve(target_id) {
                 Some(snapshot) if snapshot.container.is_none() => {
-                    return CommandStepResult::completed(update);
+                    return CommandStepResult::completed(None);
                 }
                 Some(_) => {}
-                None => return CommandStepResult::failed(update),
+                None => return CommandStepResult::failed(None),
             }
         }
 
         let Some(container_id) = self.resolve_container(ctx) else {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         };
+
+        let update = self.prepare_update(ctx);
 
         if ctx.object.container.is_none() {
             self.exit_requested = false;
@@ -14640,7 +14879,7 @@ impl ActivateState {
                 return CommandStepResult::failed(update);
             };
             let Some(container_snapshot) = ctx.resolve(container_id) else {
-                return CommandStepResult::failed(update);
+                return CommandStepResult::failed(None);
             };
             let mut candidate = None;
             for object_id in &container_snapshot.contents {
@@ -14727,43 +14966,39 @@ impl PushToState {
     }
 
     fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
-        let mut update = None;
-        if ctx.object.command_direction != CommandDirection::Stop {
-            update = Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop));
-        }
-
-        if matches!(
+        if !matches!(
             ctx.object.action_procedure,
             ActionProcedure::Build | ActionProcedure::Chop | ActionProcedure::Dig
         ) {
-            let mut object_update = update.unwrap_or_else(ObjectUpdate::new);
-            let idle_action = ActionUpdate::default()
-                .with_name("Idle")
-                .with_force(true)
-                .with_phase(0)
-                .with_ticks(0);
-            object_update = object_update.with_action_update(idle_action);
-            update = Some(object_update);
+            return None;
         }
-
-        update
+        let idle_action = ActionUpdate::default()
+            .with_name("Idle")
+            .with_force(true)
+            .with_phase(0)
+            .with_ticks(0);
+        Some(
+            ObjectUpdate::new()
+                .with_command_direction(CommandDirection::Stop)
+                .with_action_update(idle_action),
+        )
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let update = self.prepare_update(ctx);
-
         let target_snapshot = match ctx.resolve(self.target) {
             Some(snapshot) => snapshot,
-            None => return CommandStepResult::failed(update),
+            None => return CommandStepResult::failed(None),
         };
 
         if !target_snapshot.is_active() {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         }
 
         if self.container == Some(self.target) {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         }
+
+        let update = self.prepare_update(ctx);
 
         if let Some(destination) = self.container {
             if target_snapshot.container == Some(destination) {
@@ -14773,7 +15008,9 @@ impl PushToState {
             let dx = target_snapshot.position.x - tx;
             let dy = target_snapshot.position.y - ty;
             if dx.abs() <= PUSH_TO_RANGE && dy.abs() <= PUSH_TO_RANGE {
-                let mut result = CommandStepResult::completed(update.clone());
+                let mut completion_update = update.clone().unwrap_or_default();
+                completion_update.command_direction = Some(CommandDirection::Stop);
+                let mut result = CommandStepResult::completed(Some(completion_update));
                 let mut operations = Vec::new();
                 let ungrab_request = CommandRequest::new(CommandId::UnGrab)
                     .with_update_interval(50)
@@ -15065,7 +15302,7 @@ impl PutState {
 
         let container_snapshot = match ctx.resolve(self.container) {
             Some(snapshot) if snapshot.is_status_active() => snapshot,
-            _ => return CommandStepResult::failed(update),
+            _ => return CommandStepResult::failed(None),
         };
 
         let (item_id, item_snapshot) = match self.resolve_item(ctx) {
@@ -15083,7 +15320,7 @@ impl PutState {
         }
 
         if item_snapshot.destroyed {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         }
 
         if item_snapshot.container != Some(ctx.object.id) {
@@ -15408,18 +15645,17 @@ impl GetState {
     }
 
     fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
-        let mut update = self.ensure_stop(ctx, None);
-        if ctx.object.action_procedure == ActionProcedure::Dig {
-            let mut object_update = update.unwrap_or_default();
-            let action_update = ActionUpdate::default()
-                .with_name("Idle")
-                .with_force(true)
-                .with_phase(0)
-                .with_ticks(0);
-            object_update = object_update.with_action_update(action_update);
-            update = Some(object_update);
+        if ctx.object.action_procedure != ActionProcedure::Dig {
+            return None;
         }
-        update
+        let mut update = self.ensure_stop(ctx, None).unwrap_or_default();
+        let action_update = ActionUpdate::default()
+            .with_name("Idle")
+            .with_force(true)
+            .with_phase(0)
+            .with_ticks(0);
+        update = update.with_action_update(action_update);
+        Some(update)
     }
 
     fn resolve_target(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
@@ -15458,8 +15694,13 @@ impl GetState {
         ctx: &CommandRuntimeContext<'_>,
         target_id: ObjectId,
         update: Option<ObjectUpdate>,
+        stop_here: bool,
     ) -> CommandStepResult {
-        let update = self.ensure_stop(ctx, update);
+        let update = if stop_here {
+            self.ensure_stop(ctx, update)
+        } else {
+            update
+        };
         self.enter_pending = true;
         // Do not decrement `remaining` here. C++ only observes a successful
         // collection on the NEXT Get evaluation (Target->Contained == cObj,
@@ -15479,17 +15720,16 @@ impl GetState {
         update: Option<ObjectUpdate>,
     ) -> CommandStepResult {
         let Some(container_id) = target_snapshot.container else {
-            return CommandStepResult::failed(self.ensure_stop(ctx, update));
+            return CommandStepResult::failed(update);
         };
 
         if ctx.object.container == Some(container_id) {
-            return self.transfer_to_actor(ctx, target_id, update);
+            return self.transfer_to_actor(ctx, target_id, update, false);
         }
 
         if let Some(current_container) = ctx.object.container {
             if current_container != container_id {
-                let mut result =
-                    CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
+                let mut result = CommandStepResult::running(update.clone());
                 let request = CommandRequest::new(CommandId::Exit)
                     .with_update_interval(50)
                     .with_mode(CommandMode::SilentSub);
@@ -15499,20 +15739,20 @@ impl GetState {
         }
 
         let Some(container_snapshot) = ctx.resolve(container_id) else {
-            return CommandStepResult::failed(self.ensure_stop(ctx, update));
+            return CommandStepResult::failed(update);
         };
         if !container_snapshot.is_status_active() {
-            return CommandStepResult::failed(self.ensure_stop(ctx, update));
+            return CommandStepResult::failed(update);
         }
 
         if ctx.object.action_procedure == ActionProcedure::Push
             && ctx.object.action_target == Some(container_id)
         {
-            return self.transfer_to_actor(ctx, target_id, update);
+            return self.transfer_to_actor(ctx, target_id, update, false);
         }
 
         if container_snapshot.ocf & ocf::GRAB != 0 {
-            let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
+            let mut result = CommandStepResult::running(update.clone());
             let request = CommandRequest::new(CommandId::Grab)
                 .with_target(Some(container_id))
                 .with_update_interval(50)
@@ -15522,7 +15762,7 @@ impl GetState {
         }
 
         if container_snapshot.ocf & ocf::ENTRANCE != 0 {
-            let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
+            let mut result = CommandStepResult::running(update.clone());
             let request = CommandRequest::new(CommandId::Enter)
                 .with_target(Some(container_id))
                 .with_update_interval(50)
@@ -15531,7 +15771,7 @@ impl GetState {
             return result;
         }
 
-        CommandStepResult::failed(self.ensure_stop(ctx, update))
+        CommandStepResult::failed(update)
     }
 
     fn dig_out_position(
@@ -15566,10 +15806,9 @@ impl GetState {
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
         target_snapshot: &CommandObjectSnapshot,
-        update: Option<ObjectUpdate>,
     ) -> CommandStepResult {
         if ctx.object.container.is_some() {
-            let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
+            let mut result = CommandStepResult::running(None);
             let request = CommandRequest::new(CommandId::Exit)
                 .with_update_interval(50)
                 .with_mode(CommandMode::SilentSub);
@@ -15578,17 +15817,17 @@ impl GetState {
         }
 
         let Some(landscape) = ctx.landscape else {
-            return CommandStepResult::failed(self.ensure_stop(ctx, update));
+            return CommandStepResult::failed(None);
         };
         let target_position = target_snapshot.position;
         let Some(staging_position) = Self::dig_out_position(landscape, target_position) else {
-            return CommandStepResult::failed(self.ensure_stop(ctx, update));
+            return CommandStepResult::failed(None);
         };
 
         let dx = staging_position.x - ctx.position.x;
         let dy = staging_position.y - ctx.position.y;
         if dx.abs() > DIG_OUT_POSITION_RANGE || dy.abs() > DIG_OUT_POSITION_RANGE {
-            let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
+            let mut result = CommandStepResult::running(None);
             let request = CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(staging_position.x))
                 .with_ty(Some(staging_position.y))
@@ -15597,7 +15836,7 @@ impl GetState {
             return result;
         }
 
-        let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
+        let mut result = CommandStepResult::running(None);
         let request = CommandRequest::new(CommandId::Dig)
             .with_tx(Some(target_position.x))
             .with_ty(Some(target_position.y + 4))
@@ -15616,7 +15855,7 @@ impl GetState {
             } else {
                 MenuRequestKind::Get { container }
             };
-            return CommandStepResult::completed(self.prepare_update(ctx)).with_events(vec![
+            return CommandStepResult::completed(None).with_events(vec![
                 CommandEvent::OpenMenu(MenuRequest {
                     crew_id: ctx.object.id,
                     owner: ctx.object.owner,
@@ -15629,12 +15868,12 @@ impl GetState {
 
         let target_id = match self.resolve_target(ctx) {
             Some(id) => id,
-            None => return CommandStepResult::failed(update),
+            None => return CommandStepResult::failed(None),
         };
 
         let target_snapshot = match ctx.resolve(target_id) {
             Some(snapshot) if snapshot.is_status_active() => snapshot,
-            _ => return CommandStepResult::failed(update),
+            _ => return CommandStepResult::failed(None),
         };
 
         let reaches_get_try_enter_minimum_con_gate = target_snapshot.container.is_some()
@@ -15646,20 +15885,20 @@ impl GetState {
             || (target_snapshot.construction < FULL_CON
                 && !reaches_get_try_enter_minimum_con_gate)
         {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         }
 
         if target_snapshot.id == ctx.object.id {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         }
 
         if target_snapshot.container == Some(ctx.object.id) {
             if self.remaining > 1 {
                 self.remaining -= 1;
                 self.target = None;
-                return CommandStepResult::running(update);
+                return CommandStepResult::running(None);
             }
-            return CommandStepResult::completed(update);
+            return CommandStepResult::completed(self.ensure_stop(ctx, None));
         }
 
         if ctx.object.action_procedure == ActionProcedure::Push {
@@ -15687,7 +15926,7 @@ impl GetState {
         }
 
         if target_snapshot.ocf & ocf::IN_SOLID != 0 {
-            return self.handle_in_solid_target(ctx, target_snapshot, update);
+            return self.handle_in_solid_target(ctx, target_snapshot);
         }
 
         if ctx.object.container.is_some() {
@@ -15703,7 +15942,7 @@ impl GetState {
         let dy = target_snapshot.position.y - ctx.position.y;
         const PICKUP_RANGE: i32 = 12;
         if dx.abs() <= PICKUP_RANGE && dy.abs() <= PICKUP_RANGE {
-            return self.transfer_to_actor(ctx, target_id, update);
+            return self.transfer_to_actor(ctx, target_id, update, true);
         }
 
         // C4Command::Get outside pursuit (C4Command.cpp:1267-1290).
@@ -16117,10 +16356,7 @@ impl AttackState {
         let attacker = ctx.object;
         let target = match ctx.resolve(self.target) {
             Some(snapshot) => snapshot,
-            None => {
-                let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
-                return CommandStepResult::failed(Some(update));
-            }
+            None => return CommandStepResult::failed(None),
         };
 
         if !target.is_active() {
@@ -16343,16 +16579,17 @@ impl Take2State {
         }
         self.executed = true;
 
-        let update = Self::update_to_stop(ctx);
         let Some(container_id) = ctx.object.container else {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         };
         let Some(container) = ctx.resolve(container_id) else {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         };
         if !container.is_active() {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         }
+
+        let update = Self::update_to_stop(ctx);
 
         if ctx.object.owner == OWNER_NONE {
             return CommandStepResult::completed(update);
@@ -16565,7 +16802,7 @@ impl AcquireState {
                     }
                     AcquireScriptResult::Failed => {
                         self.script_invoked = false;
-                        return CommandStepResult::failed(self.update_to_stop(ctx));
+                        return CommandStepResult::failed(None);
                     }
                     AcquireScriptResult::Continue => {
                         // proceed with default logic below
@@ -16735,10 +16972,10 @@ impl SellState {
         if self.definition_id.is_empty() {
             let update = self.update_to_stop(ctx);
             if !ctx.base_sell_enabled {
-                return CommandStepResult::failed(update);
+                return CommandStepResult::failed(None);
             }
             let Some(base) = self.resolve_base(ctx) else {
-                return CommandStepResult::failed(update);
+                return CommandStepResult::failed(None);
             };
             return CommandStepResult::completed(update).with_events(vec![
                 CommandEvent::OpenMenu(MenuRequest {
@@ -16756,22 +16993,22 @@ impl SellState {
         let update_to_stop = self.update_to_stop(ctx);
 
         if !ctx.base_sell_enabled {
-            return CommandStepResult::failed(update_to_stop);
+            return CommandStepResult::failed(None);
         }
 
         let base_id = match self.resolve_base(ctx) {
             Some(id) => id,
-            None => return CommandStepResult::failed(update_to_stop),
+            None => return CommandStepResult::failed(None),
         };
 
         let base_snapshot = match ctx.resolve(base_id) {
             Some(snapshot) => snapshot,
-            None => return CommandStepResult::failed(update_to_stop),
+            None => return CommandStepResult::failed(None),
         };
 
         let base_owner = base_snapshot.base;
         if base_owner == OWNER_NONE {
-            return CommandStepResult::failed(update_to_stop);
+            return CommandStepResult::failed(None);
         }
 
         if ctx.object.container != Some(base_id) {
@@ -16790,23 +17027,23 @@ impl SellState {
 
         let candidate_id = match self.resolve_candidate(ctx, base_snapshot) {
             Some(id) => id,
-            None => return CommandStepResult::failed(update_to_stop),
+            None => return CommandStepResult::failed(None),
         };
 
         let candidate_snapshot = match ctx.resolve(candidate_id) {
             Some(snapshot) => snapshot,
-            None => return CommandStepResult::failed(update_to_stop),
+            None => return CommandStepResult::failed(None),
         };
 
         if candidate_snapshot.definition_id != self.definition_id
             || candidate_snapshot.container != Some(base_id)
         {
             self.preferred = None;
-            return CommandStepResult::failed(update_to_stop);
+            return CommandStepResult::failed(None);
         }
 
         if !candidate_snapshot.contents.is_empty() {
-            return CommandStepResult::failed(update_to_stop);
+            return CommandStepResult::failed(None);
         }
 
         let value = ctx
@@ -16965,7 +17202,7 @@ impl BuyState {
         let player = match ctx.player(base_owner) {
             Some(player) if player.is_active() => player,
             _ => {
-                return Some(CommandStepResult::failed(update_to_stop));
+                return Some(CommandStepResult::failed(None));
             }
         };
 
@@ -16975,7 +17212,7 @@ impl BuyState {
             .unwrap_or(0);
 
         if price > player.wealth {
-            return Some(CommandStepResult::failed(update_to_stop));
+            return Some(CommandStepResult::failed(None));
         }
 
         let mut events = Vec::new();
@@ -17036,10 +17273,10 @@ impl BuyState {
         if self.definition_id.is_empty() {
             let update = self.update_to_stop(ctx);
             if !ctx.base_buy_enabled {
-                return CommandStepResult::failed(update);
+                return CommandStepResult::failed(None);
             }
             let Some(base) = self.resolve_base(ctx) else {
-                return CommandStepResult::failed(update);
+                return CommandStepResult::failed(None);
             };
             return CommandStepResult::completed(update).with_events(vec![
                 CommandEvent::OpenMenu(MenuRequest {
@@ -17062,37 +17299,37 @@ impl BuyState {
         let update = self.update_to_stop(ctx);
 
         if !ctx.base_buy_enabled {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         }
 
         let buyer_owner = ctx.object.owner;
         if buyer_owner == OWNER_NONE {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         }
 
         let base_id = match self.resolve_base(ctx) {
             Some(id) => id,
-            None => return CommandStepResult::failed(update),
+            None => return CommandStepResult::failed(None),
         };
 
         let base_snapshot = match ctx.resolve(base_id) {
             Some(snapshot) => snapshot,
-            None => return CommandStepResult::failed(update),
+            None => return CommandStepResult::failed(None),
         };
 
         let base_owner = base_snapshot.base;
         if base_owner == OWNER_NONE {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         }
 
         let base_player = match ctx.player(base_owner) {
             Some(player) if player.is_active() => player,
-            _ => return CommandStepResult::failed(update),
+            _ => return CommandStepResult::failed(None),
         };
 
         let available = base_player.material_count(&self.definition_id);
         if available <= 0 {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         }
 
         let price = ctx
@@ -17101,7 +17338,7 @@ impl BuyState {
             .unwrap_or(0);
 
         if price > base_player.wealth {
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         }
 
         let mut events = Vec::new();
@@ -17216,7 +17453,7 @@ impl HomeState {
                 self.target = Some(id);
                 id
             }
-            None => return CommandStepResult::failed(self.update_to_stop(ctx)),
+            None => return CommandStepResult::failed(None),
         };
 
         let update = self.update_to_stop(ctx);
@@ -17336,30 +17573,30 @@ impl EnergyState {
         };
 
         let Some(target_snapshot) = ctx.resolve(self.target) else {
-            return CommandStepResult::failed(update_to_stop());
+            return CommandStepResult::failed(None);
         };
 
         if !target_snapshot.is_status_active() {
-            return CommandStepResult::failed(update_to_stop());
+            return CommandStepResult::failed(None);
         }
 
         if !ctx.structures_need_energy {
             return CommandStepResult::completed(None);
         }
         if (target_snapshot.line_connect & LINE_CONNECT_POWER_INPUT) == 0 {
-            return CommandStepResult::failed(update_to_stop());
+            return CommandStepResult::failed(None);
         }
 
         let Some(source_id) = self.resolve_source(ctx) else {
-            return CommandStepResult::failed(update_to_stop());
+            return CommandStepResult::failed(None);
         };
         let Some(source_snapshot) = ctx.resolve(source_id) else {
-            return CommandStepResult::failed(update_to_stop());
+            return CommandStepResult::failed(None);
         };
         let dx = i64::from(ctx.position.x - source_snapshot.position.x);
         let dy = i64::from(ctx.position.y - source_snapshot.position.y);
         if dx * dx + dy * dy > 650_i64.pow(2) {
-            return CommandStepResult::failed(update_to_stop());
+            return CommandStepResult::failed(None);
         }
 
         let linekit_id = self
@@ -17840,13 +18077,12 @@ impl ActiveCommand {
                 let request = CommandRequest::new(CommandId::Retry)
                     .with_update_interval(10)
                     .with_mode(CommandMode::SilentSub);
-                let mut result = CommandStepResult::running(stop_update(ctx));
+                let mut result = CommandStepResult::running(None);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
-            let update = stop_update(ctx);
             self.failures = 0;
-            return CommandStepResult::failed(update);
+            return CommandStepResult::failed(None);
         }
 
         // C4Command::Execute decrements this before InitEvaluation and the
@@ -17889,10 +18125,7 @@ impl ActiveCommand {
             CommandState::Acquire(state) => state.step(ctx),
             CommandState::Home(state) => state.step(ctx),
             CommandState::Energy(state) => state.step(ctx),
-            CommandState::Unsupported => {
-                let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
-                CommandStepResult::failed(Some(update))
-            }
+            CommandState::Unsupported => CommandStepResult::failed(None),
         }
     }
 }
