@@ -8013,6 +8013,10 @@ pub struct Definition {
     /// `Arc` to host functions so nested script calls (Find_Func, GameCall)
     /// can execute another definition's functions mid-VM-call.
     script: Arc<ScriptEngine>,
+    /// The preparsed, unlinked script owned by this definition. Relinking
+    /// rebuilds `script` from this pristine copy so include/append copies
+    /// and global-function links cannot accumulate.
+    base_script: lc_script::Script,
     /// The raw Script.c text — read-only presentation support and declaration
     /// ordering for C4ScriptHost `[..|Image=..]` descriptors
     /// (C4AulParse.cpp:301-380).
@@ -8037,6 +8041,9 @@ pub struct Definition {
     /// The def's ClonkNames list content (C4Def.cpp:645-652,
     /// C4CFN_ClonkNames): overrides Game.Names for new crew infos.
     clonk_names: Option<String>,
+    /// C4Def::fClonkNamesOwned: inherited include data must be cleared by
+    /// ResetIncludeDependencies while a definition's own list survives.
+    clonk_names_owned: bool,
     movement: MovementProfile,
     category: i32,
     /// DefCore `BlitMode`, copied into C4Object::BlitMode at Init/reset.
@@ -8271,7 +8278,7 @@ impl Definition {
         let appends = compiled_script.appends().to_vec();
 
         let mut script = ScriptEngine::new();
-        script.add_script(compiled_script);
+        script.add_script(compiled_script.clone());
         compat::register_host_functions(&mut script);
         let has_construction = script.has_function("Construction");
         let has_initialize = script.has_function("Initialize");
@@ -8287,6 +8294,7 @@ impl Definition {
             version: DEFAULT_DEFINITION_VERSION,
             description: None,
             script: Arc::new(script),
+            base_script: compiled_script,
             script_source: source.to_string(),
             includes,
             includes_resolved: false,
@@ -8299,6 +8307,7 @@ impl Definition {
             crew_member: false,
             can_be_base: false,
             clonk_names: None,
+            clonk_names_owned: false,
             movement: MovementProfile::default(),
             category: DEFAULT_CATEGORY,
             blit_mode: 0,
@@ -8499,8 +8508,37 @@ impl Definition {
         self.has_step = self.script.has_function("Step");
     }
 
-    pub fn merge_from(&mut self, parent: &Definition) {
-        Arc::make_mut(&mut self.script).merge_from(&parent.script);
+    /// Restores the host to its own preparsed functions. C++ UnLink deletes
+    /// linked include/append copies but retains original script functions and
+    /// the engine-owned global value cells.
+    fn reset_script_links(&mut self) {
+        Arc::make_mut(&mut self.script).replace_script(self.base_script.clone(), false);
+        self.includes_resolved = false;
+        if !self.rank_names_owned {
+            self.rank_names = None;
+        }
+        if !self.clonk_names_owned {
+            self.clonk_names = None;
+        }
+        if !self.rank_symbols_owned {
+            self.rank_symbols_image = None;
+            self.rank_symbol_count = None;
+        }
+        self.refresh_script_flags();
+    }
+
+    fn replace_base_script(&mut self, source: &str, script: lc_script::Script) {
+        self.includes = script.includes().to_vec();
+        self.appends = script.appends().to_vec();
+        self.script_source = source.to_owned();
+        self.base_script = script;
+        self.includes_resolved = false;
+    }
+
+    fn include_definition_metadata(&mut self, parent: &Definition) {
+        if !self.clonk_names_owned {
+            self.clonk_names = parent.clonk_names.clone();
+        }
         if !self.rank_names_owned {
             self.rank_names = parent.rank_names.clone();
         }
@@ -8508,17 +8546,22 @@ impl Definition {
             self.rank_symbols_image = parent.rank_symbols_image.clone();
             self.rank_symbol_count = parent.rank_symbol_count;
         }
-        // Re-check function existence flags after merging parent functions
-        if !self.has_construction {
-            self.has_construction = self.script.has_function("Construction");
-        }
-        if !self.has_initialize {
-            self.has_initialize = self.script.has_function("Initialize");
-        }
+    }
+
+    pub fn merge_from(&mut self, parent: &Definition) {
+        Arc::make_mut(&mut self.script).merge_from(&parent.script);
+        self.include_definition_metadata(parent);
+        self.refresh_script_flags();
     }
 
     pub fn function_count(&self) -> usize {
         self.script.function_count()
+    }
+
+    /// Distinct function roots plus all inherited overload nodes. Unlike
+    /// [`Self::function_count`], this detects duplicate link copies.
+    pub fn linked_function_count(&self) -> usize {
+        self.script.linked_function_count()
     }
 
     pub fn from_resource(resource: &ResourceDefinitionData) -> Result<Self, EngineError> {
@@ -8836,6 +8879,7 @@ impl Definition {
     }
 
     pub fn set_clonk_names(&mut self, clonk_names: Option<String>) {
+        self.clonk_names_owned = clonk_names.is_some();
         self.clonk_names = clonk_names;
     }
 
@@ -11918,7 +11962,8 @@ struct ScenarioScript {
     /// clones to host functions so GameCall/GameCallEx can run scenario
     /// functions mid-VM-call.
     script: Arc<ScriptEngine>,
-    append_script: Option<lc_script::Script>,
+    /// Pristine scenario host used to discard linked copies during ReLink.
+    base_script: lc_script::Script,
     has_initialize: bool,
     has_step: bool,
 }
@@ -11941,9 +11986,7 @@ impl ScenarioScript {
                 "scenario script parse error quarantined; continuing like C++"
             );
         }
-        let append_script = (!compiled.appends().is_empty())
-            .then(|| compiled.clone().without_static_declarations());
-        script.add_script(compiled);
+        script.add_script(compiled.clone());
         compat::register_host_functions(&mut script);
         let has_initialize = script.has_function("Initialize");
         let has_step = script.has_function("Step");
@@ -11952,7 +11995,7 @@ impl ScenarioScript {
             name,
             c4_args: false,
             script: Arc::new(script),
-            append_script,
+            base_script: compiled,
             has_initialize,
             has_step,
         })
@@ -11969,6 +12012,12 @@ impl ScenarioScript {
         functions: Option<Arc<HashMap<String, lc_script::Function>>>,
     ) {
         Arc::make_mut(&mut self.script).set_global_functions(functions);
+    }
+
+    fn reset_script_links(&mut self) {
+        Arc::make_mut(&mut self.script).replace_script(self.base_script.clone(), false);
+        self.has_initialize = self.script.has_function("Initialize");
+        self.has_step = self.script.has_function("Step");
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -12506,10 +12555,13 @@ struct RuntimeScenarioSection {
     environment: EnvironmentSettings,
 }
 
+/// Persistent script hosts in C4AulScriptEngine child order. ReLink replays
+/// this complete ledger to reconstruct global functions and append copies.
 #[derive(Clone)]
-enum AppendScriptSource {
+enum ScriptLinkSource {
     Script(lc_script::Script),
     Definition(DefinitionId),
+    Scenario,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12584,10 +12636,14 @@ pub struct Engine {
     /// resolve constants declared by OTHER scripts (MagiClonk's
     /// `MCLK_ComboExtraDataName()` running in the MAGE host).
     pub(crate) script_global_consts: lc_script::GlobalVariables,
-    /// Every live script host carrying `#appendto`, in C4AulScriptEngine child
-    /// order. Definition-pack System hosts are interleaved with definitions;
-    /// scenario Script.c and its System.c4g hosts follow all definitions.
-    append_script_sources: Vec<AppendScriptSource>,
+    /// Every live script host in C4AulScriptEngine child order. Definition-pack
+    /// System hosts are interleaved with definitions; scenario Script.c and
+    /// its System.c4g hosts follow all definitions.
+    script_link_sources: Vec<ScriptLinkSource>,
+    /// Definition hosts whose source was reparsed at runtime, in reparse
+    /// order. C4Aul recreates their engine-owned global functions at FuncL's
+    /// tail, while their append position remains the original child order.
+    reloaded_global_definitions: Vec<DefinitionId>,
     /// Bumped whenever `objects` changes SHAPE (push/retain/clear) so the
     /// id->index cache below can trust its entries; indices are stable
     /// between bumps (destruction only flags, removal happens in the
@@ -14466,7 +14522,8 @@ impl Engine {
             script_globals: lc_script::new_global_variables(),
             script_global_slots: lc_script::new_global_slots(),
             script_global_consts: lc_script::new_global_variables(),
-            append_script_sources: Vec::new(),
+            script_link_sources: Vec::new(),
+            reloaded_global_definitions: Vec::new(),
             objects_generation: std::cell::Cell::new(1),
             object_index_cache: std::cell::RefCell::new((0, HashMap::new())),
             definition_metadata_cache: std::cell::RefCell::new(None),
@@ -17779,6 +17836,8 @@ impl Engine {
 
     pub fn clear_scenario_script(&mut self) {
         self.scenario_script = None;
+        self.script_link_sources
+            .retain(|source| !matches!(source, ScriptLinkSource::Scenario));
     }
 
     /// Enters C4GUI's shared in-game phase for scoreboard presentation.
@@ -17848,10 +17907,12 @@ impl Engine {
             .global_access_functions()
             .map(|(name, function)| (name.clone(), function.clone()))
             .collect();
-        let append_script = script.append_script.clone();
-        if let Some(append_script) = append_script {
-            self.append_script_sources
-                .push(AppendScriptSource::Script(append_script));
+        if !self
+            .script_link_sources
+            .iter()
+            .any(|source| matches!(source, ScriptLinkSource::Scenario))
+        {
+            self.script_link_sources.push(ScriptLinkSource::Scenario);
         }
         // The scenario script's `global func`s are engine-global like any
         // other script's (C4AulScriptEngine owns AA_GLOBAL functions from
@@ -19741,10 +19802,8 @@ impl Engine {
         }
         definition.set_global_functions(self.global_script_functions.clone());
         let definition_id = DefinitionId::from(id.as_str());
-        if !definition.appends.is_empty() {
-            self.append_script_sources
-                .push(AppendScriptSource::Definition(definition_id.clone()));
-        }
+        self.script_link_sources
+            .push(ScriptLinkSource::Definition(definition_id.clone()));
         self.definition_load_order.push(definition_id.clone());
         let runtime_order = Rc::make_mut(&mut self.runtime_definition_order);
         runtime_order.push(definition_id);
@@ -19767,7 +19826,8 @@ impl Engine {
     /// (and future) script host.
     pub fn install_global_scripts(&mut self, sources: &[(String, String)]) -> usize {
         self.global_script_functions = None;
-        self.append_script_sources.clear();
+        self.script_link_sources
+            .retain(|source| !matches!(source, ScriptLinkSource::Script(_)));
         self.install_additional_global_scripts(sources)
     }
 
@@ -19810,15 +19870,8 @@ impl Engine {
                         &self.script_globals,
                         Some(&self.script_global_consts),
                     );
-                    // Scripts with #appendto also append their functions to
-                    // the named definitions at link time (C4AulLink.cpp:
-                    // 29-64). Statics were registered above and AppendTo
-                    // copies LocalNamed only (:145-157).
-                    if !script.appends().is_empty() {
-                        let append_script = script.clone().without_static_declarations();
-                        self.append_script_sources
-                            .push(AppendScriptSource::Script(append_script));
-                    }
+                    self.script_link_sources
+                        .push(ScriptLinkSource::Script(script.clone()));
                     for (function_name, function) in script.global_access_functions() {
                         let mut function = function.clone();
                         if let Some(previous) = functions.remove(function_name) {
@@ -19860,32 +19913,61 @@ impl Engine {
     /// (:42-49); `#appendto *` reaches every definition except the source
     /// (:53-60).
     pub fn resolve_appends(&mut self) {
-        if self.append_script_sources.is_empty() {
+        if self.script_link_sources.is_empty() {
             return;
         }
 
         let ordered_ids = self.definition_load_order.clone();
-        for source in self.append_script_sources.clone() {
+        for source in self.script_link_sources.clone() {
             let (source_script, source_id, targets) = match source {
-                AppendScriptSource::Script(script) => {
+                ScriptLinkSource::Script(script) => {
+                    let targets = script.appends().to_vec();
+                    if targets.is_empty() {
+                        continue;
+                    }
                     let mut engine = ScriptEngine::new();
                     engine.set_global_variables(self.script_globals.clone());
                     engine.set_global_slots(self.script_global_slots.clone());
                     engine.set_global_constants(self.script_global_consts.clone());
-                    let targets = script.appends().to_vec();
-                    engine.add_script(script);
+                    engine.add_script(script.without_static_declarations());
                     #[allow(clippy::arc_with_non_send_sync)] // single-threaded sharing
                     (Arc::new(engine), None, targets)
                 }
-                AppendScriptSource::Definition(id) => match self.definitions.get(&id) {
-                    Some(definition) => (
-                        definition.script.clone(),
-                        Some(id),
-                        definition.appends.clone(),
-                    ),
+                ScriptLinkSource::Definition(id) => match self.definitions.get(&id) {
+                    Some(definition) => {
+                        let targets = definition.appends.clone();
+                        if targets.is_empty() {
+                            continue;
+                        }
+                        (definition.script.clone(), Some(id), targets)
+                    }
                     None => continue,
                 },
+                ScriptLinkSource::Scenario => {
+                    let Some(script) = self
+                        .scenario_script
+                        .as_ref()
+                        .map(|scenario| scenario.base_script.clone())
+                    else {
+                        continue;
+                    };
+                    let targets = script.appends().to_vec();
+                    if targets.is_empty() {
+                        continue;
+                    }
+                    let mut engine = ScriptEngine::new();
+                    engine.set_global_variables(self.script_globals.clone());
+                    engine.set_global_slots(self.script_global_slots.clone());
+                    engine.set_global_constants(self.script_global_consts.clone());
+                    engine.add_script(script.without_static_declarations());
+                    #[allow(clippy::arc_with_non_send_sync)] // single-threaded sharing
+                    (Arc::new(engine), None, targets)
+                }
             };
+            let source_definition = source_id
+                .as_ref()
+                .and_then(|id| self.definitions.get(id))
+                .cloned();
             for target in targets {
                 let resolved: Vec<DefinitionId> = match &target {
                     lc_script::AppendTo::Id(token) => {
@@ -19908,6 +19990,9 @@ impl Engine {
                 };
                 for target_id in resolved {
                     if let Some(definition) = self.definitions.get_mut(&target_id) {
+                        if let Some(source) = source_definition.as_ref() {
+                            definition.include_definition_metadata(source);
+                        }
                         Arc::make_mut(&mut definition.script).append_overrides_from(&source_script);
                         definition.refresh_script_flags();
                     }
@@ -19918,36 +20003,87 @@ impl Engine {
         self.solid_mask_metadata_cache.borrow_mut().take();
     }
 
-    /// Registers `global func` declarations from DEFINITION scripts into
-    /// the engine-global table (C4Aul AA_GLOBAL functions are owned by
-    /// Game.ScriptEngine — Time.c4d's IsNight, MainTipi's GetClan):
-    /// applied on top of the installed System.c4g table in definition
-    /// load order, later declarations overloading earlier ones, then
-    /// re-shared to every script host.
-    pub fn collect_definition_global_functions(&mut self) {
-        let mut functions: HashMap<String, lc_script::Function> = self
-            .global_script_functions
-            .as_deref()
+    fn rebuild_global_script_functions(&mut self) {
+        fn chain_function(
+            functions: &mut HashMap<String, lc_script::Function>,
+            name: String,
+            mut function: lc_script::Function,
+        ) -> lc_script::Function {
+            if let Some(previous) = functions.remove(&name) {
+                function.push_overload(previous);
+            }
+            functions.insert(name, function.clone());
+            function
+        }
+
+        let reloaded = self
+            .reloaded_global_definitions
+            .iter()
             .cloned()
-            .unwrap_or_default();
-        let mut changed = false;
-        for id in &self.definition_load_order {
-            let Some(definition) = self.definitions.get(id) else {
-                continue;
-            };
-            for (name, function) in definition.script.global_access_functions() {
-                let mut function = function.clone();
-                if let Some(previous) = functions.remove(name) {
-                    function.push_overload(previous);
+            .collect::<HashSet<_>>();
+        let mut sources = self.script_link_sources.clone();
+        sources.retain(|source| {
+            !matches!(source, ScriptLinkSource::Definition(id) if reloaded.contains(id))
+        });
+        sources.extend(
+            self.reloaded_global_definitions
+                .iter()
+                .cloned()
+                .map(ScriptLinkSource::Definition),
+        );
+
+        let mut functions = HashMap::new();
+        for source in sources {
+            match source {
+                ScriptLinkSource::Script(script) => {
+                    let declarations = script
+                        .global_access_functions()
+                        .map(|(name, function)| (name.clone(), function.clone()))
+                        .collect::<Vec<_>>();
+                    for (name, function) in declarations {
+                        chain_function(&mut functions, name, function);
+                    }
                 }
-                functions.insert(name.clone(), function);
-                changed = true;
+                ScriptLinkSource::Definition(id) => {
+                    let Some(declarations) = self.definitions.get(&id).map(|definition| {
+                        definition
+                            .base_script
+                            .global_access_functions()
+                            .map(|(name, function)| (name.clone(), function.clone()))
+                            .collect::<Vec<_>>()
+                    }) else {
+                        continue;
+                    };
+                    for (name, function) in declarations {
+                        let linked = chain_function(&mut functions, name.clone(), function);
+                        if let Some(definition) = self.definitions.get_mut(&id) {
+                            Arc::make_mut(&mut definition.script)
+                                .link_global_access_function(&name, linked);
+                        }
+                    }
+                }
+                ScriptLinkSource::Scenario => {
+                    let Some(declarations) = self.scenario_script.as_ref().map(|scenario| {
+                        scenario
+                            .base_script
+                            .global_access_functions()
+                            .map(|(name, function)| (name.clone(), function.clone()))
+                            .collect::<Vec<_>>()
+                    }) else {
+                        continue;
+                    };
+                    for (name, function) in declarations {
+                        let linked = chain_function(&mut functions, name.clone(), function);
+                        if let Some(scenario) = self.scenario_script.as_mut() {
+                            Arc::make_mut(&mut scenario.script)
+                                .link_global_access_function(&name, linked);
+                        }
+                    }
+                }
             }
         }
-        if !changed {
-            return;
-        }
-        let table = Some(Arc::new(functions));
+
+        let table = (!functions.is_empty()).then(|| Arc::new(functions));
         self.global_script_functions = table.clone();
         for definition in self.definitions.values_mut() {
             definition.set_global_functions(table.clone());
@@ -19957,6 +20093,80 @@ impl Engine {
         }
         self.definition_metadata_cache.borrow_mut().take();
         self.solid_mask_metadata_cache.borrow_mut().take();
+    }
+
+    /// Rebuilds the complete script tree from its preparsed hosts. Shared
+    /// engine-global static and constant cells deliberately remain intact;
+    /// only linked function copies and dependency state are discarded.
+    pub fn relink_scripts(&mut self) -> Result<(), EngineError> {
+        for definition in self.definitions.values_mut() {
+            definition.reset_script_links();
+        }
+        if let Some(scenario) = self.scenario_script.as_mut() {
+            scenario.reset_script_links();
+        }
+
+        self.rebuild_global_script_functions();
+        self.resolve_appends();
+        self.resolve_includes()?;
+        self.definition_metadata_cache.borrow_mut().take();
+        self.solid_mask_metadata_cache.borrow_mut().take();
+        Ok(())
+    }
+
+    /// Replaces one definition's Script.c preparsed body and performs a full
+    /// ReLink. This is the source-backed core used by future disk/file-watch
+    /// reload frontends; an unknown definition mirrors ReloadScript's false
+    /// result without mutating the engine.
+    pub fn reload_definition_script(
+        &mut self,
+        definition_id: &str,
+        source: &str,
+    ) -> Result<bool, EngineError> {
+        if !self.definitions.contains_key(definition_id) {
+            return Ok(false);
+        }
+        let script = lc_script::Script::compile(source).map_err(|parse_error| {
+            EngineError::Script {
+                definition: definition_id.to_owned(),
+                function: "reload".to_owned(),
+                source: parse_error.into(),
+                recovery: None,
+            }
+        })?;
+        for diagnostic in script.parse_diagnostics() {
+            tracing::warn!(
+                definition = %definition_id,
+                %diagnostic,
+                "definition script reload parse error quarantined; continuing like C++"
+            );
+        }
+
+        // A reloaded preparser registers only this host's declarations.
+        // Existing static cells keep their values; constants reuse and
+        // overwrite their cells. Pure ReLink below must not re-register the
+        // unchanged hosts.
+        lc_script::register_global_declarations(
+            script.var_decls(),
+            &self.script_globals,
+            Some(&self.script_global_consts),
+        );
+        self.definitions
+            .get_mut(definition_id)
+            .expect("definition existence checked")
+            .replace_base_script(source, script);
+        let definition_id = DefinitionId::from(definition_id);
+        self.reloaded_global_definitions
+            .retain(|candidate| candidate != &definition_id);
+        self.reloaded_global_definitions.push(definition_id);
+        self.relink_scripts()?;
+        Ok(true)
+    }
+
+    /// Recollects every persistent host's `global func` declarations in
+    /// script-tree order. Kept as the public linking seam used by loaders.
+    pub fn collect_definition_global_functions(&mut self) {
+        self.rebuild_global_script_functions();
     }
 
     pub fn resolve_includes(&mut self) -> Result<(), EngineError> {
@@ -33811,34 +34021,11 @@ impl Engine {
         state
     }
 
-    /// C4Def::IncludeDefinition (C4Def.cpp:1358-1361): a definition
-    /// without its own ClonkNames inherits the included definition's —
-    /// each include overwrites the un-owned slot, so the LAST include
-    /// wins (TRPR #include COWB gets the 13 cowboy names).
+    /// Compatibility seam for the scenario-load tail. ClonkNames now follow
+    /// C4Def::IncludeDefinition inside [`Self::resolve_includes`], alongside
+    /// rank metadata and in the same push-front include order.
     pub fn inherit_include_clonk_names(&mut self) {
-        let inherited: Vec<(DefinitionId, Option<String>)> = self
-            .definitions
-            .iter()
-            .filter(|(_, definition)| definition.clonk_names().is_none())
-            .filter_map(|(id, definition)| {
-                let mut names = None;
-                let mut found = false;
-                for include in definition.includes() {
-                    if let Some(source) =
-                        self.definitions.get(&DefinitionId::from(include.as_str()))
-                    {
-                        names = source.clonk_names().map(str::to_owned);
-                        found = true;
-                    }
-                }
-                found.then(|| (id.clone(), names))
-            })
-            .collect();
-        for (id, names) in inherited {
-            if let Some(definition) = self.definitions.get_mut(&id) {
-                definition.set_clonk_names(names);
-            }
-        }
+        // The work is complete once resolve_includes returns.
     }
 
     /// Debug helper: a definition's shape rect.
@@ -42475,6 +42662,317 @@ mod missing_include_regression {
                 .call_object_function(index, "ParentValue", Vec::new())
                 .expect("known include still merged"),
             Value::Int(7)
+        );
+    }
+}
+
+#[cfg(test)]
+mod script_relink_regression {
+    use super::*;
+
+    fn register(engine: &mut Engine, id: &str, source: &str) {
+        engine
+            .register_definition(
+                Definition::from_script(id, id, source).expect("fixture script compiles"),
+            )
+            .expect("fixture definition registers");
+    }
+
+    fn call(engine: &mut Engine, object: ObjectId, function: &str) -> Value {
+        let index = engine.find_object_index(object).expect("object exists");
+        engine
+            .call_object_function(index, function, Vec::new())
+            .expect("fixture function runs")
+    }
+
+    #[test]
+    fn reload_rebuilds_append_include_copies_once_and_keeps_globals() {
+        let mut engine = Engine::new();
+        register(&mut engine, "INCA", "func Layer() { return 1; }");
+        register(
+            &mut engine,
+            "INCB",
+            "func Layer() { return 10 + inherited(); }",
+        );
+        register(
+            &mut engine,
+            "BASE",
+            "#strict 2\n\
+             #include INCA\n\
+             #include INCB\n\
+             static Kept;\n\
+             static const ReloadConst = 7;\n\
+             func Seed() { Kept = 41; return Kept; }\n\
+             func Globals() { return [Kept, ReloadConst]; }\n\
+             func Layer() { return 100 + inherited(); }",
+        );
+        register(
+            &mut engine,
+            "APNX",
+            "#appendto BASE\nfunc Layer() { return 1000 + inherited(); }",
+        );
+        register(
+            &mut engine,
+            "APNY",
+            "#appendto BASE\nfunc Layer() { return 10000 + inherited(); }",
+        );
+        register(&mut engine, "CHLD", "#include BASE");
+
+        engine.relink_scripts().expect("initial scripts link");
+        let base = engine
+            .spawn_object(SpawnConfig::new("BASE"))
+            .expect("base object spawns");
+        let child = engine
+            .spawn_object(SpawnConfig::new("CHLD"))
+            .expect("child object spawns");
+        assert_eq!(call(&mut engine, base, "Layer"), Value::Int(11_111));
+        assert_eq!(call(&mut engine, child, "Layer"), Value::Int(11_111));
+        assert_eq!(call(&mut engine, base, "Seed"), Value::Int(41));
+
+        assert!(
+            engine
+                .reload_definition_script(
+                    "APNY",
+                    "#appendto BASE\nfunc Layer() { return 20000 + inherited(); }",
+                )
+                .expect("append source reloads")
+        );
+        assert_eq!(call(&mut engine, base, "Layer"), Value::Int(21_111));
+        assert_eq!(call(&mut engine, child, "Layer"), Value::Int(21_111));
+
+        assert!(
+            engine
+                .reload_definition_script(
+                    "BASE",
+                    "#strict 2\n\
+                     #include INCA\n\
+                     #include INCB\n\
+                     static Kept;\n\
+                     static const ReloadConst = 9;\n\
+                     func Seed() { Kept = 99; return Kept; }\n\
+                     func Globals() { return [Kept, ReloadConst]; }\n\
+                     func Layer() { return 200 + inherited(); }",
+                )
+                .expect("base source reloads")
+        );
+        assert_eq!(call(&mut engine, base, "Layer"), Value::Int(21_211));
+        assert_eq!(call(&mut engine, child, "Layer"), Value::Int(21_211));
+        assert_eq!(
+            call(&mut engine, base, "Globals"),
+            Value::Array(vec![Value::Int(41), Value::Int(9)])
+        );
+
+        let (function_count, linked_function_count) = {
+            let definition = engine.definitions.get("BASE").expect("base definition");
+            (definition.function_count(), definition.linked_function_count())
+        };
+        engine.relink_scripts().expect("second relink succeeds");
+        let definition = engine.definitions.get("BASE").expect("base definition");
+        assert_eq!(definition.function_count(), function_count);
+        assert_eq!(definition.linked_function_count(), linked_function_count);
+        assert_eq!(call(&mut engine, base, "Layer"), Value::Int(21_211));
+        assert_eq!(
+            call(&mut engine, base, "Globals"),
+            Value::Array(vec![Value::Int(41), Value::Int(9)])
+        );
+        assert!(
+            !engine
+                .reload_definition_script("MISS", "func Nope() {}")
+                .expect("unknown reload is a clean miss")
+        );
+    }
+
+    #[test]
+    fn relink_replays_interleaved_global_hosts_and_declaring_links() {
+        let mut engine = Engine::new();
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System/Base.c".into(),
+                "global func GlobalLayer() { return 1; }".into(),
+            )]),
+            1
+        );
+        register(
+            &mut engine,
+            "OWNR",
+            "global func GlobalLayer() { return inherited() * 10 + 2; }\n\
+             func Probe() { return GlobalLayer(); }",
+        );
+        register(
+            &mut engine,
+            "CALL",
+            "func Probe() { return GlobalLayer(); }",
+        );
+        engine
+            .load_scenario_script_with_convention(
+                "Scenario/Script.c",
+                "global func GlobalLayer() { return inherited() * 10 + 3; }\n\
+                 func Probe() { return GlobalLayer(); }",
+                true,
+            )
+            .expect("scenario script loads");
+        assert_eq!(
+            engine.install_scenario_global_scripts(&[(
+                "Scenario/System/Last.c".into(),
+                "global func GlobalLayer() { return inherited() * 10 + 4; }".into(),
+            )]),
+            1
+        );
+        engine.relink_scripts().expect("scripts relink");
+
+        let owner = engine
+            .spawn_object(SpawnConfig::new("OWNR"))
+            .expect("owner object spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller object spawns");
+        assert_eq!(call(&mut engine, owner, "Probe"), Value::Int(12));
+        assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(1_234));
+        assert_eq!(
+            engine
+                .scenario_script
+                .as_ref()
+                .expect("scenario remains installed")
+                .script
+                .call("Probe", &[])
+                .expect("scenario probe runs"),
+            Value::Int(123)
+        );
+
+        let counts = engine
+            .definitions
+            .iter()
+            .map(|(id, definition)| (id.clone(), definition.linked_function_count()))
+            .collect::<HashMap<_, _>>();
+        engine.relink_scripts().expect("repeat relink succeeds");
+        for (id, count) in counts {
+            assert_eq!(
+                engine
+                    .definitions
+                    .get(&id)
+                    .expect("definition remains")
+                    .linked_function_count(),
+                count
+            );
+        }
+        assert_eq!(call(&mut engine, owner, "Probe"), Value::Int(12));
+        assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(1_234));
+    }
+
+    #[test]
+    fn reloaded_definition_globals_move_to_the_engine_function_tail() {
+        let mut engine = Engine::new();
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System/Base.c".into(),
+                "global func Layer() { return 1; }".into(),
+            )]),
+            1
+        );
+        register(
+            &mut engine,
+            "EARL",
+            "global func Layer() { return inherited() * 10 + 2; }\n\
+             func Own() { return Layer(); }",
+        );
+        register(
+            &mut engine,
+            "LATE",
+            "global func Layer() { return inherited() * 10 + 3; }\n\
+             func Own() { return Layer(); }",
+        );
+        register(
+            &mut engine,
+            "CALL",
+            "func Probe() { return Layer(); }",
+        );
+        engine.relink_scripts().expect("initial globals link");
+        let early = engine
+            .spawn_object(SpawnConfig::new("EARL"))
+            .expect("early object spawns");
+        let late = engine
+            .spawn_object(SpawnConfig::new("LATE"))
+            .expect("late object spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller object spawns");
+        assert_eq!(call(&mut engine, early, "Own"), Value::Int(12));
+        assert_eq!(call(&mut engine, late, "Own"), Value::Int(123));
+        assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(123));
+
+        assert!(
+            engine
+                .reload_definition_script(
+                    "EARL",
+                    "global func Layer() { return inherited() * 10 + 4; }\n\
+                     func Own() { return Layer(); }",
+                )
+                .expect("early definition reloads")
+        );
+        assert_eq!(call(&mut engine, early, "Own"), Value::Int(134));
+        assert_eq!(call(&mut engine, late, "Own"), Value::Int(13));
+        assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(134));
+
+        engine.relink_scripts().expect("repeat relink succeeds");
+        assert_eq!(call(&mut engine, early, "Own"), Value::Int(134));
+        assert_eq!(call(&mut engine, late, "Own"), Value::Int(13));
+        assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(134));
+    }
+
+    #[test]
+    fn relink_resets_include_metadata_and_refreshes_step_flags() {
+        let mut engine = Engine::new();
+        register(&mut engine, "PRAA", "func Step() { return 1; }");
+        register(&mut engine, "PRBB", "");
+        register(&mut engine, "META", "#include PRAA\n#include PRBB");
+        register(&mut engine, "APNM", "#appendto META");
+        engine
+            .definitions
+            .get_mut("PRAA")
+            .expect("first parent")
+            .set_clonk_names(Some("Alpha".into()));
+        engine
+            .definitions
+            .get_mut("PRBB")
+            .expect("second parent")
+            .set_clonk_names(Some("Beta".into()));
+        engine
+            .definitions
+            .get_mut("APNM")
+            .expect("append source")
+            .set_clonk_names(Some("Append".into()));
+
+        engine.relink_scripts().expect("includes link");
+        let child = engine.definitions.get("META").expect("child definition");
+        assert_eq!(child.clonk_names(), Some("Alpha"));
+        assert!(child.has_step);
+
+        assert!(
+            engine
+                .reload_definition_script("META", "#include PRBB")
+                .expect("child source reloads")
+        );
+        let child = engine.definitions.get("META").expect("child definition");
+        assert_eq!(child.clonk_names(), Some("Beta"));
+        assert!(!child.has_step);
+
+        assert!(
+            engine
+                .reload_definition_script("META", "")
+                .expect("include removal reloads")
+        );
+        let child = engine.definitions.get("META").expect("child definition");
+        assert_eq!(child.clonk_names(), Some("Append"));
+        assert!(!child.has_step);
+
+        engine.relink_scripts().expect("repeat relink succeeds");
+        assert_eq!(
+            engine
+                .definitions
+                .get("META")
+                .expect("child definition")
+                .clonk_names(),
+            Some("Append")
         );
     }
 }

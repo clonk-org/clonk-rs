@@ -329,6 +329,46 @@ impl Engine {
         }
     }
 
+    /// Replaces this host's parsed script while retaining all host-side
+    /// configuration (native functions, debugger hooks, dispatch hooks, and
+    /// shared global tables). This is the unlink/reparse primitive used by a
+    /// higher-level relink pass: linked include/append overloads disappear
+    /// because only the pristine replacement script is installed.
+    ///
+    /// When `register_declarations` is true, `static` and `static const`
+    /// declarations are registered once in the attached engine-global
+    /// tables. With a global table attached they never become object-local
+    /// declarations, even when registration is skipped because a relink is
+    /// rebuilding an otherwise unchanged host.
+    pub fn replace_script(&mut self, script: Script, register_declarations: bool) {
+        self.functions.clear();
+        self.var_decls.clear();
+
+        if register_declarations {
+            if let Some(table) = &self.globals_named {
+                register_global_declarations(
+                    &script.var_decls,
+                    table,
+                    self.globals_consts.as_ref(),
+                );
+            }
+        }
+
+        self.functions.extend(script.functions);
+        if self.globals_named.is_some() {
+            self.var_decls.extend(
+                script
+                    .var_decls
+                    .into_iter()
+                    .filter(|declaration| declaration.kind == crate::ast::VarDeclKind::Local),
+            );
+        } else {
+            // Standalone ScriptEngine fixtures retain the historical
+            // per-host fallback when no GlobalNamed table is attached.
+            self.var_decls.extend(script.var_decls);
+        }
+    }
+
     /// `C4AulScript::AppendTo` with bHighPrio=true (C4AulLink.cpp:114-141,
     /// driven by ResolveAppends :29-64): COPIES `other`'s functions here so
     /// they OVERRIDE same-name functions — the appended function wins and
@@ -409,6 +449,23 @@ impl Engine {
 
     pub fn function_count(&self) -> usize {
         self.functions.len()
+    }
+
+    /// Number of installed function nodes, including every recursive
+    /// `inherited()` overload behind each root function.
+    pub fn linked_function_count(&self) -> usize {
+        self.functions
+            .values()
+            .map(|function| {
+                let mut count = 1usize;
+                let mut overloaded = function.overloaded.as_deref();
+                while let Some(function) = overloaded {
+                    count += 1;
+                    overloaded = function.overloaded.as_deref();
+                }
+                count
+            })
+            .sum()
     }
 
     /// Final per-object local declarations after includes/appends have been
@@ -899,5 +956,131 @@ impl Engine {
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use super::*;
+
+    fn compile(source: &str) -> Script {
+        Script::compile(source).expect("test script compiles")
+    }
+
+    #[test]
+    fn replace_script_removes_linked_overloads_and_preserves_host_functions() {
+        let mut engine = Engine::new();
+        engine
+            .load_script("func Probe() { return 1; }")
+            .expect("base script loads");
+        engine
+            .load_script("func Probe() { return inherited() + 1; }")
+            .expect("overload script loads");
+        engine.register_host_function("Native", |_| Ok(Value::Int(41)));
+
+        assert_eq!(engine.function_count(), 1);
+        assert_eq!(engine.linked_function_count(), 2);
+
+        engine.replace_script(
+            compile(
+                "func Probe() { return Native() + 1; }\n\
+                 func Other() { return 7; }",
+            ),
+            false,
+        );
+
+        assert_eq!(engine.function_count(), 2);
+        assert_eq!(engine.linked_function_count(), 2);
+        assert!(engine
+            .functions()
+            .get("Probe")
+            .is_some_and(|function| function.overloaded.is_none()));
+        assert!(engine.has_host_function("Native"));
+        assert_eq!(
+            engine.call("Probe", &[]).expect("replacement runs"),
+            Value::Int(42)
+        );
+    }
+
+    #[test]
+    fn replace_script_preserves_static_cells_and_controls_registration() {
+        let globals = new_global_variables();
+        let constants = new_global_variables();
+        let mut engine = Engine::new();
+        engine.set_global_variables(globals.clone());
+        engine.set_global_constants(constants.clone());
+
+        engine.replace_script(
+            compile(
+                "static counter;\n\
+                 static const LIMIT = 4;\n\
+                 local old_local;\n\
+                 func Probe() { return LIMIT; }",
+            ),
+            true,
+        );
+        let counter = globals
+            .borrow()
+            .get("counter")
+            .cloned()
+            .expect("static registered");
+        let limit = constants
+            .borrow()
+            .get("LIMIT")
+            .cloned()
+            .expect("constant registered");
+        *counter.borrow_mut() = Value::Int(23);
+        assert_eq!(*limit.borrow(), Value::Int(4));
+        assert_eq!(
+            engine.local_variable_names().collect::<Vec<_>>(),
+            ["old_local"]
+        );
+
+        engine.replace_script(
+            compile(
+                "static counter, added;\n\
+                 static const LIMIT = 8;\n\
+                 local fresh_local;\n\
+                 func Probe() { return LIMIT; }",
+            ),
+            true,
+        );
+        let replacement_counter = globals
+            .borrow()
+            .get("counter")
+            .cloned()
+            .expect("static remains registered");
+        let replacement_limit = constants
+            .borrow()
+            .get("LIMIT")
+            .cloned()
+            .expect("constant remains registered");
+        assert!(Rc::ptr_eq(&counter, &replacement_counter));
+        assert!(Rc::ptr_eq(&limit, &replacement_limit));
+        assert_eq!(*replacement_counter.borrow(), Value::Int(23));
+        assert_eq!(*replacement_limit.borrow(), Value::Int(8));
+        assert_eq!(
+            engine.local_variable_names().collect::<Vec<_>>(),
+            ["fresh_local"]
+        );
+
+        engine.replace_script(
+            compile(
+                "static counter, skipped;\n\
+                 static const LIMIT = 99;\n\
+                 local final_local;\n\
+                 func Probe() { return LIMIT; }",
+            ),
+            false,
+        );
+        assert!(!globals.borrow().contains_key("skipped"));
+        assert_eq!(*replacement_counter.borrow(), Value::Int(23));
+        assert_eq!(*replacement_limit.borrow(), Value::Int(8));
+        assert_eq!(
+            engine.local_variable_names().collect::<Vec<_>>(),
+            ["final_local"]
+        );
     }
 }
