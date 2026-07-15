@@ -497,6 +497,61 @@ mod tests {
     }
 
     #[test]
+    fn move_to_intermediate_crew_waypoint_uses_asymmetric_3_3_2_range() {
+        // Crew waypoints use Shape.Wdt/5 with side/top/bottom factors 3/3/2;
+        // the immediate next stack node must itself be MoveTo
+        // (C4Command.cpp:218-220,286-304).
+        let target = Vector2::new(100, 100);
+        for (offset, following_move_to, expected) in [
+            (Vector2::new(6, 0), true, CommandStatus::Completed),
+            (Vector2::new(7, 0), true, CommandStatus::Running),
+            (Vector2::new(0, 6), true, CommandStatus::Completed),
+            (Vector2::new(0, 7), true, CommandStatus::Running),
+            (Vector2::new(0, -4), true, CommandStatus::Completed),
+            (Vector2::new(0, -5), true, CommandStatus::Running),
+            (Vector2::new(6, 0), false, CommandStatus::Running),
+        ] {
+            let mut clonk = walking_jumper(Vector2::new(
+                target.x + offset.x,
+                target.y + offset.y,
+            ));
+            clonk.shape = DefinitionRect::new(-5, -9, 10, 18);
+            let objects = HashMap::new();
+            let players = HashMap::new();
+            let definitions = HashMap::new();
+            let ctx = move_to_ctx_at_frame(&clonk, &objects, &players, &definitions, 1);
+            let mut stack = CommandStack::new();
+            stack
+                .push_back(
+                    CommandRequest::new(CommandId::MoveTo)
+                        .with_tx(Some(target.x))
+                        .with_ty(Some(target.y))
+                        .with_evaluated(true),
+                )
+                .expect("current MoveTo queues");
+            if following_move_to {
+                stack
+                    .push_back(
+                        CommandRequest::new(CommandId::MoveTo)
+                            .with_tx(Some(200))
+                            .with_ty(Some(100))
+                            .with_evaluated(true),
+                    )
+                    .expect("following MoveTo queues");
+            }
+
+            let result = stack.step(&ctx).expect("MoveTo executes");
+            assert_eq!(
+                result.status, expected,
+                "offset={offset:?}, following_move_to={following_move_to}"
+            );
+            let expected_len = usize::from(following_move_to)
+                + usize::from(expected == CommandStatus::Running);
+            assert_eq!(stack.len(), expected_len);
+        }
+    }
+
+    #[test]
     fn move_to_crew_pushes_pathfinder_waypoints_around_blocked_ground() {
         // A solid cave wall below the column surface blocks the direct line.
         // C4Command::MoveTo asks C4PathFinder for a route and pushes its
@@ -1442,6 +1497,59 @@ mod tests {
             }
             other => panic!("expected UnGrab, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn move_to_push_intermediate_waypoint_steers_from_actor_position() {
+        let vehicle_id = ObjectId::new(7);
+        let mut vehicle = snapshot_with_id(7);
+        vehicle.position = Vector2::new(95, 100);
+        let mut pusher = walking_jumper(Vector2::new(100, 100));
+        pusher.action_procedure = ActionProcedure::Push;
+        pusher.action_target = Some(vehicle_id);
+        let objects = HashMap::from([(vehicle_id, vehicle)]);
+        let players = HashMap::new();
+        let definitions = HashMap::from([(
+            "DEF7".to_string(),
+            CommandDefinitionSnapshot {
+                value: 0,
+                can_chop: false,
+                chop_action: None,
+                constructable: false,
+                grab: 1,
+            },
+        )]);
+        let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(95))
+                    .with_ty(Some(160))
+                    .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET))
+                    .with_evaluated(true),
+            )
+            .expect("intermediate MoveTo queues");
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(200))
+                    .with_ty(Some(100))
+                    .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET))
+                    .with_evaluated(true),
+            )
+            .expect("final MoveTo queues");
+
+        let result = stack.step(&ctx).expect("intermediate MoveTo executes");
+
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.operations.is_empty(), "PushTarget keeps the grab");
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Left),
+            "the intermediate waypoint measures x=95 from clonk x=100, not vehicle x=95"
+        );
+        assert_eq!(stack.command_names(), vec!["MoveTo", "MoveTo"]);
     }
 
     // C4Command::JumpControl trigger 1 (C4Command.cpp:1861-1872): target
@@ -11846,13 +11954,15 @@ impl CommandStack {
         ctx: &CommandRuntimeContext<'_>,
         gravity: crate::C4Fixed,
     ) -> Option<CommandStepResult> {
+        let next_is_move_to = self.entries.get(1).and_then(ActiveCommand::id)
+            == Some(CommandId::MoveTo);
         let (mode, mut result) = {
             let front = self.entries.front_mut()?;
             if front.finished.is_some() {
                 return None;
             }
             let mode = front.mode;
-            let result = front.step(ctx, gravity);
+            let result = front.step(ctx, gravity, next_is_move_to);
             if matches!(
                 result.status,
                 CommandStatus::Completed | CommandStatus::Failed
@@ -12550,6 +12660,14 @@ impl MoveToState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        self.step_with_waypoint(ctx, false)
+    }
+
+    fn step_with_waypoint(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        next_is_move_to: bool,
+    ) -> CommandStepResult {
         // The initial-evaluation Execute consumes the frame without
         // moving (`if (InitEvaluation()) return;`, C4Command.cpp:1555).
         if !self.evaluated {
@@ -12673,14 +12791,16 @@ impl MoveToState {
             }
         }
 
-        // Push/pull movers measure from the pushed vehicle's position
-        // (C4Command.cpp:271-277; the fWaypoint skip needs the pathfinder
-        // waypoint stack, which is not ported yet).
+        // Push/pull movers measure from the pushed vehicle only on the final
+        // waypoint; intermediate MoveTos steer the clonk itself
+        // (C4Command.cpp:218-220,271-277).
         let mut position = ctx.position;
-        if matches!(
-            ctx.object.action_procedure,
-            ActionProcedure::Push | ActionProcedure::Pull
-        ) {
+        if !next_is_move_to
+            && matches!(
+                ctx.object.action_procedure,
+                ActionProcedure::Push | ActionProcedure::Pull
+            )
+        {
             if let Some(vehicle) = ctx
                 .object
                 .action_target
@@ -12701,7 +12821,26 @@ impl MoveToState {
         } else {
             self.tolerance
         };
-        if dx.abs() <= target_range && dy.abs() <= target_range {
+        let (range_factor_side, range_factor_top, range_factor_bottom) =
+            if next_is_move_to
+                && ctx.object.ocf & ocf::CREW_MEMBER != 0
+                && ctx.object.action_procedure != ActionProcedure::Scale
+            {
+                (3, 3, 2)
+            } else {
+                (1, 1, 1)
+            };
+        let offset_x = position.x - target.x;
+        let offset_y = position.y - target.y;
+        if inside(
+            offset_x,
+            -range_factor_side * target_range,
+            range_factor_side * target_range,
+        ) && inside(
+            offset_y,
+            -range_factor_bottom * target_range,
+            range_factor_top * target_range,
+        ) {
             let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
             self.last_direction = CommandDirection::Stop;
             return CommandStepResult::completed(Some(update));
@@ -17656,6 +17795,7 @@ impl ActiveCommand {
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
         gravity: crate::C4Fixed,
+        next_is_move_to: bool,
     ) -> CommandStepResult {
         if self.failures > 0 {
             if self.retries > 0 {
@@ -17684,7 +17824,7 @@ impl ActiveCommand {
 
         match &mut self.state {
             CommandState::Follow(state) => state.step(ctx),
-            CommandState::MoveTo(state) => state.step(ctx),
+            CommandState::MoveTo(state) => state.step_with_waypoint(ctx, next_is_move_to),
             CommandState::Enter(state) => state.step(ctx),
             CommandState::Exit(state) => state.step(ctx),
             CommandState::Build(state) => state.step(ctx),
