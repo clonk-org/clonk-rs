@@ -82,6 +82,9 @@ pub struct CommandObjectSnapshot {
     /// Raw C4Object::OnFire, which Acquire reads independently of cached OCF.
     pub on_fire: bool,
     pub contents: Vec<ObjectId>,
+    /// Every linked command, top first. `FindObjectByCommand` scans the full
+    /// stack rather than only the executing entry (C4Game.cpp:3764-3784).
+    pub commands: Vec<CommandView>,
     pub line_connect: u32,
     pub ocf: u32,
     /// C4Object::EntranceStatus, consulted separately from OCF_Entrance by
@@ -426,6 +429,7 @@ mod tests {
             alive: true,
             on_fire: false,
             contents: Vec::new(),
+            commands: Vec::new(),
             line_connect: 0,
             ocf: ocf::AVAILABLE,
             entrance_status: false,
@@ -441,6 +445,18 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("expected {id:?} PushFront operation, got {operations:?}"))
+    }
+
+    fn command_view(id: CommandId, target: Option<ObjectId>) -> CommandView {
+        CommandView {
+            name: id.to_name().to_owned(),
+            target,
+            tx: None,
+            tx_definition: None,
+            ty: None,
+            target2: None,
+            data: CommandData::None,
+        }
     }
 
     fn assert_silent_child_failure_propagates(
@@ -8976,6 +8992,7 @@ mod tests {
 
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.command_direction = CommandDirection::Right;
+        builder.physical.can_construct = 1;
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.construction = FULL_CON;
@@ -9407,7 +9424,8 @@ mod tests {
         let builder_id = ObjectId::new(10);
         let target_id = ObjectId::new(20);
 
-        let builder = snapshot_with_id(builder_id.as_u64());
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.physical.can_construct = 1;
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.construction = FULL_CON;
@@ -9450,6 +9468,459 @@ mod tests {
             }
             other => panic!("expected energy request, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn build_zero_can_construct_reports_cannot_build() {
+        let builder_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.crew_member = true;
+        builder.ocf |= ocf::CREW_MEMBER;
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.construction = FULL_CON;
+        let objects = HashMap::from([(builder_id, builder.clone()), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Build)
+                    .with_target(Some(target_id))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("build command queued");
+
+        let result = stack.execute_front(&ctx).expect("build executed");
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert_eq!(
+            result.failure_reason,
+            Some(CommandFailureReason::CannotBuild)
+        );
+        assert!(result.update.is_none());
+        assert!(result.operations.is_empty());
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            CommandEvent::FailureFeedback { actor_id, feedback } => {
+                assert_eq!(*actor_id, builder_id);
+                assert_eq!(feedback.command.name, "Build");
+                assert_eq!(feedback.command.target, Some(target_id));
+                assert_eq!(feedback.reason, Some(CommandFailureReason::CannotBuild));
+            }
+            other => panic!("expected Build failure feedback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_skips_energy_already_commanded_for_target() {
+        let builder_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+        let other_id = ObjectId::new(30);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.physical.can_construct = 1;
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.construction = FULL_CON;
+        target.line_connect = LINE_CONNECT_POWER_INPUT;
+        let mut other = snapshot_with_id(other_id.as_u64());
+        other.commands = vec![command_view(CommandId::Energy, Some(target_id))];
+        let objects = HashMap::from([
+            (builder_id, builder.clone()),
+            (target_id, target),
+            (other_id, other),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: true,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = BuildState::from_request(
+            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
+        )
+        .expect("build state");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.operations.is_empty());
+    }
+
+    #[test]
+    fn build_reach_requires_walk_inside_target_shape() {
+        let builder_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+        let run = |position: Vector2, procedure: ActionProcedure| {
+            let mut builder = snapshot_with_id(builder_id.as_u64());
+            builder.position = position;
+            builder.physical.can_construct = 1;
+            builder.action_procedure = procedure;
+            let mut target = snapshot_with_id(target_id.as_u64());
+            target.position = Vector2::new(100, 100);
+            target.shape = DefinitionRect::new(120, 90, 20, 20);
+            let objects = HashMap::from([(builder_id, builder.clone()), (target_id, target)]);
+            let players = HashMap::new();
+            let definitions = HashMap::new();
+            let ctx = CommandRuntimeContext {
+                landscape: None,
+                frame: 0,
+                position: builder.position,
+                object: &builder,
+                objects: &objects,
+                players: &players,
+                definitions: &definitions,
+                structures_need_energy: false,
+                base_buy_enabled: true,
+                base_sell_enabled: true,
+                transfer_zones: &EMPTY_TRANSFER_ZONES,
+                rng: None,
+            };
+            let mut state = BuildState::from_request(
+                &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
+            )
+            .expect("build state");
+            state.step(&ctx)
+        };
+
+        let inside_walking = run(Vector2::new(125, 100), ActionProcedure::Walk);
+        assert_eq!(inside_walking.status, CommandStatus::Running);
+        assert!(inside_walking.operations.is_empty());
+        assert_eq!(inside_walking.events.len(), 1);
+        assert!(matches!(
+            inside_walking.events[0],
+            CommandEvent::ObjectComBuild {
+                object_id,
+                target_id: event_target,
+                stop_first: true,
+            } if object_id == builder_id && event_target == target_id
+        ));
+
+        let inside_not_walking = run(Vector2::new(125, 100), ActionProcedure::Undefined);
+        assert!(inside_not_walking.events.is_empty());
+        let move_request = pushed_request(&inside_not_walking.operations, CommandId::MoveTo);
+        assert_eq!((move_request.tx, move_request.ty), (Some(100), Some(100)));
+        assert_eq!(move_request.update_interval, 50);
+        assert_eq!(move_request.mode, CommandMode::SilentSub);
+
+        // This point is inside the old coarse +/-9 reach box but outside the
+        // actual target shape, so it must still approach.
+        let outside_walking = run(Vector2::new(105, 100), ActionProcedure::Walk);
+        assert!(outside_walking.events.is_empty());
+        let move_request = pushed_request(&outside_walking.operations, CommandId::MoveTo);
+        assert_eq!((move_request.tx, move_request.ty), (Some(100), Some(100)));
+    }
+
+    #[test]
+    fn build_push_requests_silent_ungrab() {
+        let builder_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.physical.can_construct = 1;
+        builder.action_procedure = ActionProcedure::Push;
+        let target = snapshot_with_id(target_id.as_u64());
+        let objects = HashMap::from([(builder_id, builder.clone()), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = BuildState::from_request(
+            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
+        )
+        .expect("build state");
+
+        let result = state.step(&ctx);
+        let request = pushed_request(&result.operations, CommandId::UnGrab);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none());
+        assert!(result.events.is_empty());
+        assert_eq!(request.target, None);
+        assert_eq!(request.update_interval, 50);
+        assert_eq!(request.mode, CommandMode::SilentSub);
+    }
+
+    #[test]
+    fn build_dig_stops_then_resumes_same_execute() {
+        let builder_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.position = Vector2::new(125, 100);
+        builder.physical.can_construct = 1;
+        builder.action_procedure = ActionProcedure::Dig;
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(100, 100);
+        target.shape = DefinitionRect::new(120, 90, 20, 20);
+        let mut objects =
+            HashMap::from([(builder_id, builder.clone()), (target_id, target.clone())]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Build)
+                    .with_target(Some(target_id))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("build command queued");
+
+        let stopped = stack.execute_front(&ctx).expect("dig build executed");
+        assert_eq!(stopped.status, CommandStatus::Running);
+        assert!(matches!(
+            stopped.events.as_slice(),
+            [CommandEvent::ObjectComStopBuild { object_id }] if *object_id == builder_id
+        ));
+        let mut callback_replaced = stack.clone();
+        callback_replaced.restore_from_snapshot(&CommandStack::new().snapshot());
+        assert!(callback_replaced.is_empty());
+
+        builder.action_name = "Walk".into();
+        builder.action_procedure = ActionProcedure::Walk;
+        objects.insert(builder_id, builder.clone());
+        objects.insert(target_id, target);
+        let walk_ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let detached = callback_replaced
+            .execute_pending_build_stop(&walk_ctx)
+            .expect("callback-replaced Build retained its native continuation");
+        assert!(matches!(
+            detached.events.as_slice(),
+            [CommandEvent::ObjectComBuild {
+                object_id,
+                target_id: event_target,
+                stop_first: true,
+            }] if *object_id == builder_id && *event_target == target_id
+        ));
+        let resumed = stack
+            .execute_pending_build_stop(&walk_ctx)
+            .expect("Build resumed after ObjectComStop");
+        assert_eq!(resumed.status, CommandStatus::Running);
+        assert!(matches!(
+            resumed.events.as_slice(),
+            [CommandEvent::ObjectComBuild {
+                object_id,
+                target_id: event_target,
+                stop_first: true,
+            }] if *object_id == builder_id && *event_target == target_id
+        ));
+    }
+
+    #[test]
+    fn build_structure_only_builds_internal_target() {
+        let builder_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+        for category in [CATEGORY_STRUCTURE, CATEGORY_STATIC_BACK] {
+            let mut builder = snapshot_with_id(builder_id.as_u64());
+            builder.position = Vector2::new(125, 100);
+            builder.physical.can_construct = 1;
+            builder.category = category;
+            builder.action_procedure = ActionProcedure::Walk;
+            let mut target = snapshot_with_id(target_id.as_u64());
+            target.position = Vector2::new(100, 100);
+            target.shape = DefinitionRect::new(120, 90, 20, 20);
+            let objects = HashMap::from([(builder_id, builder.clone()), (target_id, target)]);
+            let players = HashMap::new();
+            let definitions = HashMap::new();
+            let ctx = CommandRuntimeContext {
+                landscape: None,
+                frame: 0,
+                position: builder.position,
+                object: &builder,
+                objects: &objects,
+                players: &players,
+                definitions: &definitions,
+                structures_need_energy: false,
+                base_buy_enabled: true,
+                base_sell_enabled: true,
+                transfer_zones: &EMPTY_TRANSFER_ZONES,
+                rng: None,
+            };
+            let mut state = BuildState::from_request(
+                &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
+            )
+            .expect("build state");
+            let result = state.step(&ctx);
+            assert_eq!(result.status, CommandStatus::Failed, "category={category}");
+            assert!(result.events.is_empty());
+            assert!(result.operations.is_empty());
+        }
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.physical.can_construct = 1;
+        builder.category = CATEGORY_STRUCTURE;
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.container = Some(builder_id);
+        let objects = HashMap::from([(builder_id, builder.clone()), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = BuildState::from_request(
+            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
+        )
+        .expect("build state");
+        let result = state.step(&ctx);
+        assert!(matches!(
+            result.events.as_slice(),
+            [CommandEvent::ObjectComBuild {
+                object_id,
+                target_id: event_target,
+                stop_first: false,
+            }] if *object_id == builder_id && *event_target == target_id
+        ));
+    }
+
+    #[test]
+    fn build_defers_energy_to_linekit_cobuilder() {
+        let builder_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+        let other_id = ObjectId::new(30);
+        let kit_id = ObjectId::new(40);
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.physical.can_construct = 1;
+        builder.commands = vec![command_view(CommandId::Build, Some(target_id))];
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.construction = FULL_CON;
+        target.line_connect = LINE_CONNECT_POWER_INPUT;
+        let mut other = snapshot_with_id(other_id.as_u64());
+        other.commands = vec![command_view(CommandId::Build, Some(target_id))];
+        other.contents.push(kit_id);
+        let mut kit = snapshot_with_id(kit_id.as_u64());
+        kit.definition_id = LINEKIT_DEFINITION.into();
+        kit.container = Some(other_id);
+        let mut objects = HashMap::from([
+            (builder_id, builder.clone()),
+            (target_id, target),
+            (other_id, other),
+            (kit_id, kit),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: true,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = BuildState::from_request(
+            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
+        )
+        .expect("build state");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.operations.is_empty());
+
+        let current_kit_id = ObjectId::new(41);
+        builder.contents.push(current_kit_id);
+        let mut current_kit = snapshot_with_id(current_kit_id.as_u64());
+        current_kit.definition_id = LINEKIT_DEFINITION.into();
+        current_kit.container = Some(builder_id);
+        objects.insert(builder_id, builder.clone());
+        objects.insert(current_kit_id, current_kit);
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 1,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: true,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = BuildState::from_request(
+            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
+        )
+        .expect("build state");
+
+        let result = state.step(&ctx);
+        let energy = pushed_request(&result.operations, CommandId::Energy);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(energy.target, Some(target_id));
     }
 
     #[test]
@@ -12903,6 +13374,18 @@ pub enum CommandEvent {
     ObjectComStopMoveTo {
         object_id: ObjectId,
     },
+    /// Build's Dig arm runs callbackful `ObjectComStop` and resumes the
+    /// same C4Command::Build invocation afterward (C4Command.cpp:872-899).
+    ObjectComStopBuild {
+        object_id: ObjectId,
+    },
+    /// Run `ObjectComBuild` against live action state. Ordinary reached-site
+    /// builds stop first; the legacy internal-structure arm does not.
+    ObjectComBuild {
+        object_id: ObjectId,
+        target_id: ObjectId,
+        stop_first: bool,
+    },
     /// Run C4Command::Grab's live sequence. Build/chop/dig stopping may
     /// change the subsequent At result, while scale/hangle let-go and the
     /// target's RejectGrabbed callback must finish before ObjectComGrab
@@ -13013,12 +13496,19 @@ pub enum CommandStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandFailureReason {
+    CannotBuild,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandStepResult {
     pub update: Option<ObjectUpdate>,
     pub status: CommandStatus,
     pub operations: Vec<CommandOperation>,
     pub events: Vec<CommandEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<CommandFailureReason>,
 }
 
 impl CommandStepResult {
@@ -13028,6 +13518,7 @@ impl CommandStepResult {
             status: CommandStatus::Running,
             operations: Vec::new(),
             events: Vec::new(),
+            failure_reason: None,
         }
     }
 
@@ -13037,6 +13528,7 @@ impl CommandStepResult {
             status: CommandStatus::Completed,
             operations: Vec::new(),
             events: Vec::new(),
+            failure_reason: None,
         }
     }
 
@@ -13046,6 +13538,7 @@ impl CommandStepResult {
             status: CommandStatus::Failed,
             operations: Vec::new(),
             events: Vec::new(),
+            failure_reason: None,
         }
     }
 
@@ -13056,6 +13549,11 @@ impl CommandStepResult {
 
     pub fn with_events(mut self, events: Vec<CommandEvent>) -> Self {
         self.events = events;
+        self
+    }
+
+    pub fn with_failure_reason(mut self, reason: CommandFailureReason) -> Self {
+        self.failure_reason = Some(reason);
         self
     }
 }
@@ -13210,6 +13708,8 @@ pub struct CommandView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandFailureFeedback {
     pub command: CommandView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<CommandFailureReason>,
 }
 
 impl CommandView {
@@ -13288,6 +13788,9 @@ pub struct CommandStack {
     /// iExec guard, so retain that detached MoveTo until the same-Execute
     /// continuation consumes it.
     detached_move_to_stops: VecDeque<MoveToState>,
+    /// Build has the same callback-detachment hazard while its Dig stop is
+    /// in flight; retain that exact executing state through the continuation.
+    detached_build_stops: VecDeque<BuildState>,
     /// Live Grab callbacks resolve inside engine/compat event handling, so
     /// their failure feedback cannot travel on the original CommandEvent.
     /// Keep it transient and let that synchronous caller drain it before
@@ -13333,6 +13836,7 @@ impl CommandStack {
             entries: VecDeque::new(),
             detached_grab_attempts: Vec::new(),
             detached_move_to_stops: VecDeque::new(),
+            detached_build_stops: VecDeque::new(),
             pending_failure_feedback: VecDeque::new(),
         }
     }
@@ -13368,10 +13872,19 @@ impl CommandStack {
         }
     }
 
+    fn remember_detached_build_stop(&mut self, entry: &ActiveCommand) {
+        if let CommandState::Build(state) = &entry.state {
+            if state.stop_continuation {
+                self.detached_build_stops.push_back(state.clone());
+            }
+        }
+    }
+
     fn pop_front(&mut self) -> Option<ActiveCommand> {
         let entry = self.entries.pop_front()?;
         self.remember_detached_grab(&entry);
         self.remember_detached_move_to_stop(&entry);
+        self.remember_detached_build_stop(&entry);
         Some(entry)
     }
 
@@ -13452,6 +13965,15 @@ impl CommandStack {
             })
             .collect::<Vec<_>>();
         self.detached_move_to_stops.extend(move_to_stops);
+        let build_stops = self
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.state {
+                CommandState::Build(state) if state.stop_continuation => Some(state.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.detached_build_stops.extend(build_stops);
         self.entries.clear();
     }
 
@@ -13515,6 +14037,23 @@ impl CommandStack {
                 })
                 .collect::<Vec<_>>();
             self.detached_move_to_stops.extend(move_to_stops);
+        }
+        let snapshot_retains_build = snapshot.commands.iter().any(|command| {
+            matches!(
+                &command.state,
+                CommandState::Build(state) if state.stop_continuation
+            )
+        });
+        if !snapshot_retains_build {
+            let build_stops = self
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.state {
+                    CommandState::Build(state) if state.stop_continuation => Some(state.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            self.detached_build_stops.extend(build_stops);
         }
         self.entries = snapshot
             .commands
@@ -13591,7 +14130,8 @@ impl CommandStack {
         };
 
         if result.status == CommandStatus::Failed {
-            if let Some(feedback) = self.record_failure_at(0) {
+            if let Some(mut feedback) = self.record_failure_at(0) {
+                feedback.reason = result.failure_reason;
                 // C4Command::Fail runs after the command handler has
                 // returned, so preserve all handler-emitted event order.
                 result.events.push(CommandEvent::FailureFeedback {
@@ -13645,6 +14185,53 @@ impl CommandStack {
         if result.status == CommandStatus::Failed {
             if let Some(index) = index {
                 if let Some(feedback) = self.record_failure_at(index) {
+                    result.events.push(CommandEvent::FailureFeedback {
+                        actor_id: ctx.object.id,
+                        feedback,
+                    });
+                }
+            }
+        }
+
+        self.apply_result_operations(&mut result);
+        Some(result)
+    }
+
+    /// Resume the Build whose Dig arm synchronously ran ObjectComStop.
+    /// Callback-side ClearCommands may have detached the executing entry,
+    /// but native C++ continues that same command object until Build returns.
+    pub(crate) fn execute_pending_build_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> Option<CommandStepResult> {
+        let index = self.entries.iter().position(|entry| {
+            matches!(
+                &entry.state,
+                CommandState::Build(state) if state.stop_continuation
+            )
+        });
+        let mut result = if let Some(index) = index {
+            let entry = self.entries.get_mut(index)?;
+            let CommandState::Build(state) = &mut entry.state else {
+                return None;
+            };
+            let result = state.resume_after_stop(ctx);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                entry.finished = Some(result.status);
+            }
+            result
+        } else {
+            let mut state = self.detached_build_stops.pop_front()?;
+            state.resume_after_stop(ctx)
+        };
+
+        if result.status == CommandStatus::Failed {
+            if let Some(index) = index {
+                if let Some(mut feedback) = self.record_failure_at(index) {
+                    feedback.reason = result.failure_reason;
                     result.events.push(CommandEvent::FailureFeedback {
                         actor_id: ctx.object.id,
                         feedback,
@@ -13993,6 +14580,7 @@ impl CommandStack {
                     entry.request.as_ref(),
                     &entry.state,
                 ),
+                reason: None,
             }
         })
     }
@@ -14118,6 +14706,7 @@ impl CommandStack {
                     entry.request.as_ref(),
                     &entry.state,
                 ),
+                reason: None,
             }
         })
     }
@@ -15282,6 +15871,9 @@ struct BuildState {
     site: Option<Vector2>,
     approach_horizontal: i32,
     approach_vertical: i32,
+    /// Same-Execute continuation staged while Dig runs live ObjectComStop.
+    #[serde(default)]
+    stop_continuation: bool,
 }
 
 impl BuildState {
@@ -15296,6 +15888,7 @@ impl BuildState {
             site,
             approach_horizontal: 9,
             approach_vertical: 20,
+            stop_continuation: false,
         })
     }
 
@@ -15306,11 +15899,74 @@ impl BuildState {
         ctx.resolve_position(self.target)
     }
 
+    fn object_has_command(
+        object: &CommandObjectSnapshot,
+        command: CommandId,
+        target: ObjectId,
+    ) -> bool {
+        object
+            .commands
+            .iter()
+            .any(|entry| entry.name == command.to_name() && entry.target == Some(target))
+    }
+
+    fn object_contains_linekit(
+        object: &CommandObjectSnapshot,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> bool {
+        object.contents.iter().any(|id| {
+            ctx.resolve(*id).is_some_and(|item| {
+                !item.destroyed
+                    && item.status != ObjectStatus::Deleted
+                    && item.ocf != 0
+                    && item.definition_id == LINEKIT_DEFINITION
+            })
+        })
+    }
+
+    fn should_queue_energy(&self, ctx: &CommandRuntimeContext<'_>) -> bool {
+        if ctx
+            .objects
+            .values()
+            .filter(|object| !object.destroyed && object.status.is_active())
+            .any(|object| Self::object_has_command(object, CommandId::Energy, self.target))
+        {
+            return false;
+        }
+        if Self::object_contains_linekit(ctx.object, ctx) {
+            return true;
+        }
+        !ctx
+            .objects
+            .values()
+            .filter(|object| !object.destroyed && object.status.is_active())
+            .any(|object| {
+                Self::object_has_command(object, CommandId::Build, self.target)
+                    && Self::object_contains_linekit(object, ctx)
+            })
+    }
+
+    fn start_build(&self, ctx: &CommandRuntimeContext<'_>, stop_first: bool) -> CommandStepResult {
+        CommandStepResult::running(None).with_events(vec![CommandEvent::ObjectComBuild {
+            object_id: ctx.object.id,
+            target_id: self.target,
+            stop_first,
+        }])
+    }
+
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         let builder = ctx.object;
         let Some(target_snapshot) = ctx.resolve(self.target) else {
             return CommandStepResult::failed(None);
         };
+
+        // C4Object::GetPhysical always resolves a physical set for an extant
+        // object. Only exact zero loses construction ability; negative raw
+        // values remain truthy in C++ (C4Command.cpp:831-836).
+        if builder.physical.can_construct == 0 {
+            return CommandStepResult::failed(None)
+                .with_failure_reason(CommandFailureReason::CannotBuild);
+        }
 
         if target_snapshot.construction >= FULL_CON {
             let mut operations = Vec::new();
@@ -15324,6 +15980,7 @@ impl BuildState {
 
             if ctx.structures_need_energy
                 && (target_snapshot.line_connect & LINE_CONNECT_POWER_INPUT) != 0
+                && self.should_queue_energy(ctx)
             {
                 operations.push(CommandOperation::PushFront(
                     CommandRequest::new(CommandId::Energy).with_target(Some(self.target)),
@@ -15337,11 +15994,50 @@ impl BuildState {
         let builder_actively_building = builder.action_procedure == ActionProcedure::Build
             && builder.action_target == Some(self.target);
         if builder_actively_building {
-            if builder.command_direction != CommandDirection::Stop {
-                let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
-                return CommandStepResult::running(Some(update));
-            }
             return CommandStepResult::running(None);
+        }
+
+        if builder.action_procedure == ActionProcedure::Push {
+            let request = CommandRequest::new(CommandId::UnGrab)
+                .with_update_interval(50)
+                .with_mode(CommandMode::SilentSub);
+            return CommandStepResult::running(None)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+
+        if builder.action_procedure == ActionProcedure::Dig {
+            self.stop_continuation = true;
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::ObjectComStopBuild {
+                    object_id: builder.id,
+                },
+            ]);
+        }
+
+        self.step_after_dig(ctx)
+    }
+
+    fn resume_after_stop(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if !std::mem::take(&mut self.stop_continuation) {
+            return CommandStepResult::running(None);
+        }
+        self.step_after_dig(ctx)
+    }
+
+    fn step_after_dig(&self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let builder = ctx.object;
+        let Some(target_snapshot) = ctx.resolve(self.target) else {
+            return CommandStepResult::failed(None);
+        };
+
+        // Structures and StaticBack objects use only the legacy internal
+        // target path, regardless of proximity or shared outer container.
+        if builder.category & (CATEGORY_STRUCTURE | CATEGORY_STATIC_BACK) != 0 {
+            return if target_snapshot.container == Some(builder.id) {
+                self.start_build(ctx, false)
+            } else {
+                CommandStepResult::failed(None)
+            };
         }
 
         let target_position = match self.target_position(ctx) {
@@ -15353,59 +16049,34 @@ impl BuildState {
 
         let same_container =
             target_snapshot.container.is_some() && builder.container == target_snapshot.container;
-        let builder_inside_target = builder.container == Some(self.target);
-        let target_inside_builder = target_snapshot.container == Some(builder.id);
+        let at_target = target_snapshot.container.is_none()
+            && !target_snapshot.destroyed
+            && target_snapshot.status != ObjectStatus::Deleted
+            && !target_snapshot.definition_id.is_empty()
+            && target_snapshot.ocf != 0
+            && target_snapshot.at_point(ctx.position.x, ctx.position.y)
+            && builder.action_procedure == ActionProcedure::Walk;
 
-        let close_enough = if same_container || builder_inside_target || target_inside_builder {
-            true
-        } else {
-            let dx = target_position.x - ctx.position.x;
-            let dy = target_position.y - ctx.position.y;
-            dx.abs() <= self.approach_horizontal && dy.abs() <= self.approach_vertical
-        };
-
-        if close_enough {
-            let action_update = ActionUpdate::default()
-                .with_name("Build")
-                .with_target(Some(self.target))
-                .with_force(true)
-                .with_phase(0)
-                .with_ticks(0);
-            let update = ObjectUpdate::new()
-                .with_action_update(action_update)
-                .with_command_direction(CommandDirection::Stop);
-            return CommandStepResult::running(Some(update));
+        if same_container || at_target {
+            return self.start_build(ctx, true);
         }
 
-        let is_structure = (builder.category & (CATEGORY_STRUCTURE | CATEGORY_STATIC_BACK)) != 0;
-        if is_structure && !close_enough {
-            let update = (builder.action_procedure == ActionProcedure::Dig
-                && builder.command_direction != CommandDirection::Stop)
-                .then(|| ObjectUpdate::new().with_command_direction(CommandDirection::Stop));
-            return CommandStepResult::failed(update);
-        }
-
-        let mut operations = Vec::new();
-        if !is_structure {
-            let request = target_snapshot.container.map_or_else(
-                || {
-                    CommandRequest::new(CommandId::MoveTo)
-                        .with_tx(Some(target_position.x))
-                        .with_ty(Some(target_position.y))
-                        .with_update_interval(50)
-                        .with_mode(CommandMode::SilentSub)
-                },
-                |container| {
-                    CommandRequest::new(CommandId::Enter)
-                        .with_target(Some(container))
-                        .with_update_interval(50)
-                        .with_mode(CommandMode::SilentSub)
-                },
-            );
-            operations.push(CommandOperation::PushFront(request));
-        }
-
-        CommandStepResult::running(None).with_operations(operations)
+        let request = target_snapshot.container.map_or_else(
+            || {
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(target_position.x))
+                    .with_ty(Some(target_position.y))
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::SilentSub)
+            },
+            |container| {
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(container))
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::SilentSub)
+            },
+        );
+        CommandStepResult::running(None).with_operations(vec![CommandOperation::PushFront(request)])
     }
 }
 

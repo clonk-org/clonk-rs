@@ -23447,6 +23447,7 @@ impl Engine {
             alive: object.state.alive,
             on_fire: object.state.on_fire,
             contents: object.state.contents.clone(),
+            commands: object.commands.command_views(),
             line_connect,
             ocf: object.state.ocf,
             entrance_status: object.state.entrance_status,
@@ -23459,7 +23460,7 @@ impl Engine {
     /// Throw). It shares the retained-front callback/clear tail with the
     /// ordinary object tick.
     fn execute_object_command_now(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
-        self.execute_object_command_now_inner(object_id, false)
+        self.execute_object_command_now_inner(object_id, None)
     }
 
     /// Resume the post-ObjectComStop half of the retained MoveTo without a
@@ -23467,24 +23468,25 @@ impl Engine {
     /// C4Command::Execute invocation; only the live callback boundary made
     /// the engine rebuild its command snapshot.
     fn resume_move_to_after_stop(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
-        self.execute_object_command_now_inner(object_id, true)
+        self.execute_object_command_now_inner(object_id, Some(CommandId::MoveTo))
+    }
+
+    /// Resume Build after its Dig arm's live ObjectComStop without consuming
+    /// another command interval or frame.
+    fn resume_build_after_stop(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
+        self.execute_object_command_now_inner(object_id, Some(CommandId::Build))
     }
 
     fn execute_object_command_now_inner(
         &mut self,
         object_id: ObjectId,
-        resume_move_to: bool,
+        resume_after_stop: Option<CommandId>,
     ) -> Result<(), EngineError> {
         let command_snapshots = self
             .objects
             .iter()
             .enumerate()
-            .map(|(index, object)| {
-                (
-                    object.id,
-                    self.live_command_snapshot(index),
-                )
-            })
+            .map(|(index, object)| (object.id, self.live_command_snapshot(index)))
             .collect::<HashMap<_, _>>();
         let player_snapshots = self
             .players
@@ -23560,13 +23562,17 @@ impl Engine {
             base_sell_enabled: self.base_sell_enabled,
             transfer_zones: &transfer_zones,
         };
-        let result = if resume_move_to {
-            self.objects[index]
+        let result = match resume_after_stop {
+            Some(CommandId::MoveTo) => self.objects[index]
                 .commands
-                .execute_pending_move_to_stop(&command_context)
-        } else {
-            let command_gravity = self.physics.gravity_as_c4fixed();
-            self.objects[index].step_command_stack(command_context, command_gravity)
+                .execute_pending_move_to_stop(&command_context),
+            Some(CommandId::Build) => self.objects[index]
+                .commands
+                .execute_pending_build_stop(&command_context),
+            _ => {
+                let command_gravity = self.physics.gravity_as_c4fixed();
+                self.objects[index].step_command_stack(command_context, command_gravity)
+            }
         };
         self.rng = command_rng.into_inner();
 
@@ -23768,6 +23774,7 @@ impl Engine {
                     alive: object.state.alive,
                     on_fire: object.state.on_fire,
                     contents: object.state.contents.clone(),
+                    commands: object.commands.command_views(),
                     line_connect,
                     ocf,
                     entrance_status: object.state.entrance_status,
@@ -23947,9 +23954,44 @@ impl Engine {
             };
             // UpdateOCF runs first in C4Object::Execute (C4Object.cpp:1058).
             self.refresh_object_ocf(idx);
-            command_snapshots
-                .entry(current_id)
-                .or_insert_with(|| self.live_command_snapshot(idx));
+            let build_target = (self.objects[idx].commands.front_command_name() == Some("Build"))
+                .then(|| {
+                    self.objects[idx]
+                        .commands
+                        .command_views()
+                        .first()
+                        .and_then(|command| command.target)
+                })
+                .flatten();
+            if let Some(target_id) = build_target {
+                let live_target = self
+                    .find_object_index(target_id)
+                    .map(|target_index| self.live_command_snapshot(target_index));
+                let completing = live_target
+                    .as_ref()
+                    .is_some_and(|target| target.construction >= FULL_CON);
+                if let Some(target) = live_target {
+                    command_snapshots.insert(target_id, target);
+                }
+                if completing {
+                    // Completion scans every live command stack and each
+                    // co-builder's current contents. Foreign callbacks can
+                    // mutate either after that object's own Execute, so
+                    // refresh the full table where C++ calls FindObjectByCommand.
+                    let live_snapshots = (0..self.objects.len())
+                        .map(|index| {
+                            let snapshot = self.live_command_snapshot(index);
+                            (snapshot.id, snapshot)
+                        })
+                        .collect::<Vec<_>>();
+                    command_snapshots.extend(live_snapshots);
+                }
+            }
+            // C++ command handlers read the live object and command lists.
+            // Refresh the executing object after any earlier object in this
+            // frame may have changed it; completed objects are likewise
+            // written back below for later command scans.
+            command_snapshots.insert(current_id, self.live_command_snapshot(idx));
             let (mut definition_id, mut action_library) =
                 self.object_definition_context(idx)?;
             let previous_action_state = self.objects[idx].state.action.clone();
@@ -25030,6 +25072,7 @@ impl Engine {
                     alive: self.objects[idx].state.alive,
                     on_fire: self.objects[idx].state.on_fire,
                     contents: self.objects[idx].state.contents.clone(),
+                    commands: self.objects[idx].commands.command_views(),
                     line_connect,
                     ocf,
                     entrance_status: self.objects[idx].state.entrance_status,
@@ -33447,6 +33490,36 @@ impl Engine {
         let definition_id = self.objects[idx].definition_id.clone();
         let _ = self.action_with_calls(idx, &definition_id, "Idle")?;
         self.object_action_stand_live(object_id)
+    }
+
+    /// `ObjectComBuild` (C4ObjectCom.cpp:690-697): the target must remain
+    /// valid and the builder must be in ActIdle or DFA_WALK; the ordinary,
+    /// non-forced Build transition runs all action callbacks synchronously.
+    fn object_com_build_live(
+        &mut self,
+        object_id: ObjectId,
+        target_id: ObjectId,
+    ) -> Result<bool, EngineError> {
+        if self.find_object_index(target_id).is_none() {
+            return Ok(false);
+        }
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        let definition_id = self.objects[idx].definition_id.clone();
+        let can_build = self
+            .definitions
+            .get(&definition_id)
+            .is_some_and(|definition| {
+                let actions = definition.action_library();
+                let action = &self.objects[idx].state.action.name;
+                actions.is_idle_action(action)
+                    || actions.procedure_for_action(action) == ActionProcedure::Walk
+            });
+        if !can_build {
+            return Ok(false);
+        }
+        self.action_with_target_and_calls(idx, &definition_id, "Build", target_id)
     }
 
     fn object_com_stop_action(
@@ -42104,6 +42177,20 @@ impl Engine {
                 let _ = self.object_com_stop_live(object_id)?;
                 self.resume_move_to_after_stop(object_id)?;
             }
+            CommandEvent::ObjectComStopBuild { object_id } => {
+                let _ = self.object_com_stop_live(object_id)?;
+                self.resume_build_after_stop(object_id)?;
+            }
+            CommandEvent::ObjectComBuild {
+                object_id,
+                target_id,
+                stop_first,
+            } => {
+                if stop_first {
+                    let _ = self.object_com_stop_live(object_id)?;
+                }
+                let _ = self.object_com_build_live(object_id, target_id)?;
+            }
             CommandEvent::AttemptGrab {
                 actor_id,
                 target_id,
@@ -42400,6 +42487,28 @@ impl Engine {
         let Some(actor_index) = self.find_object_index(actor_id) else {
             return Ok(());
         };
+        if fail_message.is_none()
+            && feedback.reason == Some(command::CommandFailureReason::CannotBuild)
+        {
+            let actor = &self.objects[actor_index];
+            let name = actor
+                .state
+                .custom_name
+                .clone()
+                .filter(|name| !name.is_empty())
+                .or_else(|| {
+                    self.crew_object_infos
+                        .get(&actor_id)
+                        .map(|info| info.name.clone())
+                })
+                .or_else(|| {
+                    self.definitions
+                        .get(&actor.definition_id)
+                        .map(|definition| definition.name().to_string())
+                })
+                .unwrap_or_else(|| actor.definition_id.clone());
+            fail_message = Some(format!("{name} can't build."));
+        }
         // C++ reads the cached OCF at Fail entry. Inactive objects still have
         // a nonzero Status and remain eligible for the later common tail.
         if self.objects[actor_index].state.ocf & ocf::CREW_MEMBER == 0 {

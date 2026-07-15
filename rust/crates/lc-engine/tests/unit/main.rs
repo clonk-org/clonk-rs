@@ -22972,6 +22972,165 @@ protected func WorkFailed(caller, tx, ty, other)
     }
 
     #[test]
+    fn build_without_can_construct_reports_cantbuild_message() {
+        let script = r#"#strict 3
+local needs_material_called;
+
+public func RunNow() { return ExecuteCommand(); }
+
+protected func BuildNeedsMaterial()
+{
+  needs_material_called = 1;
+  return 1;
+}
+"#;
+        let mut builder =
+            Definition::from_script("BLDR", "Builder", script).expect("builder compiles");
+        builder.set_crew_member(true);
+        builder.set_physical(PhysicalInfo {
+            can_construct: 0,
+            ..PhysicalInfo::default()
+        });
+        let mut site = Definition::from_script("SITE", "Site", "#strict").expect("site compiles");
+        site.set_constructable(true);
+
+        let mut engine = Engine::with_seed(313);
+        engine
+            .register_definition(builder)
+            .expect("builder registers");
+        engine.register_definition(site).expect("site registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("SITE").with_construction(1_000))
+            .expect("site spawns");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("BLDR")
+                    .with_alive(true)
+                    .with_crew_member(true)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("builder spawns");
+        let actor_index = engine.find_object_index(actor).expect("builder exists");
+        engine.objects[actor_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Build)
+                    .with_target(Some(target))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("Build queues");
+        engine.refresh_object_ocf(actor_index);
+
+        let snapshot = engine.tick().expect("Build failure tick succeeds");
+        let actor_snapshot = snapshot.object(actor).expect("builder remains");
+        assert_eq!(actor_snapshot.command_direction, CommandDirection::Stop);
+        assert_eq!(
+            actor_snapshot.local_vars.get("needs_material_called"),
+            Some(&Value::Int(1)),
+            "the explicit CANTBUILD message does not skip BuildNeedsMaterial"
+        );
+        assert_eq!(snapshot.hud.messages.len(), 1);
+        assert_eq!(snapshot.hud.messages[0].kind, MessageKind::Target);
+        assert_eq!(snapshot.hud.messages[0].target, Some(actor));
+        assert_eq!(snapshot.hud.messages[0].lines, vec!["Builder can't build."]);
+
+        let sync_actor = engine
+            .spawn_object(
+                SpawnConfig::new("BLDR")
+                    .with_alive(true)
+                    .with_crew_member(true)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("synchronous builder spawns");
+        let sync_index = engine
+            .find_object_index(sync_actor)
+            .expect("synchronous builder exists");
+        engine.objects[sync_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Build)
+                    .with_target(Some(target))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("synchronous Build queues");
+        engine.refresh_object_ocf(sync_index);
+        assert_eq!(
+            engine
+                .call_object_function(sync_index, "RunNow", Vec::new())
+                .expect("synchronous Build failure runs"),
+            Value::Bool(true)
+        );
+        let sync_snapshot = engine.snapshot();
+        assert_eq!(
+            sync_snapshot
+                .object(sync_actor)
+                .expect("synchronous builder remains")
+                .command_direction,
+            CommandDirection::Stop
+        );
+        assert!(sync_snapshot.hud.messages.iter().any(|message| {
+            message.kind == MessageKind::Target
+                && message.target == Some(sync_actor)
+                && message.lines == vec!["Builder can't build."]
+        }));
+    }
+
+    #[test]
+    fn completed_builders_queue_only_one_energy_command_in_same_tick() {
+        let mut builder =
+            Definition::from_script("BLDR", "Builder", "#strict").expect("builder compiles");
+        builder.set_physical(PhysicalInfo {
+            can_construct: 1,
+            ..PhysicalInfo::default()
+        });
+        let mut site = Definition::from_script("SITE", "Site", "#strict").expect("site compiles");
+        site.set_line_connect(LINE_CONNECT_POWER_INPUT);
+
+        let mut engine = Engine::with_seed(314);
+        engine.set_structures_need_energy(true);
+        engine
+            .register_definition(builder)
+            .expect("builder registers");
+        engine.register_definition(site).expect("site registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("SITE"))
+            .expect("site spawns");
+        let builders = [
+            engine
+                .spawn_object(SpawnConfig::new("BLDR"))
+                .expect("first builder spawns"),
+            engine
+                .spawn_object(SpawnConfig::new("BLDR"))
+                .expect("second builder spawns"),
+        ];
+        for builder_id in builders {
+            let index = engine
+                .find_object_index(builder_id)
+                .expect("builder exists");
+            engine.objects[index]
+                .commands
+                .push_front(
+                    CommandRequest::new(CommandId::Build)
+                        .with_target(Some(target))
+                        .with_mode(CommandMode::Base),
+                )
+                .expect("Build queues");
+        }
+
+        let snapshot = engine.tick().expect("builders execute");
+        let energy_count = builders
+            .iter()
+            .filter_map(|id| snapshot.object(*id))
+            .flat_map(|object| object.command_stack.command_names())
+            .filter(|name| name == "Energy")
+            .count();
+        assert_eq!(
+            energy_count, 1,
+            "the later builder must see the earlier builder's live Energy command"
+        );
+    }
+
+    #[test]
     fn failed_build_feedback_uses_live_component_zero_and_truthy_still_stops() {
         let actor_script = r#"#strict 3
 local needed_id, needed_count, needed_id_is_nil, needed_count_is_int;
