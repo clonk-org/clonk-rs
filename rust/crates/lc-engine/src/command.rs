@@ -373,6 +373,29 @@ mod tests {
             .unwrap_or_else(|| panic!("expected {id:?} PushFront operation, got {operations:?}"))
     }
 
+    fn assert_silent_child_failure_propagates(
+        parent: CommandRequest,
+        child: CommandRequest,
+        ctx: &CommandRuntimeContext<'_>,
+    ) {
+        assert_eq!(child.mode, CommandMode::SilentSub);
+        let parent_id = parent.id;
+        let child_id = child.id;
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(parent.with_mode(CommandMode::Base))
+            .expect("parent command queued");
+        stack.push_front(child).expect("child command queued");
+        assert!(stack.fail_front_if(child_id));
+
+        let failure = stack.step(ctx).expect("child failure evaluated");
+        assert_eq!(failure.status, CommandStatus::Failed);
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 1);
+        assert_eq!(snapshot.commands[0].state.id(), Some(parent_id));
+        assert_eq!(snapshot.commands[0].failures, 1);
+    }
+
     fn walking_jumper(position: Vector2) -> CommandObjectSnapshot {
         let mut walker = snapshot_with_id(1);
         walker.position = position;
@@ -1886,10 +1909,9 @@ mod tests {
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
-        let mut state = GetState::from_request(
-            &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let parent_request =
+            CommandRequest::new(CommandId::Get).with_target(Some(target_id));
+        let mut state = GetState::from_request(&parent_request).expect("state created");
         let result = state.step(&ctx);
 
         let move_to = result
@@ -1925,6 +1947,7 @@ mod tests {
             crate::LcgRng::seed_from_u64(7).count + 2,
             "reissued pursuit performs the next C++ random-offset draw"
         );
+        assert_silent_child_failure_propagates(parent_request, move_to.clone(), &ctx);
     }
 
     #[test]
@@ -2076,7 +2099,7 @@ mod tests {
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait))
+            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
             .expect("base queues");
         stack
             .push_front(
@@ -3268,7 +3291,7 @@ mod tests {
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait))
+            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
             .expect("base queues");
         stack
             .push_front(
@@ -3372,10 +3395,9 @@ mod tests {
             rng: None,
         };
 
-        let mut state = EnterState::from_request(
-            &CommandRequest::new(CommandId::Enter).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let parent_request =
+            CommandRequest::new(CommandId::Enter).with_target(Some(target_id));
+        let mut state = EnterState::from_request(&parent_request).expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -3405,6 +3427,7 @@ mod tests {
             first_move,
             "Enter reissues MoveTo on its next execution"
         );
+        assert_silent_child_failure_propagates(parent_request, first_move, &ctx);
 
         // C4Command::Enter passes C4CMD_MoveTo_PushTarget through when
         // its own Data carries C4CMD_Enter_PushTarget (C4Command.cpp:615).
@@ -3654,7 +3677,7 @@ mod tests {
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait))
+            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
             .expect("base queues");
         stack
             .push_front(
@@ -3720,7 +3743,7 @@ mod tests {
         let target = ObjectId::new(322);
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait))
+            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
             .expect("base queues");
         stack
             .push_front(
@@ -5125,7 +5148,7 @@ mod tests {
         match &result.operations[0] {
             CommandOperation::PushFront(request) => {
                 assert_eq!(request.id, CommandId::Acquire);
-                assert_eq!(request.mode, CommandMode::Sub);
+                assert_eq!(request.mode, CommandMode::SilentSub);
                 match &request.data {
                     CommandData::Text(text) => assert_eq!(text, "STON"),
                     other => panic!("unexpected acquire data: {:?}", other),
@@ -6002,10 +6025,9 @@ mod tests {
             rng: None,
         };
 
-        let mut state = AttackState::from_request(
-            &CommandRequest::new(CommandId::Attack).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let parent_request =
+            CommandRequest::new(CommandId::Attack).with_target(Some(target_id));
+        let mut state = AttackState::from_request(&parent_request).expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -6021,6 +6043,11 @@ mod tests {
             }
             other => panic!("expected move request, got {:?}", other),
         }
+        assert_silent_child_failure_propagates(
+            parent_request,
+            pushed_request(&result.operations, CommandId::MoveTo),
+            &ctx,
+        );
     }
 
     #[test]
@@ -6444,10 +6471,9 @@ mod tests {
             rng: None,
         };
 
-        let mut state = TransferState::from_request(
-            &CommandRequest::new(CommandId::Transfer).with_target(Some(target_id)),
-        )
-        .expect("state created");
+        let parent_request =
+            CommandRequest::new(CommandId::Transfer).with_target(Some(target_id));
+        let mut state = TransferState::from_request(&parent_request).expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -6462,6 +6488,11 @@ mod tests {
             }
             other => panic!("unexpected operation: {:?}", other),
         }
+        assert_silent_child_failure_propagates(
+            parent_request,
+            pushed_request(&result.operations, CommandId::MoveTo),
+            &ctx,
+        );
     }
 
     #[test]
@@ -7097,6 +7128,49 @@ mod tests {
             }
             other => panic!("expected energy request, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn energy_acquire_child_failure_propagates_to_parent() {
+        // Energy's missing-linekit AddCommand uses the default SilentSub
+        // mode (C4Command.cpp:2268-2272).
+        let builder_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+        let supply_id = ObjectId::new(30);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.owner = 1;
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(100, 0);
+        target.line_connect = LINE_CONNECT_POWER_INPUT;
+        let mut supply = snapshot_with_id(supply_id.as_u64());
+        supply.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+        supply.ocf |= ocf::POWER_SUPPLY;
+
+        let objects = HashMap::from([(target_id, target), (supply_id, supply)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: true,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let parent_request =
+            CommandRequest::new(CommandId::Energy).with_target(Some(target_id));
+        let mut state = EnergyState::from_request(&parent_request).expect("energy state");
+
+        let result = state.step(&ctx);
+        let acquire = pushed_request(&result.operations, CommandId::Acquire);
+        assert_silent_child_failure_propagates(parent_request, acquire, &ctx);
     }
 
     #[test]
@@ -7884,6 +7958,7 @@ mod tests {
             CommandOperation::PushFront(request) => {
                 assert_eq!(request.id, CommandId::Buy);
                 assert_eq!(request.update_interval, 100);
+                assert_eq!(request.mode, CommandMode::Sub);
             }
             other => panic!("expected buy request, got {:?}", other),
         }
@@ -8072,7 +8147,9 @@ mod tests {
         let mut stack = CommandStack::new();
         stack
             .push_back(
-                CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+                CommandRequest::new(CommandId::Acquire)
+                    .with_data(CommandData::Text("WOOD".into()))
+                    .with_mode(CommandMode::Base),
             )
             .expect("command queued");
 
@@ -8458,6 +8535,16 @@ mod tests {
     }
 
     #[test]
+    fn command_request_defaults_to_cpp_add_command_silent_sub_mode() {
+        // C4Object::AddCommand defaults iBaseMode to zero, which is
+        // C4CMD_Mode_SilentSub (C4Object.h:221-225; C4Command.h:62).
+        assert_eq!(
+            CommandRequest::new(CommandId::Wait).mode,
+            CommandMode::SilentSub
+        );
+    }
+
+    #[test]
     fn command_stack_snapshot_preserves_acquire_state() {
         let builder_id = ObjectId::new(10);
         let item_id = ObjectId::new(11);
@@ -8485,7 +8572,9 @@ mod tests {
         let mut stack = CommandStack::new();
         stack
             .push_back(
-                CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+                CommandRequest::new(CommandId::Acquire)
+                    .with_data(CommandData::Text("WOOD".into()))
+                    .with_mode(CommandMode::Base),
             )
             .expect("command enqueued");
 
@@ -8656,7 +8745,8 @@ mod tests {
         let mut stack = CommandStack::new();
         let wait_request = CommandRequest::new(CommandId::Wait)
             .with_update_interval(1)
-            .with_retries(1);
+            .with_retries(1)
+            .with_mode(CommandMode::Base);
         stack.push_back(wait_request).expect("wait command queued");
         stack
             .push_front(
@@ -8733,7 +8823,7 @@ mod tests {
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(CommandRequest::new(CommandId::Wait))
+            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
             .expect("base command queued");
         stack
             .push_front(
@@ -9116,12 +9206,10 @@ mod tests {
             rng: None,
         };
 
-        let mut state = BuyState::from_request(
-            &CommandRequest::new(CommandId::Buy)
-                .with_target(Some(target_id))
-                .with_data(CommandData::Text("WOOD".into())),
-        )
-        .expect("state created");
+        let parent_request = CommandRequest::new(CommandId::Buy)
+            .with_target(Some(target_id))
+            .with_data(CommandData::Text("WOOD".into()));
+        let mut state = BuyState::from_request(&parent_request).expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -9134,6 +9222,11 @@ mod tests {
             }
             other => panic!("expected move request, got {:?}", other),
         }
+        assert_silent_child_failure_propagates(
+            parent_request,
+            pushed_request(&result.operations, CommandId::MoveTo),
+            &ctx,
+        );
     }
 
     #[test]
@@ -9993,7 +10086,7 @@ impl CommandRequest {
             update_interval: 0,
             evaluated: false,
             retries: 0,
-            mode: CommandMode::Base,
+            mode: CommandMode::SilentSub,
         }
     }
 
@@ -12272,7 +12365,7 @@ impl ConstructState {
                 let mut result = CommandStepResult::running(update_to_stop.clone());
                 let request = CommandRequest::new(CommandId::Exit)
                     .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
+                    .with_mode(CommandMode::SilentSub);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
@@ -12286,7 +12379,7 @@ impl ConstructState {
                 let mut result = CommandStepResult::running(update_to_stop.clone());
                 let request = CommandRequest::new(CommandId::UnGrab)
                     .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
+                    .with_mode(CommandMode::SilentSub);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
@@ -12386,7 +12479,7 @@ impl ConstructState {
                 .with_tx(Some(site.x))
                 .with_ty(Some(site.y))
                 .with_update_interval(50)
-                .with_mode(CommandMode::Sub),
+                .with_mode(CommandMode::SilentSub),
         ));
 
         CommandStepResult::completed(update_to_stop).with_operations(operations)
@@ -12660,7 +12753,7 @@ impl ChopState {
         if ctx.object.action_procedure == ActionProcedure::Push {
             let request = CommandRequest::new(CommandId::UnGrab)
                 .with_update_interval(50)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             let mut result = CommandStepResult::running(self.update_to_stop(ctx));
             result.operations.push(CommandOperation::PushFront(request));
             return result;
@@ -12848,7 +12941,7 @@ impl DigState {
                 let mut result = CommandStepResult::running(pending_update.clone());
                 let request = CommandRequest::new(CommandId::UnGrab)
                     .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
+                    .with_mode(CommandMode::SilentSub);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
@@ -12863,7 +12956,7 @@ impl DigState {
                 let mut result = CommandStepResult::running(pending_update.clone());
                 let request = CommandRequest::new(CommandId::Exit)
                     .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
+                    .with_mode(CommandMode::SilentSub);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
@@ -12993,7 +13086,7 @@ impl GrabState {
         {
             let request = CommandRequest::new(CommandId::UnGrab)
                 .with_update_interval(50)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             let mut result = CommandStepResult::running(pending_update);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
@@ -13116,7 +13209,7 @@ impl ActivateState {
         result.events.push(CommandEvent::SetObjectCommand {
             object_id: target_id,
             controller: ctx.object.controller,
-            request: CommandRequest::new(CommandId::Exit),
+            request: CommandRequest::new(CommandId::Exit).with_mode(CommandMode::Base),
         });
 
         result
@@ -13130,7 +13223,7 @@ impl ActivateState {
             let mut result = CommandStepResult::running(update);
             let request = CommandRequest::new(CommandId::Exit)
                 .with_update_interval(50)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             result.operations.push(CommandOperation::PushFront(request));
             result
         }
@@ -13149,7 +13242,7 @@ impl ActivateState {
             let request = CommandRequest::new(CommandId::Enter)
                 .with_target(Some(container_id))
                 .with_update_interval(50)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             result.operations.push(CommandOperation::PushFront(request));
             result
         }
@@ -13341,11 +13434,11 @@ impl PushToState {
                 let mut operations = Vec::new();
                 let ungrab_request = CommandRequest::new(CommandId::UnGrab)
                     .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
+                    .with_mode(CommandMode::SilentSub);
                 operations.push(CommandOperation::PushFront(ungrab_request));
                 let wait_request = CommandRequest::new(CommandId::Wait)
                     .with_update_interval(10)
-                    .with_mode(CommandMode::Sub);
+                    .with_mode(CommandMode::SilentSub);
                 operations.push(CommandOperation::PushFront(wait_request));
                 result = result.with_operations(operations);
                 return result;
@@ -13358,7 +13451,7 @@ impl PushToState {
                 let request = CommandRequest::new(CommandId::Activate)
                     .with_target(Some(self.target))
                     .with_update_interval(40)
-                    .with_mode(CommandMode::Sub);
+                    .with_mode(CommandMode::SilentSub);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
@@ -13372,7 +13465,7 @@ impl PushToState {
             let request = CommandRequest::new(CommandId::Grab)
                 .with_target(Some(self.target))
                 .with_update_interval(40)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
         }
@@ -13382,7 +13475,7 @@ impl PushToState {
             let request = CommandRequest::new(CommandId::Enter)
                 .with_target(Some(destination))
                 .with_update_interval(40)
-                .with_mode(CommandMode::Sub)
+                .with_mode(CommandMode::SilentSub)
                 .with_data(CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
             result.operations.push(CommandOperation::PushFront(request));
             return result;
@@ -13397,7 +13490,7 @@ impl PushToState {
             .with_tx(self.tx)
             .with_ty(self.ty)
             .with_update_interval(40)
-            .with_mode(CommandMode::Sub)
+            .with_mode(CommandMode::SilentSub)
             .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET));
         result.operations.push(CommandOperation::PushFront(request));
         result
@@ -13657,7 +13750,7 @@ impl PutState {
                 let request = CommandRequest::new(CommandId::Get)
                     .with_target(Some(item_id))
                     .with_update_interval(40)
-                    .with_mode(CommandMode::Sub);
+                    .with_mode(CommandMode::SilentSub);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
@@ -13672,7 +13765,7 @@ impl PutState {
                     let mut result = CommandStepResult::running(update.clone());
                     let request = CommandRequest::new(CommandId::Exit)
                         .with_update_interval(50)
-                        .with_mode(CommandMode::Sub);
+                        .with_mode(CommandMode::SilentSub);
                     result.operations.push(CommandOperation::PushFront(request));
                     return result;
                 }
@@ -13688,7 +13781,7 @@ impl PutState {
                 let mut result = CommandStepResult::running(update.clone());
                 let request = CommandRequest::new(CommandId::UnGrab)
                     .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
+                    .with_mode(CommandMode::SilentSub);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
@@ -13711,7 +13804,7 @@ impl PutState {
                     let request = CommandRequest::new(CommandId::MoveTo)
                         .with_target(Some(self.container))
                         .with_update_interval(15)
-                        .with_mode(CommandMode::Sub);
+                        .with_mode(CommandMode::SilentSub);
                     result.operations.push(CommandOperation::PushFront(request));
                     return result;
                 }
@@ -13817,7 +13910,7 @@ impl DropState {
         let mut request = CommandRequest::new(CommandId::Put)
             .with_target(Some(container_id))
             .with_target2(Some(item_id))
-            .with_mode(CommandMode::Sub)
+            .with_mode(CommandMode::SilentSub)
             .with_update_interval(15);
 
         if let Some(position) = self.target_position {
@@ -13857,7 +13950,7 @@ impl DropState {
             let request = CommandRequest::new(CommandId::Get)
                 .with_target(Some(item_id))
                 .with_update_interval(40)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
         }
@@ -13883,7 +13976,7 @@ impl DropState {
                     let mut result = CommandStepResult::running(update.clone());
                     let request = CommandRequest::new(CommandId::UnGrab)
                         .with_update_interval(50)
-                        .with_mode(CommandMode::Sub);
+                        .with_mode(CommandMode::SilentSub);
                     result.operations.push(CommandOperation::PushFront(request));
                     return result;
                 }
@@ -13893,7 +13986,7 @@ impl DropState {
                     .with_tx(Some(position.x))
                     .with_ty(Some(position.y))
                     .with_update_interval(20)
-                    .with_mode(CommandMode::Sub);
+                    .with_mode(CommandMode::SilentSub);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
@@ -13901,7 +13994,7 @@ impl DropState {
             let mut result = CommandStepResult::running(update.clone());
             let request = CommandRequest::new(CommandId::UnGrab)
                 .with_update_interval(50)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
         }
@@ -14067,7 +14160,7 @@ impl GetState {
                     CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
                 let request = CommandRequest::new(CommandId::Exit)
                     .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
+                    .with_mode(CommandMode::SilentSub);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
@@ -14091,7 +14184,7 @@ impl GetState {
             let request = CommandRequest::new(CommandId::Grab)
                 .with_target(Some(container_id))
                 .with_update_interval(50)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
         }
@@ -14101,7 +14194,7 @@ impl GetState {
             let request = CommandRequest::new(CommandId::Enter)
                 .with_target(Some(container_id))
                 .with_update_interval(50)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
         }
@@ -14120,7 +14213,7 @@ impl GetState {
             let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
             let request = CommandRequest::new(CommandId::Exit)
                 .with_update_interval(50)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
         }
@@ -14141,7 +14234,7 @@ impl GetState {
             .with_tx(Some(target_snapshot.position.x))
             .with_ty(Some(target_snapshot.position.y + 4))
             .with_update_interval(50)
-            .with_mode(CommandMode::Sub);
+            .with_mode(CommandMode::SilentSub);
         result.operations.push(CommandOperation::PushFront(request));
         result
     }
@@ -14207,7 +14300,7 @@ impl GetState {
                     let mut result = CommandStepResult::running(update.clone());
                     let request = CommandRequest::new(CommandId::UnGrab)
                         .with_update_interval(50)
-                        .with_mode(CommandMode::Sub);
+                        .with_mode(CommandMode::SilentSub);
                     result.operations.push(CommandOperation::PushFront(request));
                     return result;
                 }
@@ -14215,7 +14308,7 @@ impl GetState {
                 let mut result = CommandStepResult::running(update.clone());
                 let request = CommandRequest::new(CommandId::UnGrab)
                     .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
+                    .with_mode(CommandMode::SilentSub);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
@@ -14233,7 +14326,7 @@ impl GetState {
             let mut result = CommandStepResult::running(update.clone());
             let request = CommandRequest::new(CommandId::Exit)
                 .with_update_interval(50)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
         }
@@ -14454,7 +14547,7 @@ impl ThrowState {
         if ctx.object.action_procedure == ActionProcedure::Push && self.throw_position().is_some() {
             let request = CommandRequest::new(CommandId::UnGrab)
                 .with_update_interval(50)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             let mut result = CommandStepResult::running(pending_update);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
@@ -14479,7 +14572,7 @@ impl ThrowState {
                 let acquire_request = CommandRequest::new(CommandId::Acquire)
                     .with_data(CommandData::Text(target_snapshot.definition_id.clone()))
                     .with_update_interval(ACQUIRE_REQUEST_INTERVAL)
-                    .with_mode(CommandMode::Sub)
+                    .with_mode(CommandMode::SilentSub)
                     .with_tx(Some(500))
                     .with_ty(Some(250));
                 let mut result = CommandStepResult::running(pending_update);
@@ -15293,7 +15386,7 @@ impl SellState {
                 let request = CommandRequest::new(CommandId::Enter)
                     .with_target(Some(base_id))
                     .with_update_interval(25)
-                    .with_mode(CommandMode::Sub);
+                    .with_mode(CommandMode::SilentSub);
                 result.operations.push(CommandOperation::PushFront(request));
             }
             return result;
@@ -15737,7 +15830,7 @@ impl HomeState {
             let request = CommandRequest::new(CommandId::Enter)
                 .with_target(Some(base_id))
                 .with_update_interval(25)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             return CommandStepResult::running(update)
                 .with_operations(vec![CommandOperation::PushFront(request)]);
         }
@@ -15907,7 +16000,7 @@ impl EnergyState {
                     let request = CommandRequest::new(CommandId::MoveTo)
                         .with_target(Some(source_id))
                         .with_update_interval(50)
-                        .with_mode(CommandMode::Sub);
+                        .with_mode(CommandMode::SilentSub);
                     return CommandStepResult::running(update_to_stop())
                         .with_operations(vec![CommandOperation::PushFront(request)]);
                 }
@@ -15928,7 +16021,7 @@ impl EnergyState {
             let request = CommandRequest::new(CommandId::MoveTo)
                 .with_target(Some(self.target))
                 .with_update_interval(50)
-                .with_mode(CommandMode::Sub);
+                .with_mode(CommandMode::SilentSub);
             return CommandStepResult::running(update_to_stop())
                 .with_operations(vec![CommandOperation::PushFront(request)]);
         }

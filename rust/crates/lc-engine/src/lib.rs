@@ -16462,9 +16462,10 @@ impl Engine {
                         self.objects[index].apply_command_operations([
                             CommandOperation::DecrementNoCollectDelay,
                             CommandOperation::Clear,
-                            CommandOperation::PushFront(command::CommandRequest::new(
-                                CommandId::Exit,
-                            )),
+                            CommandOperation::PushFront(
+                                command::CommandRequest::new(CommandId::Exit)
+                                    .with_mode(CommandMode::Base),
+                            ),
                         ]);
                     }
                 }
@@ -16572,7 +16573,10 @@ impl Engine {
                 self.objects[index].apply_command_operations([
                     CommandOperation::DecrementNoCollectDelay,
                     CommandOperation::Clear,
-                    CommandOperation::PushFront(command::CommandRequest::new(CommandId::Exit)),
+                    CommandOperation::PushFront(
+                        command::CommandRequest::new(CommandId::Exit)
+                            .with_mode(CommandMode::Base),
+                    ),
                 ]);
             }
         }
@@ -37871,10 +37875,11 @@ impl Engine {
                     CommandOperation::PushFront(
                         CommandRequest::new(CommandId::Drop)
                             .with_target(Some(unused))
-                            .with_mode(CommandMode::Sub),
+                            .with_mode(CommandMode::SilentSub),
                     ),
                     CommandOperation::PushFront(
-                        CommandRequest::new(CommandId::Exit).with_mode(CommandMode::Sub),
+                        CommandRequest::new(CommandId::Exit)
+                            .with_mode(CommandMode::SilentSub),
                     ),
                 ]);
                 return Ok(true);
@@ -37886,7 +37891,7 @@ impl Engine {
             self.objects[actor_index].apply_command_operations([CommandOperation::PushFront(
                 CommandRequest::new(CommandId::Drop)
                     .with_target(Some(unused))
-                    .with_mode(CommandMode::Sub),
+                    .with_mode(CommandMode::SilentSub),
             )]);
             return Ok(true);
         }

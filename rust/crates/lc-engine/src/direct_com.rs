@@ -4298,7 +4298,9 @@ impl Engine {
                     CommandOperation::DecrementNoCollectDelay,
                     CommandOperation::Clear,
                     CommandOperation::PushFront(
-                        CommandRequest::new(CommandId::Enter).with_target(Some(entrance_id)),
+                        CommandRequest::new(CommandId::Enter)
+                            .with_target(Some(entrance_id))
+                            .with_mode(CommandMode::Base),
                     ),
                 ]);
                 return Ok(true);
