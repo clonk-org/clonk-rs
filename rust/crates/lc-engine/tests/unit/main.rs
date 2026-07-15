@@ -23737,6 +23737,165 @@ func Leave()
         );
     }
 
+    #[test]
+    fn script_exit_cancels_attach_before_containment_and_position_writes() {
+        let driver_script = r#"#strict
+public func Leave(object target, int x, int y, int r)
+{
+    return Exit(target, x, y, r);
+}
+"#;
+        let item_script = r#"#strict
+local abort_count, abort_container, abort_x, abort_y, abort_r, abort_phase, abort_saw_idle;
+protected func AttachAbort(int phase)
+{
+    abort_count++;
+    abort_container = Contained();
+    abort_x = GetX();
+    abort_y = GetY();
+    abort_r = GetR();
+    abort_phase = phase;
+    abort_saw_idle = ActIdle();
+}
+"#;
+
+        let mut engine = Engine::with_seed(4);
+        engine
+            .register_definition(
+                Definition::from_script("DRVR", "Driver", driver_script)
+                    .expect("driver compiles"),
+            )
+            .expect("driver registers");
+        let mut item_definition =
+            Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
+        item_definition.set_c4_callback_convention(true);
+        item_definition.configure_actions(
+            Some("Attach".to_string()),
+            HashMap::from([
+                (
+                    "Attach".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("ATTACH")
+                        .with_abort_call("AttachAbort"),
+                ),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_abort_call("AttachAbort"),
+                ),
+            ]),
+        );
+        engine
+            .register_definition(item_definition)
+            .expect("item registers");
+
+        let driver = engine
+            .spawn_object(SpawnConfig::new("DRVR").with_position(Vector2::new(100, 200)))
+            .expect("driver spawns");
+        let driver_index = engine.find_object_index(driver).expect("driver index");
+
+        let mut attach_action = ActionState::new("Attach");
+        attach_action.phase = 3;
+        let loose = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_position(Vector2::new(30, 40))
+                    .with_rotation(11)
+                    .with_action(attach_action)
+                    .with_loaded(true),
+            )
+            .expect("loose attached item spawns");
+        let result = engine
+            .call_object_function(
+                driver_index,
+                "Leave",
+                vec![
+                    object_reference_value(loose),
+                    Value::Int(10),
+                    Value::Int(5),
+                    Value::Int(90),
+                ],
+            )
+            .expect("uncontained Exit runs");
+        assert_eq!(result, Value::Bool(false));
+        let loose = engine.object_snapshot(loose).expect("loose item remains");
+        assert_eq!(loose.action.name, "Idle");
+        assert_eq!(loose.position, Vector2::new(30, 40));
+        assert_eq!(loose.rotation, 11);
+        assert_eq!(loose.local_vars.get("abort_count"), Some(&Value::Int(1)));
+        assert_eq!(loose.local_vars.get("abort_container"), Some(&Value::Nil));
+        assert_eq!(loose.local_vars.get("abort_phase"), Some(&Value::Int(3)));
+        assert_eq!(loose.local_vars.get("abort_saw_idle"), Some(&Value::Bool(true)));
+
+        let mut attach_action = ActionState::new("Attach");
+        attach_action.phase = 7;
+        let contained = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_position(Vector2::new(30, 40))
+                    .with_rotation(11)
+                    .with_container(driver)
+                    .with_action(attach_action)
+                    .with_loaded(true),
+            )
+            .expect("contained attached item spawns");
+        let result = engine
+            .call_object_function(
+                driver_index,
+                "Leave",
+                vec![
+                    object_reference_value(contained),
+                    Value::Int(10),
+                    Value::Int(5),
+                    Value::Int(90),
+                ],
+            )
+            .expect("contained Exit runs");
+        assert_eq!(result, Value::Bool(true));
+        let contained = engine
+            .object_snapshot(contained)
+            .expect("contained item remains");
+        assert_eq!(contained.action.name, "Idle");
+        assert_eq!(contained.container, None);
+        assert_eq!(contained.position, Vector2::new(110, 205));
+        assert_eq!(contained.rotation, 90);
+        assert_eq!(
+            contained.local_vars.get("abort_container"),
+            Some(&object_reference_value(driver))
+        );
+        assert_eq!(contained.local_vars.get("abort_x"), Some(&Value::Int(30)));
+        assert_eq!(contained.local_vars.get("abort_y"), Some(&Value::Int(40)));
+        assert_eq!(contained.local_vars.get("abort_r"), Some(&Value::Int(11)));
+        assert_eq!(contained.local_vars.get("abort_phase"), Some(&Value::Int(7)));
+
+        let walking = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_position(Vector2::new(50, 60))
+                    .with_container(driver)
+                    .with_action(ActionState::new("Walk"))
+                    .with_loaded(true),
+            )
+            .expect("walking item spawns");
+        let result = engine
+            .call_object_function(
+                driver_index,
+                "Leave",
+                vec![
+                    object_reference_value(walking),
+                    Value::Int(10),
+                    Value::Int(5),
+                    Value::Int(90),
+                ],
+            )
+            .expect("non-attach Exit runs");
+        assert_eq!(result, Value::Bool(true));
+        let walking = engine.object_snapshot(walking).expect("walking item remains");
+        assert_eq!(walking.action.name, "Walk");
+        assert_eq!(walking.local_vars.get("abort_count"), None);
+    }
+
     // C4Object::Enter adds the object to the container's Contents list
     // IMMEDIATELY (`Contents.Add(this, C4ObjectList::stContents)`,
     // C4Object.cpp:1601-1605) — the mirror of the same-call Exit shrink

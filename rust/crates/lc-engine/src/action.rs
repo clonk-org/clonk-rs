@@ -681,7 +681,10 @@ impl ActionState {
             }
         }
         if let Some(name) = resolved.name.as_ref() {
-            if !library.contains(name) {
+            // ActIdle is a built-in action slot before ActMap, so it remains
+            // a valid target when a fixture library has a different default
+            // and no explicit "Idle" entry.
+            if name != DEFAULT_ACTION_NAME && !library.contains(name) {
                 resolved.name = Some(library.default_action().to_string());
                 resolved.phase = Some(0);
                 resolved.ticks = Some(0);
@@ -706,7 +709,7 @@ impl ActionState {
     }
 
     pub fn reconcile_with_library(&mut self, library: &ActionLibrary) {
-        if !library.contains(&self.name) {
+        if self.name != DEFAULT_ACTION_NAME && !library.contains(&self.name) {
             self.name = library.default_action().to_string();
             self.phase = 0;
             self.ticks = 0;

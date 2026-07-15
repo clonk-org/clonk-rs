@@ -8102,9 +8102,10 @@ fn grab_contents(args: &[Value]) -> Result<Value, RuntimeError> {
 /// re-places the object at the caller's position with r = 0 and zeroed
 /// dirs (C4Object.cpp:1549-1553), the y target offset by the SUBJECT's
 /// Shape.y (:385) and rdir scaled `itofix(trdir) / 10` (:388). The
-/// ObjectComCancelAttach and BoundsCheck side arms stay unmodeled. Exit
-/// dispatches Ejection then Departure synchronously and returns the live
-/// post-callback `!Contained` state (C4Object.cpp:1559-1563).
+/// BoundsCheck side arm stays unmodeled. ObjectComCancelAttach changes an
+/// ATTACH action to Idle (including its AbortCall) before Exit checks
+/// containment. Exit dispatches Ejection then Departure synchronously and
+/// returns the live post-callback `!Contained` state (C4Object.cpp:1559-1563).
 fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 7 {
         return Err(RuntimeError::new(
@@ -8119,7 +8120,7 @@ fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
     let txdir = parse_optional_i32(args.get(4), "Exit", "xdir")?.unwrap_or(0);
     let tydir = parse_optional_i32(args.get(5), "Exit", "ydir")?.unwrap_or(0);
     let trdir = parse_optional_i32(args.get(6), "Exit", "rdir")?.unwrap_or(0);
-    let exited = HOST_CONTEXT.with(|cell| {
+    let prepared = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return Ok(None);
@@ -8143,8 +8144,43 @@ fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
         } else {
             tr
         };
+        Ok(Some((target, abs_x, abs_y, rotation)))
+    })?;
+    let Some((target, abs_x, abs_y, rotation)) = prepared else {
+        return Ok(Value::Bool(false));
+    };
+
+    // ObjectComCancelAttach runs after the optional rotation draw but before
+    // C4Object::Exit checks Contained. SetAction(ActIdle) is a native call:
+    // a script function named SetAction may not intercept it, and the old
+    // ATTACH action's AbortCall observes the pre-Exit position/container.
+    let attached = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        context
+            .object_scope(target)
+            .map(ObjectScopeContext::effective_action_procedure)
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .and_then(|object| object.procedure_name().map(ActionProcedure::from_name))
+            })
+            == Some(ActionProcedure::Attach)
+    });
+    if attached {
+        let _ = native_set_action_by_name(target, "Idle")?;
+    }
+
+    let exited = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return None;
+        };
         // The SUBJECT's live Shape.y (C4Script.cpp:385): a same-call
-        // SetShape override wins over the def shape.
+        // SetShape override wins over the def shape. Read it only after the
+        // attach AbortCall, which may change the shape or definition.
         let shape_y = context
             .object_scope(target)
             .and_then(|scope| scope.pending_update.shape_override)
@@ -8157,13 +8193,13 @@ fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
             })
             .unwrap_or(0);
         if !context.ensure_object_scope(target) {
-            return Ok(None);
+            return None;
         }
         let Some(scope) = context.object_scope_mut(target) else {
-            return Ok(None);
+            return None;
         };
         let Some(previous_container) = scope.container() else {
-            return Ok(None); // not contained (C4Object.cpp:1539)
+            return None; // not contained (C4Object.cpp:1539)
         };
         scope.set_container(None);
         scope.set_position(Vector2::new(abs_x, abs_y.saturating_add(shape_y)));
@@ -8173,9 +8209,9 @@ fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
         scope.pending_update.rotation = Some(rotation);
         scope.set_fixed_velocity(FixedVec2::new(itofix(txdir), itofix(tydir)));
         scope.set_rotation_velocity(itofix(trdir) / 10);
-        Ok(Some((target, previous_container)))
-    })?;
-    let Some((target, previous_container)) = exited else {
+        Some(previous_container)
+    });
+    let Some(previous_container) = exited else {
         return Ok(Value::Bool(false));
     };
 
@@ -21847,7 +21883,9 @@ fn native_set_action_by_name_with_target(
         let Some(object) = context.object_scope_mut(target) else {
             return Ok(None);
         };
-        if !object.action_library.contains(name) {
+        // ActIdle is the built-in action slot before ActMap and is always a
+        // valid SetAction target even when no action named "Idle" exists.
+        if name != "Idle" && !object.action_library.contains(name) {
             return Ok(None);
         }
         let current = object.effective_action_name().to_string();
@@ -21888,9 +21926,9 @@ fn native_set_action_by_name_with_target(
         object.refresh_cached_ocf();
 
         Ok(Some((
-            object
-                .action_library
-                .start_call_for_action(actual_name)
+            (actual_name != "Idle")
+                .then(|| object.action_library.start_call_for_action(actual_name))
+                .flatten()
                 .map(str::to_string),
             object
                 .action_library
