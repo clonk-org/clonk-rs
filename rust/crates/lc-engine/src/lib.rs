@@ -31543,6 +31543,31 @@ impl Engine {
         Ok(true)
     }
 
+    /// C++'s shared `GrabLost` helper: notify the current action target,
+    /// then clear commands above the first PushTo in the pusher's live stack.
+    /// The callback may replace that stack, so the clear must follow it.
+    fn grab_lost(&mut self, pusher_id: ObjectId) -> Result<(), EngineError> {
+        let Some(target_id) = self
+            .find_object_index(pusher_id)
+            .and_then(|index| self.objects[index].state.action.target)
+        else {
+            return Ok(());
+        };
+        let Some(target_idx) = self.find_object_index(target_id) else {
+            return Ok(());
+        };
+
+        let _ = tolerate_script_error(self.call_object_function(
+            target_idx,
+            "GrabLost",
+            Vec::new(),
+        ))?;
+        if let Some(pusher_idx) = self.find_object_index(pusher_id) {
+            self.objects[pusher_idx].commands.clear_to_first_push_to();
+        }
+        Ok(())
+    }
+
     #[doc(hidden)]
     pub fn apply_no_attach_action(
         &mut self,
@@ -31555,8 +31580,9 @@ impl Engine {
             return Ok(());
         }
 
-        let previous = self.objects[idx].state.action.clone();
-        if previous.name == library.default_action() {
+        let object_id = self.objects[idx].id;
+        let initial_action = self.objects[idx].state.action.clone();
+        if initial_action.name == library.default_action() {
             // Inactive objects: simple mobile natural gravity
             // (C4Object.cpp:4299-4303) — DoGravity's free-fall branch
             // still skips StaticBack (:4662).
@@ -31570,7 +31596,7 @@ impl Engine {
             return Ok(());
         }
 
-        let procedure = library.procedure_for_action(&previous.name);
+        let procedure = library.procedure_for_action(&initial_action.name);
         let command_direction = self.objects[idx].state.command_direction;
         let direction = self.objects[idx].state.direction;
         let scaling_upward = matches!(
@@ -31592,11 +31618,35 @@ impl Engine {
             }
         }
 
+        // Pushing off an attachment first notifies the vehicle and restores
+        // the PushTo command before falling through to ObjectActionJump
+        // (C4Object.cpp:4302-4306).
+        if matches!(procedure, ActionProcedure::Push) {
+            self.grab_lost(object_id)?;
+        }
+
+        // GrabLost and corner-probe callbacks are synchronous. The ensuing
+        // ObjectActionJump resolves the pusher's live definition and action.
+        let Some(idx) = self.find_object_index(object_id).filter(|&index| {
+            !self.objects[index].destroyed
+                && !matches!(self.objects[index].state.status, ObjectStatus::Deleted)
+        }) else {
+            return Ok(());
+        };
+        let live_definition_id = self.objects[idx].definition_id.clone();
+        let live_library = self
+            .definitions
+            .get(&live_definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(live_definition_id.clone()))?
+            .action_library()
+            .clone();
+        let previous = self.objects[idx].state.action.clone();
+
         // ObjectActionJump is `if (!SetActionByName("Jump")) return false;`
         // (C4ObjectCom.cpp:54) — a def without a Jump action keeps its
         // current action untouched (the GoldRush coach stays in Turn even
         // while its attach probe finds no ground at the map edge).
-        if !library.contains("Jump") {
+        if !live_library.contains("Jump") {
             return Ok(());
         }
         let next_action = "Jump";
@@ -31619,7 +31669,7 @@ impl Engine {
         let result = object
             .state
             .action
-            .apply_update_with_library(&update, library);
+            .apply_update_with_library(&update, &live_library);
         // SetAction fix resync (C4Object.cpp:4144) — only past the
         // NoOtherAction early returns.
         if update.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
@@ -32315,14 +32365,9 @@ impl Engine {
         if !(-push_range..=sawdt - 1 + push_range).contains(&(position.x - sax))
             || !(-push_range..=sahgt - 1 + push_range).contains(&(position.y - say))
         {
+            let pusher_id = self.objects[idx].id;
             self.stop_action_delay_command(idx, definition_id)?;
-            // Grab lost: GrabLost script call on the target
-            // (C4Object.cpp:4251-4254).
-            let _ = tolerate_script_error(self.call_object_function(
-                target_idx,
-                "GrabLost",
-                Vec::new(),
-            ))?;
+            self.grab_lost(pusher_id)?;
             return Ok(false);
         }
         // Vertical follow (C4Object.cpp:5083).

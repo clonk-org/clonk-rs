@@ -19118,6 +19118,207 @@ protected func Activity() { SetActionTargets(); return(1); }
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
     }
 
+    fn grab_lost_push_fixture(
+        pusher_position: Vector2,
+        vehicle_position: Vector2,
+    ) -> (Engine, ObjectId, ObjectId) {
+        let mut pusher = Definition::from_script("PSHR", "Pusher", "#strict")
+            .expect("pusher compiles");
+        pusher.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        pusher.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+        pusher.set_contact_density(50);
+        pusher.set_physical(PhysicalInfo {
+            walk: 35_000,
+            push: 45_000,
+            ..PhysicalInfo::default()
+        });
+        pusher.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Push".to_string(),
+                    ActionSpec::default().with_procedure("PUSH"),
+                ),
+                (
+                    "Jump".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+            ]),
+        );
+
+        let vehicle_script = r#"#strict
+local pusher, grab_lost_calls, action_seen;
+public func Arm(actor) { pusher = actor; }
+protected func GrabLost()
+{
+    grab_lost_calls = grab_lost_calls + 1;
+    action_seen = GetAction(pusher);
+}
+"#;
+        let mut vehicle = Definition::from_script("VEHI", "Vehicle", vehicle_script)
+            .expect("vehicle compiles");
+        vehicle.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        vehicle.set_grab(1);
+        vehicle.set_mass(200);
+
+        let mut engine = Engine::with_seed(7);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine.register_definition(pusher).expect("pusher registers");
+        engine
+            .register_definition(vehicle)
+            .expect("vehicle registers");
+        let vehicle_id = engine
+            .spawn_object(
+                SpawnConfig::new("VEHI")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(vehicle_position)
+                    .with_fixed_position(FixedVec2::from_ints(
+                        vehicle_position.x,
+                        vehicle_position.y,
+                    ))
+                    .with_loaded(true),
+            )
+            .expect("vehicle spawns");
+        let mut push = ActionState::new("Push");
+        push.target = Some(vehicle_id);
+        let pusher_id = engine
+            .spawn_object(
+                SpawnConfig::new("PSHR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(pusher_position)
+                    .with_fixed_position(FixedVec2::from_ints(
+                        pusher_position.x,
+                        pusher_position.y,
+                    ))
+                    .with_action(push)
+                    .with_command_direction(CommandDirection::Right)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("pusher spawns");
+
+        let vehicle_idx = engine
+            .find_object_index(vehicle_id)
+            .expect("vehicle exists");
+        engine
+            .call_object_function(
+                vehicle_idx,
+                "Arm",
+                vec![object_reference_value(pusher_id)],
+            )
+            .expect("vehicle arms callback");
+        let pusher_idx = engine
+            .find_object_index(pusher_id)
+            .expect("pusher exists");
+        let commands = &mut engine.objects[pusher_idx].commands;
+        commands
+            .push_back(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(20))
+                    .with_ty(Some(5)),
+            )
+            .expect("MoveTo queues");
+        commands
+            .push_back(CommandRequest::new(CommandId::PushTo).with_target(Some(vehicle_id)))
+            .expect("PushTo queues");
+        commands
+            .push_back(CommandRequest::new(CommandId::Wait).with_update_interval(90))
+            .expect("Wait queues");
+        assert_eq!(
+            commands.command_names(),
+            vec!["MoveTo", "PushTo", "Wait"]
+        );
+
+        (engine, pusher_id, vehicle_id)
+    }
+
+    #[test]
+    fn push_no_attach_calls_grab_lost_before_jump_and_restores_push_to() {
+        let (mut engine, pusher_id, vehicle_id) =
+            grab_lost_push_fixture(Vector2::new(5, 5), Vector2::new(8, 5));
+        let mut landscape = vehicle_grid_landscape(16, 16);
+        landscape.set_world_height(16);
+        landscape.grid_write_byte(5, 6, 1);
+        engine.set_landscape(landscape);
+
+        let pusher_idx = engine
+            .find_object_index(pusher_id)
+            .expect("pusher exists");
+        engine.objects[pusher_idx].frame_t_attach = CNAT_BOTTOM;
+        engine.objects[pusher_idx]
+            .set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
+        let definition_id = engine.objects[pusher_idx].definition_id.clone();
+        let actions = engine
+            .definitions
+            .get(&definition_id)
+            .expect("pusher definition exists")
+            .action_library()
+            .clone();
+
+        assert!(
+            engine
+                .exec_object_movement(pusher_idx, &actions, &definition_id, &[])
+                .expect("ledge movement succeeds")
+                .alive
+        );
+
+        let pusher = engine.object_snapshot(pusher_id).expect("pusher remains");
+        assert_eq!(pusher.position, Vector2::new(6, 5));
+        assert_eq!(pusher.action.name, "Jump");
+        assert_eq!(
+            pusher.command_stack.command_names(),
+            vec!["PushTo", "Wait"]
+        );
+        let vehicle = engine.object_snapshot(vehicle_id).expect("vehicle remains");
+        assert_eq!(
+            vehicle.local_vars.get("grab_lost_calls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            vehicle.local_vars.get("action_seen"),
+            Some(&Value::String("Push".to_owned())),
+            "GrabLost must run before the pusher's Jump transition"
+        );
+    }
+
+    #[test]
+    fn push_got_hold_loss_clears_delay_and_approach_above_push_to() {
+        let (mut engine, pusher_id, vehicle_id) =
+            grab_lost_push_fixture(Vector2::new(100, 5), Vector2::new(8, 5));
+        let pusher_idx = engine
+            .find_object_index(pusher_id)
+            .expect("pusher exists");
+
+        assert!(
+            !engine
+                .apply_physics_at_index(pusher_idx)
+                .expect("out-of-range push resolves")
+        );
+
+        let pusher = engine.object_snapshot(pusher_id).expect("pusher remains");
+        assert_eq!(pusher.action.name, "Walk");
+        assert_eq!(pusher.command_direction, CommandDirection::Stop);
+        assert_eq!(
+            pusher.command_stack.command_names(),
+            vec!["PushTo", "Wait"],
+            "GrabLost clears the new delay and MoveTo but preserves PushTo's tail"
+        );
+        let vehicle = engine.object_snapshot(vehicle_id).expect("vehicle remains");
+        assert_eq!(
+            vehicle.local_vars.get("grab_lost_calls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            vehicle.local_vars.get("action_seen"),
+            Some(&Value::String("Walk".to_owned())),
+            "StopActionDelayCommand precedes GrabLost"
+        );
+    }
+
     fn push_pull_fixture() -> (Engine, ObjectId, ObjectId) {
         let script = r#"
         global func Initialize(state, random) {

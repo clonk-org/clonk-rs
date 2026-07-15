@@ -8545,6 +8545,45 @@ mod tests {
     }
 
     #[test]
+    fn grab_lost_clears_only_to_a_push_to_with_a_predecessor() {
+        let target = ObjectId::new(7);
+        let request = |id| match id {
+            CommandId::PushTo => {
+                CommandRequest::new(CommandId::PushTo).with_target(Some(target))
+            }
+            other => CommandRequest::new(other),
+        };
+
+        let mut stack = CommandStack::new();
+        for id in [CommandId::MoveTo, CommandId::PushTo, CommandId::Wait] {
+            stack.push_back(request(id)).expect("command queues");
+        }
+        stack.clear_to_first_push_to();
+        assert_eq!(stack.command_names(), vec!["PushTo", "Wait"]);
+
+        // C++ tests pCom->Next, so a PushTo already at the head is not a
+        // match. A later PushTo can still become the preserved successor.
+        let mut duplicate = CommandStack::new();
+        for id in [
+            CommandId::PushTo,
+            CommandId::MoveTo,
+            CommandId::PushTo,
+            CommandId::Wait,
+        ] {
+            duplicate.push_back(request(id)).expect("command queues");
+        }
+        duplicate.clear_to_first_push_to();
+        assert_eq!(duplicate.command_names(), vec!["PushTo", "Wait"]);
+
+        let mut head_only = CommandStack::new();
+        for id in [CommandId::PushTo, CommandId::Wait] {
+            head_only.push_back(request(id)).expect("command queues");
+        }
+        head_only.clear_to_first_push_to();
+        assert_eq!(head_only.command_names(), vec!["PushTo", "Wait"]);
+    }
+
+    #[test]
     fn command_stack_snapshot_preserves_acquire_state() {
         let builder_id = ObjectId::new(10);
         let item_id = ObjectId::new(11);
@@ -10732,6 +10771,23 @@ impl CommandStack {
             .collect::<Vec<_>>();
         self.detached_grab_attempts.extend(attempts);
         self.entries.clear();
+    }
+
+    /// `GrabLost` clears through the predecessor of the first PushTo that
+    /// has one, keeping that PushTo and its tail (C4Object.cpp:4262-4273).
+    pub(crate) fn clear_to_first_push_to(&mut self) {
+        let Some(count) = self
+            .entries
+            .iter()
+            .skip(1)
+            .position(|entry| entry.id() == Some(CommandId::PushTo))
+            .map(|index| index + 1)
+        else {
+            return;
+        };
+        for _ in 0..count {
+            self.pop_front();
+        }
     }
 
     pub fn snapshot(&self) -> CommandStackSnapshot {
