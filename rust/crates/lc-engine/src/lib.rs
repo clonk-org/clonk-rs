@@ -3165,8 +3165,8 @@ pub(crate) fn normalize_menu_info_caption(text: impl Into<String>) -> String {
 /// A script-created object menu (C4ObjectMenu; FnCreateMenu →
 /// C4ObjectMenu::Init, C4ObjectMenu.cpp:86-91): the minimal state scripts
 /// can observe — GetMenu reads `identification`, SelectMenuItem moves
-/// `selection`, MenuQueryCancel/OnMenuSelection dispatch on
-/// `command_object` (CB_Object) or the scenario script (CB_Scenario).
+/// `selection`, MenuQueryCancel/OnMenuSelection dispatch on the callback
+/// type captured at initialization (CB_Object or CB_Scenario).
 /// C++ never persists menus in Objects.txt, so this state is runtime-only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectMenuState {
@@ -3206,9 +3206,14 @@ pub struct ObjectMenuState {
     /// C4ObjectMenu::UserMenu — script menus always pass fUserMenu=true
     /// (C4Script.cpp:1451), enabling MenuQueryCancel/OnMenuSelection.
     pub user_menu: bool,
-    /// C4ObjectMenu::Object — the callback target (CB_Object); None =
-    /// CB_Scenario (C4ObjectMenu::LocalInit, C4ObjectMenu.cpp:78-84).
+    /// C4ObjectMenu::Object — the callback target for CB_Object. Pointer
+    /// clearing may turn this into None without changing the callback type.
     pub command_object: Option<ObjectId>,
+    /// C4ObjectMenu::eCallbackType == CB_Scenario. This is captured by
+    /// LocalInit and deliberately survives command-object pointer clearing
+    /// (C4ObjectMenu.cpp:78-84; C4ObjectMenu::ClearPointers).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub scenario_callbacks: bool,
     /// C4ObjectMenu::RefillObject. Internal object menus retain this exact
     /// target because an explicit Activate/Get target need not be the
     /// command object's current container (C4ObjectMenu.h:61-71).
@@ -13187,6 +13192,7 @@ impl ScenarioScript {
         script_name: &str,
         script: &ScriptEngine,
         source: &str,
+        function_label: &str,
         strict_level: Option<u8>,
         world: HostWorldContext,
         rng: LcgRng,
@@ -13207,7 +13213,7 @@ impl ScenarioScript {
         let (value, _finals, batch, audio, rng, error) = Self::execute_value_for_script(
             script_name,
             None,
-            "console script",
+            function_label,
             &[],
             world,
             rng,
@@ -18954,7 +18960,8 @@ impl Engine {
             )
         };
 
-        let _ = self.direct_exec_script_control_global(&source, Some(3))?;
+        let _ =
+            self.direct_exec_script_control_global(&source, "console script", Some(3))?;
         Ok(true)
     }
 
@@ -19005,7 +19012,7 @@ impl Engine {
             return Ok(Some(value));
         }
 
-        self.direct_exec_script_control_global(&source, strict_level)
+        self.direct_exec_script_control_global(&source, "console script", strict_level)
             .map(Some)
     }
 
@@ -19027,6 +19034,15 @@ impl Engine {
         source: &str,
         strict_level: Option<u8>,
     ) -> Result<Value, EngineError> {
+        self.direct_exec_scenario_script(source, "console script", strict_level)
+    }
+
+    fn direct_exec_scenario_script(
+        &mut self,
+        source: &str,
+        function_label: &str,
+        strict_level: Option<u8>,
+    ) -> Result<Value, EngineError> {
         let Some((name, script)) = self
             .scenario_script
             .as_ref()
@@ -19034,14 +19050,25 @@ impl Engine {
         else {
             // Game.Script exists even when the scenario supplied no Script.c;
             // its empty host still resolves through Game.ScriptEngine.
-            return self.direct_exec_script_control_global(source, strict_level);
+            return self.direct_exec_script_control_global(
+                source,
+                function_label,
+                strict_level,
+            );
         };
-        self.direct_exec_script_control_host(&name, script.as_ref(), source, strict_level)
+        self.direct_exec_script_control_host(
+            &name,
+            script.as_ref(),
+            source,
+            function_label,
+            strict_level,
+        )
     }
 
     fn direct_exec_script_control_global(
         &mut self,
         source: &str,
+        function_label: &str,
         strict_level: Option<u8>,
     ) -> Result<Value, EngineError> {
         let script = self.script_control_global_host();
@@ -19049,6 +19076,7 @@ impl Engine {
             "Game.ScriptEngine",
             &script,
             source,
+            function_label,
             strict_level,
         )
     }
@@ -19091,11 +19119,58 @@ impl Engine {
         Ok(value.unwrap_or(Value::Nil))
     }
 
+    /// `Game.Script.Call` with the exact C++ argument list and raw return
+    /// value. Unlike [`Self::call_scenario_script_function`], this does not
+    /// prepend the fixture-only scenario state and keeps fail-safe callback
+    /// errors as a silent miss.
+    fn call_scenario_script_value(
+        &mut self,
+        function: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>, EngineError> {
+        let Some((name, script)) = self.scenario_script.as_ref().and_then(|scenario| {
+            scenario
+                .script
+                .has_local_function(function)
+                .then(|| (scenario.name.clone(), scenario.script_arc()))
+        }) else {
+            return Ok(None);
+        };
+        let world = self.host_world_context();
+        let (value, _final_args, batch, audio_state, rng, script_error) =
+            ScenarioScript::call_value_for_script(
+                &name,
+                script.as_ref(),
+                None,
+                function,
+                args,
+                world,
+                self.rng.clone(),
+                self.frame,
+                &self.global_effects.clone(),
+                self.physics,
+                self.environment,
+                self.audio_registry.clone(),
+                self.game_over_triggered,
+            );
+        self.rng = rng;
+        self.audio_registry = audio_state;
+        self.apply_scenario_batch(batch)?;
+        if let Some(error) = script_error {
+            if !matches!(error, EngineError::Script { .. }) {
+                return Err(error);
+            }
+            return Ok(None);
+        }
+        Ok(value)
+    }
+
     fn direct_exec_script_control_host(
         &mut self,
         script_name: &str,
         script: &ScriptEngine,
         source: &str,
+        function_label: &str,
         strict_level: Option<u8>,
     ) -> Result<Value, EngineError> {
         let world = self.host_world_context();
@@ -19104,6 +19179,7 @@ impl Engine {
                 script_name,
                 script,
                 source,
+                function_label,
                 strict_level,
                 world,
                 self.rng.clone(),
@@ -21077,25 +21153,28 @@ impl Engine {
         if !menu.permanent {
             self.objects[index].state.menu = None;
         }
-        // C4ObjectMenu::MenuCommand CB_Object (C4ObjectMenu.cpp:519-521):
-        // DirectExec on the command object, fail-safe (fPassErrors=false).
-        // CB_Scenario (Game.Script.DirectExec, :523-526) is unported —
-        // see PORT_STATUS. C4Player::Execute performs the later
+        // C4ObjectMenu::MenuCommand dispatches the copied expression either
+        // on the command object or, for CB_Scenario, on Game.Script with a
+        // nil object context (C4ObjectMenu.cpp:519-526). Both calls are
+        // fail-safe (fPassErrors=false). C4Player::Execute performs the later
         // AutoContextMenu pass through execute_player_controls.
-        match menu.command_object.and_then(|id| self.find_object_index(id)) {
-            Some(command_index) => {
+        if menu.scenario_callbacks {
+            let strict_level = self
+                .scenario_script
+                .as_ref()
+                .and_then(|scenario| scenario.base_script.strict_level());
+            let _ = self.direct_exec_scenario_script(
+                &command,
+                "MenuCommand",
+                strict_level,
+            )?;
+        } else if let Some(command_object) = menu.command_object {
+            if let Some(command_index) = self.find_object_index(command_object) {
                 tolerate_script_error(self.direct_exec_on_object(
                     command_index,
                     &command,
                     "MenuCommand",
                 ))?;
-            }
-            None => {
-                tracing::warn!(
-                    id = object_id.as_u64(),
-                    command,
-                    "menu Enter without a command object (CB_Scenario MenuCommand unported)"
-                );
             }
         }
         // Internal permanent inventory/base menus are refill-driven. The
@@ -38691,9 +38770,9 @@ impl Engine {
     /// (C4Menu::TryClose, C4Menu.cpp:317-320); a soft close of a USER menu
     /// asks MenuQueryCancel(Selection, ParentObject) on the command object
     /// first (C4ObjectMenu::IsCloseDenied, C4ObjectMenu.cpp:57-76) — a
-    /// truthy answer keeps the menu and fails the close. CB_Scenario menus
-    /// (no command object) skip the query here — see the PORT_STATUS
-    /// `object menus` row.
+    /// truthy answer keeps the menu and fails the close. A menu initialized
+    /// with CB_Scenario uses the scenario script even though a cleared
+    /// CB_Object target is also represented by a missing command pointer.
     pub(crate) fn close_object_menu(
         &mut self,
         object_id: ObjectId,
@@ -38709,31 +38788,37 @@ impl Engine {
             // Missing handler = silent miss (the "~" in PSF_MenuQueryCancel,
             // C4GameScript.h); callee errors fall back to close-OK like the
             // C++ fail-safe Call.
-            let command_index = menu
-                .command_object
-                .and_then(|command_object| self.find_object_index(command_object))
-                .filter(|&command_index| {
-                    self.definitions
-                        .get(&self.objects[command_index].definition_id)
-                        .is_some_and(|definition| definition.has_function("MenuQueryCancel"))
-                });
-            let denied = match command_index {
-                Some(command_index) => {
-                    let pars = vec![
-                        Value::Int(menu.selection),
-                        object_reference_value(object_id),
-                    ];
-                    tolerate_script_error(self.call_object_function(
+            let pars = vec![
+                Value::Int(menu.selection),
+                object_reference_value(object_id),
+            ];
+            let denied = if menu.scenario_callbacks {
+                self.call_scenario_script_value("MenuQueryCancel", &pars)
+                    .map(|value| value.is_some_and(|value| value.as_bool()))
+            } else if let Some(command_object) = menu.command_object {
+                let command_index = self
+                    .find_object_index(command_object)
+                    .filter(|&command_index| {
+                        self.definitions
+                            .get(&self.objects[command_index].definition_id)
+                            .is_some_and(|definition| {
+                                definition.has_function("MenuQueryCancel")
+                            })
+                    });
+                match command_index {
+                    Some(command_index) => tolerate_script_error(self.call_object_function(
                         command_index,
                         "MenuQueryCancel",
                         pars,
-                    ))?
-                    .map(|value| value.as_bool())
-                    .unwrap_or(false)
+                    ))
+                    .map(|value| value.is_some_and(|value| value.as_bool())),
+                    None => Ok(false),
                 }
-                None => false,
+            } else {
+                Ok(false)
             };
             compat::end_menu_close_query(object_id);
+            let denied = denied?;
             if denied {
                 return Ok(false);
             }

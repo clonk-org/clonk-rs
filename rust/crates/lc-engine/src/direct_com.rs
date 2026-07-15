@@ -912,6 +912,7 @@ impl Engine {
                             &script_name,
                             script.as_ref(),
                             &source,
+                            "EffectContextCondition",
                             None,
                         )?;
                         compat::value_raw_truthy(&value)
@@ -1267,6 +1268,7 @@ impl Engine {
             selection: -1,
             user_menu: false,
             command_object: Some(crew_id),
+            scenario_callbacks: false,
             refill_object: Some(base_id),
             refill_object_contents_count: 0,
             items: Vec::new(),
@@ -1503,6 +1505,7 @@ impl Engine {
             selection: -1,
             user_menu: false,
             command_object: Some(crew_id),
+            scenario_callbacks: false,
             refill_object: None,
             refill_object_contents_count: 0,
             items: Vec::new(),
@@ -2717,25 +2720,28 @@ impl Engine {
         if !menu.user_menu {
             return Ok(());
         }
-        let Some(command_index) = menu
-            .command_object
-            .and_then(|command_object| self.find_object_index(command_object))
-            .filter(|&command_index| {
-                self.definitions
-                    .get(&self.objects[command_index].definition_id)
-                    .is_some_and(|definition| definition.has_function("OnMenuSelection"))
-            })
-        else {
-            // CB_Scenario selection callbacks remain part of the scenario
-            // script-menu gap; a missing callback is a silent C++ miss.
-            return Ok(());
-        };
         let args = vec![Value::Int(menu.selection), compat::object_reference_value(object_id)];
-        let _ = tolerate_script_error(self.call_object_function(
-            command_index,
-            "OnMenuSelection",
-            args,
-        ))?;
+        if menu.scenario_callbacks {
+            let _ = self.call_scenario_script_value("OnMenuSelection", &args)?;
+        } else if let Some(command_object) = menu.command_object {
+            let Some(command_index) = self
+                .find_object_index(command_object)
+                .filter(|&command_index| {
+                    self.definitions
+                        .get(&self.objects[command_index].definition_id)
+                        .is_some_and(|definition| {
+                            definition.has_function("OnMenuSelection")
+                        })
+                })
+            else {
+                return Ok(());
+            };
+            let _ = tolerate_script_error(self.call_object_function(
+                command_index,
+                "OnMenuSelection",
+                args,
+            ))?;
+        }
         Ok(())
     }
 
@@ -3441,6 +3447,7 @@ impl Engine {
             selection,
             user_menu: false,
             command_object: Some(crew_id),
+            scenario_callbacks: false,
             refill_object: Some(base_id),
             refill_object_contents_count: 0,
             items,
@@ -3737,6 +3744,7 @@ impl Engine {
             selection,
             user_menu: false,
             command_object: Some(crew_id),
+            scenario_callbacks: false,
             refill_object: Some(base_id),
             refill_object_contents_count: 0,
             items,
@@ -3885,6 +3893,7 @@ impl Engine {
             selection,
             user_menu: false,
             command_object: Some(crew_id),
+            scenario_callbacks: false,
             refill_object: Some(container_id),
             refill_object_contents_count,
             items,
@@ -4084,6 +4093,7 @@ impl Engine {
             selection,
             user_menu: false,
             command_object: Some(crew_id),
+            scenario_callbacks: false,
             refill_object: Some(container_id),
             refill_object_contents_count,
             items,
@@ -6680,6 +6690,180 @@ mod tests {
             "Jump",
             "once the mandatory menu closes, Up reaches ObjectComUp"
         );
+    }
+
+    #[test]
+    fn scenario_script_menu_routes_enter_close_and_selection_callbacks_like_cpp() {
+        let scenario = r#"
+        #strict 2
+        static menu_owner;
+
+        func Open(obj) {
+            menu_owner = obj;
+            CreateMenu(WIPF, obj, 0, 0, "Scenario");
+            AddMenuItem("First", "Choose(11)", WIPF, obj);
+            AddMenuItem("Second", "Choose(22)", WIPF, obj);
+            return 1;
+        }
+
+        func Choose(value) {
+            SetWealth(1, value);
+            return 1;
+        }
+
+        func OnMenuSelection(selection, parent) {
+            if (selection == 1 && parent == menu_owner) SetWealth(1, 101);
+            return 1;
+        }
+
+        func MenuQueryCancel(selection, parent) {
+            if (selection == 1 && parent == menu_owner) {
+                SetWealth(1, 201);
+                return 1;
+            }
+            return 0;
+        }
+        "#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        engine
+            .install_scenario_script_with_convention("Scenario", scenario, true)
+            .expect("scenario script installs");
+        engine
+            .call_scenario_script_function(
+                "Open",
+                vec![compat::object_reference_value(crew)],
+            )
+            .expect("scenario menu opens");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("menu open");
+        assert_eq!(menu.selection, 0);
+        assert_eq!(menu.command_object, None, "scenario scope selects CB_Scenario");
+        assert!(menu.scenario_callbacks);
+
+        engine.player_in_com(1, COM_RIGHT, 0).expect("menu right");
+        assert_eq!(
+            engine.player(1).expect("player").wealth(),
+            101,
+            "OnMenuSelection receives the live selection and parent object"
+        );
+
+        engine.player_in_com(1, COM_DIG, 0).expect("menu close");
+        assert!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .is_some(),
+            "scenario MenuQueryCancel may deny the soft close"
+        );
+        assert_eq!(engine.player(1).expect("player").wealth(), 201);
+
+        engine.player_in_com(1, COM_THROW, 0).expect("menu enter");
+        assert_eq!(
+            engine.debug_object_menu(crew.as_u64()),
+            Some(None),
+            "non-permanent menu closes before its command executes"
+        );
+        assert_eq!(
+            engine.player(1).expect("player").wealth(),
+            22,
+            "the selected command executes in scenario scope"
+        );
+    }
+
+    #[test]
+    fn cleared_object_menu_callback_does_not_become_scenario_callback() {
+        let object_script = r#"
+        #strict 2
+        func OpenMenu(command) {
+            CreateMenu(WIPF, this(), command, 0, "Object");
+            AddMenuItem("First", "Choose(11)", WIPF, this());
+            AddMenuItem("Second", "Choose(22)", WIPF, this());
+            return 1;
+        }
+        func Choose(value) { SetWealth(1, value); return 1; }
+        func OnMenuSelection() { SetWealth(1, 301); return 1; }
+        func MenuQueryCancel() { SetWealth(1, 302); return 1; }
+        "#;
+        let scenario = r#"
+        #strict 2
+        func Choose(value) { SetWealth(1, value); return 1; }
+        func OnMenuSelection() { SetWealth(1, 101); return 1; }
+        func MenuQueryCancel() { SetWealth(1, 201); return 1; }
+        "#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", object_script);
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        engine
+            .install_scenario_script_with_convention("Scenario", scenario, true)
+            .expect("scenario script installs");
+
+        let open_menu = |engine: &mut Engine, command_object: ObjectId| {
+            let crew_index = engine.find_object_index(crew).expect("crew exists");
+            engine
+                .call_object_function(
+                    crew_index,
+                    "OpenMenu",
+                    vec![compat::object_reference_value(command_object)],
+                )
+                .expect("object-callback menu opens");
+        };
+
+        let command_object = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("command object spawns");
+        open_menu(&mut engine, command_object);
+        engine
+            .assign_object_removal(command_object)
+            .expect("command object removal succeeds");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("menu remains");
+        assert_eq!(menu.command_object, None, "the object pointer is cleared");
+        assert!(
+            !menu.scenario_callbacks,
+            "ClearPointers does not change the captured CB_Object type"
+        );
+
+        engine.player_in_com(1, COM_RIGHT, 0).expect("menu right");
+        assert_eq!(
+            engine.player(1).expect("player").wealth(),
+            0,
+            "selection does not fall through to the scenario callback"
+        );
+        engine.player_in_com(1, COM_THROW, 0).expect("menu enter");
+        assert_eq!(engine.debug_object_menu(crew.as_u64()), Some(None));
+        assert_eq!(
+            engine.player(1).expect("player").wealth(),
+            0,
+            "Enter does not run the copied command in scenario scope"
+        );
+
+        let second_command_object = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("second command object spawns");
+        open_menu(&mut engine, second_command_object);
+        engine
+            .assign_object_removal(second_command_object)
+            .expect("second command object removal succeeds");
+        engine.player_in_com(1, COM_DIG, 0).expect("menu close");
+        assert_eq!(
+            engine.debug_object_menu(crew.as_u64()),
+            Some(None),
+            "soft close is not denied by the scenario callback"
+        );
+        assert_eq!(engine.player(1).expect("player").wealth(), 0);
     }
 
     #[test]

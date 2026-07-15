@@ -5544,17 +5544,19 @@ fn menu_close_denied(menu_object: ObjectId, menu: &crate::ObjectMenuState) -> bo
     // A missing function is a silent miss (the "~" in PSF_MenuQueryCancel);
     // callee errors fall back to close-OK (C4Object::Call, fPassErrors
     // defaults false — the error logs and the call yields C4VNull).
-    let denied = match menu.command_object {
-        Some(command_object) => {
-            call_world_object_own_function(command_object, "MenuQueryCancel", &pars)
-        }
-        None => HOST_CONTEXT
+    let denied = if menu.scenario_callbacks {
+        HOST_CONTEXT
             .with(|cell| {
                 cell.borrow()
                     .as_ref()
                     .and_then(|context| context.world.scenario_script().cloned())
             })
-            .and_then(|script| call_scoped_script_function(script, "MenuQueryCancel", &pars)),
+            .filter(|script| script.has_local_function("MenuQueryCancel"))
+            .and_then(|script| call_scoped_script_function(script, "MenuQueryCancel", &pars))
+    } else if let Some(command_object) = menu.command_object {
+        call_world_object_own_function(command_object, "MenuQueryCancel", &pars)
+    } else {
+        None
     }
     .map(|result| result.map(|value| value.as_bool()).unwrap_or(false))
     .unwrap_or(false);
@@ -5616,6 +5618,7 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false)); // !pMenuObj && !cthr->Obj
     };
     let command_object = explicit_command.or(active);
+    let scenario_callbacks = command_object.is_none();
     // Object menu: validate the command object (C4Script.cpp:1433-1436);
     // no command object is the scenario-script-callback form.
     if let Some(command_object) = command_object {
@@ -5653,6 +5656,7 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         selection: -1,
         user_menu: true,
         command_object,
+        scenario_callbacks,
         refill_object: None,
         refill_object_contents_count: 0,
         items: Vec::new(),
@@ -6398,17 +6402,19 @@ fn menu_selection_changed(menu_object: ObjectId, menu: &crate::ObjectMenuState) 
         Value::Int(menu.selection),
         object_reference_value(menu_object),
     ];
-    let result = match menu.command_object {
-        Some(command_object) => {
-            call_world_object_own_function(command_object, "OnMenuSelection", &pars)
-        }
-        None => HOST_CONTEXT
+    let result = if menu.scenario_callbacks {
+        HOST_CONTEXT
             .with(|cell| {
                 cell.borrow()
                     .as_ref()
                     .and_then(|context| context.world.scenario_script().cloned())
             })
-            .and_then(|script| call_scoped_script_function(script, "OnMenuSelection", &pars)),
+            .filter(|script| script.has_local_function("OnMenuSelection"))
+            .and_then(|script| call_scoped_script_function(script, "OnMenuSelection", &pars))
+    } else if let Some(command_object) = menu.command_object {
+        call_world_object_own_function(command_object, "OnMenuSelection", &pars)
+    } else {
+        None
     };
     if let Some(Err(error)) = result {
         tracing::warn!(

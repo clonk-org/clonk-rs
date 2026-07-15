@@ -79,6 +79,7 @@ fn tutorial04_enter_all_keeps_only_one_tflint_in_the_real_clonk() {
         selection: 0,
         user_menu: false,
         command_object: Some(clonk),
+        scenario_callbacks: false,
         refill_object: Some(hut),
         refill_object_contents_count: 3,
         items: vec![ObjectMenuItem {

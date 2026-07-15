@@ -61199,6 +61199,7 @@ protected func Entrance(pTarget)
                     selection: -1,
                     user_menu: false,
                     command_object: Some(occupant),
+                    scenario_callbacks: false,
                     refill_object: None,
                     refill_object_contents_count: 0,
                     items: Vec::new(),

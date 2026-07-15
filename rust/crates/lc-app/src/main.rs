@@ -68635,6 +68635,7 @@ protected func InputCallback(string answer, int player)
             selection: 0,
             user_menu: true,
             command_object: Some(cursor),
+            scenario_callbacks: false,
             refill_object: None,
             refill_object_contents_count: 0,
             items: vec![

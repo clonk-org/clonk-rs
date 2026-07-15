@@ -4735,6 +4735,7 @@ global func Step(state, frame, random)
                         selection: 0,
                         user_menu: false,
                         command_object: Some(crew),
+                        scenario_callbacks: false,
                         refill_object: None,
                         refill_object_contents_count: 0,
                         items,
