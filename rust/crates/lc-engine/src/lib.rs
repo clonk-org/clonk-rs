@@ -8553,6 +8553,9 @@ pub struct Definition {
     /// Grab DefCore value: 0 none, 1 grab+push, 2 grab-only (C4Object.cpp:1763).
     grab: i32,
     burn_turn_to: Option<String>,
+    /// DefCore `ConstructTo` / C4Def::BuildTurnTo: successful Build ticks
+    /// change the construction target after DoCon.
+    build_turn_to: Option<String>,
     incomplete_activity: bool,
     /// `Exclusive` DefCore flag (C4Def.cpp:313): OCF_Exclusive — no action
     /// through this, no construction in front of it (SetOCF,
@@ -8757,6 +8760,7 @@ impl Definition {
             grab: 0,
             no_burn_damage: false,
             burn_turn_to: None,
+            build_turn_to: None,
             incomplete_activity: false,
             exclusive: false,
             edible: false,
@@ -9070,6 +9074,7 @@ impl Definition {
         definition.set_contain_blast(resource.core.contain_blast);
         definition.set_no_horizontal_move(resource.core.no_horizontal_move);
         definition.set_burn_turn_to(resource.core.burn_turn_to.clone());
+        definition.set_build_turn_to(resource.core.build_turn_to.clone());
         definition.set_incomplete_activity(resource.core.incomplete_activity);
         definition.set_no_breath(resource.core.no_breath);
         definition.set_grab(resource.core.grab);
@@ -10025,12 +10030,20 @@ impl Definition {
         self.burn_turn_to.as_deref()
     }
 
+    pub fn build_turn_to(&self) -> Option<&str> {
+        self.build_turn_to.as_deref()
+    }
+
     pub fn incomplete_activity(&self) -> bool {
         self.incomplete_activity
     }
 
     pub fn set_burn_turn_to(&mut self, target: Option<String>) {
         self.burn_turn_to = target;
+    }
+
+    pub fn set_build_turn_to(&mut self, target: Option<String>) {
+        self.build_turn_to = target;
     }
 
     pub fn set_incomplete_activity(&mut self, enabled: bool) {
@@ -30585,6 +30598,7 @@ impl Engine {
                 return Ok(false);
             }
         };
+        let builder_id = self.objects[idx].id;
 
         let target_idx = match self.find_object_index(target_id) {
             Some(index) if index != idx => index,
@@ -30622,34 +30636,17 @@ impl Engine {
         } else {
             10
         };
-        let target_mass = self
-            .definitions
-            .get(&target_definition_id)
-            .map(|definition| definition.mass().max(1))
-            .unwrap_or(100)
-            .max(1);
 
-        let build_speed = 100; // Legacy default; physical training not yet modeled.
-        let mut delta = (i64::from(level) * i64::from(build_speed) * 150) / i64::from(target_mass);
-        if delta <= 0 {
-            delta = 1;
-        }
-        let current_construction = self.objects[target_idx].state.construction;
-        let desired_construction =
-            (i64::from(current_construction) + delta).clamp(0, i64::from(FULL_CON)) as i32;
-
-        let missing_component = need_material
-            .then(|| {
-                self.ensure_build_components(
-                    idx,
-                    target_idx,
-                    current_construction,
-                    &required_components,
-                )
-            })
-            .flatten();
+        let missing_component = if need_material {
+            self.ensure_build_components(
+                idx,
+                target_idx,
+                &required_components,
+            )?
+        } else {
+            None
+        };
         if let Some((missing_component, missing_count)) = missing_component {
-            let builder_id = self.objects[idx].id;
             // C4Object::Build lets the builder override missing-material
             // handling after the component-grab pass. Script errors are
             // fail-safe/falsy like C4Object::Call (C4Object.cpp:1734-1748).
@@ -30738,14 +30735,71 @@ impl Engine {
             return Ok(false);
         }
 
+        // Component-removal callbacks may have changed either object's live
+        // definition or physicals. C++ reads GetPhysical and Def->Mass only
+        // after both material passes (C4Object.cpp:1751-1763).
+        let Some(builder_idx) = self.find_object_index(builder_id) else {
+            return Ok(false);
+        };
+        let mut build_speed = self.object_physical(builder_idx).can_construct;
+        if build_speed == 0 {
+            let live_definition_id = self.objects[builder_idx].definition_id.clone();
+            let _ = self.object_com_stop_action(builder_idx, &live_definition_id)?;
+            return Ok(false);
+        }
+        if build_speed <= 1 {
+            build_speed = 100;
+        }
+
+        let Some(target_idx) = self.find_object_index(target_id) else {
+            let live_definition_id = self.objects[builder_idx].definition_id.clone();
+            let _ = self.object_com_stop_action(builder_idx, &live_definition_id)?;
+            return Ok(false);
+        };
+        let target_mass = self
+            .definitions
+            .get(&self.objects[target_idx].definition_id)
+            .map(Definition::mass)
+            .unwrap_or(100);
+        let target_mass = if target_mass == 0 { 1 } else { target_mass };
+        let delta = (i64::from(level) * i64::from(build_speed) * 150)
+            / i64::from(target_mass);
+        let delta = delta.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        let current_construction = self.objects[target_idx].state.construction;
+        let desired_construction = current_construction
+            .saturating_add(delta)
+            .clamp(0, FULL_CON);
         let crossed_full_con = current_construction < FULL_CON
             && desired_construction >= FULL_CON;
-        {
-            let target = &mut self.objects[target_idx];
-            target.set_construction(desired_construction);
+        let refresh_components = !need_material
+            && docon_refreshes_construction(current_construction, desired_construction);
+        let gained_components = refresh_components.then(|| {
+            let definition_components = self
+                .definitions
+                .get(&self.objects[target_idx].definition_id)
+                .map(|definition| {
+                    definition
+                        .components()
+                        .iter()
+                        .map(|component| (component.id.clone(), component.count))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            docon_component_counts(
+                &self.objects[target_idx].state.components,
+                &self.objects[target_idx].state.component_order,
+                &definition_components,
+                desired_construction,
+                delta,
+            )
+        });
+        self.objects[target_idx].set_construction(desired_construction);
+        if let Some(components) = gained_components {
+            self.objects[target_idx].state.components = components;
         }
         self.refresh_object_ocf(target_idx);
         self.update_sector_for_index(target_idx);
+        self.update_solid_mask(target_idx);
 
         // C4Object::DoCon dispatches Completion and then Initialize after
         // the bottom-preserving shape adjustment on the first FullCon
@@ -30770,6 +30824,22 @@ impl Engine {
                     Vec::new(),
                 ))?;
             }
+        }
+
+        // BuildTurnTo is read from the live definition only after DoCon's
+        // Completion/Initialize callbacks, and runs on every successful
+        // Build tick (C4Object.cpp:1765-1769).
+        let build_turn_to = self
+            .find_object_index(target_id)
+            .and_then(|index| self.definitions.get(&self.objects[index].definition_id))
+            .and_then(|definition| definition.build_turn_to().map(str::to_owned));
+        if let (Some(target_idx), Some(build_turn_to)) =
+            (self.find_object_index(target_id), build_turn_to)
+        {
+            let _ = self.change_object_def_live(target_idx, &build_turn_to)?;
+        }
+        if let Some(target_idx) = self.find_object_index(target_id) {
+            self.objects[target_idx].state.damage = 0;
         }
 
         Ok(true)
@@ -30847,61 +30917,52 @@ impl Engine {
         &mut self,
         builder_idx: usize,
         target_idx: usize,
-        current_construction: i32,
         required: &[DefinitionComponent],
-    ) -> Option<(DefinitionId, i32)> {
+    ) -> Result<Option<(DefinitionId, i32)>, EngineError> {
         if required.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         // Target::Build makes two independent passes: at most one full-con
         // object of every missing component from the builder, then at most
         // one more from the construction's container (C4Object.cpp:1694-1723).
         for component in required {
-            let mut inserted = self.objects[target_idx]
+            let inserted = self.objects[target_idx]
                 .state
                 .components
                 .get(&component.id)
                 .copied()
                 .unwrap_or(0);
 
-            if inserted < component.count
-                && self.consume_component_from_contents(builder_idx, &component.id)
-            {
-                inserted = inserted.wrapping_add(1);
-                let target_state = &mut self.objects[target_idx].state;
-                if !target_state.components.contains_key(&component.id) {
-                    target_state.component_order.push(component.id.clone());
+            if inserted < component.count {
+                if let Some(material_id) =
+                    self.first_eligible_build_component(builder_idx, &component.id)
+                {
+                    self.credit_build_component(target_idx, &component.id, inserted);
+                    self.consume_build_component(builder_idx, material_id)?;
                 }
-                target_state
-                    .components
-                    .insert(component.id.clone(), inserted);
             }
         }
 
         for component in required {
-            let mut inserted = self.objects[target_idx]
+            let inserted = self.objects[target_idx]
                 .state
                 .components
                 .get(&component.id)
                 .copied()
                 .unwrap_or(0);
 
-            if inserted < component.count
-                && self.consume_component_from_container_of(target_idx, &component.id)
-            {
-                inserted = inserted.wrapping_add(1);
-                let target_state = &mut self.objects[target_idx].state;
-                if !target_state.components.contains_key(&component.id) {
-                    target_state.component_order.push(component.id.clone());
+            if inserted < component.count {
+                if let Some((container_idx, material_id)) =
+                    self.first_build_component_from_container_of(target_idx, &component.id)
+                {
+                    self.credit_build_component(target_idx, &component.id, inserted);
+                    self.consume_build_component(container_idx, material_id)?;
                 }
-                target_state
-                    .components
-                    .insert(component.id.clone(), inserted);
             }
         }
 
-        required.iter().find_map(|component| {
+        Ok(required.iter().find_map(|component| {
             (component.count != 0)
                 .then(|| {
                     let inserted = self.objects[target_idx]
@@ -30912,9 +30973,10 @@ impl Engine {
                         .unwrap_or(0);
                     let inserted_percent =
                         i64::from(inserted).saturating_mul(100) / i64::from(component.count);
-                    let construction_percent = i64::from(current_construction)
-                        .saturating_mul(100)
-                        / i64::from(FULL_CON);
+                    let construction_percent =
+                        i64::from(self.objects[target_idx].state.construction)
+                            .saturating_mul(100)
+                            / i64::from(FULL_CON);
                     (inserted_percent < construction_percent).then(|| {
                         (
                             component.id.clone(),
@@ -30923,19 +30985,21 @@ impl Engine {
                     })
                 })
                 .flatten()
-        })
+        }))
     }
 
-    fn consume_component_from_contents(
-        &mut self,
+    /// C4ObjectList::Find(id) returns the first matching live content. Build
+    /// tests only that one for OnFire/OCF_FullCon; an ineligible head blocks
+    /// later same-ID entries for this pass (C4Object.cpp:1697-1709).
+    fn first_eligible_build_component(
+        &self,
         container_index: usize,
         component_id: &DefinitionId,
-    ) -> bool {
+    ) -> Option<ObjectId> {
         if container_index >= self.objects.len() {
-            return false;
+            return None;
         }
-        let contents = self.objects[container_index].state.contents.clone();
-        for object_id in contents {
+        for &object_id in &self.objects[container_index].state.contents {
             let Some(child_index) = self.find_object_index(object_id) else {
                 continue;
             };
@@ -30943,38 +31007,67 @@ impl Engine {
             if child.definition_id != *component_id
                 || child.destroyed
                 || matches!(child.state.status, ObjectStatus::Deleted)
-                || child.state.construction < FULL_CON
             {
                 continue;
             }
-            self.objects[container_index]
-                .state
-                .contents
-                .retain(|&id| id != object_id);
-            self.objects[child_index].state.container = None;
-            self.objects[child_index].mark_destroyed();
-            self.clear_destroyed_object_layers();
-            return true;
+            return (!child.state.on_fire && child.state.ocf & ocf::FULL_CON != 0)
+                .then_some(object_id);
         }
-        false
+        None
     }
 
-    fn consume_component_from_container_of(
-        &mut self,
+    fn first_build_component_from_container_of(
+        &self,
         object_index: usize,
         component_id: &DefinitionId,
-    ) -> bool {
+    ) -> Option<(usize, ObjectId)> {
         if object_index >= self.objects.len() {
-            return false;
+            return None;
         }
         let container_id = match self.objects[object_index].state.container {
             Some(id) => id,
-            None => return false,
+            None => return None,
         };
-        let Some(container_index) = self.find_object_index(container_id) else {
-            return false;
-        };
-        self.consume_component_from_contents(container_index, component_id)
+        let container_index = self.find_object_index(container_id)?;
+        self.first_eligible_build_component(container_index, component_id)
+            .map(|material_id| (container_index, material_id))
+    }
+
+    fn credit_build_component(
+        &mut self,
+        target_idx: usize,
+        component_id: &DefinitionId,
+        previous_count: i32,
+    ) {
+        let target_state = &mut self.objects[target_idx].state;
+        if !target_state.components.contains_key(component_id) {
+            target_state.component_order.push(component_id.clone());
+        }
+        target_state
+            .components
+            .insert(component_id.clone(), previous_count.wrapping_add(1));
+    }
+
+    /// Build credits the component, unlinks it from the parent list, then
+    /// calls native AssignRemoval while the child's Contained pointer still
+    /// names that parent (C4Object.cpp:1705-1709,1717-1721).
+    fn consume_build_component(
+        &mut self,
+        container_index: usize,
+        material_id: ObjectId,
+    ) -> Result<(), EngineError> {
+        if self.objects.get(container_index).is_none() {
+            return Ok(());
+        }
+        if self.find_object_index(material_id).is_none() {
+            return Ok(());
+        }
+        self.objects[container_index]
+            .state
+            .contents
+            .retain(|&id| id != material_id);
+        let _ = self.assign_object_removal(material_id)?;
+        Ok(())
     }
 
     fn reset_action_to_default(
@@ -36274,6 +36367,7 @@ impl Engine {
         definition.set_contain_blast(core.contain_blast);
         definition.set_no_horizontal_move(core.no_horizontal_move);
         definition.set_burn_turn_to(core.burn_turn_to.clone());
+        definition.set_build_turn_to(core.build_turn_to.clone());
         definition.set_incomplete_activity(core.incomplete_activity);
         definition.set_no_breath(core.no_breath);
         definition.set_grab(core.grab);
@@ -46102,7 +46196,9 @@ mod component_con_regression {
             .to_vec();
 
         assert_eq!(
-            engine.ensure_build_components(builder_idx, site_idx, FULL_CON / 2, &required),
+            engine
+                .ensure_build_components(builder_idx, site_idx, &required)
+                .expect("component pass succeeds"),
             None
         );
         assert_eq!(

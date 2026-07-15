@@ -1,5 +1,6 @@
 use lc_engine::{
-    ActionSpec, ActionState, Definition, Engine, SpawnConfig, Vector2, CATEGORY_OBJECT, FULL_CON,
+    ActionSpec, ActionState, Definition, Engine, PhysicalInfo, SpawnConfig, Vector2,
+    CATEGORY_OBJECT, FULL_CON,
 };
 use std::collections::HashMap;
 
@@ -23,6 +24,11 @@ fn builder_definition() -> Definition {
     // deliberately exempts structure builders with no target from stopping
     // (src/C4Object.cpp:5010-5016), so this fixture must not be a structure.
     definition.set_category(CATEGORY_OBJECT);
+    // CanConstruct=1 is C++'s legacy sentinel for normal (100%) speed.
+    definition.set_physical(PhysicalInfo {
+        can_construct: 1,
+        ..PhysicalInfo::default()
+    });
     definition
 }
 

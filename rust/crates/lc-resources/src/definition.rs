@@ -504,6 +504,9 @@ pub struct DefCore {
     pub no_burn_damage: bool,
     /// BurnTurnTo=ID: definition change on incineration (C4Effect.cpp:580-585).
     pub burn_turn_to: Option<String>,
+    /// `ConstructTo=ID` (`C4Def::BuildTurnTo`): successful Build ticks
+    /// change the construction target to this definition after DoCon.
+    pub build_turn_to: Option<String>,
     /// IncompleteActivity=1: keeps contents on incineration and allows
     /// collection below FullCon (C4Effect.cpp:588, SetOCF C4Object.cpp:594).
     pub incomplete_activity: bool,
@@ -834,6 +837,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut line_intersect: i32 = 0;
     let mut no_burn_damage = false;
     let mut burn_turn_to: Option<String> = None;
+    let mut build_turn_to: Option<String> = None;
     let mut incomplete_activity = false;
     let mut physical = PhysicalInfo::default();
     let mut collectible = false;
@@ -1091,6 +1095,14 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     burn_turn_to = Some(value.to_string());
                 }
             }
+            "constructto" => {
+                if !value.is_empty()
+                    && !value.eq_ignore_ascii_case("NONE")
+                    && value != "0000"
+                {
+                    build_turn_to = Some(value.to_string());
+                }
+            }
             "incompleteactivity" => {
                 incomplete_activity = parse_bool(value);
             }
@@ -1260,6 +1272,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         line_intersect,
         no_burn_damage,
         burn_turn_to,
+        build_turn_to,
         incomplete_activity,
         physical,
         collectible,
@@ -3606,6 +3619,22 @@ Attach=1
 
         let defaulted = parse_def_core(b"[DefCore]\nid=ROCK\n").expect("defcore parsed");
         assert!(!defaulted.silent_commands);
+    }
+
+    #[test]
+    fn parse_def_core_construct_to_as_build_turn_to_like_cpp() {
+        // C4Def::CompileFunc exposes the BuildTurnTo field under the legacy
+        // DefCore key `ConstructTo` (src/C4Def.cpp:361).
+        let parsed = parse_def_core(b"[DefCore]\nid=SITE\ncOnStRuCtTo=DONE\n")
+            .expect("defcore parsed");
+        assert_eq!(parsed.build_turn_to.as_deref(), Some("DONE"));
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=SITE\n").expect("defcore parsed");
+        assert!(defaulted.build_turn_to.is_none());
+
+        let none = parse_def_core(b"[DefCore]\nid=SITE\nConstructTo=NONE\n")
+            .expect("defcore parsed");
+        assert!(none.build_turn_to.is_none());
     }
 
     #[test]

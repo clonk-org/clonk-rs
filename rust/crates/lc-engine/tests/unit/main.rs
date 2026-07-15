@@ -10956,6 +10956,10 @@ protected func BuildAbort()
         builder_definition.configure_actions(Some("Idle".to_string()), builder_actions);
         builder_definition.set_category(DEFAULT_CATEGORY);
         builder_definition.set_mass(50);
+        builder_definition.set_physical(PhysicalInfo {
+            can_construct: 1,
+            ..PhysicalInfo::default()
+        });
 
         let mut structure_definition = Definition::from_script("Structure", "Structure", script)?;
         structure_definition.set_constructable(true);
@@ -11009,6 +11013,248 @@ protected func BuildAbort()
         assert!(
             snapshot.object(wood_id).is_none(),
             "component should be consumed during build"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_consumes_only_eligible_first_material_via_assign_removal(
+    ) -> Result<(), EngineError> {
+        let builder_script = r#"#strict
+local removal_order, contents_seen, component_seen, contained_seen;
+
+protected func ContentsDestruction(material)
+{
+    removal_order = removal_order * 10 + 1;
+    contents_seen = ContentsCount(WOOD);
+    component_seen = GetComponent(WOOD, 0, GetActionTarget());
+    contained_seen = Contained(material) == this();
+}
+
+public func MaterialDestruction()
+{
+    removal_order = removal_order * 10 + 2;
+}
+"#;
+        let material_script = r#"#strict
+protected func Destruction()
+{
+    if (Contained()) Contained()->MaterialDestruction();
+}
+"#;
+
+        let mut builder = Definition::from_script("BLDR", "Builder", builder_script)?;
+        builder.set_c4_callback_convention(true);
+        builder.configure_actions(
+            Some("Walk".to_owned()),
+            HashMap::from([
+                (
+                    "Walk".to_owned(),
+                    ActionSpec::default().with_procedure("walk"),
+                ),
+                (
+                    "Build".to_owned(),
+                    ActionSpec::default().with_procedure("build"),
+                ),
+            ]),
+        );
+        builder.set_physical(PhysicalInfo {
+            can_construct: 1,
+            ..PhysicalInfo::default()
+        });
+
+        let mut site = Definition::from_script("SITE", "Site", "#strict")?;
+        site.set_category(CATEGORY_STRUCTURE);
+        site.set_mass(100);
+        site.set_components(vec![DefinitionComponent {
+            id: "WOOD".to_owned(),
+            // At Con=10%, inserting one object exactly satisfies the
+            // material gate. The following successful DoCon must retain one
+            // rather than auto-gaining a second component while
+            // fNoComponentChange/fNeedMaterial is true.
+            count: 10,
+        }]);
+
+        let wood = Definition::from_script("WOOD", "Wood", material_script)?;
+        let mut engine = Engine::with_seed(55);
+        engine.register_definition(builder)?;
+        engine.register_definition(site)?;
+        engine.register_definition(wood)?;
+        engine.set_construction_needs_material(true);
+
+        let spawn_pair = |engine: &mut Engine| -> Result<(ObjectId, ObjectId), EngineError> {
+            let site_id = engine.spawn_object(
+                SpawnConfig::new("SITE")
+                    .with_construction(1_000)
+                    .with_ordered_components(vec![("WOOD".to_owned(), 0)]),
+            )?;
+            let mut action = ActionState::new("Build");
+            action.target = Some(site_id);
+            let builder_id = engine.spawn_object(
+                SpawnConfig::new("BLDR")
+                    .with_action(action)
+                    .with_command_direction(CommandDirection::Right),
+            )?;
+            Ok((builder_id, site_id))
+        };
+
+        let (valid_builder, valid_site) = spawn_pair(&mut engine)?;
+        let valid_wood = engine.spawn_object(
+            SpawnConfig::new("WOOD")
+                .with_construction(FULL_CON)
+                .with_container(valid_builder),
+        )?;
+
+        let (burning_builder, burning_site) = spawn_pair(&mut engine)?;
+        let burning_a = engine.spawn_object(
+            SpawnConfig::new("WOOD")
+                .with_construction(FULL_CON)
+                .with_container(burning_builder),
+        )?;
+        let burning_b = engine.spawn_object(
+            SpawnConfig::new("WOOD")
+                .with_construction(FULL_CON)
+                .with_container(burning_builder),
+        )?;
+        let burning_head = engine
+            .object_snapshot(burning_builder)
+            .and_then(|builder| builder.contents.first().copied())
+            .expect("burning builder has a head component");
+        let mut fire = ObjectUpdate::new();
+        fire.stage_ignite(0, 0);
+        engine.apply_object_update(burning_head, fire)?;
+
+        let (partial_builder, partial_site) = spawn_pair(&mut engine)?;
+        let partial_a = engine.spawn_object(
+            SpawnConfig::new("WOOD")
+                .with_construction(FULL_CON)
+                .with_container(partial_builder),
+        )?;
+        let partial_b = engine.spawn_object(
+            SpawnConfig::new("WOOD")
+                .with_construction(FULL_CON)
+                .with_container(partial_builder),
+        )?;
+        let partial_head = engine
+            .object_snapshot(partial_builder)
+            .and_then(|builder| builder.contents.first().copied())
+            .expect("partial builder has a head component");
+        engine.apply_object_update(
+            partial_head,
+            ObjectUpdate::new().with_construction(FULL_CON / 2),
+        )?;
+
+        let snapshot = engine.tick()?;
+        assert!(snapshot.object(valid_wood).is_none());
+        let valid_builder = snapshot.object(valid_builder).expect("builder survives");
+        assert_eq!(valid_builder.local_vars.get("removal_order"), Some(&Value::Int(12)));
+        assert_eq!(valid_builder.local_vars.get("contents_seen"), Some(&Value::Int(0)));
+        assert_eq!(valid_builder.local_vars.get("component_seen"), Some(&Value::Int(1)));
+        assert_eq!(valid_builder.local_vars.get("contained_seen"), Some(&Value::Bool(true)));
+        assert_eq!(
+            snapshot
+                .object(valid_site)
+                .and_then(|site| site.components.get("WOOD")),
+            Some(&1)
+        );
+
+        for (label, material) in [
+            ("burning first", burning_a),
+            ("burning duplicate", burning_b),
+            ("partial first", partial_a),
+            ("partial duplicate", partial_b),
+        ] {
+            assert!(snapshot.object(material).is_some(), "{label} survives");
+        }
+        for site in [burning_site, partial_site] {
+            let site = snapshot.object(site).expect("blocked site survives");
+            assert_eq!(site.construction, 1_000);
+            assert_eq!(site.components.get("WOOD"), Some(&0));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn build_uses_can_construct_turn_to_docon_components_and_repair(
+    ) -> Result<(), EngineError> {
+        fn builder_definition(id: &str, can_construct: i32) -> Result<Definition, EngineError> {
+            let mut definition = Definition::from_script(id, id, "#strict")?;
+            definition.configure_actions(
+                Some("Walk".to_owned()),
+                HashMap::from([
+                    (
+                        "Walk".to_owned(),
+                        ActionSpec::default().with_procedure("walk"),
+                    ),
+                    (
+                        "Build".to_owned(),
+                        ActionSpec::default().with_procedure("build"),
+                    ),
+                ]),
+            );
+            definition.set_physical(PhysicalInfo {
+                can_construct,
+                ..PhysicalInfo::default()
+            });
+            Ok(definition)
+        }
+
+        let mut site = Definition::from_script("SITE", "Site", "#strict")?;
+        site.set_category(CATEGORY_STRUCTURE);
+        site.set_mass(100);
+        site.set_components(vec![DefinitionComponent {
+            id: "STON".to_owned(),
+            count: 100,
+        }]);
+        site.set_build_turn_to(Some("DONE".to_owned()));
+
+        let mut engine = Engine::with_seed(56);
+        engine.register_definition(builder_definition("FAST", 200)?)?;
+        engine.register_definition(builder_definition("ZERO", 0)?)?;
+        engine.register_definition(site)?;
+        engine.register_definition(Definition::from_script("DONE", "Done", "#strict")?)?;
+        engine.register_definition(Definition::from_script("STON", "Stone", "#strict")?)?;
+
+        let spawn_build =
+            |engine: &mut Engine, builder: &str| -> Result<(ObjectId, ObjectId), EngineError> {
+                let site_id = engine.spawn_object(
+                    SpawnConfig::new("SITE")
+                        .with_construction(1_000)
+                        .with_ordered_components(vec![("STON".to_owned(), 0)]),
+                )?;
+                engine.apply_object_update(site_id, ObjectUpdate::new().with_damage(77))?;
+                let mut action = ActionState::new("Build");
+                action.target = Some(site_id);
+                let builder_id =
+                    engine.spawn_object(SpawnConfig::new(builder).with_action(action))?;
+                Ok((builder_id, site_id))
+            };
+        let (fast_builder, fast_site) = spawn_build(&mut engine, "FAST")?;
+        let (zero_builder, zero_site) = spawn_build(&mut engine, "ZERO")?;
+
+        let snapshot = engine.tick()?;
+        let fast = snapshot.object(fast_site).expect("fast site survives");
+        assert_eq!(fast.construction, 4_000);
+        assert_eq!(fast.components.get("STON"), Some(&4));
+        assert_eq!(fast.definition_id, "DONE");
+        assert_eq!(fast.damage, 0);
+        assert_eq!(
+            snapshot
+                .object(fast_builder)
+                .map(|builder| builder.action.name.as_str()),
+            Some("Build")
+        );
+
+        let zero = snapshot.object(zero_site).expect("zero-speed site survives");
+        assert_eq!(zero.construction, 1_000);
+        assert_eq!(zero.components.get("STON"), Some(&0));
+        assert_eq!(zero.definition_id, "SITE");
+        assert_eq!(zero.damage, 77);
+        assert_eq!(
+            snapshot
+                .object(zero_builder)
+                .and_then(|builder| builder.action_procedure.as_deref()),
+            Some("walk")
         );
         Ok(())
     }
@@ -46148,6 +46394,10 @@ func Place(tree, growth) {
                 ),
             ]),
         );
+        builder.set_physical(PhysicalInfo {
+            can_construct: 1,
+            ..PhysicalInfo::default()
+        });
         let mut target = Definition::from_script(
             "Target",
             "Target",
