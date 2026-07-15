@@ -458,6 +458,57 @@ fn sim_flight_matches_cpp_native_argument_conversions() {
 }
 
 #[test]
+fn sim_flight_optional_precision_default_follows_caller_strictness() {
+    let script = |strict_level: u8, precision: &str| {
+        format!(
+            r#"#strict {strict_level}
+            func Probe()
+            {{
+                var x = 2, y = 2, xdir = 20, ydir = 10;
+                var result = SimFlight(x, y, xdir, ydir, nil, nil, nil, {precision});
+                return [result, x, y, xdir, ydir];
+            }}
+            "#
+        )
+    };
+    let expected_default = Value::Array(vec![
+        Value::Bool(true),
+        Value::Int(11),
+        Value::Int(8),
+        Value::Int(20),
+        Value::Int(20),
+    ]);
+
+    for falsy in ["false", "0"] {
+        let legacy = call_probe_result(
+            &script(2, falsy),
+            raster_landscape(20, 12, |_, y| u8::from(y >= 8)),
+            PhysicsSettings::new(100, 20, -20),
+        )
+        .unwrap_or_else(|error| panic!("strict-2 SimFlight({falsy}) failed: {error}"));
+        assert_eq!(
+            legacy,
+            expected_default,
+            "below strict 3, {falsy} is absent and uses precision 10"
+        );
+
+        let error = call_probe_result(
+            &script(3, falsy),
+            raster_landscape(20, 12, |_, y| u8::from(y >= 8)),
+            PhysicsSettings::new(100, 20, -20),
+        )
+        .expect_err("strict 3 preserves explicit zero precision");
+        let EngineError::Script { source, .. } = error else {
+            panic!("unexpected strict-3 SimFlight error: {error}");
+        };
+        assert!(
+            source.to_string().contains("precision must not be zero"),
+            "unexpected strict-3 SimFlight script error: {source}"
+        );
+    }
+}
+
+#[test]
 fn sim_flight_requires_variable_references_like_cpp_native_dispatch() {
     // Native C4V_pC4Value parameters reject rvalues and omitted arguments
     // before FnSimFlight executes (C4AulExec.cpp:1363-1391;

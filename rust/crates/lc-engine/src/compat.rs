@@ -6665,13 +6665,8 @@ fn get_clr_modulation(args: &[Value]) -> Result<Value, RuntimeError> {
 /// FnModulateColor (C4Script.cpp:5597-5612): multiply packed RGB channels
 /// with the engine's `/ 256` rule and combine inverted alpha upwards.
 fn modulate_color(args: &[Value]) -> Result<Value, RuntimeError> {
-    let color1 = match args.first() {
-        // Shipped scripts are below #strict 3, where C4Aul's native-call
-        // conversion turns all falsy optional values into nil before the
-        // std::optional<C4ValueInt> conversion (C4AulExec.cpp:1435-1439).
-        None | Some(Value::Nil | Value::Int(0) | Value::Bool(false)) => 0x00ff_ffff,
-        Some(value) => value_to_i32(value, "ModulateColor", "color 1")? as u32,
-    };
+    let color1 = parse_native_optional_i32(args.first(), "ModulateColor", "color 1")?
+        .unwrap_or(0x00ff_ffff) as u32;
     let color2 = value_to_i32(
         args.get(1).unwrap_or(&Value::Nil),
         "ModulateColor",
@@ -9504,12 +9499,33 @@ fn parse_optional_i32(
         None => Ok(None),
         Some(Value::Nil) => Ok(None),
         Some(Value::Int(int)) => Ok(Some(*int)),
+        Some(Value::Bool(flag)) => Ok(Some(i32::from(*flag))),
         Some(other) => Err(RuntimeError::new(format!(
             "{}: expected integer for {}, got {}",
             function,
             parameter,
             other.type_name()
         ))),
+    }
+}
+
+/// Parse a native `std::optional<C4ValueInt>` parameter. Before `#strict 3`,
+/// C++ eagerly resets every falsy native-call argument to nil, which the
+/// optional wrapper observes as absence rather than an explicit integer zero.
+fn parse_native_optional_i32(
+    value: Option<&Value>,
+    function: &str,
+    parameter: &str,
+) -> Result<Option<i32>, RuntimeError> {
+    let parsed = parse_optional_i32(value, function, parameter)?;
+    let has_strict_nil = matches!(
+        lc_script::caller_strictness(),
+        lc_script::HostCallerStrictness::Strict(level) if level >= 3
+    );
+    if parsed == Some(0) && !has_strict_nil {
+        Ok(None)
+    } else {
+        Ok(parsed)
     }
 }
 
@@ -11628,10 +11644,8 @@ fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(value) => value_to_i32(value, "CustomMessage", "y")?,
     };
 
-    let raw_color = match args.get(5) {
-        Some(Value::Nil) | None => None,
-        Some(value) => Some(value_to_i32(value, "CustomMessage", "color")? as u32),
-    };
+    let raw_color = parse_native_optional_i32(args.get(5), "CustomMessage", "color")?
+        .map(|color| color as u32);
 
     let decoration = parse_custom_message_decoration(args.get(6))?;
     if let Some(id) = decoration.as_deref() {
@@ -15550,14 +15564,8 @@ fn sim_flight(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
             .and_then(Value::as_c4_int)
             .unwrap_or(0)
     };
-    let optional_int = |index: usize, parameter: &str| match values.get(index) {
-        None | Some(Value::Nil) => Ok(None),
-        Some(value) => value.as_c4_int().map(Some).ok_or_else(|| {
-            RuntimeError::new(format!(
-                "SimFlight: expected integer for {parameter}, got {}",
-                value.type_name()
-            ))
-        }),
+    let optional_int = |index: usize, parameter: &str| {
+        parse_native_optional_i32(values.get(index), "SimFlight", parameter)
     };
     let density_min = optional_int(4, "density_min")?.unwrap_or(50);
     let density_max = optional_int(5, "density_max")?.unwrap_or(100);

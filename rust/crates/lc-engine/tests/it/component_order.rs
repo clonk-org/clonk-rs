@@ -15,6 +15,13 @@ func SeedAndRead()
   return [GetComponent(0, 0), GetComponent(0, 1),
           GetComponent(ZERO), GetComponent(IROC)];
 }
+
+func SeedAndReadBoolIndexes()
+{
+  SetComponent(ZERO, 0);
+  SetComponent(IROC, 3);
+  return [GetComponent(0, false), GetComponent(0, true)];
+}
 "#;
 
 fn engine_with_bag() -> (Engine, ObjectId) {
@@ -61,6 +68,22 @@ fn dynamic_object_components_keep_cpp_insertion_order_and_zero_entries() {
     restored.restore_state(&state).expect("restore component list");
     let restored = restored.object_snapshot(bag).expect("restored bag");
     assert_eq!(restored.component_order, ["ZERO", "IROC"]);
+}
+
+#[test]
+fn optional_integer_builtin_parameters_coerce_bool_to_zero_or_one() {
+    let (mut engine, bag) = engine_with_bag();
+    let bag_index = engine.find_object_index(bag).expect("bag index");
+
+    assert_eq!(
+        engine
+            .call_object_function(bag_index, "SeedAndReadBoolIndexes", Vec::new())
+            .expect("bool values convert to optional integer indexes"),
+        Value::Array(vec![
+            Value::C4Id("ZERO".to_owned()),
+            Value::C4Id("IROC".to_owned()),
+        ])
+    );
 }
 
 #[test]
