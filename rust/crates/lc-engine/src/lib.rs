@@ -22407,13 +22407,23 @@ impl Engine {
                     let object = &mut self.objects[idx];
                     // iPhaseAdvance (C4Object.cpp:4696): WALK fixtoi(|xdir|*10)
                     // (:4787-4789), SCALE fixtoi(|ydir|*14) (:4830-4832),
-                    // HANGLE fixtoi(|xdir|*10) (:4867-4869), SWIM
+                    // HANGLE fixtoi(|xdir|*10) (:4867-4869), PUSH the same
+                    // for nonzero xdir while retaining the default 1 at
+                    // rest (:5106-5108), PULL the same with a zero baseline
+                    // (:5189-5192), SWIM
                     // fixtoi(swimlimit*10) with the PHYSICAL limit, not the
                     // velocity (:5010-ish "iPhaseAdvance = fixtoi(lLimit*10)"),
                     // DIG fixtoi(diglimit*40) (:4894-4895); everything else 1.
                     let phase_advance =
                         match action_library.procedure_for_action(&exec_action_source) {
                         ActionProcedure::Walk | ActionProcedure::Hang => {
+                            math::fixtoi(object.fixed_velocity.x.abs() * 10)
+                        }
+                        ActionProcedure::Push if object.fixed_velocity.x.is_nonzero() => {
+                            math::fixtoi(object.fixed_velocity.x.abs() * 10)
+                        }
+                        ActionProcedure::Push => 1,
+                        ActionProcedure::Pull => {
                             math::fixtoi(object.fixed_velocity.x.abs() * 10)
                         }
                         ActionProcedure::Scale => math::fixtoi(object.fixed_velocity.y.abs() * 14),

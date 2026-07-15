@@ -18224,11 +18224,19 @@ protected func Activity() { SetActionTargets(); return(1); }
         );
         pusher_actions.insert(
             "Push".to_string(),
-            ActionSpec::default().with_procedure("push"),
+            ActionSpec::default()
+                .with_procedure("push")
+                .with_delay(13)
+                .with_length(20)
+                .with_next("Push"),
         );
         pusher_actions.insert(
             "Pull".to_string(),
-            ActionSpec::default().with_procedure("pull"),
+            ActionSpec::default()
+                .with_procedure("pull")
+                .with_delay(13)
+                .with_length(20)
+                .with_next("Pull"),
         );
         pusher_definition.configure_actions(Some("Idle".to_string()), pusher_actions);
         pusher_definition.set_physical(PhysicalInfo {
@@ -18311,6 +18319,14 @@ protected func Activity() { SetActionTargets(); return(1); }
         assert_eq!(engine.objects[pusher_idx].fixed_velocity.y, C4Fixed::ZERO);
         assert_eq!(engine.objects[pusher_idx].state.direction, Direction::Right);
         assert_eq!(engine.objects[pusher_idx].state.action.name, "Push");
+        assert_eq!(
+            (
+                engine.objects[pusher_idx].state.action.phase,
+                engine.objects[pusher_idx].state.action.ticks,
+            ),
+            (0, 10),
+            "raw xdir 64225 advances PhaseDelay by fixtoi(|xdir|*10)=10"
+        );
         assert_eq!(
             engine.objects[crate_idx].state.controller, 7,
             "a successful PUSH copies the pusher Controller before range checks"
@@ -18400,9 +18416,193 @@ protected func Activity() { SetActionTargets(); return(1); }
         assert_eq!(engine.objects[puller_idx].state.direction, Direction::Right);
         assert_eq!(engine.objects[puller_idx].state.action.name, "Pull");
         assert_eq!(
+            (
+                engine.objects[puller_idx].state.action.phase,
+                engine.objects[puller_idx].state.action.ticks,
+            ),
+            (1, 0),
+            "raw xdir 128450 advances by 20, crosses Delay 13 once, and discards overshoot"
+        );
+        assert_eq!(
             engine.objects[crate_idx].state.controller, 9,
             "a successful PULL copies the puller Controller before range checks"
         );
+    }
+
+    #[test]
+    fn stationary_push_retains_one_phase_step_but_pull_freezes() {
+        // ExecAction starts with iPhaseAdvance=1. DFA_PUSH overwrites it
+        // only for a nonzero raw xdir; DFA_PULL first resets it to zero
+        // (C4Object.cpp:5106-5108,5189-5192).
+        for (action, stationary_advance) in [("Push", 1_u32), ("Pull", 0_u32)] {
+            let (mut engine, crate_id, _) = push_pull_fixture();
+            let mut state = ActionState::new(action);
+            state.target = Some(crate_id);
+            let actor = engine
+                .spawn_object(
+                    SpawnConfig::new("Pusher")
+                        // The zero-width synthetic target's inclusive right
+                        // edge is x=9, so this is the exact follow position.
+                        .with_position(Vector2::new(9, 0))
+                        .with_action(state)
+                        .with_command_direction(CommandDirection::Stop),
+                )
+                .expect("actor spawns");
+
+            for frame in 1_u32..=20 {
+                engine.tick().expect("stationary procedure tick succeeds");
+                let index = engine.find_object_index(actor).expect("actor survives");
+                let object = &engine.objects[index];
+                assert_eq!(
+                    object.fixed_velocity.x,
+                    C4Fixed::ZERO,
+                    "{action} is stationary"
+                );
+                assert_eq!(object.state.action.name, action);
+
+                let accumulated = frame * stationary_advance;
+                let expected_phase = (accumulated / 13) as i32;
+                let expected_delay = accumulated % 13;
+                assert_eq!(
+                    (object.state.action.phase, object.state.action.ticks),
+                    (expected_phase, expected_delay),
+                    "{action} phase state after frame {frame}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pinned_push_phase_trajectory_matches_cpp_for_one_hundred_frames() {
+        // With the fixture's raw follow xdir 64225, PUSH contributes 10 to
+        // PhaseDelay each successful frame. Delay 13 therefore advances one
+        // phase every second frame, discarding the seven-point overshoot;
+        // Length 20 wraps the same-name action every 40 frames.
+        let (mut engine, crate_id, _) = push_pull_fixture();
+        let mut push = ActionState::new("Push");
+        push.target = Some(crate_id);
+        let pusher = engine
+            .spawn_object(
+                SpawnConfig::new("Pusher")
+                    .with_position(Vector2::ZERO)
+                    .with_action(push)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("pusher spawns");
+
+        for frame in 1_u32..=100 {
+            let pusher_index = engine.find_object_index(pusher).expect("pusher survives");
+            engine.objects[pusher_index].set_position(Vector2::ZERO);
+            engine.objects[pusher_index].set_fixed_velocity(FixedVec2::ZERO);
+            let crate_index = engine.find_object_index(crate_id).expect("crate survives");
+            engine.objects[crate_index].set_position(Vector2::new(10, 0));
+            engine.objects[crate_index].set_fixed_velocity(FixedVec2::ZERO);
+
+            engine.tick().expect("pinned push tick succeeds");
+            let pusher_index = engine.find_object_index(pusher).expect("pusher survives");
+            let object = &engine.objects[pusher_index];
+            assert_eq!(object.fixed_velocity.x.val(), 64225);
+            assert_eq!(
+                (object.state.action.phase, object.state.action.ticks),
+                (
+                    ((frame / 2) % 20) as i32,
+                    if frame % 2 == 0 { 0 } else { 10 },
+                ),
+                "PUSH phase trajectory at frame {frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_horse_pull_wraps_and_refires_start_call_after_twenty_frames() {
+        // Western Horse Pull: Delay=13, Length=20, NextAction=Pull,
+        // StartCall=Pulling. At the pinned full pull force, raw xdir 183500
+        // gives advance 28, so C++ advances exactly one phase per frame and
+        // the same-action SetAction refires Pulling on frame 20.
+        use std::sync::{Arc, Mutex};
+
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let calls = Arc::clone(&calls);
+            hooks.set_on_call(move |name, _args| {
+                if name == "Pulling" {
+                    calls.lock().unwrap().push(name.to_string());
+                }
+            });
+        }
+
+        let mut horse = Definition::from_script(
+            "HRSE",
+            "Horse",
+            "#strict 2\nfunc Pulling() { return 1; }\n",
+        )
+        .expect("horse compiles");
+        horse.set_debugger_hooks(hooks);
+        horse.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        horse.set_physical(PhysicalInfo {
+            walk: 50_000,
+            push: 100_000,
+            ..PhysicalInfo::default()
+        });
+        horse.configure_actions(
+            Some("Pull".to_string()),
+            HashMap::from([(
+                "Pull".to_string(),
+                ActionSpec::default()
+                    .with_procedure("pull")
+                    .with_delay(13)
+                    .with_length(20)
+                    .with_next("Pull")
+                    .with_start_call("Pulling"),
+            )]),
+        );
+
+        let mut wagon = simple_definition("WAGN");
+        wagon.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        wagon.set_category(CATEGORY_VEHICLE);
+        wagon.set_grab(1);
+        wagon.set_mass(200);
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine.register_definition(horse).expect("horse registers");
+        engine.register_definition(wagon).expect("wagon registers");
+        let wagon = engine
+            .spawn_object(SpawnConfig::new("WAGN").with_position(Vector2::new(12, 0)))
+            .expect("wagon spawns");
+        let mut pull = ActionState::new("Pull");
+        pull.target = Some(wagon);
+        let horse = engine
+            .spawn_object(
+                SpawnConfig::new("HRSE")
+                    .with_position(Vector2::ZERO)
+                    .with_action(pull)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("horse spawns");
+        calls.lock().unwrap().clear();
+
+        for frame in 1_i32..=20 {
+            let horse_index = engine.find_object_index(horse).expect("horse survives");
+            engine.objects[horse_index].set_position(Vector2::ZERO);
+            engine.objects[horse_index].set_fixed_velocity(FixedVec2::ZERO);
+            let wagon_index = engine.find_object_index(wagon).expect("wagon survives");
+            engine.objects[wagon_index].set_position(Vector2::new(12, 0));
+            engine.objects[wagon_index].set_fixed_velocity(FixedVec2::ZERO);
+
+            engine.tick().expect("pinned pull tick succeeds");
+            let horse_index = engine.find_object_index(horse).expect("horse survives");
+            let action = &engine.objects[horse_index].state.action;
+            assert_eq!(engine.objects[horse_index].fixed_velocity.x.val(), 183500);
+            assert_eq!(action.phase, frame % 20, "PULL phase at frame {frame}");
+            assert_eq!(action.ticks, 0, "advance 28 crosses Delay 13 each frame");
+            assert_eq!(
+                calls.lock().unwrap().len(),
+                usize::from(frame == 20),
+                "Pulling StartCall count at frame {frame}"
+            );
+        }
     }
 
     #[test]
