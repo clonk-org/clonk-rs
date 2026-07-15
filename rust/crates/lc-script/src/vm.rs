@@ -2751,9 +2751,7 @@ impl<'a> Vm<'a> {
                         .evaluate_assignment(target, value_expr, env, depth)
                         .map(TrackedValue::runtime);
                 }
-                let tracked = self.evaluate_tracked(value_expr, env, depth)?;
-                self.assign_target_tracked(env, target, tracked.clone())?;
-                Ok(tracked)
+                self.evaluate_plain_assignment_tracked(target, value_expr, env, depth)
             }
             Expr::Comma(exprs) => {
                 let mut result = TrackedValue::runtime(Value::Nil);
@@ -3796,115 +3794,6 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn assign_target(
-        &self,
-        env: &mut Environment,
-        target: &AssignmentTarget,
-        value: Value,
-    ) -> Result<(), RuntimeError> {
-        match target {
-            AssignmentTarget::EffectSlot(args) => {
-                let mut arg_values = Vec::new();
-                for arg in args {
-                    arg_values.push(self.evaluate(arg, env, 0)?);
-                }
-                // `EffectVar(i, obj, num) = v`: FnEffectVar returns a
-                // REFERENCE into the effect's variables (C4Script.cpp) —
-                // write through the host's set path (4th argument).
-                if let Some(host) = self.host_functions.get("EffectVar") {
-                    arg_values.push(value);
-                    let _guard = CallerSlotsGuard::enter(Some(env.var_slots.clone()));
-                    return self
-                        .invoke_host_function("EffectVar", host, &arg_values)
-                        .map(|_| ());
-                }
-                // Host-less fixture VMs keep the legacy env-slot shim.
-                let slot_name = format!(
-                    "__effect_{}",
-                    arg_values
-                        .iter()
-                        .map(|v| match v {
-                            Value::Int(n) => n.to_string(),
-                            Value::String(s) => s.clone(),
-                            _ => format!("{:?}", v),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("_")
-                );
-                env.define(&slot_name, value);
-                Ok(())
-            }
-            AssignmentTarget::MethodSlot {
-                object,
-                method,
-                args,
-            } => {
-                if !matches!(method.as_str(), "LocalN" | "Local" | "Var" | "EffectVar") {
-                    return self
-                        .assignment_target_to_lvalue(env, target, 0)?
-                        .write(value);
-                }
-                // Evaluate the object to get its identity
-                let object_value = self.evaluate(object, env, 0)?;
-                // `LocalN("name", obj) = v` / `obj->LocalN("name") = v`:
-                // FnLocalN returns a reference into the TARGET's named
-                // locals (C4Script.cpp:4591-4605) — write through the
-                // resolved cell (self or host-supplied foreign cell).
-                if method == "LocalN" && args.len() == 1 {
-                    let local_name = match self.evaluate(&args[0], env, 0)? {
-                        Value::String(local_name) => local_name,
-                        other => {
-                            return Err(RuntimeError::new(format!(
-                                "LocalN: expected string for name, got {}",
-                                other.type_name()
-                            )))
-                        }
-                    };
-                    let cell = self.localn_cell(env, &local_name, Some(object_value));
-                    *cell.borrow_mut() = value;
-                    return Ok(());
-                }
-                // `Local(n, obj) = v` / `obj->Local(n) = v`: FnLocal's
-                // returned reference targets the FOREIGN numbered slot
-                // (C4Script.cpp:3423-3433).
-                if method == "Local" && args.len() == 1 {
-                    let index = self.evaluate_slot_index("Local()", &args[0], env, 0)?;
-                    let cell = self.numbered_local_cell(env, index, Some(object_value));
-                    *cell.borrow_mut() = value;
-                    return Ok(());
-                }
-                let object_id = match object_value {
-                    Value::Int(n) => n.to_string(),
-                    Value::String(s) => s.clone(),
-                    _ => format!("{:?}", object_value),
-                };
-
-                // Evaluate arguments to create the key
-                let mut arg_values = Vec::new();
-                for arg in args {
-                    arg_values.push(self.evaluate(arg, env, 0)?);
-                }
-                let key = arg_values
-                    .iter()
-                    .map(|v| match v {
-                        Value::Int(n) => n.to_string(),
-                        Value::String(s) => s.clone(),
-                        _ => format!("{:?}", v),
-                    })
-                    .collect::<Vec<_>>()
-                    .join("_");
-
-                // Store in environment with naming scheme: __method_{object_id}_{method}_{key}
-                let slot_name = format!("__method_{}_{}_{}", object_id, method, key);
-                env.define(&slot_name, value);
-                Ok(())
-            }
-            _ => self
-                .assignment_target_to_lvalue(env, target, 0)?
-                .write(value),
-        }
-    }
-
     fn evaluate_assignment(
         &self,
         target: &AssignmentTarget,
@@ -3928,39 +3817,24 @@ impl<'a> Vm<'a> {
             )));
         }
 
-        // Preserve the existing RHS-first behavior for valid targets; this
-        // issue only restores AB_Set's invalid-value path.
-        let tracked = self.evaluate_tracked(value_expr, env, depth)?;
-        let value = tracked.value.clone();
-        self.assign_target_tracked(env, target, tracked)?;
-        Ok(value)
+        self.evaluate_plain_assignment_tracked(target, value_expr, env, depth)
+            .map(|tracked| tracked.value)
     }
 
-    fn assign_target_tracked(
+    fn evaluate_plain_assignment_tracked(
         &self,
-        env: &mut Environment,
         target: &AssignmentTarget,
-        tracked: TrackedValue,
-    ) -> Result<(), RuntimeError> {
-        if let AssignmentTarget::Variable(name) = target {
-            if env.assign_tracked(name, tracked.clone()).is_ok() {
-                return Ok(());
-            }
-        }
-        match target {
-            AssignmentTarget::MethodSlot { method, .. }
-                if matches!(method.as_str(), "LocalN" | "Local") =>
-            {
-                self.assignment_target_to_lvalue(env, target, 0)?
-                    .write_tracked(tracked)
-            }
-            AssignmentTarget::EffectSlot(_) | AssignmentTarget::MethodSlot { .. } => {
-                self.assign_target(env, target, tracked.value)
-            }
-            _ => self
-                .assignment_target_to_lvalue(env, target, 0)?
-                .write_tracked(tracked),
-        }
+        value_expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<TrackedValue, RuntimeError> {
+        // AB_Set receives one already-evaluated reference, followed by the
+        // RHS. Retain that reference across RHS evaluation without reading it:
+        // value-style host references need only their address arguments here.
+        let reference = self.assignment_target_to_lvalue(env, target, depth)?;
+        let tracked = self.evaluate_tracked(value_expr, env, depth)?;
+        reference.write_tracked(tracked.clone())?;
+        Ok(tracked)
     }
 
     fn assignment_target_value(
@@ -4255,6 +4129,39 @@ impl<'a> Vm<'a> {
                 let object_value = self.evaluate(object, env, depth + 1)?;
                 let index = self.evaluate_slot_index("Local()", &args[0], env, depth)?;
                 Ok(self.tracked_cell(self.numbered_local_cell(env, index, Some(object_value))))
+            }
+            AssignmentTarget::MethodSlot {
+                object,
+                method,
+                args,
+            } if matches!(method.as_str(), "Var" | "EffectVar") => {
+                // Preserve the legacy method-slot shim as an actual retained
+                // cell so plain assignment can resolve it before the RHS.
+                let object_value = self.evaluate(object, env, depth + 1)?;
+                let object_id = match object_value {
+                    Value::Int(value) => value.to_string(),
+                    Value::String(value) => value,
+                    other => format!("{other:?}"),
+                };
+                let arg_values = args
+                    .iter()
+                    .map(|arg| self.evaluate(arg, env, depth + 1))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let key = arg_values
+                    .iter()
+                    .map(|value| match value {
+                        Value::Int(value) => value.to_string(),
+                        Value::String(value) => value.clone(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("_");
+                let slot_name = format!("__method_{object_id}_{method}_{key}");
+                if env.get(&slot_name)?.is_none() {
+                    env.define(&slot_name, Value::Nil);
+                }
+                env.lvalue(&slot_name)
+                    .ok_or_else(|| RuntimeError::new("method slot disappeared"))
             }
             AssignmentTarget::MethodSlot {
                 object,

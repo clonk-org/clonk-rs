@@ -1,13 +1,87 @@
-//! Compound assignments retain one lvalue reference across their read,
-//! operation, and write. This keeps address-side effects deterministic and
-//! lets `??=` skip both its RHS and its store when the old value is non-nil.
+//! Assignments retain one lvalue reference before evaluating their RHS.
+//! Compound operations reuse that reference for their read and write, and
+//! `??=` skips both its RHS and store when the old value is non-nil.
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 use lc_script::{Engine, Script, Value};
+
+#[test]
+fn plain_assignment_resolves_array_index_before_rhs() {
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let observed_trace = Arc::clone(&trace);
+    let mut engine = Engine::new();
+    engine.register_host_function("Trace", move |args| {
+        let [Value::Int(marker)] = args else {
+            panic!("Trace expects one integer marker, got {args:?}");
+        };
+        observed_trace.lock().unwrap().push(*marker);
+        Ok(Value::Int(if *marker == 1 { 0 } else { 42 }))
+    });
+    engine.add_script(
+        Script::compile(
+            r#"
+                func Test() {
+                    var values = [0];
+                    values[Trace(1)] = Trace(2);
+                    return values;
+                }
+            "#,
+        )
+        .expect("side-effecting plain assignment compiles"),
+    );
+
+    assert_eq!(
+        engine.call("Test", &[]).expect("plain assignment succeeds"),
+        Value::Array(vec![Value::Int(42)])
+    );
+    assert_eq!(
+        *trace.lock().unwrap(),
+        vec![1, 2],
+        "the indexed target must resolve before the RHS is evaluated"
+    );
+}
+
+#[test]
+fn assignment_expression_resolves_array_index_before_rhs() {
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let observed_trace = Arc::clone(&trace);
+    let mut engine = Engine::new();
+    engine.register_host_function("Trace", move |args| {
+        let [Value::Int(marker)] = args else {
+            panic!("Trace expects one integer marker, got {args:?}");
+        };
+        observed_trace.lock().unwrap().push(*marker);
+        Ok(Value::Int(if *marker == 1 { 0 } else { 42 }))
+    });
+    engine.add_script(
+        Script::compile(
+            r#"
+                func Test() {
+                    var values = [0];
+                    var assigned = values[Trace(1)] = Trace(2);
+                    return [values, assigned];
+                }
+            "#,
+        )
+        .expect("side-effecting assignment expression compiles"),
+    );
+
+    assert_eq!(
+        engine
+            .call("Test", &[])
+            .expect("assignment expression succeeds"),
+        Value::Array(vec![Value::Array(vec![Value::Int(42)]), Value::Int(42)])
+    );
+    assert_eq!(
+        *trace.lock().unwrap(),
+        vec![1, 2],
+        "the indexed target must resolve before an expression RHS"
+    );
+}
 
 #[test]
 fn compound_assignment_evaluates_array_index_once() {
