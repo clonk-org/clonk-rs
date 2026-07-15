@@ -33772,9 +33772,9 @@ func Probe(target) {
 local object_no, global_no, id_no;
 
 public func Arm(pTarget) {
-    id_no = AddEffect("DefinitionBound", this(), 100, 2, nil, CMND);
-    object_no = AddEffect("ObjectBound", this(), 100, 2, pTarget);
-    global_no = AddEffect("GlobalBound", nil, 100, 2, pTarget);
+    id_no = AddEffect("DefinitionBound", this(), 100, 5, nil, CMND);
+    object_no = AddEffect("ObjectBound", this(), 100, 5, pTarget);
+    global_no = AddEffect("GlobalBound", nil, 100, 5, pTarget);
     return [object_no, global_no, id_no];
 }
 
@@ -33848,8 +33848,9 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
                 .expect("effects install"),
             Value::Array(vec![Value::Int(2), Value::Int(1), Value::Int(1)])
         );
-        engine.tick().expect("first pre-removal tick succeeds");
-        engine.tick().expect("second pre-removal tick succeeds");
+        for _ in 0..5 {
+            engine.tick().expect("pre-removal tick succeeds");
+        }
         {
             let calls = calls.lock().unwrap();
             for callback in [
@@ -33900,8 +33901,9 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         engine
             .change_object_damage(carrier_idx, 5, 0, -1)
             .expect("damage traversal succeeds");
-        engine.tick().expect("first post-removal tick succeeds");
-        engine.tick().expect("second post-removal tick succeeds");
+        for _ in 0..10 {
+            engine.tick().expect("post-removal tick succeeds");
+        }
 
         let calls = calls.lock().unwrap();
         for callback in [
@@ -33922,8 +33924,8 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
                 .iter()
                 .filter(|name| name.as_str() == "FxDefinitionBoundTimer")
                 .count(),
-            1,
-            "the C4ID-only command target remains scheduled"
+            2,
+            "the C4ID-only command target remains scheduled across two intervals"
         );
         drop(calls);
 
