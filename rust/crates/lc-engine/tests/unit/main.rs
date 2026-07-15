@@ -7399,6 +7399,104 @@ func ProbeSilent()
     }
 
     #[test]
+    fn deferred_named_remove_preserves_the_selected_same_name_effect_number() {
+        let script = r#"#strict 3
+global func Initialize(state, random)
+{
+  AddEffect("Twin", state, 100, 0);
+  AddEffect("Twin", state, 200, 0);
+  return nil;
+}
+
+global func Step(state, frame, random)
+{
+  if (frame == 1) RemoveEffect("Twin", state, 1);
+  return nil;
+}
+
+global func FxTwinStop(state, int number, int reason) { return nil; }
+global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
+"#;
+
+        let calls: Arc<Mutex<Vec<(String, Vec<Value>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let calls = Arc::clone(&calls);
+            hooks.set_on_call(move |name, args| {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push((name.to_owned(), args.to_vec()));
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("CALL", "Caller", script).expect("caller compiles");
+        definition.set_debugger_hooks(hooks);
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("caller registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+
+        let initial = engine.object_snapshot(object).expect("caller remains live");
+        let first_number = initial
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Twin" && effect.priority == 100)
+            .expect("first Twin exists")
+            .number;
+        let second_number = initial
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Twin" && effect.priority == 200)
+            .expect("second Twin exists")
+            .number;
+        assert!(first_number < second_number);
+
+        engine.tick().expect("indexed removal frame succeeds");
+        let after_remove = engine.object_snapshot(object).expect("caller remains live");
+        assert!(after_remove.effects.iter().any(|effect| {
+            effect.number == first_number && effect.name == "Twin" && effect.priority == 100
+        }));
+        assert!(after_remove.effects.iter().any(|effect| {
+            effect.number == second_number && effect.name == "Twin" && effect.priority == 0
+        }));
+        let index = engine.find_object_index(object).expect("caller index");
+        assert_eq!(
+            engine
+                .call_object_function(index, "FirstTwin", vec![])
+                .expect("live name lookup succeeds"),
+            Value::Int(first_number)
+        );
+
+        let stop_calls = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == "FxTwinStop")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(stop_calls.len(), 1);
+        assert_eq!(stop_calls[0].1.get(1), Some(&Value::Int(second_number)));
+        assert_eq!(stop_calls[0].1.get(2), Some(&Value::Int(0)));
+
+        engine.tick().expect("next Execute cleans selected Twin");
+        assert_eq!(
+            engine
+                .object_snapshot(object)
+                .expect("caller remains live")
+                .effects
+                .iter()
+                .map(|effect| effect.number)
+                .collect::<Vec<_>>(),
+            vec![first_number]
+        );
+    }
+
+    #[test]
     fn check_effect_preserves_dead_head_zero_and_skips_removed_later_checker() {
         // C4Effect nodes are only unlinked by Execute. Within one VM call a
         // removed final node still means FnCheckEffect had a non-null head,

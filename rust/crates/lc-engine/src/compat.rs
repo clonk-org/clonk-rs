@@ -39665,14 +39665,14 @@ impl EffectScopeContext {
         let effect = &mut self.effects[position];
         effect.priority = 0;
         let effect = effect.clone();
-        let command = if name_filter.is_none() {
-            EffectCommand::remove_number(effect.number, no_callbacks)
-        } else if no_callbacks {
-            EffectCommand::remove_without_callbacks(effect.name.clone())
-        } else {
-            EffectCommand::remove(effect.name.clone())
-        };
-        self.commands.push(command);
+        // The name/wildcard and index have already resolved one concrete
+        // C4Effect node. Preserve that identity through the deferred fold:
+        // same-name peers are legal and a name-keyed command could mark the
+        // wrong peer dead or dispatch Stop with its number.
+        self.commands.push(EffectCommand::remove_number(
+            effect.number,
+            no_callbacks,
+        ));
         Some(effect)
     }
 
@@ -51161,9 +51161,9 @@ func Missing() { return ComponentAll(nil, WOOD); }
         assert!(matches!(outcome.object[0], EffectCommand::Add(_)));
         assert!(matches!(
             outcome.object[1],
-            EffectCommand::Remove {
-                no_callbacks: false,
-                ..
+            EffectCommand::RemoveNumber {
+                number: 1,
+                no_callbacks: false
             }
         ));
     }
@@ -51187,9 +51187,9 @@ func Missing() { return ComponentAll(nil, WOOD); }
         assert!(matches!(outcome.object[0], EffectCommand::Add(_)));
         assert!(matches!(
             outcome.object[1],
-            EffectCommand::Remove {
-                no_callbacks: true,
-                ..
+            EffectCommand::RemoveNumber {
+                number: 1,
+                no_callbacks: true
             }
         ));
     }
