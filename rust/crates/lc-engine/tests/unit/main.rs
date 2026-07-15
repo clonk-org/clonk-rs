@@ -19536,6 +19536,125 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
     }
 
     #[test]
+    fn exec_action_resets_kill_trace_on_walk_before_later_death() {
+        let script = r#"#strict
+local death_by;
+func Death(by) { death_by = by; return 1; }
+"#;
+        let mut definition =
+            Definition::from_script("KTRC", "Kill trace walker", script).unwrap();
+        definition.set_category(CATEGORY_LIVING);
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Dead".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 0, 0));
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("KTRC")
+                    .with_category(CATEGORY_LIVING)
+                    .with_alive(true)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("walker spawns");
+        let idx = engine.find_object_index(id).expect("walker exists");
+        engine.objects[idx].last_energy_loss_cause = 7;
+
+        engine
+            .apply_physics_at_index(idx)
+            .expect("walk action executes");
+        assert_eq!(
+            engine.objects[idx].last_energy_loss_cause, OWNER_NONE,
+            "a controllable action clears the stale attacker"
+        );
+
+        engine.assign_death(idx, false).expect("death assigns");
+        let idx = engine.find_object_index(id).expect("corpse remains");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("death_by"),
+            Some(&Value::Int(OWNER_NONE)),
+            "a later environmental death is credited to NO_OWNER"
+        );
+    }
+
+    #[test]
+    fn exec_action_retains_kill_trace_for_idle_flight_swim_disabled_and_fire() {
+        let mut definition = simple_definition("KTRC");
+        definition.set_category(CATEGORY_LIVING);
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Jump".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+                (
+                    "Swim".to_string(),
+                    ActionSpec::default().with_procedure("SWIM"),
+                ),
+                (
+                    "DisabledWalk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_disabled(true),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 0, 0));
+
+        for (action, on_fire) in [
+            ("Idle", false),
+            ("Jump", false),
+            ("Swim", false),
+            ("DisabledWalk", false),
+            ("Walk", true),
+        ] {
+            let id = engine
+                .spawn_object(
+                    SpawnConfig::new("KTRC")
+                        .with_category(CATEGORY_LIVING)
+                        .with_alive(true)
+                        .with_action(ActionState::new(action)),
+                )
+                .expect("object spawns");
+            let idx = engine.find_object_index(id).expect("object exists");
+            engine.objects[idx].last_energy_loss_cause = 7;
+            engine.objects[idx].state.on_fire = on_fire;
+
+            engine
+                .apply_physics_at_index(idx)
+                .expect("action executes");
+            assert_eq!(
+                engine.objects[idx].last_energy_loss_cause, 7,
+                "{action} (on_fire={on_fire}) must retain the attacker"
+            );
+        }
+    }
+
+    #[test]
     fn walk_procedure_automatically_steers_rotation_to_floor_slope() {
         // DFA_WALK calls AdjustWalkRotation(20,20,100) after xdir steering
         // when the rotateable shape retained a material attachment

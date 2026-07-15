@@ -29001,7 +29001,14 @@ impl Engine {
         let command_direction = self.objects[idx].state.command_direction;
         let action_target = self.objects[idx].state.action.target;
 
-        let (procedure, movement_profile, gravity_component, is_idle, action_attach) = {
+        let (
+            procedure,
+            movement_profile,
+            gravity_component,
+            is_idle,
+            action_attach,
+            action_disabled,
+        ) = {
             let gravity = self.physics.gravity_as_c4fixed();
             if let Some(definition) = self.definitions.get(&definition_id) {
                 let object = &self.objects[idx];
@@ -29016,11 +29023,19 @@ impl Engine {
                     gravity,
                     is_idle,
                     action_attach,
+                    library.disables_object(&object.state.action.name),
                 )
             } else {
                 let procedure = ActionProcedure::default();
                 let gravity = procedure.gravity_component_fixed(gravity);
-                (procedure, MovementProfile::default(), gravity, true, 0)
+                (
+                    procedure,
+                    MovementProfile::default(),
+                    gravity,
+                    true,
+                    0,
+                    false,
+                )
             }
         };
 
@@ -29065,6 +29080,18 @@ impl Engine {
         // Mirror into the script-visible state: FnAdjustWalkRotation
         // reads Action.t_attach (C4Script.cpp:5444).
         self.objects[idx].state.t_attach = self.objects[idx].frame_t_attach;
+
+        // Once an object is controllable again, an older attack no longer
+        // owns a later environmental death (C4Object.cpp:4771-4776). Flight,
+        // swimming, disabled actions, and burning deliberately retain the
+        // trace so throws, drowning, and fire deaths keep their attacker.
+        if !is_idle
+            && !action_disabled
+            && !matches!(procedure, ActionProcedure::Flight | ActionProcedure::Swim)
+            && !self.objects[idx].state.on_fire
+        {
+            self.objects[idx].last_energy_loss_cause = OWNER_NONE;
+        }
 
         // DFA_DIG must stay attached to solid ground. C++ performs this
         // independent CNAT_Bottom probe before assigning dig velocity and
