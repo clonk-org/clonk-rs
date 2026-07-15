@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ast::{
     AccessLevel, AssignmentTarget, BinaryOp, Expr, ForInit, Function, NavigationOperation,
@@ -165,6 +166,15 @@ fn slot_cell(slots: &SlotMap, index: i32) -> ValueCell {
 #[derive(Clone)]
 pub(crate) struct ScriptCallerContext {
     var_slots: SlotMap,
+    /// Caller-local lookup host: `Func->Owner` for an ordinary function and
+    /// the declaring `Func->LinkedTo` host for an engine-global function.
+    /// This is intentionally independent from `this`, whose definition may
+    /// change during the call.
+    owner_host: ScriptHostIdentity,
+    /// Whether the caller function resolves unqualified names through the
+    /// engine/global scope. `GetLocalSFunc` keeps the linked destination
+    /// host first, then permits the engine table only for this case.
+    engine_scope: bool,
     /// `cthr->Caller->Func->Owner->Strict`, used by native compatibility
     /// functions. Includes/appends therefore use their destination owner.
     owner_strict_level: Option<u8>,
@@ -172,6 +182,24 @@ pub(crate) struct ScriptCallerContext {
     /// source-sensitive native conversions and script-function parameter
     /// conversion. Includes/appends retain source strictness here.
     origin_strict_level: Option<u8>,
+}
+
+/// Process-local identity of one compiled script host. It is meaningful only
+/// while the host is alive and is used to match a native call's suspended
+/// caller frame back to the exact `Engine` retained by lc-engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ScriptHostIdentity(usize);
+
+impl ScriptHostIdentity {
+    pub(crate) fn fresh() -> Self {
+        static NEXT_IDENTITY: AtomicUsize = AtomicUsize::new(1);
+        let identity = NEXT_IDENTITY
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .expect("script host identity space exhausted");
+        Self(identity)
+    }
 }
 
 thread_local! {
@@ -216,6 +244,20 @@ pub fn caller_origin_strictness() -> HostCallerStrictness {
             Some(level) => HostCallerStrictness::Strict(level),
         },
     })
+}
+
+/// Exact local-lookup host of the function immediately calling the current
+/// native host function: its destination owner for a local function or its
+/// declaring `LinkedTo` host for a global. `None` means direct native entry.
+pub fn caller_host_identity() -> Option<ScriptHostIdentity> {
+    HOST_CALLER_CONTEXT.with(|cell| cell.borrow().as_ref().map(|context| context.owner_host))
+}
+
+/// Whether the script frame immediately calling the native host function is
+/// an engine/global-scope function. `None` distinguishes a direct native
+/// invocation with no suspended script caller.
+pub fn caller_uses_engine_scope() -> Option<bool> {
+    HOST_CALLER_CONTEXT.with(|cell| cell.borrow().as_ref().map(|context| context.engine_scope))
 }
 
 /// The calling script function's numbered `Var(n)` slots, exposed to host
@@ -1195,6 +1237,7 @@ impl ReturnValue {
 
 pub struct Vm<'a> {
     functions: &'a HashMap<String, Function>,
+    host_identity: ScriptHostIdentity,
     /// Destination script strictness for `Func->Owner->Strict`. None means
     /// this bare VM has no configured base script; Some(None) is an
     /// explicitly NONSTRICT destination.
@@ -1209,6 +1252,10 @@ pub struct Vm<'a> {
     /// Engine-global script functions (System.c4g `global func`s): the
     /// resolution fallback between the own script and host functions.
     global_functions: Option<&'a HashMap<String, Function>>,
+    /// Exact retained engine-global callback mode. Ordinary Engine::call
+    /// keeps the historical own-root dispatch used by synthetic callbacks;
+    /// a captured C4AulFunc pointer skips unnamed own global links.
+    exact_global_link_lookup: bool,
     /// The object context the call runs on, returned by `Expr::This`
     /// (`Value::Object` in lc-engine). Nil when the call has no object
     /// context (e.g. global functions).
@@ -1246,6 +1293,7 @@ impl<'a> Vm<'a> {
     ) -> Self {
         Self {
             functions,
+            host_identity: ScriptHostIdentity::fresh(),
             owner_strict_level: None,
             host_functions,
             host_reference_functions: None,
@@ -1253,6 +1301,7 @@ impl<'a> Vm<'a> {
             debugger,
             constants: None,
             global_functions: None,
+            exact_global_link_lookup: false,
             this_value: Value::Nil,
             method_dispatch: None,
             method_reference_dispatch: None,
@@ -1270,6 +1319,11 @@ impl<'a> Vm<'a> {
         functions: &'a HashMap<String, HostReferenceFunction>,
     ) -> Self {
         self.host_reference_functions = Some(functions);
+        self
+    }
+
+    pub(crate) fn with_host_identity(mut self, identity: ScriptHostIdentity) -> Self {
+        self.host_identity = identity;
         self
     }
 
@@ -1295,6 +1349,11 @@ impl<'a> Vm<'a> {
     /// `None` = no globals installed.
     pub fn with_optional_globals(mut self, functions: Option<&'a HashMap<String, Function>>) -> Self {
         self.global_functions = functions;
+        self
+    }
+
+    pub(crate) fn with_exact_global_link_lookup(mut self) -> Self {
+        self.exact_global_link_lookup = true;
         self
     }
 
@@ -1546,6 +1605,43 @@ impl<'a> Vm<'a> {
         self.invoke_value(name, args, 0, ObjectState::default(), None)
     }
 
+    /// Engine-owned SFunc entry: bypass the destination host's own function
+    /// map and invoke the function currently pinned in the shared global
+    /// table. This mirrors calling the C4AulScriptFunc pointer returned by
+    /// GetLocalSFunc rather than resolving its name again through FnLinks.
+    pub(crate) fn call_engine_args(
+        &self,
+        name: &str,
+        args: Vec<CallArg>,
+    ) -> Result<Value, RuntimeError> {
+        self.invoke_engine_value(name, args, 0, ObjectState::default(), None)
+    }
+
+    /// Invoke an already-resolved immutable script function without another
+    /// name lookup. Deferred native callbacks use this to mirror a retained
+    /// C4AulFunc pointer while the VM still supplies the live host surface.
+    pub(crate) fn call_pinned_args(
+        &self,
+        function: &Function,
+        args: Vec<CallArg>,
+    ) -> Result<Value, RuntimeError> {
+        let depth = 0usize;
+        if depth >= MAX_CALL_DEPTH {
+            return Err(RuntimeError::new("maximum call depth exceeded"));
+        }
+        maybe_grow(|| {
+            self.invoke_script_function(
+                &function.name,
+                function,
+                args,
+                depth,
+                ObjectState::default(),
+                None,
+            )?
+            .into_value()
+        })
+    }
+
     /// Call against SHARED local cells (see [`LocalCells`]): writes land
     /// live — deeper sessions on the same object observe them mid-call.
     pub(crate) fn call_with_cells(
@@ -1749,6 +1845,25 @@ impl<'a> Vm<'a> {
             .map_or_else(|| self.functions.get(name), |functions| functions.get(name))
     }
 
+    /// Named functions visible in the destination script's own scope.
+    /// Ordinary callbacks preserve historical own-root dispatch. Exact
+    /// retained-global calls model C++'s unnamed global FnLinks instead.
+    fn own_script_function(&self, name: &str) -> Option<&Function> {
+        let function = self.functions.get(name)?;
+        if self.exact_global_link_lookup {
+            function.first_non_global()
+        } else {
+            Some(function)
+        }
+    }
+
+    fn own_or_global_script_function(&self, name: &str) -> Option<&Function> {
+        self.own_script_function(name).or_else(|| {
+            self.global_functions
+                .and_then(|functions| functions.get(name))
+        })
+    }
+
     fn invoke_reference(
         &self,
         name: &str,
@@ -1778,7 +1893,7 @@ impl<'a> Vm<'a> {
         }
 
         maybe_grow(|| {
-            if let Some(function) = self.functions.get(name) {
+            if let Some(function) = self.own_script_function(name) {
                 return self.invoke_script_function(
                     name,
                     function,
@@ -1868,6 +1983,14 @@ impl<'a> Vm<'a> {
         env.inherited_target = function.overloaded.clone();
         env.function_name = function.name.clone();
         env.engine_scope = function.access == AccessLevel::Global;
+        env.linked_host_lookup = self.exact_global_link_lookup
+            && env.engine_scope
+            && function.global_link_host == Some(self.host_identity);
+        env.caller_host_identity = if env.engine_scope {
+            function.global_link_host.unwrap_or(self.host_identity)
+        } else {
+            self.host_identity
+        };
         env.caller_owner_strict_level = if env.engine_scope {
             Some(3)
         } else {
@@ -2786,20 +2909,17 @@ impl<'a> Vm<'a> {
                                     return Ok(Self::fold_legacy_zero(value, env.strict_level));
                                 }
                             }
-                            let function = if env.engine_scope {
+                            let function = if env.engine_scope && !env.linked_host_lookup {
                                 self.engine_script_function(name)
                             } else {
-                                self.functions.get(name).or_else(|| {
-                                    self.global_functions
-                                        .and_then(|functions| functions.get(name))
-                                })
+                                self.own_or_global_script_function(name)
                             };
                             let mut evaluated_args =
                                 self.build_call_args(Some(name), function, args, env, depth + 1)?;
                             if *forward_rest {
                                 Self::append_forwarded_args(&mut evaluated_args, env)?;
                             }
-                            if env.engine_scope {
+                            if env.engine_scope && !env.linked_host_lookup {
                                 self.invoke_engine_value(
                                     name,
                                     evaluated_args,
@@ -3103,13 +3223,10 @@ impl<'a> Vm<'a> {
                         .map(TrackedValue::runtime);
                 }
                 if let Expr::Variable(name) = callee.as_ref() {
-                    let function = if env.engine_scope {
+                    let function = if env.engine_scope && !env.linked_host_lookup {
                         self.engine_script_function(name)
                     } else {
-                        self.functions.get(name).or_else(|| {
-                            self.global_functions
-                                .and_then(|functions| functions.get(name))
-                        })
+                        self.own_or_global_script_function(name)
                     };
                     if name == "SetLocal"
                         && (1..=3).contains(&args.len())
@@ -3154,7 +3271,7 @@ impl<'a> Vm<'a> {
                         if *forward_rest {
                             Self::append_forwarded_args(&mut evaluated_args, env)?;
                         }
-                        return if env.engine_scope {
+                        return if env.engine_scope && !env.linked_host_lookup {
                             self.invoke_engine_tracked_value(
                                 name,
                                 evaluated_args,
@@ -4075,7 +4192,7 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<Value, RuntimeError> {
-        let function = self.functions.get(name);
+        let function = self.own_or_global_script_function(name);
         if failsafe
             && function.is_none()
             && !self.has_host_function(name)
@@ -4508,7 +4625,7 @@ impl<'a> Vm<'a> {
                     .unwrap_or_else(|| Binding::direct(Value::Nil).lvalue()))
             }
             AssignmentTarget::FunctionCall { name, args } => {
-                let function = self.functions.get(name);
+                let function = self.own_or_global_script_function(name);
                 let args =
                     self.build_call_args(Some(name), function, args, env, depth + 1)?;
                 self.invoke_reference(
@@ -4953,6 +5070,7 @@ struct Environment {
     /// bodies keep source strictness above but are owned by the destination
     /// script, whose strictness can differ.
     caller_owner_strict_level: Option<u8>,
+    caller_host_identity: ScriptHostIdentity,
     /// C4Script numeric scratch slots, addressed by `Var(n)` / `Local(n)`. These
     /// are SEPARATE from named variables (C++ `NumVars` and the object `Local`
     /// array, not `Vars`/`LocalNamed`) and are function-scoped, not block-scoped,
@@ -4978,6 +5096,10 @@ struct Environment {
     /// C4Aul global functions are owned by Game.ScriptEngine; unqualified
     /// calls inside them resolve in engine scope, not against `this`'s def.
     engine_scope: bool,
+    /// A global function's named-link lookup still starts at its declaring
+    /// `LinkedTo` script. This is enabled only when the VM is that exact
+    /// retained host; otherwise execution remains engine-table-only.
+    linked_host_lookup: bool,
 }
 
 impl Environment {
@@ -5013,6 +5135,9 @@ impl Environment {
             scopes,
             strict_level,
             caller_owner_strict_level: strict_level,
+            // invoke_script_function stamps the owning VM before executing the
+            // body; zero is only the construction sentinel.
+            caller_host_identity: ScriptHostIdentity(0),
             var_slots: Rc::new(RefCell::new(HashMap::new())),
             object_state,
             call_args: Rc::new(call_args),
@@ -5020,12 +5145,15 @@ impl Environment {
             inherited_target: None,
             function_name: String::new(),
             engine_scope: false,
+            linked_host_lookup: false,
         })
     }
 
     fn caller_context(&self) -> ScriptCallerContext {
         ScriptCallerContext {
             var_slots: self.var_slots.clone(),
+            owner_host: self.caller_host_identity,
+            engine_scope: self.engine_scope,
             owner_strict_level: self.caller_owner_strict_level,
             origin_strict_level: self.strict_level,
         }

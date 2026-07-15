@@ -54358,6 +54358,891 @@ protected func HangleStart() { callback_order = callback_order * 10 + 4; return(
         );
     }
 
+    const ORDER_FUNC_RESORT_SCRIPT: &str = r#"#strict 2
+static pResortLogger, fQueuedReentrantResort, iSynchronousCategorySortCalls;
+static pRankProbe, iRankSwapCalls;
+
+local iResortCallCount;
+local iResortPair0, iResortPair1, iResortPair2, iResortPair3;
+local iResortPair4, iResortPair5, iResortPair6, iResortPair7;
+local iResortPair8, iResortPair9, iResortPair10, iResortPair11;
+local iSawContained;
+local iSectorCount, iSector0, iSector1, iSector2, iSector3, iSector4;
+
+func ArmResortLogger()
+{
+    pResortLogger = this();
+    return ResetResortLog();
+}
+
+func ResetResortLog()
+{
+    iResortCallCount = 0;
+    iResortPair0 = iResortPair1 = iResortPair2 = iResortPair3 = 0;
+    iResortPair4 = iResortPair5 = iResortPair6 = iResortPair7 = 0;
+    iResortPair8 = iResortPair9 = iResortPair10 = iResortPair11 = 0;
+    iSawContained = 0;
+    iSectorCount = -1;
+    iSector0 = iSector1 = iSector2 = iSector3 = iSector4 = 0;
+    return true;
+}
+
+func RecordResortPair(int iTag, object pLeft, object pRight)
+{
+    var iPair = iTag + GetX(pLeft) * 10 + GetX(pRight);
+    if (iResortCallCount == 0) iResortPair0 = iPair;
+    else if (iResortCallCount == 1) iResortPair1 = iPair;
+    else if (iResortCallCount == 2) iResortPair2 = iPair;
+    else if (iResortCallCount == 3) iResortPair3 = iPair;
+    else if (iResortCallCount == 4) iResortPair4 = iPair;
+    else if (iResortCallCount == 5) iResortPair5 = iPair;
+    else if (iResortCallCount == 6) iResortPair6 = iPair;
+    else if (iResortCallCount == 7) iResortPair7 = iPair;
+    else if (iResortCallCount == 8) iResortPair8 = iPair;
+    else if (iResortCallCount == 9) iResortPair9 = iPair;
+    else if (iResortCallCount == 10) iResortPair10 = iPair;
+    else if (iResortCallCount == 11) iResortPair11 = iPair;
+    iResortCallCount += 1;
+    return true;
+}
+
+func RecordCrossCheckPair(object pLeft, object pRight)
+{
+    RecordResortPair(0, pLeft, pRight);
+    if (Contained(pLeft) || Contained(pRight)) iSawContained = 1;
+    return true;
+}
+
+func ReadResortLog()
+{
+    return [iResortCallCount,
+            iResortPair0, iResortPair1, iResortPair2, iResortPair3,
+            iResortPair4, iResortPair5, iResortPair6, iResortPair7,
+            iResortPair8, iResortPair9, iResortPair10, iResortPair11];
+}
+
+func ReadSawContained() { return iSawContained; }
+
+func RecordSectorOrder(aObjects)
+{
+    if (iSectorCount >= 0) return true;
+    iSectorCount = GetLength(aObjects);
+    if (iSectorCount > 0) iSector0 = GetX(aObjects[0]);
+    if (iSectorCount > 1) iSector1 = GetX(aObjects[1]);
+    if (iSectorCount > 2) iSector2 = GetX(aObjects[2]);
+    if (iSectorCount > 3) iSector3 = GetX(aObjects[3]);
+    if (iSectorCount > 4) iSector4 = GetX(aObjects[4]);
+    return true;
+}
+
+func ReadSectorOrder()
+{
+    return [iSectorCount, iSector0, iSector1, iSector2, iSector3, iSector4];
+}
+
+func QueueWholeResort()
+{
+    ResortObjects("ResortOrder", C4D_Object);
+    return true;
+}
+
+func QueueObjectResort(object pObject)
+{
+    ResortObject("ResortOrder", pObject);
+    return true;
+}
+
+func QueueNewestFirstResorts()
+{
+    ResortObjects("ResortAscending", C4D_Object);
+    ResortObjects("ResortDescending", C4D_Object);
+    return true;
+}
+
+func QueueCrossCheckResort()
+{
+    ResortObjects("ResortObserveCrossCheck", C4D_Object);
+    return true;
+}
+
+func QueueSectorVisibilityResorts()
+{
+    ResortObjects("ResortObserveSector", C4D_Object);
+    ResortObjects("ResortOrder", C4D_Object);
+    return true;
+}
+
+func QueueSectorObserver()
+{
+    ResortObjects("ResortObserveSector", C4D_Object);
+    return true;
+}
+
+func QueueReentrantResort()
+{
+    fQueuedReentrantResort = 0;
+    ResortObjects("ResortReentrant", C4D_Object);
+    return true;
+}
+
+func QueueSynchronousCategorySort()
+{
+    iSynchronousCategorySortCalls = 0;
+    ResortObjects("ResortSynchronousCategorySort", C4D_Object);
+    return true;
+}
+
+func QueueSwapRankProbe(object pProbe)
+{
+    pRankProbe = pProbe;
+    iRankSwapCalls = 0;
+    ResortObjects("ResortSwapRankProbe", C4D_Object);
+    return true;
+}
+
+func ResortOrder(object pLeft, object pRight)
+{
+    pResortLogger->RecordResortPair(0, pLeft, pRight);
+    return GetY(pLeft) - GetY(pRight);
+}
+
+func ResortAscending(object pLeft, object pRight)
+{
+    pResortLogger->RecordResortPair(100, pLeft, pRight);
+    return GetY(pLeft) - GetY(pRight);
+}
+
+func ResortDescending(object pLeft, object pRight)
+{
+    pResortLogger->RecordResortPair(200, pLeft, pRight);
+    return GetY(pRight) - GetY(pLeft);
+}
+
+func ResortObserveCrossCheck(object pLeft, object pRight)
+{
+    pResortLogger->RecordCrossCheckPair(pLeft, pRight);
+    return 0;
+}
+
+func ResortObserveSector(object pLeft, object pRight)
+{
+    var aObjects = FindObjects([10, 0, 0, 200, 200], [20, "RSRT"]);
+    pResortLogger->RecordSectorOrder(aObjects);
+    return 0;
+}
+
+func ResortReentrant(object pLeft, object pRight)
+{
+    pResortLogger->RecordResortPair(0, pLeft, pRight);
+    if (!fQueuedReentrantResort)
+    {
+        fQueuedReentrantResort = 1;
+        Resort(pLeft);
+    }
+    return GetY(pLeft) - GetY(pRight);
+}
+
+func ResortSynchronousCategorySort(object pLeft, object pRight)
+{
+    iSynchronousCategorySortCalls += 1;
+    if (iSynchronousCategorySortCalls == 1)
+    {
+        Resort();
+        var aObjects = FindObjects([20, "RSRT"]);
+        pResortLogger->RecordSectorOrder(aObjects);
+    }
+    return 0;
+}
+
+func ResortSwapRankProbe(object pLeft, object pRight)
+{
+    iRankSwapCalls += 1;
+    if (iRankSwapCalls == 2) SetPosition(3, 3, pRankProbe);
+    else if (iRankSwapCalls == 3)
+    {
+        var aObjects = FindObjects([10, 0, 0, 50, 50], [20, "RSRT"]);
+        pResortLogger->RecordSectorOrder(aObjects);
+    }
+    return GetY(pLeft) - GetY(pRight);
+}
+"#;
+
+    fn order_func_resort_fixture(
+        exec_spawn_order: &[(i32, i32)],
+    ) -> (Engine, ObjectId, HashMap<i32, ObjectId>) {
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(200, 200));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(
+                Definition::from_script("RLOG", "Resort logger", ORDER_FUNC_RESORT_SCRIPT)
+                    .expect("resort logger compiles"),
+            )
+            .expect("resort logger registers");
+        engine
+            .register_definition(
+                Definition::from_script("RSRT", "Resort target", "#strict 2\n")
+                    .expect("resort target compiles"),
+            )
+            .expect("resort target registers");
+
+        let logger = engine
+            .spawn_object(
+                SpawnConfig::new("RLOG")
+                    .with_category(CATEGORY_STATIC_BACK)
+                    .with_position(Vector2::new(10, 10)),
+            )
+            .expect("resort logger spawns");
+        let mut ids = HashMap::new();
+        for &(label, key) in exec_spawn_order {
+            let id = engine
+                .spawn_object(
+                    SpawnConfig::new("RSRT")
+                        .with_category(CATEGORY_OBJECT)
+                        .with_position(Vector2::new(label, key)),
+                )
+                .expect("resort target spawns");
+            assert!(ids.insert(label, id).is_none(), "labels are unique");
+        }
+        assert_eq!(
+            order_func_resort_call(&mut engine, logger, "ArmResortLogger", Vec::new()),
+            Value::Bool(true)
+        );
+        (engine, logger, ids)
+    }
+
+    fn order_func_resort_call(
+        engine: &mut Engine,
+        logger: ObjectId,
+        function: &str,
+        args: Vec<Value>,
+    ) -> Value {
+        let logger_index = engine
+            .find_object_index(logger)
+            .expect("resort logger remains");
+        engine
+            .call_object_function(logger_index, function, args)
+            .unwrap_or_else(|error| panic!("{function} succeeds: {error}"))
+    }
+
+    fn order_func_resort_ids(
+        ids: &HashMap<i32, ObjectId>,
+        labels: &[i32],
+    ) -> Vec<ObjectId> {
+        labels.iter().map(|label| ids[label]).collect()
+    }
+
+    fn order_func_resort_exec_order(
+        engine: &Engine,
+        ids: &HashMap<i32, ObjectId>,
+    ) -> Vec<ObjectId> {
+        engine
+            .debug_exec_order()
+            .into_iter()
+            .filter(|id| ids.values().any(|target| target == id))
+            .collect()
+    }
+
+    fn order_func_resort_master_order(
+        engine: &Engine,
+        ids: &HashMap<i32, ObjectId>,
+    ) -> Vec<ObjectId> {
+        engine
+            .debug_exec_order()
+            .into_iter()
+            .rev()
+            .filter(|id| ids.values().any(|target| target == id))
+            .collect()
+    }
+
+    fn order_func_resort_sector_order(
+        engine: &Engine,
+        ids: &HashMap<i32, ObjectId>,
+    ) -> Vec<ObjectId> {
+        engine
+            .sectors
+            .as_ref()
+            .expect("sector map exists")
+            .object_ids(sector::SectorKey::Inside { x: 0, y: 0 })
+            .iter()
+            .copied()
+            .filter(|id| ids.values().any(|target| target == id))
+            .collect()
+    }
+
+    fn order_func_resort_pairs(engine: &mut Engine, logger: ObjectId) -> Vec<i32> {
+        let Value::Array(values) =
+            order_func_resort_call(engine, logger, "ReadResortLog", Vec::new())
+        else {
+            panic!("resort log must be an array")
+        };
+        let Some(Value::Int(count)) = values.first() else {
+            panic!("resort log count must be an integer")
+        };
+        let count = usize::try_from(*count).expect("resort log count is nonnegative");
+        assert!(count <= values.len().saturating_sub(1));
+        values
+            .into_iter()
+            .skip(1)
+            .take(count)
+            .map(|value| match value {
+                Value::Int(pair) => pair,
+                other => panic!("resort pair must be an integer, got {other:?}"),
+            })
+            .collect()
+    }
+
+    fn order_func_resort_sector_snapshot(engine: &mut Engine, logger: ObjectId) -> Vec<i32> {
+        let Value::Array(values) =
+            order_func_resort_call(engine, logger, "ReadSectorOrder", Vec::new())
+        else {
+            panic!("sector-order log must be an array")
+        };
+        let Some(Value::Int(count)) = values.first() else {
+            panic!("sector-order count must be an integer")
+        };
+        let count = usize::try_from(*count).expect("sector-order callback ran");
+        values
+            .into_iter()
+            .skip(1)
+            .take(count)
+            .map(|value| match value {
+                Value::Int(label) => label,
+                other => panic!("sector-order label must be an integer, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn order_func_resort_objects_pins_cpp_comparisons_and_all_three_orders() {
+        // C4ObjResort::Sort walks C++ First->Last [4,1,3,2] from the back
+        // on every pass. `debug_exec_order` is that master list reversed,
+        // hence the deliberately odd spawn/exec order below.
+        let (mut engine, logger, ids) =
+            order_func_resort_fixture(&[(2, 2), (3, 3), (1, 1), (4, 4)]);
+        assert_eq!(
+            order_func_resort_exec_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[2, 3, 1, 4])
+        );
+        assert_eq!(
+            order_func_resort_master_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[4, 1, 3, 2])
+        );
+
+        assert_eq!(
+            order_func_resort_call(&mut engine, logger, "QueueWholeResort", Vec::new()),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            order_func_resort_exec_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[2, 3, 1, 4]),
+            "ResortObjects is deferred"
+        );
+        engine
+            .game_start_synchronize()
+            .expect("queued whole-list resort executes");
+
+        assert_eq!(
+            order_func_resort_pairs(&mut engine, logger),
+            vec![23, 21, 14, 32, 24, 34],
+            "each payload swap keeps comparing the same right-hand object"
+        );
+        let final_master = order_func_resort_ids(&ids, &[1, 2, 3, 4]);
+        assert_eq!(order_func_resort_master_order(&engine, &ids), final_master);
+        assert_eq!(
+            order_func_resort_exec_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[4, 3, 2, 1])
+        );
+        assert_eq!(order_func_resort_sector_order(&engine, &ids), final_master);
+    }
+
+    #[test]
+    fn order_func_payload_swap_refreshes_sector_ranks_before_later_update() {
+        let (mut engine, logger, ids) =
+            order_func_resort_fixture(&[(2, 2), (3, 3), (1, 1), (4, 4)]);
+        let probe_index = engine
+            .find_object_index(ids[&3])
+            .expect("rank probe remains");
+        engine.objects[probe_index].state.position = Vector2::new(80, 3);
+        engine.set_landscape(Landscape::flat(200, 200));
+        assert_eq!(
+            order_func_resort_sector_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[4, 1, 2]),
+            "the probe begins outside the observed sector"
+        );
+        assert_eq!(
+            order_func_resort_call(
+                &mut engine,
+                logger,
+                "QueueSwapRankProbe",
+                vec![Value::Object(ids[&3].as_u64())],
+            ),
+            Value::Bool(true)
+        );
+
+        engine.execute_object_order_commands();
+
+        assert_eq!(
+            order_func_resort_sector_snapshot(&mut engine, logger),
+            vec![4, 1, 2, 3],
+            "the first payload swap refreshes ranks before the second comparator moves the probe"
+        );
+    }
+
+    #[test]
+    fn order_func_resort_object_forward_walk_continues_ties_and_readds_sector() {
+        // Master labels/keys: S=(1,4), A=(2,1), tie=(3,4), B=(4,3),
+        // stop=(5,5). Forward calls use (candidate,S); zero continues but
+        // is not a move anchor, and the first positive result stops.
+        let (mut engine, logger, ids) =
+            order_func_resort_fixture(&[(5, 5), (4, 3), (3, 4), (2, 1), (1, 4)]);
+        assert_eq!(
+            order_func_resort_master_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[1, 2, 3, 4, 5])
+        );
+
+        assert_eq!(
+            order_func_resort_call(
+                &mut engine,
+                logger,
+                "QueueObjectResort",
+                vec![Value::Object(ids[&1].as_u64())],
+            ),
+            Value::Bool(true)
+        );
+        engine
+            .game_start_synchronize()
+            .expect("queued forward object resort executes");
+
+        assert_eq!(order_func_resort_pairs(&mut engine, logger), vec![21, 31, 41, 51]);
+        let final_master = order_func_resort_ids(&ids, &[2, 3, 4, 1, 5]);
+        assert_eq!(order_func_resort_master_order(&engine, &ids), final_master);
+        assert_eq!(
+            order_func_resort_exec_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[5, 1, 4, 3, 2])
+        );
+        assert_eq!(order_func_resort_sector_order(&engine, &ids), final_master);
+    }
+
+    #[test]
+    fn order_func_resort_object_backward_walk_uses_reversed_arguments_and_readds_sector() {
+        // Master labels/keys: low=(1,1), A=(2,5), tie=(3,4), S=(4,4),
+        // next=(5,6). The forward positive result selects the backward
+        // scan, whose calls use (S,candidate); ties continue without moving.
+        let (mut engine, logger, ids) =
+            order_func_resort_fixture(&[(5, 6), (4, 4), (3, 4), (2, 5), (1, 1)]);
+        assert_eq!(
+            order_func_resort_master_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[1, 2, 3, 4, 5])
+        );
+
+        assert_eq!(
+            order_func_resort_call(
+                &mut engine,
+                logger,
+                "QueueObjectResort",
+                vec![Value::Object(ids[&4].as_u64())],
+            ),
+            Value::Bool(true)
+        );
+        engine
+            .game_start_synchronize()
+            .expect("queued backward object resort executes");
+
+        assert_eq!(order_func_resort_pairs(&mut engine, logger), vec![54, 43, 42, 41]);
+        let final_master = order_func_resort_ids(&ids, &[1, 4, 2, 3, 5]);
+        assert_eq!(order_func_resort_master_order(&engine, &ids), final_master);
+        assert_eq!(
+            order_func_resort_exec_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[5, 3, 2, 4, 1])
+        );
+        assert_eq!(order_func_resort_sector_order(&engine, &ids), final_master);
+    }
+
+    #[test]
+    fn order_func_resort_requests_execute_newest_first() {
+        // Queue ascending first and descending second. Head insertion makes
+        // descending execute first; the older ascending request therefore
+        // owns the final order. FIFO would leave the exact opposite result.
+        let (mut engine, logger, ids) =
+            order_func_resort_fixture(&[(4, 4), (3, 3), (2, 2), (1, 1)]);
+        assert_eq!(
+            order_func_resort_master_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[1, 2, 3, 4])
+        );
+        assert_eq!(
+            order_func_resort_call(
+                &mut engine,
+                logger,
+                "QueueNewestFirstResorts",
+                Vec::new(),
+            ),
+            Value::Bool(true)
+        );
+        engine
+            .game_start_synchronize()
+            .expect("both queued order-function resorts execute");
+
+        assert_eq!(
+            order_func_resort_pairs(&mut engine, logger),
+            vec![
+                243, 242, 241, 232, 231, 221, // newest descending request
+                112, 113, 114, 123, 124, 134, // older ascending request
+            ]
+        );
+        let final_master = order_func_resort_ids(&ids, &[1, 2, 3, 4]);
+        assert_eq!(order_func_resort_master_order(&engine, &ids), final_master);
+        assert_eq!(
+            order_func_resort_exec_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[4, 3, 2, 1])
+        );
+        assert_eq!(order_func_resort_sector_order(&engine, &ids), final_master);
+    }
+
+    #[test]
+    fn order_func_next_request_bounded_find_sees_prior_update_pos_resort_order() {
+        // The newer ascending request executes first. Its UpdatePosResort
+        // must be reflected in the older observer's freshly built host-world
+        // sector lists; inspecting Engine.sectors only after both requests
+        // would miss the callback-visible stale-order bug. Spawn/storage
+        // order is [2,3,1,4], deliberately distinct from the sorted result.
+        let (mut engine, logger, ids) =
+            order_func_resort_fixture(&[(2, 2), (3, 3), (1, 1), (4, 4)]);
+        assert_eq!(
+            order_func_resort_master_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[4, 1, 3, 2])
+        );
+        assert_eq!(
+            order_func_resort_call(
+                &mut engine,
+                logger,
+                "QueueSectorVisibilityResorts",
+                Vec::new(),
+            ),
+            Value::Bool(true)
+        );
+
+        engine
+            .game_start_synchronize()
+            .expect("sector-observing resorts execute");
+
+        assert_eq!(
+            order_func_resort_sector_snapshot(&mut engine, logger),
+            vec![1, 2, 3, 4],
+            "bounded FindObjects in the next OrderFunc sees the prior request's sector re-adds"
+        );
+    }
+
+    #[test]
+    fn order_func_after_native_category_sort_sees_presort_physical_sector_order() {
+        // Native global Resort() sorts Game.Objects by category and refreshes
+        // only C4LSectors' master-rank oracle. It does not remove/re-add the
+        // existing sector links, so a later OrderFunc callback in the same
+        // ExecuteResorts sweep must still enumerate their pre-sort order.
+        let (mut engine, logger, ids) =
+            order_func_resort_fixture(&[(2, 2), (3, 3), (1, 1), (4, 4)]);
+        for (label, category) in [
+            (4, CATEGORY_STATIC_BACK),
+            (1, CATEGORY_OBJECT),
+            (3, CATEGORY_OBJECT),
+            (2, CATEGORY_STRUCTURE),
+        ] {
+            let index = engine
+                .find_object_index(ids[&label])
+                .expect("mixed-category target remains");
+            engine.objects[index].state.category = category;
+        }
+        let physical_sector_order = order_func_resort_ids(&ids, &[4, 1, 3, 2]);
+        assert_eq!(
+            order_func_resort_sector_order(&engine, &ids),
+            physical_sector_order,
+            "all targets begin in one deliberately non-category-sorted sector list"
+        );
+
+        engine
+            .load_scenario_script_with_convention(
+                "Native category resort probe",
+                "#strict 2\nfunc QueueNativeCategorySort() { Resort(); return true; }",
+                true,
+            )
+            .expect("native category resort probe loads");
+        engine
+            .call_scenario_script_function("QueueNativeCategorySort", Vec::new())
+            .expect("global Resort queues SortByCategory");
+        assert_eq!(
+            order_func_resort_call(&mut engine, logger, "QueueSectorObserver", Vec::new()),
+            Value::Bool(true)
+        );
+
+        engine.execute_object_order_commands();
+
+        assert_eq!(
+            order_func_resort_master_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[1, 3, 2, 4]),
+            "native SortByCategory changes the forward master order"
+        );
+        assert_eq!(
+            order_func_resort_sector_snapshot(&mut engine, logger),
+            vec![4, 1, 3, 2],
+            "bounded FindObjects observes the unchanged physical sector links"
+        );
+        assert_eq!(
+            order_func_resort_sector_order(&engine, &ids),
+            physical_sector_order,
+            "the zero comparator performs no UpdatePosResort sector rebuild"
+        );
+    }
+
+    #[test]
+    fn order_func_global_resort_sorts_synchronously_before_next_comparison() {
+        // The three Object-category links already occupy the correct high
+        // bracket, while StaticBack and Structure are reversed below them.
+        // Resort() in the first comparator must swap those lower brackets
+        // before the same script body performs its boundless master walk.
+        let (mut engine, logger, ids) = order_func_resort_fixture(&[
+            (5, 5),
+            (4, 4),
+            (2, 2),
+            (3, 3),
+            (1, 1),
+        ]);
+        for (label, category) in [
+            (1, CATEGORY_OBJECT),
+            (3, CATEGORY_OBJECT),
+            (2, CATEGORY_OBJECT),
+            (4, CATEGORY_STATIC_BACK),
+            (5, CATEGORY_STRUCTURE),
+        ] {
+            let index = engine
+                .find_object_index(ids[&label])
+                .expect("category-sort target remains");
+            engine.objects[index].state.category = category;
+        }
+        assert_eq!(
+            order_func_resort_master_order(&engine, &ids),
+            order_func_resort_ids(&ids, &[1, 3, 2, 4, 5])
+        );
+        assert_eq!(
+            order_func_resort_call(
+                &mut engine,
+                logger,
+                "QueueSynchronousCategorySort",
+                Vec::new(),
+            ),
+            Value::Bool(true)
+        );
+
+        engine.execute_object_order_commands();
+
+        let category_sorted = order_func_resort_ids(&ids, &[1, 3, 2, 5, 4]);
+        assert_eq!(
+            order_func_resort_master_order(&engine, &ids),
+            category_sorted,
+            "global Resort() sorts immediately at the comparator call boundary"
+        );
+        assert_eq!(
+            order_func_resort_sector_snapshot(&mut engine, logger),
+            vec![1, 3, 2, 5, 4],
+            "later script in the same comparator sees the synchronous category order"
+        );
+        assert!(
+            engine.pending_object_order_commands.is_empty(),
+            "comparator-global Resort() must not survive as a deferred SortByCategory"
+        );
+    }
+
+    #[test]
+    fn order_func_whole_sort_treats_inactive_exec_hole_as_absent_and_fixed() {
+        let (mut engine, logger, ids) =
+            order_func_resort_fixture(&[(2, 2), (3, 3), (1, 1), (4, 4)]);
+        let inactive = engine
+            .spawn_object(
+                SpawnConfig::new("RSRT")
+                    .with_category(CATEGORY_STRUCTURE)
+                    .with_position(Vector2::new(9, 9))
+                    .with_status(ObjectStatus::Inactive)
+                    .with_loaded(true),
+            )
+            .expect("inactive ledger hole spawns");
+        let physical_master = vec![ids[&4], inactive, ids[&1], ids[&3], ids[&2]];
+        engine.exec_list = std::iter::once(logger)
+            .chain(physical_master.iter().rev().copied())
+            .collect();
+
+        assert_eq!(
+            order_func_resort_call(&mut engine, logger, "QueueWholeResort", Vec::new()),
+            Value::Bool(true)
+        );
+        engine
+            .game_start_synchronize()
+            .expect("whole-list resort crosses inactive hole");
+
+        assert_eq!(
+            order_func_resort_pairs(&mut engine, logger),
+            vec![23, 21, 14, 32, 24, 34],
+            "the nonmatching inactive category is transparent to the whole-sort extent"
+        );
+        assert_eq!(
+            engine
+                .debug_exec_order()
+                .into_iter()
+                .rev()
+                .filter(|id| *id == inactive || ids.values().any(|target| target == id))
+                .collect::<Vec<_>>(),
+            vec![ids[&1], inactive, ids[&2], ids[&3], ids[&4]],
+            "active payloads sort across the absent C++ link while its Rust ledger slot stays fixed"
+        );
+    }
+
+    #[test]
+    fn order_func_single_sort_crosses_inactive_exec_hole_without_moving_it() {
+        let (mut engine, logger, ids) =
+            order_func_resort_fixture(&[(5, 5), (4, 3), (3, 4), (2, 1), (1, 4)]);
+        let inactive = engine
+            .spawn_object(
+                SpawnConfig::new("RSRT")
+                    .with_category(CATEGORY_STRUCTURE)
+                    .with_position(Vector2::new(9, 9))
+                    .with_status(ObjectStatus::Inactive)
+                    .with_loaded(true),
+            )
+            .expect("inactive ledger hole spawns");
+        let physical_master = vec![
+            ids[&1], inactive, ids[&2], ids[&3], ids[&4], ids[&5],
+        ];
+        engine.exec_list = std::iter::once(logger)
+            .chain(physical_master.iter().rev().copied())
+            .collect();
+
+        assert_eq!(
+            order_func_resort_call(
+                &mut engine,
+                logger,
+                "QueueObjectResort",
+                vec![Value::Object(ids[&1].as_u64())],
+            ),
+            Value::Bool(true)
+        );
+        engine
+            .game_start_synchronize()
+            .expect("single-object resort crosses inactive hole");
+
+        assert_eq!(order_func_resort_pairs(&mut engine, logger), vec![21, 31, 41, 51]);
+        assert_eq!(
+            engine
+                .debug_exec_order()
+                .into_iter()
+                .rev()
+                .filter(|id| *id == inactive || ids.values().any(|target| target == id))
+                .collect::<Vec<_>>(),
+            vec![ids[&2], inactive, ids[&3], ids[&4], ids[&1], ids[&5]],
+            "the inactive object is absent from comparisons and retains its unified ledger slot"
+        );
+    }
+
+    #[test]
+    fn reentrant_resort_trigger_does_not_remark_object_after_whole_sort_cleanup() {
+        let (mut engine, logger, ids) =
+            order_func_resort_fixture(&[(2, 2), (3, 3), (1, 1), (4, 4)]);
+        assert_eq!(
+            order_func_resort_call(&mut engine, logger, "QueueReentrantResort", Vec::new()),
+            Value::Bool(true)
+        );
+        engine
+            .game_start_synchronize()
+            .expect("reentrant Resort whole-sort executes");
+
+        let sorted_master = order_func_resort_ids(&ids, &[1, 2, 3, 4]);
+        assert_eq!(order_func_resort_master_order(&engine, &ids), sorted_master);
+        assert!(
+            !engine.objects[engine.find_object_index(ids[&2]).expect("target remains")].unsorted,
+            "whole Sort cleanup consumes the reentrant Resort object's Unsorted flag"
+        );
+        assert_eq!(
+            engine.pending_object_order_commands,
+            [ObjectOrderCommand::ResortUnsortedSweep],
+            "only the already-armed global sweep survives ExecuteResorts"
+        );
+
+        engine.execute_object_order_commands();
+        assert_eq!(
+            order_func_resort_master_order(&engine, &ids),
+            sorted_master,
+            "the retained trigger must not recreate the consumed Unsorted flag"
+        );
+        assert!(engine.pending_object_order_commands.is_empty());
+    }
+
+    #[test]
+    fn order_func_resort_runs_after_same_frame_cross_check() {
+        let (mut engine, logger, _ids) = order_func_resort_fixture(&[(2, 2), (1, 1)]);
+        let mut collector = simple_definition("RCLL");
+        collector.set_shape_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+        collector.set_collection_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+        engine
+            .register_definition(collector)
+            .expect("collector registers");
+        let mut item_definition = simple_definition("RITM");
+        item_definition.set_category(CATEGORY_OBJECT);
+        item_definition.set_collectible(true);
+        engine
+            .register_definition(item_definition)
+            .expect("collectible registers");
+
+        let collector = engine
+            .spawn_object(
+                SpawnConfig::new("RCLL")
+                    .with_category(CATEGORY_LIVING)
+                    .with_alive(true)
+                    .with_position(Vector2::new(50, 60)),
+            )
+            .expect("collector spawns");
+        let item = engine
+            .spawn_object(
+                SpawnConfig::new("RITM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50, 50)),
+            )
+            .expect("collectible spawns");
+
+        engine.tick().expect("frame one succeeds");
+        engine.tick().expect("frame two succeeds");
+        assert_eq!(
+            engine.object_snapshot(item).expect("item remains").container,
+            None,
+            "collection is Tick3-gated"
+        );
+        assert_eq!(
+            order_func_resort_call(&mut engine, logger, "ResetResortLog", Vec::new()),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            order_func_resort_call(
+                &mut engine,
+                logger,
+                "QueueCrossCheckResort",
+                Vec::new(),
+            ),
+            Value::Bool(true)
+        );
+
+        engine.tick().expect("frame-three resort succeeds");
+
+        assert_eq!(
+            engine.object_snapshot(item).expect("item remains").container,
+            Some(collector)
+        );
+        assert_eq!(
+            order_func_resort_call(&mut engine, logger, "ReadSawContained", Vec::new()),
+            Value::Int(1),
+            "OrderFunc sees the collection CrossCheck performed earlier in frame three"
+        );
+        assert!(
+            !order_func_resort_pairs(&mut engine, logger).is_empty(),
+            "the containment observation came from a real comparator call"
+        );
+    }
+
     #[test]
     fn set_object_order_defers_lifo_and_persists_exec_order_like_cpp() {
         // FnSetObjectOrder pushes C4ObjResort at the ResortProc head
@@ -54416,7 +55301,19 @@ func Reorder(pRelative, pSort, fAfter) {
         );
 
         // OrderObjectBefore accepts an already-satisfied relationship
-        // without moving it (C4ObjectList.cpp:777-780).
+        // without moving it (C4ObjectList.cpp:777-780), but its wrapper still
+        // calls UpdatePosResort. Stage a current-position change without
+        // touching the initially consistent sector map so the re-add is
+        // observable in a different sector.
+        engine.objects[a_index].state.position = Vector2::new(60, 0);
+        assert_eq!(
+            engine
+                .sectors
+                .as_ref()
+                .expect("sector map exists")
+                .object_ids(sector::SectorKey::Inside { x: 0, y: 0 }),
+            &[b, a, c]
+        );
         assert_eq!(
             engine
                 .call_object_function(
@@ -54435,10 +55332,43 @@ func Reorder(pRelative, pSort, fAfter) {
             .game_start_synchronize()
             .expect("game-start synchronization succeeds");
         assert_eq!(engine.debug_exec_order(), vec![c, a, b]);
+        assert_eq!(
+            engine
+                .sectors
+                .as_ref()
+                .expect("sector map exists")
+                .object_ids(sector::SectorKey::Inside { x: 0, y: 0 }),
+            &[b, c],
+            "the satisfied relation removes its target's old sector link"
+        );
+        assert_eq!(
+            engine
+                .sectors
+                .as_ref()
+                .expect("sector map exists")
+                .object_ids(sector::SectorKey::Inside { x: 1, y: 0 }),
+            &[a],
+            "the satisfied relation still re-adds its target at the current position"
+        );
+
+        let b_index = engine.find_object_index(b).expect("B exists");
+        // C4ObjResort::Execute also skips a still-normal sort object whose
+        // Unsorted bit is pending (for example, after ChangeDef).
+        engine.objects[b_index].unsorted = true;
+        engine
+            .pending_object_order_commands
+            .push(ObjectOrderCommand::SetRelative {
+                relative_to: c,
+                object: b,
+                after: true,
+            });
+        engine.execute_object_order_commands();
+        assert_eq!(engine.debug_exec_order(), vec![c, a, b]);
+        assert!(engine.objects[b_index].unsorted);
+        engine.objects[b_index].unsorted = false;
 
         // C4ObjResort::Execute skips a sort object that is no longer normal
         // (C4GameObjects.cpp:360-369).
-        let b_index = engine.find_object_index(b).expect("B exists");
         engine.objects[b_index].state.status = ObjectStatus::Inactive;
         engine
             .pending_object_order_commands
@@ -54820,6 +55750,33 @@ func ResortExplicit(object target) { Resort(target); }
             active_order,
             vec![low, high, newcomer],
             "an inactive same-def hole is not a main-list cluster candidate"
+        );
+
+        let inactive_position = engine
+            .debug_exec_order()
+            .iter()
+            .position(|id| *id == inactive)
+            .expect("inactive hole is represented");
+        engine
+            .pending_object_order_commands
+            .push(ObjectOrderCommand::SetRelative {
+                relative_to: newcomer,
+                object: high,
+                after: false,
+            });
+        engine.execute_object_order_commands();
+        assert_eq!(
+            engine.debug_exec_order(),
+            vec![low, inactive, newcomer, high],
+            "SetObjectOrder moves only logical main-list links across an inactive hole"
+        );
+        assert_eq!(
+            engine
+                .debug_exec_order()
+                .iter()
+                .position(|id| *id == inactive),
+            Some(inactive_position),
+            "SetObjectOrder preserves the unified inactive ledger slot"
         );
 
         let inactive_position = engine

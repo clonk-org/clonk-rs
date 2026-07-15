@@ -681,9 +681,53 @@ pub enum PlayerCommand {
     ClearLastPlrCom { player_id: i32 },
 }
 
+/// One queue-time-resolved `C4ObjResort::OrderFunc`. C++ stores the resolved
+/// `C4AulFunc *`, rather than looking the function name up again when the
+/// deferred resort executes. The immutable function clone pins that body and
+/// overload chain; the stable host identity supplies live native/global state
+/// without carrying the Rc-based ScriptEngine through Send + Sync errors.
+#[derive(Clone)]
+#[doc(hidden)]
+pub struct ObjectOrderFunction {
+    pub(crate) host_identity: lc_script::ScriptHostIdentity,
+    pub(crate) pinned_function: Arc<lc_script::Function>,
+    pub(crate) script_name: String,
+    pub(crate) definition_context: Option<DefinitionId>,
+    pub(crate) function: String,
+    /// The resolved SFunc is owned by Game.ScriptEngine. Enable exact
+    /// LinkedTo-local lookup while invoking the pinned function body.
+    pub(crate) engine_global: bool,
+}
+
+impl std::fmt::Debug for ObjectOrderFunction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ObjectOrderFunction")
+            .field("host_identity", &self.host_identity)
+            .field("script_name", &self.script_name)
+            .field("definition_context", &self.definition_context)
+            .field("function", &self.function)
+            .field("engine_global", &self.engine_global)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ObjectOrderFunction {
+    fn eq(&self, other: &Self) -> bool {
+        self.host_identity == other.host_identity
+            && self.pinned_function == other.pinned_function
+            && self.script_name == other.script_name
+            && self.definition_context == other.definition_context
+            && self.function == other.function
+            && self.engine_global == other.engine_global
+    }
+}
+
+impl Eq for ObjectOrderFunction {}
+
 /// Deferred object-list ordering work. C++ resolves `C4Object::Resort` flags
 /// before executing the newest `C4ObjResort` request (`SetObjectOrder`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[doc(hidden)]
 pub enum ObjectOrderCommand {
     #[doc(hidden)]
@@ -694,8 +738,23 @@ pub enum ObjectOrderCommand {
     },
     #[doc(hidden)]
     ResortObject(ObjectId),
+    /// Trigger-only post-CrossCheck sweep of every object still carrying
+    /// C4Object::Unsorted. Ordinary `Resort()` calls retain their object id
+    /// in `ResortObject`; the engine emits this only for the frame sweep.
+    #[doc(hidden)]
+    ResortUnsortedSweep,
     #[doc(hidden)]
     SortByCategory,
+    #[doc(hidden)]
+    OrderFuncAll {
+        order: ObjectOrderFunction,
+        category: i32,
+    },
+    #[doc(hidden)]
+    OrderFuncObject {
+        order: ObjectOrderFunction,
+        object: ObjectId,
+    },
 }
 
 impl HostWorldObject {
@@ -1206,6 +1265,10 @@ pub struct HostWorldContext {
     /// functions can run script functions on other objects mid-VM-call
     /// (Find_Func/Sort_Func, GameCall). Empty in legacy fixture contexts.
     definition_scripts: Rc<HashMap<DefinitionId, Arc<ScriptEngine>>>,
+    /// Retained System.c4g hosts. Their global functions live in the shared
+    /// engine table, but `Func->LinkedTo` still resolves local functions on
+    /// the declaring System script (for example an OrderFunc comparator).
+    linked_script_hosts: Rc<Vec<(String, Arc<ScriptEngine>)>>,
     /// The material table (Game.Material): name lookups for FnMaterial
     /// (C4Script.cpp:2488-2491). `None` in legacy fixture contexts.
     materials: Option<Rc<MaterialSet>>,
@@ -1280,6 +1343,7 @@ impl Default for HostWorldContext {
             needed_material_strings: Rc::new(crate::NeededMaterialStrings::default()),
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
+            linked_script_hosts: Rc::new(Vec::new()),
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
             crew_infos: Rc::new(HashMap::new()),
@@ -1491,6 +1555,7 @@ impl HostWorldContext {
             crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
+            linked_script_hosts: Rc::new(Vec::new()),
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
             crew_infos: Rc::new(HashMap::new()),
@@ -1721,6 +1786,14 @@ impl HostWorldContext {
         self
     }
 
+    pub(crate) fn with_linked_script_hosts(
+        mut self,
+        scripts: Vec<(String, Arc<ScriptEngine>)>,
+    ) -> Self {
+        self.linked_script_hosts = Rc::new(scripts);
+        self
+    }
+
     pub(crate) fn definition_script(&self, id: &str) -> Option<&Arc<ScriptEngine>> {
         self.definition_scripts.get(id)
     }
@@ -1729,15 +1802,54 @@ impl HostWorldContext {
         self.definition_scripts.values()
     }
 
+    /// Resolve the local-lookup script host of the suspended VM frame. This
+    /// follows a local function's Owner or a global function's LinkedTo host,
+    /// never the mutable definition of `cthr->Obj`.
+    pub(crate) fn script_for_host_identity(
+        &self,
+        identity: lc_script::ScriptHostIdentity,
+    ) -> Option<(String, Option<DefinitionId>, Arc<ScriptEngine>)> {
+        if let Some(script) = self
+            .scenario_script
+            .as_ref()
+            .filter(|script| script.host_identity() == identity)
+        {
+            return Some(("Game.Script".to_string(), None, Arc::clone(script)));
+        }
+        if let Some((name, script)) = self
+            .linked_script_hosts
+            .iter()
+            .find(|(_, script)| script.host_identity() == identity)
+        {
+            return Some((name.clone(), None, Arc::clone(script)));
+        }
+        let mut matches = self
+            .definition_scripts
+            .iter()
+            .filter(|(_, script)| script.host_identity() == identity)
+            .collect::<Vec<_>>();
+        matches.sort_by(|(left, _), (right, _)| left.cmp(right));
+        matches.first().map(|(definition, script)| {
+            (
+                (*definition).clone(),
+                Some((*definition).clone()),
+                Arc::clone(script),
+            )
+        })
+    }
+
     /// Whether any definition script, global script, or host function knows
     /// `name` — the global-function-map lookup of `GetFirstFunc`
     /// (C4Aul.cpp:545-552).
     pub(crate) fn script_function_known(&self, name: &str) -> bool {
-        self.definition_scripts.values().any(|script| {
-            script.has_function(name)
-                || script.has_global_function(name)
-                || script.has_host_function(name)
-        })
+        self.definition_scripts
+            .values()
+            .chain(self.linked_script_hosts.iter().map(|(_, script)| script))
+            .any(|script| {
+                script.has_function(name)
+                    || script.has_global_function(name)
+                    || script.has_host_function(name)
+            })
     }
 
     /// Attach the engine's particle def registry (names from
@@ -1828,6 +1940,15 @@ impl HostWorldContext {
         I: IntoIterator<Item = ObjectId>,
     {
         self.master_order = Rc::new(order.into_iter().collect());
+        self
+    }
+
+    /// Attach an exact callback-entry snapshot of `C4LSectors`. Its rank
+    /// oracle and physical per-sector vectors can legitimately disagree
+    /// after a native SortByCategory, so reconstructing it from ids loses
+    /// observable ordering state.
+    pub(crate) fn with_sector_map(mut self, sectors: Option<SectorMap>) -> Self {
+        self.sectors = RefCell::new(sectors.map(Rc::new));
         self
     }
 
@@ -2204,6 +2325,7 @@ struct FuncFindView {
     world: HostWorldContext,
     pending_objects: HashMap<ObjectId, HostWorldObject>,
     pending_order: Vec<ObjectId>,
+    master_order_preview: Option<Vec<ObjectId>>,
 }
 
 impl WorldAccessor for FuncFindView {
@@ -2215,12 +2337,18 @@ impl WorldAccessor for FuncFindView {
     }
 
     fn object_ids(&self) -> Vec<ObjectId> {
+        if let Some(order) = &self.master_order_preview {
+            return order.clone();
+        }
         let mut ids = self.world.object_ids().to_vec();
         ids.extend(self.pending_order.iter().copied());
         ids
     }
 
     fn master_object_ids(&self) -> Vec<ObjectId> {
+        if let Some(order) = &self.master_order_preview {
+            return order.clone();
+        }
         let mut ids = self.world.master_object_ids().to_vec();
         ids.extend(self.pending_order.iter().copied());
         ids
@@ -2331,6 +2459,7 @@ fn snapshot_func_find_view() -> Option<FuncFindView> {
             // Existing scoped ids remain in the world's master order. Only
             // genuinely new objects belong in this appended list.
             pending_order: context.pending_order.clone(),
+            master_order_preview: context.master_order_preview.clone(),
         })
     })
 }
@@ -11966,6 +12095,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetObjectLayer", set_object_layer);
     script.register_host_function("SetObjectOrder", set_object_order);
     script.register_host_function("Resort", resort);
+    script.register_host_function("ResortObjects", resort_objects);
+    script.register_host_function("ResortObject", resort_object);
     script.register_host_function("GetObjectBlitMode", get_object_blit_mode);
     script.register_host_function("SetObjectBlitMode", set_object_blit_mode);
     script.register_host_function("GetOCF", get_ocf);
@@ -34582,6 +34713,131 @@ fn set_object_order(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// Resolve the caller-local order function at queue time. C++ retains the
+/// resulting `C4AulFunc *`; cloning the selected Function prevents a later
+/// script-table replacement from changing which body the resort calls.
+fn capture_object_order_function(
+    context: &EffectHostContext,
+    function: String,
+) -> Result<Option<ObjectOrderFunction>, RuntimeError> {
+    let Some(caller_host) = lc_script::caller_host_identity() else {
+        return Ok(None);
+    };
+    let caller_uses_engine_scope = lc_script::caller_uses_engine_scope().unwrap_or(false);
+    let Some((mut script_name, mut definition_context, script)) =
+        context.world.script_for_host_identity(caller_host)
+    else {
+        return Ok(None);
+    };
+    let Some(resolution) = script.resolve_function(&function, caller_uses_engine_scope)
+    else {
+        return Err(RuntimeError::new(format!(
+            "ResortObjects: Resort function {function} not found"
+        )));
+    };
+    let engine_global = resolution.scope == lc_script::ScriptFunctionScope::Global;
+    let mut host_identity = script.host_identity();
+    if engine_global {
+        definition_context = None;
+        // A global caller's LinkedTo host and the currently selected global
+        // comparator need not match. C++ queues the selected C4AulFunc*, so
+        // pin the comparator's own declaring host (and its local helpers),
+        // not the caller's host. Detached lc-script fixtures may provide a
+        // global table without retaining its source Engine; their attached
+        // caller VM remains the only executable host and is a safe fallback.
+        if let Some((resolved_name, _, _)) = context
+            .world
+            .script_for_host_identity(resolution.host_identity)
+        {
+            script_name = resolved_name;
+            host_identity = resolution.host_identity;
+        }
+    }
+    Ok(Some(ObjectOrderFunction {
+        host_identity,
+        pinned_function: resolution.function,
+        script_name,
+        definition_context,
+        function,
+        engine_global,
+    }))
+}
+
+/// FnResortObjects (C4Script.cpp:4318-4338): resolve a caller-local function
+/// immediately and prepend a category-mask resort for post-CrossCheck work.
+fn resort_objects(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "ResortObjects expects at most 2 arguments: function and category",
+        ));
+    }
+    let Some(function) = parse_optional_string(args.first(), "ResortObjects", "function")?
+    else {
+        return Ok(Value::Bool(false));
+    };
+    let mut category = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "ResortObjects",
+        "category",
+    )?;
+    if category == 0 {
+        category = CATEGORY_SORT_LIMIT;
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(order) = capture_object_order_function(context, function)? else {
+            return Ok(Value::Bool(false));
+        };
+        context.record_object_order_command(ObjectOrderCommand::OrderFuncAll {
+            order,
+            category,
+        });
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnResortObject (C4Script.cpp:4340-4359): nil pObj defaults to cthr->Obj;
+/// the same queue-time local-function resolution is retained for one object.
+fn resort_object(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "ResortObject expects at most 2 arguments: function and object",
+        ));
+    }
+    let Some(function) = parse_optional_string(args.first(), "ResortObject", "function")? else {
+        return Ok(Value::Bool(false));
+    };
+    let explicit = args
+        .get(1)
+        .map(|value| parse_object_reference_argument(value, "ResortObject", "object"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(object) = explicit.or(context.script_object_context) else {
+            return Ok(Value::Bool(false));
+        };
+        let resolves = context.object_scope(object).is_some()
+            || context.get_world_object(object).is_some();
+        if !resolves {
+            return Ok(Value::Bool(false));
+        }
+        let Some(order) = capture_object_order_function(context, function)? else {
+            return Ok(Value::Bool(false));
+        };
+        context.record_object_order_command(ObjectOrderCommand::OrderFuncObject { order, object });
+        Ok(Value::Bool(true))
+    })
+}
+
 /// FnResort (C4Script.cpp:3543-3552): an explicit object wins, otherwise
 /// `cthr->Obj` is used. Object resorts are deferred to the post-CrossCheck
 /// phase; a call without either object performs the stable category sort.
@@ -34615,6 +34871,7 @@ fn resort(args: &[Value]) -> Result<Value, RuntimeError> {
                 context.record_object_order_command(ObjectOrderCommand::ResortObject(target));
             }
         } else {
+            context.preview_sort_master_by_category();
             context.record_object_order_command(ObjectOrderCommand::SortByCategory);
         }
         Ok(Value::Nil)
@@ -35995,6 +36252,10 @@ struct EffectHostContext {
     teams: Vec<TeamInfo>,
     player_commands: Vec<PlayerCommand>,
     object_order_commands: Vec<ObjectOrderCommand>,
+    /// Same-VM-call logical Game.Objects view after global Resort(). The
+    /// authoritative engine applies the sort when the host batch returns;
+    /// this preview exposes its synchronous C++ visibility meanwhile.
+    master_order_preview: Option<Vec<ObjectId>>,
     next_mission_commands: Vec<NextMissionCommand>,
     team_home_base_rule: bool,
     pending_spawns: Vec<SpawnConfig>,
@@ -36227,6 +36488,7 @@ impl EffectHostContext {
             teams,
             player_commands: Vec::new(),
             object_order_commands: Vec::new(),
+            master_order_preview: None,
             next_mission_commands: Vec::new(),
             team_home_base_rule,
             pending_spawns: Vec::new(),
@@ -36293,6 +36555,9 @@ impl EffectHostContext {
         }
         self.pending_objects.insert(id, preview);
         self.pending_spawns.push(spawn);
+        if self.master_order_preview.is_some() {
+            self.preview_sort_master_by_category();
+        }
     }
 
     /// The effective parameters C4Object::UpdateSolidMask would use for a
@@ -38237,15 +38502,53 @@ impl EffectHostContext {
     }
 
     fn world_object_ids(&self) -> Vec<ObjectId> {
+        if let Some(order) = &self.master_order_preview {
+            return order.clone();
+        }
         let mut ids = self.world.object_ids().to_vec();
         ids.extend(self.pending_order.iter().copied());
         ids
     }
 
     fn master_object_ids(&self) -> Vec<ObjectId> {
+        if let Some(order) = &self.master_order_preview {
+            return order.clone();
+        }
         let mut ids = self.world.master_object_ids().to_vec();
         ids.extend(self.pending_order.iter().copied());
         ids
+    }
+
+    fn preview_sort_master_by_category(&mut self) {
+        let mut ids = self
+            .master_order_preview
+            .clone()
+            .unwrap_or_else(|| self.world.master_object_ids().to_vec());
+        let mut seen = ids.iter().copied().collect::<HashSet<_>>();
+        ids.extend(
+            self.world
+                .object_ids()
+                .iter()
+                .chain(&self.pending_order)
+                .copied()
+                .filter(|id| seen.insert(*id)),
+        );
+        ids.retain(|id| {
+            self.get_world_object(*id)
+                .is_some_and(|object| object.status() != ObjectStatus::Inactive)
+        });
+        ids.sort_by(|left, right| {
+            let left_category = self
+                .get_world_object(*left)
+                .map(|object| object.category() & CATEGORY_SORT_LIMIT)
+                .unwrap_or(0);
+            let right_category = self
+                .get_world_object(*right)
+                .map(|object| object.category() & CATEGORY_SORT_LIMIT)
+                .unwrap_or(0);
+            right_category.cmp(&left_category)
+        });
+        self.master_order_preview = Some(ids);
     }
 
     /// `cthr->Obj` for the executing host call: the FindObject family
@@ -38553,6 +38856,20 @@ impl EffectHostContext {
         // script object is null, so only that case falls through to cthr->Def.
         self.script_object_context
             .and_then(|object| self.object_effective_definition_id(object))
+            .or_else(|| {
+                // Entering an ordinary helper from a no-object global call
+                // gives the nested C4Aul frame its destination definition as
+                // cthr->Def. HOST_CONTEXT itself remains no-object, so derive
+                // that definition from the active local frame's exact host.
+                (lc_script::caller_uses_engine_scope() == Some(false))
+                    .then(lc_script::caller_host_identity)
+                    .flatten()
+                    .and_then(|identity| {
+                        self.world
+                            .script_for_host_identity(identity)
+                            .and_then(|(_, definition, _)| definition)
+                    })
+            })
             .or_else(|| self.definition_context.clone())
             .or_else(|| {
                 self.object.as_ref().and_then(|object| {
@@ -40631,6 +40948,14 @@ mod tests {
     use tracing_subscriber::registry::Registry;
 
     #[test]
+    fn queued_object_order_functions_remain_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<ObjectOrderFunction>();
+        assert_send_sync::<ObjectOrderCommand>();
+    }
+
+    #[test]
     fn pending_solid_mask_negative_source_clamp_keeps_cpp_oob_pixels_solid() {
         // CheckSolidMaskRect rewrites (-1,-1,3,3) to (0,0,3,3) for this
         // 2x2 bitmap because its width/height clamp still uses the OLD -1
@@ -40953,6 +41278,8 @@ mod tests {
         "ResetGamma",
         "ResetPhysical",
         "Resort",
+        "ResortObject",
+        "ResortObjects",
         "SEqual",
         "ScoreboardCol",
         "ScriptCounter",
@@ -41642,6 +41969,402 @@ mod tests {
                 after: true,
             }]
         );
+    }
+
+    fn resort_order_world_object(id: u64, definition: &str) -> HostWorldObject {
+        HostWorldObject::new(
+            ObjectId::new(id),
+            definition,
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+    }
+
+    #[test]
+    fn order_func_resorts_capture_caller_owner_after_change_def_and_cpp_defaults() {
+        let definition_a = DefinitionId::from("ADEF");
+        let definition_b = DefinitionId::from("BDEF");
+        let mut script_a = ScriptEngine::new();
+        register_host_functions(&mut script_a);
+        script_a
+            .load_script(
+                r#"
+                func NearFirst(object first, object second) { return 0; }
+                func FarFirst(object first, object second) { return 0; }
+                func Queue(object explicit_target) {
+                    ChangeDef("BDEF");
+                    ResortObjects("NearFirst");
+                    ResortObject("FarFirst");
+                    ResortObjects("NearFirst", 8);
+                    ResortObject("NearFirst", explicit_target);
+                    return true;
+                }
+                "#,
+            )
+            .expect("definition A order functions compile");
+        let script_a = Arc::new(script_a);
+
+        // B deliberately has same-named but different functions. Resolving
+        // through the object's effective definition after ChangeDef would
+        // capture this Arc instead of the suspended Queue function's owner.
+        let mut script_b = ScriptEngine::new();
+        script_b
+            .load_script(
+                r#"
+                func NearFirst(object first, object second) { return 21; }
+                func FarFirst(object first, object second) { return 22; }
+                "#,
+            )
+            .expect("definition B order functions compile");
+        let script_b = Arc::new(script_b);
+
+        let world = HostWorldContext::from_objects(vec![
+            resort_order_world_object(1, &definition_a),
+            resort_order_world_object(2, &definition_a),
+        ])
+        .with_definition_metadata(Rc::new(HashMap::from([
+            (definition_a.clone(), DefinitionMetadata::default()),
+            (definition_b.clone(), DefinitionMetadata::default()),
+        ])))
+        .with_definition_scripts(HashMap::from([
+            (definition_a.clone(), Arc::clone(&script_a)),
+            (definition_b, Arc::clone(&script_b)),
+        ]));
+
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            script_a
+                .call("Queue", &[Value::Object(2)])
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+        assert_eq!(
+            result.expect("definition-local resorts queue after ChangeDef"),
+            Value::Bool(true)
+        );
+
+        let [
+            ObjectOrderCommand::OrderFuncAll {
+                order: first,
+                category: default_category,
+            },
+            ObjectOrderCommand::OrderFuncObject {
+                order: second,
+                object: default_object,
+            },
+            ObjectOrderCommand::OrderFuncAll {
+                order: third,
+                category: explicit_category,
+            },
+            ObjectOrderCommand::OrderFuncObject {
+                order: fourth,
+                object: explicit_object,
+            },
+        ] = outcome.object_order_commands.as_slice()
+        else {
+            panic!("unexpected order-function queue: {:?}", outcome.object_order_commands);
+        };
+        assert_eq!(*default_category, CATEGORY_SORT_LIMIT);
+        assert_eq!(*default_object, ObjectId::new(1));
+        assert_eq!(*explicit_category, 8);
+        assert_eq!(*explicit_object, ObjectId::new(2));
+        assert_eq!(first.function, "NearFirst");
+        assert_eq!(second.function, "FarFirst");
+        assert_eq!(third.function, "NearFirst");
+        assert_eq!(fourth.function, "NearFirst");
+        for order in [first, second, third, fourth] {
+            assert_eq!(order.host_identity, script_a.host_identity());
+            assert_ne!(order.host_identity, script_b.host_identity());
+            assert_eq!(order.script_name, definition_a);
+            assert_eq!(order.definition_context.as_ref(), Some(&definition_a));
+        }
+        // Outcome vectors retain call chronology; ExecuteResorts consumes this
+        // batch in reverse, reproducing ResortProc head insertion.
+        assert_eq!(
+            outcome
+                .object_order_commands
+                .iter()
+                .rev()
+                .map(|command| match command {
+                    ObjectOrderCommand::OrderFuncAll { order, .. }
+                    | ObjectOrderCommand::OrderFuncObject { order, .. } => order.function.as_str(),
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>(),
+            ["NearFirst", "NearFirst", "FarFirst", "NearFirst"]
+        );
+    }
+
+    #[test]
+    fn order_func_resorts_use_scenario_scope_without_definition_context() {
+        let mut scenario_script = ScriptEngine::new();
+        register_host_functions(&mut scenario_script);
+        scenario_script
+            .load_script(
+                r#"
+                func ScenarioOrder(object first, object second) { return 0; }
+                func QueueScenario(object target) {
+                    ResortObjects("ScenarioOrder", -1);
+                    ResortObject("ScenarioOrder", target);
+                    return true;
+                }
+                "#,
+            )
+            .expect("scenario order function compiles");
+        let scenario_script = Arc::new(scenario_script);
+        let world = HostWorldContext::from_objects(vec![resort_order_world_object(2, "SORT")])
+            .with_scenario_script(Some(Arc::clone(&scenario_script)));
+
+        let (result, outcome) = with_effect_context(None, &[], world, 3, || {
+            scenario_script
+                .call("QueueScenario", &[Value::Object(2)])
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+        assert_eq!(
+            result.expect("scenario-local resorts queue"),
+            Value::Bool(true)
+        );
+        assert_eq!(outcome.object_order_commands.len(), 2);
+
+        for command in &outcome.object_order_commands {
+            let order = match command {
+                ObjectOrderCommand::OrderFuncAll { order, category } => {
+                    assert_eq!(*category, -1);
+                    order
+                }
+                ObjectOrderCommand::OrderFuncObject { order, object } => {
+                    assert_eq!(*object, ObjectId::new(2));
+                    order
+                }
+                _ => panic!("unexpected command: {command:?}"),
+            };
+            assert_eq!(order.host_identity, scenario_script.host_identity());
+            assert_eq!(order.script_name, "Game.Script");
+            assert_eq!(order.definition_context, None);
+            assert_eq!(order.function, "ScenarioOrder");
+        }
+    }
+
+    #[test]
+    fn order_func_resorts_match_cpp_validation_and_missing_function_error() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"
+                func Known(object first, object second) { return 0; }
+                func MissingAll() { return ResortObjects("Missing"); }
+                func MissingObject(object target) { return ResortObject("Missing", target); }
+                func EmptyName() { return ResortObjects(""); }
+                func MissingObjectWithoutTarget() { return ResortObject("Missing"); }
+                func KnownInvalidTarget(object target) { return ResortObject("Known", target); }
+                "#,
+            )
+            .expect("known order function compiles");
+        let script = Arc::new(script);
+        let world = HostWorldContext::from_objects(vec![resort_order_world_object(2, "SORT")])
+            .with_scenario_script(Some(Arc::clone(&script)));
+
+        let (result, outcome) = with_effect_context(None, &[], world, 3, || {
+            // A native entry without a suspended script frame has no
+            // cthr->Caller, even when a scenario script is attached.
+            assert_eq!(resort_objects(&[])?, Value::Bool(false));
+            assert_eq!(resort_objects(&[Value::Nil])?, Value::Bool(false));
+            assert_eq!(
+                resort_objects(&[Value::String("Missing".into())])?,
+                Value::Bool(false)
+            );
+            assert_eq!(
+                resort_object(&[Value::String("Known".into()), Value::Object(2)])?,
+                Value::Bool(false)
+            );
+
+            assert_eq!(
+                script
+                    .call("MissingObjectWithoutTarget", &[])
+                    .map_err(|error| RuntimeError::new(error.to_string()))?,
+                Value::Bool(false)
+            );
+            assert_eq!(
+                script
+                    .call("KnownInvalidTarget", &[Value::Object(999)])
+                    .map_err(|error| RuntimeError::new(error.to_string()))?,
+                Value::Bool(false)
+            );
+
+            let all_error = script
+                .call("MissingAll", &[])
+                .expect_err("missing whole-list function must throw");
+            assert_eq!(
+                all_error.to_string(),
+                "runtime error: ResortObjects: Resort function Missing not found"
+            );
+            let object_error = script
+                .call("MissingObject", &[Value::Object(2)])
+                .expect_err("missing single-object function must throw");
+            assert_eq!(
+                object_error.to_string(),
+                "runtime error: ResortObjects: Resort function Missing not found"
+            );
+            let empty_error = script
+                .call("EmptyName", &[])
+                .expect_err("empty names are looked up rather than treated as nil");
+            assert_eq!(
+                empty_error.to_string(),
+                "runtime error: ResortObjects: Resort function  not found"
+            );
+            Ok::<_, RuntimeError>(())
+        });
+        result.expect("validation probes complete");
+        assert!(outcome.object_order_commands.is_empty());
+    }
+
+    #[test]
+    fn order_func_resorts_allow_global_fallback_only_for_global_callers() {
+        let mut global_script = ScriptEngine::new();
+        global_script
+            .load_script(
+                "global func GlobalOrder(object first, object second) { return 0; }",
+            )
+            .expect("engine-global order function compiles");
+        let mut globals = global_script.functions().clone();
+
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"
+                global func QueueGlobal() { return ResortObjects("GlobalOrder"); }
+                global func OwnGlobalOrder(object first, object second) { return 0; }
+                func QueueLocal() { return ResortObjects("GlobalOrder"); }
+                func QueueLocalOwn() { return ResortObjects("OwnGlobalOrder"); }
+                "#,
+            )
+            .expect("global/local caller probes compile");
+        // Global declarations are engine-owned; install QueueGlobal in the
+        // shared table as the linker would, rather than calling an own named
+        // entry that C++ represents only through an unnamed FnLink.
+        globals.extend(
+            script
+                .global_access_functions()
+                .map(|(name, function)| (name.clone(), function.clone())),
+        );
+        script.set_global_functions(Some(Arc::new(globals)));
+        let script = Arc::new(script);
+        let world = HostWorldContext::default()
+            .with_scenario_script(Some(Arc::clone(&script)));
+
+        let (result, outcome) = with_effect_context(None, &[], world, 3, || {
+            assert_eq!(
+                script
+                    .call("QueueGlobal", &[])
+                    .map_err(|error| RuntimeError::new(error.to_string()))?,
+                Value::Bool(true)
+            );
+            let local_error = script
+                .call("QueueLocal", &[])
+                .expect_err("local caller must not search engine globals");
+            assert_eq!(
+                local_error.to_string(),
+                "runtime error: ResortObjects: Resort function GlobalOrder not found"
+            );
+            let own_global_error = script
+                .call("QueueLocalOwn", &[])
+                .expect_err("an unnamed own global FnLink is not a local SFunc");
+            assert_eq!(
+                own_global_error.to_string(),
+                "runtime error: ResortObjects: Resort function OwnGlobalOrder not found"
+            );
+            Ok::<_, RuntimeError>(())
+        });
+        result.expect("global/local caller probes complete");
+        let [ObjectOrderCommand::OrderFuncAll { order, category }] =
+            outcome.object_order_commands.as_slice()
+        else {
+            panic!("unexpected global order queue: {:?}", outcome.object_order_commands);
+        };
+        assert_eq!(order.host_identity, script.host_identity());
+        assert_eq!(order.function, "GlobalOrder");
+        assert_eq!(*category, CATEGORY_SORT_LIMIT);
+    }
+
+    #[test]
+    fn order_func_global_fallback_uses_the_declaring_link_host_across_definitions() {
+        for destination_has_cmp in [false, true] {
+            let definition_a = DefinitionId::from("ADEF");
+            let definition_b = DefinitionId::from("BDEF");
+
+            let mut script_a = ScriptEngine::new();
+            script_a
+                .load_script(
+                    r#"
+                    global func Queue() { return ResortObjects("Cmp"); }
+                    func Cmp(object first, object second) { return -11; }
+                    "#,
+                )
+                .expect("declaring definition compiles");
+            let globals = Arc::new(
+                script_a
+                    .global_access_functions()
+                    .map(|(name, function)| (name.clone(), function.clone()))
+                    .collect::<HashMap<_, _>>(),
+            );
+            script_a.set_global_functions(Some(Arc::clone(&globals)));
+            let script_a = Arc::new(script_a);
+
+            let mut script_b = ScriptEngine::new();
+            register_host_functions(&mut script_b);
+            if destination_has_cmp {
+                script_b
+                    .load_script(
+                        "func Cmp(object first, object second) { return 22; }",
+                    )
+                    .expect("destination comparator compiles");
+            }
+            script_b.set_global_functions(Some(globals));
+            let script_b = Arc::new(script_b);
+
+            let world = HostWorldContext::from_objects(vec![resort_order_world_object(
+                1,
+                &definition_b,
+            )])
+            .with_definition_scripts(HashMap::from([
+                (definition_a.clone(), Arc::clone(&script_a)),
+                (definition_b, Arc::clone(&script_b)),
+            ]));
+            let (result, outcome) = with_object_host_context_with_world(world, || {
+                script_b
+                    .call("Queue", &[])
+                    .map_err(|error| RuntimeError::new(error.to_string()))
+            });
+            assert_eq!(
+                result.expect("cross-host global caller queues its declaring comparator"),
+                Value::Bool(true),
+                "destination_has_cmp={destination_has_cmp}"
+            );
+
+            let [ObjectOrderCommand::OrderFuncAll { order, category }] =
+                outcome.object_order_commands.as_slice()
+            else {
+                panic!("unexpected cross-host queue: {:?}", outcome.object_order_commands);
+            };
+            assert_eq!(order.host_identity, script_a.host_identity());
+            assert_ne!(order.host_identity, script_b.host_identity());
+            assert_eq!(order.script_name, definition_a);
+            assert_eq!(order.definition_context.as_ref(), Some(&definition_a));
+            assert_eq!(order.function, "Cmp");
+            assert_eq!(*category, CATEGORY_SORT_LIMIT);
+        }
     }
 
     #[test]
@@ -59971,6 +60694,76 @@ protected func Construction()
                 Some(ObjectId::new(3)),
             ],
             "boundless criteria keep the master-list walk"
+        );
+    }
+
+    #[test]
+    fn attached_host_sector_snapshot_preserves_physical_lists_after_rank_refresh() {
+        let objects = || {
+            vec![
+                find_world_object(1, "ROCK", 10, 10, 1),
+                find_world_object(2, "ROCK", 20, 10, 1),
+                find_world_object(3, "ROCK", 30, 10, 1),
+            ]
+        };
+        let bounded = vec![Value::Array(vec![
+            Value::Int(10),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(50),
+            Value::Int(50),
+        ])];
+
+        let snapshot_objects = objects();
+        let snapshot_landscape =
+            Landscape::new(150, vec![120; 150]).expect("snapshot landscape builds");
+        let definitions = HashMap::new();
+        let mut sectors = build_host_sector_map(
+            [1_usize, 0, 2]
+                .into_iter()
+                .map(|index| &snapshot_objects[index]),
+            &definitions,
+            &snapshot_landscape,
+        );
+        // SortByCategory refreshes only the rank oracle. Existing links in
+        // each C4Sector::Objects list deliberately retain their old order.
+        sectors.set_master_order([
+            ObjectId::new(3),
+            ObjectId::new(2),
+            ObjectId::new(1),
+        ]);
+        let world = sectored_find_world(objects(), HashMap::new())
+            .with_master_order([ObjectId::new(3), ObjectId::new(2), ObjectId::new(1)])
+            .with_sector_map(Some(sectors));
+        let (result, _) = with_object_host_context_with_world(world, || find_objects2(&bounded));
+        let Value::Array(values) = result.expect("bounded sector query succeeds") else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            [
+                Some(ObjectId::new(2)),
+                Some(ObjectId::new(1)),
+                Some(ObjectId::new(3)),
+            ],
+            "the attached physical sector list survives a rank-only refresh"
+        );
+
+        let fallback = sectored_find_world(objects(), HashMap::new())
+            .with_master_order([ObjectId::new(3), ObjectId::new(2), ObjectId::new(1)]);
+        let (result, _) =
+            with_object_host_context_with_world(fallback, || find_objects2(&bounded));
+        let Value::Array(values) = result.expect("fallback sector query succeeds") else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            [
+                Some(ObjectId::new(1)),
+                Some(ObjectId::new(2)),
+                Some(ObjectId::new(3)),
+            ],
+            "an absent live snapshot falls back to callback storage order"
         );
     }
 

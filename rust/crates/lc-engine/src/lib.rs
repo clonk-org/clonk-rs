@@ -186,7 +186,8 @@ use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
     object_reference_value, AudioRegistry, DefinitionMetadata, EffectContextOutcome,
     EnvironmentDelta, HostSolidMaskImage, HostSolidMaskMetadata, HostWorldContext, HostWorldObject,
-    LandscapeOperation, NextMissionCommand, ObjectOrderCommand, PhysicsDelta, PlayerCommand,
+    LandscapeOperation, NextMissionCommand, ObjectOrderCommand, ObjectOrderFunction, PhysicsDelta,
+    PlayerCommand,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use material::{
@@ -8733,6 +8734,9 @@ impl Definition {
         let mut script = ScriptEngine::new();
         script.add_script(compiled_script.clone());
         compat::register_host_functions(&mut script);
+        // Synthetic command-DSL fixtures historically declare these as
+        // `global func`; real C4 content switches to local-only callback
+        // gates in set_c4_callback_convention below.
         let has_construction = script.has_function("Construction");
         let has_initialize = script.has_function("Initialize");
         let has_step = script.has_function("Step");
@@ -8965,9 +8969,22 @@ impl Definition {
     /// Recomputes the lifecycle-callback gates after script linking
     /// (appends/includes can introduce Construction/Initialize/Step).
     fn refresh_script_flags(&mut self) {
-        self.has_construction = self.script.has_function("Construction");
-        self.has_initialize = self.script.has_function("Initialize");
-        self.has_step = self.script.has_function("Step");
+        let (has_construction, has_initialize, has_step) = if self.c4_callback_args {
+            (
+                self.script.has_local_function("Construction"),
+                self.script.has_local_function("Initialize"),
+                self.script.has_local_function("Step"),
+            )
+        } else {
+            (
+                self.script.has_function("Construction"),
+                self.script.has_function("Initialize"),
+                self.script.has_function("Step"),
+            )
+        };
+        self.has_construction = has_construction;
+        self.has_initialize = has_initialize;
+        self.has_step = has_step;
     }
 
     /// Restores the host to its own preparsed functions. C++ UnLink deletes
@@ -9281,6 +9298,7 @@ impl Definition {
     /// resources runs this way; synthetic command-DSL fixtures do not.
     pub fn set_c4_callback_convention(&mut self, enabled: bool) {
         self.c4_callback_args = enabled;
+        self.refresh_script_flags();
     }
 
     /// Shared handle to the compiled script for nested script calls
@@ -13243,7 +13261,11 @@ struct RuntimeScenarioSection {
 /// this complete ledger to reconstruct global functions and append copies.
 #[derive(Clone)]
 enum ScriptLinkSource {
-    Script(lc_script::Script),
+    Script {
+        name: String,
+        base_script: lc_script::Script,
+        script: Arc<ScriptEngine>,
+    },
     Definition(DefinitionId),
     Scenario,
 }
@@ -18367,6 +18389,25 @@ impl Engine {
         }
     }
 
+    /// `C4GameObjects::UpdatePosResort`: remove and re-add exactly one
+    /// object's sector links against the current master list. A full rebuild
+    /// is observably different when unrelated sector pairs intentionally
+    /// retain an older order after native SortByCategory.
+    fn update_pos_resort(&mut self, object_id: ObjectId) {
+        let record = self
+            .find_object_index(object_id)
+            .and_then(|index| self.sector_record_for_object(&self.objects[index]));
+        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        let Some(sectors) = self.sectors.as_mut() else {
+            return;
+        };
+        sectors.remove(object_id);
+        sectors.set_master_order(master_order);
+        if let Some(record) = record {
+            sectors.add(record);
+        }
+    }
+
     fn update_sector_for_index(&mut self, index: usize) {
         let Some(object) = self.objects.get(index) else {
             return;
@@ -19202,6 +19243,17 @@ impl Engine {
                 .map(|(id, definition)| (id.clone(), definition.script_arc()))
                 .collect(),
         )
+        .with_linked_script_hosts(
+            self.script_link_sources
+                .iter()
+                .filter_map(|source| match source {
+                    ScriptLinkSource::Script { name, script, .. } => {
+                        Some((name.clone(), Arc::clone(script)))
+                    }
+                    ScriptLinkSource::Definition(_) | ScriptLinkSource::Scenario => None,
+                })
+                .collect(),
+        )
         .with_definition_descriptions(
             self.definitions
                 .iter()
@@ -19368,10 +19420,7 @@ impl Engine {
         }
         if changed {
             let table = Some(Arc::new(functions));
-            self.global_script_functions = table.clone();
-            for definition in self.definitions.values_mut() {
-                definition.set_global_functions(table.clone());
-            }
+            self.distribute_global_script_functions(table);
             self.definition_metadata_cache.borrow_mut().take();
             self.solid_mask_metadata_cache.borrow_mut().take();
         }
@@ -21250,13 +21299,7 @@ impl Engine {
                 functions.insert(function_name, function);
             }
             let table = Some(Arc::new(functions));
-            self.global_script_functions = table.clone();
-            for existing in self.definitions.values_mut() {
-                existing.set_global_functions(table.clone());
-            }
-            if let Some(script) = self.scenario_script.as_mut() {
-                script.set_global_functions(table.clone());
-            }
+            self.distribute_global_script_functions(table);
         }
         definition.set_global_functions(self.global_script_functions.clone());
         let definition_id = DefinitionId::from(id.as_str());
@@ -21282,10 +21325,28 @@ impl Engine {
     /// fallback, C4Aul.cpp:130-148). Scripts that fail to compile log and
     /// are skipped like C++. The table is shared into every registered
     /// (and future) script host.
+    fn distribute_global_script_functions(
+        &mut self,
+        table: Option<Arc<HashMap<String, lc_script::Function>>>,
+    ) {
+        self.global_script_functions = table.clone();
+        for definition in self.definitions.values_mut() {
+            definition.set_global_functions(table.clone());
+        }
+        if let Some(scenario) = self.scenario_script.as_mut() {
+            scenario.set_global_functions(table.clone());
+        }
+        for source in &mut self.script_link_sources {
+            if let ScriptLinkSource::Script { script, .. } = source {
+                Arc::make_mut(script).set_global_functions(table.clone());
+            }
+        }
+    }
+
     pub fn install_global_scripts(&mut self, sources: &[(String, String)]) -> usize {
         self.global_script_functions = None;
         self.script_link_sources
-            .retain(|source| !matches!(source, ScriptLinkSource::Script(_)));
+            .retain(|source| !matches!(source, ScriptLinkSource::Script { .. }));
         self.install_additional_global_scripts(sources)
     }
 
@@ -21311,8 +21372,8 @@ impl Engine {
         let mut loaded = 0usize;
         for (name, source) in sources {
             match lc_script::Script::compile(source) {
-                Ok(script) => {
-                    for diagnostic in script.parse_diagnostics() {
+                Ok(compiled) => {
+                    for diagnostic in compiled.parse_diagnostics() {
                         tracing::warn!(
                             script = %name,
                             %diagnostic,
@@ -21324,19 +21385,37 @@ impl Engine {
                     // as definition scripts (C4Aul preparser and
                     // RegisterGlobalConstant, C4Aul.cpp:484-492).
                     lc_script::register_global_declarations(
-                        script.var_decls(),
+                        compiled.var_decls(),
                         &self.script_globals,
                         Some(&self.script_global_consts),
                     );
-                    self.script_link_sources
-                        .push(ScriptLinkSource::Script(script.clone()));
-                    for (function_name, function) in script.global_access_functions() {
-                        let mut function = function.clone();
-                        if let Some(previous) = functions.remove(function_name) {
+                    let mut script = ScriptEngine::new();
+                    script.set_global_variables(self.script_globals.clone());
+                    script.set_global_slots(self.script_global_slots.clone());
+                    script.set_global_constants(self.script_global_consts.clone());
+                    script.set_global_functions(self.global_script_functions.clone());
+                    script.add_script(compiled.clone().without_static_declarations());
+                    compat::register_host_functions(&mut script);
+                    let declarations = script
+                        .global_access_functions()
+                        .map(|(function_name, function)| {
+                            (function_name.clone(), function.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    for (function_name, mut function) in declarations {
+                        if let Some(previous) = functions.remove(&function_name) {
                             function.push_overload(previous);
                         }
-                        functions.insert(function_name.clone(), function);
+                        script.link_global_access_function(&function_name, function.clone());
+                        functions.insert(function_name, function);
                     }
+                    #[allow(clippy::arc_with_non_send_sync)] // single-threaded sharing
+                    let script = Arc::new(script);
+                    self.script_link_sources.push(ScriptLinkSource::Script {
+                        name: name.clone(),
+                        base_script: compiled,
+                        script,
+                    });
                     loaded += 1;
                 }
                 Err(error) => {
@@ -21349,13 +21428,7 @@ impl Engine {
             }
         }
         let table = (!functions.is_empty()).then(|| Arc::new(functions));
-        self.global_script_functions = table.clone();
-        for definition in self.definitions.values_mut() {
-            definition.set_global_functions(table.clone());
-        }
-        if let Some(script) = self.scenario_script.as_mut() {
-            script.set_global_functions(table.clone());
-        }
+        self.distribute_global_script_functions(table);
         loaded
     }
 
@@ -21378,18 +21451,16 @@ impl Engine {
         let ordered_ids = self.definition_load_order.clone();
         for source in self.script_link_sources.clone() {
             let (source_script, source_id, targets) = match source {
-                ScriptLinkSource::Script(script) => {
-                    let targets = script.appends().to_vec();
+                ScriptLinkSource::Script {
+                    base_script,
+                    script,
+                    ..
+                } => {
+                    let targets = base_script.appends().to_vec();
                     if targets.is_empty() {
                         continue;
                     }
-                    let mut engine = ScriptEngine::new();
-                    engine.set_global_variables(self.script_globals.clone());
-                    engine.set_global_slots(self.script_global_slots.clone());
-                    engine.set_global_constants(self.script_global_consts.clone());
-                    engine.add_script(script.without_static_declarations());
-                    #[allow(clippy::arc_with_non_send_sync)] // single-threaded sharing
-                    (Arc::new(engine), None, targets)
+                    (script, None, targets)
                 }
                 ScriptLinkSource::Definition(id) => match self.definitions.get(&id) {
                     Some(definition) => {
@@ -21493,19 +21564,33 @@ impl Engine {
         let mut functions = HashMap::new();
         for source in sources {
             match source {
-                ScriptLinkSource::Script(script) => {
+                ScriptLinkSource::Script { script, .. } => {
+                    let host_identity = script.host_identity();
                     let declarations = script
                         .global_access_functions()
                         .map(|(name, function)| (name.clone(), function.clone()))
                         .collect::<Vec<_>>();
+                    drop(script);
                     for (name, function) in declarations {
-                        chain_function(&mut functions, name, function);
+                        let linked = chain_function(&mut functions, name.clone(), function);
+                        if let Some(retained) = self.script_link_sources.iter_mut().find_map(
+                            |source| match source {
+                                ScriptLinkSource::Script { script, .. }
+                                    if script.host_identity() == host_identity =>
+                                {
+                                    Some(script)
+                                }
+                                _ => None,
+                            },
+                        ) {
+                            Arc::make_mut(retained).link_global_access_function(&name, linked);
+                        }
                     }
                 }
                 ScriptLinkSource::Definition(id) => {
                     let Some(declarations) = self.definitions.get(&id).map(|definition| {
                         definition
-                            .base_script
+                            .script
                             .global_access_functions()
                             .map(|(name, function)| (name.clone(), function.clone()))
                             .collect::<Vec<_>>()
@@ -21523,7 +21608,7 @@ impl Engine {
                 ScriptLinkSource::Scenario => {
                     let Some(declarations) = self.scenario_script.as_ref().map(|scenario| {
                         scenario
-                            .base_script
+                            .script
                             .global_access_functions()
                             .map(|(name, function)| (name.clone(), function.clone()))
                             .collect::<Vec<_>>()
@@ -21542,13 +21627,7 @@ impl Engine {
         }
 
         let table = (!functions.is_empty()).then(|| Arc::new(functions));
-        self.global_script_functions = table.clone();
-        for definition in self.definitions.values_mut() {
-            definition.set_global_functions(table.clone());
-        }
-        if let Some(script) = self.scenario_script.as_mut() {
-            script.set_global_functions(table.clone());
-        }
+        self.distribute_global_script_functions(table);
         self.definition_metadata_cache.borrow_mut().take();
         self.solid_mask_metadata_cache.borrow_mut().take();
     }
@@ -21557,6 +21636,16 @@ impl Engine {
     /// engine-global static and constant cells deliberately remain intact;
     /// only linked function copies and dependency state are discarded.
     pub fn relink_scripts(&mut self) -> Result<(), EngineError> {
+        for source in &mut self.script_link_sources {
+            if let ScriptLinkSource::Script {
+                base_script,
+                script,
+                ..
+            } = source
+            {
+                Arc::make_mut(script).replace_script(base_script.clone(), false);
+            }
+        }
         for definition in self.definitions.values_mut() {
             definition.reset_script_links();
         }
@@ -37856,9 +37945,6 @@ impl Engine {
         }
         let commands = std::mem::take(&mut self.pending_object_order_commands);
 
-        let has_relative = commands
-            .iter()
-            .any(|command| matches!(command, ObjectOrderCommand::SetRelative { .. }));
         let sort_all = commands
             .iter()
             .any(|command| matches!(command, ObjectOrderCommand::SortByCategory));
@@ -37869,7 +37955,10 @@ impl Engine {
                 _ => None,
             })
             .collect();
-        let has_object_resorts = !resort_objects.is_empty();
+        let has_object_resorts = !resort_objects.is_empty()
+            || commands
+                .iter()
+                .any(|command| matches!(command, ObjectOrderCommand::ResortUnsortedSweep));
 
         // C4Object::Resort sets both the object's Unsorted bit and the one
         // global `fResortAnyObject` trigger. Once that trigger fires,
@@ -37891,20 +37980,518 @@ impl Engine {
 
         // C4ObjResort nodes are pushed at the list head: newest first.
         for command in commands.into_iter().rev() {
-            if let ObjectOrderCommand::SetRelative {
-                relative_to,
-                object,
-                after,
-            } = command
-            {
-                self.execute_relative_object_order_command(relative_to, object, after);
+            match command {
+                ObjectOrderCommand::SetRelative {
+                    relative_to,
+                    object,
+                    after,
+                } => {
+                    if self.execute_relative_object_order_command(relative_to, object, after) {
+                        self.update_pos_resort(object);
+                    }
+                }
+                ObjectOrderCommand::OrderFuncAll { order, category } => {
+                    self.execute_order_function_all(&order, category);
+                }
+                ObjectOrderCommand::OrderFuncObject { order, object } => {
+                    if self.execute_order_function_object(&order, object) {
+                        self.update_pos_resort(object);
+                    }
+                }
+                ObjectOrderCommand::ResortObject(_)
+                | ObjectOrderCommand::ResortUnsortedSweep
+                | ObjectOrderCommand::SortByCategory => {}
             }
         }
-        // Native global SortByCategory only reorders the main list. Object
-        // re-adds and SetObjectOrder also update sector traversal.
-        if has_relative || has_object_resorts {
-            self.rebuild_sectors();
+
+        // ExecuteResorts saves each node's old Next pointer before invoking
+        // it. A comparator that prepends another C4ObjResort therefore puts
+        // it outside that traversal, and the final ResortProc=null discards
+        // it. Native Resort flags are a separate game-level trigger and stay
+        // armed for the next post-CrossCheck sweep.
+        self.pending_object_order_commands.retain(|command| {
+            matches!(
+                command,
+                ObjectOrderCommand::ResortObject(_)
+                    | ObjectOrderCommand::ResortUnsortedSweep
+                    | ObjectOrderCommand::SortByCategory
+            )
+        });
+    }
+
+    /// Invoke one C4ObjResort OrderFunc through the script host captured at
+    /// queue time. C4AulParSet supplies two object values with no `this`
+    /// object; ordinary script errors, nil, and non-integer results compare
+    /// as zero. Host side effects and the synchronized RNG position commit
+    /// before the caller performs the next comparison.
+    fn call_object_order_function(
+        &mut self,
+        order: &ObjectOrderFunction,
+        first: ObjectId,
+        second: ObjectId,
+    ) -> i32 {
+        let args = [
+            object_reference_value(first),
+            object_reference_value(second),
+        ];
+        // C4LSectors retains its own physical list order until an object is
+        // re-added. Native SortByCategory refreshes only its rank oracle, so
+        // this comparator needs the exact callback-entry sector snapshot.
+        // Keep ordinary host contexts lazy to avoid a full-map clone on every
+        // unrelated script call.
+        let world = self
+            .host_world_context()
+            .with_sector_map(self.sectors.clone());
+        let Some((_, _, script)) = world.script_for_host_identity(order.host_identity) else {
+            tracing::warn!(
+                script = %order.script_name,
+                function = %order.function,
+                "queued object-order function lost its retained script host"
+            );
+            return 0;
+        };
+        let global_effects = self.global_effects.clone();
+        let (value, _finals, mut batch, audio, rng, script_error) =
+            ScenarioScript::execute_value_for_script(
+                &order.script_name,
+                order.definition_context.clone(),
+                &order.function,
+                &args,
+                world,
+                self.rng.clone(),
+                self.frame,
+                &global_effects,
+                self.physics,
+                self.environment,
+                self.audio_registry.clone(),
+                self.game_over_triggered,
+                || {
+                    script.call_pinned_with_ref_args(
+                        &order.pinned_function,
+                        order.engine_global,
+                        &args,
+                    )
+                },
+            );
+        self.rng = rng;
+        self.audio_registry = audio;
+
+        // C4Object::Resort writes Unsorted immediately and separately arms
+        // Game.fResortAnyObject. Host outcomes otherwise retain only the
+        // deferred command, so materialize that write around the copied
+        // batch and convert the surviving command to an arm-only trigger.
+        // The second pass covers CreateObject()+Resort(new_object) from one
+        // comparator call: the explicit id exists only after batch apply.
+        let mut reentrant_resorts = Vec::new();
+        let mut synchronous_category_sort = false;
+        batch.object_order_commands.retain_mut(|command| {
+            if matches!(command, ObjectOrderCommand::SortByCategory) {
+                synchronous_category_sort = true;
+                return false;
+            }
+            if let ObjectOrderCommand::ResortObject(object) = command {
+                reentrant_resorts.push(*object);
+                *command = ObjectOrderCommand::ResortUnsortedSweep;
+            }
+            true
+        });
+        for &object in &reentrant_resorts {
+            if let Some(index) = self.find_object_index(object) {
+                self.objects[index].unsorted = true;
+            }
         }
+
+        let mut failed = false;
+        if let Err(error) = self.apply_scenario_batch(batch) {
+            failed = true;
+            if let Some(error) = self.defer_runtime_flash_boundary(error) {
+                tracing::warn!(%error, "object-order script batch failed to apply");
+            }
+        }
+        if synchronous_category_sort {
+            // Global Resort() has no ResortProc node in C++; it sorts the
+            // main list before the script call returns. Host outcomes keep
+            // mutation channels separately, so exact cross-channel call
+            // chronology is unavailable here. Applying the whole batch and
+            // sorting at its boundary nevertheless preserves the visible
+            // post-call state for the next comparator and never defers the
+            // native sort into a later sweep.
+            self.sort_exec_list_by_category();
+        }
+        for object in reentrant_resorts {
+            if let Some(index) = self.find_object_index(object) {
+                self.objects[index].unsorted = true;
+            }
+        }
+        if let Some(error) = script_error {
+            failed = true;
+            // Raw-value execution already logged ordinary script failures;
+            // retain only fatal runtime boundaries for the enclosing tick.
+            let _ = self.defer_runtime_flash_boundary(error);
+        }
+
+        if failed {
+            0
+        } else {
+            value.as_ref().and_then(Value::as_c4_int).unwrap_or(0)
+        }
+    }
+
+    /// Object stored in a physical C++ master-list link. `exec_list` is the
+    /// reverse representation, so master index zero maps to its final slot.
+    fn object_order_master_id(&self, master_index: usize) -> Option<ObjectId> {
+        let reverse_offset = master_index.checked_add(1)?;
+        let exec_index = self.exec_list.len().checked_sub(reverse_offset)?;
+        self.exec_list.get(exec_index).copied()
+    }
+
+    fn object_order_master_active(&self, master_index: usize) -> bool {
+        self.object_order_master_id(master_index)
+            .and_then(|id| self.find_object_index(id))
+            .is_some_and(|index| {
+                let object = &self.objects[index];
+                !object.destroyed && object.state.status == ObjectStatus::Normal
+            })
+    }
+
+    fn object_order_master_status(&self, master_index: usize) -> Option<ObjectStatus> {
+        self.object_order_master_id(master_index)
+            .and_then(|id| self.find_object_index(id))
+            .map(|index| self.objects[index].state.status)
+    }
+
+    fn object_order_master_category(&self, master_index: usize) -> i32 {
+        self.object_order_master_id(master_index)
+            .and_then(|id| self.find_object_index(id))
+            .map(|index| self.objects[index].state.category)
+            .unwrap_or(0)
+    }
+
+    fn swap_object_order_master_links(&mut self, first: usize, second: usize) -> bool {
+        let Some(first_offset) = first.checked_add(1) else {
+            return false;
+        };
+        let Some(second_offset) = second.checked_add(1) else {
+            return false;
+        };
+        let Some(first_exec) = self.exec_list.len().checked_sub(first_offset) else {
+            return false;
+        };
+        let Some(second_exec) = self.exec_list.len().checked_sub(second_offset) else {
+            return false;
+        };
+        if first_exec >= self.exec_list.len() || second_exec >= self.exec_list.len() {
+            return false;
+        }
+        self.exec_list.swap(first_exec, second_exec);
+        // Swapping payloads changes Game.Objects immediately. Existing
+        // physical sector vectors stay untouched until UpdatePosResort, but
+        // any object added or re-added by a later comparator must rank
+        // against this new live master order.
+        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        if let Some(sectors) = self.sectors.as_mut() {
+            sectors.set_master_order(master_order);
+        }
+        true
+    }
+
+    /// C4ObjResort::Execute's raw-category walk. It starts at master Last,
+    /// processes requested sort bits from 1 through 16, and carries the
+    /// First-side boundary into the next category. The extent loop
+    /// intentionally tests the moving link's category without its Status —
+    /// matching the legacy `pLnk`/`pNextLnk` typo.
+    fn execute_order_function_all(&mut self, order: &ObjectOrderFunction, category: i32) {
+        let mut cursor = self.exec_list.len().checked_sub(1);
+        let mut bit = 1;
+        while bit < CATEGORY_SORT_LIMIT {
+            if category & bit == 0 {
+                bit <<= 1;
+                continue;
+            }
+
+            loop {
+                let Some(position) = cursor else {
+                    // The C++ loop leaves a null cursor here (and would
+                    // dereference it if another requested category follows).
+                    // A fail-safe return preserves every completed sort.
+                    return;
+                };
+                if self.object_order_master_active(position)
+                    && self.object_order_master_category(position) & bit != 0
+                {
+                    break;
+                }
+                cursor = position.checked_sub(1);
+            }
+
+            let last = cursor.expect("matching master-list link established");
+            let fixed_last_is_inactive = !self.object_order_master_active(last);
+            let mut next = Some(last);
+            while let Some(position) = next {
+                // C4OS_INACTIVE lives in C4GameObjects::InactiveObjects and
+                // has no physical link in Game.Objects. Rust retains a slot
+                // in exec_list for save/restore bookkeeping, so it must be
+                // transparent here regardless of its stale raw category.
+                if self.object_order_master_status(position) == Some(ObjectStatus::Inactive) {
+                    next = position.checked_sub(1);
+                    continue;
+                }
+                if !fixed_last_is_inactive && self.object_order_master_category(position) & bit == 0
+                {
+                    break;
+                }
+                next = position.checked_sub(1);
+            }
+
+            let mut first = next.map_or(0, |position| position + 1);
+            while first <= last && !self.object_order_master_active(first) {
+                first += 1;
+            }
+            if first <= last {
+                self.sort_object_order_span(order, first, last);
+            }
+
+            cursor = next;
+            if cursor.is_none() {
+                return;
+            }
+            bit <<= 1;
+        }
+    }
+
+    /// C4ObjResort::Sort. The physical master-list span stays fixed while
+    /// object payloads bubble from Last toward First. Comparisons therefore
+    /// run in the exact legacy order; only a negative integer swaps.
+    fn sort_object_order_span(
+        &mut self,
+        order: &ObjectOrderFunction,
+        first: usize,
+        last: usize,
+    ) {
+        let first_backup = first;
+        let mut first = first;
+        while first != last {
+            let mut current = last;
+            let mut new_first = last;
+            while current != first {
+                let Some(mut previous) = current.checked_sub(1) else {
+                    break;
+                };
+                while !self.object_order_master_active(previous) {
+                    let Some(earlier) = previous.checked_sub(1) else {
+                        break;
+                    };
+                    previous = earlier;
+                }
+                if !self.object_order_master_active(previous) {
+                    break;
+                }
+                let Some(current_object) = self.object_order_master_id(current) else {
+                    current = previous;
+                    continue;
+                };
+                let Some(previous_object) = self.object_order_master_id(previous) else {
+                    current = previous;
+                    continue;
+                };
+                if self.call_object_order_function(order, current_object, previous_object) < 0
+                    && self.swap_object_order_master_links(current, previous)
+                {
+                    for position in [current, previous] {
+                        if let Some(index) = self
+                            .object_order_master_id(position)
+                            .and_then(|id| self.find_object_index(id))
+                        {
+                            self.objects[index].unsorted = true;
+                        }
+                    }
+                    new_first = current;
+                }
+                current = previous;
+            }
+            first = new_first;
+        }
+
+        // UpdatePosResort is delayed until every comparison is complete and
+        // scans the original physical span in final master-forward order.
+        for position in first_backup..=last {
+            let Some(object_id) = self.object_order_master_id(position) else {
+                continue;
+            };
+            let should_resort = self.find_object_index(object_id).is_some_and(|index| {
+                let object = &mut self.objects[index];
+                if !object.destroyed
+                    && object.state.status == ObjectStatus::Normal
+                    && object.unsorted
+                {
+                    object.unsorted = false;
+                    true
+                } else {
+                    false
+                }
+            });
+            if should_resort {
+                self.update_pos_resort(object_id);
+            }
+        }
+    }
+
+    /// C4ObjResort::SortObject. Try the master-forward direction first; only
+    /// if it records no negative comparison does the legacy code walk back
+    /// toward First. Zero keeps scanning, positive stops, and category
+    /// compatibility uses the full raw category intersection.
+    fn execute_order_function_object(
+        &mut self,
+        order: &ObjectOrderFunction,
+        object: ObjectId,
+    ) -> bool {
+        let Some(object_index) = self.find_object_index(object) else {
+            return false;
+        };
+        if self.objects[object_index].destroyed
+            || self.objects[object_index].state.status != ObjectStatus::Normal
+            || self.objects[object_index].unsorted
+        {
+            return false;
+        }
+        let Some(origin) = self
+            .exec_list
+            .iter()
+            .rev()
+            .position(|candidate| *candidate == object)
+        else {
+            return false;
+        };
+
+        let mut move_after = None;
+        let mut position = origin + 1;
+        while position < self.exec_list.len() {
+            let Some(candidate) = self.object_order_master_id(position) else {
+                break;
+            };
+            let Some(candidate_index) = self.find_object_index(candidate) else {
+                position += 1;
+                continue;
+            };
+            if self.objects[candidate_index].destroyed
+                || self.objects[candidate_index].state.status != ObjectStatus::Normal
+            {
+                position += 1;
+                continue;
+            }
+            let Some(current_object_index) = self.find_object_index(object) else {
+                break;
+            };
+            if self.objects[candidate_index].state.category
+                & self.objects[current_object_index].state.category
+                == 0
+            {
+                break;
+            }
+            let result = self.call_object_order_function(order, candidate, object);
+            if result > 0 {
+                break;
+            }
+            if result < 0 {
+                move_after = Some(candidate);
+            }
+            position += 1;
+        }
+
+        if let Some(relative_to) = move_after {
+            return self.move_object_order_relative(object, relative_to, true);
+        }
+
+        let mut move_before = None;
+        let mut position = origin;
+        while let Some(previous) = position.checked_sub(1) {
+            position = previous;
+            let Some(candidate) = self.object_order_master_id(position) else {
+                continue;
+            };
+            let Some(candidate_index) = self.find_object_index(candidate) else {
+                continue;
+            };
+            if self.objects[candidate_index].destroyed
+                || self.objects[candidate_index].state.status != ObjectStatus::Normal
+            {
+                continue;
+            }
+            let Some(current_object_index) = self.find_object_index(object) else {
+                break;
+            };
+            if self.objects[candidate_index].state.category
+                & self.objects[current_object_index].state.category
+                == 0
+            {
+                break;
+            }
+            let result = self.call_object_order_function(order, object, candidate);
+            if result > 0 {
+                break;
+            }
+            if result < 0 {
+                move_before = Some(candidate);
+            }
+        }
+
+        move_before
+            .is_some_and(|relative_to| self.move_object_order_relative(object, relative_to, false))
+    }
+
+    /// Move one existing payload directly before/after another in C++
+    /// master order. In the reversed exec representation those insertion
+    /// sides are inverted.
+    fn move_object_order_relative(
+        &mut self,
+        object: ObjectId,
+        relative_to: ObjectId,
+        after: bool,
+    ) -> bool {
+        if object == relative_to {
+            return false;
+        }
+
+        // Inactive objects belong to a separate C++ list. Preserve their
+        // unified Rust ledger slots while performing the remove/insert over
+        // the logical Game.Objects links (including retained Deleted links).
+        let mut inactive_slots = Vec::new();
+        let mut logical_links = Vec::with_capacity(self.exec_list.len());
+        for (position, &id) in self.exec_list.iter().enumerate() {
+            let inactive = self
+                .find_object_index(id)
+                .is_some_and(|index| self.objects[index].state.status == ObjectStatus::Inactive);
+            if inactive {
+                inactive_slots.push((position, id));
+            } else {
+                logical_links.push(id);
+            }
+        }
+
+        let Some(object_position) = logical_links.iter().position(|id| *id == object) else {
+            return false;
+        };
+        if !logical_links.iter().any(|id| *id == relative_to) {
+            return false;
+        }
+        logical_links.remove(object_position);
+        let Some(relative_position) = logical_links.iter().position(|id| *id == relative_to)
+        else {
+            return false;
+        };
+        let insert_at = if after {
+            // Master AFTER is exec BEFORE.
+            relative_position
+        } else {
+            // Master BEFORE is exec AFTER.
+            relative_position + 1
+        };
+        logical_links.insert(insert_at, object);
+        for (position, inactive) in inactive_slots {
+            logical_links.insert(position.min(logical_links.len()), inactive);
+        }
+        self.exec_list = logical_links;
+        true
     }
 
     /// C4GameObjects::ResortUnsorted, scanning main-list First -> Next.
@@ -37932,6 +38519,7 @@ impl Engine {
                 self.objects[index].unsorted = false;
             }
             self.resort_object(object, &unprocessed_resorts);
+            self.update_pos_resort(object);
         }
     }
 
@@ -37996,19 +38584,20 @@ impl Engine {
         relative_to: ObjectId,
         object: ObjectId,
         after: bool,
-    ) {
+    ) -> bool {
         let Some(object_index) = self.find_object_index(object) else {
-            return;
+            return false;
         };
         let Some(relative_index) = self.find_object_index(relative_to) else {
-            return;
+            return false;
         };
         if self.objects[object_index].destroyed
             || !self.objects[object_index].state.status.is_active()
+            || self.objects[object_index].unsorted
             || self.objects[relative_index].destroyed
             || !self.objects[relative_index].state.status.is_active()
         {
-            return;
+            return false;
         }
         let object_category = self.objects[object_index].state.category & CATEGORY_SORT_LIMIT;
         let relative_category = self.objects[relative_index].state.category & CATEGORY_SORT_LIMIT;
@@ -38017,49 +38606,42 @@ impl Engine {
         if (!after && object_category < relative_category)
             || (after && object_category > relative_category)
         {
-            return;
+            return false;
         }
-        let Some(object_position) = self.exec_list.iter().position(|&id| id == object)
-        else {
-            return;
-        };
-        let Some(relative_position) = self
+        let logical_links = self
             .exec_list
             .iter()
-            .position(|&id| id == relative_to)
-        else {
-            return;
+            .copied()
+            .filter(|id| {
+                self.find_object_index(*id).is_none_or(|index| {
+                    self.objects[index].state.status != ObjectStatus::Inactive
+                })
+            })
+            .collect::<Vec<_>>();
+        let Some(object_position) = logical_links.iter().position(|&id| id == object) else {
+            return false;
+        };
+        let Some(relative_position) = logical_links.iter().position(|&id| id == relative_to) else {
+            return false;
         };
 
-        if after {
+        // C4ObjectList's wrappers report success when the requested relation
+        // is already satisfied; C4GameObjects still calls UpdatePosResort on
+        // the target in that case. Compare the logical main list with Rust's
+        // inactive-only ledger slots projected out.
+        let already_satisfied = if after {
             // Main-list AFTER is exec-list BEFORE.
-            if object_position < relative_position {
-                return;
-            }
-            self.exec_list.remove(object_position);
-            let Some(relative_position) = self
-                .exec_list
-                .iter()
-                .position(|&id| id == relative_to)
-            else {
-                return;
-            };
-            self.exec_list.insert(relative_position, object);
+            object_position < relative_position
         } else {
             // Main-list BEFORE is exec-list AFTER.
-            if object_position > relative_position {
-                return;
-            }
-            self.exec_list.remove(object_position);
-            let Some(relative_position) = self
-                .exec_list
-                .iter()
-                .position(|&id| id == relative_to)
-            else {
-                return;
-            };
-            self.exec_list.insert(relative_position + 1, object);
+            object_position > relative_position
+        };
+        if !already_satisfied
+            && !self.move_object_order_relative(object, relative_to, after)
+        {
+            return false;
         }
+        true
     }
 
     fn insert_exec_link(&mut self, position: usize, id: ObjectId) {
@@ -47795,6 +48377,204 @@ mod script_relink_regression {
         }
         assert_eq!(call(&mut engine, owner, "Probe"), Value::Int(12));
         assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(1_234));
+    }
+
+    #[test]
+    fn relink_keeps_global_resort_lookup_bound_to_the_declaring_definition() {
+        let mut engine = Engine::new();
+        register(
+            &mut engine,
+            "ADEF",
+            "global func Queue() { return ResortObjects(\"Cmp\"); }\n\
+             func Cmp(object first, object second) { return -11; }",
+        );
+        register(
+            &mut engine,
+            "BDEF",
+            "func Cmp(object first, object second) { return 22; }\n\
+             func Trigger() { return Queue(); }",
+        );
+        engine.relink_scripts().expect("scripts relink");
+        let declaring_script = engine
+            .definitions
+            .get("ADEF")
+            .expect("declaring definition remains")
+            .script_arc();
+        let destination_script = engine
+            .definitions
+            .get("BDEF")
+            .expect("destination definition remains")
+            .script_arc();
+        let caller = engine
+            .spawn_object(SpawnConfig::new("BDEF"))
+            .expect("destination object spawns");
+
+        assert_eq!(call(&mut engine, caller, "Trigger"), Value::Bool(true));
+        let [ObjectOrderCommand::OrderFuncAll { order, category }] =
+            engine.pending_object_order_commands.as_slice()
+        else {
+            panic!(
+                "unexpected relinked order queue: {:?}",
+                engine.pending_object_order_commands
+            );
+        };
+        assert_eq!(order.host_identity, declaring_script.host_identity());
+        assert_ne!(order.host_identity, destination_script.host_identity());
+        assert_eq!(order.script_name, "ADEF");
+        assert_eq!(order.definition_context.as_deref(), Some("ADEF"));
+        assert_eq!(order.function, "Cmp");
+        assert_eq!(*category, CATEGORY_SORT_LIMIT);
+    }
+
+    #[test]
+    fn retained_system_host_owns_and_executes_its_local_resort_comparator() {
+        let mut engine = Engine::new();
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System/Order.c".into(),
+                "global func Queue() { return ResortObjects(\"Cmp\"); }\n\
+                 func Cmp(object first, object second) { return -1; }"
+                    .into(),
+            )]),
+            1
+        );
+        register(
+            &mut engine,
+            "BDEF",
+            "func Cmp(object first, object second) { return 1; }\n\
+             func Trigger() { return Queue(); }",
+        );
+        engine.relink_scripts().expect("system scripts relink");
+        let system_script = engine
+            .script_link_sources
+            .iter()
+            .find_map(|source| match source {
+                ScriptLinkSource::Script { name, script, .. }
+                    if name == "System/Order.c" =>
+                {
+                    Some(Arc::clone(script))
+                }
+                _ => None,
+            })
+            .expect("retained System host exists");
+        let first = engine
+            .spawn_object(SpawnConfig::new("BDEF"))
+            .expect("first destination object spawns");
+        let second = engine
+            .spawn_object(SpawnConfig::new("BDEF"))
+            .expect("second destination object spawns");
+        assert_eq!(engine.debug_exec_order(), [first, second]);
+
+        assert_eq!(call(&mut engine, first, "Trigger"), Value::Bool(true));
+        let [ObjectOrderCommand::OrderFuncAll { order, .. }] =
+            engine.pending_object_order_commands.as_slice()
+        else {
+            panic!("expected one System-host OrderFunc request");
+        };
+        assert_eq!(order.host_identity, system_script.host_identity());
+        assert_eq!(order.script_name, "System/Order.c");
+        assert_eq!(order.definition_context, None);
+
+        engine.execute_object_order_commands();
+        assert_eq!(
+            engine.debug_exec_order(),
+            [second, first],
+            "the System-local -1 comparator wins over BDEF's +1 comparator"
+        );
+    }
+
+    #[test]
+    fn global_resort_comparator_executes_without_a_definition_context() {
+        let mut engine = Engine::new();
+        register(
+            &mut engine,
+            "ADEF",
+            "global func Queue() { return ResortObjects(\"Cmp\"); }\n\
+             func Helper() { return 1; }",
+        );
+        register(
+            &mut engine,
+             "BDEF",
+             "global func Cmp(object first, object second) {\n\
+                 return Helper();\n\
+             }\n\
+             func Helper() {\n\
+                 if (GetID() == BDEF) return -1;\n\
+                 return 1;\n\
+             }\n\
+             func Trigger() { return Queue(); }",
+        );
+        engine.relink_scripts().expect("global comparator relinks");
+        let declaring_script = engine
+            .definitions
+            .get("BDEF")
+            .expect("comparator definition remains")
+            .script_arc();
+        let first = engine
+            .spawn_object(SpawnConfig::new("BDEF"))
+            .expect("first destination object spawns");
+        let second = engine
+            .spawn_object(SpawnConfig::new("BDEF"))
+            .expect("second destination object spawns");
+        assert_eq!(engine.debug_exec_order(), [first, second]);
+
+        assert_eq!(call(&mut engine, first, "Trigger"), Value::Bool(true));
+        let [ObjectOrderCommand::OrderFuncAll { order, .. }] =
+            engine.pending_object_order_commands.as_slice()
+        else {
+            panic!("expected one global-comparator OrderFunc request");
+        };
+        assert_eq!(order.definition_context, None);
+        assert!(order.engine_global);
+        assert_eq!(order.host_identity, declaring_script.host_identity());
+        assert_eq!(order.script_name, "BDEF");
+
+        engine.execute_object_order_commands();
+        assert_eq!(
+            engine.debug_exec_order(),
+            [second, first],
+            "BDEF's global Cmp resolves BDEF's local Helper, not ADEF's conflicting helper"
+        );
+    }
+
+    #[test]
+    fn queued_global_resort_pins_its_body_across_relink() {
+        let mut engine = Engine::new();
+        register(
+            &mut engine,
+            "ADEF",
+            "global func Queue() { return ResortObjects(\"Cmp\"); }",
+        );
+        register(
+            &mut engine,
+            "BDEF",
+            "global func Cmp(object first, object second) { return -1; }\n\
+             func Trigger() { return Queue(); }",
+        );
+        engine.relink_scripts().expect("global comparator relinks");
+        let first = engine
+            .spawn_object(SpawnConfig::new("BDEF"))
+            .expect("first object spawns");
+        let second = engine
+            .spawn_object(SpawnConfig::new("BDEF"))
+            .expect("second object spawns");
+        assert_eq!(call(&mut engine, first, "Trigger"), Value::Bool(true));
+
+        assert!(
+            engine
+                .reload_definition_script(
+                    "BDEF",
+                    "global func Cmp(object first, object second) { return 1; }\n\
+                     func Trigger() { return Queue(); }",
+                )
+                .expect("comparator definition reloads")
+        );
+        engine.execute_object_order_commands();
+        assert_eq!(
+            engine.debug_exec_order(),
+            [second, first],
+            "the queued -1 body wins over the reloaded +1 function"
+        );
     }
 
     #[test]

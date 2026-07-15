@@ -351,6 +351,8 @@ impl<'a> Parser<'a> {
             description,
             // Stamped with the script's #strict level in Script::from_ast.
             strict_level: None,
+            // Bound to the destination ScriptEngine when the script is added.
+            global_link_host: None,
             // Linked when a later script or an #include overload collides.
             overloaded: None,
         })
@@ -416,6 +418,7 @@ impl<'a> Parser<'a> {
                 returns_reference,
                 description,
                 strict_level: None,
+                global_link_host: None,
                 overloaded: None,
             },
             error,
@@ -447,6 +450,7 @@ impl<'a> Parser<'a> {
             returns_reference: false,
             description,
             strict_level: None,
+            global_link_host: None,
             overloaded: None,
         })
     }
@@ -517,6 +521,7 @@ impl<'a> Parser<'a> {
                 returns_reference: false,
                 description,
                 strict_level: None,
+                global_link_host: None,
                 overloaded: None,
             },
             error,

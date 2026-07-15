@@ -221,6 +221,10 @@ impl Script {
 #[derive(Clone)]
 pub struct Engine {
     functions: HashMap<String, Function>,
+    /// Stable identity of this C4AulScript destination host. It survives
+    /// Rust moves and copy-on-write Engine clones so global Function
+    /// `LinkedTo` provenance never depends on a HashMap's address.
+    host_identity: crate::vm::ScriptHostIdentity,
     /// Strictness of this C4AulScript host itself. Linked include/append
     /// function copies keep their source strictness for expression semantics,
     /// but native calls inspect `Func->Owner->Strict` (the destination host).
@@ -261,10 +265,32 @@ pub struct Engine {
     local_cell_hook: Option<LocalCellHook>,
 }
 
+/// Ownership scope of a resolved script function. A global function is
+/// owned by the script engine even when its local FnLink lives on a
+/// definition host; callers executing it therefore have no `cthr->Def`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptFunctionScope {
+    Local,
+    Global,
+}
+
+/// The function selected by C4Aul's caller-local lookup, including the
+/// destination host that owns its named link. Engine-global functions live
+/// in one shared table, but retain their declaring `LinkedTo` host so native
+/// code can pin the exact script used by a deferred callback.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScriptFunctionResolution {
+    pub scope: ScriptFunctionScope,
+    pub host_identity: crate::vm::ScriptHostIdentity,
+    /// Immutable queue-time function body and overload provenance.
+    pub function: Arc<Function>,
+}
+
 impl Engine {
     pub fn new() -> Self {
         Self {
             functions: HashMap::new(),
+            host_identity: crate::vm::ScriptHostIdentity::fresh(),
             owner_strict_level: None,
             host_functions: HashMap::new(),
             host_reference_functions: HashMap::new(),
@@ -279,6 +305,14 @@ impl Engine {
             globals_consts: None,
             local_cell_hook: None,
         }
+    }
+
+    /// Process-local identity of this destination script host. Native
+    /// compatibility code uses it to match a caller's local-lookup host
+    /// (`Func->Owner` for local functions, `Func->LinkedTo` for globals)
+    /// back to the exact retained engine without consulting the object def.
+    pub fn host_identity(&self) -> crate::vm::ScriptHostIdentity {
+        self.host_identity
     }
 
     /// Installs the engine-global script function table (System.c4g
@@ -309,7 +343,10 @@ impl Engine {
         Ok(())
     }
 
-    pub fn add_script(&mut self, script: Script) {
+    pub fn add_script(&mut self, mut script: Script) {
+        for function in script.functions.values_mut() {
+            function.bind_global_link_host(self.host_identity);
+        }
         if self.owner_strict_level.is_none() {
             self.owner_strict_level = Some(script.strict_level);
         }
@@ -350,7 +387,10 @@ impl Engine {
     /// tables. With a global table attached they never become object-local
     /// declarations, even when registration is skipped because a relink is
     /// rebuilding an otherwise unchanged host.
-    pub fn replace_script(&mut self, script: Script, register_declarations: bool) {
+    pub fn replace_script(&mut self, mut script: Script, register_declarations: bool) {
+        for function in script.functions.values_mut() {
+            function.bind_global_link_host(self.host_identity);
+        }
         self.owner_strict_level = Some(script.strict_level);
         self.functions.clear();
         self.var_decls.clear();
@@ -611,6 +651,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
@@ -641,6 +682,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
@@ -662,6 +704,92 @@ impl Engine {
         Ok((result, finals))
     }
 
+    /// Execute the named function from the currently attached engine-global
+    /// table, bypassing this host's own function map. Deferred C4Aul callers
+    /// use this after retaining an engine-owned SFunc pointer at queue time.
+    #[doc(hidden)]
+    pub fn call_global_with_ref_args(
+        &self,
+        name: &str,
+        args: &[Value],
+    ) -> Result<(Value, Vec<Value>), ScriptError> {
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            &self.var_decls,
+            self.debugger_hooks.clone(),
+        )
+        .with_host_identity(self.host_identity)
+        .with_host_reference_functions(&self.host_reference_functions)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
+        .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref())
+        .with_exact_global_link_lookup()
+        .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref());
+        let cells: Vec<crate::vm::ValueCell> =
+            args.iter().cloned().map(crate::vm::value_cell).collect();
+        let call_args = cells
+            .iter()
+            .map(|cell| crate::vm::CallArg::Reference(crate::vm::LValueRef::cell(cell.clone())))
+            .collect();
+        let result = vm
+            .call_engine_args(name, call_args)
+            .map_err(ScriptError::from)?;
+        let finals = cells.iter().map(|cell| cell.borrow().clone()).collect();
+        Ok((result, finals))
+    }
+
+    /// Execute an immutable function captured by a deferred native callback.
+    /// The destination Engine still contributes its live host functions,
+    /// globals and local-helper scope; the entry body is never re-resolved by
+    /// name. `engine_global` enables exact LinkedTo lookup inside the body.
+    #[doc(hidden)]
+    pub fn call_pinned_with_ref_args(
+        &self,
+        function: &Function,
+        engine_global: bool,
+        args: &[Value],
+    ) -> Result<(Value, Vec<Value>), ScriptError> {
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            &self.var_decls,
+            self.debugger_hooks.clone(),
+        )
+        .with_host_identity(self.host_identity)
+        .with_host_reference_functions(&self.host_reference_functions)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
+        .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref())
+        .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref());
+        let vm = if engine_global {
+            vm.with_exact_global_link_lookup()
+        } else {
+            vm
+        };
+        let cells: Vec<crate::vm::ValueCell> =
+            args.iter().cloned().map(crate::vm::value_cell).collect();
+        let call_args = cells
+            .iter()
+            .map(|cell| crate::vm::CallArg::Reference(crate::vm::LValueRef::cell(cell.clone())))
+            .collect();
+        let result = vm
+            .call_pinned_args(function, call_args)
+            .map_err(ScriptError::from)?;
+        let finals = cells.iter().map(|cell| cell.borrow().clone()).collect();
+        Ok((result, finals))
+    }
+
     /// Call a function with per-object local variable context
     /// Returns (result, updated_local_vars)
     pub fn call_with_locals(
@@ -676,6 +804,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
@@ -709,6 +838,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
@@ -742,6 +872,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
@@ -773,6 +904,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
@@ -804,6 +936,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
@@ -832,6 +965,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
@@ -882,6 +1016,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
@@ -933,6 +1068,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
@@ -962,6 +1098,17 @@ impl Engine {
         self.functions.contains_key(name)
     }
 
+    /// Whether this host has a named, non-global script function. A C4Aul
+    /// `global func` is stored on the script engine and leaves only an
+    /// unnamed FnLink in its declaring script, so it cannot arm an object's
+    /// own lifecycle callback (Construction/Initialize/Step).
+    pub fn has_local_function(&self, name: &str) -> bool {
+        self.functions
+            .get(name)
+            .and_then(crate::ast::Function::first_non_global)
+            .is_some()
+    }
+
     /// Own linked script functions, including inherited definition functions.
     /// Consumers such as C4MN_Context need the retained C4Aul description
     /// metadata, not merely name-based execution.
@@ -981,6 +1128,53 @@ impl Engine {
                 .global_functions
                 .as_deref()
                 .is_some_and(|table| table.contains_key(name))
+    }
+
+    /// Resolve C4AulFunc::GetLocalSFunc and report the selected function's
+    /// ownership scope. A script-local global declaration is represented in
+    /// C++ by an unnamed FnLink, so it is never a named local candidate:
+    /// global callers search ordinary functions in LinkedTo's host first and
+    /// then the current engine-global table; local callers search only the
+    /// ordinary functions in their owner host.
+    pub fn resolve_function(
+        &self,
+        name: &str,
+        include_engine_globals: bool,
+    ) -> Option<ScriptFunctionResolution> {
+        let local = self
+            .functions
+            .get(name)
+            .and_then(crate::ast::Function::first_non_global);
+        let function = local.or_else(|| {
+            include_engine_globals
+                .then(|| self.global_functions.as_deref()?.get(name))
+                .flatten()
+        })?;
+        let scope = if function.access == crate::ast::AccessLevel::Global {
+            ScriptFunctionScope::Global
+        } else {
+            ScriptFunctionScope::Local
+        };
+        let host_identity = if scope == ScriptFunctionScope::Global {
+            function.global_link_host.unwrap_or(self.host_identity)
+        } else {
+            self.host_identity
+        };
+        Some(ScriptFunctionResolution {
+            scope,
+            host_identity,
+            function: Arc::new(function.clone()),
+        })
+    }
+
+    /// Backward-compatible ownership-only view of [`Self::resolve_function`].
+    pub fn resolve_function_scope(
+        &self,
+        name: &str,
+        include_engine_globals: bool,
+    ) -> Option<ScriptFunctionScope> {
+        self.resolve_function(name, include_engine_globals)
+            .map(|resolution| resolution.scope)
     }
 
     pub fn has_host_function(&self, name: &str) -> bool {
@@ -1082,11 +1276,145 @@ impl Default for Engine {
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
+    use std::sync::Mutex;
 
     use super::*;
 
     fn compile(source: &str) -> Script {
         Script::compile(source).expect("test script compiles")
+    }
+
+    #[test]
+    fn global_fallback_keeps_the_declaring_host_while_local_calls_use_destination() {
+        let mut declaring = Engine::new();
+        declaring
+            .load_script("global func Queue() { return Capture(); }")
+            .expect("declaring global compiles");
+        let declaring_identity = declaring.host_identity();
+        let moved_declaring = declaring;
+        assert_eq!(
+            moved_declaring.host_identity(),
+            declaring_identity,
+            "host identity survives Engine moves"
+        );
+        assert_eq!(
+            moved_declaring.clone().host_identity(),
+            declaring_identity,
+            "copy-on-write clones retain the logical host identity"
+        );
+        let globals = Arc::new(
+            moved_declaring
+                .global_access_functions()
+                .map(|(name, function)| (name.clone(), function.clone()))
+                .collect::<HashMap<_, _>>(),
+        );
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut destination = Engine::new();
+        let destination_identity = destination.host_identity();
+        assert_ne!(declaring_identity, destination_identity);
+        let observed_from_host = Arc::clone(&observed);
+        destination.register_host_function("Capture", move |_| {
+            observed_from_host.lock().expect("capture log locks").push((
+                crate::vm::caller_host_identity(),
+                crate::vm::caller_uses_engine_scope(),
+            ));
+            Ok(Value::Bool(true))
+        });
+        destination
+            .load_script("func LocalQueue() { return Capture(); }")
+            .expect("destination local compiles");
+        destination.set_global_functions(Some(globals));
+
+        assert_eq!(
+            destination.call("LocalQueue", &[]).expect("local call runs"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            destination.call("Queue", &[]).expect("global fallback runs"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            observed.lock().expect("capture log locks").as_slice(),
+            [
+                (Some(destination_identity), Some(false)),
+                (Some(declaring_identity), Some(true)),
+            ]
+        );
+    }
+
+    #[test]
+    fn ordinary_entries_keep_own_globals_while_global_bodies_use_engine_scope() {
+        let mut declaring = Engine::new();
+        declaring
+            .load_script(
+                "global func Pick() { return 1; }\n\
+                 global func Queue() { return Pick(); }\n\
+                 func LocalQueue() { return Pick(); }",
+            )
+            .expect("declaring functions compile");
+        let mut functions = declaring
+            .global_access_functions()
+            .map(|(name, function)| (name.clone(), function.clone()))
+            .collect::<HashMap<_, _>>();
+
+        let mut later = Engine::new();
+        later
+            .load_script("global func Pick() { return 2; }")
+            .expect("later overload compiles");
+        let mut latest = later.functions().get("Pick").expect("Pick exists").clone();
+        latest.push_overload(functions.remove("Pick").expect("old Pick exists"));
+        functions.insert("Pick".to_string(), latest);
+        declaring.set_global_functions(Some(Arc::new(functions)));
+
+        assert_eq!(
+            declaring.call("Pick", &[]).expect("global entry resolves"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            declaring.call("Queue", &[]).expect("global helper resolves"),
+            Value::Int(2)
+        );
+        assert_eq!(
+            declaring
+                .call("LocalQueue", &[])
+                .expect("local global fallback resolves"),
+            Value::Int(1)
+        );
+    }
+
+    #[test]
+    fn named_local_survives_a_newer_own_global_in_the_overload_chain() {
+        let mut host = Engine::new();
+        host.load_script("func Pick() { return 1; }")
+            .expect("local declaration compiles");
+        host.load_script("global func Pick() { return 2; }")
+            .expect("same-name global declaration compiles");
+        host.load_script("global func Queue() { return Pick(); }")
+            .expect("global caller compiles");
+        let globals = host
+            .global_access_functions()
+            .map(|(name, function)| (name.clone(), function.clone()))
+            .collect::<HashMap<_, _>>();
+        host.set_global_functions(Some(Arc::new(globals)));
+
+        assert!(host.has_local_function("Pick"));
+        let resolution = host
+            .resolve_function("Pick", false)
+            .expect("native local lookup resolves");
+        assert_eq!(resolution.scope, ScriptFunctionScope::Local);
+        assert_eq!(resolution.host_identity, host.host_identity());
+        assert_eq!(resolution.function.access, crate::ast::AccessLevel::Public);
+        assert_eq!(
+            host.call("Pick", &[]).expect("ordinary own root resolves"),
+            Value::Int(2)
+        );
+        assert_eq!(
+            host.call_global_with_ref_args("Queue", &[])
+                .expect("exact global callback resolves")
+                .0,
+            Value::Int(1)
+        );
     }
 
     #[test]

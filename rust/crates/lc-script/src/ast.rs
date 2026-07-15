@@ -164,6 +164,11 @@ pub struct Function {
     /// owning script's strict level for `==`/`!=`, `Fn->pOrgScript->Strict`).
     /// `None` = no `#strict` directive (NONSTRICT). Stamped in `Script::from_ast`.
     pub strict_level: Option<u8>,
+    /// The script host referenced by a global function's C4Aul `LinkedTo`
+    /// pointer. Global functions execute from the shared engine table, but
+    /// native local-function lookup still starts in their declaring host.
+    /// Non-global functions always use the destination VM host instead.
+    pub(crate) global_link_host: Option<crate::vm::ScriptHostIdentity>,
     /// The function this one overloaded (C++ `Fn->OwnerOverloaded`): a later
     /// script redefining the name, or an #include'd parent's same-name
     /// function. `inherited(...)`/`_inherited(...)` call it.
@@ -171,6 +176,15 @@ pub struct Function {
 }
 
 impl Function {
+    /// First named local candidate in this overload chain. Rust keeps
+    /// declarations under their source name, while C4Aul represents every
+    /// global declaration with an unnamed link in that source host; skip
+    /// those global nodes without hiding an older ordinary same-name func.
+    pub(crate) fn first_non_global(&self) -> Option<&Self> {
+        std::iter::successors(Some(self), |function| function.overloaded.as_deref())
+            .find(|function| function.access != AccessLevel::Global)
+    }
+
     /// Hang `parent` at the tail of this function's overload chain (C++
     /// `Fn->OwnerOverloaded`). Idempotent for repeat-link callers: a parent
     /// already on the chain is replaced when it has gained its own chain.
@@ -183,6 +197,7 @@ impl Function {
                 && a.returns_reference == b.returns_reference
                 && a.description == b.description
                 && a.strict_level == b.strict_level
+                && a.global_link_host == b.global_link_host
         }
         let mut tail = &mut self.overloaded;
         loop {
@@ -214,6 +229,18 @@ impl Function {
             tail = &mut std::sync::Arc::make_mut(next).overloaded;
         }
         *tail = Some(std::sync::Arc::new(parent));
+    }
+
+    /// Stamp every global node in this declaration's overload chain with
+    /// its declaring script host. `Arc::make_mut` preserves the provenance
+    /// when a parsed same-name chain is shared.
+    pub(crate) fn bind_global_link_host(&mut self, host: crate::vm::ScriptHostIdentity) {
+        if self.access == AccessLevel::Global {
+            self.global_link_host = Some(host);
+        }
+        if let Some(overloaded) = self.overloaded.as_mut() {
+            std::sync::Arc::make_mut(overloaded).bind_global_link_host(host);
+        }
     }
 }
 
