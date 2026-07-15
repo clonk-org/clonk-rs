@@ -6684,6 +6684,97 @@ protected func ControlCommand(szCommand) { return(1); }
     }
 
     #[test]
+    fn contained_buy_menu_appends_new_rebuyable_stock_at_its_numeric_slot() {
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 1);
+        for (id, name) in [("ZINC", "Zinc"), ("BRIK", "Brick"), ("AARD", "Aardvark")] {
+            let mut definition =
+                Definition::from_script(id, name, "#strict\n").expect("item compiles");
+            definition.set_value(1);
+            if id == "AARD" {
+                definition.set_rebuyable(true);
+            }
+            engine
+                .register_definition(definition)
+                .expect("register item");
+        }
+        engine
+            .player_mut(1)
+            .expect("base player")
+            .set_home_base_material_entries(vec![("ZINC".into(), 1), ("BRIK".into(), 1)]);
+
+        let sold = engine
+            .spawn_object(SpawnConfig::new("AARD").with_container(hut))
+            .expect("spawn sale item");
+        engine
+            .sell_object_to_home(sold, 1)
+            .expect("sell rebuyable item");
+        assert_eq!(
+            engine
+                .player(1)
+                .expect("base player")
+                .home_base_material_entries(),
+            &[
+                ("ZINC".to_string(), 1),
+                ("BRIK".to_string(), 1),
+                ("AARD".to_string(), 1),
+            ],
+            "Sell2Home appends a missing Rebuyable ID instead of sorting it"
+        );
+
+        engine.player_in_com(1, COM_UP, 0).expect("open buy menu");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("buy menu opens");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.item_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ZINC", "BRIK", "AARD"]
+        );
+
+        engine
+            .player_in_com(1, COM_RIGHT, 0)
+            .expect("select second stock row");
+        engine
+            .player_in_com(1, COM_RIGHT, 0)
+            .expect("select appended stock row");
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("buy menu remains open")
+                .selection,
+            2
+        );
+
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("buy appended stock row");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("permanent buy menu remains open");
+        assert_eq!(menu.selection, 2);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| (item.item_id.as_str(), item.count))
+                .collect::<Vec<_>>(),
+            vec![("ZINC", 1), ("BRIK", 1), ("AARD", 0)]
+        );
+        assert_eq!(engine.player(1).expect("base player").wealth(), 0);
+        assert!(engine.snapshot().objects.iter().any(|object| {
+            object.definition_id == "AARD"
+                && object.status.is_active()
+                && object.container == Some(hut)
+        }));
+    }
+
+    #[test]
     fn contained_buy_menu_enter_purchases_and_refills() {
         // C4Player::InCom converts Throw to MenuEnter while a menu is open
         // (C4Player.cpp:1502-1513; C4Menu.cpp:1051-1057). The Buy row then
