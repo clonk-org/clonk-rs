@@ -3618,6 +3618,192 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
     }
 
     #[test]
+    fn fire_timer_extinguishes_living_in_valid_base_on_tick5() -> Result<(), EngineError> {
+        // ExecFire advances FirePhase, then its Tick5 base arm extinguishes a
+        // living object contained in an object whose Base names any present
+        // player. Extinguish does not return from ExecFire: that frame still
+        // performs decay, Tick10 damage and Tick5 energy
+        // (C4Object.cpp:768-785). Cover both the native timer and a script
+        // overload that reaches the same engine function via inherited().
+        let mut native_definition = Definition::from_script(
+            "NativeBaseFire",
+            "Native base fire",
+            r#"#strict
+local abort_saw_fire, damage_saw_fire;
+func WorkAbort()
+{
+    abort_saw_fire = !!GetEffect("Fire", this());
+    return 1;
+}
+func Damage(int change, int caused_by)
+{
+    damage_saw_fire = !!GetEffect("Fire", this());
+    return 1;
+}
+"#,
+        )?;
+        native_definition.set_c4_callback_convention(true);
+        native_definition.set_category(CATEGORY_LIVING);
+        native_definition.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
+        native_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Work".to_string(),
+                    ActionSpec::default().with_abort_call("WorkAbort"),
+                ),
+            ]),
+        );
+        let mut inherited_definition = Definition::from_script(
+            "InheritedBaseFire",
+            "Inherited base fire",
+            r#"#strict
+local abort_saw_fire, damage_saw_fire;
+func WorkAbort()
+{
+    abort_saw_fire = !!GetEffect("Fire", this());
+    return 1;
+}
+func Damage(int change, int caused_by)
+{
+    damage_saw_fire = !!GetEffect("Fire", this());
+    return 1;
+}
+func FxFireTimer(object target, int number, int time)
+{
+    return inherited(target, number, time);
+}
+"#,
+        )?;
+        inherited_definition.set_c4_callback_convention(true);
+        inherited_definition.set_category(CATEGORY_LIVING);
+        inherited_definition.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
+        inherited_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Work".to_string(),
+                    ActionSpec::default().with_abort_call("WorkAbort"),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(33);
+        engine.register_player(PlayerConfig::new(7, "Base owner"))?;
+        engine.register_definition(simple_definition("Base"))?;
+        engine.register_definition(native_definition)?;
+        engine.register_definition(inherited_definition)?;
+        let base = engine.spawn_object(SpawnConfig::new("Base"))?;
+        engine.apply_object_update(base, ObjectUpdate::new().with_base(7))?;
+        let mut burning = Vec::new();
+        for definition in ["NativeBaseFire", "InheritedBaseFire"] {
+            let id = engine.spawn_object(
+                SpawnConfig::new(definition)
+                    .with_category(CATEGORY_LIVING)
+                    .with_container(base)
+                    .with_energy(100_000),
+            )?;
+            let idx = engine.find_object_index(id).expect("living object exists");
+            assert!(engine.incinerate_object(idx, 7, false, None)?);
+            burning.push((id, definition));
+        }
+
+        // Keep the scenario bit disabled across the first Tick5 pulse, then
+        // enable it for frame 10 so the extinguish and every remaining burn
+        // arm execute in the same observable frame.
+        engine.set_base_extinguish_enabled(false);
+        while engine.frame() < 9 {
+            engine.tick()?;
+        }
+        for (id, path) in &burning {
+            let object = engine.object_snapshot(*id).expect("burning object remains");
+            assert!(object.on_fire, "{path} respects a disabled base bit");
+            assert_eq!(object.container, Some(base));
+            engine.apply_object_update(
+                *id,
+                ObjectUpdate::new()
+                    .with_construction(FULL_CON)
+                    .with_action("Work"),
+            )?;
+        }
+        let before = burning
+            .iter()
+            .map(|(id, _)| {
+                let object = engine.object_snapshot(*id).expect("object remains");
+                (
+                    *id,
+                    (
+                        object.construction,
+                        object.damage,
+                        object.energy,
+                        object.fire_phase,
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        engine.set_base_extinguish_enabled(true);
+        engine.tick()?;
+        assert_eq!(engine.frame(), 10);
+
+        for (id, path) in burning {
+            let object = engine.object_snapshot(id).expect("extinguished object remains");
+            assert!(
+                !object.on_fire,
+                "{path} extinguishes in its valid base; effects={:?}",
+                object.effects
+            );
+            assert!(
+                !object
+                    .effects
+                    .iter()
+                    .any(|effect| effect.name == "Fire" && effect.priority != 0),
+                "{path} kills the numbered Fire effect"
+            );
+            let (construction, damage, energy, fire_phase) = before[&id];
+            assert_eq!(
+                object.construction,
+                construction - 100,
+                "{path} still runs decay after the base extinguish"
+            );
+            assert_eq!(
+                object.damage,
+                damage + 2,
+                "{path} still runs Tick10 damage after the base extinguish"
+            );
+            assert_eq!(
+                object.energy,
+                energy - 1_000,
+                "{path} still runs Tick5 energy after the base extinguish"
+            );
+            assert_eq!(
+                object.fire_phase,
+                (fire_phase + 1) % MAX_FIRE_PHASE,
+                "{path} retains the phase advance that precedes extinguish"
+            );
+            assert_eq!(
+                object.local_vars.get("abort_saw_fire"),
+                Some(&Value::Bool(false)),
+                "{path} extinguishes before DoCon's action callback"
+            );
+            assert_eq!(
+                object.local_vars.get("damage_saw_fire"),
+                Some(&Value::Bool(false)),
+                "{path} extinguishes before Tick10 damage"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn incinerate_and_extinguish_script_functions_manage_the_fire_effect(
     ) -> Result<(), EngineError> {
         // FnIncinerate (C4Script.cpp:245-252): the target defaults to the

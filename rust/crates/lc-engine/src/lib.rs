@@ -4247,6 +4247,16 @@ impl ObjectDelta {
         if let Some(cause) = update.energy_loss_cause {
             self.energy_loss_cause = Some(cause);
         }
+        if let Some(fire) = update.fire {
+            self.fire = Some(fire);
+            // stage_ignite is the later write when no bare flag accompanies
+            // this update, so it supersedes a previously merged flag.
+            self.fire_flag = update.fire_flag;
+        } else if let Some(flag) = update.fire_flag {
+            // A bare SetOnFire changes only the flag and retains any phase
+            // and attribution payload staged earlier in the batch.
+            self.fire_flag = Some(flag);
+        }
         if let Some(construction) = update.construction {
             self.construction = Some(construction);
         }
@@ -4546,9 +4556,9 @@ pub struct ObjectUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fire: Option<(i32, i32)>,
     /// Bare OnFire flag write — the engine-internal FnFxFireStop /
-    /// FnFxFireStart temp arms (C4Effect.cpp:563-565, 775-791). Mutually
-    /// exclusive with `fire`: staging one clears the other, so the last
-    /// in-call write wins like C++'s sequential SetOnFire.
+    /// FnFxFireStart temp arms (C4Effect.cpp:563-565, 775-791). A preceding
+    /// `fire` payload stays staged so SetOnFire can change only the flag
+    /// without discarding the already-written cause and phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fire_flag: Option<bool>,
     #[serde(default)]
@@ -4722,7 +4732,6 @@ impl ObjectUpdate {
     /// C4Effect.cpp:563-565, 775-791).
     pub fn stage_fire_flag(&mut self, flag: bool) {
         self.fire_flag = Some(flag);
-        self.fire = None;
     }
 
     pub fn with_position(mut self, position: Vector2) -> Self {
@@ -13640,6 +13649,7 @@ struct RuntimeScenarioSection {
     saved_object_order: Vec<ObjectId>,
     scenario_values: scenario::ScenarioValueStore,
     base_reject_entrance_enabled: bool,
+    base_extinguish_enabled: bool,
     environment: EnvironmentSettings,
 }
 
@@ -13992,6 +14002,7 @@ pub struct Engine {
     base_auto_sell_enabled: bool,
     base_reject_entrance_enabled: bool,
     base_regenerate_energy_enabled: bool,
+    base_extinguish_enabled: bool,
     base_regenerate_energy_price: i32,
     landscape_insert_thrust: bool,
     known_crew_owners: HashSet<i32>,
@@ -15964,6 +15975,7 @@ impl Engine {
             base_auto_sell_enabled: true,
             base_reject_entrance_enabled: true,
             base_regenerate_energy_enabled: true,
+            base_extinguish_enabled: true,
             base_regenerate_energy_price: 5,
             landscape_insert_thrust: false,
             known_crew_owners: HashSet::new(),
@@ -16069,6 +16081,10 @@ impl Engine {
 
     pub fn set_base_regenerate_energy_enabled(&mut self, enabled: bool) {
         self.base_regenerate_energy_enabled = enabled;
+    }
+
+    pub fn set_base_extinguish_enabled(&mut self, enabled: bool) {
+        self.base_extinguish_enabled = enabled;
     }
 
     pub fn set_base_regenerate_energy_price(&mut self, price: i32) {
@@ -16204,6 +16220,7 @@ impl Engine {
                         saved_object_order: Vec::new(),
                         scenario_values: section.scenario_values.clone(),
                         base_reject_entrance_enabled: section.base_reject_entrance_enabled,
+                        base_extinguish_enabled: section.base_extinguish_enabled,
                         environment: section.environment,
                     },
                 )
@@ -19849,6 +19866,7 @@ impl Engine {
             self.base_buy_enabled,
             self.base_sell_enabled,
             self.base_reject_entrance_enabled,
+            self.base_extinguish_enabled,
         )
         .with_structures_need_energy(self.structures_need_energy)
         .with_flag_removeable(self.flag_removeable)
@@ -25476,6 +25494,7 @@ impl Engine {
             breath,
             energy_loss_cause,
             fire,
+            fire_flag,
             construction,
             construction_via_docon,
             construction_preserves_fixed_position,
@@ -25659,6 +25678,9 @@ impl Engine {
                 object.state.on_fire = true;
                 object.state.fire_caused_by = fire_caused_by;
                 object.state.fire_phase = fire_phase;
+            }
+            if let Some(flag) = fire_flag {
+                object.state.on_fire = flag;
             }
             if let Some(magic_energy) = magic_energy {
                 object.state.magic_energy = magic_energy.max(0);
@@ -29388,6 +29410,7 @@ impl Engine {
                     current.scenario_values = self.scenario_values.as_ref().clone();
                     current.base_reject_entrance_enabled =
                         self.base_reject_entrance_enabled;
+                    current.base_extinguish_enabled = self.base_extinguish_enabled;
                     current.environment = self.environment;
                 }
                 if let Some(objects) = saved_objects {
@@ -29443,6 +29466,7 @@ impl Engine {
             .retain(|id| !preserved.contains(id));
         state.object_order.extend(retained_order);
 
+        self.base_extinguish_enabled = target.base_extinguish_enabled;
         self.restore_state(&state)?;
         // Objects.Load follows Landscape.Init's second FixRandom. Keep the
         // same boundary before fresh section objects run Construction or
@@ -36571,9 +36595,8 @@ impl Engine {
     /// `C4Object::ExecFire` (C4Object.cpp:766-810), run by the fire
     /// effect's timer (FnFxFireTimer, C4Effect.cpp:643-658). Returns the
     /// deferred Fx*Stop events of effects an extinguish killed. Still open:
-    /// the Tick5 base extinguish (needs the base model), SmokeRate smoke
-    /// (visual), and death/removal callbacks from the energy and damage
-    /// changes.
+    /// SmokeRate smoke (visual), and death/removal callbacks from the energy
+    /// and damage changes.
     #[doc(hidden)]
     pub fn exec_object_fire(&mut self, idx: usize, frame: u64, fire_number: i32) -> Vec<EffectEvent> {
         if !self.objects[idx].state.on_fire {
@@ -36604,6 +36627,26 @@ impl Engine {
         {
             let object = &mut self.objects[idx];
             object.state.fire_phase = (object.state.fire_phase + 1) % MAX_FIRE_PHASE;
+        }
+        // Tick5 base extinguish precedes decay/damage/energy and does not
+        // stop the rest of this ExecFire call (C4Object.cpp:772-777). The
+        // direct container's Base only needs to name a currently linked
+        // player; ownership, hostility and the burning object's Alive flag
+        // are irrelevant.
+        if frame % 5 == 0
+            && self.base_extinguish_enabled
+            && self.objects[idx].state.category & CATEGORY_LIVING != 0
+        {
+            let valid_container_base = self.objects[idx]
+                .state
+                .container
+                .and_then(|container| self.find_object_index(container))
+                .map(|container_idx| self.objects[container_idx].state.base)
+                .is_some_and(|base| self.players.contains_key(&base));
+            if valid_container_base {
+                let (_, events) = self.extinguish_object(idx, fire_number);
+                stop_events.extend(events);
+            }
         }
         let (no_burn_decay, no_burn_damage) = self
             .definitions
@@ -52952,7 +52995,11 @@ protected func Departure(pContainer)
 mod scenario_section_random_regression {
     use super::*;
 
-    fn section(name: &str, width: u32) -> scenario::ScenarioSectionSpec {
+    fn section(
+        name: &str,
+        width: u32,
+        base_extinguish_enabled: bool,
+    ) -> scenario::ScenarioSectionSpec {
         scenario::ScenarioSectionSpec {
             name: name.to_string(),
             landscape: Some(Landscape::flat(width, 40)),
@@ -52960,6 +53007,7 @@ mod scenario_section_random_regression {
             scenario_values: scenario::ScenarioValueStore::default(),
             environment: EnvironmentSettings::default(),
             base_reject_entrance_enabled: true,
+            base_extinguish_enabled,
         }
     }
 
@@ -52967,7 +53015,10 @@ mod scenario_section_random_regression {
     fn section_landscape_init_refixes_the_exact_synced_rng_ledger() {
         let seed = 7;
         let mut engine = Engine::with_seed(seed);
-        engine.configure_scenario_sections(&[section("main", 100), section("next", 240)]);
+        engine.configure_scenario_sections(&[
+            section("main", 100, true),
+            section("next", 240, false),
+        ]);
         engine.set_landscape(Landscape::flat(100, 40));
 
         engine.rng.random(31);
@@ -52989,6 +53040,10 @@ mod scenario_section_random_regression {
         assert_eq!(
             engine.landscape().expect("section landscape").width(),
             240
+        );
+        assert!(
+            !engine.base_extinguish_enabled,
+            "the target section projects its BaseFunctionality mask"
         );
 
         let mut expected = LcgRng::seed_from_u64(seed);

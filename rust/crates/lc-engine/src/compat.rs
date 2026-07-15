@@ -1319,6 +1319,7 @@ pub struct HostWorldContext {
     base_sell_enabled: bool,
     base_auto_sell_enabled: bool,
     base_reject_entrance_enabled: bool,
+    base_extinguish_enabled: bool,
     /// Raw `C4Sky::Modulation`/`BackClr` at callback entry.
     sky_adjustment: SkyAdjustment,
     /// Engine-owned surrogate for process config `MissionAccess`, shared so
@@ -1388,6 +1389,7 @@ impl Default for HostWorldContext {
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
             base_reject_entrance_enabled: true,
+            base_extinguish_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
             mission_access: Rc::new(RefCell::new(String::new())),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
@@ -1413,11 +1415,13 @@ impl HostWorldContext {
         base_buy_enabled: bool,
         base_sell_enabled: bool,
         base_reject_entrance_enabled: bool,
+        base_extinguish_enabled: bool,
     ) -> Self {
         self.frame = frame;
         self.base_buy_enabled = base_buy_enabled;
         self.base_sell_enabled = base_sell_enabled;
         self.base_reject_entrance_enabled = base_reject_entrance_enabled;
+        self.base_extinguish_enabled = base_extinguish_enabled;
         self
     }
 
@@ -1618,6 +1622,7 @@ impl HostWorldContext {
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
             base_reject_entrance_enabled: true,
+            base_extinguish_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
             mission_access: Rc::new(RefCell::new(String::new())),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
@@ -20559,6 +20564,41 @@ fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
     });
+    // C4Object::ExecFire's Tick5 base arm runs immediately after the phase
+    // advance and before decay/damage/energy. ValidPlr is only membership in
+    // the live player list; the container need not belong to the victim.
+    if frame % 5 == 0 {
+        let extinguish_in_base = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let Some(context) = borrow.as_ref() else {
+                return false;
+            };
+            if !context.world.base_extinguish_enabled {
+                return false;
+            }
+            let Some(scope) = context.object_scope(target) else {
+                return false;
+            };
+            if scope.category() & crate::CATEGORY_LIVING == 0 {
+                return false;
+            }
+            let Some(container) = scope.container() else {
+                return false;
+            };
+            let base = context
+                .object_scope(container)
+                .and_then(|scope| scope.pending_update.base)
+                .or_else(|| {
+                    context
+                        .get_world_object(container)
+                        .and_then(|object| object.full_state().map(|state| state.base))
+                });
+            base.is_some_and(|base| context.player_state(base).is_some())
+        });
+        if extinguish_in_base {
+            extinguish_effect_target(target, fire_number)?;
+        }
+    }
     // Decay: DoCon(-100) every frame; burned away at zero construction
     // (C4Object.cpp:779-781 + the engine-side burn loop).
     if !state.no_burn_decay {
@@ -20610,8 +20650,7 @@ fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
             if extinguisher {
                 // Extinguish(iFireNumber) — C4Object.cpp:801; the number
                 // form kills exactly this effect.
-                let _ = fire_number;
-                extinguish_target(target)?;
+                extinguish_effect_target(target, fire_number)?;
             }
             // Inflame (C4Object.cpp:803-804)
             if draw_context_random(3)? == 0 {
@@ -20723,6 +20762,16 @@ fn extinguish(args: &[Value]) -> Result<Value, RuntimeError> {
 /// (C4Effect.cpp:787) unless a script global shadows it; script Fx*Stop
 /// callbacks ride the deferred Stopped dispatch of the staged removals.
 fn extinguish_target(target: ObjectId) -> Result<bool, RuntimeError> {
+    extinguish_effect_target(target, 0)
+}
+
+/// The numbered `C4Object::Extinguish(iFireNumber)` form used by ExecFire:
+/// zero selects every public `*Fire*` effect, while a nonzero number kills
+/// exactly that effect (C4Object.cpp:1276-1299).
+fn extinguish_effect_target(
+    target: ObjectId,
+    fire_number: i32,
+) -> Result<bool, RuntimeError> {
     let engine_fire_stop = !script_shadows_engine_fx("FxFireStop");
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -20737,24 +20786,29 @@ fn extinguish_target(target: ObjectId) -> Result<bool, RuntimeError> {
         };
         let mut killed = 0usize;
         loop {
-            let name = scope.effects.effects.iter().find_map(|effect| {
+            let number = scope.effects.effects.iter().find_map(|effect| {
                 (effect.priority != 0
-                    && effect.name.contains("Fire")
-                    && !effect.name.starts_with("Int"))
-                    .then(|| effect.name.clone())
+                    && if fire_number != 0 {
+                        effect.number == fire_number
+                    } else {
+                        effect.name.contains("Fire") && !effect.name.starts_with("Int")
+                    })
+                .then_some(effect.number)
             });
-            let Some(name) = name else { break };
-            if scope
+            let Some(number) = number else { break };
+            let Some(removed) = scope
                 .effects
-                .remove_live_effect(Some(&name), 0, false)
-                .is_none()
-            {
+                .remove_live_effect(None, number.max(0) as usize, false)
+            else {
                 break;
-            }
-            if name == crate::C4FX_FIRE && engine_fire_stop {
+            };
+            if removed.name == crate::C4FX_FIRE && engine_fire_stop {
                 scope.pending_update.stage_fire_flag(false);
             }
             killed += 1;
+            if fire_number != 0 {
+                break;
+            }
         }
         Ok(killed > 0)
     })

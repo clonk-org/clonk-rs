@@ -194,6 +194,7 @@ pub(crate) struct ScenarioSectionSpec {
     pub(crate) objects: Vec<ScenarioSpawn>,
     pub(crate) scenario_values: ScenarioValueStore,
     pub(crate) base_reject_entrance_enabled: bool,
+    pub(crate) base_extinguish_enabled: bool,
     pub(crate) environment: EnvironmentSettings,
 }
 
@@ -261,6 +262,7 @@ pub struct Scenario {
     base_auto_sell_enabled: bool,
     base_reject_entrance_enabled: bool,
     base_regenerate_energy_enabled: bool,
+    base_extinguish_enabled: bool,
     base_regenerate_energy_price: i32,
     landscape_insert_thrust: bool,
     /// `[Head] DisableMouse`: prevents every joined player from receiving
@@ -2323,6 +2325,9 @@ impl Scenario {
             base_regenerate_energy_enabled: (manifest.core.game.realism.base_functionality
                 & BASEFUNC_REGENERATE_ENERGY)
                 != 0,
+            base_extinguish_enabled: (manifest.core.game.realism.base_functionality
+                & BASEFUNC_EXTINGUISH)
+                != 0,
             base_regenerate_energy_price: manifest.core.game.realism.base_regenerate_energy_price,
             landscape_insert_thrust: manifest.core.game.realism.landscape_insert_thrust != 0,
             disable_mouse: manifest.core.head.disable_mouse != 0,
@@ -2617,6 +2622,7 @@ impl Scenario {
         engine.set_base_auto_sell_enabled(self.base_auto_sell_enabled);
         engine.set_base_reject_entrance_enabled(self.base_reject_entrance_enabled);
         engine.set_base_regenerate_energy_enabled(self.base_regenerate_energy_enabled);
+        engine.set_base_extinguish_enabled(self.base_extinguish_enabled);
         engine.set_base_regenerate_energy_price(self.base_regenerate_energy_price);
         engine.set_landscape_insert_thrust(self.landscape_insert_thrust);
 
@@ -3305,6 +3311,7 @@ impl Scenario {
             base_auto_sell_enabled: false,
             base_reject_entrance_enabled: true,
             base_regenerate_energy_enabled: true,
+            base_extinguish_enabled: true,
             base_regenerate_energy_price: BASE_REGENERATE_ENERGY_PRICE,
             landscape_insert_thrust: false,
             disable_mouse: false,
@@ -9160,6 +9167,9 @@ fn load_legacy_scenario_sections(
         base_reject_entrance_enabled: (main_manifest.core.game.realism.base_functionality
             & BASEFUNC_REJECT_ENTRANCE)
             != 0,
+        base_extinguish_enabled: (main_manifest.core.game.realism.base_functionality
+            & BASEFUNC_EXTINGUISH)
+            != 0,
         environment: main_environment,
     }];
 
@@ -9200,6 +9210,9 @@ fn load_legacy_scenario_sections(
             scenario_values,
             base_reject_entrance_enabled: (manifest.core.game.realism.base_functionality
                 & BASEFUNC_REJECT_ENTRANCE)
+                != 0,
+            base_extinguish_enabled: (manifest.core.game.realism.base_functionality
+                & BASEFUNC_EXTINGUISH)
                 != 0,
             environment,
         });
@@ -14910,6 +14923,7 @@ global func Step(state, frame, random)
             base_auto_sell_enabled: true,
             base_reject_entrance_enabled: false,
             base_regenerate_energy_enabled: false,
+            base_extinguish_enabled: false,
             base_regenerate_energy_price: 12,
             landscape_insert_thrust: false,
             disable_mouse: false,
@@ -14931,6 +14945,7 @@ global func Step(state, frame, random)
         assert_eq!(created.len(), 2);
         assert!(!engine.base_reject_entrance_enabled);
         assert!(!engine.base_regenerate_energy_enabled);
+        assert!(!engine.base_extinguish_enabled);
         assert_eq!(engine.base_regenerate_energy_price, 12);
 
         let mut energies: Vec<i32> = created
@@ -15031,6 +15046,7 @@ global func Step(state, frame, random)
             base_auto_sell_enabled: true,
             base_reject_entrance_enabled: true,
             base_regenerate_energy_enabled: true,
+            base_extinguish_enabled: true,
             base_regenerate_energy_price: BASE_REGENERATE_ENERGY_PRICE,
             landscape_insert_thrust: false,
             disable_mouse: false,
@@ -19130,6 +19146,10 @@ public func ActualizePhase(pClonk)
         assert!(
             !engine.base_reject_entrance_enabled,
             "the legacy BaseFunctionality mask disables RejectEntrance"
+        );
+        assert!(
+            !engine.base_extinguish_enabled,
+            "the legacy BaseFunctionality mask disables Extinguish"
         );
         // The `[Player1] Crew=FOOO=2` list places at JOIN
         // (C4Player::PlaceReadyCrew new spec, C4Player.cpp:528-570); the
