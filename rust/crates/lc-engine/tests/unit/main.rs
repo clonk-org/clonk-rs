@@ -3775,6 +3775,74 @@ func FxFireTimer(pObj, iNumber, iTime)
     }
 
     #[test]
+    fn cross_check_contained_fight_stops_after_the_first_hostile_content() -> Result<(), EngineError>
+    {
+        // C4GameObjects.cpp:222-227 aborts obj1's inner Contents walk when
+        // obj1 is still contained after ObjectActionFight. This deliberately
+        // preserves the C++ copy/paste quirk: A targets B, the first hostile
+        // content, rather than continuing on to C.
+        let mut fighter = Definition::from_script("Knight", "Knight", "#strict 2\n")?;
+        fighter.set_category(CATEGORY_LIVING);
+        let mut specs = HashMap::new();
+        specs.insert("Idle".to_string(), ActionSpec::default());
+        specs.insert("Fight".to_string(), ActionSpec::default());
+        fighter.configure_actions(Some("Idle".to_string()), specs);
+
+        let mut engine = Engine::new();
+        engine.register_definition(fighter)?;
+        engine.register_definition(simple_definition("Hut"))?;
+        engine.register_player(PlayerConfig::new(1, "P1"))?;
+        engine.register_player(PlayerConfig::new(2, "P2"))?;
+        engine.set_hostility(1, 2, true)?;
+
+        let hut = engine.spawn_object(SpawnConfig::new("Hut"))?;
+        let knight_a = engine.spawn_object(
+            SpawnConfig::new("Knight")
+                .with_owner(1)
+                .with_alive(true)
+                .with_container(hut),
+        )?;
+        // Enter C before B so same-definition stContents insertion leaves
+        // [B, C, A]. stMain has the same B/C/A forward order, making A the
+        // last outer object and its own final target directly observable.
+        let knight_c = engine.spawn_object(
+            SpawnConfig::new("Knight")
+                .with_owner(2)
+                .with_alive(true)
+                .with_container(hut),
+        )?;
+        let knight_b = engine.spawn_object(
+            SpawnConfig::new("Knight")
+                .with_owner(2)
+                .with_alive(true)
+                .with_container(hut),
+        )?;
+        assert_eq!(
+            engine.object_snapshot(hut).expect("hut exists").contents,
+            vec![knight_b, knight_c, knight_a]
+        );
+        let fighters = engine
+            .debug_exec_order()
+            .into_iter()
+            .rev()
+            .filter(|id| [knight_a, knight_b, knight_c].contains(id))
+            .collect::<Vec<_>>();
+        assert_eq!(fighters, vec![knight_b, knight_c, knight_a]);
+
+        engine.cross_check(10)?;
+
+        let action_target = |object_id| {
+            let index = engine.find_object_index(object_id).expect("knight exists");
+            assert_eq!(engine.objects[index].state.action.name, "Fight");
+            engine.objects[index].state.action.target
+        };
+        assert_eq!(action_target(knight_a), Some(knight_b));
+        assert_eq!(action_target(knight_b), Some(knight_a));
+        assert_eq!(action_target(knight_c), Some(knight_a));
+        Ok(())
+    }
+
+    #[test]
     fn cross_check_hit_respects_query_catch_blow() -> Result<(), EngineError> {
         // C4GameObjects.cpp:168: a truthy QueryCatchBlow callback on the
         // victim suppresses the hit entirely.

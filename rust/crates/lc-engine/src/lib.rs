@@ -32661,7 +32661,7 @@ impl Engine {
                         let obj1 = &self.objects[idx];
                         if obj1.destroyed
                             || !obj1.state.status.is_active()
-                            || obj1.state.container.is_none()
+                            || obj1.state.container.is_some()
                             || self.object_ocf_at_index(idx) & focf == 0
                         {
                             continue 'outer;
