@@ -5597,10 +5597,13 @@ impl Object {
                         layer.position.x + layer.shape_rect.x + layer.shape_rect.width + shape_x,
                     )
                 };
-                if let Some(bound) = target_bounds(target_x, low, high) {
+                for cnat in
+                    target_bounds(target_x, low, high, CNAT_LEFT, CNAT_RIGHT)
+                        .into_iter()
+                        .flatten()
+                {
                     self.fixed_velocity.x = C4Fixed::ZERO;
                     self.state.velocity = self.velocity_pixels();
-                    let cnat = if bound < 0 { CNAT_LEFT } else { CNAT_RIGHT };
                     on_contact(self, cnat)?;
                 }
             }
@@ -5610,10 +5613,18 @@ impl Object {
             return Ok(());
         }
         let shape_x = movement.shape_rect.map(|shape| shape.x).unwrap_or(0);
-        if let Some(bound) = target_bounds(target_x, -shape_x, landscape.width() as i32 + shape_x) {
+        for cnat in target_bounds(
+            target_x,
+            -shape_x,
+            landscape.width() as i32 + shape_x,
+            CNAT_LEFT,
+            CNAT_RIGHT,
+        )
+        .into_iter()
+        .flatten()
+        {
             self.fixed_velocity.x = C4Fixed::ZERO;
             self.state.velocity = self.velocity_pixels();
-            let cnat = if bound < 0 { CNAT_LEFT } else { CNAT_RIGHT };
             on_contact(self, cnat)?;
         }
         Ok(())
@@ -5642,28 +5653,49 @@ impl Object {
                         layer.position.y + layer.shape_rect.y + layer.shape_rect.height + shape_y,
                     )
                 };
-                if let Some(bound) = target_bounds(target_y, low, high) {
+                for cnat in
+                    target_bounds(target_y, low, high, CNAT_TOP, CNAT_BOTTOM)
+                        .into_iter()
+                        .flatten()
+                {
                     self.fixed_velocity.y = C4Fixed::ZERO;
                     self.state.velocity = self.velocity_pixels();
-                    let cnat = if bound < 0 { CNAT_TOP } else { CNAT_BOTTOM };
                     on_contact(self, cnat)?;
                 }
             }
         }
 
-        if movement.border_bound & C4D_BORDER_TOP != 0
-            && target_bounds(target_y, -shape_y, i32::MAX).is_some()
-        {
-            self.fixed_velocity.y = C4Fixed::ZERO;
-            self.state.velocity = self.velocity_pixels();
-            on_contact(self, CNAT_TOP)?;
+        if movement.border_bound & C4D_BORDER_TOP != 0 {
+            for cnat in target_bounds(
+                target_y,
+                -shape_y,
+                i32::MAX,
+                CNAT_TOP,
+                CNAT_BOTTOM,
+            )
+            .into_iter()
+            .flatten()
+            {
+                self.fixed_velocity.y = C4Fixed::ZERO;
+                self.state.velocity = self.velocity_pixels();
+                on_contact(self, cnat)?;
+            }
         }
         if movement.border_bound & C4D_BORDER_BOTTOM != 0 {
             let bottom = landscape.estimated_height() + shape_y;
-            if target_bounds(target_y, i32::MIN, bottom).is_some() {
+            for cnat in target_bounds(
+                target_y,
+                i32::MIN,
+                bottom,
+                CNAT_TOP,
+                CNAT_BOTTOM,
+            )
+            .into_iter()
+            .flatten()
+            {
                 self.fixed_velocity.y = C4Fixed::ZERO;
                 self.state.velocity = self.velocity_pixels();
-                on_contact(self, CNAT_BOTTOM)?;
+                on_contact(self, cnat)?;
             }
         }
         self.state.velocity = self.velocity_pixels();
@@ -13993,21 +14025,28 @@ fn shape_attach(
     attached
 }
 
-/// C4Object::TargetBounds (C4Movement.cpp:128-150): clamps the INT step
-/// target and zeroes the dir — fix_x/fix_y are NOT resynced, so an
-/// out-of-bounds object legitimately walks its int position back inside
-/// while the fixed coordinate keeps the outside value (the rider-at-the-
-/// map-edge x/fix split).
-fn target_bounds(target: &mut i32, low: i32, high: i32) -> Option<i32> {
+/// C4Object::TargetBounds (C4Movement.cpp:128-163): clamps the INT step
+/// target and returns its low/high contacts in execution order. The checks
+/// are independent, so inverted limits can trigger both and finish at
+/// `high`. Callers zero the corresponding dir before each callback;
+/// fix_x/fix_y are not resynchronized.
+fn target_bounds(
+    target: &mut i32,
+    low: i32,
+    high: i32,
+    cnat_low: u32,
+    cnat_high: u32,
+) -> [Option<u32>; 2] {
+    let mut contacts = [None, None];
     if *target < low {
         *target = low;
-        Some(-1)
-    } else if *target > high {
-        *target = high;
-        Some(1)
-    } else {
-        None
+        contacts[0] = Some(cnat_low);
     }
+    if *target > high {
+        *target = high;
+        contacts[1] = Some(cnat_high);
+    }
+    contacts
 }
 
 /// DFA_FLOAT ComDir movement with a nonzero Float physical

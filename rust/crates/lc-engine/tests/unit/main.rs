@@ -37400,6 +37400,8 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
 
     #[test]
     fn layer_border_bound_clamps_horizontal_target_like_cpp() {
+        use std::sync::{Arc, Mutex};
+
         // Mirrors src/C4Movement.cpp:185-196. For a non-static object, C++ applies
         // layer-side TargetBounds when `pLayer->Def->BorderBound & C4D_Border_Layer`:
         // low  = layer.x + layer.Shape.x - object.Shape.x
@@ -37414,9 +37416,29 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         layer_definition.set_shape_rect(Some(DefinitionRect::new(-1, -1, 10, 10)));
         layer_definition.set_border_bound(C4D_BORDER_LAYER);
 
-        let mut mover_definition = simple_definition("Mover");
+        let call_log = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                if name == "ContactLeft" || name == "ContactRight" {
+                    call_log.lock().unwrap().push(name.to_string());
+                }
+            });
+        }
+        let mut mover_definition = Definition::from_script(
+            "Mover",
+            "Mover",
+            r#"
+            global func ContactLeft() { return 0; }
+            global func ContactRight() { return 0; }
+            "#,
+        )
+        .expect("mover script compiles");
+        mover_definition.set_debugger_hooks(hooks);
         mover_definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
         mover_definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+        mover_definition.set_contact_function_calls(true);
 
         let mut engine = Engine::with_seed(57);
         engine.set_landscape(Landscape::flat(100, 100));
@@ -37461,6 +37483,93 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         // (TargetBounds clamps the INT target only).
         assert_eq!(engine.objects[idx].fixed_position.x, itofix(33));
         assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
+        assert_eq!(
+            *call_log.lock().unwrap(),
+            vec!["ContactRight".to_string()]
+        );
+    }
+
+    #[test]
+    fn inverted_layer_bounds_clamp_low_then_high_like_cpp() {
+        use std::sync::{Arc, Mutex};
+
+        // A layer narrower than the mover inverts the non-static limits:
+        // low=20-1-(-3)=22, high=20-1+2+(-3)=18. C++ TargetBounds uses
+        // independent if arms, so target 21 first calls ContactLeft at 22,
+        // then ContactRight at 18 and finally moves the object to x=18.
+        let mut layer_definition = simple_definition("NarrowLayer");
+        layer_definition.set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2)));
+        layer_definition.set_border_bound(C4D_BORDER_LAYER);
+
+        let call_log = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                if name == "ContactLeft" || name == "ContactRight" {
+                    call_log.lock().unwrap().push(name.to_string());
+                }
+            });
+        }
+        let mut mover_definition = Definition::from_script(
+            "WideMover",
+            "WideMover",
+            r#"
+            global func ContactLeft() { SetXDir(10); return 0; }
+            global func ContactRight() { return 0; }
+            "#,
+        )
+        .expect("mover script compiles");
+        mover_definition.set_debugger_hooks(hooks);
+        mover_definition.set_shape_rect(Some(DefinitionRect::new(-3, -1, 6, 2)));
+        mover_definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+        mover_definition.set_contact_function_calls(true);
+
+        let mut engine = Engine::with_seed(61);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine
+            .register_definition(layer_definition)
+            .expect("layer definition registers");
+        engine
+            .register_definition(mover_definition)
+            .expect("mover definition registers");
+
+        let layer_id = engine
+            .spawn_object(
+                SpawnConfig::new("NarrowLayer")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(20, 10)),
+            )
+            .expect("layer spawns");
+        let mover_id = engine
+            .spawn_object(
+                SpawnConfig::new("WideMover")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(20, 10))
+                    .with_layer(layer_id),
+            )
+            .expect("mover spawns");
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
+        engine.objects[idx].state.mobile = true;
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(mover_id).expect("object present");
+        assert_eq!(object.position.x, 18);
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(21));
+        // ContactLeft's SetXDir is erased by the second arm before
+        // ContactRight, exactly like C++ TargetBounds.
+        assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
+        assert_eq!(
+            *call_log.lock().unwrap(),
+            vec!["ContactLeft".to_string(), "ContactRight".to_string()]
+        );
     }
 
     #[test]
