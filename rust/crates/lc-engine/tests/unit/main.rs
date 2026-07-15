@@ -48169,6 +48169,115 @@ func ResortExplicit(object target) { Resort(target); }
     }
 
     #[test]
+    fn same_frame_spawn_ignores_a_destroyed_definition_cluster_anchor() {
+        // AssignRemoval clears Status before returning, but the dead master
+        // link remains until the frame-end removal pass. C4ObjectList::Add
+        // must skip that link in both scans. Keep another definition between
+        // the dead SAME link and its live SAME peer so a stale cluster anchor
+        // would put the newcomer on the opposite side of both timer objects.
+        let mut same = simple_definition("SAME");
+        same.set_category(CATEGORY_OBJECT);
+        let mut killer = Definition::from_script(
+            "KILL",
+            "Killer",
+            "#strict\nlocal victim;\nfunc Cull() { RemoveObject(victim); }\n",
+        )
+        .expect("killer compiles");
+        killer.set_category(CATEGORY_OBJECT);
+        killer.set_timer(1);
+        killer.set_timer_call(Some("Cull".to_string()));
+        let mut spawner = Definition::from_script(
+            "SPWN",
+            "Spawner",
+            "#strict\nfunc Seed() { CreateObject(SAME, 0, 0, -1); }\n",
+        )
+        .expect("spawner compiles");
+        spawner.set_category(CATEGORY_OBJECT);
+        spawner.set_timer(1);
+        spawner.set_timer_call(Some("Seed".to_string()));
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.register_definition(same).expect("same registers");
+        engine
+            .register_definition(killer)
+            .expect("killer registers");
+        engine
+            .register_definition(spawner)
+            .expect("spawner registers");
+
+        let survivor = engine
+            .spawn_object(SpawnConfig::new("SAME").with_category(CATEGORY_OBJECT))
+            .expect("survivor spawns");
+        let victim = engine
+            .spawn_object(SpawnConfig::new("SAME").with_category(CATEGORY_OBJECT))
+            .expect("victim spawns");
+        let killer = engine
+            .spawn_object(
+                SpawnConfig::new("KILL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_local_vars(HashMap::from([(
+                        "victim".to_string(),
+                        Value::Object(victim.as_u64()),
+                    )])),
+            )
+            .expect("killer spawns");
+        let spawner = engine
+            .spawn_object(SpawnConfig::new("SPWN").with_category(CATEGORY_OBJECT))
+            .expect("spawner spawns");
+        assert_eq!(
+            engine.debug_exec_order(),
+            vec![survivor, victim, killer, spawner]
+        );
+
+        // Main-list Before is exec-list After. Put the future tombstone at
+        // the master front so it is the first apparent SAME cluster anchor.
+        engine
+            .pending_object_order_commands
+            .push(ObjectOrderCommand::SetRelative {
+                relative_to: spawner,
+                object: victim,
+                after: false,
+            });
+        engine.execute_object_order_commands();
+        assert_eq!(
+            engine.debug_exec_order(),
+            vec![survivor, killer, spawner, victim]
+        );
+
+        engine.tick().expect("killer/spawner frame succeeds");
+
+        assert!(
+            engine.object_snapshot(victim).is_none(),
+            "the killed cluster anchor is no longer a live snapshot object"
+        );
+        let newcomer = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "SAME" && object.id != survivor)
+            .expect("spawner created a replacement");
+        assert_eq!(
+            newcomer.state.timer, 0,
+            "insertion behind the live cursor keeps the newborn out of its birth-frame exec"
+        );
+        let newcomer = newcomer.id;
+        assert_eq!(
+            engine.debug_exec_order(),
+            vec![survivor, newcomer, killer, spawner, victim],
+            "the dead link remains physical but cannot anchor the SAME definition cluster"
+        );
+        assert_eq!(
+            engine
+                .sectors
+                .as_ref()
+                .expect("sector map exists")
+                .object_ids(sector::SectorKey::Inside { x: 0, y: 0 }),
+            &[spawner, killer, newcomer, survivor],
+            "sector traversal follows the surviving master-list order"
+        );
+    }
+
+    #[test]
     fn inactive_exec_list_holes_do_not_participate_in_add_or_unsorted_sweeps() {
         // C4OS_INACTIVE objects live in C4GameObjects::InactiveObjects, not
         // the main list. Rust keeps their ids as inert exec-list holes, so a
