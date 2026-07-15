@@ -164,7 +164,7 @@ impl CommandPlayerSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommandDefinitionSnapshot {
     pub value: i32,
     #[serde(default)]
@@ -177,6 +177,14 @@ pub struct CommandDefinitionSnapshot {
     /// pushing let-go checks (C4Command.cpp:260, :565).
     #[serde(default)]
     pub grab: i32,
+    /// DefCore `GrabPutGet`; bit 2 (`C4D_Grab_Get`) permits Get to take
+    /// contents through a pushed container (C4Command.cpp:1226-1238).
+    #[serde(default)]
+    pub grab_put_get: i32,
+    /// DefCore `NoGet`; contained objects with this flag remain inaccessible
+    /// to C4Command::Get (C4Command.cpp:1209-1211).
+    #[serde(default)]
+    pub no_get: bool,
 }
 
 /// Identifiers that map to the classic C4 command constants.
@@ -1452,6 +1460,7 @@ mod tests {
                 chop_action: None,
                 constructable: false,
                 grab: 1,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -1500,6 +1509,7 @@ mod tests {
                 chop_action: None,
                 constructable: false,
                 grab: 1,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -1557,6 +1567,7 @@ mod tests {
                 chop_action: None,
                 constructable: false,
                 grab: 1,
+                ..CommandDefinitionSnapshot::default()
             },
         )]);
         let ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 1);
@@ -2690,18 +2701,20 @@ mod tests {
     }
 
     #[test]
-    fn get_enters_nonliving_structure_for_contained_item() {
-        // C4Command::Get treats a target container as an object with Status,
-        // not as a living object. A HUT3 therefore remains a valid entrance
-        // on the automatic construction-material route
-        // (C4Command.cpp:1180-1217).
+    fn get_uses_grab_get_definition_policy_before_container_entrance() {
+        // OCF_Grab alone does not permit taking contents through a pushed
+        // container. C++ consults Def->GrabPutGet & C4D_Grab_Get first and
+        // falls through to OCF_Entrance when that bit is absent
+        // (C4Command.cpp:1226-1243).
         let actor_id = ObjectId::new(101);
         let container_id = ObjectId::new(201);
         let item_id = ObjectId::new(301);
         let actor = snapshot_with_id(actor_id.as_u64());
         let mut container = snapshot_with_id(container_id.as_u64());
+        container.definition_id = "BOX".into();
+        container.status = ObjectStatus::Inactive;
         container.alive = false;
-        container.ocf = ocf::ENTRANCE;
+        container.ocf = ocf::AVAILABLE | ocf::GRAB | ocf::ENTRANCE;
         container.contents.push(item_id);
         let mut item = snapshot_with_id(item_id.as_u64());
         item.definition_id = "WOOD".into();
@@ -2709,28 +2722,22 @@ mod tests {
         item.collectible = true;
         item.construction = FULL_CON;
         item.container = Some(container_id);
-        let objects = HashMap::from([
+        let mut objects = HashMap::from([
             (actor_id, actor),
             (container_id, container),
             (item_id, item),
         ]);
         let players = HashMap::new();
-        let definitions = HashMap::new();
-        let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor_snapshot.position,
-            object: actor_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let mut definitions = HashMap::from([(
+            DefinitionId::from("BOX"),
+            CommandDefinitionSnapshot {
+                grab: 1,
+                grab_put_get: 0,
+                ..CommandDefinitionSnapshot::default()
+            },
+        )]);
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 0);
         let mut state =
             GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
                 .expect("state created");
@@ -2738,11 +2745,94 @@ mod tests {
         let result = state.step(&ctx);
 
         assert_eq!(result.status, CommandStatus::Running);
-        assert!(result.operations.iter().any(|operation| matches!(
-            operation,
-            CommandOperation::PushFront(request)
-                if request.id == CommandId::Enter && request.target == Some(container_id)
-        )));
+        assert!(result.update.is_none());
+        assert!(result.events.is_empty());
+        assert!(matches!(
+            result.operations.as_slice(),
+            [CommandOperation::PushFront(request)]
+                if request.id == CommandId::Enter
+                    && request.target == Some(container_id)
+                    && request.update_interval == 50
+                    && request.mode == CommandMode::SilentSub
+        ));
+
+        objects
+            .get_mut(&container_id)
+            .expect("container present")
+            .ocf &= !ocf::ENTRANCE;
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 1);
+        let mut state =
+            GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
+                .expect("state created");
+        let sealed = state.step(&ctx);
+        assert_eq!(sealed.status, CommandStatus::Failed);
+        assert!(sealed.update.is_none());
+        assert!(sealed.operations.is_empty());
+        assert!(sealed.events.is_empty());
+
+        definitions
+            .get_mut("BOX")
+            .expect("container definition present")
+            .grab_put_get = crate::GRAB_PUT_GET_GET;
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 2);
+        let mut state =
+            GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
+                .expect("state created");
+        let grab_get = state.step(&ctx);
+        assert_eq!(grab_get.status, CommandStatus::Running);
+        assert!(grab_get.update.is_none());
+        assert!(grab_get.events.is_empty());
+        assert!(matches!(
+            grab_get.operations.as_slice(),
+            [CommandOperation::PushFront(request)]
+                if request.id == CommandId::Grab
+                    && request.target == Some(container_id)
+                    && request.update_interval == 50
+                    && request.mode == CommandMode::SilentSub
+        ));
+    }
+
+    #[test]
+    fn get_no_get_item_in_same_container_remains_running_untouched() {
+        let actor_id = ObjectId::new(102);
+        let container_id = ObjectId::new(202);
+        let item_id = ObjectId::new(302);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(container_id);
+        let container = snapshot_with_id(container_id.as_u64());
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "LOCK".into();
+        item.container = Some(container_id);
+        item.collectible = true;
+        item.construction = FULL_CON;
+        let objects = HashMap::from([
+            (actor_id, actor),
+            (container_id, container),
+            (item_id, item),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::from([(
+            DefinitionId::from("LOCK"),
+            CommandDefinitionSnapshot {
+                no_get: true,
+                ..CommandDefinitionSnapshot::default()
+            },
+        )]);
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 0);
+        let mut state =
+            GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
+                .expect("state created");
+
+        for _ in 0..2 {
+            let result = state.step(&ctx);
+            assert_eq!(result.status, CommandStatus::Running);
+            assert!(result.update.is_none());
+            assert!(result.operations.is_empty());
+            assert!(result.events.is_empty());
+        }
     }
 
     #[test]
@@ -2871,6 +2961,80 @@ mod tests {
             }
             other => panic!("expected ungrab request, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn get_pushing_container_transfers_only_with_grab_get_definition_bit() {
+        let actor_id = ObjectId::new(5);
+        let container_id = ObjectId::new(6);
+        let item_id = ObjectId::new(7);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Push;
+        actor.action_target = Some(container_id);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.definition_id = "BOX".into();
+        container.ocf = ocf::AVAILABLE | ocf::GRAB | ocf::ENTRANCE;
+        container.contents.push(item_id);
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "WOOD".into();
+        item.container = Some(container_id);
+        item.collectible = true;
+        item.construction = FULL_CON;
+
+        let objects = HashMap::from([
+            (actor_id, actor),
+            (container_id, container),
+            (item_id, item),
+        ]);
+        let players = HashMap::new();
+        let mut definitions = HashMap::from([(
+            DefinitionId::from("BOX"),
+            CommandDefinitionSnapshot {
+                grab: 1,
+                grab_put_get: 0,
+                ..CommandDefinitionSnapshot::default()
+            },
+        )]);
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 0);
+        let mut state =
+            GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
+                .expect("state created");
+
+        let blocked = state.step(&ctx);
+        assert_eq!(blocked.status, CommandStatus::Running);
+        assert!(blocked.update.is_none());
+        assert!(blocked.events.is_empty(), "non-Grab_Get must not transfer");
+        assert!(matches!(
+            blocked.operations.as_slice(),
+            [CommandOperation::PushFront(request)]
+                if request.id == CommandId::Enter
+                    && request.target == Some(container_id)
+                    && request.update_interval == 50
+                    && request.mode == CommandMode::SilentSub
+        ));
+
+        definitions
+            .get_mut("BOX")
+            .expect("container definition present")
+            .grab_put_get = crate::GRAB_PUT_GET_GET;
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 1);
+        let mut state =
+            GetState::from_request(&CommandRequest::new(CommandId::Get).with_target(Some(item_id)))
+                .expect("state created");
+        let allowed = state.step(&ctx);
+        assert_eq!(allowed.status, CommandStatus::Running);
+        assert!(allowed.operations.is_empty());
+        assert_eq!(
+            allowed.events,
+            vec![CommandEvent::GetObject {
+                actor_id,
+                object_id: item_id,
+            }]
+        );
     }
 
     #[test]
@@ -4261,6 +4425,7 @@ mod tests {
                     chop_action: None,
                     constructable: false,
                     grab: vehicle_grab,
+                    ..CommandDefinitionSnapshot::default()
                 },
             ),
             (
@@ -4271,6 +4436,7 @@ mod tests {
                     chop_action: None,
                     constructable: false,
                     grab: 1,
+                    ..CommandDefinitionSnapshot::default()
                 },
             ),
         ]);
@@ -5374,6 +5540,7 @@ mod tests {
                 chop_action: None,
                 constructable: true,
                 grab: 0,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -5579,6 +5746,7 @@ mod tests {
                 chop_action: None,
                 constructable: true,
                 grab: 0,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -10585,6 +10753,7 @@ mod tests {
                 chop_action: None,
                 constructable: false,
                 grab: 0,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -10711,6 +10880,7 @@ mod tests {
                 chop_action: None,
                 constructable: false,
                 grab: 0,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -10815,6 +10985,7 @@ mod tests {
                 chop_action: None,
                 constructable: false,
                 grab: 0,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -10909,6 +11080,7 @@ mod tests {
                 chop_action: None,
                 constructable: false,
                 grab: 0,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -11092,6 +11264,7 @@ mod tests {
                 chop_action: None,
                 constructable: false,
                 grab: 0,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -11180,6 +11353,7 @@ mod tests {
                 chop_action: None,
                 constructable: false,
                 grab: 0,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -11267,6 +11441,7 @@ mod tests {
                 chop_action: Some("Chop".into()),
                 constructable: false,
                 grab: 0,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -11331,6 +11506,7 @@ mod tests {
                 chop_action: Some("Chop".into()),
                 constructable: false,
                 grab: 0,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -11401,6 +11577,7 @@ mod tests {
                 chop_action: Some("Chop".into()),
                 constructable: false,
                 grab: 0,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -11462,6 +11639,7 @@ mod tests {
                 chop_action: Some("Chop".into()),
                 constructable: false,
                 grab: 0,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -11518,6 +11696,7 @@ mod tests {
                 chop_action: Some("Chop".into()),
                 constructable: false,
                 grab: 0,
+                ..CommandDefinitionSnapshot::default()
             },
         );
 
@@ -15903,6 +16082,13 @@ impl GetState {
             return CommandStepResult::failed(update);
         };
 
+        if ctx
+            .definition(target_snapshot.definition_id.as_str())
+            .is_some_and(|definition| definition.no_get)
+        {
+            return CommandStepResult::running(update);
+        }
+
         if ctx.object.container == Some(container_id) {
             return self.transfer_to_actor(ctx, target_id, update, false);
         }
@@ -15921,17 +16107,22 @@ impl GetState {
         let Some(container_snapshot) = ctx.resolve(container_id) else {
             return CommandStepResult::failed(update);
         };
-        if !container_snapshot.is_status_active() {
+        // C++ accepts every nonzero Status here; inactive containers retain
+        // their definition policy and cached OCF just like normal ones.
+        if container_snapshot.destroyed || container_snapshot.status == ObjectStatus::Deleted {
             return CommandStepResult::failed(update);
         }
 
-        if ctx.object.action_procedure == ActionProcedure::Push
-            && ctx.object.action_target == Some(container_id)
-        {
-            return self.transfer_to_actor(ctx, target_id, update, false);
-        }
+        let grab_get = ctx
+            .definition(container_snapshot.definition_id.as_str())
+            .is_some_and(|definition| definition.grab_put_get & crate::GRAB_PUT_GET_GET != 0);
+        if grab_get {
+            if ctx.object.action_procedure == ActionProcedure::Push
+                && ctx.object.action_target == Some(container_id)
+            {
+                return self.transfer_to_actor(ctx, target_id, update, false);
+            }
 
-        if container_snapshot.ocf & ocf::GRAB != 0 {
             let mut result = CommandStepResult::running(update.clone());
             let request = CommandRequest::new(CommandId::Grab)
                 .with_target(Some(container_id))

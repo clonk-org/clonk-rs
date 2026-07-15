@@ -18983,6 +18983,7 @@ impl Engine {
                                 no_horizontal_move: definition.no_horizontal_move(),
                                 grab: definition.grab(),
                                 no_push_enter: definition.no_push_enter(),
+                                no_get: definition.no_get(),
                                 oversize: definition.oversize(),
                                 collection_rect: definition.collection_rect(),
                                 entrance_rect: definition.entrance_rect(),
@@ -23013,6 +23014,8 @@ impl Engine {
                         chop_action,
                         constructable: definition.is_constructable(),
                         grab: definition.grab(),
+                        grab_put_get: definition.grab_put_get(),
+                        no_get: definition.no_get(),
                     },
                 )
             })
@@ -23288,6 +23291,8 @@ impl Engine {
                         chop_action,
                         constructable: definition.is_constructable(),
                         grab: definition.grab(),
+                        grab_put_get: definition.grab_put_get(),
+                        no_get: definition.no_get(),
                     },
                 )
             })

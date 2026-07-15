@@ -216,6 +216,9 @@ pub(crate) struct DefinitionFireMetadata {
     /// DefCore NoPushEnter; any nonzero value rejects C4Command::Enter for
     /// objects of this definition.
     pub no_push_enter: i32,
+    /// DefCore NoGet; contained objects of this definition cannot be taken
+    /// by C4Command::Get.
+    pub no_get: bool,
     /// DefCore Oversize removes DoCon's upper FullCon clamp.
     pub oversize: bool,
     /// Positive Collection rect enables OCF_Collection when construction,
@@ -37099,6 +37102,8 @@ impl EffectHostContext {
                         }),
                         constructable: metadata.constructable,
                         grab: metadata.fire.grab,
+                        grab_put_get: metadata.grab_put_get,
+                        no_get: metadata.fire.no_get,
                     },
                 )
             })
