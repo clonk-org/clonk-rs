@@ -3,10 +3,10 @@
 //! navigation suffix, including index and method-argument evaluation, and
 //! the final `AB_DEREF` makes the result an rvalue.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use indexmap::IndexMap;
 use lc_script::{Engine, Script, Value};
 
 fn diagnostic_messages(source: &str) -> Vec<String> {
@@ -94,7 +94,7 @@ fn strict3_safe_navigation_supports_method_index_and_property_access() {
         engine
             .call(
                 "ReadProperty",
-                &[Value::Proplist(HashMap::from([(
+                &[Value::Proplist(IndexMap::from([(
                     "key".to_string(),
                     Value::String("value".into()),
                 )]))],
@@ -224,7 +224,7 @@ fn guard_covers_the_contiguous_suffix_but_not_a_new_nonnil_intermediate() {
         Value::Nil
     );
 
-    let empty = Value::Proplist(HashMap::new());
+    let empty = Value::Proplist(IndexMap::new());
     let error = engine
         .call("Contiguous", std::slice::from_ref(&empty))
         .expect_err("a nil intermediate is not guarded by the receiver's question mark");

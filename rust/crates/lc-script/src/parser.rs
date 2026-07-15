@@ -1051,139 +1051,118 @@ impl<'a> Parser<'a> {
         Ok(Stmt::While { condition, body })
     }
 
+    /// Probe the tokens after `for (` without consuming them. C4Aul has two
+    /// foreach header shapes: `[var] item in array` and
+    /// `[var] key, value in map`. Everything else belongs to the C-style
+    /// parser, including declaration lists such as `var i, j;`.
+    fn probe_for_in_binder_count(&mut self) -> Result<Option<usize>, ParseError> {
+        self.begin_speculative();
+        let result = (|| {
+            self.consume_if_keyword(Keyword::Var)?;
+            if !matches!(
+                self.peek()?.kind,
+                TokenKind::Identifier(_) | TokenKind::Keyword(_)
+            ) {
+                return Ok(None);
+            }
+            self.consume()?;
+
+            if self.consume_if_keyword(Keyword::In)?.is_some() {
+                return Ok(Some(1));
+            }
+            if self.consume_if_symbol(Symbol::Comma)?.is_none()
+                || !matches!(
+                    self.peek()?.kind,
+                    TokenKind::Identifier(_) | TokenKind::Keyword(_)
+                )
+            {
+                return Ok(None);
+            }
+            self.consume()?;
+
+            Ok(self.consume_if_keyword(Keyword::In)?.map(|_| 2))
+        })();
+        self.reset_speculative();
+        result
+    }
+
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {
         use crate::ast::ForInit;
 
         self.expect_symbol(Symbol::LParen, "expected '(' after 'for'")?;
 
-        // Distinguish for-in from C-style for
-        // for-in: for(var obj in expr) or for(obj in expr)
-        // C-style: for(init; cond; incr)
-
-        // Check if this starts with 'var'
-        if self.check_keyword(Keyword::Var)? {
-            self.consume()?; // consume 'var'
-
-            // Parse the identifier
+        if let Some(binder_count) = self.probe_for_in_binder_count()? {
+            let declare_var = self.consume_if_keyword(Keyword::Var)?.is_some();
             let (variable, _) = self.expect_identifier("expected variable name")?;
-
-            // Check next token to distinguish for-in from C-style
-            if self.consume_if_keyword(Keyword::In)?.is_some() {
-                // For-in loop: for(var variable in iterable)
-                let iterable = self.parse_expression()?;
-                self.expect_symbol(Symbol::RParen, "expected ')' after for-in header")?;
-                let body = self.parse_stmt_or_block_vec()?;
-
-                return Ok(Stmt::ForIn {
-                    variable,
-                    declare_var: true,
-                    iterable,
-                    body,
-                });
+            let value_variable = if binder_count == 2 {
+                self.expect_symbol(Symbol::Comma, "expected ',' between map variables")?;
+                Some(
+                    self.expect_identifier("expected map value variable name")?
+                        .0,
+                )
             } else {
-                // C-style for loop: for(var i = 0, j = 1; ...)
-                // We've already consumed 'var' and the first identifier
-                // Continue parsing as var decl list
-                let mut decls = Vec::new();
+                None
+            };
+            self.expect_keyword(Keyword::In, "expected 'in' after foreach variables")?;
+            let iterable = self.parse_expression()?;
+            self.expect_symbol(Symbol::RParen, "expected ')' after for-in header")?;
+            let body = self.parse_stmt_or_block_vec()?;
 
-                // Check for initializer on first variable
-                let first_init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
-                    // Use parse_assignment() instead of parse_expression() to avoid comma operator
-                    // In variable declarations, commas separate variables, not comma expressions
+            return Ok(Stmt::ForIn {
+                variable,
+                value_variable,
+                declare_var,
+                iterable,
+                body,
+            });
+        }
+
+        // C-style declaration loop: for(var i = 0, j = 1; cond; incr)
+        if self.check_keyword(Keyword::Var)? {
+            self.consume()?;
+            let (variable, _) = self.expect_identifier("expected variable name")?;
+            let mut decls = Vec::new();
+
+            // Parse assignments below the comma-expression level: commas in
+            // this clause separate declarations.
+            let first_init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
+                Some(self.parse_assignment()?)
+            } else {
+                None
+            };
+            decls.push((variable, first_init));
+
+            while self.consume_if_symbol(Symbol::Comma)?.is_some() {
+                let (name, _) = self.expect_identifier("expected variable name")?;
+                let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
                     Some(self.parse_assignment()?)
                 } else {
                     None
                 };
-                decls.push((variable, first_init));
-
-                // Parse additional comma-separated variables
-                while self.consume_if_symbol(Symbol::Comma)?.is_some() {
-                    let (name, _) = self.expect_identifier("expected variable name")?;
-                    let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
-                        // Use parse_assignment() instead of parse_expression() to avoid comma operator
-                        // In variable declarations, commas separate variables, not comma expressions
-                        Some(self.parse_assignment()?)
-                    } else {
-                        None
-                    };
-                    decls.push((name, init));
-                }
-
-                let init = Some(ForInit::VarDecls(decls));
-
-                self.expect_symbol(Symbol::Semicolon, "expected ';' after for-init")?;
-
-                // Parse condition clause (optional)
-                let condition = if self.check_symbol(Symbol::Semicolon)? {
-                    None
-                } else {
-                    Some(self.parse_expression()?)
-                };
-
-                self.expect_symbol(Symbol::Semicolon, "expected ';' after for-condition")?;
-
-                // Parse increment clause (optional)
-                let increment = if self.check_symbol(Symbol::RParen)? {
-                    None
-                } else {
-                    Some(self.parse_expression()?)
-                };
-
-                self.expect_symbol(Symbol::RParen, "expected ')' after for-clauses")?;
-
-                // Parse body
-                let body = self.parse_stmt_or_block_vec()?;
-
-                return Ok(Stmt::For {
-                    init,
-                    condition,
-                    increment,
-                    body,
-                });
+                decls.push((name, init));
             }
-        }
 
-        // No 'var' - could be for-in with pre-declared variable or C-style for
-        // Need 2-token lookahead: identifier + 'in' means for-in, otherwise C-style
-        if self.check_identifier()? {
-            // Get first token (identifier) by consuming
-            let token1 = self.consume()?;
-
-            // Get second token by consuming
-            let token2 = self.consume()?;
-
-            // Check if it's for-in pattern
-            let is_for_in = matches!(token2.kind, TokenKind::Keyword(Keyword::In));
-
-            if is_for_in {
-                // For-in: for(variable in iterable)
-                let variable = if let TokenKind::Identifier(name) = token1.kind {
-                    name
-                } else {
-                    unreachable!()
-                };
-
-                // Both tokens are already consumed, just continue parsing
-                let iterable = self.parse_expression()?;
-                self.expect_symbol(Symbol::RParen, "expected ')' after for-in header")?;
-                let body = self.parse_stmt_or_block_vec()?;
-
-                return Ok(Stmt::ForIn {
-                    variable,
-                    declare_var: false,
-                    iterable,
-                    body,
-                });
+            self.expect_symbol(Symbol::Semicolon, "expected ';' after for-init")?;
+            let condition = if self.check_symbol(Symbol::Semicolon)? {
+                None
             } else {
-                // C-style for: restore both tokens
-                // Push in reverse order so token1 comes out first
-                self.rewind_consumed_token(&token2);
-                self.rewind_consumed_token(&token1);
-                self.lookahead_buffer.insert(0, token2);
-                self.lookahead_buffer.insert(0, token1);
-                // Clear peeked to ensure restored tokens are seen first
-                self.peeked = None;
-            }
+                Some(self.parse_expression()?)
+            };
+            self.expect_symbol(Symbol::Semicolon, "expected ';' after for-condition")?;
+            let increment = if self.check_symbol(Symbol::RParen)? {
+                None
+            } else {
+                Some(self.parse_expression()?)
+            };
+            self.expect_symbol(Symbol::RParen, "expected ')' after for-clauses")?;
+            let body = self.parse_stmt_or_block_vec()?;
+
+            return Ok(Stmt::For {
+                init: Some(ForInit::VarDecls(decls)),
+                condition,
+                increment,
+                body,
+            });
         }
 
         // C-style for loop: for(init; cond; incr) or for(; cond; incr)
@@ -2225,11 +2204,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn check_identifier(&mut self) -> Result<bool, ParseError> {
-        let token = self.peek()?;
-        Ok(matches!(token.kind, TokenKind::Identifier(_)))
-    }
-
     fn is_eof(&mut self) -> Result<bool, ParseError> {
         let token = self.peek()?;
         Ok(matches!(token.kind, TokenKind::Eof))
@@ -2690,5 +2664,80 @@ fn static_const_multi_declarators_parse() {
     fn parse_assignment_in_expression_context() {
         let result = parse_script("func Test() { SetValue(x = 42); }");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn map_foreach_headers_capture_both_binders() {
+        for (header, expected_declare) in [
+            ("var key, value in map", true),
+            ("key, value in map", false),
+        ] {
+            let script = parse_script(&format!(
+                "func Test() {{ var key, value, map; for ({header}) {{ break; }} }}"
+            ))
+            .expect("map foreach parses");
+            let foreach = script.functions[0]
+                .body
+                .iter()
+                .find(|statement| matches!(statement, Stmt::ForIn { .. }))
+                .expect("foreach statement retained in AST");
+
+            assert!(matches!(
+                foreach,
+                Stmt::ForIn {
+                    variable,
+                    value_variable: Some(value_variable),
+                    declare_var,
+                    body,
+                    ..
+                } if variable == "key"
+                    && value_variable == "value"
+                    && *declare_var == expected_declare
+                    && matches!(body.as_slice(), [Stmt::Break])
+            ));
+        }
+    }
+
+    #[test]
+    fn map_foreach_accepts_contextual_keywords_as_binders() {
+        let script = parse_script(
+            "func Test() { var func, while, map; for (var func, while in map) {} }",
+        )
+        .expect("contextual-keyword map binders parse");
+
+        assert!(matches!(
+            &script.functions[0].body[1],
+            Stmt::ForIn {
+                variable,
+                value_variable: Some(value_variable),
+                ..
+            } if variable == "func" && value_variable == "while"
+        ));
+    }
+
+    #[test]
+    fn foreach_probe_leaves_c_style_comma_initializers_intact() {
+        let script = parse_script(
+            "func Test() { \
+                 for (var i = 0, j = 1; i < 3; ++i) {} \
+                 for (i = 0, j = 1; i < 3; ++i) {} \
+             }",
+        )
+        .expect("C-style loops with comma initializers still parse");
+
+        assert!(matches!(
+            &script.functions[0].body[0],
+            Stmt::For {
+                init: Some(crate::ast::ForInit::VarDecls(declarations)),
+                ..
+            } if declarations.len() == 2
+        ));
+        assert!(matches!(
+            &script.functions[0].body[1],
+            Stmt::For {
+                init: Some(crate::ast::ForInit::Expr(_)),
+                ..
+            }
+        ));
     }
 }

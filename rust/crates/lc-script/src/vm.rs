@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
+use indexmap::IndexMap;
+
 use crate::ast::{
     AccessLevel, AssignmentTarget, BinaryOp, Expr, ForInit, Function, NavigationOperation,
     Parameter, SafeNavigationStep, Stmt, UnaryOp, VarDecl,
@@ -425,7 +427,7 @@ impl TrackedValue {
     }
 
     fn proplist(entries: Vec<(String, Self)>) -> Self {
-        let mut values = HashMap::with_capacity(entries.len());
+        let mut values = IndexMap::with_capacity(entries.len());
         let mut identities = HashMap::with_capacity(entries.len());
         for (key, entry) in entries {
             identities.insert(key.clone(), entry.identity);
@@ -1845,32 +1847,53 @@ impl<'a> Vm<'a> {
             }
             Stmt::ForIn {
                 variable,
-                declare_var,
+                value_variable,
                 iterable,
                 body,
+                ..
             } => {
-                // Evaluate the iterable expression
+                // C4Aul evaluates the container once and keeps its key order
+                // stable for the duration of the loop.
                 let iterable_value = self.evaluate(iterable, env, depth)?;
 
-                // Extract the collection to iterate over
-                let items = match &iterable_value {
-                    Value::Array(arr) => arr.clone(),
-                    // For non-arrays, treat as empty iteration (matches C++ behavior)
-                    _ => Vec::new(),
+                let items: Vec<(Value, Option<Value>)> = if value_variable.is_some() {
+                    match &iterable_value {
+                        Value::Proplist(entries) => entries
+                            .iter()
+                            .map(|(key, value)| {
+                                (Value::String(key.clone()), Some(value.clone()))
+                            })
+                            .collect(),
+                        other => {
+                            return Err(RuntimeError::new(format!(
+                                "for: map expected, but got {}!",
+                                other.type_name()
+                            )))
+                        }
+                    }
+                } else {
+                    match &iterable_value {
+                        Value::Array(values) => values
+                            .iter()
+                            .cloned()
+                            .map(|value| (value, None))
+                            .collect(),
+                        // Preserve the existing array-foreach behavior here;
+                        // its non-array diagnostics are tracked separately.
+                        _ => Vec::new(),
+                    }
                 };
 
-                // Iterate over each item
-                for item in items {
-                    // Assign the item to the iteration variable
-                    if *declare_var {
-                        // Define new variable (or redefine if in same scope)
-                        env.define(variable, item);
-                    } else {
-                        // Assign to existing variable
-                        env.assign(variable, item)?;
+                for (key_or_item, map_value) in items {
+                    // Both header spellings use the function-scoped named-var
+                    // slots populated by the pre-parser/hoisting pass.
+                    env.assign(variable, key_or_item)?;
+                    if let (Some(value_variable), Some(map_value)) =
+                        (value_variable, map_value)
+                    {
+                        env.assign(value_variable, map_value)?;
                     }
 
-                    // Execute body
                     match self.execute_block(body, env, depth, returns_reference)? {
                         ControlFlow::Normal => {}
                         ControlFlow::LoopContinue => continue,
@@ -2409,7 +2432,7 @@ impl<'a> Vm<'a> {
                 Ok(Value::Array(values))
             }
             Expr::Proplist(entries) => {
-                let mut map = HashMap::with_capacity(entries.len());
+                let mut map = IndexMap::with_capacity(entries.len());
                 for (key, expr) in entries {
                     let value = self.evaluate(expr, env, depth)?;
                     map.insert(key.clone(), value);
@@ -4514,12 +4537,15 @@ fn hoist_function_vars(body: &[Stmt], env: &mut Environment) {
             }
             Stmt::ForIn {
                 variable,
-                declare_var,
+                value_variable,
                 body,
                 ..
             } => {
-                if *declare_var {
-                    env.declare_hoisted(variable);
+                // C4Aul's pre-parser adds foreach binders to the function's
+                // named-var table even when the optional `var` is omitted.
+                env.declare_hoisted(variable);
+                if let Some(value_variable) = value_variable {
+                    env.declare_hoisted(value_variable);
                 }
                 hoist_function_vars(body, env);
             }
@@ -5108,6 +5134,84 @@ mod tests {
         "#;
         let result = execute_script(source, "Test", &[]).unwrap();
         assert_eq!(result, Value::Int(42));
+    }
+
+    #[test]
+    fn vm_map_for_in_declares_and_binds_key_value_pairs() {
+        let source = r#"#strict 3
+            func Test() {
+                var seen = {};
+                for (var key, value in { alpha = 11, beta = 22 }) {
+                    seen[key] = value;
+                }
+                return seen;
+            }
+        "#;
+
+        assert_eq!(
+            execute_script(source, "Test", &[]).expect("declared map foreach runs"),
+            Value::Proplist(IndexMap::from([
+                ("alpha".to_string(), Value::Int(11)),
+                ("beta".to_string(), Value::Int(22)),
+            ]))
+        );
+    }
+
+    #[test]
+    fn vm_map_for_in_predeclared_variables_honor_continue_and_break() {
+        let source = r#"#strict 3
+            func Test() {
+                var key, value;
+                var visited = 0, sum = 0;
+                var entries = { one = 1, two = 2, three = 3 };
+
+                for (key, value in entries) {
+                    visited += 1;
+                    if (value == 2) continue;
+                    sum += value;
+                }
+
+                var break_visits = 0;
+                for (key, value in entries) {
+                    break_visits += 1;
+                    break;
+                }
+
+                return [visited, sum, break_visits];
+            }
+        "#;
+
+        assert_eq!(
+            execute_script(source, "Test", &[]).expect("predeclared map foreach runs"),
+            Value::Array(vec![Value::Int(3), Value::Int(4), Value::Int(1)])
+        );
+    }
+
+    #[test]
+    fn vm_map_for_in_uses_insertion_order_and_hoists_implicit_binders() {
+        let source = r#"#strict 3
+            func Test() {
+                var order = "";
+                var total = 0;
+                var entries = { second = 2, first = 1, second = 22 };
+                entries ..= { first = 11, third = 3 };
+                for (key, value in entries) {
+                    order = order .. key;
+                    total += value;
+                }
+                return [order, total, key, value];
+            }
+        "#;
+
+        assert_eq!(
+            execute_script(source, "Test", &[]).expect("ordered map foreach runs"),
+            Value::Array(vec![
+                Value::String("secondfirstthird".to_string()),
+                Value::Int(36),
+                Value::String("third".to_string()),
+                Value::Int(3),
+            ])
+        );
     }
 
     #[test]

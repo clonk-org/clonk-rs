@@ -1,5 +1,6 @@
-use std::collections::HashMap;
 use std::fmt;
+
+use indexmap::IndexMap;
 
 const C4V_ANY: usize = 0;
 const C4V_INT: usize = 1;
@@ -130,7 +131,7 @@ pub enum Value {
     C4Id(String),
     Object(u64),
     Array(Vec<Value>),
-    Proplist(HashMap<String, Value>),
+    Proplist(IndexMap<String, Value>),
     Nil,
 }
 
@@ -679,7 +680,7 @@ mod cnv_tests {
         assert_eq!(Value::Object(42).c4v_type(), C4VType::C4Object);
         assert_eq!(Value::String("x".into()).c4v_type(), C4VType::String);
         assert_eq!(Value::Array(vec![]).c4v_type(), C4VType::Array);
-        assert_eq!(Value::Proplist(HashMap::new()).c4v_type(), C4VType::Map);
+        assert_eq!(Value::Proplist(IndexMap::new()).c4v_type(), C4VType::Map);
     }
 
     #[test]
@@ -757,6 +758,6 @@ mod cnv_tests {
         assert!(Value::Object(42).convert_to(C4Object, true));
         assert!(Value::Object(42).convert_to(Bool, true));
         assert!(Value::Array(vec![]).convert_to(Array, true));
-        assert!(Value::Proplist(HashMap::new()).convert_to(Bool, true));
+        assert!(Value::Proplist(IndexMap::new()).convert_to(Bool, true));
     }
 }

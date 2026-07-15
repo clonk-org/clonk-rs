@@ -2,6 +2,8 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
 
+use indexmap::IndexMap;
+
 use crate::engine::Engine;
 use crate::value::Value;
 
@@ -164,7 +166,7 @@ fn lc_value_to_rust(value: &LcScriptValue) -> Result<Value, ()> {
         }
         LcScriptValueKind::Proplist => {
             let entries = lc_map_entry_slice(value)?;
-            let mut map = std::collections::HashMap::with_capacity(entries.len());
+            let mut map = IndexMap::with_capacity(entries.len());
             for entry in entries {
                 if entry.key.is_null() {
                     return Err(());
@@ -224,11 +226,8 @@ fn rust_value_to_lc(value: &Value) -> LcScriptValue {
             }
         }
         Value::Proplist(entries) => {
-            let mut sorted_entries: Vec<_> = entries.iter().collect();
-            sorted_entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-
-            let mut ffi_entries = Vec::with_capacity(sorted_entries.len());
-            for (key, value) in sorted_entries {
+            let mut ffi_entries = Vec::with_capacity(entries.len());
+            for (key, value) in entries {
                 let key = match CString::new(key.as_str()) {
                     Ok(key) => key.into_raw(),
                     Err(_) => {
@@ -334,7 +333,6 @@ unsafe fn free_lc_map_entry(entry: &mut LcScriptMapEntry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn rust_to_lc_preserves_arrays() {
@@ -356,7 +354,7 @@ mod tests {
 
     #[test]
     fn rust_to_lc_preserves_proplists() {
-        let value = Value::Proplist(HashMap::from([
+        let value = Value::Proplist(IndexMap::from([
             ("flag".to_string(), Value::Bool(true)),
             (
                 "items".to_string(),
@@ -366,13 +364,23 @@ mod tests {
             ("object".to_string(), Value::Object(42)),
             (
                 "nested".to_string(),
-                Value::Proplist(HashMap::from([("answer".to_string(), Value::Int(42))])),
+                Value::Proplist(IndexMap::from([("answer".to_string(), Value::Int(42))])),
             ),
-            ("empty".to_string(), Value::Proplist(HashMap::new())),
+            ("empty".to_string(), Value::Proplist(IndexMap::new())),
         ]));
 
         let mut ffi_value = rust_value_to_lc(&value);
         assert_ne!(ffi_value.kind, LcScriptValueKind::Nil);
+        let ffi_keys: Vec<_> = lc_map_entry_slice(&ffi_value)
+            .expect("FFI map entries")
+            .iter()
+            .map(|entry| {
+                unsafe { CStr::from_ptr(entry.key) }
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(ffi_keys, ["flag", "items", "id", "object", "nested", "empty"]);
         assert_eq!(lc_value_to_rust(&ffi_value), Ok(value));
 
         lc_script_value_free(&mut ffi_value);

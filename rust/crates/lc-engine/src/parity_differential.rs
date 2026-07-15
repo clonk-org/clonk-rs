@@ -23,6 +23,7 @@
 //! field, C++ value vs Rust value).
 
 use lc_script::{c4_hash_combine, cnv_fn, C4VType, Value as ScriptValue};
+use indexmap::IndexMap;
 use serde_json::Value;
 
 use crate::landscape::{Landscape, LandscapeRasterState, PixelGrid};
@@ -198,7 +199,7 @@ fn convert_case_value(name: &str) -> ScriptValue {
         "id_CLNK" => ScriptValue::C4Id("CLNK".to_string()),
         "string" => ScriptValue::String("x".to_string()),
         "array" => ScriptValue::Array(Vec::new()),
-        "map" => ScriptValue::Proplist(std::collections::HashMap::new()),
+        "map" => ScriptValue::Proplist(IndexMap::new()),
         other => panic!("unknown script_value_convert case `{other}`"),
     }
 }
@@ -1624,13 +1625,13 @@ fn parity_differential_matches_cpp_golden() {
             );
         }
 
-        let mut map = std::collections::HashMap::new();
+        let mut map = IndexMap::new();
         map.insert("a".to_string(), ScriptValue::Int(1));
         map.insert(
             "b".to_string(),
             ScriptValue::Array(vec![ScriptValue::Int(2), ScriptValue::Int(3)]),
         );
-        let mut reversed = std::collections::HashMap::new();
+        let mut reversed = IndexMap::new();
         reversed.insert(
             "b".to_string(),
             ScriptValue::Array(vec![ScriptValue::Int(2), ScriptValue::Int(3)]),

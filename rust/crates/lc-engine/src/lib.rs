@@ -219,6 +219,7 @@ pub use lc_resources::PhysicalInfo;
 pub use lc_script::ScriptError;
 
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, Value};
+use indexmap::IndexMap;
 use mass_mover::MassMoverSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sky::{SkyAdjustment, SkyState};
@@ -39020,7 +39021,7 @@ fn build_state_value(
     state: &ObjectState,
     library: &ActionLibrary,
 ) -> Value {
-    let mut map = HashMap::with_capacity(8);
+    let mut map = IndexMap::with_capacity(8);
     map.insert(
         "definition".into(),
         Value::String(definition_id.to_string()),
@@ -39059,7 +39060,7 @@ fn build_state_value(
         .map(|id| Value::Int(truncate_to_i32(id.as_u64())))
         .collect();
     map.insert("contents".into(), Value::Array(contents));
-    let mut action = HashMap::with_capacity(7);
+    let mut action = IndexMap::with_capacity(7);
     action.insert("name".into(), Value::String(state.action.name.clone()));
     action.insert("phase".into(), Value::Int(state.action.phase));
     let ticks = (state.action.ticks).min(i32::MAX as u32) as i32;
@@ -39095,7 +39096,7 @@ fn build_state_value(
         .effects
         .iter()
         .map(|effect| {
-            let mut props = HashMap::with_capacity(6);
+            let mut props = IndexMap::with_capacity(6);
             props.insert("name".into(), Value::String(effect.name.clone()));
             props.insert("priority".into(), Value::Int(effect.priority));
             props.insert("interval".into(), Value::Int(effect.interval));
@@ -39114,7 +39115,7 @@ fn build_state_value(
 }
 
 fn build_menu_selection_value(selection: &MenuCommandSelection) -> Value {
-    let mut map = HashMap::with_capacity(4);
+    let mut map = IndexMap::with_capacity(4);
     map.insert(
         "primary".into(),
         Value::Int(truncate_to_i32(selection.primary_id.as_u64())),
@@ -39134,7 +39135,7 @@ fn build_menu_selection_value(selection: &MenuCommandSelection) -> Value {
 }
 
 fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
-    let mut map = HashMap::with_capacity(11);
+    let mut map = IndexMap::with_capacity(11);
     map.insert(
         "definition".into(),
         Value::String(snapshot.definition_id.clone()),
@@ -39181,7 +39182,7 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
         .map(|id| Value::Int(truncate_to_i32(id.as_u64())))
         .collect();
     map.insert("contents".into(), Value::Array(contents));
-    let mut action = HashMap::with_capacity(7);
+    let mut action = IndexMap::with_capacity(7);
     action.insert("name".into(), Value::String(snapshot.action.name.clone()));
     action.insert("phase".into(), Value::Int(snapshot.action.phase));
     let ticks = snapshot.action.ticks.min(i32::MAX as u32) as i32;
@@ -39436,7 +39437,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
 }
 
 fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {
-    let mut map = HashMap::with_capacity(5);
+    let mut map = IndexMap::with_capacity(5);
     let frame_value = if snapshot.frame > i32::MAX as u64 {
         i32::MAX
     } else {
@@ -39471,8 +39472,8 @@ fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {
     Value::Proplist(map)
 }
 
-fn physics_to_map(settings: PhysicsSettings) -> HashMap<String, Value> {
-    let mut map = HashMap::with_capacity(4);
+fn physics_to_map(settings: PhysicsSettings) -> IndexMap<String, Value> {
+    let mut map = IndexMap::with_capacity(4);
     map.insert("gravity".into(), Value::Int(settings.gravity));
     map.insert("max_fall_speed".into(), Value::Int(settings.max_fall_speed));
     map.insert("max_rise_speed".into(), Value::Int(settings.max_rise_speed));
@@ -39483,8 +39484,8 @@ fn physics_to_map(settings: PhysicsSettings) -> HashMap<String, Value> {
     map
 }
 
-fn environment_frame_to_map(frame: &EnvironmentFrame) -> HashMap<String, Value> {
-    let mut map = HashMap::with_capacity(12);
+fn environment_frame_to_map(frame: &EnvironmentFrame) -> IndexMap<String, Value> {
+    let mut map = IndexMap::with_capacity(12);
     let settings = frame.settings;
     map.insert("wind".into(), Value::Int(settings.wind));
     map.insert("wind_variation".into(), Value::Int(settings.wind_variation));
@@ -39811,7 +39812,7 @@ fn parse_command(
 fn parse_command_from_proplist(
     definition: &str,
     function: &str,
-    map: HashMap<String, Value>,
+    map: IndexMap<String, Value>,
 ) -> Result<CommandBatch, EngineError> {
     let mut batch = CommandBatch::default();
     for (key, value) in map.into_iter() {
@@ -39921,7 +39922,7 @@ fn value_to_action(
 fn parse_action_update(
     definition: &str,
     function: &str,
-    map: HashMap<String, Value>,
+    map: IndexMap<String, Value>,
 ) -> Result<ActionUpdate, EngineError> {
     let mut update = ActionUpdate::default();
     for (key, value) in map.into_iter() {
@@ -40410,7 +40411,7 @@ fn value_to_effect_commands(
             }
         };
 
-        let op = match map.remove("op") {
+        let op = match map.shift_remove("op") {
             Some(Value::String(op)) => op,
             Some(other) => {
                 return Err(EngineError::InvalidScriptOutput {
@@ -40431,7 +40432,7 @@ fn value_to_effect_commands(
         match op.as_str() {
             "add" => {
                 let name_value =
-                    map.remove("name")
+                    map.shift_remove("name")
                         .ok_or_else(|| EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
                             function: function.to_string(),
@@ -40451,14 +40452,14 @@ fn value_to_effect_commands(
                     }
                 };
 
-                let priority = match map.remove("priority") {
+                let priority = match map.shift_remove("priority") {
                     Some(value) => value_to_int(definition, function, value)?,
                     None => 100,
                 };
 
                 // A zero interval is valid in C++ (no timer callbacks,
                 // C4Effect.cpp:342).
-                let interval = match map.remove("interval") {
+                let interval = match map.shift_remove("interval") {
                     Some(value) => {
                         let interval = value_to_int(definition, function, value)?;
                         if interval < 0 {
@@ -40473,7 +40474,7 @@ fn value_to_effect_commands(
                     None => 0,
                 };
 
-                let timer = match map.remove("timer") {
+                let timer = match map.shift_remove("timer") {
                     Some(value) => {
                         let timer = value_to_int(definition, function, value)?;
                         if timer < 0 {
@@ -40488,7 +40489,7 @@ fn value_to_effect_commands(
                     None => 0,
                 };
 
-                let command_target = match map.remove("command_target") {
+                let command_target = match map.shift_remove("command_target") {
                     Some(Value::Int(value)) => Some(value),
                     Some(Value::Nil) | None => None,
                     Some(other) => {
@@ -40503,7 +40504,7 @@ fn value_to_effect_commands(
                     }
                 };
 
-                let command_target_id = match map.remove("command_target_id") {
+                let command_target_id = match map.shift_remove("command_target_id") {
                     Some(Value::String(value)) if !value.is_empty() => Some(value),
                     Some(Value::String(_)) | Some(Value::Nil) | None => None,
                     Some(other) => {
@@ -40536,7 +40537,7 @@ fn value_to_effect_commands(
             }
             "remove" => {
                 let name_value =
-                    map.remove("name")
+                    map.shift_remove("name")
                         .ok_or_else(|| EngineError::InvalidScriptOutput {
                             definition: definition.to_string(),
                             function: function.to_string(),
@@ -40623,7 +40624,7 @@ fn value_to_landscape_commands(
             }
         };
 
-        let op = match map.remove("op") {
+        let op = match map.shift_remove("op") {
             Some(Value::String(op)) => op,
             Some(other) => {
                 return Err(EngineError::InvalidScriptOutput {
@@ -40643,7 +40644,7 @@ fn value_to_landscape_commands(
 
         match op.as_str() {
             "lower" => {
-                let start = match map.remove("start") {
+                let start = match map.shift_remove("start") {
                     Some(value) => value_to_int(definition, function, value)?,
                     None => {
                         return Err(EngineError::InvalidScriptOutput {
@@ -40654,7 +40655,7 @@ fn value_to_landscape_commands(
                     }
                 };
 
-                let height = match map.remove("height") {
+                let height = match map.shift_remove("height") {
                     Some(value) => value_to_int(definition, function, value)?,
                     None => {
                         return Err(EngineError::InvalidScriptOutput {
@@ -40665,9 +40666,9 @@ fn value_to_landscape_commands(
                     }
                 };
 
-                let end = if let Some(value) = map.remove("end") {
+                let end = if let Some(value) = map.shift_remove("end") {
                     value_to_int(definition, function, value)?
-                } else if let Some(value) = map.remove("width") {
+                } else if let Some(value) = map.shift_remove("width") {
                     let width = value_to_int(definition, function, value)?;
                     if width <= 0 {
                         return Err(EngineError::InvalidScriptOutput {
@@ -40700,7 +40701,10 @@ fn value_to_landscape_commands(
                 commands.push(LandscapeCommand::LowerRange { start, end, height });
             }
             "set_liquid" => {
-                let column_value = match map.remove("column").or_else(|| map.remove("x")) {
+                let column_value = match map
+                    .shift_remove("column")
+                    .or_else(|| map.shift_remove("x"))
+                {
                     Some(value) => value,
                     None => {
                         return Err(EngineError::InvalidScriptOutput {
@@ -40713,7 +40717,7 @@ fn value_to_landscape_commands(
 
                 let column = value_to_int(definition, function, column_value)?;
 
-                let segments_value = map.remove("segments").unwrap_or(Value::Nil);
+                let segments_value = map.shift_remove("segments").unwrap_or(Value::Nil);
                 let segments = value_to_liquid_segments(definition, function, segments_value)?;
 
                 if let Some((key, _)) = map.into_iter().next() {
@@ -40727,7 +40731,10 @@ fn value_to_landscape_commands(
                 commands.push(LandscapeCommand::SetLiquidColumn { column, segments });
             }
             "clear_liquid" => {
-                let column_value = match map.remove("column").or_else(|| map.remove("x")) {
+                let column_value = match map
+                    .shift_remove("column")
+                    .or_else(|| map.shift_remove("x"))
+                {
                     Some(value) => value,
                     None => {
                         return Err(EngineError::InvalidScriptOutput {
@@ -40801,7 +40808,7 @@ fn value_to_liquid_segments(
 
         let top_value =
             segment_map
-                .remove("top")
+                .shift_remove("top")
                 .ok_or_else(|| EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
                     function: function.to_string(),
@@ -40810,7 +40817,7 @@ fn value_to_liquid_segments(
 
         let bottom_value =
             segment_map
-                .remove("bottom")
+                .shift_remove("bottom")
                 .ok_or_else(|| EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
                     function: function.to_string(),

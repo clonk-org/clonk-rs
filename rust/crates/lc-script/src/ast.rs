@@ -255,7 +255,10 @@ pub enum Stmt {
         body: Vec<Stmt>,
     },
     ForIn {
-        variable: String,  // The iteration variable
+        variable: String, // The array item or map key variable
+        /// Present for map foreach (`for (key, value in map)`); absent for
+        /// array foreach (`for (value in array)`).
+        value_variable: Option<String>,
         declare_var: bool, // true if using "var variable", false if pre-declared
         iterable: Expr,    // Expression to iterate over
         body: Vec<Stmt>,
