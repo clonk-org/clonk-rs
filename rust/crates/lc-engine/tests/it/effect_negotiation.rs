@@ -340,6 +340,80 @@ func FxUpperStart(object target, int number, int temp)
 }
 
 #[test]
+fn live_object_kill_of_temp_removed_effect_restarts_for_removal() {
+    // C4Effect::Kill on an inactive upper effect first runs
+    // Fx*Start(C4FxCall_TempAddForRemoval), then the ordinary Fx*Stop. This
+    // happens when the lower effect removes the upper one from its Start
+    // callback while AddEffect's temp bracket is active
+    // (C4Effect.cpp:376-400).
+    let script = r#"#strict 3
+local iOrder, iStartTemp, iStopReason;
+
+func Install()
+{
+  AddEffect("Upper", this(), 200, 0, this());
+  return(1);
+}
+
+func Trigger()
+{
+  iOrder = 0;
+  iStartTemp = iStopReason = -1;
+  AddEffect("Lower", this(), 100, 0, this());
+  return([iOrder, iStartTemp, iStopReason]);
+}
+
+func FxLowerStart(object target)
+{
+  RemoveEffect("Upper", target);
+}
+
+func FxUpperStart(object target, int number, int temp)
+{
+  if(temp == 2)
+  {
+    iOrder = iOrder * 10 + 1;
+    iStartTemp = temp;
+  }
+}
+
+func FxUpperStop(object target, int number, int reason, bool temp)
+{
+  if(!temp)
+  {
+    iOrder = iOrder * 10 + 2;
+    iStopReason = reason;
+  }
+}
+"#;
+
+    let mut engine = Engine::new();
+    engine
+        .register_definition(
+            Definition::from_script("FXTR", "Temp-removed effect killer", script)
+                .expect("effect killer script compiles"),
+        )
+        .expect("effect killer definition registers");
+    let target = engine
+        .spawn_object(SpawnConfig::new("FXTR"))
+        .expect("effect killer spawns");
+    let target_index = engine
+        .find_object_index(target)
+        .expect("effect killer remains live");
+    engine
+        .call_object_function(target_index, "Install", Vec::new())
+        .expect("upper effect installs");
+
+    assert_eq!(
+        engine
+            .call_object_function(target_index, "Trigger", Vec::new())
+            .expect("nested inactive removal completes"),
+        Value::Array(vec![Value::Int(12), Value::Int(2), Value::Int(0)]),
+        "the inactive upper effect receives Start(2) before Stop(0)"
+    );
+}
+
+#[test]
 fn shipped_hazard_jumper_bite_check_uses_strict1_raw_string_identity() {
     let group = Group::open(content_root().join("Hazard.c4d/Enemies.c4d/Jumper.c4d"))
         .expect("shipped Hazard Jumper group opens");

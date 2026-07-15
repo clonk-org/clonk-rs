@@ -15195,9 +15195,28 @@ fn kill_effect_inline(
         let effects = snapshot_effects_from_context(scope).unwrap_or_default();
         temp_remove_upper_effects(scope, target, &effects, victim.number)?
     } else {
-        // An inactive victim first receives Fx*Start(iTemp=2) in C++.
-        // That distinct legacy case is tracked separately; it never runs
-        // the active victim's upper-effect bracket.
+        // An inactive victim remains negative while its Start callback runs;
+        // this is a distinct reactivation-for-removal call, not the ordinary
+        // temp readd (C4Effect.cpp:376-387). The callback may mutate the live
+        // node, so Stop below resolves it again afterwards.
+        let function = format!("Fx{}Start", victim.name);
+        if victim.priority != 1
+            && effect_fx_callback_exists(
+                victim.command_target,
+                victim.command_id.as_deref(),
+                &function,
+            )
+        {
+            dispatch_effect_fx_callback_fail_safe(
+                victim,
+                &function,
+                &[
+                    target.clone(),
+                    Value::Int(victim.number),
+                    Value::Int(2),
+                ],
+            );
+        }
         Vec::new()
     };
 
@@ -15206,7 +15225,7 @@ fn kill_effect_inline(
             let effect = ctx
                 .effects
                 .iter_mut()
-                .find(|effect| effect.number == victim.number && effect.priority != 0)?;
+                .find(|effect| effect.number == victim.number)?;
             let previous_priority = effect.priority;
             effect.priority = 0;
             (previous_priority, effect.clone())
