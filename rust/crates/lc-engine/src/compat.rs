@@ -15422,10 +15422,13 @@ fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
         0
     };
 
-    if let Some(arg) = args.get(index) {
-        value_to_i32(arg, "Sound", "at_player")?;
+    let at_player = if let Some(arg) = args.get(index) {
+        let player = value_to_i32(arg, "Sound", "at_player")?;
         index += 1;
-    }
+        player
+    } else {
+        0
+    };
 
     let loop_flag = if let Some(arg) = args.get(index) {
         index += 1;
@@ -15455,6 +15458,16 @@ fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
             None => return Ok(Value::Bool(true)),
         };
 
+        if at_player != 0 {
+            let player_id = at_player.wrapping_sub(1);
+            let Some(player) = context.player_state(player_id) else {
+                return Ok(Value::Bool(false));
+            };
+            if !context.world.local_players.contains(&player_id) && player.viewports.is_empty() {
+                return Ok(Value::Bool(true));
+            }
+        }
+
         let mut target_id = if let Some(value) = object_value {
             parse_object_reference_argument(value, "Sound", "object")?
         } else {
@@ -15467,12 +15480,12 @@ fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
             target_id = context.object_context().map(|object| object.id());
         }
 
-        if loop_flag < 0 {
-            context.audio_mut().stop_sound(&name, target_id);
+        if level < 0 {
             return Ok(Value::Bool(true));
         }
 
-        if level < 0 {
+        if loop_flag < 0 {
+            context.audio_mut().stop_sound(&name, target_id);
             return Ok(Value::Bool(true));
         }
 
@@ -15485,7 +15498,7 @@ fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
         let custom_falloff = custom_falloff.filter(|value| *value > 0);
 
         let audio = context.audio_mut();
-        if looped && !multiple && audio.is_looping(&name, target_id) {
+        if !multiple && audio.is_playing(&name, target_id) {
             return Ok(Value::Bool(true));
         }
 
@@ -33174,6 +33187,41 @@ impl AudioRegistry {
         self.looping.contains_key(&key)
     }
 
+    pub fn is_playing(&self, name: &str, target: Option<ObjectId>) -> bool {
+        let key = AudioInstanceKey {
+            name: normalize_sound_name(name),
+            target,
+        };
+        if self.looping.contains_key(&key) {
+            return true;
+        }
+
+        // One-shot lifetime is owned by the frontend mixer. Within one host
+        // transaction, pending commands model the instances that C++ has
+        // already started; across transactions the mixer performs the same
+        // channel-is-playing check before allocating another instance.
+        self.events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                AudioCommand::PlaySound {
+                    name,
+                    target: event_target,
+                    ..
+                } if normalize_sound_name(name) == key.name && *event_target == key.target => {
+                    Some(true)
+                }
+                AudioCommand::StopSound {
+                    name,
+                    target: event_target,
+                } if normalize_sound_name(name) == key.name && *event_target == key.target => {
+                    Some(false)
+                }
+                _ => None,
+            })
+            .unwrap_or(false)
+    }
+
     pub fn play_sound(
         &mut self,
         name: &str,
@@ -40305,6 +40353,112 @@ func Trigger(object pOther)
             outcome.audio.events.as_slice(),
             [AudioCommand::PlaySound { multiple: true, .. }]
         ));
+    }
+
+    #[test]
+    fn sound_at_player_gates_playback_to_local_players_and_viewports() {
+        // iAtPlayer is one-based and gates playback on each client. A valid
+        // remote player remains a successful sync-safe no-op unless this
+        // client owns a viewport for it (C4Script.cpp:2297-2309).
+        let players = vec![
+            PlayerState {
+                id: 0,
+                ..PlayerState::default()
+            },
+            PlayerState {
+                id: 1,
+                ..PlayerState::default()
+            },
+            PlayerState {
+                id: 2,
+                viewports: vec![PlayerViewport::new(Vector2::ZERO)],
+                ..PlayerState::default()
+            },
+        ];
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            players,
+        )
+        .with_local_players([0]);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            let call = |name: &str, at_player: i32| {
+                sound(&[
+                    Value::String(name.into()),
+                    Value::Bool(true),
+                    Value::Nil,
+                    Value::Int(100),
+                    Value::Int(at_player),
+                ])
+            };
+
+            assert_eq!(call("DingInvalid", 100)?, Value::Bool(false));
+            assert_eq!(call("DingRemote", 2)?, Value::Bool(true));
+            assert_eq!(call("DingLocal", 1)?, Value::Bool(true));
+            assert_eq!(call("DingViewport", 3)?, Value::Bool(true));
+            Ok::<Value, RuntimeError>(Value::Nil)
+        });
+
+        result.expect("Sound at-player probes run");
+        let played = outcome
+            .audio
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AudioCommand::PlaySound { name, target, .. } => {
+                    assert_eq!(*target, None);
+                    Some(name.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(played, vec!["DingLocal", "DingViewport"]);
+    }
+
+    #[test]
+    fn sound_dedupes_pending_one_shots_and_negative_level_does_not_stop() {
+        let (result, outcome) = with_object_host_context(|| {
+            assert_eq!(sound(&[Value::String("Hit".into())])?, Value::Bool(true));
+            assert_eq!(sound(&[Value::String("Hit".into())])?, Value::Bool(true));
+
+            let start_loop = [
+                Value::String("Loop".into()),
+                Value::Bool(false),
+                Value::Nil,
+                Value::Int(100),
+                Value::Int(0),
+                Value::Int(1),
+            ];
+            assert_eq!(sound(&start_loop)?, Value::Bool(true));
+            let negative_level_stop = [
+                Value::String("Loop".into()),
+                Value::Bool(false),
+                Value::Nil,
+                Value::Int(-1),
+                Value::Int(0),
+                Value::Int(-1),
+            ];
+            assert_eq!(sound(&negative_level_stop)?, Value::Bool(true));
+            Ok::<Value, RuntimeError>(Value::Nil)
+        });
+
+        result.expect("Sound dedupe probes run");
+        let played = outcome
+            .audio
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AudioCommand::PlaySound { name, .. } => Some(name.as_str()),
+                AudioCommand::StopSound { .. } => panic!("negative level must not stop audio"),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(played, vec!["Hit", "Loop"]);
+        assert!(
+            outcome
+                .audio
+                .state
+                .is_looping("Loop", Some(ObjectId::new(1)))
+        );
     }
 
     #[test]
