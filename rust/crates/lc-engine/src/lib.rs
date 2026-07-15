@@ -24379,6 +24379,7 @@ impl Engine {
                     object_order_commands,
                     next_mission_commands,
                     landscape_ops,
+                    effect_transfer_zones,
                     effect_spawns,
                     effect_other_objects,
                     effect_solid_mask_changed,
@@ -24420,6 +24421,9 @@ impl Engine {
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
+                }
+                if !effect_transfer_zones.is_empty() {
+                    self.apply_transfer_zone_commands(effect_transfer_zones)?;
                 }
                 if !effect_other_objects.is_empty() {
                     self.apply_nested_object_outcomes(effect_other_objects)?;
@@ -25127,6 +25131,7 @@ impl Engine {
                     object_order_commands,
                     next_mission_commands,
                     landscape_ops,
+                    effect_transfer_zones,
                     effect_spawns,
                     effect_other_objects,
                     effect_solid_mask_changed,
@@ -25170,6 +25175,9 @@ impl Engine {
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
+                }
+                if !effect_transfer_zones.is_empty() {
+                    self.apply_transfer_zone_commands(effect_transfer_zones)?;
                 }
                 if !effect_other_objects.is_empty() {
                     self.apply_nested_object_outcomes(effect_other_objects)?;
@@ -26535,6 +26543,7 @@ impl Engine {
                 object_order_commands,
                 next_mission_commands,
                 landscape_ops,
+                effect_transfer_zones,
                 effect_spawns,
                 effect_other_objects,
                 nested_effect_solid_mask_changed,
@@ -26569,6 +26578,9 @@ impl Engine {
             self.sync_next_object_id(effect_next_object_id);
             if !effect_spawns.is_empty() {
                 self.process_spawn_queue(effect_spawns)?;
+            }
+            if !effect_transfer_zones.is_empty() {
+                self.apply_transfer_zone_commands(effect_transfer_zones)?;
             }
             if !effect_other_objects.is_empty() {
                 self.apply_nested_object_outcomes(effect_other_objects)?;
@@ -26855,6 +26867,7 @@ impl Engine {
                     object_order_commands,
                     next_mission_commands,
                     landscape_ops,
+                    effect_transfer_zones,
                     effect_spawns,
                     effect_other_objects,
                     nested_effect_solid_mask_changed,
@@ -26889,6 +26902,9 @@ impl Engine {
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
+                }
+                if !effect_transfer_zones.is_empty() {
+                    self.apply_transfer_zone_commands(effect_transfer_zones)?;
                 }
                 if !effect_other_objects.is_empty() {
                     retained.extend(
@@ -28170,6 +28186,7 @@ impl Engine {
             object_order_commands,
             next_mission_commands,
             landscape_ops,
+            effect_transfer_zones,
             effect_spawns,
             effect_other_objects,
             effect_solid_mask_changed,
@@ -28211,6 +28228,9 @@ impl Engine {
         self.sync_next_object_id(effect_next_object_id);
         if !effect_spawns.is_empty() {
             self.process_spawn_queue(effect_spawns)?;
+        }
+        if !effect_transfer_zones.is_empty() {
+            self.apply_transfer_zone_commands(effect_transfer_zones)?;
         }
         if !effect_other_objects.is_empty() {
             self.apply_nested_object_outcomes(effect_other_objects)?;
@@ -28282,6 +28302,7 @@ impl Engine {
             Vec<ObjectOrderCommand>,
             Vec<NextMissionCommand>,
             Vec<LandscapeOperation>,
+            Vec<TransferZoneCommand>,
             Vec<SpawnConfig>,
             Vec<compat::NestedObjectOutcome>,
             bool,
@@ -28301,6 +28322,7 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 PhysicsDelta::default(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -28339,6 +28361,7 @@ impl Engine {
         let mut pending_object_order_commands = Vec::new();
         let mut pending_next_mission_commands = Vec::new();
         let mut pending_landscape_ops = Vec::new();
+        let mut pending_transfer_zones = Vec::new();
         // Nested-call mutations to OTHER objects (the copy-in/copy-out
         // model's deferred fold; C++ mutates live state mid-call): the
         // CALLER applies them via apply_nested_object_outcomes.
@@ -28894,6 +28917,7 @@ impl Engine {
                 physics: physics_update,
                 landscape: host_landscape_ops,
                 particles: mut emitted_particles,
+                transfer_zones: event_transfer_zones,
                 messages: event_messages,
                 player_commands: effect_player_commands,
                 object_order_commands: effect_object_order_commands,
@@ -28908,6 +28932,15 @@ impl Engine {
                 other_objects: event_other_objects,
                 ..
             } = outcome;
+
+            // Every effect callback receives a cloned host world. Replay
+            // transfer-zone mutations into the threaded copy before the
+            // next callback, while retaining their original order for the
+            // authoritative Engine fold after this batch returns.
+            for command in &event_transfer_zones {
+                world.preview_transfer_zone_command(command);
+            }
+            pending_transfer_zones.extend(event_transfer_zones);
 
             // The callback ran in this object's own context
             // (C4Effect.cpp:129) — persist its local writes. VM finals
@@ -29144,6 +29177,7 @@ impl Engine {
             pending_object_order_commands,
             pending_next_mission_commands,
             pending_landscape_ops,
+            pending_transfer_zones,
             pending_spawns,
             pending_other_objects,
             solid_mask_changed,
@@ -43894,10 +43928,10 @@ impl Engine {
         })
     }
 
-    /// C4Game::ClearObjectPtrs -> C4Object::ClearPointers pLayer sweep for
-    /// engine-owned removal paths. Script RemoveObject stages the same clear
-    /// synchronously in compat; this idempotent fallback also covers direct
-    /// status updates and queued/native destruction.
+    /// C4Game::ClearObjectPtrs fallback for engine-owned removal paths.
+    /// Script RemoveObject stages the same layer and transfer-zone clears
+    /// synchronously in compat; this idempotent sweep also covers direct
+    /// status updates and queued/native destruction after their callbacks.
     fn clear_destroyed_object_layers(&mut self) {
         let destroyed = self
             .objects
@@ -43909,6 +43943,9 @@ impl Engine {
             .collect::<HashSet<_>>();
         if destroyed.is_empty() {
             return;
+        }
+        for object_id in &destroyed {
+            self.transfer_zones.clear(*object_id);
         }
         for object in &mut self.objects {
             if object
@@ -46227,6 +46264,7 @@ impl Engine {
                 object_order_commands,
                 next_mission_commands,
                 landscape_ops,
+                transfer_zones,
                 spawns,
                 other_objects,
                 next_object_id,
@@ -46241,6 +46279,9 @@ impl Engine {
             self.sync_next_object_id(next_object_id);
             if !spawns.is_empty() {
                 self.process_spawn_queue(spawns)?;
+            }
+            if !transfer_zones.is_empty() {
+                self.apply_transfer_zone_commands(transfer_zones)?;
             }
             if !other_objects.is_empty() {
                 self.apply_nested_object_outcomes(other_objects)?;
@@ -46311,6 +46352,7 @@ impl Engine {
         let mut pending_object_order_commands = Vec::new();
         let mut pending_next_mission_commands = Vec::new();
         let mut pending_landscape_ops = Vec::new();
+        let mut pending_transfer_zones = Vec::new();
         let mut pending_other_objects = Vec::new();
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
@@ -46521,6 +46563,7 @@ impl Engine {
                 physics: physics_update,
                 landscape: host_landscape_ops,
                 particles: mut emitted_particles,
+                transfer_zones: event_transfer_zones,
                 messages: event_messages,
                 player_commands: effect_player_commands,
                 object_order_commands: effect_object_order_commands,
@@ -46534,6 +46577,11 @@ impl Engine {
                 other_objects: event_other_objects,
                 ..
             } = event_outcome;
+
+            for command in &event_transfer_zones {
+                world.preview_transfer_zone_command(command);
+            }
+            pending_transfer_zones.extend(event_transfer_zones);
 
             if !spawns.is_empty() {
                 pending_spawns.extend(spawns);
@@ -46625,6 +46673,7 @@ impl Engine {
             object_order_commands: pending_object_order_commands,
             next_mission_commands: pending_next_mission_commands,
             landscape_ops: pending_landscape_ops,
+            transfer_zones: pending_transfer_zones,
             spawns: pending_spawns,
             other_objects: pending_other_objects,
             next_object_id,
@@ -47364,6 +47413,14 @@ impl Engine {
                 next_object_id,
                 initialize_error,
             ) = {
+                // Keep the world snapshot phase-local: retaining its COW
+                // landscape while folding Construction would split dirty
+                // generations. Replay only the ordered zone overlay that
+                // C++ kept live between the two callbacks.
+                let mut world = self.host_world_context();
+                for command in &deferred_transfer_zones {
+                    world.preview_transfer_zone_command(command);
+                }
                 let definition = self
                     .definitions
                     .get(&initialize_definition_id)
@@ -47377,7 +47434,7 @@ impl Engine {
                     self.physics,
                     self.environment,
                     self.frame,
-                    self.host_world_context(),
+                    world,
                     self.game_over_triggered,
                     self.audio_registry.clone(),
                 )?
@@ -47499,6 +47556,10 @@ impl Engine {
         }
 
         if !effect_events.is_empty() {
+            let mut world = self.host_world_context();
+            for command in &deferred_transfer_zones {
+                world.preview_transfer_zone_command(command);
+            }
             let effect_definition_id = object.definition_id.clone();
             let definition = self
                 .definitions
@@ -47508,7 +47569,6 @@ impl Engine {
             let global_view = self.global_effects.clone();
             let previous_container = object.state.container;
             let rng_state = self.rng.clone();
-            let world = self.host_world_context();
             let (
                 global_cmds,
                 emitted_particles,
@@ -47519,6 +47579,7 @@ impl Engine {
                 object_order_commands,
                 next_mission_commands,
                 landscape_ops,
+                effect_transfer_zones,
                 effect_spawns,
                 effect_other_objects,
                 _effect_solid_mask_changed,
@@ -47550,6 +47611,11 @@ impl Engine {
                 change_def_reinsert = marker;
             }
             self.sync_next_object_id(effect_next_object_id);
+            // Creation callbacks run with the new object already linked in
+            // C++, but Rust inserts it after this local effect batch. Keep
+            // all effect-produced zone commands ordered with the other
+            // creation commands and fold them immediately after insertion.
+            deferred_transfer_zones.extend(effect_transfer_zones);
             additional_spawns.extend(effect_spawns);
             pending_nested_outcomes.extend(
                 self.apply_nested_object_outcomes_retaining_missing(effect_other_objects)?,
@@ -48432,6 +48498,7 @@ struct GlobalEffectRunOutcome {
     object_order_commands: Vec<ObjectOrderCommand>,
     next_mission_commands: Vec<NextMissionCommand>,
     landscape_ops: Vec<LandscapeOperation>,
+    transfer_zones: Vec<TransferZoneCommand>,
     spawns: Vec<SpawnConfig>,
     other_objects: Vec<compat::NestedObjectOutcome>,
     next_object_id: u64,
@@ -53215,5 +53282,367 @@ mod pathfinder_host_state_regression {
             "same-call GetPath observes ExecuteCommand's disabled-zone write"
         );
         assert_eq!(script_get_path(&mut engine, from, to), Value::Nil);
+    }
+
+    #[test]
+    fn script_removal_clears_transfer_zone_before_same_frame_pathfind_and_transfer() {
+        // AssignRemoval reaches Game.ClearPointers synchronously. A GetPath
+        // later in the same VM call, then native commands later in the same
+        // engine frame, must all observe the zone's immediate deletion
+        // (C4Object.cpp:300-313; C4TransferZone.cpp:68-76).
+        const WIDTH: u32 = 100;
+        const HEIGHT: u32 = 100;
+        let mut pixels = vec![0; WIDTH as usize * HEIGHT as usize];
+        for y in 0..HEIGHT as usize {
+            pixels[y * WIDTH as usize + 49] = 1;
+            pixels[y * WIDTH as usize + 50] = 1;
+        }
+        let from = Vector2::new(10, 50);
+        let to = Vector2::new(90, 50);
+        let mut engine = Engine::with_seed(1);
+        engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
+
+        engine
+            .register_definition(
+                Definition::from_script("GATE", "Transfer gate", "")
+                    .expect("gate definition compiles"),
+            )
+            .expect("gate definition registers");
+        let mut mover_definition = Definition::from_script(
+            "PFMR",
+            "Pathfinder mover",
+            r#"
+                #strict 2
+                func RemoveGate(object)
+                {
+                    RemoveObject(object);
+                    return GetPath(10, 50, 90, 50);
+                }
+            "#,
+        )
+        .expect("mover definition compiles");
+        mover_definition.set_pathfinder(1);
+        engine
+            .register_definition(mover_definition)
+            .expect("mover definition registers");
+
+        let gate = engine
+            .spawn_object(SpawnConfig::new("GATE").with_position(Vector2::new(50, 50)))
+            .expect("gate spawns");
+        let path_actor = engine
+            .spawn_object(SpawnConfig::new("PFMR").with_position(from))
+            .expect("path actor spawns");
+        let transfer_actor = engine
+            .spawn_object(SpawnConfig::new("PFMR").with_position(Vector2::new(45, 50)))
+            .expect("transfer actor spawns");
+        engine
+            .set_transfer_zone(
+                gate,
+                TransferZoneRect {
+                    x: 45,
+                    y: 40,
+                    width: 10,
+                    height: 20,
+                },
+            )
+            .expect("transfer zone registers");
+        assert!(
+            engine.find_path(from, to, 1, true).is_some(),
+            "the live gate is the only route through the full-height wall"
+        );
+        run_obstructed_move_to(&mut engine, path_actor, to);
+        let path_index = engine
+            .find_object_index(path_actor)
+            .expect("path actor exists");
+        assert!(
+            engine.objects[path_index]
+                .commands
+                .snapshot()
+                .command_names()
+                .iter()
+                .any(|name| name == "Transfer"),
+            "the live-zone control must generate a Transfer leg"
+        );
+        engine.objects[path_index].commands.clear();
+
+        let transfer_index = engine
+            .find_object_index(transfer_actor)
+            .expect("transfer actor exists");
+        engine.objects[transfer_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Transfer)
+                    .with_target(Some(gate))
+                    .with_tx(Some(to.x))
+                    .with_ty(Some(to.y)),
+            )
+            .expect("Transfer queues before removal");
+
+        let path_index = engine
+            .find_object_index(path_actor)
+            .expect("path actor exists");
+        let same_call_path = engine
+            .call_object_function(
+                path_index,
+                "RemoveGate",
+                vec![object_reference_value(gate)],
+            )
+            .expect("script removal executes");
+        assert_eq!(
+            same_call_path,
+            Value::Nil,
+            "GetPath later in the removal call must not see the dead gate's zone"
+        );
+        assert_eq!(engine.frame(), 0, "no end-of-frame sweep has run");
+        let gate_index = engine
+            .find_object_index(gate)
+            .expect("the deleted object remains as a physical tombstone");
+        assert!(engine.objects[gate_index].destroyed);
+        assert_eq!(engine.objects[gate_index].state.status, ObjectStatus::Deleted);
+        assert!(
+            engine.transfer_zones.get(gate).is_none(),
+            "the authoritative zone table clears before frame cleanup"
+        );
+        assert!(engine.find_path(from, to, 1, true).is_none());
+
+        run_obstructed_move_to(&mut engine, path_actor, to);
+        let path_index = engine
+            .find_object_index(path_actor)
+            .expect("path actor remains");
+        assert!(
+            engine.objects[path_index]
+                .commands
+                .snapshot()
+                .command_names()
+                .iter()
+                .all(|name| name != "Transfer"),
+            "same-frame MoveTo must not enqueue a route through the removed zone"
+        );
+
+        let transfer_index = engine
+            .find_object_index(transfer_actor)
+            .expect("transfer actor remains");
+        let transfer_view = engine.objects[transfer_index]
+            .commands
+            .snapshot()
+            .command_views()
+            .into_iter()
+            .next()
+            .expect("the pending Transfer remains queued until execution");
+        assert_eq!(transfer_view.name, "Transfer");
+        assert_eq!(
+            transfer_view.target, None,
+            "ClearPointers nulls the removed Transfer target synchronously"
+        );
+        engine
+            .execute_object_command_now(transfer_actor)
+            .expect("queued Transfer executes after removal");
+        let transfer_index = engine
+            .find_object_index(transfer_actor)
+            .expect("transfer actor remains");
+        assert!(
+            engine.objects[transfer_index].commands.snapshot().is_empty(),
+            "Transfer targeting the removed owner fails on its next same-frame execution"
+        );
+    }
+
+    #[test]
+    fn effect_batch_threads_and_folds_immediate_transfer_zone_clear() {
+        const WIDTH: u32 = 100;
+        const HEIGHT: u32 = 100;
+        let mut pixels = vec![0; WIDTH as usize * HEIGHT as usize];
+        for y in 0..HEIGHT as usize {
+            pixels[y * WIDTH as usize + 49] = 1;
+            pixels[y * WIDTH as usize + 50] = 1;
+        }
+        let from = Vector2::new(10, 50);
+        let to = Vector2::new(90, 50);
+        let mut engine = Engine::with_seed(2);
+        engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
+        engine
+            .register_definition(
+                Definition::from_script("GATE", "Transfer gate", "")
+                    .expect("gate definition compiles"),
+            )
+            .expect("gate definition registers");
+        let mut effect_definition = Definition::from_script(
+            "FXRM",
+            "Effect remover",
+            r#"
+                #strict 2
+                func Arm(object)
+                {
+                    AddEffect("RemoveGate", this(), 10, 1, this());
+                    AddEffect("Observe", this(), 20, 1, this());
+                    return true;
+                }
+
+                func FxRemoveGateTimer(object target, int number, int time)
+                {
+                    RemoveObject(FindObject(GATE));
+                    return 0;
+                }
+
+                func FxObserveTimer(object target, int number, int time)
+                {
+                    if (GetPath(10, 50, 90, 50)) SetR(17);
+                    else SetR(23);
+                    return 0;
+                }
+            "#,
+        )
+        .expect("effect definition compiles");
+        effect_definition.set_c4_callback_convention(true);
+        effect_definition.set_pathfinder(1);
+        engine
+            .register_definition(effect_definition)
+            .expect("effect definition registers");
+
+        let gate = engine
+            .spawn_object(SpawnConfig::new("GATE").with_position(Vector2::new(50, 50)))
+            .expect("gate spawns");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("FXRM")
+                    .with_position(from)
+                    .with_rotation(5),
+            )
+            .expect("effect actor spawns");
+        engine
+            .set_transfer_zone(
+                gate,
+                TransferZoneRect {
+                    x: 45,
+                    y: 40,
+                    width: 10,
+                    height: 20,
+                },
+        )
+        .expect("transfer zone registers");
+        assert!(engine.find_path(from, to, 1, true).is_some());
+        assert_ne!(
+            script_get_path(&mut engine, from, to),
+            Value::Nil,
+            "the effect callback's host GetPath can use the live zone"
+        );
+
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_index, "Arm", vec![object_reference_value(gate)])
+            .expect("effects arm");
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let remove = engine.objects[actor_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "RemoveGate")
+            .cloned()
+            .expect("removal effect exists");
+        let observe = engine.objects[actor_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Observe")
+            .cloned()
+            .expect("observer effect exists");
+        let definition_id = engine.objects[actor_index].definition_id.clone();
+
+        engine
+            .dispatch_object_effect_events(
+                actor_index,
+                &definition_id,
+                vec![EffectEvent::timer(remove), EffectEvent::timer(observe)],
+            )
+            .expect("effect batch executes");
+
+        assert_eq!(engine.frame(), 0, "no frame cleanup has run");
+        assert_eq!(
+            engine.objects[actor_index].state.rotation,
+            23,
+            "the next effect callback sees the clear in its threaded host world"
+        );
+        assert!(
+            engine.find_path(from, to, 1, true).is_none(),
+            "the effect batch folds the clear into the authoritative table"
+        );
+    }
+
+    #[test]
+    fn construction_zone_clear_is_visible_to_immediate_initialize() {
+        const WIDTH: u32 = 100;
+        const HEIGHT: u32 = 100;
+        let mut pixels = vec![0; WIDTH as usize * HEIGHT as usize];
+        for y in 0..HEIGHT as usize {
+            pixels[y * WIDTH as usize + 49] = 1;
+            pixels[y * WIDTH as usize + 50] = 1;
+        }
+        let from = Vector2::new(10, 50);
+        let to = Vector2::new(90, 50);
+        let mut engine = Engine::with_seed(3);
+        engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
+        engine
+            .register_definition(
+                Definition::from_script("GATE", "Transfer gate", "")
+                    .expect("gate definition compiles"),
+            )
+            .expect("gate definition registers");
+        let mut lifecycle_definition = Definition::from_script(
+            "PFLC",
+            "Lifecycle remover",
+            r#"
+                #strict 2
+                func Construction()
+                {
+                    RemoveObject(FindObject(GATE));
+                    return true;
+                }
+
+                func Initialize()
+                {
+                    if (GetPath(10, 50, 90, 50)) SetR(17);
+                    else SetR(23);
+                    return true;
+                }
+            "#,
+        )
+        .expect("lifecycle definition compiles");
+        lifecycle_definition.set_c4_callback_convention(true);
+        lifecycle_definition.set_pathfinder(1);
+        engine
+            .register_definition(lifecycle_definition)
+            .expect("lifecycle definition registers");
+
+        let gate = engine
+            .spawn_object(SpawnConfig::new("GATE").with_position(Vector2::new(50, 50)))
+            .expect("gate spawns");
+        engine
+            .set_transfer_zone(
+                gate,
+                TransferZoneRect {
+                    x: 45,
+                    y: 40,
+                    width: 10,
+                    height: 20,
+                },
+            )
+            .expect("transfer zone registers");
+        assert_ne!(script_get_path(&mut engine, from, to), Value::Nil);
+
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("PFLC")
+                    .with_position(from)
+                    .with_rotation(5),
+            )
+            .expect("lifecycle actor spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+
+        assert_eq!(engine.frame(), 0, "no frame cleanup has run");
+        assert_eq!(
+            engine.objects[actor_index].state.rotation,
+            23,
+            "Initialize sees Construction's synchronous zone clear"
+        );
+        assert!(engine.transfer_zones.get(gate).is_none());
     }
 }

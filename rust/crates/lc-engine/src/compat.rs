@@ -2106,6 +2106,15 @@ impl HostWorldContext {
         self.transfer_zones.as_ref()
     }
 
+    pub(crate) fn preview_transfer_zone_command(&mut self, command: &TransferZoneCommand) {
+        let mut zones = TransferZoneTable::from_states(self.transfer_zones.as_ref());
+        match command {
+            TransferZoneCommand::Set { owner, rect } => zones.set(*owner, *rect),
+            TransferZoneCommand::Clear { owner } => zones.clear(*owner),
+        }
+        self.transfer_zones = Rc::new(zones.states());
+    }
+
     pub(crate) fn with_pathfinder_settings(
         mut self,
         level: i32,
@@ -39738,6 +39747,15 @@ impl EffectHostContext {
             clear_removed_object_references(&mut cell.borrow_mut(), removed);
         }
         self.clear_object_action_and_command_pointers(target);
+        // Game.ClearPointers removes every transfer zone owned by the
+        // object before AssignRemoval returns. Mutate this callback's world
+        // immediately for later same-VM-call GetPath/ExecuteCommand reads,
+        // and retain the command so the live Engine observes the same clear
+        // when the copied host outcome folds back (C4Game.cpp:1020-1031;
+        // C4TransferZone.cpp:68-76).
+        let command = TransferZoneCommand::clear(target);
+        self.world.preview_transfer_zone_command(&command);
+        self.register_transfer_zone_command(command);
     }
 
     fn unlink_content_for_removal(&mut self, parent: ObjectId, child: ObjectId) {
