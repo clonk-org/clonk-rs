@@ -9465,6 +9465,9 @@ impl Definition {
         if action.disabled {
             spec = spec.with_disabled(true);
         }
+        if action.energy_usage != 0 {
+            spec = spec.with_energy_usage(action.energy_usage);
+        }
         if let Some(dig_free) = action.dig_free {
             spec = spec.with_dig_free(dig_free);
         }
@@ -24421,18 +24424,15 @@ impl Engine {
                 continue;
             }
 
-            // DFA_CONNECT line tracking (C4Object.cpp:5341-5420) runs in
-            // ExecAction; broken targets fire LineBreak and remove the
-            // line, skipping the rest of this object's exec.
-            if !self.exec_connect_line(idx)? {
-                continue;
-            }
             dbg_stage(&self.objects[idx], "POSTCMD");
             // ExecAction captures pAction before procedure steering. SetDir
             // may replace the live action through TurnAction, but C++ keeps
             // this entry for phase advance through the end of ExecAction.
             let exec_action_source = self.objects[idx].state.action.name.clone();
             let exec_action_returned_early = self.apply_physics_at_index(idx)?;
+            if self.objects[idx].destroyed {
+                continue;
+            }
             dbg_stage(&self.objects[idx], "POSTACT");
 
             // Phase advance runs at the END of ExecAction
@@ -24487,6 +24487,7 @@ impl Engine {
                             action_library.procedure_for_action(&exec_action_source),
                             ActionProcedure::Bridge
                                 | ActionProcedure::Build
+                                | ActionProcedure::Connect
                                 | ActionProcedure::Lift
                         );
                     action_library.advance_state_from_action_by(
@@ -30911,6 +30912,63 @@ impl Engine {
         })
     }
 
+    /// `DoGravity(this)` as used by the ExecAction idle and insufficient
+    /// action-energy returns (C4Object.cpp:4644-4664, 4708-4712, 4747-4752).
+    /// This is the raw native operation: no procedure gravity mask, terminal
+    /// clamp, steering, phase work, or generic DoEnergy side effects.
+    fn apply_do_gravity_at_index(&mut self, idx: usize) {
+        if idx >= self.objects.len() {
+            return;
+        }
+        let float_line = self
+            .definitions
+            .get(&self.objects[idx].definition_id)
+            .map(|definition| definition.float_line)
+            .unwrap_or(0);
+        let floats = self.objects[idx].state.in_liquid && float_line != 0;
+        let surfaced = if floats {
+            let state = &self.objects[idx].state;
+            let probe_y = state.position.y - 1
+                + float_line
+                    .saturating_mul(state.construction)
+                    .checked_div(FULL_CON)
+                    .unwrap_or(0)
+                - 1;
+            self.landscape
+                .as_ref()
+                .map(|landscape| !landscape.is_liquid_at(state.position.x, probe_y))
+                .unwrap_or(true)
+        } else {
+            false
+        };
+        let gravity = self.physics.gravity_as_c4fixed();
+        let object = &mut self.objects[idx];
+        if floats {
+            object.fixed_velocity.y -= math::FLOAT_ACCEL;
+            let min_rise = C4Fixed::from_raw(-10 * math::FLOAT_ACCEL.val());
+            if object.fixed_velocity.y < min_rise {
+                object.fixed_velocity.y = min_rise;
+            }
+            let friction = math::FLOAT_FRICTION;
+            if object.fixed_velocity.x < -friction {
+                object.fixed_velocity.x += friction;
+            } else if object.fixed_velocity.x > friction {
+                object.fixed_velocity.x -= friction;
+            }
+            if object.rotation_velocity < -friction {
+                object.rotation_velocity += friction;
+            } else if object.rotation_velocity > friction {
+                object.rotation_velocity -= friction;
+            }
+            if surfaced && object.fixed_velocity.y < C4Fixed::ZERO {
+                object.fixed_velocity.y = C4Fixed::ZERO;
+            }
+        } else if object.state.category & CATEGORY_STATIC_BACK == 0 {
+            object.fixed_velocity.y += gravity;
+        }
+        object.refresh_velocity_from_fixed();
+    }
+
     #[doc(hidden)]
     pub fn apply_physics_at_index(&mut self, mut idx: usize) -> Result<bool, EngineError> {
         if idx >= self.objects.len() {
@@ -30920,6 +30978,81 @@ impl Engine {
         // early returns below leave it CNAT_None for this frame's
         // movement.
         self.objects[idx].frame_t_attach = CNAT_NONE;
+        // Upright attachment check precedes the idle and action-energy gates
+        // (C4Object.cpp:4698-4705). Preserve its Action.t_attach bit even
+        // when either later gate returns before procedure attachment latches.
+        {
+            let upright_attach = self
+                .definitions
+                .get(&self.objects[idx].definition_id)
+                .map(|definition| definition.upright_attach())
+                .unwrap_or(0);
+            let object = &mut self.objects[idx];
+            object.upright_t_attach = 0;
+            object.swim_exit_this_frame = false;
+            if !object.state.mobile && upright_attach != 0 {
+                let rotation = object.state.rotation;
+                let signed = if rotation > 180 {
+                    rotation - 360
+                } else {
+                    rotation
+                };
+                if (-math::STABLE_RANGE..=math::STABLE_RANGE).contains(&signed) {
+                    object.upright_t_attach = upright_attach;
+                    object.state.mobile = true;
+                }
+            }
+            object.frame_t_attach = object.upright_t_attach;
+            object.state.t_attach = object.frame_t_attach;
+        }
+
+        // C4ActionDef::EnergyUsage is a signed, nonzero gate on every real
+        // ActMap action while C4RULE_StructuresNeedEnergy is active
+        // (C4Object.cpp:4738-4753). It runs before Action.Time++,
+        // InLiquidAction, steering and phase advance. Insufficient power is
+        // the native idle return: mark NeedEnergy, apply raw gravity only to
+        // Mobile objects, and skip all remaining action work.
+        let (is_idle_action, energy_usage, source_procedure) = self
+            .definitions
+            .get(&self.objects[idx].definition_id)
+            .map(|definition| {
+                let action = &self.objects[idx].state.action.name;
+                let library = definition.action_library();
+                (
+                    library.is_idle_action(action),
+                    library.energy_usage_for_action(action),
+                    library.procedure_for_action(action),
+                )
+            })
+            .unwrap_or((true, 0, ActionProcedure::Undefined));
+        if self.structures_need_energy && !is_idle_action && energy_usage != 0 {
+            if energy_usage <= self.objects[idx].state.energy {
+                let object = &mut self.objects[idx];
+                object.state.energy = object.state.energy.wrapping_sub(energy_usage);
+                object.state.need_energy = false;
+            } else {
+                let mobile = {
+                    let object = &mut self.objects[idx];
+                    object.state.need_energy = true;
+                    object.state.mobile
+                };
+                if mobile {
+                    self.apply_do_gravity_at_index(idx);
+                }
+                return Ok(true);
+            }
+        }
+        // CONNECT is executed inside this helper rather than the deferred
+        // phase tail. Advance its source Action.Time here, after the energy
+        // gate but before InLiquidAction, exactly where C++ advances every
+        // real action (C4Object.cpp:4755-4756).
+        if matches!(source_procedure, ActionProcedure::Connect) {
+            self.objects[idx].state.action.time = self.objects[idx]
+                .state
+                .action
+                .time
+                .saturating_add(1);
+        }
         // InLiquidAction check (C4Object.cpp:4749-4753): an InLiquid
         // object whose action declares one switches THROUGH
         // SetActionByName (Abort+Start calls, fix resync) and returns
@@ -30987,33 +31120,6 @@ impl Engine {
             }
         };
 
-        // Upright attachment check (C4Object.cpp:4698-4705): the FIRST
-        // thing ExecAction does — a resting (non-Mobile) object standing
-        // within ±StableRange re-arms Mobile and ORs Def->UprightAttach
-        // into this frame's Action.t_attach (fed to the movement config).
-        {
-            let upright_attach = self
-                .definitions
-                .get(&definition_id)
-                .map(|definition| definition.upright_attach())
-                .unwrap_or(0);
-            let object = &mut self.objects[idx];
-            object.upright_t_attach = 0;
-            object.swim_exit_this_frame = false;
-            if !object.state.mobile && upright_attach != 0 {
-                let rotation = object.state.rotation;
-                let signed = if rotation > 180 {
-                    rotation - 360
-                } else {
-                    rotation
-                };
-                if (-math::STABLE_RANGE..=math::STABLE_RANGE).contains(&signed) {
-                    object.upright_t_attach = upright_attach;
-                    object.state.mobile = true;
-                }
-            }
-        }
-
         // Latch this frame's Action.t_attach from the PRE-wrap action
         // (C4Object.cpp:4692 + per-procedure assignments): the phase-wrap
         // SetAction at ExecAction's end must not retroactively attach
@@ -31039,6 +31145,14 @@ impl Engine {
             && !self.objects[idx].state.on_fire
         {
             self.objects[idx].last_energy_loss_cause = OWNER_NONE;
+        }
+
+        // DFA_CONNECT is procedure work, so it follows the action-energy,
+        // Action.Time, InLiquidAction, attachment, and attribution steps
+        // (C4Object.cpp:4738-4776, 5341-5420). Broken targets fire LineBreak
+        // and remove the line, skipping the rest of this object's exec.
+        if matches!(procedure, ActionProcedure::Connect) && !self.exec_connect_line(idx)? {
+            return Ok(true);
         }
 
         // DFA_DIG must stay attached to solid ground. C++ performs this

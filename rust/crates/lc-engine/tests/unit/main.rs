@@ -56926,6 +56926,197 @@ protected func HangleStart() { callback_order = callback_order * 10 + 4; return(
     // runs in ExecMovement after that frame's ExecAction already saw
     // Mobile == false.
     #[test]
+    fn exec_action_energy_usage_parses_and_gates_before_action_work() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Powered.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=PWRD\nName=Powered\nCategory=C4D_Object\n",
+        )
+        .expect("write DefCore");
+        std::fs::write(def_dir.join("Script.c"), b"#strict\n").expect("write Script.c");
+        std::fs::write(
+            def_dir.join("ActMap.txt"),
+            br#"[Action]
+Name=Work
+Procedure=WALK
+Length=20
+Delay=1
+Step=1
+NextAction=Hold
+InLiquidAction=Wet
+EnergyUsage=10
+
+[Action]
+Name=Wet
+Procedure=SWIM
+Length=1
+NextAction=Hold
+
+[Action]
+Name=Refund
+EnergyUsage=-3
+
+[Action]
+Name=ConnectWork
+Procedure=CONNECT
+EnergyUsage=10
+"#,
+        )
+        .expect("write ActMap.txt");
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load definition resource");
+        let mut definition =
+            Definition::from_resource(&resource).expect("compile resource definition");
+        assert_eq!(
+            definition
+                .action_library()
+                .energy_usage_for_action("Work"),
+            10,
+            "ActMap EnergyUsage reaches the runtime action library"
+        );
+        assert_eq!(
+            definition
+                .action_library()
+                .energy_usage_for_action("Refund"),
+            -3,
+            "EnergyUsage remains signed like C4ActionDef::EnergyUsage"
+        );
+        // Definition::from_resource's older conversion seam does not yet
+        // carry InLiquidAction. Add that pre-existing field synthetically so
+        // this regression can pin the EnergyUsage ordering without expanding
+        // L011 into the unrelated conversion gap.
+        let mut specs = definition.action_library().specs().clone();
+        let work = specs
+            .remove("Work")
+            .expect("parsed Work action")
+            .with_in_liquid_action("Wet");
+        specs.insert("Work".to_string(), work);
+        definition.configure_actions(None, specs);
+        definition.set_line(1);
+
+        let mut engine = Engine::with_seed(11);
+        engine.set_structures_need_energy(true);
+        engine.set_physics(PhysicsSettings::new(100, 200, -200));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let work_action = || {
+            let mut action = ActionState::new("Work");
+            action.time = 4;
+            action.phase = 2;
+            action
+        };
+        let stalled = engine
+            .spawn_object(
+                SpawnConfig::new("PWRD")
+                    .with_position(Vector2::new(20, 20))
+                    .with_fixed_position(FixedVec2::from_ints(20, 20))
+                    .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
+                    .with_action(work_action())
+                    .with_command_direction(CommandDirection::Right)
+                    .with_energy(5)
+                    .with_in_liquid(true)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("underpowered object spawns");
+        let powered = engine
+            .spawn_object(
+                SpawnConfig::new("PWRD")
+                    .with_position(Vector2::new(40, 20))
+                    .with_fixed_position(FixedVec2::from_ints(40, 20))
+                    .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
+                    .with_action(work_action())
+                    .with_command_direction(CommandDirection::Right)
+                    .with_energy(10)
+                    .with_need_energy(true)
+                    .with_alive(true)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("powered object spawns");
+        let stalled_connect = engine
+            .spawn_object(
+                SpawnConfig::new("PWRD")
+                    .with_action(ActionState::new("ConnectWork"))
+                    .with_energy(0)
+                    .with_loaded(true),
+            )
+            .expect("underpowered CONNECT object spawns");
+
+        engine.tick().expect("energy-gated frame executes");
+        let stalled_idx = engine
+            .find_object_index(stalled)
+            .expect("underpowered object remains");
+        let stalled_object = &engine.objects[stalled_idx];
+        assert_eq!(stalled_object.state.energy, 5);
+        assert!(stalled_object.state.need_energy);
+        assert_eq!(stalled_object.state.action.name, "Work");
+        assert_eq!(stalled_object.state.action.time, 4);
+        assert_eq!(stalled_object.state.action.phase, 2);
+        assert_eq!(stalled_object.state.action.ticks, 0);
+        assert_eq!(
+            stalled_object.fixed_velocity.x,
+            itofix(1),
+            "insufficient energy skips WALK steering"
+        );
+        assert_eq!(
+            stalled_object.fixed_velocity.y,
+            PhysicsSettings::new(100, 200, -200).gravity_as_c4fixed(),
+            "a Mobile stalled action still receives raw DoGravity"
+        );
+
+        let powered_idx = engine
+            .find_object_index(powered)
+            .expect("powered object remains");
+        let powered_object = &engine.objects[powered_idx];
+        assert_eq!(powered_object.state.energy, 0, "equality is sufficient");
+        assert!(
+            powered_object.state.alive,
+            "direct EnergyUsage subtraction does not run DoEnergy death"
+        );
+        assert!(!powered_object.state.need_energy);
+        assert_eq!(powered_object.state.action.time, 5);
+        assert_eq!(powered_object.state.action.phase, 3);
+        let stalled_connect_idx = engine
+            .find_object_index(stalled_connect)
+            .expect("energy gate keeps CONNECT line alive");
+        assert!(engine.objects[stalled_connect_idx].state.need_energy);
+        assert_eq!(engine.objects[stalled_connect_idx].state.action.time, 0);
+
+        // ExecMovement's no-landscape liquid probe clears InLiquid after the
+        // first action. Re-arm the saved flag to exercise the next ExecAction.
+        engine.objects[stalled_idx].state.in_liquid = true;
+        engine.set_structures_need_energy(false);
+        engine.tick().expect("rule-off frame executes");
+        let stalled_idx = engine
+            .find_object_index(stalled)
+            .expect("underpowered object remains after rule-off frame");
+        let powered_idx = engine
+            .find_object_index(powered)
+            .expect("powered object remains after rule-off frame");
+        let stalled_object = &engine.objects[stalled_idx];
+        assert_eq!(stalled_object.state.energy, 5, "rule-off skips the drain");
+        assert!(
+            stalled_object.state.need_energy,
+            "rule-off leaves the stale NeedEnergy bit untouched"
+        );
+        assert_eq!(
+            stalled_object.state.action.name, "Wet",
+            "rule-off resumes later InLiquidAction work"
+        );
+        let powered_object = &engine.objects[powered_idx];
+        assert_eq!(powered_object.state.energy, 0, "rule-off skips the drain");
+        assert_eq!(powered_object.state.action.time, 6);
+        assert!(
+            engine.find_object_index(stalled_connect).is_none(),
+            "once ungated, CONNECT reaches its missing-target LineBreak removal"
+        );
+    }
+
+    #[test]
     fn resting_object_freezes_until_tick10_mobilization_like_cpp() {
         let mut engine = Engine::with_seed(42);
         engine

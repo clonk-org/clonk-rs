@@ -11150,6 +11150,9 @@ fn convert_action_definition(
     if action.no_other_action {
         spec = spec.with_no_other_action(true);
     }
+    if action.energy_usage != 0 {
+        spec = spec.with_energy_usage(action.energy_usage);
+    }
     if let Some(in_liquid_action) = &action.in_liquid_action {
         spec = spec.with_in_liquid_action(in_liquid_action.clone());
     }

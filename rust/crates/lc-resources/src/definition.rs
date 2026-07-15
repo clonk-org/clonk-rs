@@ -722,6 +722,10 @@ pub struct ActionDefinition {
     /// action suspends the object — vetoes OCF_Collection/OCF_FightReady
     /// (SetOCF, C4Object.cpp:597,608).
     pub disabled: bool,
+    /// Signed `EnergyUsage=` consumed by ExecAction while
+    /// C4RULE_StructuresNeedEnergy is active (C4Def.cpp:108;
+    /// C4Object.cpp:4738-4753).
+    pub energy_usage: i32,
     pub dig_free: Option<i32>,
     pub attach: u32,
     pub directions: Option<u32>,
@@ -755,6 +759,7 @@ impl Default for ActionDefinition {
             abort_call: None,
             no_other_action: false,
             disabled: false,
+            energy_usage: 0,
             dig_free: None,
             attach: 0,
             turn_action: None,
@@ -1625,6 +1630,9 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
             }
             "objectdisabled" => {
                 current_definition.disabled = parse_bool(value);
+            }
+            "energyusage" => {
+                current_definition.energy_usage = parse_i32(value).unwrap_or(0);
             }
             "digfree" => {
                 current_definition.dig_free = parse_i32(value);

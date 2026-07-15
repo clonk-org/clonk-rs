@@ -33,6 +33,11 @@ pub struct ActionSpec {
     /// OCF_FightReady (SetOCF, C4Object.cpp:597,608).
     #[serde(default)]
     pub disabled: bool,
+    /// `EnergyUsage=` (C4ActionDef::EnergyUsage, C4Def.cpp:108): signed
+    /// energy consumed before Action.Time advances while the
+    /// StructuresNeedEnergy rule is active (C4Object.cpp:4738-4753).
+    #[serde(default)]
+    pub energy_usage: i32,
     /// `InLiquidAction` (C4ActionDef): the ExecAction head switches to
     /// it while InLiquid with an early return (C4Object.cpp:4749-4753).
     #[serde(default)]
@@ -68,6 +73,7 @@ impl ActionSpec {
             turn_action: None,
             no_other_action: false,
             disabled: false,
+            energy_usage: 0,
             dig_free: None,
             attach: 0,
         }
@@ -125,6 +131,11 @@ impl ActionSpec {
 
     pub fn with_disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    pub fn with_energy_usage(mut self, energy_usage: i32) -> Self {
+        self.energy_usage = energy_usage;
         self
     }
 
@@ -326,6 +337,13 @@ impl ActionLibrary {
             .get(action)
             .map(|spec| spec.disabled)
             .unwrap_or(false)
+    }
+
+    pub fn energy_usage_for_action(&self, action: &str) -> i32 {
+        self.specs
+            .get(action)
+            .map(|spec| spec.energy_usage)
+            .unwrap_or(0)
     }
 
     pub fn start_call_for_action(&self, action: &str) -> Option<&str> {
