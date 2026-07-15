@@ -13655,23 +13655,6 @@ fn step_fixed_toward(current: C4Fixed, desired: C4Fixed, step: C4Fixed) -> C4Fix
     }
 }
 
-fn horizontal_span(vertices: &[ObjectVertex]) -> i32 {
-    if vertices.is_empty() {
-        return 0;
-    }
-    let mut min_x = vertices[0].x;
-    let mut max_x = vertices[0].x;
-    for vertex in vertices.iter().skip(1) {
-        if vertex.x < min_x {
-            min_x = vertex.x;
-        }
-        if vertex.x > max_x {
-            max_x = vertex.x;
-        }
-    }
-    (max_x - min_x).abs()
-}
-
 /// ComName(byCom) (C4ObjectCom.cpp:800-852): base name plus the
 /// Single/Double/Released suffix shared by the Control/Contained script
 /// callback families (PSF_Control "~Control{}" / PSF_ContainedControl
@@ -13697,16 +13680,6 @@ fn com_name(command: ControlCommand, kind: CommandKind) -> Option<String> {
 
 fn control_function_name(command: ControlCommand, kind: CommandKind) -> Option<String> {
     com_name(command, kind).map(|com| format!("Control{com}"))
-}
-
-fn fight_distance_threshold(
-    fighter_vertices: &[ObjectVertex],
-    target_vertices: &[ObjectVertex],
-) -> i32 {
-    const MIN_THRESHOLD: i32 = 20;
-    let fighter_span = horizontal_span(fighter_vertices);
-    let target_span = horizontal_span(target_vertices);
-    fighter_span.max(target_span).max(MIN_THRESHOLD)
 }
 
 fn apply_horizontal_friction_fixed(value: C4Fixed, friction: i32) -> C4Fixed {
@@ -33771,8 +33744,6 @@ impl Engine {
 
         let fighter_position = self.objects[idx].state.position;
         let target_position = self.objects[target_idx].state.position;
-        let fighter_vertices = self.objects[idx].state.vertices.clone();
-        let target_vertices = self.objects[target_idx].state.vertices.clone();
         let initial_direction = self.objects[idx].state.direction;
 
         // Physical training (C4Object.cpp:5214-5216): Tick5 trains Fight.
@@ -33789,11 +33760,16 @@ impl Engine {
         } else {
             initial_direction
         };
+        self.objects[idx].state.direction = direction;
 
         // Position (C4Object.cpp:5221-5228): stand beside the target at half
         // its shape width + 2, approach with the Walk physical:
         // lLimit = ValByPhysical(95, Walk), Towards(xdir, ±lLimit, lLimit).
-        let target_half_width = fight_distance_threshold(&target_vertices, &target_vertices) / 2;
+        let target_half_width = self.objects[target_idx]
+            .current_shape_rect()
+            .unwrap_or_default()
+            .width
+            / 2;
         let mut approach_x = fighter_position.x;
         if direction == Direction::Left {
             approach_x = target_position.x + target_half_width + 2;
@@ -33804,7 +33780,6 @@ impl Engine {
         let limit = math::val_by_physical(95, self.object_physical(idx).walk);
         let physics = self.physics;
         let fighter = &mut self.objects[idx];
-        fighter.state.direction = direction;
         let mut xdir = fighter.fixed_velocity.x;
         match fighter_position.x.cmp(&approach_x) {
             std::cmp::Ordering::Equal => math::towards(&mut xdir, C4Fixed::ZERO, limit),
@@ -33814,7 +33789,10 @@ impl Engine {
         fighter.fixed_velocity.x = xdir;
 
         // Distance check (C4Object.cpp:5229-5234): own shape width bounds.
-        let threshold = fight_distance_threshold(&fighter_vertices, &fighter_vertices);
+        let threshold = self.objects[idx]
+            .current_shape_rect()
+            .unwrap_or_default()
+            .width;
         if (fighter_position.x - target_position.x).abs() > threshold
             || (fighter_position.y - target_position.y).abs() > threshold
         {

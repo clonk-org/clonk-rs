@@ -13396,6 +13396,126 @@ protected func GrabLost()
         }
     }
 
+    fn l074_wide_vertex_fight_pair(separation: i32) -> (Engine, ObjectId, ObjectId) {
+        let mut engine = l073_fight_failure_engine();
+        // Deliberately disagree with the 16px shape rect. DFA_FIGHT uses the
+        // live Shape.Wdt for both its approach point and give-up distance,
+        // never the span of the contact vertices.
+        let wide_vertices = vec![
+            ObjectVertex::new(-20, -8),
+            ObjectVertex::new(20, -8),
+            ObjectVertex::new(20, 8),
+            ObjectVertex::new(-20, 8),
+        ];
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("L73O")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(separation, 0))
+                    .with_vertices(wide_vertices.clone())
+                    .with_action(ActionState::new("Fight")),
+            )
+            .expect("fight target spawns");
+        let mut fight = ActionState::new("Fight");
+        fight.target = Some(target);
+        let fighter = engine
+            .spawn_object(
+                SpawnConfig::new("L73F")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::ZERO)
+                    .with_vertices(wide_vertices)
+                    .with_action(fight),
+            )
+            .expect("fighter spawns");
+        (engine, fighter, target)
+    }
+
+    #[test]
+    fn l074_fight_approach_uses_target_shape_rect_width() {
+        let (mut engine, fighter, target) = l074_wide_vertex_fight_pair(10);
+        let fighter_idx = engine.find_object_index(fighter).expect("fighter exists");
+        let target_idx = engine.find_object_index(target).expect("target exists");
+        engine.objects[fighter_idx].state.shape_override =
+            Some(DefinitionRect::new(-6, -8, 12, 16));
+        assert_eq!(
+            engine.objects[fighter_idx]
+                .current_shape_rect()
+                .expect("fighter has a live shape rect")
+                .width,
+            12,
+            "the approach point must not use the fighter width"
+        );
+        assert_eq!(
+            engine.objects[target_idx]
+                .current_shape_rect()
+                .expect("target has a live shape rect")
+                .width,
+            16
+        );
+
+        let _ = engine
+            .apply_physics_at_index(fighter_idx)
+            .expect("Fight equilibrium resolves");
+
+        let fighter = &engine.objects[fighter_idx];
+        assert_eq!(fighter.state.action.name, "Fight");
+        assert_eq!(fighter.state.direction, Direction::Right);
+        assert_eq!(
+            fighter.fixed_velocity.x,
+            C4Fixed::ZERO,
+            "target x=10 and Shape.Wdt=16 put the right-facing equilibrium at x=0"
+        );
+    }
+
+    #[test]
+    fn l074_fight_give_up_uses_inclusive_own_shape_rect_width() {
+        for (target_width, separation, expected_action) in [
+            (16, 16, "Fight"),
+            (16, 17, "Walk"),
+            (32, 16, "Fight"),
+            (32, 17, "Walk"),
+        ] {
+            let (mut engine, fighter, target) = l074_wide_vertex_fight_pair(separation);
+            let fighter_idx = engine.find_object_index(fighter).expect("fighter exists");
+            let target_idx = engine.find_object_index(target).expect("target exists");
+            engine.objects[target_idx].state.shape_override = Some(DefinitionRect::new(
+                -target_width / 2,
+                -8,
+                target_width,
+                16,
+            ));
+            assert_eq!(
+                engine.objects[fighter_idx]
+                    .current_shape_rect()
+                    .expect("fighter has a live shape rect")
+                    .width,
+                16
+            );
+            assert_eq!(
+                engine.objects[target_idx]
+                    .current_shape_rect()
+                    .expect("target has a live shape rect")
+                    .width,
+                target_width
+            );
+
+            let _ = engine
+                .apply_physics_at_index(fighter_idx)
+                .unwrap_or_else(|error| panic!("Fight separation {separation} failed: {error}"));
+
+            let fighter = &engine.objects[fighter_idx];
+            assert_eq!(
+                fighter.state.action.name, expected_action,
+                "own Shape.Wdt=16 keeps distance 16 and gives up at 17, independent of target width {target_width}"
+            );
+            if separation == 17 {
+                assert_eq!(fighter.state.command_direction, CommandDirection::Stop);
+                assert_eq!(fighter.fixed_velocity, FixedVec2::ZERO);
+                assert_eq!(fighter.state.velocity, Vector2::ZERO);
+            }
+        }
+    }
+
     #[test]
     fn fight_procedure_moves_toward_target() {
         let script = r#"
@@ -13409,6 +13529,7 @@ protected func GrabLost()
         "#;
 
         let mut fighter_definition = Definition::from_script("Fighter", "Fighter", script).unwrap();
+        fighter_definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         let mut fighter_actions = HashMap::new();
         fighter_actions.insert(
             "Idle".to_string(),
@@ -13428,6 +13549,7 @@ protected func GrabLost()
 
         let mut opponent_definition =
             Definition::from_script("Opponent", "Opponent", script).unwrap();
+        opponent_definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         let mut opponent_actions = HashMap::new();
         opponent_actions.insert(
             "Idle".to_string(),
@@ -13618,6 +13740,7 @@ protected func GrabLost()
         "#;
 
         let mut fighter_definition = Definition::from_script("Fighter", "Fighter", script).unwrap();
+        fighter_definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         let mut fighter_actions = HashMap::new();
         fighter_actions.insert(
             "Fight".to_string(),
@@ -13632,6 +13755,7 @@ protected func GrabLost()
 
         let mut opponent_definition =
             Definition::from_script("Opponent", "Opponent", script).unwrap();
+        opponent_definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         let mut opponent_actions = HashMap::new();
         opponent_actions.insert(
             "Fight".to_string(),
@@ -13710,6 +13834,7 @@ protected func GrabLost()
         let mut fighter_definition =
             Definition::from_script("CREW", "Crew", "").expect("crew definition compiles");
         fighter_definition.set_crew_member(true);
+        fighter_definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         fighter_definition.configure_actions(
             Some("Fight".to_string()),
             HashMap::from([(
@@ -13726,6 +13851,7 @@ protected func GrabLost()
 
         let mut opponent_definition =
             Definition::from_script("OPPN", "Opponent", "").expect("opponent compiles");
+        opponent_definition.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
         opponent_definition.configure_actions(
             Some("Fight".to_string()),
             HashMap::from([(
