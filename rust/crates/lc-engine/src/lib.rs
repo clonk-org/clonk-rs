@@ -34838,7 +34838,7 @@ impl Engine {
                             idx,
                             -(hit_energy / 5),
                             C4FX_CALL_ENG_OBJ_HIT,
-                            self.objects[candidate_idx].state.owner,
+                            self.objects[candidate_idx].state.controller,
                         )?;
                         // tmass = max(obj1->Mass, 50) with the LIVE mass
                         // (C4GameObjects.cpp:174).

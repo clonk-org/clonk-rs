@@ -1224,6 +1224,53 @@ mod tests {
     }
 
     #[test]
+    fn cross_check_zero_hit_tracks_striker_controller_not_owner() -> Result<(), EngineError> {
+        // EngObjHit is the one DoEnergy cause that updates the kill trace
+        // even when integer division reduces iChange to zero. CrossCheck
+        // attributes that hit to the hitting object's Controller, not Owner.
+        let mut engine = Engine::with_seed(41);
+        let mut victim_def = simple_definition("Clonk");
+        victim_def.set_category(CATEGORY_LIVING);
+        victim_def.set_mass(100);
+        engine.register_definition(victim_def)?;
+        let mut rock_def = simple_definition("Rock");
+        rock_def.set_category(CATEGORY_OBJECT);
+        rock_def.set_mass(50);
+        engine.register_definition(rock_def)?;
+
+        let victim = engine.spawn_object(
+            SpawnConfig::new("Clonk")
+                .with_position(Vector2::new(50, 50))
+                .with_velocity(Vector2::new(5, 0))
+                .with_alive(true)
+                .with_energy(100_000)
+                .with_controller(3),
+        )?;
+        let _rock = engine.spawn_object(
+            SpawnConfig::new("Rock")
+                .with_position(Vector2::new(50, 50))
+                .with_velocity(Vector2::new(5, 0))
+                .with_owner(4)
+                .with_controller(9),
+        )?;
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].last_energy_loss_cause = 7;
+
+        engine.cross_check(1)?;
+
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].state.energy, 100_000,
+            "equal velocities produce an exact zero-percent hit change"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].last_energy_loss_cause, 9,
+            "a zero-change EngObjHit still records the hitter's controller, not its owner"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn energy_loss_to_zero_assigns_death_like_cpp() -> Result<(), EngineError> {
         // C4Object::DoEnergy (C4Object.cpp:1361-1363): an alive object whose
         // energy first reaches zero dies. AssignDeath (C4Object.cpp:1137-1177)
