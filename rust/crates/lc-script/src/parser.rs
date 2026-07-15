@@ -1710,9 +1710,10 @@ impl<'a> Parser<'a> {
 
     fn parse_exponentiation(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_unary()?;
-        // Right-associative: 2**3**2 is parsed as 2**(3**2), not (2**3)**2
-        if self.consume_if_symbol(Symbol::StarStar)?.is_some() {
-            let right = self.parse_exponentiation()?; // Recursive call for right-associativity
+        // C4ScriptOpMap marks `**` left-associative: fold a chain as
+        // `(2**3)**2`, while each operand still keeps unary precedence.
+        while self.consume_if_symbol(Symbol::StarStar)?.is_some() {
+            let right = self.parse_unary()?;
             expr = Expr::Binary(Box::new(expr), BinaryOp::Pow, Box::new(right));
         }
         Ok(expr)
