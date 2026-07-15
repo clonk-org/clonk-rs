@@ -29326,14 +29326,6 @@ fn parse_draw_transform_matrix(args: &[Value], function: &str) -> Result<[i32; 9
     ])
 }
 
-fn normalize_draw_transform(transform: DrawTransform) -> Option<DrawTransform> {
-    if transform.is_identity() {
-        None
-    } else {
-        Some(transform)
-    }
-}
-
 fn set_obj_draw_transform(args: &[Value]) -> Result<Value, RuntimeError> {
     let components = parse_draw_transform_components(args, "SetObjDrawTransform")?;
     let mut index = 6;
@@ -29356,13 +29348,23 @@ fn set_obj_draw_transform(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let transform = DrawTransform::from_components(
+    let transform = DrawTransform::from_matrix([
         components[0] as f32 / 1000.0,
-        components[4] as f32 / 1000.0,
+        components[1] as f32 / 1000.0,
         components[2] as f32 / 1000.0,
+        components[3] as f32 / 1000.0,
+        components[4] as f32 / 1000.0,
         components[5] as f32 / 1000.0,
-    );
-    let normalized = normalize_draw_transform(transform);
+        0.0,
+        0.0,
+        1.0,
+    ]);
+    let resets_base = components[1] == 0
+        && components[2] == 0
+        && components[3] == 0
+        && components[5] == 0
+        && components[0] == components[4]
+        && matches!(components[0], 0 | 1000);
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -29381,11 +29383,11 @@ fn set_obj_draw_transform(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(false));
         };
 
-        if overlay_id <= 0 {
-            object.set_draw_transform(normalized);
+        if overlay_id == 0 {
+            object.set_draw_transform(if resets_base { None } else { Some(transform) });
             Ok(Value::Bool(true))
         } else {
-            let changed = object.set_overlay_transform(overlay_id, normalized);
+            let changed = object.set_overlay_transform(overlay_id, Some(transform));
             Ok(Value::Bool(changed))
         }
     })
@@ -29413,12 +29415,17 @@ fn set_obj_draw_transform2(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let delta = DrawTransform::from_components(
+    let delta = DrawTransform::from_matrix([
         matrix[0] as f32 / 1000.0,
-        matrix[4] as f32 / 1000.0,
+        matrix[1] as f32 / 1000.0,
         matrix[2] as f32 / 1000.0,
+        matrix[3] as f32 / 1000.0,
+        matrix[4] as f32 / 1000.0,
         matrix[5] as f32 / 1000.0,
-    );
+        matrix[6] as f32 / 1000.0,
+        matrix[7] as f32 / 1000.0,
+        matrix[8] as f32 / 1000.0,
+    ]);
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -29437,10 +29444,10 @@ fn set_obj_draw_transform2(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(false));
         };
 
-        if overlay_id <= 0 {
+        if overlay_id == 0 {
             let current = object.draw_transform().unwrap_or(DrawTransform::identity());
             let combined = current.combined(delta);
-            object.set_draw_transform(normalize_draw_transform(combined));
+            object.set_draw_transform(Some(combined));
             Ok(Value::Bool(true))
         } else {
             let existing = match object.overlay_transform(overlay_id) {
@@ -29448,8 +29455,7 @@ fn set_obj_draw_transform2(args: &[Value]) -> Result<Value, RuntimeError> {
                 None => return Ok(Value::Bool(false)),
             };
             let combined = existing.combined(delta);
-            let changed =
-                object.set_overlay_transform(overlay_id, normalize_draw_transform(combined));
+            let changed = object.set_overlay_transform(overlay_id, Some(combined));
             Ok(Value::Bool(changed))
         }
     })
@@ -59598,11 +59604,11 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             100,
             || {
                 set_obj_draw_transform(&[
-                    Value::Int(2000),
+                    Value::Int(866),
+                    Value::Int(-500),
                     Value::Int(0),
-                    Value::Int(0),
-                    Value::Int(0),
-                    Value::Int(1500),
+                    Value::Int(500),
+                    Value::Int(866),
                     Value::Int(0),
                 ])
             },
@@ -59617,16 +59623,78 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             .draw_transform
             .expect("transform update expected")
             .expect("transform set");
-        assert!((transform.scale_x - 2.0).abs() < f32::EPSILON);
-        assert!((transform.scale_y - 1.5).abs() < f32::EPSILON);
-        assert!(transform.offset_x.abs() < f32::EPSILON);
-        assert!(transform.offset_y.abs() < f32::EPSILON);
+        assert_eq!(
+            transform.matrix(),
+            [
+                866.0 / 1000.0,
+                -0.5,
+                0.0,
+                0.5,
+                866.0 / 1000.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            ]
+        );
+    }
+
+    #[test]
+    fn set_obj_draw_transform_default_matrix_resets_base() {
+        let object_id = ObjectId::new(2);
+        let object_context = HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            0,
+            0,
+            crate::FULL_CON,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            0,
+            &[],
+            "Idle",
+            0,
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+            Some(DrawTransform::from_components(2.0, 3.0, 4.0, 5.0)),
+            None,
+        );
+
+        let (result, outcome) = with_effect_context(
+            Some(object_context),
+            &[],
+            HostWorldContext::default(),
+            100,
+            || set_obj_draw_transform(&[]),
+        );
+
+        assert_eq!(
+            result.expect("SetObjDrawTransform succeeds"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            outcome.object_update.expect("object update expected").draw_transform,
+            Some(None)
+        );
     }
 
     #[test]
     fn set_obj_draw_transform_updates_overlay_transform() {
         let object_id = ObjectId::new(5);
-        let overlay = ObjectGraphicsOverlay::new(2, GraphicsOverlayMode::Base);
+        let overlay = ObjectGraphicsOverlay::new(-2, GraphicsOverlayMode::Base);
+        let zero_overlay = ObjectGraphicsOverlay::new(-3, GraphicsOverlayMode::Base);
         let object_context = HostObjectContext::with_category(
             object_id,
             None,
@@ -59656,7 +59724,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             None,
             None,
         )
-        .with_graphics_overlays(vec![overlay])
+        .with_graphics_overlays(vec![overlay, zero_overlay])
         .with_base_graphics(None);
 
         let (result, outcome) = with_effect_context(
@@ -59665,26 +59733,41 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             HostWorldContext::default(),
             100,
             || {
-                set_obj_draw_transform(&[
-                    Value::Int(1000),
-                    Value::Int(0),
+                let rotated = set_obj_draw_transform(&[
+                    Value::Int(866),
+                    Value::Int(-500),
+                    Value::Int(125),
                     Value::Int(500),
-                    Value::Int(0),
-                    Value::Int(1000),
+                    Value::Int(866),
                     Value::Int(-250),
                     Value::Proplist({
                         let mut map = ValueMap::new();
                         map.insert("id".into(), Value::Int(object_id.as_u64() as i32));
                         map
                     }),
-                    Value::Int(2),
-                ])
+                    Value::Int(-2),
+                ])?;
+                let zero = set_obj_draw_transform(&[
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Proplist({
+                        let mut map = ValueMap::new();
+                        map.insert("id".into(), Value::Int(object_id.as_u64() as i32));
+                        map
+                    }),
+                    Value::Int(-3),
+                ])?;
+                Ok::<_, RuntimeError>((rotated, zero))
             },
         );
 
         assert_eq!(
             result.expect("SetObjDrawTransform succeeds"),
-            Value::Bool(true)
+            (Value::Bool(true), Value::Bool(true))
         );
         let update = outcome.object_update.expect("object update expected");
         let overlays = update
@@ -59692,11 +59775,168 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             .expect("graphics overlay update expected");
         let overlay = overlays
             .iter()
-            .find(|overlay| overlay.id == 2)
+            .find(|overlay| overlay.id == -2)
             .expect("overlay present");
         let transform = overlay.transform.expect("overlay transform set");
-        assert!((transform.offset_x - 0.5).abs() < f32::EPSILON);
-        assert!((transform.offset_y + 0.25).abs() < f32::EPSILON);
+        assert_eq!(
+            transform.matrix(),
+            [
+                866.0 / 1000.0,
+                -0.5,
+                0.125,
+                0.5,
+                866.0 / 1000.0,
+                -0.25,
+                0.0,
+                0.0,
+                1.0,
+            ]
+        );
+        let zero_overlay = overlays
+            .iter()
+            .find(|overlay| overlay.id == -3)
+            .expect("zero overlay present");
+        assert_eq!(
+            zero_overlay
+                .transform
+                .expect("zero overlay transform remains allocated")
+                .matrix(),
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn set_obj_draw_transform2_composes_all_nine_matrix_components() {
+        let object_id = ObjectId::new(6);
+        let object_context = HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            0,
+            0,
+            crate::FULL_CON,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            0,
+            &[],
+            "Idle",
+            0,
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+            Some(DrawTransform::from_matrix([
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0,
+            ])),
+            None,
+        );
+
+        let (result, outcome) = with_effect_context(
+            Some(object_context),
+            &[],
+            HostWorldContext::default(),
+            100,
+            || {
+                set_obj_draw_transform2(&[
+                    Value::Int(2000),
+                    Value::Int(3000),
+                    Value::Int(5000),
+                    Value::Int(7000),
+                    Value::Int(11000),
+                    Value::Int(13000),
+                    Value::Int(17000),
+                    Value::Int(19000),
+                    Value::Int(23000),
+                ])
+            },
+        );
+
+        assert_eq!(
+            result.expect("SetObjDrawTransform2 succeeds"),
+            Value::Bool(true)
+        );
+        let transform = outcome
+            .object_update
+            .expect("object update expected")
+            .draw_transform
+            .expect("transform update expected")
+            .expect("transform set");
+        assert_eq!(
+            transform.matrix(),
+            [49.0, 59.0, 74.0, 142.0, 173.0, 217.0, 254.0, 313.0, 395.0]
+        );
+    }
+
+    #[test]
+    fn set_obj_draw_transform2_retains_identity_matrix() {
+        let object_id = ObjectId::new(7);
+        let object_context = HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            0,
+            0,
+            crate::FULL_CON,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            0,
+            &[],
+            "Idle",
+            0,
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+            None,
+            None,
+        );
+
+        let (result, outcome) = with_effect_context(
+            Some(object_context),
+            &[],
+            HostWorldContext::default(),
+            100,
+            || {
+                set_obj_draw_transform2(&[
+                    Value::Int(1000),
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(1000),
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(1000),
+                ])
+            },
+        );
+
+        assert_eq!(
+            result.expect("SetObjDrawTransform2 succeeds"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            outcome.object_update.expect("object update expected").draw_transform,
+            Some(Some(DrawTransform::identity()))
+        );
     }
 
     #[test]

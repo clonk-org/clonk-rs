@@ -32467,12 +32467,8 @@ fn compose_owned_menu_picture(
                 .ok()?;
             let scale_factor = side as f32 / 35.0;
             let center = side as f32 / 2.0;
-            let matrix = Transform::set_move_scale(
-                center - transform.scale_x * center + transform.offset_x * scale_factor,
-                center - transform.scale_y * center + transform.offset_y * scale_factor,
-                transform.scale_x,
-                transform.scale_y,
-            );
+            let matrix =
+                centered_picture_transform(transform.matrix(), scale_factor, center, center);
             composed
                 .blit_transformed(
                     &layer,
@@ -32557,12 +32553,8 @@ fn compose_inventory_picture(
             let scale_factor = width as f32 / 64.0;
             let center_x = width as f32 / 2.0;
             let center_y = height as f32 / 2.0;
-            let matrix = Transform::set_move_scale(
-                center_x - transform.scale_x * center_x + transform.offset_x * scale_factor,
-                center_y - transform.scale_y * center_y + transform.offset_y * scale_factor,
-                transform.scale_x,
-                transform.scale_y,
-            );
+            let matrix =
+                centered_picture_transform(transform.matrix(), scale_factor, center_x, center_y);
             let mut stretched = Surface::new(width, height, PixelFormat::Rgba8888);
             stretched
                 .blit_stretched(
@@ -32597,6 +32589,36 @@ fn compose_inventory_picture(
     }
 
     Some(ImageData::new(width, height, composed.pixels().to_vec()))
+}
+
+/// C4GraphicsOverlay::DrawPicture first rescales the transform's translation
+/// into the destination picture's coordinate system and then applies
+/// C4DrawTransform::SetTransformAt at the picture center
+/// (src/C4DefGraphics.cpp:849-855; src/C4Facet.cpp:446-456).
+fn centered_picture_transform(
+    mut matrix: [f32; 9],
+    translation_scale: f32,
+    center_x: f32,
+    center_y: f32,
+) -> Transform {
+    matrix[2] *= translation_scale;
+    matrix[5] *= translation_scale;
+
+    let a = matrix[0] + matrix[6] * center_x;
+    let b = matrix[1] + matrix[7] * center_x;
+    let d = matrix[3] + matrix[6] * center_y;
+    let e = matrix[4] + matrix[7] * center_y;
+    Transform::set(
+        a,
+        b,
+        matrix[2] - a * center_x - b * center_y + matrix[8] * center_x,
+        d,
+        e,
+        matrix[5] - d * center_x - e * center_y + matrix[8] * center_y,
+        matrix[6],
+        matrix[7],
+        matrix[8] - matrix[6] * center_x - matrix[7] * center_y,
+    )
 }
 
 fn object_menu_item_picture(
@@ -41147,6 +41169,27 @@ mod tests {
                 Color::new(source[0], source[1], source[2], source[3]).modulate_clr(modulation);
             assert_eq!(actual, &[expected.r, expected.g, expected.b, expected.a]);
         }
+    }
+
+    #[test]
+    fn picture_overlay_transform_keeps_shear_and_projective_row_at_center() {
+        // C4GraphicsOverlay::DrawPicture scales only c/f, then rebases the
+        // complete matrix around the picture center. This asymmetric matrix
+        // distinguishes that path from the former diagonal scale reduction.
+        let transform = centered_picture_transform(
+            [0.8, -0.3, 2.0, 0.25, 1.2, -3.0, 0.01, -0.02, 1.0],
+            2.0,
+            10.0,
+            6.0,
+        );
+        let expected = [0.9, -0.5, 8.0, 0.31, 1.08, -9.58, 0.01, -0.02, 1.02];
+        for (actual, expected) in transform.mat.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-5, "{actual} != {expected}");
+        }
+
+        let (x, y) = transform.transform_point(10.0, 6.0);
+        assert!((x - 14.0).abs() < 1.0e-5);
+        assert!(y.abs() < 1.0e-5);
     }
 
     #[test]

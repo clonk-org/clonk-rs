@@ -474,12 +474,13 @@ impl Surface {
         Ok(())
     }
 
-    /// Affine-transformed blit (rotation/scale/mirror), the C++ `CBltTransform`
-    /// path used for rotated object sprites. The `src_rect` is conceptually placed
-    /// at `dest_origin` and then `transform` is applied in destination space; each
-    /// covered destination pixel is inverse-mapped back to source space, sampled
-    /// nearest-neighbour, modulated (white = identity) and composited per `mode`.
-    /// A non-invertible transform draws nothing.
+    /// Homogeneous 3x3 transformed blit (rotation/scale/mirror/projective),
+    /// the C++ `CBltTransform` path used for object sprites. The `src_rect` is
+    /// conceptually placed at `dest_origin` and then `transform` is applied in
+    /// destination space; each covered destination pixel is inverse-mapped
+    /// back to source space, sampled nearest-neighbour, modulated (white =
+    /// identity) and composited per `mode`. A non-invertible transform, or a
+    /// projective quad crossing the horizon, draws nothing.
     pub fn blit_transformed(
         &mut self,
         src: &Surface,
@@ -502,7 +503,7 @@ impl Surface {
         if src_rect.width == 0 || src_rect.height == 0 {
             return Ok(());
         }
-        let inv = match transform.inverse_affine() {
+        let inv = match transform.inverse() {
             Some(t) => t,
             None => return Ok(()),
         };
@@ -511,27 +512,58 @@ impl Surface {
         let (ox, oy) = (dest_origin.x as f32, dest_origin.y as f32);
         let (w, h) = (src_rect.width as f32, src_rect.height as f32);
         let corners = [(ox, oy), (ox + w, oy), (ox, oy + h), (ox + w, oy + h)];
-        let mut min_x = f32::MAX;
-        let mut min_y = f32::MAX;
-        let mut max_x = f32::MIN;
-        let mut max_y = f32::MIN;
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        let mut positive_w = false;
+        let mut negative_w = false;
         for &(cx, cy) in &corners {
+            let w = transform.mat[6] * cx + transform.mat[7] * cy + transform.mat[8];
+            if !w.is_finite() || w == 0.0 {
+                return Ok(());
+            }
+            positive_w |= w.is_sign_positive();
+            negative_w |= w.is_sign_negative();
+            // A linear homogeneous denominator with both signs at the quad's
+            // corners crosses zero somewhere inside. Its image is unbounded;
+            // skip it instead of constructing an overflowing raster box.
+            if positive_w && negative_w {
+                return Ok(());
+            }
             let (tx, ty) = transform.transform_point(cx, cy);
+            if !tx.is_finite() || !ty.is_finite() {
+                return Ok(());
+            }
             min_x = min_x.min(tx);
             min_y = min_y.min(ty);
             max_x = max_x.max(tx);
             max_y = max_y.max(ty);
         }
-        let bbox = Rect::new(
-            min_x.floor() as i32,
-            min_y.floor() as i32,
-            (max_x.ceil() - min_x.floor()).max(0.0) as u32,
-            (max_y.ceil() - min_y.floor()).max(0.0) as u32,
+        // Clip in floating-point space before integer conversion. Besides
+        // avoiding a giant temporary rectangle, this keeps very large but
+        // finite projective coordinates away from i32/u32 overflow paths.
+        let clip = self.clip_bounds();
+        if clip.width == 0 || clip.height == 0 {
+            return Ok(());
+        }
+        let clip_left = clip.x as f32;
+        let clip_top = clip.y as f32;
+        let clip_right = clip_left + clip.width as f32;
+        let clip_bottom = clip_top + clip.height as f32;
+        let left = min_x.floor().max(clip_left);
+        let top = min_y.floor().max(clip_top);
+        let right = max_x.ceil().min(clip_right);
+        let bottom = max_y.ceil().min(clip_bottom);
+        if left >= right || top >= bottom {
+            return Ok(());
+        }
+        let clipped = Rect::new(
+            left as i32,
+            top as i32,
+            (right - left) as u32,
+            (bottom - top) as u32,
         );
-        let clipped = match bbox.intersection(self.clip_bounds()) {
-            Some(r) => r,
-            None => return Ok(()),
-        };
         let modulate = modulation != Color::opaque(255, 255, 255);
         let bpp = self.format.bytes_per_pixel();
         for row in 0..clipped.height {
@@ -540,8 +572,13 @@ impl Surface {
                 let dest_x = clipped.x + col as i32;
                 // Inverse-map the pixel centre back to source-local coordinates.
                 let (bx, by) = inv.transform_point(dest_x as f32 + 0.5, dest_y as f32 + 0.5);
-                let lx = (bx - ox).floor();
-                let ly = (by - oy).floor();
+                let local_x = bx - ox;
+                let local_y = by - oy;
+                if !local_x.is_finite() || !local_y.is_finite() {
+                    continue;
+                }
+                let lx = local_x.floor();
+                let ly = local_y.floor();
                 if lx < 0.0 || ly < 0.0 || lx >= w || ly >= h {
                     continue;
                 }
@@ -884,6 +921,79 @@ mod tests {
         assert_eq!(dest.get_pixel(1, 1), Some(Color::opaque(255, 0, 0))); // was (0,0)
         assert_eq!(dest.get_pixel(0, 1), Some(Color::opaque(0, 255, 0))); // was (1,0)
         assert_eq!(dest.get_pixel(1, 0), Some(Color::opaque(0, 0, 255))); // was (0,1)
+    }
+
+    #[test]
+    fn blit_transformed_uses_projective_inverse_for_sampling() {
+        use crate::transform::Transform;
+        let mut src = Surface::new(4, 2, PixelFormat::Rgba8888);
+        let colors = [
+            Color::opaque(255, 0, 0),
+            Color::opaque(0, 255, 0),
+            Color::opaque(0, 0, 255),
+            Color::opaque(255, 255, 255),
+        ];
+        for y in 0..2 {
+            for (x, color) in colors.into_iter().enumerate() {
+                src.set_pixel(x as u32, y, color).unwrap();
+            }
+        }
+        let background = Color::opaque(7, 9, 11);
+        let mut dest = Surface::new(4, 2, PixelFormat::Rgba8888);
+        dest.fill(background);
+
+        // x' = x / (0.1*x + 1): the right edge contracts toward the left.
+        let transform = Transform::set(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.1, 0.0, 1.0);
+        dest.blit_transformed(
+            &src,
+            Rect::new(0, 0, 4, 2),
+            Point::new(0, 0),
+            &transform,
+            Color::opaque(255, 255, 255),
+            BlitMode::Normal,
+        )
+        .unwrap();
+
+        assert_eq!(dest.get_pixel(0, 0), Some(colors[0]));
+        assert_eq!(dest.get_pixel(1, 0), Some(colors[1]));
+        assert_eq!(
+            dest.get_pixel(2, 0),
+            Some(colors[3]),
+            "general inverse samples source column 3, not affine column 2"
+        );
+        assert_eq!(dest.get_pixel(2, 1), Some(background));
+    }
+
+    #[test]
+    fn blit_transformed_rejects_non_finite_or_horizon_crossing_quads() {
+        use crate::transform::Transform;
+        let mut src = Surface::new(2, 2, PixelFormat::Rgba8888);
+        src.fill(Color::opaque(255, 0, 0));
+        let background = Color::opaque(3, 5, 7);
+
+        for transform in [
+            // w=x: the left corners transform through division by zero.
+            Transform::set(0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0),
+            // w=x-1 crosses the projective horizon through the source quad.
+            Transform::set(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, -1.0),
+            Transform::set(f32::INFINITY, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        ] {
+            let mut dest = Surface::new(3, 3, PixelFormat::Rgba8888);
+            dest.fill(background);
+            dest.blit_transformed(
+                &src,
+                Rect::new(0, 0, 2, 2),
+                Point::new(0, 0),
+                &transform,
+                Color::opaque(255, 255, 255),
+                BlitMode::Normal,
+            )
+            .unwrap();
+            assert!(dest
+                .pixels()
+                .chunks_exact(4)
+                .all(|pixel| pixel == [background.r, background.g, background.b, background.a]));
+        }
     }
 
     #[test]

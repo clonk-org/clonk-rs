@@ -423,61 +423,138 @@ impl GraphicsOverlayMode {
     }
 }
 
+fn draw_transform_component_is_zero(component: &f32) -> bool {
+    *component == 0.0
+}
+
+fn draw_transform_component_is_one(component: &f32) -> bool {
+    *component == 1.0
+}
+
+fn draw_transform_homogeneous_default() -> f32 {
+    1.0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct DrawTransform {
     pub scale_x: f32,
     pub scale_y: f32,
     pub offset_x: f32,
     pub offset_y: f32,
+    #[serde(default, skip_serializing_if = "draw_transform_component_is_zero")]
+    shear_x: f32,
+    #[serde(default, skip_serializing_if = "draw_transform_component_is_zero")]
+    shear_y: f32,
+    #[serde(default, skip_serializing_if = "draw_transform_component_is_zero")]
+    projective_x: f32,
+    #[serde(default, skip_serializing_if = "draw_transform_component_is_zero")]
+    projective_y: f32,
+    #[serde(
+        default = "draw_transform_homogeneous_default",
+        skip_serializing_if = "draw_transform_component_is_one"
+    )]
+    homogeneous: f32,
 }
 
 impl DrawTransform {
     pub fn identity() -> Self {
-        Self {
-            scale_x: 1.0,
-            scale_y: 1.0,
-            offset_x: 0.0,
-            offset_y: 0.0,
-        }
+        Self::from_matrix([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
     }
 
     pub fn is_identity(&self) -> bool {
-        (self.scale_x - 1.0).abs() <= f32::EPSILON
-            && (self.scale_y - 1.0).abs() <= f32::EPSILON
-            && self.offset_x.abs() <= f32::EPSILON
-            && self.offset_y.abs() <= f32::EPSILON
+        self.matrix() == Self::identity().matrix()
     }
 
     pub fn from_components(scale_x: f32, scale_y: f32, offset_x: f32, offset_y: f32) -> Self {
+        Self::from_matrix([
+            scale_x, 0.0, offset_x, 0.0, scale_y, offset_y, 0.0, 0.0, 1.0,
+        ])
+    }
+
+    pub fn from_matrix(matrix: [f32; 9]) -> Self {
         Self {
-            scale_x,
-            scale_y,
-            offset_x,
-            offset_y,
+            scale_x: matrix[0],
+            shear_x: matrix[1],
+            offset_x: matrix[2],
+            shear_y: matrix[3],
+            scale_y: matrix[4],
+            offset_y: matrix[5],
+            projective_x: matrix[6],
+            projective_y: matrix[7],
+            homogeneous: matrix[8],
         }
     }
 
-    pub fn combined(self, other: Self) -> Self {
-        let delta_scale_x = other.scale_x;
-        let delta_scale_y = other.scale_y;
-        let delta_offset_x = other.offset_x;
-        let delta_offset_y = other.offset_y;
+    pub fn matrix(&self) -> [f32; 9] {
+        [
+            self.scale_x,
+            self.shear_x,
+            self.offset_x,
+            self.shear_y,
+            self.scale_y,
+            self.offset_y,
+            self.projective_x,
+            self.projective_y,
+            self.homogeneous,
+        ]
+    }
 
-        let mut combined = Self {
-            scale_x: self.scale_x * delta_scale_x,
-            scale_y: self.scale_y * delta_scale_y,
-            offset_x: self.offset_x + self.scale_x * delta_offset_x,
-            offset_y: self.offset_y + self.scale_y * delta_offset_y,
-        };
+    /// Matches `C4DrawTransform::operator*=`: the supplied delta is applied
+    /// before the current transform, so this returns `delta * self`.
+    pub fn combined(self, delta: Self) -> Self {
+        let matrix = self.matrix();
+        let rhs = delta.matrix();
 
-        if combined.scale_x.abs() <= f32::EPSILON {
-            combined.scale_x = 0.0;
-        }
-        if combined.scale_y.abs() <= f32::EPSILON {
-            combined.scale_y = 0.0;
-        }
+        Self::from_matrix([
+            matrix[0] * rhs[0] + matrix[3] * rhs[1] + matrix[6] * rhs[2],
+            matrix[1] * rhs[0] + matrix[4] * rhs[1] + matrix[7] * rhs[2],
+            matrix[2] * rhs[0] + matrix[5] * rhs[1] + matrix[8] * rhs[2],
+            matrix[0] * rhs[3] + matrix[3] * rhs[4] + matrix[6] * rhs[5],
+            matrix[1] * rhs[3] + matrix[4] * rhs[4] + matrix[7] * rhs[5],
+            matrix[2] * rhs[3] + matrix[5] * rhs[4] + matrix[8] * rhs[5],
+            matrix[0] * rhs[6] + matrix[3] * rhs[7] + matrix[6] * rhs[8],
+            matrix[1] * rhs[6] + matrix[4] * rhs[7] + matrix[7] * rhs[8],
+            matrix[2] * rhs[6] + matrix[5] * rhs[7] + matrix[8] * rhs[8],
+        ])
+    }
+}
 
-        combined
+#[cfg(test)]
+mod draw_transform_tests {
+    use super::DrawTransform;
+
+    #[test]
+    fn legacy_serialized_transform_defaults_new_matrix_components() {
+        let transform: DrawTransform = serde_json::from_str(
+            r#"{"scale_x":2.0,"scale_y":3.0,"offset_x":4.0,"offset_y":5.0}"#,
+        )
+        .expect("legacy draw transform deserializes");
+
+        assert_eq!(
+            transform.matrix(),
+            [2.0, 0.0, 4.0, 0.0, 3.0, 5.0, 0.0, 0.0, 1.0]
+        );
+        assert_eq!(
+            serde_json::to_value(transform).expect("draw transform serializes"),
+            serde_json::json!({
+                "scale_x": 2.0,
+                "scale_y": 3.0,
+                "offset_x": 4.0,
+                "offset_y": 5.0,
+            })
+        );
+    }
+
+    #[test]
+    fn full_matrix_round_trips_through_serde() {
+        let transform = DrawTransform::from_matrix([
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0,
+        ]);
+        let serialized = serde_json::to_string(&transform).expect("draw transform serializes");
+        let decoded: DrawTransform =
+            serde_json::from_str(&serialized).expect("draw transform deserializes");
+
+        assert_eq!(decoded.matrix(), transform.matrix());
     }
 }
 

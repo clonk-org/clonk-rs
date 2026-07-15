@@ -50,7 +50,7 @@ use lc_engine::{
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
-    SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont,
+    SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont, Transform as GraphicsTransform,
 };
 use lc_gui::{Rect as GuiRect, Size as GuiSize};
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
@@ -3803,7 +3803,7 @@ impl GraphicsSystem {
         blit: SpriteBlitState,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
-        let (mut dest_x, mut dest_y, mut dest_w, mut dest_h) = dest;
+        let (dest_x, dest_y, mut dest_w, mut dest_h) = dest;
         if dest_w <= 0.0 || dest_h <= 0.0 || source.width <= 0 || source.height <= 0 {
             return;
         }
@@ -3821,43 +3821,9 @@ impl GraphicsSystem {
         dest_h *= clamped_h as f32 / source.height as f32;
         let source = SourceRect::new(source.x, source.y, clamped_w, clamped_h);
 
-        let mut flip = flipped;
-        if flip {
-            dest_x = 2.0 * shape_center.0 - (dest_x + dest_w);
-        }
-        if let Some(transform) = transform {
-            let scale_x = if transform.scale_x.abs() > f32::EPSILON {
-                transform.scale_x
-            } else {
-                1.0
-            };
-            let scale_y = if transform.scale_y.abs() > f32::EPSILON {
-                transform.scale_y
-            } else {
-                1.0
-            };
-            let x0 = shape_center.0 + (dest_x - shape_center.0) * scale_x + transform.offset_x;
-            let x1 =
-                shape_center.0 + (dest_x + dest_w - shape_center.0) * scale_x + transform.offset_x;
-            let y0 = shape_center.1 + (dest_y - shape_center.1) * scale_y + transform.offset_y;
-            let y1 =
-                shape_center.1 + (dest_y + dest_h - shape_center.1) * scale_y + transform.offset_y;
-            dest_x = x0.min(x1);
-            dest_y = y0.min(y1);
-            dest_w = (x1 - x0).abs();
-            dest_h = (y1 - y0).abs();
-            if scale_x < 0.0 {
-                flip = !flip;
-            }
-        }
-
-        if dest_w <= 0.0 || dest_h <= 0.0 {
-            return;
-        }
-
         let viewport_x = self.viewport_x;
         let viewport_y = self.viewport_y;
-        if rotation_degrees.abs() <= f32::EPSILON {
+        if transform.is_none() && !flipped && rotation_degrees.abs() <= f32::EPSILON {
             let rect = GuiRect::from_origin_size(
                 GuiPoint::new((dest_x - viewport_x) * zoom, (dest_y - viewport_y) * zoom),
                 GuiSize::new(dest_w * zoom, dest_h * zoom),
@@ -3868,32 +3834,44 @@ impl GraphicsSystem {
                 &sprite.image,
                 sprite.color_mask.as_ref(),
                 &source,
-                flip,
+                false,
                 owner_color,
                 blit,
                 gamma,
             );
         } else {
-            // The dest rect center orbits the shape center
-            // (src/C4Object.cpp:483-488).
-            let angle = rotation_degrees.to_radians();
-            let (sin, cos) = angle.sin_cos();
-            let rel_x = dest_x + dest_w / 2.0 - shape_center.0;
-            let rel_y = dest_y + dest_h / 2.0 - shape_center.1;
-            let center_x = shape_center.0 + rel_x * cos - rel_y * sin;
-            let center_y = shape_center.1 + rel_x * sin + rel_y * cos;
-            draw_image_region_rotated(
+            let mut matrix = transform
+                .map(|transform| transform.matrix())
+                .unwrap_or(GraphicsTransform::identity().mat);
+            // C4DrawTransform::SetFlipDir changes only matrix a. Direction
+            // mirroring must therefore happen before SetTransformAt, not as a
+            // second texture flip after the script matrix.
+            if flipped {
+                matrix[0] = -matrix[0];
+            }
+            let mut matrix = draw_transform_at(matrix, shape_center.0, shape_center.1);
+            if rotation_degrees.abs() > f32::EPSILON {
+                matrix = matrix.multiply(&GraphicsTransform::set_rotate(
+                    (rotation_degrees * 100.0).round() as i32,
+                    shape_center.0,
+                    shape_center.1,
+                ));
+            }
+            matrix = matrix.multiply(&GraphicsTransform::set_move_scale(
+                -viewport_x * zoom,
+                -viewport_y * zoom,
+                zoom,
+                zoom,
+            ));
+            draw_image_region_transformed(
                 &mut self.surface,
-                (center_x - viewport_x) * zoom,
-                (center_y - viewport_y) * zoom,
-                dest_w * zoom,
-                dest_h * zoom,
+                (dest_x, dest_y, dest_w, dest_h),
+                &matrix,
                 &sprite.image,
                 sprite.color_mask.as_ref(),
                 &source,
-                flip,
+                false,
                 owner_color,
-                rotation_degrees,
                 blit,
                 gamma,
             );
@@ -3968,47 +3946,44 @@ impl GraphicsSystem {
             return false;
         }
 
-        let mut scale_x = 1.0f32;
-        let mut scale_y = 1.0f32;
-        let mut offset_x = 0.0f32;
-        let mut offset_y = 0.0f32;
-        let mut transform_flipped = false;
-
         if let Some(transform) = transform {
-            if (transform.scale_x).abs() > f32::EPSILON {
-                scale_x = transform.scale_x;
+            let center = (screen_x / zoom, screen_y / zoom);
+            let dest = (
+                center.0 - facet.width as f32 / 2.0,
+                center.1 - facet.height as f32 / 2.0,
+                facet.width as f32,
+                facet.height as f32,
+            );
+            let mut matrix = draw_transform_at(transform.matrix(), center.0, center.1);
+            if rotation_degrees.abs() > f32::EPSILON {
+                matrix = matrix.multiply(&GraphicsTransform::set_rotate(
+                    (rotation_degrees * 100.0).round() as i32,
+                    center.0,
+                    center.1,
+                ));
             }
-            if (transform.scale_y).abs() > f32::EPSILON {
-                scale_y = transform.scale_y;
-            }
-            offset_x = transform.offset_x;
-            offset_y = transform.offset_y;
-        }
-
-        let final_screen_x = screen_x + offset_x * zoom;
-        let final_screen_y = screen_y + offset_y * zoom;
-
-        if scale_x < 0.0 {
-            transform_flipped = !transform_flipped;
-            scale_x = -scale_x;
-        }
-        if scale_y < 0.0 {
-            scale_y = -scale_y;
-        }
-
-        let dest_width = facet.width as f32 * zoom * scale_x;
-        let dest_height = facet.height as f32 * zoom * scale_y;
-        if dest_width <= 0.0 || dest_height <= 0.0 {
-            return false;
-        }
-
-        let final_flipped = flipped ^ transform_flipped;
-
-        if rotation_degrees.abs() <= f32::EPSILON {
+            matrix = matrix.multiply(&GraphicsTransform::set_move_scale(
+                0.0, 0.0, zoom, zoom,
+            ));
+            draw_image_region_transformed(
+                &mut self.surface,
+                dest,
+                &matrix,
+                &sprite.image,
+                sprite.color_mask.as_ref(),
+                &source_rect,
+                flipped,
+                owner_color,
+                blit,
+                gamma,
+            );
+        } else if rotation_degrees.abs() <= f32::EPSILON {
+            let dest_width = facet.width as f32 * zoom;
+            let dest_height = facet.height as f32 * zoom;
             let dest_rect = GuiRect::from_origin_size(
                 GuiPoint::new(
-                    final_screen_x - dest_width / 2.0,
-                    final_screen_y - dest_height / 2.0,
+                    screen_x - dest_width / 2.0,
+                    screen_y - dest_height / 2.0,
                 ),
                 GuiSize::new(dest_width, dest_height),
             );
@@ -4018,22 +3993,24 @@ impl GraphicsSystem {
                 &sprite.image,
                 sprite.color_mask.as_ref(),
                 &source_rect,
-                final_flipped,
+                flipped,
                 owner_color,
                 blit,
                 gamma,
             );
         } else {
+            let dest_width = facet.width as f32 * zoom;
+            let dest_height = facet.height as f32 * zoom;
             draw_image_region_rotated(
                 &mut self.surface,
-                final_screen_x,
-                final_screen_y,
+                screen_x,
+                screen_y,
                 dest_width,
                 dest_height,
                 &sprite.image,
                 sprite.color_mask.as_ref(),
                 &source_rect,
-                final_flipped,
+                flipped,
                 owner_color,
                 rotation_degrees,
                 blit,
@@ -4086,8 +4063,8 @@ impl GraphicsSystem {
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
-        rotation_degrees: f32,
-        base_transform: Option<DrawTransform>,
+        _rotation_degrees: f32,
+        _base_transform: Option<DrawTransform>,
         gamma: Option<&lc_graphics::GammaRamp>,
         object_ancestry: &mut HashSet<ObjectId>,
     ) {
@@ -4097,16 +4074,10 @@ impl GraphicsSystem {
         for overlay in &object.graphics_overlays {
             match overlay.mode {
                 GraphicsOverlayMode::Action | GraphicsOverlayMode::Base => {
-                    // Parent is a sentinel tested by equality in C++; any
-                    // ordinary mode, including combinations that carry bit 1,
-                    // remains local.
+                    // Ordinary C++ overlays draw through their own Transform;
+                    // the host's base draw transform and rotation are not
+                    // inherited (C4DefGraphics.cpp:808-821).
                     let blit = SpriteBlitState::for_overlay(object, overlay);
-                    let combined_transform = match (base_transform, overlay.transform) {
-                        (Some(base), Some(local)) => Some(base.combined(local)),
-                        (Some(base), None) => Some(base),
-                        (None, Some(local)) => Some(local),
-                        (None, None) => None,
-                    };
                     if overlay.mode == GraphicsOverlayMode::Action {
                         self.draw_overlay_action(
                             object,
@@ -4115,8 +4086,8 @@ impl GraphicsSystem {
                             screen_x,
                             screen_y,
                             zoom,
-                            rotation_degrees,
-                            combined_transform,
+                            0.0,
+                            overlay.transform,
                             blit,
                             gamma,
                         );
@@ -4128,8 +4099,8 @@ impl GraphicsSystem {
                             screen_x,
                             screen_y,
                             zoom,
-                            rotation_degrees,
-                            combined_transform,
+                            0.0,
+                            overlay.transform,
                             blit,
                             gamma,
                         );
@@ -4375,46 +4346,44 @@ impl GraphicsSystem {
             return;
         }
 
-        let mut scale_x = 1.0f32;
-        let mut scale_y = 1.0f32;
-        let mut offset_x = 0.0f32;
-        let mut offset_y = 0.0f32;
-        let mut flip_x = false;
-
         if let Some(transform) = transform {
-            if (transform.scale_x).abs() > f32::EPSILON {
-                scale_x = transform.scale_x;
+            let center = (screen_x / zoom, screen_y / zoom);
+            let dest = (
+                center.0 - sprite.image.width() as f32 / 2.0,
+                center.1 - sprite.image.height() as f32 / 2.0,
+                sprite.image.width() as f32,
+                sprite.image.height() as f32,
+            );
+            let mut matrix = draw_transform_at(transform.matrix(), center.0, center.1);
+            if rotation_degrees.abs() > f32::EPSILON {
+                matrix = matrix.multiply(&GraphicsTransform::set_rotate(
+                    (rotation_degrees * 100.0).round() as i32,
+                    center.0,
+                    center.1,
+                ));
             }
-            if (transform.scale_y).abs() > f32::EPSILON {
-                scale_y = transform.scale_y;
-            }
-            offset_x = transform.offset_x;
-            offset_y = transform.offset_y;
-        }
-
-        let final_screen_x = screen_x + offset_x * zoom;
-        let final_screen_y = screen_y + offset_y * zoom;
-        if scale_x < 0.0 {
-            flip_x = !flip_x;
-            scale_x = -scale_x;
-        }
-        if scale_y < 0.0 {
-            scale_y = -scale_y;
-        }
-
-        let dest_width = sprite_width * scale_x;
-        let dest_height = sprite_height * scale_y;
-        if dest_width <= 0.0 || dest_height <= 0.0 {
-            return;
-        }
-
-        if rotation_degrees.abs() <= f32::EPSILON {
+            matrix = matrix.multiply(&GraphicsTransform::set_move_scale(
+                0.0, 0.0, zoom, zoom,
+            ));
+            draw_image_region_transformed(
+                &mut self.surface,
+                dest,
+                &matrix,
+                &sprite.image,
+                sprite.color_mask.as_ref(),
+                &source_rect,
+                false,
+                owner_color,
+                blit,
+                gamma,
+            );
+        } else if rotation_degrees.abs() <= f32::EPSILON {
             let rect = GuiRect::from_origin_size(
                 GuiPoint::new(
-                    final_screen_x - dest_width / 2.0,
-                    final_screen_y - dest_height / 2.0,
+                    screen_x - sprite_width / 2.0,
+                    screen_y - sprite_height / 2.0,
                 ),
-                GuiSize::new(dest_width, dest_height),
+                GuiSize::new(sprite_width, sprite_height),
             );
             draw_image_region(
                 &mut self.surface,
@@ -4422,7 +4391,7 @@ impl GraphicsSystem {
                 &sprite.image,
                 sprite.color_mask.as_ref(),
                 &source_rect,
-                flip_x,
+                false,
                 owner_color,
                 blit,
                 gamma,
@@ -4430,14 +4399,14 @@ impl GraphicsSystem {
         } else {
             draw_image_region_rotated(
                 &mut self.surface,
-                final_screen_x,
-                final_screen_y,
-                dest_width,
-                dest_height,
+                screen_x,
+                screen_y,
+                sprite_width,
+                sprite_height,
                 &sprite.image,
                 sprite.color_mask.as_ref(),
                 &source_rect,
-                flip_x,
+                false,
                 owner_color,
                 rotation_degrees,
                 blit,
@@ -5978,6 +5947,141 @@ pub(crate) fn fill_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
     }
 }
 
+/// Rebase a C4 draw matrix around the target-space pivot used by
+/// `C4DrawTransform::SetTransformAt` (src/C4Facet.cpp:446-456).
+fn draw_transform_at(matrix: [f32; 9], off_x: f32, off_y: f32) -> GraphicsTransform {
+    let [a, b, c, d, e, f, g, h, i] = matrix;
+    let rebased_a = a + g * off_x;
+    let rebased_b = b + h * off_x;
+    let rebased_d = d + g * off_y;
+    let rebased_e = e + h * off_y;
+    GraphicsTransform::set(
+        rebased_a,
+        rebased_b,
+        c - rebased_a * off_x - rebased_b * off_y + i * off_x,
+        rebased_d,
+        rebased_e,
+        f - rebased_d * off_x - rebased_e * off_y + i * off_y,
+        g,
+        h,
+        i - g * off_x - h * off_y,
+    )
+}
+
+/// Sprite blit through a full projective matrix. This is the CPU equivalent
+/// of C++'s transformed GL/software blit and intentionally keeps the normal
+/// owner-colour, modulation, gamma and framebuffer-composition pipeline.
+#[allow(clippy::too_many_arguments)]
+fn draw_image_region_transformed(
+    surface: &mut Surface,
+    dest: (f32, f32, f32, f32),
+    transform: &GraphicsTransform,
+    image: &ImageData,
+    mask: Option<&ColorByOwnerMask>,
+    source: &SourceRect,
+    flip_x: bool,
+    owner_color: Option<u32>,
+    blit: SpriteBlitState,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
+    let (dest_x, dest_y, dest_width, dest_height) = dest;
+    if dest_width <= 0.0 || dest_height <= 0.0 || source.width <= 0 || source.height <= 0 {
+        return;
+    }
+    if image.width() == 0 || image.height() == 0 {
+        return;
+    }
+    let Some(inverse) = transform.inverse() else {
+        return;
+    };
+
+    let corners = [
+        (dest_x, dest_y),
+        (dest_x + dest_width, dest_y),
+        (dest_x, dest_y + dest_height),
+        (dest_x + dest_width, dest_y + dest_height),
+    ];
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for (x, y) in corners {
+        let (x, y) = transform.transform_point(x, y);
+        if !x.is_finite() || !y.is_finite() {
+            return;
+        }
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+
+    let bounds = surface.bounds();
+    let min_x = (min_x.floor() as i32).max(bounds.x);
+    let min_y = (min_y.floor() as i32).max(bounds.y);
+    let max_x = (max_x.ceil() as i32).min(bounds.x + bounds.width as i32);
+    let max_y = (max_y.ceil() as i32).min(bounds.y + bounds.height as i32);
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
+
+    let image_width = image.width() as i32;
+    let image_height = image.height() as i32;
+    let pixels = image.pixels();
+    for target_y in min_y..max_y {
+        for target_x in min_x..max_x {
+            let (sample_x, sample_y) =
+                inverse.transform_point(target_x as f32 + 0.5, target_y as f32 + 0.5);
+            if !sample_x.is_finite() || !sample_y.is_finite() {
+                continue;
+            }
+            let normalized_x = (sample_x - dest_x) / dest_width;
+            let normalized_y = (sample_y - dest_y) / dest_height;
+            if !(0.0..1.0).contains(&normalized_x) || !(0.0..1.0).contains(&normalized_y) {
+                continue;
+            }
+
+            let source_x = (normalized_x * source.width as f32).floor() as i32;
+            let source_x = if flip_x {
+                (source.width - 1).saturating_sub(source_x)
+            } else {
+                source_x
+            };
+            let source_x = source.x + source_x;
+            let source_y = source.y + (normalized_y * source.height as f32).floor() as i32;
+            if source_x < 0
+                || source_y < 0
+                || source_x >= image_width
+                || source_y >= image_height
+            {
+                continue;
+            }
+
+            let idx = (source_y as usize * image.width() as usize + source_x as usize) * 4;
+            if idx + 3 >= pixels.len() {
+                continue;
+            }
+            let color = Color::new(
+                pixels[idx],
+                pixels[idx + 1],
+                pixels[idx + 2],
+                pixels[idx + 3],
+            );
+            let owner_mask =
+                mask.map(|mask_map| mask_map.value_at(source_x as u32, source_y as u32));
+            let source = prepare_sprite_fragment(color, owner_mask, owner_color, blit);
+            if source.alpha() == 0 {
+                continue;
+            }
+            let background = surface
+                .get_pixel(target_x as u32, target_y as u32)
+                .unwrap_or_default();
+            let blended = composite_sprite_fragment(source, background, blit, gamma);
+            let _ = surface.set_pixel(target_x as u32, target_y as u32, blended);
+        }
+    }
+}
+
 fn draw_image_region(
     surface: &mut Surface,
     rect: &GuiRect,
@@ -6919,6 +7023,152 @@ mod tests {
         assert_eq!(
             GraphicsSystem::resolve_draw_direction(&flag, direction),
             (4, false)
+        );
+    }
+
+    #[test]
+    fn set_obj_draw_transform_rotation_reaches_presenter() {
+        let sprite = DefinitionSprite {
+            image: ImageData::new(9, 3, [220, 40, 20, 255].repeat(27)),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-4, -1, 9, 3)),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let render = |transform| {
+            let mut graphics = GraphicsSystem::new(
+                24,
+                24,
+                24,
+                "Draw transform",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.blit_face(
+                &sprite,
+                SourceRect::new(0, 0, 9, 3),
+                (6.0, 9.0, 9.0, 3.0),
+                (10.5, 10.5),
+                false,
+                None,
+                1.0,
+                0.0,
+                transform,
+                SpriteBlitState::normal(),
+                None,
+            );
+            let mut min_x = i32::MAX;
+            let mut min_y = i32::MAX;
+            let mut max_x = i32::MIN;
+            let mut max_y = i32::MIN;
+            for y in 0..graphics.surface().height() {
+                for x in 0..graphics.surface().width() {
+                    if graphics
+                        .surface()
+                        .get_pixel(x, y)
+                        .is_some_and(|pixel| pixel == Color::opaque(220, 40, 20))
+                    {
+                        min_x = min_x.min(x as i32);
+                        min_y = min_y.min(y as i32);
+                        max_x = max_x.max(x as i32);
+                        max_y = max_y.max(y as i32);
+                    }
+                }
+            }
+            (min_x, min_y, max_x, max_y)
+        };
+
+        let straight = render(None);
+        let rotated = render(Some(DrawTransform::from_matrix([
+            0.866, -0.5, 0.0, 0.5, 0.866, 0.0, 0.0, 0.0, 1.0,
+        ])));
+        assert_eq!(straight.3 - straight.1 + 1, 3);
+        assert!(
+            rotated.3 - rotated.1 + 1 >= 6,
+            "30-degree b/d rotation must increase the 9x3 sprite's vertical span: {rotated:?}"
+        );
+        assert!(
+            rotated.2 - rotated.0 + 1 >= 8,
+            "rotated sprite unexpectedly collapsed: {rotated:?}"
+        );
+    }
+
+    #[test]
+    fn overlay_draw_transform_uses_its_full_local_matrix() {
+        let sprite = DefinitionSprite {
+            image: ImageData::new(9, 3, [30, 180, 70, 255].repeat(27)),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-4, -1, 9, 3)),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(12, 12);
+        object.graphics_overlays = vec![ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base)
+            .with_definition(Some("RotatedOverlay".to_string()))
+            .with_transform(Some(DrawTransform::from_matrix([
+                0.866, -0.5, 0.0, 0.5, 0.866, 0.0, 0.0, 0.0, 1.0,
+            ])))];
+        let mut graphics = GraphicsSystem::new(
+            28,
+            28,
+            28,
+            "Overlay transform",
+            test_font(),
+            Arc::new(HashMap::from([(
+                sprite_map_key("RotatedOverlay", None),
+                sprite,
+            )])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.draw_object_overlays(
+            &object,
+            &[],
+            &[],
+            OWNER_NONE,
+            None,
+            12.0,
+            12.0,
+            1.0,
+            90.0,
+            Some(DrawTransform::from_components(3.0, 3.0, 0.0, 0.0)),
+            None,
+        );
+
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
+        for y in 0..graphics.surface().height() {
+            for x in 0..graphics.surface().width() {
+                if graphics
+                    .surface()
+                    .get_pixel(x, y)
+                    .is_some_and(|pixel| pixel == Color::opaque(30, 180, 70))
+                {
+                    min_x = min_x.min(x as i32);
+                    min_y = min_y.min(y as i32);
+                    max_x = max_x.max(x as i32);
+                    max_y = max_y.max(y as i32);
+                }
+            }
+        }
+        let width = max_x - min_x + 1;
+        let height = max_y - min_y + 1;
+        assert!(
+            height >= 6,
+            "overlay b/d terms were not presented: {:?}",
+            (min_x, min_y, max_x, max_y)
+        );
+        assert!(
+            width <= 11,
+            "ordinary overlay incorrectly inherited host scale/rotation: {:?}",
+            (min_x, min_y, max_x, max_y)
         );
     }
 

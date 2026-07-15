@@ -1,6 +1,7 @@
-//! 2D affine blit transform, a faithful port of C++ `CBltTransform`
+//! 2D homogeneous blit transform, a faithful port of C++ `CBltTransform`
 //! (`src/StdDDraw2.h:53`, `src/StdDDraw2.cpp`). Used for rotated/scaled/mirrored
-//! object sprites (`SetObjDrawTransform`, action facets) and HUD elements.
+//! object sprites (`SetObjDrawTransform`, action facets), projective
+//! `SetObjDrawTransform2` matrices and HUD elements.
 //!
 //! The matrix layout matches C++ exactly: a row-major 3x3 homogeneous matrix
 //! stored as `mat[0..9]`, applied to a point with a homogeneous divide.
@@ -98,9 +99,47 @@ impl Transform {
         )
     }
 
+    /// Inverse of the complete homogeneous 3x3 matrix, matching
+    /// `CBltTransform::SetAsInv` (`src/StdDDraw2.cpp`). This includes the
+    /// projective `g/h/i` row used by `SetObjDrawTransform2`.
+    ///
+    /// C++ rejects an exactly-zero determinant. Rust additionally rejects
+    /// non-finite input/results so a malformed script transform cannot feed
+    /// infinities or NaNs into the software rasterizer.
+    pub fn inverse(&self) -> Option<Transform> {
+        let m = &self.mat;
+        if !m.iter().all(|component| component.is_finite()) {
+            return None;
+        }
+        let det = m[0] * m[4] * m[8] + m[1] * m[5] * m[6] + m[2] * m[3] * m[7]
+            - m[2] * m[4] * m[6]
+            - m[0] * m[5] * m[7]
+            - m[1] * m[3] * m[8];
+        if det == 0.0 || !det.is_finite() {
+            return None;
+        }
+        let inverse = Transform::set(
+            (m[4] * m[8] - m[5] * m[7]) / det,
+            (m[2] * m[7] - m[1] * m[8]) / det,
+            (m[1] * m[5] - m[2] * m[4]) / det,
+            (m[5] * m[6] - m[3] * m[8]) / det,
+            (m[0] * m[8] - m[2] * m[6]) / det,
+            (m[2] * m[3] - m[0] * m[5]) / det,
+            (m[3] * m[7] - m[4] * m[6]) / det,
+            (m[1] * m[6] - m[0] * m[7]) / det,
+            (m[0] * m[4] - m[1] * m[3]) / det,
+        );
+        inverse
+            .mat
+            .iter()
+            .all(|component| component.is_finite())
+            .then_some(inverse)
+    }
+
     /// Inverse of an affine transform (`mat[6]=mat[7]=0, mat[8]=1`). Returns
-    /// `None` for a degenerate (non-invertible) matrix. Used to inverse-map
-    /// destination pixels back to source space for sampling.
+    /// `None` for a degenerate (non-invertible) matrix. Retained for callers
+    /// that explicitly operate on the affine subset; projective blits use
+    /// [`Self::inverse`].
     pub fn inverse_affine(&self) -> Option<Transform> {
         let m = &self.mat;
         let (a, b, c) = (m[0], m[1], m[2]);
@@ -169,5 +208,40 @@ mod tests {
             (rx - 9.0).abs() < 1e-2 && (ry - -4.0).abs() < 1e-2,
             "({rx},{ry})"
         );
+    }
+
+    #[test]
+    fn projective_inverse_round_trips() {
+        let transform = Transform::set(1.2, 0.1, 3.0, -0.2, 0.9, -2.0, 0.01, -0.02, 1.0);
+        let inverse = transform
+            .inverse()
+            .expect("projective matrix is invertible");
+
+        for (expected_x, expected_y) in [(9.0, -4.0), (0.5, 2.25), (-3.0, 7.0)] {
+            let (x, y) = transform.transform_point(expected_x, expected_y);
+            let (actual_x, actual_y) = inverse.transform_point(x, y);
+            assert!(
+                (actual_x - expected_x).abs() < 1e-3 && (actual_y - expected_y).abs() < 1e-3,
+                "({expected_x},{expected_y}) round-tripped as ({actual_x},{actual_y})"
+            );
+        }
+    }
+
+    #[test]
+    fn general_inverse_matches_cpp_zero_and_finite_guards() {
+        assert!(Transform::set(1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 0.0, 0.0, 1.0)
+            .inverse()
+            .is_none());
+        assert!(
+            Transform::set(f32::NAN, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0,)
+                .inverse()
+                .is_none()
+        );
+
+        // SetAsInv tests `!det`, not an epsilon. Preserve invertible, very
+        // small finite determinants rather than treating them as singular.
+        let tiny = Transform::set(1.0e-10, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+        let inverse = tiny.inverse().expect("nonzero determinant is invertible");
+        assert!((inverse.mat[0] - 1.0e10).abs() / 1.0e10 < 1e-6);
     }
 }
