@@ -100,6 +100,13 @@ struct Zone {
     used: bool,
 }
 
+#[derive(Clone, Copy)]
+struct ZoneEntryPoint {
+    x: i32,
+    y: i32,
+    found: bool,
+}
+
 impl Zone {
     fn contains(&self, x: i32, y: i32) -> bool {
         inside(x - self.x, 0, self.width - 1) && inside(y - self.y, 0, self.height - 1)
@@ -112,7 +119,7 @@ impl Zone {
         _from_y: i32,
         mut to_x: i32,
         to_y: i32,
-    ) -> Option<(i32, i32)> {
+    ) -> ZoneEntryPoint {
         if self.contains(to_x, to_y) {
             if to_x < self.x + self.width / 2 {
                 to_x = self.x - 1;
@@ -190,19 +197,16 @@ impl Zone {
                 y_incr2 = 1;
             }
         }
-        if !found && !state.is_solid(rx, ry) {
-            found = true;
-        }
-        if !found {
-            return None;
-        }
-        if !inside(rx - self.x, 0, self.width - 1) {
+        if found && !inside(rx - self.x, 0, self.width - 1) {
             state.adjust_move_to_target(&mut rx, &mut ry, false, 20);
         }
-        if state.is_solid(rx, ry) {
-            return None;
+        // C++ returns the perimeter scan result without revalidating the
+        // coordinates changed by AdjustMoveToTarget.
+        ZoneEntryPoint {
+            x: rx,
+            y: ry,
+            found,
         }
-        Some((rx, ry))
     }
 }
 
@@ -435,22 +439,15 @@ impl<'a> PathFinderState<'a> {
                 self.rays[index].borrow_mut().status = RayStatus::Still;
                 return;
             }
-            let (entry_x, entry_y) = {
+            let entry = {
                 let ray = self.rays[index].borrow();
-                let result = self.zones[zone_index].entry_point(
+                self.zones[zone_index].entry_point(
                     self,
                     ray.x2,
                     ray.y2,
                     ray.target_x,
                     ray.target_y,
-                );
-                match result {
-                    Some(point) => point,
-                    None => {
-                        self.rays[index].borrow_mut().status = RayStatus::Failure;
-                        return;
-                    }
-                }
+                )
             };
             // C++ passes this use-zone ray's X2/Y2 by reference to
             // GetEntryPoint; SetCompletePath later emits that far-side exit
@@ -458,12 +455,16 @@ impl<'a> PathFinderState<'a> {
             // (C4PathFinder.cpp:128-139,383-400).
             {
                 let mut ray = self.rays[index].borrow_mut();
-                ray.x2 = entry_x;
-                ray.y2 = entry_y;
+                ray.x2 = entry.x;
+                ray.y2 = entry.y;
+            }
+            if !entry.found {
+                self.rays[index].borrow_mut().status = RayStatus::Failure;
+                return;
             }
             if !self.add_ray(
-                entry_x,
-                entry_y,
+                entry.x,
+                entry.y,
                 target_x,
                 target_y,
                 depth + 1,
@@ -500,9 +501,9 @@ impl<'a> PathFinderState<'a> {
                 if self.zones[zone_index].contains(ray.x, ray.y) {
                     (ray.x2, ray.y2)
                 } else {
-                    self.zones[zone_index]
-                        .entry_point(self, ray.x2, ray.y2, ray.x2, ray.y2)
-                        .unwrap_or((ray.x2, ray.y2))
+                    let entry = self.zones[zone_index]
+                        .entry_point(self, ray.x2, ray.y2, ray.x2, ray.y2);
+                    (entry.x, entry.y)
                 }
             };
             // The initial zone-entry adjustment also mutates the parent
@@ -578,21 +579,20 @@ impl<'a> PathFinderState<'a> {
             };
             if let Some(zone_index) = self.find_zone(x2, y2) {
                 if !self.zones[zone_index].used {
-                    let Some((entry_x, entry_y)) =
-                        self.zones[zone_index].entry_point(self, x2, y2, x2, y2)
-                    else {
+                    let entry = self.zones[zone_index].entry_point(self, x2, y2, x2, y2);
+                    if !entry.found {
                         // C4PF_Ray_Crawl returns for this pass even when
                         // GetEntryPoint fails, leaving the ray crawling
                         // (C4PathFinder.cpp:198-212).
                         return;
-                    };
+                    }
                     let target_x = self.rays[index].borrow().target_x;
                     let target_y = self.rays[index].borrow().target_y;
                     let depth = self.rays[index].borrow().depth;
                     let direction = self.rays[index].borrow().direction;
                     if !self.add_ray(
-                        entry_x,
-                        entry_y,
+                        entry.x,
+                        entry.y,
                         target_x,
                         target_y,
                         depth + 1,
@@ -1241,6 +1241,30 @@ mod tests {
         assert_eq!(finder.level, 10);
     }
 
+    fn landscape_with_solid_transfer_zone_ring() -> Landscape {
+        let mut landscape =
+            Landscape::with_default_material(16, vec![16; 16], None).expect("test landscape");
+        landscape.set_world_height(16);
+        let mut bytes = vec![0; 16 * 16];
+        for x in 4..=9 {
+            bytes[4 * 16 + x] = 1;
+            bytes[9 * 16 + x] = 1;
+        }
+        for y in 4..=9 {
+            bytes[y * 16 + 4] = 1;
+            bytes[y * 16 + 9] = 1;
+        }
+        landscape.set_pixel_grid(PixelGrid::new(
+            16,
+            16,
+            bytes,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+        landscape
+    }
+
     #[test]
     fn transfer_waypoints_keep_the_far_side_zone_exit() {
         // C4PathFinder passes X2/Y2 by reference through GetEntryPoint and
@@ -1291,31 +1315,72 @@ mod tests {
     }
 
     #[test]
+    fn launch_zone_intersection_uses_clamped_entry_when_scan_fails() {
+        // The ordinary launch arm ignores GetEntryPoint's return value but
+        // still consumes its unconditionally clamped rX/rY out-parameters
+        // (C4PathFinder.cpp:153-161; C4TransferZone.cpp:167-178).
+        let landscape = landscape_with_solid_transfer_zone_ring();
+        let mut zones = [Zone {
+            owner: ObjectId::new(9),
+            x: 5,
+            y: 5,
+            width: 4,
+            height: 4,
+            used: false,
+        }];
+        let mut state = PathFinderState::new(&landscape, &mut zones, true, 1, Vector2::new(1, 6));
+        assert!(state.add_ray(1, 6, 12, 6, 0, DIRECTION_RIGHT, None, None));
+        {
+            let mut ray = state.rays[0].borrow_mut();
+            // Force the already-checked PathFree point inside the zone while
+            // preserving an origin outside, selecting the pZone launch arm.
+            ray.x2 = 5;
+            ray.y2 = 6;
+        }
+
+        state.execute_launch(0);
+
+        {
+            let parent = state.rays[0].borrow();
+            assert!(matches!(parent.status, RayStatus::Still));
+            assert_eq!((parent.x2, parent.y2), (4, 6));
+        }
+        assert_eq!(state.rays.len(), 2);
+        let child = state.rays[1].borrow();
+        assert!(matches!(child.status, RayStatus::Launch));
+        assert_eq!((child.x, child.y, child.x2, child.y2), (4, 6, 4, 6));
+        assert_eq!(child.use_zone, Some(0));
+    }
+
+    #[test]
+    fn zero_perimeter_entry_does_not_recover_an_unscanned_free_clamp() {
+        // C++ returns false when the signed perimeter loop has no
+        // iterations; it never promotes the free initial clamp afterward
+        // (C4TransferZone.cpp:175-198).
+        let landscape = Landscape::flat(16, 20);
+        let mut zones = [Zone {
+            owner: ObjectId::new(9),
+            x: 5,
+            y: 5,
+            width: 0,
+            height: 0,
+            used: false,
+        }];
+        let state = PathFinderState::new(&landscape, &mut zones, true, 1, Vector2::new(1, 1));
+
+        let entry = state.zones[0].entry_point(&state, 5, 5, 5, 5);
+
+        assert!(!entry.found);
+        assert_eq!((entry.x, entry.y), (5, 5));
+    }
+
+    #[test]
     fn failed_crawl_zone_entry_keeps_the_ray_crawling() {
         // C4PF_Ray_Crawl returns early after touching an unused transfer
         // zone even when GetEntryPoint exhausts a fully solid perimeter. It
         // neither kills the ray nor increments CrawlLength
         // (C4PathFinder.cpp:198-212).
-        let mut landscape =
-            Landscape::with_default_material(16, vec![16; 16], None).expect("test landscape");
-        landscape.set_world_height(16);
-        let mut bytes = vec![0; 16 * 16];
-        for x in 4..=9 {
-            bytes[4 * 16 + x] = 1;
-            bytes[9 * 16 + x] = 1;
-        }
-        for y in 4..=9 {
-            bytes[y * 16 + 4] = 1;
-            bytes[y * 16 + 9] = 1;
-        }
-        landscape.set_pixel_grid(PixelGrid::new(
-            16,
-            16,
-            bytes,
-            vec![0, 100],
-            vec![None, Some("Earth".to_owned())],
-            vec![None; 2],
-        ));
+        let landscape = landscape_with_solid_transfer_zone_ring();
 
         let mut zones = [Zone {
             owner: ObjectId::new(9),
@@ -1339,7 +1404,9 @@ mod tests {
             ray.crawl_length = 7;
         }
 
-        assert!(state.zones[0].entry_point(&state, 5, 5, 5, 5).is_none());
+        let entry = state.zones[0].entry_point(&state, 5, 5, 5, 5);
+        assert!(!entry.found);
+        assert_eq!((entry.x, entry.y), (4, 5));
 
         state.execute_crawl(0);
         {
