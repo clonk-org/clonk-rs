@@ -16739,16 +16739,12 @@ impl Engine {
                 let vehicle = self.spawn_object(config)?;
                 if first_base.is_some() {
                     if let Some(index) = self.find_object_index(vehicle) {
-                        // C4Object::SetCommand (C4Object.cpp:3937-3986):
-                        // decrement NoCollectDelay, clear, then push Base Exit.
-                        self.objects[index].apply_command_operations([
-                            CommandOperation::DecrementNoCollectDelay,
-                            CommandOperation::Clear,
-                            CommandOperation::PushFront(
-                                command::CommandRequest::new(CommandId::Exit)
-                                    .with_mode(CommandMode::Base),
-                            ),
-                        ]);
+                        self.set_object_command(
+                            index,
+                            command::CommandRequest::new(CommandId::Exit)
+                                .with_mode(CommandMode::Base),
+                            false,
+                        )?;
                     }
                 }
             }
@@ -16848,20 +16844,6 @@ impl Engine {
             config = config.with_container(base);
         }
         let id = self.spawn_object(config)?;
-        if first_base.is_some() {
-            if let Some(index) = self.find_object_index(id) {
-                // Enter(FirstBase), then SetCommand(C4CMD_Exit) before the
-                // Recruitment callback (C4Player.cpp:551-564, :557-558).
-                self.objects[index].apply_command_operations([
-                    CommandOperation::DecrementNoCollectDelay,
-                    CommandOperation::Clear,
-                    CommandOperation::PushFront(
-                        command::CommandRequest::new(CommandId::Exit)
-                            .with_mode(CommandMode::Base),
-                    ),
-                ]);
-            }
-        }
         Rc::make_mut(&mut self.crew_object_infos).insert(
             id,
             CrewObjectInfo {
@@ -16906,6 +16888,19 @@ impl Engine {
             }
         }
 
+        if first_base.is_some() {
+            if let Some(index) = self.find_object_index(id) {
+                // CreateInfoObject has already attached the roster info and
+                // physicals. Enter(FirstBase), then SetCommand(C4CMD_Exit)
+                // precedes Recruitment (C4Player.cpp:551-568).
+                self.set_object_command(
+                    index,
+                    command::CommandRequest::new(CommandId::Exit).with_mode(CommandMode::Base),
+                    false,
+                )?;
+            }
+        }
+
         // Fail-safe Recruitment callback (PSF_OnJoinCrew = "~Recruitment",
         // C4Script.h:107; C4Player.cpp:520-524/565-568).
         let has_recruitment = self
@@ -16915,10 +16910,12 @@ impl Engine {
             .unwrap_or(false);
         if has_recruitment {
             if let Some(index) = self.find_object_index(id) {
-                tolerate_script_error(
-                    self.call_object_function(index, "Recruitment", vec![Value::Int(number)])
-                        .map(|_| ()),
-                )?;
+                if self.objects[index].state.status.is_active() {
+                    tolerate_script_error(
+                        self.call_object_function(index, "Recruitment", vec![Value::Int(number)])
+                            .map(|_| ()),
+                    )?;
+                }
             }
         }
         Ok(())
@@ -18629,6 +18626,7 @@ impl Engine {
                             ocf_base: definition.ocf_base(),
                             crew_member: definition.is_crew(),
                             silent_commands: definition.silent_commands(),
+                            vehicle_control: definition.vehicle_control(),
                             action_library: definition.action_library().clone(),
                             action_graphics: definition.action_graphics().clone(),
                             value: definition.value(),
@@ -39533,11 +39531,7 @@ impl Engine {
                     if let Some(controller) = controller {
                         self.objects[index].state.controller = controller;
                     }
-                    self.objects[index].apply_command_operations([
-                        CommandOperation::DecrementNoCollectDelay,
-                        CommandOperation::Clear,
-                        CommandOperation::PushFront(request),
-                    ]);
+                    self.set_object_command(index, request, false)?;
                 }
             }
             CommandEvent::ControlCommandAcquire {
@@ -44214,6 +44208,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     ocf_base: OCF_NORMAL,
                     crew_member: false,
                     silent_commands: false,
+                    vehicle_control: 0,
                     action_library: ActionLibrary::default(),
                     action_graphics: HashMap::new(),
                     value: 0,

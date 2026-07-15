@@ -4769,7 +4769,7 @@ impl Engine {
 
     /// `ObjectComEnter` for the pushed target (C4ObjectCom.cpp:316-333):
     /// the vehicle enters the entrance at its own position via a plain
-    /// SetCommand (no control overload).
+    /// SetCommand.
     fn object_com_enter(&mut self, target_index: Option<usize>) -> Result<bool, EngineError> {
         let Some(target_index) = target_index else {
             return Ok(false);
@@ -4782,18 +4782,13 @@ impl Engine {
             self.at_object(position, ocf::ENTRANCE, Some(target_id))
         {
             if entrance_ocf & ocf::ENTRANCE != 0 {
-                // SetCommand: NoCollectDelay decrement, clear stack, push
-                // (C4Object.h:214-219, C4Object.cpp:3939-3943 without the
-                // fControl overloads).
-                self.objects[target_index].apply_command_operations([
-                    CommandOperation::DecrementNoCollectDelay,
-                    CommandOperation::Clear,
-                    CommandOperation::PushFront(
-                        CommandRequest::new(CommandId::Enter)
-                            .with_target(Some(entrance_id))
-                            .with_mode(CommandMode::Base),
-                    ),
-                ]);
+                self.set_object_command(
+                    target_index,
+                    CommandRequest::new(CommandId::Enter)
+                        .with_target(Some(entrance_id))
+                        .with_mode(CommandMode::Base),
+                    false,
+                )?;
                 return Ok(true);
             }
         }
@@ -5330,6 +5325,19 @@ impl Engine {
             }
             PlayerObjectCommandMode::Set => {}
         }
+        self.set_object_command(index, request, f_control)
+    }
+
+    /// `C4Object::SetCommand` for a fully parsed request. Only menu closing
+    /// and the command object's own ControlCommand overload are gated by
+    /// `f_control`; contained/pushed vehicle overloads run for every entry
+    /// point (C4Object.cpp:3939-3983).
+    pub(crate) fn set_object_command(
+        &mut self,
+        index: usize,
+        request: CommandRequest,
+        f_control: bool,
+    ) -> Result<(), EngineError> {
         // SetCommand: decrement NoCollectDelay (:3941-3942), then clear the
         // stack (:3943).
         self.objects[index].apply_command_operations([
@@ -5351,14 +5359,26 @@ impl Engine {
         };
         // Script overload (:3935-3942): `ControlCommand(name, target, tx,
         // ty, target2, data)`.
+        let tx = request
+            .tx_definition
+            .as_ref()
+            .map(|id| Value::C4Id(id.as_str().to_string()))
+            .or_else(|| request.tx.map(Value::Int))
+            .unwrap_or(Value::Int(0));
+        let data = match &request.data {
+            CommandData::Integer(value) => *value,
+            CommandData::Text(_) | CommandData::None => 0,
+        };
         let args = [
-            Value::String(command.to_name().to_string()),
-            target
+            Value::String(request.id.to_name().to_string()),
+            request
+                .target
                 .map(compat::object_reference_value)
                 .unwrap_or(Value::Nil),
-            Value::Int(tx),
-            Value::Int(ty),
-            target2
+            tx,
+            Value::Int(request.ty.unwrap_or(0)),
+            request
+                .target2
                 .map(compat::object_reference_value)
                 .unwrap_or(Value::Nil),
             Value::Int(data),
@@ -5371,6 +5391,9 @@ impl Engine {
                 return Ok(());
             }
         }
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
         // Inside vehicle control overload (:3947-3961): the container's
         // ControlCommand with the clonk appended in slot 7.
         if let Some(container_index) = self
@@ -5398,6 +5421,9 @@ impl Engine {
                 }
             }
         }
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
         // Outside vehicle control overload (:3962-3974): the pushed
         // target's ControlCommand, plain six args.
         if self.object_procedure(index) == ActionProcedure::Push {
@@ -5425,7 +5451,10 @@ impl Engine {
                 }
             }
         }
-        self.objects[index].apply_command_operations([CommandOperation::PushFront(request)]);
+        if let Some(index) = self.find_object_index(object_id) {
+            self.objects[index]
+                .apply_command_operations([CommandOperation::PushFront(request)]);
+        }
         Ok(())
     }
 
@@ -5433,15 +5462,9 @@ impl Engine {
     /// clear and replace the stack without the menu/own-object control arms,
     /// while retaining the unconditional inside/outside vehicle overloads.
     pub(crate) fn set_plain_exit_command(&mut self, index: usize) -> Result<(), EngineError> {
-        self.object_command_to_obj(
+        self.set_object_command(
             index,
-            CommandId::Exit,
-            None,
-            None,
-            0,
-            0,
-            0,
-            PlayerObjectCommandMode::Set,
+            CommandRequest::new(CommandId::Exit).with_mode(CommandMode::Base),
             false,
         )
     }
@@ -8334,7 +8357,15 @@ protected func ContainedThrow(object clonk)
     /// Crew contained in a VehicleControl=Inside vehicle whose script is
     /// `vehicle_script`.
     fn inside_vehicle_fixture(engine: &mut Engine, vehicle_script: &str) -> (ObjectId, ObjectId) {
-        register_clonk(engine, "CLNK", "#strict\n");
+        inside_vehicle_fixture_with_clonk(engine, "#strict\n", vehicle_script)
+    }
+
+    fn inside_vehicle_fixture_with_clonk(
+        engine: &mut Engine,
+        clonk_script: &str,
+        vehicle_script: &str,
+    ) -> (ObjectId, ObjectId) {
+        register_clonk(engine, "CLNK", clonk_script);
         let mut lorry =
             Definition::from_script("LORY", "Lorry", vehicle_script).expect("lorry compiles");
         lorry.set_vehicle_control(crate::VEHICLE_CONTROL_INSIDE);
@@ -8430,6 +8461,156 @@ protected func ControlCommand(szCommand) { return(1); }
         assert!(
             snapshot.command_stack.command_names().is_empty(),
             "the pushed vehicle's ControlCommand consumed the command"
+        );
+    }
+
+    #[test]
+    fn script_set_command_uses_inside_vehicle_overload_without_control_arms() {
+        // FnSetCommand calls C4Object::SetCommand with fControl=false. The
+        // contained VehicleControl=Inside arm is nevertheless unconditional,
+        // while CloseMenu and the clonk's own ControlCommand stay disabled.
+        let clonk = r#"
+#strict
+local own_calls;
+protected func ControlCommand() { own_calls++; return(1); }
+public func IssueExit() {
+  CreateMenu(CLNK, this(), this(), 0, "Open");
+  return SetCommand(this(), "Exit", nil, nil, 24, nil, 25);
+}
+"#;
+        let vehicle = r#"
+#strict
+local calls, seen_command, seen_target, seen_tx, seen_ty, seen_target2, seen_data, seen_by;
+protected func ControlCommand(command, target, tx, ty, target2, data, by) {
+  calls++;
+  seen_command = command;
+  seen_target = target;
+  seen_tx = tx;
+  seen_ty = ty;
+  seen_target2 = target2;
+  seen_data = data;
+  seen_by = by;
+  return(1);
+}
+"#;
+        let mut engine = Engine::new();
+        let (crew, lorry) =
+            inside_vehicle_fixture_with_clonk(&mut engine, clonk, vehicle);
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.controller = 17;
+
+        let result = engine
+            .call_object_function(crew_index, "IssueExit", Vec::new())
+            .expect("IssueExit succeeds");
+
+        assert_eq!(result, Value::Bool(true));
+        let crew_index = engine.find_object_index(crew).expect("crew survives");
+        assert!(
+            engine.objects[crew_index].commands.is_empty(),
+            "the inside callback consumes the command"
+        );
+        assert!(
+            engine.objects[crew_index].state.menu.is_some(),
+            "fControl=false must not close the clonk's menu"
+        );
+        assert_eq!(
+            engine.objects[crew_index].state.local_vars.get("own_calls"),
+            Some(&Value::Nil),
+            "fControl=false must not call the clonk's own overload"
+        );
+
+        let lorry_index = engine.find_object_index(lorry).expect("lorry survives");
+        assert_eq!(engine.objects[lorry_index].state.controller, 17);
+        let locals = &engine.objects[lorry_index].state.local_vars;
+        assert_eq!(locals.get("calls"), Some(&Value::Int(1)));
+        assert_eq!(
+            locals.get("seen_command"),
+            Some(&Value::String("Exit".to_string()))
+        );
+        assert_eq!(locals.get("seen_target"), Some(&Value::Nil));
+        assert_eq!(
+            locals.get("seen_tx"),
+            Some(&Value::Nil),
+            "FnSetCommand preserves its omitted Tx as a nil callback value"
+        );
+        assert_eq!(locals.get("seen_ty"), Some(&Value::Int(24)));
+        assert_eq!(locals.get("seen_target2"), Some(&Value::Nil));
+        assert_eq!(locals.get("seen_data"), Some(&Value::Int(25)));
+        assert_eq!(locals.get("seen_by"), Some(&Value::Object(crew.as_u64())));
+    }
+
+    #[test]
+    fn script_set_command_uses_outside_vehicle_overload_and_transfers_controller() {
+        // The pushed VehicleControl=Outside twin receives exactly the six
+        // regular arguments (no seventh clonk slot), inherits Controller,
+        // and may consume a script SetCommand even though fControl is false.
+        let clonk = r#"
+#strict
+public func IssueExit() { return SetCommand(this(), "Exit", nil, nil, 24, nil, 25); }
+"#;
+        let vehicle = r#"
+#strict
+local calls, seen_command, seen_target, seen_tx, seen_ty, seen_target2, seen_data, seen_seventh;
+protected func ControlCommand(command, target, tx, ty, target2, data, seventh) {
+  calls++;
+  seen_command = command;
+  seen_target = target;
+  seen_tx = tx;
+  seen_ty = ty;
+  seen_target2 = target2;
+  seen_data = data;
+  seen_seventh = seventh;
+  return(1);
+}
+"#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", clonk);
+        let mut lorry =
+            Definition::from_script("LORY", "Lorry", vehicle).expect("lorry compiles");
+        lorry.set_vehicle_control(crate::VEHICLE_CONTROL_OUTSIDE);
+        engine.register_definition(lorry).expect("register lorry");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("register player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let lorry = engine
+            .spawn_object(SpawnConfig::new("LORY"))
+            .expect("spawn lorry");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.action.name = "Push".to_string();
+        engine.objects[crew_index].state.action.target = Some(lorry);
+        engine.objects[crew_index].state.controller = 17;
+
+        let result = engine
+            .call_object_function(crew_index, "IssueExit", Vec::new())
+            .expect("IssueExit succeeds");
+
+        assert_eq!(result, Value::Bool(true));
+        assert!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew survives")
+                .command_stack
+                .is_empty(),
+            "the outside callback consumes the command"
+        );
+        let lorry_index = engine.find_object_index(lorry).expect("lorry survives");
+        assert_eq!(engine.objects[lorry_index].state.controller, 17);
+        let locals = &engine.objects[lorry_index].state.local_vars;
+        assert_eq!(locals.get("calls"), Some(&Value::Int(1)));
+        assert_eq!(
+            locals.get("seen_command"),
+            Some(&Value::String("Exit".to_string()))
+        );
+        assert_eq!(locals.get("seen_target"), Some(&Value::Nil));
+        assert_eq!(locals.get("seen_tx"), Some(&Value::Nil));
+        assert_eq!(locals.get("seen_ty"), Some(&Value::Int(24)));
+        assert_eq!(locals.get("seen_target2"), Some(&Value::Nil));
+        assert_eq!(locals.get("seen_data"), Some(&Value::Int(25)));
+        assert_eq!(
+            locals.get("seen_seventh"),
+            Some(&Value::Nil),
+            "the outside overload receives only six arguments"
         );
     }
 

@@ -233,6 +233,9 @@ pub(crate) struct DefinitionMetadata {
     /// DefCore `SilentCommands`, read after a failed-command script callback
     /// from the actor's current definition.
     pub silent_commands: bool,
+    /// DefCore `VehicleControl`: SetCommand's unconditional contained/pushed
+    /// ControlCommand routing bits (C4Object.cpp:3957-3983).
+    pub vehicle_control: i32,
     /// ActMap for building nested object scopes (Find_Func targets).
     pub action_library: ActionLibrary,
     /// Presentation facets used by FrameDecoration::SetByDef.
@@ -26243,17 +26246,97 @@ fn update_player_selection_toggle_status_host(player_id: i32) {
     });
 }
 
-/// C4Object::SetCommand(..., fControl=true) for one recipient of
-/// C4Player::ObjectCommand. Command operations live on the target's copied
-/// object scope, so GetCommand observes them before this host call returns and
-/// the ordinary callback outcome fold persists the exact same stack.
-fn set_player_control_command(target: ObjectId, request: CommandRequest) {
+fn native_set_command_tx(request: &CommandRequest) -> Value {
+    request
+        .tx_definition
+        .as_ref()
+        .map(|id| Value::C4Id(id.as_str().to_string()))
+        .or_else(|| request.tx.map(Value::Int))
+        .unwrap_or(Value::Int(0))
+}
+
+fn set_command_callback_args(request: &CommandRequest, tx: Value) -> [Value; 6] {
+    let data = match &request.data {
+        CommandData::Integer(value) => *value,
+        CommandData::Text(_) | CommandData::None => 0,
+    };
+    [
+        Value::String(request.id.to_name().to_string()),
+        request
+            .target
+            .map(object_reference_value)
+            .unwrap_or(Value::Nil),
+        tx,
+        Value::Int(request.ty.unwrap_or(0)),
+        request
+            .target2
+            .map(object_reference_value)
+            .unwrap_or(Value::Nil),
+        Value::Int(data),
+    ]
+}
+
+/// `C4Object::Call` is fail-safe and returns nil without executing when the
+/// receiver has status zero. Controller transfer happens before this helper.
+fn call_control_command_fail_safe(target: ObjectId, args: &[Value]) -> bool {
+    let present = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|context| context.object_status_present(target))
+    });
+    if !present {
+        return false;
+    }
+    match call_world_object_own_function(target, "ControlCommand", args) {
+        Some(Ok(value)) => value_raw_truthy(&value),
+        Some(Err(error)) => {
+            tracing::warn!(
+                object = %target,
+                %error,
+                "script error in ControlCommand; continuing like the C++ fail-safe exec"
+            );
+            false
+        }
+        None => false,
+    }
+}
+
+fn clear_command_stack_live(target: ObjectId) -> bool {
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        if !context.ensure_object_scope(target) {
+            return false;
+        }
+        let Some(object) = context.object_scope_mut(target) else {
+            return false;
+        };
+        object.clear_command_stack();
+        true
+    })
+}
+
+/// Native C4Object::SetCommand over a live host scope. Only menu closing and
+/// the receiver's own ControlCommand are `fControl`-gated; inside/outside
+/// vehicle overloads run for script and engine SetCommand calls too
+/// (C4Object.cpp:3939-3983).
+fn set_command_live(
+    target: ObjectId,
+    request: CommandRequest,
+    f_control: bool,
+    callback_tx: Value,
+) -> bool {
     let staged = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return false;
         };
-        if !context.ensure_object_scope(target) || !context.object_status_present(target) {
+        // FnSetCommand only checks that pObj is non-null. A status-zero object
+        // can still be the in-flight script receiver and SetCommand continues
+        // operating on its removal-delay tombstone.
+        if !context.ensure_object_scope(target) {
             return false;
         }
         let Some(object) = context.object_scope_mut(target) else {
@@ -26265,47 +26348,79 @@ fn set_player_control_command(target: ObjectId, request: CommandRequest) {
         true
     });
     if !staged {
-        return;
+        return false;
     }
 
-    // The soft menu close happens after ClearCommands. A denial therefore
-    // leaves the stack cleared (plus any command the query callback created).
-    if !close_object_menu(target, false) {
-        return;
-    }
-
-    let callback_args = [
-        Value::String(request.id.to_name().to_string()),
-        request
-            .target
-            .map(object_reference_value)
-            .unwrap_or(Value::Nil),
-        Value::Int(request.tx.unwrap_or(0)),
-        Value::Int(request.ty.unwrap_or(0)),
-        request
-            .target2
-            .map(object_reference_value)
-            .unwrap_or(Value::Nil),
-        command_data_value(&request.data),
-    ];
-    let overloaded = match call_world_object_own_function(
-        target,
-        "ControlCommand",
-        &callback_args,
-    ) {
-        Some(Ok(value)) => value_raw_truthy(&value),
-        Some(Err(error)) => {
-            tracing::warn!(
-                object = %target,
-                %error,
-                "script error in ControlCommand; continuing like the C++ fail-safe exec"
-            );
-            false
+    if f_control {
+        // The soft menu close happens after ClearCommands. A denial therefore
+        // leaves the stack cleared (plus any command the query callback created).
+        if !close_object_menu(target, false) {
+            return true;
         }
-        None => false,
-    };
-    if overloaded {
-        return;
+    }
+
+    let callback_args = set_command_callback_args(&request, callback_tx);
+    if f_control && call_control_command_fail_safe(target, &callback_args) {
+        return true;
+    }
+
+    // The contained vehicle receives a seventh argument naming the command
+    // object, and inherits that object's live Controller before its call.
+    let inside = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        let (container, controller) = {
+            let actor = context.object_scope(target)?;
+            (actor.container()?, actor.controller())
+        };
+        let definition = context.object_effective_definition_id(container)?;
+        let enabled = context
+            .definition_metadata(definition.as_str())
+            .is_some_and(|metadata| {
+                metadata.vehicle_control & crate::VEHICLE_CONTROL_INSIDE != 0
+            });
+        if !enabled || !context.ensure_object_scope(container) {
+            return None;
+        }
+        context.object_scope_mut(container)?.set_controller(controller);
+        Some(container)
+    });
+    if let Some(container) = inside {
+        let mut args = callback_args.to_vec();
+        args.push(object_reference_value(target));
+        if call_control_command_fail_safe(container, &args) {
+            return true;
+        }
+    }
+
+    // Re-read action/procedure/target/controller after the inside callback:
+    // it may have redirected the pushed vehicle or changed the actor.
+    let outside = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        let (pushed, controller) = {
+            let actor = context.object_scope(target)?;
+            if actor.effective_action_procedure() != ActionProcedure::Push {
+                return None;
+            }
+            (actor.effective_action_target(0)?, actor.controller())
+        };
+        let definition = context.object_effective_definition_id(pushed)?;
+        let enabled = context
+            .definition_metadata(definition.as_str())
+            .is_some_and(|metadata| {
+                metadata.vehicle_control & crate::VEHICLE_CONTROL_OUTSIDE != 0
+            });
+        if !enabled || !context.ensure_object_scope(pushed) {
+            return None;
+        }
+        context.object_scope_mut(pushed)?.set_controller(controller);
+        Some(pushed)
+    });
+    if let Some(pushed) = outside {
+        if call_control_command_fail_safe(pushed, &callback_args) {
+            return true;
+        }
     }
 
     HOST_CONTEXT.with(|cell| {
@@ -26313,13 +26428,22 @@ fn set_player_control_command(target: ObjectId, request: CommandRequest) {
         let Some(context) = borrow.as_mut() else {
             return;
         };
-        if !context.object_status_present(target) {
-            return;
-        }
         if let Some(object) = context.object_scope_mut(target) {
             let _ = object.push_command_front(request);
         }
     });
+    // FnSetCommand reports success for every recognized command regardless of
+    // overload consumption or the final AddCommand stack-limit result.
+    true
+}
+
+/// C4Object::SetCommand(..., fControl=true) for one recipient of
+/// C4Player::ObjectCommand. Command operations live on the target's copied
+/// object scope, so GetCommand observes them before this host call returns and
+/// the ordinary callback outcome fold persists the exact same stack.
+fn set_player_control_command(target: ObjectId, request: CommandRequest) {
+    let callback_tx = native_set_command_tx(&request);
+    let _ = set_command_live(target, request, true, callback_tx);
 }
 
 fn player_object_command_request(
@@ -26532,10 +26656,7 @@ fn player_object_command_host(args: &[Value]) -> Result<Value, RuntimeError> {
 fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
     // C++ FnSetCommand leads with the object slot (pObj, szCommand, ...;
     // C4Script.cpp:840-844); 0/nil means the calling object. The
-    // name-first form stays for the command-DSL fixtures. A FOREIGN
-    // target re-dispatches through the reentrancy seam so the command
-    // stack write folds with the target's own nested outcome (GoldRush's
-    // StopClonk drives other clonks, Helpers.c:94).
+    // name-first form stays for the command-DSL fixtures.
     let mut args = args;
     let mut leading_target: Option<ObjectId> = None;
     let leads_with_object_slot = matches!(
@@ -26551,55 +26672,42 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
         // C++ FnSetCommand: !szCommand -> false (C4Script.cpp:843-899).
         return Ok(Value::Bool(false));
     }
-    if let Some(target) = leading_target {
-        if active_object_id() != Some(target) {
-            return match call_world_object_function(target, "SetCommand", args) {
-                Some(result) => result,
-                None => Ok(Value::Bool(false)),
-            };
+    let Some(target) = leading_target.or_else(active_object_id) else {
+        return Ok(Value::Bool(false));
+    };
+
+    let command_name = match &args[0] {
+        Value::String(name) if !name.is_empty() => name.clone(),
+        Value::String(_) => {
+            clear_command_stack_live(target);
+            return Ok(Value::Bool(false));
         }
-    }
+        // FnSetCommand returns before ClearCommands when szCommand is null.
+        Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetCommand: expected string for command name, got {}",
+                other.type_name()
+            )))
+        }
+    };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetCommand requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
-        };
+    let Some(command_id) = CommandId::from_name(&command_name) else {
+        clear_command_stack_live(target);
+        return Ok(Value::Bool(false));
+    };
 
-        let command_name = match &args[0] {
-            Value::String(name) if !name.is_empty() => name.clone(),
-            Value::String(_) | Value::Nil => {
-                object.clear_command_stack();
-                return Ok(Value::Bool(false));
-            }
-            other => {
-                return Err(RuntimeError::new(format!(
-                    "SetCommand: expected string for command name, got {}",
-                    other.type_name()
-                )))
-            }
-        };
-
-        let command_id = match CommandId::from_name(&command_name) {
-            Some(id) => id,
-            None => {
-                object.clear_command_stack();
-                return Ok(Value::Bool(false));
-            }
-        };
-
-        let request = parse_command_request(command_id, args, CommandArgLayout::Set, "SetCommand")?;
-        // C4Object::SetCommand entry decrement (C4Object.cpp:3941-3942),
-        // then ClearCommands (:3943) and the push.
-        object.decrement_no_collect_delay();
-        object.clear_command_stack();
-        let success = object.push_command_front(request);
-        Ok(Value::Bool(success))
-    })
+    // FnSetCommand's ignored ConvertTo(Int) preserves a nil/default Tx value
+    // as nil. Retain the callback value separately from the normalized
+    // CommandRequest used by the hardcoded command stack.
+    let callback_tx = args.get(2).cloned().unwrap_or(Value::Nil);
+    let request = parse_command_request(command_id, args, CommandArgLayout::Set, "SetCommand")?;
+    Ok(Value::Bool(set_command_live(
+        target,
+        request,
+        false,
+        callback_tx,
+    )))
 }
 
 fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -27612,6 +27720,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -28030,6 +28139,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     ocf_base: ocf::NORMAL,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
                     action_graphics: HashMap::new(),
                     value: 0,
@@ -29107,6 +29217,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -46552,6 +46663,7 @@ func ProbeBadIndex(id) {
                 ocf_base: 0,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -46611,6 +46723,7 @@ func ProbeBadIndex(id) {
                     ocf_base: 0,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
                     action_graphics: HashMap::new(),
                     value: 0,
@@ -46648,6 +46761,7 @@ func ProbeBadIndex(id) {
                     ocf_base: 0,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
                     action_graphics: HashMap::new(),
                     value: 0,
@@ -46709,6 +46823,7 @@ func ProbeBadIndex(id) {
                 ocf_base: 0,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -46782,6 +46897,7 @@ func ProbeBadIndex(id) {
                 ocf_base: 0,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -46865,6 +46981,7 @@ func ProbeBadIndex(id) {
             ocf_base: 0,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
             action_graphics: HashMap::new(),
             value: 0,
@@ -47987,6 +48104,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 ocf_base: 0,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -48137,6 +48255,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 ocf_base: 0,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -48211,6 +48330,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 ocf_base: 0,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -58134,6 +58254,7 @@ public func SeedFull()
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
@@ -58353,6 +58474,7 @@ protected func Construction()
             ocf_base: ocf::NORMAL,
                 crew_member: false,
                 silent_commands: false,
+                vehicle_control: 0,
                 action_library: ActionLibrary::default(),
             action_graphics: HashMap::new(),
             value: 0,
