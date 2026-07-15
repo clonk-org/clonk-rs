@@ -57117,6 +57117,159 @@ EnergyUsage=10
     }
 
     #[test]
+    fn exec_action_incomplete_objects_reset_before_action_work() {
+        let script = r#"#strict
+local abort_count, abort_phase, wet_start_count;
+
+protected func WalkAbort(int phase)
+{
+    abort_count = abort_count + 1;
+    abort_phase = phase;
+}
+
+protected func WetStart()
+{
+    wet_start_count = wet_start_count + 1;
+}
+"#;
+        let make_definition = |id: &str, incomplete_activity: bool| {
+            let mut definition =
+                Definition::from_script(id, id, script).expect("definition compiles");
+            definition.set_c4_callback_convention(true);
+            definition.configure_actions(
+                Some("Walk".to_string()),
+                HashMap::from([
+                    (
+                        "Walk".to_string(),
+                        ActionSpec::default()
+                            .with_procedure("WALK")
+                            .with_length(20)
+                            .with_delay(1)
+                            .with_next("Hold")
+                            .with_abort_call("WalkAbort")
+                            .with_energy_usage(10)
+                            .with_in_liquid_action("Wet"),
+                    ),
+                    (
+                        "Wet".to_string(),
+                        ActionSpec::default()
+                            .with_procedure("SWIM")
+                            .with_start_call("WetStart"),
+                    ),
+                ]),
+            );
+            definition.set_incomplete_activity(incomplete_activity);
+            definition
+        };
+
+        let mut engine = Engine::with_seed(12);
+        engine.set_structures_need_energy(true);
+        engine.set_physics(PhysicsSettings::new(100, 200, -200));
+        engine
+            .register_definition(make_definition("RST0", false))
+            .expect("reset definition registers");
+        engine
+            .register_definition(make_definition("KEEP", true))
+            .expect("incomplete-activity definition registers");
+        let walk_action = || {
+            let mut action = ActionState::new("Walk");
+            action.time = 7;
+            action.phase = 3;
+            action
+        };
+        let callback_vars = || {
+            HashMap::from([
+                ("abort_count".to_string(), Value::Int(0)),
+                ("abort_phase".to_string(), Value::Int(-1)),
+                ("wet_start_count".to_string(), Value::Int(0)),
+            ])
+        };
+        let reset = engine
+            .spawn_object(
+                SpawnConfig::new("RST0")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_construction(FULL_CON / 2)
+                    .with_action(walk_action())
+                    .with_command_direction(CommandDirection::Right)
+                    .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
+                    .with_energy(20)
+                    .with_need_energy(true)
+                    .with_in_liquid(true)
+                    .with_mobile(true)
+                    .with_local_vars(callback_vars())
+                    .with_loaded(true),
+            )
+            .expect("reset object spawns");
+        let keep = engine
+            .spawn_object(
+                SpawnConfig::new("KEEP")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_construction(FULL_CON / 2)
+                    .with_action(walk_action())
+                    .with_command_direction(CommandDirection::Right)
+                    .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
+                    .with_energy(20)
+                    .with_need_energy(true)
+                    .with_mobile(true)
+                    .with_local_vars(callback_vars())
+                    .with_loaded(true),
+            )
+            .expect("incomplete-activity object spawns");
+
+        for id in [reset, keep] {
+            let idx = engine.find_object_index(id).expect("object exists");
+            assert_eq!(
+                engine.objects[idx].state.ocf & ocf::FULL_CON,
+                0,
+                "fixture must exercise the live OCF_FullCon gate"
+            );
+        }
+
+        engine.tick().expect("incomplete-action frame executes");
+        let reset_idx = engine.find_object_index(reset).expect("reset object remains");
+        let reset_object = &engine.objects[reset_idx];
+        assert_eq!(reset_object.state.action, ActionState::new("Idle"));
+        assert_eq!(reset_object.state.energy, 20);
+        assert!(
+            reset_object.state.need_energy,
+            "incomplete reset precedes and therefore skips EnergyUsage"
+        );
+        assert_eq!(reset_object.fixed_velocity.x, itofix(1));
+        assert_eq!(
+            reset_object.fixed_velocity.y,
+            C4Fixed::ZERO,
+            "the reset frame returns before both WALK steering and idle gravity"
+        );
+        assert_eq!(
+            reset_object.state.local_vars.get("abort_count"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            reset_object.state.local_vars.get("abort_phase"),
+            Some(&Value::Int(3)),
+            "ordinary SetAction supplies the previous phase to AbortCall"
+        );
+        assert_eq!(
+            reset_object.state.local_vars.get("wet_start_count"),
+            Some(&Value::Int(0)),
+            "incomplete reset precedes InLiquidAction"
+        );
+
+        let keep_idx = engine
+            .find_object_index(keep)
+            .expect("incomplete-activity object remains");
+        let keep_object = &engine.objects[keep_idx];
+        assert_eq!(keep_object.state.action.name, "Walk");
+        assert_eq!(keep_object.state.action.time, 8);
+        assert_eq!(keep_object.state.energy, 10);
+        assert!(!keep_object.state.need_energy);
+        assert_eq!(
+            keep_object.state.local_vars.get("abort_count"),
+            Some(&Value::Int(0))
+        );
+    }
+
+    #[test]
     fn resting_object_freezes_until_tick10_mobilization_like_cpp() {
         let mut engine = Engine::with_seed(42);
         engine

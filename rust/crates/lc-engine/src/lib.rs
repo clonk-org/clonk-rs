@@ -31082,7 +31082,8 @@ impl Engine {
         // early returns below leave it CNAT_None for this frame's
         // movement.
         self.objects[idx].frame_t_attach = CNAT_NONE;
-        // Upright attachment check precedes the idle and action-energy gates
+        // Upright attachment check precedes the idle, incomplete, and
+        // action-energy gates.
         // (C4Object.cpp:4698-4705). Preserve its Action.t_attach bit even
         // when either later gate returns before procedure attachment latches.
         {
@@ -31110,13 +31111,7 @@ impl Engine {
             object.state.t_attach = object.frame_t_attach;
         }
 
-        // C4ActionDef::EnergyUsage is a signed, nonzero gate on every real
-        // ActMap action while C4RULE_StructuresNeedEnergy is active
-        // (C4Object.cpp:4738-4753). It runs before Action.Time++,
-        // InLiquidAction, steering and phase advance. Insufficient power is
-        // the native idle return: mark NeedEnergy, apply raw gravity only to
-        // Mobile objects, and skip all remaining action work.
-        let (is_idle_action, energy_usage, source_procedure) = self
+        let (is_idle_action, incomplete_activity, energy_usage, source_procedure) = self
             .definitions
             .get(&self.objects[idx].definition_id)
             .map(|definition| {
@@ -31124,11 +31119,33 @@ impl Engine {
                 let library = definition.action_library();
                 (
                     library.is_idle_action(action),
+                    definition.incomplete_activity(),
                     library.energy_usage_for_action(action),
                     library.procedure_for_action(action),
                 )
             })
-            .unwrap_or((true, 0, ActionProcedure::Undefined));
+            .unwrap_or((true, false, 0, ActionProcedure::Undefined));
+
+        // A real action on an object without OCF_FullCon is reset through
+        // ordinary SetAction(ActIdle) unless its definition opts into
+        // IncompleteActivity (C4Object.cpp:4725-4729). SetAction supplies the
+        // synchronous Abort callback, OCF refresh and fixed-position resync;
+        // ExecAction returns even when NoOtherAction rejects the transition.
+        if !is_idle_action
+            && self.objects[idx].state.ocf & crate::ocf::FULL_CON == 0
+            && !incomplete_activity
+        {
+            let definition_id = self.objects[idx].definition_id.clone();
+            let _ = tolerate_script_error(self.action_with_calls(idx, &definition_id, "Idle"))?;
+            return Ok(true);
+        }
+
+        // C4ActionDef::EnergyUsage is a signed, nonzero gate on every real
+        // ActMap action while C4RULE_StructuresNeedEnergy is active
+        // (C4Object.cpp:4738-4753). It runs before Action.Time++,
+        // InLiquidAction, steering and phase advance. Insufficient power is
+        // the native idle return: mark NeedEnergy, apply raw gravity only to
+        // Mobile objects, and skip all remaining action work.
         if self.structures_need_energy && !is_idle_action && energy_usage != 0 {
             if energy_usage <= self.objects[idx].state.energy {
                 let object = &mut self.objects[idx];
