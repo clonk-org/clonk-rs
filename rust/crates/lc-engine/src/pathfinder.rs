@@ -578,13 +578,13 @@ impl<'a> PathFinderState<'a> {
             };
             if let Some(zone_index) = self.find_zone(x2, y2) {
                 if !self.zones[zone_index].used {
-                    let entry = self.zones[zone_index].entry_point(self, x2, y2, x2, y2);
-                    let (entry_x, entry_y) = match entry {
-                        Some(point) => point,
-                        None => {
-                            self.rays[index].borrow_mut().status = RayStatus::Failure;
-                            return;
-                        }
+                    let Some((entry_x, entry_y)) =
+                        self.zones[zone_index].entry_point(self, x2, y2, x2, y2)
+                    else {
+                        // C4PF_Ray_Crawl returns for this pass even when
+                        // GetEntryPoint fails, leaving the ray crawling
+                        // (C4PathFinder.cpp:198-212).
+                        return;
                     };
                     let target_x = self.rays[index].borrow().target_x;
                     let target_y = self.rays[index].borrow().target_y;
@@ -1288,5 +1288,72 @@ mod tests {
             ],
             "C++ retains both GetEntryPoint mutations before ObjectAddWaypoint"
         );
+    }
+
+    #[test]
+    fn failed_crawl_zone_entry_keeps_the_ray_crawling() {
+        // C4PF_Ray_Crawl returns early after touching an unused transfer
+        // zone even when GetEntryPoint exhausts a fully solid perimeter. It
+        // neither kills the ray nor increments CrawlLength
+        // (C4PathFinder.cpp:198-212).
+        let mut landscape =
+            Landscape::with_default_material(16, vec![16; 16], None).expect("test landscape");
+        landscape.set_world_height(16);
+        let mut bytes = vec![0; 16 * 16];
+        for x in 4..=9 {
+            bytes[4 * 16 + x] = 1;
+            bytes[9 * 16 + x] = 1;
+        }
+        for y in 4..=9 {
+            bytes[y * 16 + 4] = 1;
+            bytes[y * 16 + 9] = 1;
+        }
+        landscape.set_pixel_grid(PixelGrid::new(
+            16,
+            16,
+            bytes,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+
+        let mut zones = [Zone {
+            owner: ObjectId::new(9),
+            x: 5,
+            y: 5,
+            width: 4,
+            height: 4,
+            used: false,
+        }];
+        let mut state = PathFinderState::new(&landscape, &mut zones, true, 1, Vector2::new(5, 5));
+        assert!(state.add_ray(5, 5, 12, 12, 0, DIRECTION_RIGHT, None, None));
+        {
+            let mut ray = state.rays[0].borrow_mut();
+            ray.status = RayStatus::Crawl;
+            ray.x2 = 5;
+            ray.y2 = 5;
+            ray.crawl_start_x = 5;
+            ray.crawl_start_y = 6;
+            ray.crawl_attach = CRAWL_TOP;
+            ray.crawl_start_attach = CRAWL_TOP;
+            ray.crawl_length = 7;
+        }
+
+        assert!(state.zones[0].entry_point(&state, 5, 5, 5, 5).is_none());
+
+        state.execute_crawl(0);
+        {
+            let ray = state.rays[0].borrow();
+            assert!(matches!(ray.status, RayStatus::Crawl));
+            assert_eq!((ray.x2, ray.y2), (6, 5));
+            assert_eq!(ray.crawl_length, 7);
+        }
+        assert_eq!(state.rays.len(), 1);
+
+        state.execute_crawl(0);
+        let ray = state.rays[0].borrow();
+        assert!(matches!(ray.status, RayStatus::Crawl));
+        assert_eq!((ray.x2, ray.y2), (7, 5));
+        assert_eq!(ray.crawl_length, 7);
     }
 }
