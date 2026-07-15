@@ -43810,4 +43810,78 @@ protected func RejectCollect(id, pObject) { return(1); }
         assert_eq!(crew_snapshot.container, Some(hut));
         Ok(())
     }
+
+    #[test]
+    fn nil_map_assignment_matches_cpp_removal_and_unchanged_slot_rules() {
+        let script_template = r#"#strict 2
+func Probe() {
+    var removed = {};
+    removed["a"] = 1;
+    removed["a"] = nil;
+
+    var fresh = {};
+    fresh["a"] = nil;
+
+    var reduced = { a = 1, b = 2 };
+    reduced.b = nil;
+
+    var already_nil = { a = nil };
+    already_nil.a = nil;
+    var concat_removed = { a = 1 } .. { a = nil };
+    var concat_fresh = {} .. { a = nil };
+    return [GetLength(removed), GetLength(fresh), removed == {}, fresh == {},
+            reduced == { a = 1 }, GetLength(already_nil), concat_removed == {},
+            GetLength(concat_fresh), removed, fresh, reduced, already_nil,
+            concat_removed, concat_fresh];
+}
+"#;
+        for (id, strict) in [("MN02", 2), ("MN03", 3)] {
+            let script = script_template.replacen("#strict 2", &format!("#strict {strict}"), 1);
+            let mut engine = Engine::new();
+            engine
+                .register_definition(
+                    Definition::from_script(id, "Map nil removal", &script)
+                        .expect("map fixture compiles"),
+                )
+                .expect("map fixture registers");
+            let object = engine
+                .spawn_object(SpawnConfig::new(id))
+                .expect("map fixture spawns");
+            let index = engine.find_object_index(object).expect("map object exists");
+            let result = engine
+                .call_object_function(index, "Probe", Vec::new())
+                .expect("map removal probe runs");
+            let Value::Array(values) = result else {
+                panic!("map removal probe must return an array");
+            };
+
+            assert_eq!(
+                values[..8],
+                [
+                    Value::Int(0),
+                    Value::Int(1),
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Bool(true),
+                    Value::Int(1),
+                    Value::Bool(true),
+                    Value::Int(1)
+                ]
+            );
+            let empty = Value::Proplist(lc_script::ValueMap::new());
+            let reduced =
+                Value::Proplist(lc_script::ValueMap::from([("a", Value::Int(1))]));
+            let nil_entry =
+                Value::Proplist(lc_script::ValueMap::from([("a", Value::Nil)]));
+            assert_eq!(values[8], empty);
+            assert_eq!(values[9], nil_entry);
+            assert_eq!(values[10], reduced);
+            assert_eq!(values[11], nil_entry);
+            assert_eq!(values[12], empty);
+            assert_eq!(values[13], nil_entry);
+            assert_eq!(values[8].c4_value_hash(), empty.c4_value_hash());
+            assert_eq!(values[9].c4_value_hash(), nil_entry.c4_value_hash());
+            assert_eq!(values[10].c4_value_hash(), reduced.c4_value_hash());
+        }
+    }
 }

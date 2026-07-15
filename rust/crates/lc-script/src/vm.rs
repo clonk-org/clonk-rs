@@ -837,11 +837,7 @@ fn write_path(
     match (value, segment) {
         (Value::Proplist(entries), PathSegment::Property(property)) => {
             if rest.is_empty() {
-                if matches!(new_value, Value::Nil) {
-                    entries.shift_remove(property);
-                } else {
-                    entries.insert(property.clone(), new_value);
-                }
+                entries.assign(property.clone(), new_value);
                 Ok(())
             } else {
                 let Some(next) = entries.get_mut(property) else {
@@ -873,11 +869,7 @@ fn write_path(
         }
         (Value::Proplist(entries), PathSegment::Index(key)) => {
             if rest.is_empty() {
-                if matches!(new_value, Value::Nil) {
-                    entries.shift_remove_key(key);
-                } else {
-                    entries.insert_key(key.clone(), new_value);
-                }
+                entries.assign_key(key.clone(), new_value);
                 Ok(())
             } else {
                 let Some(next) = entries.get_key_mut(key) else {
@@ -2432,15 +2424,7 @@ impl<'a> Vm<'a> {
                 for (key_expr, value_expr) in entries {
                     let key = self.evaluate(key_expr, env, depth)?;
                     let value = self.evaluate(value_expr, env, depth)?;
-                    if matches!(&value, Value::Nil)
-                        && map
-                            .get_key(&key)
-                            .is_some_and(|value| !matches!(value, Value::Nil))
-                    {
-                        map.shift_remove_key(&key);
-                    } else {
-                        map.insert_key(key, value);
-                    }
+                    map.assign_key(key, value);
                 }
                 Ok(Value::Proplist(map))
             }
@@ -2628,7 +2612,7 @@ impl<'a> Vm<'a> {
                             )))),
                         })
                     }
-                    (Value::Proplist(_), Value::Proplist(_)) => {
+                    (Value::Proplist(left_entries), Value::Proplist(right_entries)) => {
                         let mut identities = match left.identity.as_ref() {
                             Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
                                 HeapIdentity::Proplist(identities) => identities.clone(),
@@ -2649,7 +2633,20 @@ impl<'a> Vm<'a> {
                                 _ => unreachable!(),
                             },
                         };
-                        identities.extend(right_identities);
+                        for (key, value) in right_entries {
+                            if matches!(value, Value::Nil)
+                                && left_entries
+                                    .get_key(key)
+                                    .is_some_and(|current| !matches!(current, Value::Nil))
+                            {
+                                identities.remove(key);
+                            } else {
+                                identities.insert(
+                                    key.clone(),
+                                    right_identities.get(key).cloned().unwrap_or(None),
+                                );
+                            }
+                        }
                         let value = self.eval_concat(left.value, right.value)?;
                         Ok(TrackedValue {
                             value,
@@ -3207,7 +3204,9 @@ impl<'a> Vm<'a> {
             },
             Value::Proplist(mut a) => match right {
                 Value::Proplist(b) => {
-                    a.extend(b);
+                    for (key, value) in b {
+                        a.assign_key(key, value);
+                    }
                     Ok(Value::Proplist(a))
                 }
                 other => Err(RuntimeError::new(format!(

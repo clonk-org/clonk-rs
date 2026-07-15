@@ -187,6 +187,21 @@ impl ValueMap {
         self.insert_key(Value::String(key), value)
     }
 
+    /// Assigns through a C4ValueHash-owned string slot. Nonnil -> nil erases
+    /// the entry, while missing/already-nil -> nil remains present because
+    /// C4Value::Set returns before CheckRemoveFromMap for an unchanged nil.
+    pub(crate) fn assign(&mut self, key: String, value: Value) {
+        if matches!(value, Value::Nil)
+            && self
+                .get(&key)
+                .is_some_and(|current| !matches!(current, Value::Nil))
+        {
+            self.shift_remove(&key);
+        } else {
+            self.insert(key, value);
+        }
+    }
+
     pub fn shift_remove(&mut self, key: &str) -> Option<Value> {
         self.0.shift_remove(&StringQuery(key))
     }
@@ -205,6 +220,19 @@ impl ValueMap {
 
     pub fn insert_key(&mut self, key: Value, value: Value) -> Option<Value> {
         self.0.insert(key, value)
+    }
+
+    /// Arbitrary-key form of [`Self::assign`].
+    pub(crate) fn assign_key(&mut self, key: Value, value: Value) {
+        if matches!(value, Value::Nil)
+            && self
+                .get_key(&key)
+                .is_some_and(|current| !matches!(current, Value::Nil))
+        {
+            self.shift_remove_key(&key);
+        } else {
+            self.insert_key(key, value);
+        }
     }
 
     pub fn shift_remove_key(&mut self, key: &Value) -> Option<Value> {
