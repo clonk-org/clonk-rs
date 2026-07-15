@@ -598,14 +598,21 @@ pub enum PlayerCommand {
     ClearLastPlrCom { player_id: i32 },
 }
 
-/// One `C4ObjResort` queued by FnSetObjectOrder. C++ defers these until
-/// `C4GameObjects::ExecuteResorts` and executes the newest request first.
+/// Deferred object-list ordering work. C++ resolves `C4Object::Resort` flags
+/// before executing the newest `C4ObjResort` request (`SetObjectOrder`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
-pub struct ObjectOrderCommand {
-    #[doc(hidden)] pub relative_to: ObjectId,
-    #[doc(hidden)] pub object: ObjectId,
-    #[doc(hidden)] pub after: bool,
+pub enum ObjectOrderCommand {
+    #[doc(hidden)]
+    SetRelative {
+        relative_to: ObjectId,
+        object: ObjectId,
+        after: bool,
+    },
+    #[doc(hidden)]
+    ResortObject(ObjectId),
+    #[doc(hidden)]
+    SortByCategory,
 }
 
 impl HostWorldObject {
@@ -10444,6 +10451,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetObjectLayer", get_object_layer);
     script.register_host_function("SetObjectLayer", set_object_layer);
     script.register_host_function("SetObjectOrder", set_object_order);
+    script.register_host_function("Resort", resort);
     script.register_host_function("GetObjectBlitMode", get_object_blit_mode);
     script.register_host_function("SetObjectBlitMode", set_object_blit_mode);
     script.register_host_function("GetOCF", get_ocf);
@@ -31522,12 +31530,46 @@ fn set_object_order(args: &[Value]) -> Result<Value, RuntimeError> {
         if !resolves(relative_to) || !resolves(object) {
             return Ok(Value::Bool(false));
         }
-        context.record_object_order_command(ObjectOrderCommand {
+        context.record_object_order_command(ObjectOrderCommand::SetRelative {
             relative_to,
             object,
             after,
         });
         Ok(Value::Bool(true))
+    })
+}
+
+/// FnResort (C4Script.cpp:3543-3552): an explicit object wins, otherwise
+/// `cthr->Obj` is used. Object resorts are deferred to the post-CrossCheck
+/// phase; a call without either object performs the stable category sort.
+fn resort(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "Resort expects at most 1 argument: object",
+        ));
+    }
+    let explicit = args
+        .first()
+        .map(|value| parse_object_reference_argument(value, "Resort", "object"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        let target = explicit.or(context.script_object_context);
+        if let Some(target) = target {
+            let resolves = context.object_scope(target).is_some()
+                || context.get_world_object(target).is_some();
+            if resolves {
+                context.record_object_order_command(ObjectOrderCommand::ResortObject(target));
+            }
+        } else {
+            context.record_object_order_command(ObjectOrderCommand::SortByCategory);
+        }
+        Ok(Value::Nil)
     })
 }
 
@@ -37005,6 +37047,7 @@ mod tests {
         "RemoveVertex",
         "ResetGamma",
         "ResetPhysical",
+        "Resort",
         "SEqual",
         "ScoreboardCol",
         "ScriptCounter",
@@ -37686,11 +37729,53 @@ mod tests {
         result.expect("SetObjectOrder calls succeed");
         assert_eq!(
             outcome.object_order_commands,
-            [ObjectOrderCommand {
+            [ObjectOrderCommand::SetRelative {
                 relative_to: ObjectId::new(2),
                 object: ObjectId::new(1),
                 after: true,
             }]
+        );
+    }
+
+    #[test]
+    fn resort_queues_explicit_context_and_global_category_work() {
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            ObjectId::new(2),
+            "Dummy",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )]);
+        let (result, outcome) = with_object_host_context_with_world(world.clone(), || {
+            assert_eq!(resort(&[])?, Value::Nil);
+            assert_eq!(resort(&[Value::Object(2)])?, Value::Nil);
+            Ok::<_, RuntimeError>(())
+        });
+        result.expect("object Resort calls succeed");
+        assert_eq!(
+            outcome.object_order_commands,
+            [
+                ObjectOrderCommand::ResortObject(ObjectId::new(1)),
+                ObjectOrderCommand::ResortObject(ObjectId::new(2)),
+            ]
+        );
+
+        let (result, outcome) = with_effect_context(None, &[], world, 3, || resort(&[]));
+        assert_eq!(result.expect("global Resort succeeds"), Value::Nil);
+        assert_eq!(
+            outcome.object_order_commands,
+            [ObjectOrderCommand::SortByCategory]
         );
     }
 

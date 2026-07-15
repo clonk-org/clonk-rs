@@ -39678,11 +39678,13 @@ func Reorder(pRelative, pSort, fAfter) {
         // (C4GameObjects.cpp:360-369).
         let b_index = engine.find_object_index(b).expect("B exists");
         engine.objects[b_index].state.status = ObjectStatus::Inactive;
-        engine.pending_object_order_commands.push(ObjectOrderCommand {
-            relative_to: c,
-            object: b,
-            after: true,
-        });
+        engine
+            .pending_object_order_commands
+            .push(ObjectOrderCommand::SetRelative {
+                relative_to: c,
+                object: b,
+                after: true,
+            });
         engine.execute_object_order_commands();
         assert_eq!(engine.debug_exec_order(), vec![c, a, b]);
         engine.objects[b_index].state.status = ObjectStatus::Normal;
@@ -39713,6 +39715,133 @@ func Reorder(pRelative, pSort, fAfter) {
         restored.register_definition(simple_definition("C")).expect("C registers");
         restored.restore_state(&state).expect("state restores");
         assert_eq!(restored.debug_exec_order(), vec![c, a, b]);
+    }
+
+    #[test]
+    fn resort_object_readds_into_its_category_and_definition_cluster() {
+        let script = r#"
+#strict
+func ResortArrow(object target) { target->Resort(); }
+func ResortExplicit(object target) { Resort(target); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine
+            .register_definition(Definition::from_script("A", "A", script).expect("compiles"))
+            .expect("A registers");
+        engine.register_definition(simple_definition("B")).expect("B registers");
+        let a1 = engine
+            .spawn_object(SpawnConfig::new("A").with_category(CATEGORY_OBJECT))
+            .expect("first A spawns");
+        let b = engine
+            .spawn_object(SpawnConfig::new("B").with_category(CATEGORY_OBJECT))
+            .expect("B spawns");
+        let a2 = engine
+            .spawn_object(SpawnConfig::new("A").with_category(CATEGORY_OBJECT))
+            .expect("second A spawns");
+        assert_eq!(engine.debug_exec_order(), vec![a1, a2, b]);
+
+        for function in ["ResortArrow", "ResortExplicit"] {
+            engine
+                .pending_object_order_commands
+                .push(ObjectOrderCommand::SetRelative {
+                    relative_to: b,
+                    object: a2,
+                    after: false,
+                });
+            engine.execute_object_order_commands();
+            assert_eq!(engine.debug_exec_order(), vec![a1, b, a2]);
+
+            let a1_index = engine.find_object_index(a1).expect("first A exists");
+            assert_eq!(
+                engine
+                    .call_object_function(
+                        a1_index,
+                        function,
+                        vec![Value::Object(a2.as_u64())],
+                    )
+                    .expect("Resort call succeeds"),
+                Value::Nil
+            );
+            assert_eq!(
+                engine.debug_exec_order(),
+                vec![a1, b, a2],
+                "per-object Resort is deferred"
+            );
+            assert_eq!(
+                engine.pending_object_order_commands,
+                [ObjectOrderCommand::ResortObject(a2)]
+            );
+            engine.execute_object_order_commands();
+            assert_eq!(engine.debug_exec_order(), vec![a1, a2, b]);
+        }
+
+        engine
+            .pending_object_order_commands
+            .extend([
+                ObjectOrderCommand::ResortObject(a1),
+                ObjectOrderCommand::ResortObject(a2),
+            ]);
+        engine.execute_object_order_commands();
+        assert_eq!(
+            engine.debug_exec_order(),
+            vec![b, a2, a1],
+            "still-unsorted peers are ignored during each C++ re-add"
+        );
+    }
+
+    #[test]
+    fn global_resort_stably_sorts_by_raw_masked_category() {
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(100, 100));
+        for id in ["A", "B", "C", "D", "E"] {
+            engine
+                .register_definition(simple_definition(id))
+                .expect("definition registers");
+        }
+        let ids = ["A", "B", "C", "D", "E"].map(|definition| {
+            engine
+                .spawn_object(SpawnConfig::new(definition).with_category(CATEGORY_OBJECT))
+                .expect("object spawns")
+        });
+        let [a, b, c, d, e] = ids;
+        for (id, category) in [
+            (a, CATEGORY_VEHICLE),
+            (b, CATEGORY_STATIC_BACK),
+            (c, CATEGORY_VEHICLE),
+            (d, CATEGORY_STRUCTURE),
+            (e, CATEGORY_LIVING | CATEGORY_OBJECT),
+        ] {
+            let index = engine.find_object_index(id).expect("object exists");
+            engine.objects[index].state.category = category;
+        }
+        assert_eq!(engine.debug_exec_order(), vec![a, b, c, d, e]);
+
+        engine
+            .load_scenario_script_with_convention(
+                "Resort probe",
+                "#strict\nfunc Sort() { Resort(); }",
+                true,
+            )
+            .expect("scenario script loads");
+        engine
+            .call_scenario_script_function("Sort", Vec::new())
+            .expect("global Resort succeeds");
+        assert_eq!(engine.debug_exec_order(), vec![a, b, c, d, e]);
+        assert_eq!(
+            engine.pending_object_order_commands,
+            [ObjectOrderCommand::SortByCategory]
+        );
+
+        engine.execute_object_order_commands();
+        assert_eq!(engine.debug_exec_order(), vec![b, d, a, c, e]);
+        assert_eq!(engine.snapshot().render_order, vec![b, d, a, c, e]);
+        let e_index = engine.find_object_index(e).expect("E exists");
+        assert_eq!(
+            engine.objects[e_index].state.category & CATEGORY_SORT_LIMIT,
+            CATEGORY_LIVING | CATEGORY_OBJECT,
+            "SortByCategory compares the raw mask without normalizing it"
+        );
     }
 
     // The GoldRush intro wall (f22 talker x 30-vs-28): C4ObjectList::Add

@@ -12466,8 +12466,8 @@ pub struct Engine {
     /// semantics) on spawn and pruned of removed ids each tick. Enter/Exit
     /// never touch it (C4Object.cpp:1513-1615 only move Contents).
     #[doc(hidden)] pub exec_list: Vec<ObjectId>,
-    /// Deferred FnSetObjectOrder requests (`C4GameObjects::ResortProc`).
-    /// They execute newest-first after CrossCheck or during Synchronize.
+    /// Deferred category resorts plus FnSetObjectOrder requests. Category
+    /// work runs first; relative requests execute newest-first afterward.
     #[doc(hidden)] pub pending_object_order_commands: Vec<ObjectOrderCommand>,
     /// Next `exec_list` slot during the live reverse-list walk. Insertions
     /// before this cursor have already missed the C++ iterator; insertions at
@@ -33494,22 +33494,109 @@ impl Engine {
         if self.pending_object_order_commands.is_empty() {
             return;
         }
-        // C4Game resolves SetCategory's Unsorted objects first
-        // (C4Game.cpp:1611-1616). Rust has no transient Unsorted bit;
-        // this stable category fix is its equivalent.
-        self.fix_exec_list_order();
         let commands = std::mem::take(&mut self.pending_object_order_commands);
-        for command in commands.into_iter().rev() {
-            self.execute_object_order_command(command);
+
+        let has_relative = commands
+            .iter()
+            .any(|command| matches!(command, ObjectOrderCommand::SetRelative { .. }));
+        let sort_all = commands
+            .iter()
+            .any(|command| matches!(command, ObjectOrderCommand::SortByCategory));
+        let resort_objects: HashSet<ObjectId> = commands
+            .iter()
+            .filter_map(|command| match command {
+                ObjectOrderCommand::ResortObject(object) => Some(*object),
+                _ => None,
+            })
+            .collect();
+        let has_object_resorts = !resort_objects.is_empty();
+
+        // Preserve SetObjectOrder's existing load/category normalization when
+        // it is the only kind of request. Explicit Resort commands carry the
+        // exact C++ category operation below and must not normalize multi-bit
+        // sort categories.
+        if has_relative && !sort_all && resort_objects.is_empty() {
+            self.fix_exec_list_order();
         }
-        self.rebuild_sectors();
+        if sort_all {
+            self.sort_exec_list_by_category();
+        }
+
+        // C4GameObjects::ResortUnsorted scans the main list First -> Next.
+        // `exec_list` is that list reversed, and duplicate Resort calls only
+        // set the same boolean flag.
+        let resort_order = self
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .filter(|object| resort_objects.contains(object))
+            .collect::<Vec<_>>();
+        let mut unprocessed_resorts = resort_objects;
+        for object in resort_order {
+            unprocessed_resorts.remove(&object);
+            self.resort_object(object, &unprocessed_resorts);
+        }
+
+        // C4ObjResort nodes are pushed at the list head: newest first.
+        for command in commands.into_iter().rev() {
+            if let ObjectOrderCommand::SetRelative {
+                relative_to,
+                object,
+                after,
+            } = command
+            {
+                self.execute_relative_object_order_command(relative_to, object, after);
+            }
+        }
+        // Native global SortByCategory only reorders the main list. Object
+        // re-adds and SetObjectOrder also update sector traversal.
+        if has_relative || has_object_resorts {
+            self.rebuild_sectors();
+        }
     }
 
-    fn execute_object_order_command(&mut self, command: ObjectOrderCommand) {
-        let Some(object_index) = self.find_object_index(command.object) else {
+    fn sort_exec_list_by_category(&mut self) {
+        let mut keyed = self
+            .exec_list
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &id)| {
+                let index = self.find_object_index(id)?;
+                let category = self.objects[index].state.category & CATEGORY_SORT_LIMIT;
+                Some((category, position, id))
+            })
+            .collect::<Vec<_>>();
+        keyed.sort_by_key(|&(category, position, _)| (category, position));
+        self.exec_list = keyed.into_iter().map(|(_, _, id)| id).collect();
+    }
+
+    fn resort_object(&mut self, object: ObjectId, still_unsorted: &HashSet<ObjectId>) {
+        let Some(object_index) = self.find_object_index(object) else {
             return;
         };
-        let Some(relative_index) = self.find_object_index(command.relative_to) else {
+        if self.objects[object_index].destroyed
+            || !self.objects[object_index].state.status.is_active()
+        {
+            return;
+        }
+        let Some(position) = self.exec_list.iter().position(|&id| id == object) else {
+            return;
+        };
+        self.exec_list.remove(position);
+        self.insert_into_exec_list_ignoring(object, false, Some(still_unsorted));
+    }
+
+    fn execute_relative_object_order_command(
+        &mut self,
+        relative_to: ObjectId,
+        object: ObjectId,
+        after: bool,
+    ) {
+        let Some(object_index) = self.find_object_index(object) else {
+            return;
+        };
+        let Some(relative_index) = self.find_object_index(relative_to) else {
             return;
         };
         if self.objects[object_index].destroyed
@@ -33523,24 +33610,24 @@ impl Engine {
         let relative_category = self.objects[relative_index].state.category & CATEGORY_SORT_LIMIT;
         // C4GameObjects::OrderObjectBefore/After protect category sorting
         // with opposite one-sided comparisons (C4GameObjects.cpp:749-769).
-        if (!command.after && object_category < relative_category)
-            || (command.after && object_category > relative_category)
+        if (!after && object_category < relative_category)
+            || (after && object_category > relative_category)
         {
             return;
         }
-        let Some(object_position) = self.exec_list.iter().position(|&id| id == command.object)
+        let Some(object_position) = self.exec_list.iter().position(|&id| id == object)
         else {
             return;
         };
         let Some(relative_position) = self
             .exec_list
             .iter()
-            .position(|&id| id == command.relative_to)
+            .position(|&id| id == relative_to)
         else {
             return;
         };
 
-        if command.after {
+        if after {
             // Main-list AFTER is exec-list BEFORE.
             if object_position < relative_position {
                 return;
@@ -33549,11 +33636,11 @@ impl Engine {
             let Some(relative_position) = self
                 .exec_list
                 .iter()
-                .position(|&id| id == command.relative_to)
+                .position(|&id| id == relative_to)
             else {
                 return;
             };
-            self.exec_list.insert(relative_position, command.object);
+            self.exec_list.insert(relative_position, object);
         } else {
             // Main-list BEFORE is exec-list AFTER.
             if object_position > relative_position {
@@ -33563,11 +33650,11 @@ impl Engine {
             let Some(relative_position) = self
                 .exec_list
                 .iter()
-                .position(|&id| id == command.relative_to)
+                .position(|&id| id == relative_to)
             else {
                 return;
             };
-            self.exec_list.insert(relative_position + 1, command.object);
+            self.exec_list.insert(relative_position + 1, object);
         }
     }
 
@@ -33585,6 +33672,15 @@ impl Engine {
     }
 
     fn insert_into_exec_list(&mut self, id: ObjectId, loaded: bool) {
+        self.insert_into_exec_list_ignoring(id, loaded, None);
+    }
+
+    fn insert_into_exec_list_ignoring(
+        &mut self,
+        id: ObjectId,
+        loaded: bool,
+        ignored: Option<&HashSet<ObjectId>>,
+    ) {
         if loaded {
             self.insert_exec_link(self.exec_list.len(), id);
             return;
@@ -33610,7 +33706,7 @@ impl Engine {
         // :156,:168); rust prunes removed objects from the list, and the
         // transient Unsorted resort flag is not modeled.
         let live_index = |engine: &Self, other: ObjectId| {
-            (other != id)
+            (other != id && ignored.is_none_or(|ignored| !ignored.contains(&other)))
                 .then(|| engine.find_object_index(other))
                 .flatten()
         };
