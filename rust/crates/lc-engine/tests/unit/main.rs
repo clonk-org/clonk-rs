@@ -26,7 +26,9 @@
 #[allow(unused_imports)]
 pub use lc_engine::*;
 #[allow(unused_imports)]
-pub use lc_engine::command::{CommandData, CommandId, CommandMode, CommandRequest};
+pub use lc_engine::command::{
+    AcquireScriptResult, CommandData, CommandId, CommandMode, CommandRequest,
+};
 #[allow(unused_imports)]
 pub use lc_engine::compat::{LandscapeOperation, ObjectOrderCommand, PlayerCommand};
 #[allow(unused_imports)]
@@ -60176,6 +60178,112 @@ protected func RejectCollect(id, pObject) { return(1); }
         let crew_snapshot = engine.object_snapshot(crew).expect("crew snapshot");
         assert_eq!(crew_snapshot.container, Some(hut));
         Ok(())
+    }
+
+    #[test]
+    fn l111_acquire_preserves_walk_trajectory_across_frames() {
+        let script = "#strict 2";
+        let mut walker =
+            Definition::from_script("L111", "L111 walker", script).expect("definition compiles");
+        walker.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([(
+                "Walk".to_string(),
+                ActionSpec::default().with_procedure("WALK"),
+            )]),
+        );
+        // Keep Physical.Walk at zero so the deterministic fixture uses the
+        // compact MovementProfile path.
+        walker.set_movement_profile(
+            MovementProfile::default()
+                .with_walk_speed(8)
+                .with_walk_acceleration(2),
+        );
+
+        let mut engine = Engine::with_seed(111);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(walker)
+            .expect("walker registers");
+
+        let spawn = |y| {
+            SpawnConfig::new("L111")
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(100, y))
+                .with_action(ActionState::new("Walk"))
+                .with_command_direction(CommandDirection::Right)
+                .with_alive(true)
+                .with_mobile(true)
+        };
+        let control = engine
+            .spawn_object(spawn(20))
+            .expect("control walker spawns");
+        let acquiring = engine
+            .spawn_object(spawn(80))
+            .expect("Acquire walker spawns");
+
+        let acquiring_index = engine
+            .find_object_index(acquiring)
+            .expect("Acquire walker exists");
+        engine.objects[acquiring_index]
+            .commands
+            .push_back(
+                CommandRequest::new(CommandId::Acquire)
+                    .with_data(CommandData::Text("WOOD".into()))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("Acquire queues");
+
+        let start_x = 100;
+        let mut final_x = start_x;
+        for frame in 1..=6 {
+            let snapshot = engine.tick().expect("frame executes");
+            let control_state = snapshot.object(control).expect("control survives");
+            let acquiring_state = snapshot.object(acquiring).expect("Acquire walker survives");
+
+            assert_eq!(
+                control_state.command_direction,
+                CommandDirection::Right,
+                "frame {frame}"
+            );
+            assert_eq!(
+                acquiring_state.command_direction,
+                CommandDirection::Right,
+                "Acquire must not overwrite ComDir on frame {frame}"
+            );
+            assert_eq!(
+                acquiring_state.position.x, control_state.position.x,
+                "frame {frame}"
+            );
+            assert_eq!(
+                acquiring_state.velocity, control_state.velocity,
+                "frame {frame}"
+            );
+            assert_eq!(
+                acquiring_state.fixed_velocity, control_state.fixed_velocity,
+                "subpixel trajectory differs on frame {frame}"
+            );
+            assert_eq!(
+                acquiring_state.command_stack.command_names(),
+                vec!["Acquire".to_string()],
+                "handled Acquire must remain active on frame {frame}"
+            );
+            final_x = acquiring_state.position.x;
+
+            // Drive the asynchronous script response directly so this replay
+            // isolates Acquire's command delta from optional-callback lookup
+            // and the separate InitEvaluation timing slice.
+            let acquiring_index = engine
+                .find_object_index(acquiring)
+                .expect("Acquire walker remains");
+            assert!(engine.objects[acquiring_index]
+                .commands
+                .set_acquire_script_result(AcquireScriptResult::Handled));
+        }
+        assert!(
+            final_x > start_x,
+            "the preserved Right ComDir must move the actor"
+        );
     }
 
     #[test]
