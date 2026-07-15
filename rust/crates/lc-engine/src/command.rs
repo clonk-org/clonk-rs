@@ -4445,6 +4445,26 @@ mod tests {
         assert!(result.operations.is_empty());
     }
 
+    fn step_dig_once(
+        actor: CommandObjectSnapshot,
+        request: CommandRequest,
+    ) -> CommandStepResult {
+        let actor_id = actor.id;
+        let mut objects = HashMap::new();
+        objects.insert(actor_id, actor);
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = move_to_ctx_at_frame(
+            objects.get(&actor_id).expect("actor present"),
+            &objects,
+            &players,
+            &definitions,
+            0,
+        );
+        let mut state = DigState::from_request(&request).expect("dig state created");
+        state.step(&ctx)
+    }
+
     #[test]
     fn dig_requests_ungrab_when_pushing() {
         let actor_id = ObjectId::new(60);
@@ -4540,6 +4560,7 @@ mod tests {
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.action_procedure = ActionProcedure::Walk;
         actor.command_direction = CommandDirection::Stop;
+        actor.physical.can_dig = 1;
 
         let mut objects = HashMap::new();
         objects.insert(actor.id, actor.clone());
@@ -4574,8 +4595,8 @@ mod tests {
         let update = result.update.expect("dig should issue an update");
         assert_eq!(
             update.command_direction,
-            Some(CommandDirection::Down),
-            "dig should direct the crew towards the target"
+            Some(CommandDirection::DownLeft),
+            "the C++ tx-DigRange guard overwrites straight Down"
         );
         let action_update = update.action.expect("dig should start the dig action");
         assert_eq!(action_update.name.as_deref(), Some("Dig"));
@@ -4622,6 +4643,167 @@ mod tests {
         assert_eq!(update.command_direction, Some(CommandDirection::Stop));
         let action_update = update.action.expect("dig should reset to idle");
         assert_eq!(action_update.name.as_deref(), Some("Idle"));
+    }
+
+    #[test]
+    fn dig_reached_check_uses_bottom_center_target() {
+        let mut actor = snapshot_with_id(64);
+        actor.position = Vector2::new(100, 93);
+        actor.shape_top = -10;
+        actor.action_procedure = ActionProcedure::Dig;
+
+        let request = CommandRequest::new(CommandId::Dig)
+            .with_tx(Some(100))
+            .with_ty(Some(100));
+        let result = step_dig_once(actor.clone(), request.clone());
+        assert_eq!(
+            result.status,
+            CommandStatus::Completed,
+            "raw y=100 is adjusted to the actor bottom-center y=93"
+        );
+
+        actor.position.y = 100;
+        let result = step_dig_once(actor, request);
+        assert_eq!(
+            result.status,
+            CommandStatus::Running,
+            "the raw target itself is seven pixels outside the default range"
+        );
+    }
+
+    #[test]
+    fn dig_steering_keeps_cpp_downleft_quirk_and_emits_no_plain_up() {
+        let mut actor = snapshot_with_id(65);
+        actor.position = Vector2::new(100, 100);
+        actor.shape_top = -10;
+        actor.action_procedure = ActionProcedure::Dig;
+
+        let below = step_dig_once(
+            actor.clone(),
+            CommandRequest::new(CommandId::Dig)
+                .with_tx(Some(100))
+                .with_ty(Some(127)),
+        );
+        assert_eq!(
+            below
+                .update
+                .and_then(|update| update.command_direction),
+            Some(CommandDirection::DownLeft),
+            "cx == tx below the target is overwritten from Down to DownLeft"
+        );
+
+        actor.command_direction = CommandDirection::Right;
+        for (target_x, expected) in [
+            (90, Some(CommandDirection::UpLeft)),
+            (99, None),
+            (100, None),
+            (101, None),
+            (110, Some(CommandDirection::UpRight)),
+        ] {
+            let result = step_dig_once(
+                actor.clone(),
+                CommandRequest::new(CommandId::Dig)
+                    .with_tx(Some(target_x))
+                    .with_ty(Some(73)),
+            );
+            let emitted = result
+                .update
+                .and_then(|update| update.command_direction);
+            assert_eq!(emitted, expected, "raw target x={target_x}");
+            assert_ne!(emitted, Some(CommandDirection::Up));
+        }
+    }
+
+    #[test]
+    fn dig_fails_on_the_start_frame_without_can_dig() {
+        let mut actor = snapshot_with_id(66);
+        actor.action_procedure = ActionProcedure::Walk;
+        actor.physical.can_dig = 0;
+
+        let result = step_dig_once(
+            actor,
+            CommandRequest::new(CommandId::Dig)
+                .with_tx(Some(0))
+                .with_ty(Some(20)),
+        );
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result.update.is_none(), "the Dig action never starts");
+        assert!(result.operations.is_empty());
+    }
+
+    #[test]
+    fn dig_uses_positive_definition_move_to_range() {
+        let mut actor = snapshot_with_id(67);
+        actor.position = Vector2::new(100, 100);
+        actor.shape_top = -10;
+        actor.action_procedure = ActionProcedure::Dig;
+
+        let request = CommandRequest::new(CommandId::Dig)
+            .with_tx(Some(115))
+            .with_ty(Some(107));
+        assert_eq!(
+            step_dig_once(actor.clone(), request.clone()).status,
+            CommandStatus::Running,
+            "fifteen pixels exceeds the default move-to range"
+        );
+
+        actor.move_to_range = 20;
+        assert_eq!(
+            step_dig_once(actor, request).status,
+            CommandStatus::Completed,
+            "positive DefCore MoveToRange overrides the default five"
+        );
+    }
+
+    #[test]
+    fn dig_scale_and_hangle_use_object_com_let_go() {
+        for procedure in [ActionProcedure::Scale, ActionProcedure::Hang] {
+            for (direction, xdirf) in [(Direction::Left, 1), (Direction::Right, -1)] {
+                let mut actor = snapshot_with_id(68);
+                actor.action_procedure = procedure;
+                actor.direction = direction;
+                let result = step_dig_once(
+                    actor,
+                    CommandRequest::new(CommandId::Dig)
+                        .with_tx(Some(100))
+                        .with_ty(Some(100)),
+                );
+                assert_eq!(result.status, CommandStatus::Running);
+                let update = result.update.expect("let-go produces an object update");
+                assert_eq!(
+                    update
+                        .action
+                        .as_ref()
+                        .and_then(|action| action.name.as_deref()),
+                    Some("Jump")
+                );
+                assert_eq!(
+                    update.fixed_velocity,
+                    Some(FixedVec2::new(math::itofix(xdirf), crate::C4Fixed::ZERO))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dig_out_material_reasserts_data_while_already_digging() {
+        let mut actor = snapshot_with_id(69);
+        actor.action_procedure = ActionProcedure::Dig;
+        actor.command_direction = CommandDirection::DownLeft;
+
+        let result = step_dig_once(
+            actor,
+            CommandRequest::new(CommandId::Dig)
+                .with_tx(Some(0))
+                .with_ty(Some(20))
+                .with_data(CommandData::Integer(1)),
+        );
+        assert_eq!(result.status, CommandStatus::Running);
+        let update = result.update.expect("dig-out data is refreshed");
+        assert_eq!(update.command_direction, None);
+        let action = update.action.expect("data-only action update exists");
+        assert_eq!(action.name, None, "the Dig action is not restarted");
+        assert_eq!(action.data, Some(1));
     }
 
     #[test]
@@ -15829,52 +16011,70 @@ impl DigState {
         )
     }
 
-    fn move_to_range(&self, _ctx: &CommandRuntimeContext<'_>) -> i32 {
-        DIG_MOVE_TO_RANGE_DEFAULT
+    fn adjusted_target(&self, ctx: &CommandRuntimeContext<'_>) -> Vector2 {
+        Vector2::new(
+            self.target.x,
+            self.target.y + ctx.object.shape_top + 3,
+        )
     }
 
-    fn desired_direction(&self, position: Vector2) -> CommandDirection {
-        let mut direction = CommandDirection::Stop;
-
-        if position.x < self.target.x - DIG_DIRECTION_RANGE {
-            direction = CommandDirection::Right;
-        } else if position.x > self.target.x + DIG_DIRECTION_RANGE {
-            direction = CommandDirection::Left;
+    fn move_to_range(&self, ctx: &CommandRuntimeContext<'_>) -> i32 {
+        if ctx.object.move_to_range > 0 {
+            ctx.object.move_to_range
+        } else {
+            DIG_MOVE_TO_RANGE_DEFAULT
         }
+    }
 
-        if position.y < self.target.y - DIG_DIRECTION_RANGE {
-            direction = match direction {
-                CommandDirection::Right => CommandDirection::DownRight,
-                CommandDirection::Left => CommandDirection::DownLeft,
-                _ => CommandDirection::Down,
-            };
-        } else if position.y > self.target.y + DIG_DIRECTION_RANGE {
-            direction = match direction {
-                CommandDirection::Right => CommandDirection::UpRight,
-                CommandDirection::Left => CommandDirection::UpLeft,
-                _ => CommandDirection::Up,
-            };
+    fn desired_direction(
+        &self,
+        position: Vector2,
+        target: Vector2,
+    ) -> Option<CommandDirection> {
+        let mut direction = None;
+
+        // C4Command::Dig (C4Command.cpp:478-484) deliberately uses seven
+        // independent writes. In particular, the DownLeft guard compares
+        // against `tx - DigRange`, and the chain never assigns plain Up.
+        if position.x < target.x - DIG_DIRECTION_RANGE {
+            direction = Some(CommandDirection::Right);
+        }
+        if position.x > target.x + DIG_DIRECTION_RANGE {
+            direction = Some(CommandDirection::Left);
+        }
+        if position.y < target.y - DIG_DIRECTION_RANGE {
+            direction = Some(CommandDirection::Down);
+        }
+        if position.x < target.x - DIG_DIRECTION_RANGE
+            && position.y < target.y - DIG_DIRECTION_RANGE
+        {
+            direction = Some(CommandDirection::DownRight);
+        }
+        if position.x > target.x - DIG_DIRECTION_RANGE
+            && position.y < target.y - DIG_DIRECTION_RANGE
+        {
+            direction = Some(CommandDirection::DownLeft);
+        }
+        if position.x < target.x - DIG_DIRECTION_RANGE
+            && position.y > target.y + DIG_DIRECTION_RANGE
+        {
+            direction = Some(CommandDirection::UpRight);
+        }
+        if position.x > target.x + DIG_DIRECTION_RANGE
+            && position.y > target.y + DIG_DIRECTION_RANGE
+        {
+            direction = Some(CommandDirection::UpLeft);
         }
 
         direction
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        // C++ snapshots the adjusted bottom-center target before any helper
+        // call in this evaluation, but recomputes it from live Shape.y on
+        // every later execution.
+        let target = self.adjusted_target(ctx);
         let mut pending_update: Option<ObjectUpdate> = None;
-
-        if matches!(
-            ctx.object.action_procedure,
-            ActionProcedure::Build | ActionProcedure::Chop
-        ) {
-            pending_update = self.apply_idle(ctx, pending_update);
-        }
-
-        if matches!(
-            ctx.object.action_procedure,
-            ActionProcedure::Hang | ActionProcedure::Scale
-        ) {
-            pending_update = self.apply_idle(ctx, pending_update);
-        }
 
         if ctx.object.action_procedure == ActionProcedure::Push {
             pending_update = self.ensure_stop(ctx, pending_update);
@@ -15906,9 +16106,28 @@ impl DigState {
         }
         self.exit_requested = false;
 
+        if matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Build | ActionProcedure::Chop
+        ) {
+            pending_update = self.apply_idle(ctx, pending_update);
+        }
+
+        if matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Hang | ActionProcedure::Scale
+        ) {
+            let xdirf = if ctx.object.direction == Direction::Left {
+                1
+            } else {
+                -1
+            };
+            pending_update = Some(let_go_update(None, xdirf));
+        }
+
         let move_to_range = self.move_to_range(ctx);
-        let dx = self.target.x - ctx.position.x;
-        let dy = self.target.y - ctx.position.y;
+        let dx = target.x - ctx.position.x;
+        let dy = target.y - ctx.position.y;
         if dx.abs() <= move_to_range && dy.abs() <= move_to_range {
             let update = self.apply_idle(ctx, pending_update);
             return CommandStepResult::completed(update);
@@ -15918,28 +16137,31 @@ impl DigState {
             if ctx.object.action_procedure != ActionProcedure::Walk {
                 return CommandStepResult::running(pending_update);
             }
-            let mut update = self.ensure_stop(ctx, pending_update).unwrap_or_default();
-            let mut action_update = ActionUpdate::default()
+            if ctx.object.physical.can_dig == 0 {
+                return CommandStepResult::failed(pending_update);
+            }
+            let mut update = pending_update.unwrap_or_default();
+            let action_update = ActionUpdate::default()
                 .with_name("Dig")
                 .with_force(true)
                 .with_phase(0)
-                .with_ticks(0);
-            if self.dig_out_material {
-                action_update = action_update.with_data(1);
-            }
+                .with_ticks(0)
+                .with_data(0);
             update = update.with_action_update(action_update);
             pending_update = Some(update);
         }
 
-        let direction = self.desired_direction(ctx.position);
-        if direction == CommandDirection::Stop {
-            return CommandStepResult::running(pending_update);
+        if self.dig_out_material {
+            let update = pending_update.unwrap_or_default().with_action_data(1);
+            pending_update = Some(update);
         }
 
-        if ctx.object.command_direction != direction {
-            let mut update = pending_update.unwrap_or_default();
-            update = update.with_command_direction(direction);
-            pending_update = Some(update);
+        if let Some(direction) = self.desired_direction(ctx.position, target) {
+            if ctx.object.command_direction != direction {
+                let mut update = pending_update.unwrap_or_default();
+                update = update.with_command_direction(direction);
+                pending_update = Some(update);
+            }
         }
 
         CommandStepResult::running(pending_update)
