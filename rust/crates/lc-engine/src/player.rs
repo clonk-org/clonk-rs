@@ -129,6 +129,43 @@ fn default_zoom() -> f32 {
     1.0
 }
 
+/// One `C4MessageBoardQuery` retained by a runtime player. The answered bit
+/// is deliberately not serialized: C++ re-asks an in-flight query after a
+/// savegame reload (C4MessageInput.cpp:790-801).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MessageBoardQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ObjectId>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub uppercase: bool,
+    #[serde(skip)]
+    pub answered: bool,
+}
+
+impl MessageBoardQuery {
+    pub fn new(target: Option<ObjectId>, prompt: String, uppercase: bool) -> Self {
+        Self {
+            target,
+            prompt,
+            uppercase,
+            answered: false,
+        }
+    }
+}
+
+/// Process-local `C4ChatInputDialog` projection for a script query. Query
+/// registration is synchronized player state; the one visible edit line is
+/// runtime presentation state and is not part of a savegame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveMessageBoardInput {
+    pub player: i32,
+    pub target: Option<ObjectId>,
+    pub prompt: String,
+    pub uppercase: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PlayerState {
     pub id: i32,
@@ -286,6 +323,9 @@ pub struct PlayerState {
     pub message_status: i32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub message_buf: String,
+    /// Saved `C4Player::pMsgBoardQuery` list, in linked-list order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_board_queries: Vec<MessageBoardQuery>,
     /// C4Player::ShowControlPos: tutorial-selected placement for the command
     /// hint strip (FnSetPlrShowControlPos, C4Script.cpp:2561-2566).
     #[serde(default)]
@@ -344,11 +384,32 @@ impl PlayerState {
         if self.view_target == Some(object) {
             self.view_target = None;
         }
+        self.remove_message_board_query(Some(object));
         self.sync_viewport_focus();
+    }
+
+    pub(crate) fn call_message_board(&mut self, query: MessageBoardQuery) {
+        self.remove_message_board_query(query.target);
+        self.message_board_queries.push(query);
+    }
+
+    pub(crate) fn remove_message_board_query(&mut self, target: Option<ObjectId>) -> bool {
+        let Some(index) = self
+            .message_board_queries
+            .iter()
+            .position(|query| query.target == target)
+        else {
+            return false;
+        };
+        self.message_board_queries.remove(index);
+        true
     }
 
     pub(crate) fn prepare_for_save(&mut self) {
         self.view_target = None;
+        for query in &mut self.message_board_queries {
+            query.answered = false;
+        }
     }
 
     pub(crate) fn restore_runtime_view(&mut self) {
@@ -485,6 +546,7 @@ pub struct Player {
     select_count: i32,
     message_status: i32,
     message_buf: String,
+    message_board_queries: Vec<MessageBoardQuery>,
     /// Direct-com input state (C4Player.h:118-121).
     #[doc(hidden)] pub control: PlayerControlState,
     /// C4Player::ExtraData named slots (Fn[Set/Get]PlrExtraData).
@@ -553,6 +615,7 @@ impl Player {
             select_count: 0,
             message_status: 0,
             message_buf: String::new(),
+            message_board_queries: Vec::new(),
             control: PlayerControlState::default(),
             extra_data: Vec::new(),
         }
@@ -634,6 +697,27 @@ impl Player {
 
     pub fn set_message_buf(&mut self, message: impl Into<String>) {
         self.message_buf = bounded_message_buf(message.into());
+    }
+
+    pub fn message_board_queries(&self) -> &[MessageBoardQuery] {
+        &self.message_board_queries
+    }
+
+    pub(crate) fn call_message_board(&mut self, query: MessageBoardQuery) {
+        self.remove_message_board_query(query.target);
+        self.message_board_queries.push(query);
+    }
+
+    pub(crate) fn remove_message_board_query(&mut self, target: Option<ObjectId>) -> bool {
+        let Some(index) = self
+            .message_board_queries
+            .iter()
+            .position(|query| query.target == target)
+        else {
+            return false;
+        };
+        self.message_board_queries.remove(index);
+        true
     }
 
     pub fn view_wealth(&self) -> i32 {
@@ -763,6 +847,7 @@ impl Player {
             select_count: 0,
             message_status: 0,
             message_buf: String::new(),
+            message_board_queries: Vec::new(),
             control: PlayerControlState::default(),
             extra_data: Vec::new(),
         }
@@ -824,6 +909,7 @@ impl Player {
             select_count,
             message_status,
             message_buf,
+            message_board_queries,
             show_control_position,
             show_control,
             hostility,
@@ -892,6 +978,7 @@ impl Player {
             select_count,
             message_status,
             message_buf: bounded_message_buf(message_buf),
+            message_board_queries,
             control,
             extra_data,
         }
@@ -955,6 +1042,7 @@ impl Player {
             select_count: self.select_count,
             message_status: self.message_status,
             message_buf: self.message_buf.clone(),
+            message_board_queries: self.message_board_queries.clone(),
             show_control_position: self.show_control_position,
             show_control: self.show_control,
             hostility: {
@@ -1379,6 +1467,7 @@ impl Player {
         if self.view_target == Some(object) {
             self.view_target = None;
         }
+        self.remove_message_board_query(Some(object));
         self.sync_viewport_focus();
     }
 
@@ -1900,9 +1989,40 @@ mod tests {
             "view_cursor",
             "captain",
             "view_target",
+            "message_board_queries",
         ] {
             assert!(value.get(field).is_none(), "unexpected default field {field}");
         }
+    }
+
+    #[test]
+    fn message_board_queries_save_without_the_answered_runtime_bit() {
+        let state = PlayerState {
+            id: 2,
+            message_board_queries: vec![MessageBoardQuery {
+                target: Some(ObjectId::new(7)),
+                prompt: "Name?".to_string(),
+                uppercase: true,
+                answered: true,
+            }],
+            ..PlayerState::default()
+        };
+
+        let encoded = serde_json::to_value(&state)
+            .unwrap_or_else(|error| panic!("message-board query serializes: {error}"));
+        let query = &encoded["message_board_queries"][0];
+        assert_eq!(query["target"], serde_json::json!(7));
+        assert_eq!(query["prompt"], "Name?");
+        assert_eq!(query["uppercase"], true);
+        assert!(query.get("answered").is_none());
+
+        let restored: PlayerState = serde_json::from_value(encoded)
+            .unwrap_or_else(|error| panic!("message-board query restores: {error}"));
+        assert!(!restored.message_board_queries[0].answered);
+
+        let mut captured = state;
+        captured.prepare_for_save();
+        assert!(!captured.message_board_queries[0].answered);
     }
 
     #[test]

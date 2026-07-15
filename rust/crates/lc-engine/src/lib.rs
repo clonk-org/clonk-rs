@@ -111,9 +111,9 @@ pub use network_game_data::{
 };
 pub use pathfinder::{PathFinder, PathWaypoint};
 pub use player::{
-    Player, PlayerAtClient, PlayerConfig, PlayerControlState, PlayerState, PlayerStatus,
-    PlayerViewport, PLAYER_VIEW_MODE_CURSOR, PLAYER_VIEW_MODE_SCROLLING,
-    PLAYER_VIEW_MODE_TARGET,
+    ActiveMessageBoardInput, MessageBoardQuery, Player, PlayerAtClient, PlayerConfig,
+    PlayerControlState, PlayerState, PlayerStatus, PlayerViewport, PLAYER_VIEW_MODE_CURSOR,
+    PLAYER_VIEW_MODE_SCROLLING, PLAYER_VIEW_MODE_TARGET,
 };
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use round_results::{RoundResultsPlayerState, RoundResultsState};
@@ -12699,6 +12699,10 @@ pub struct Engine {
     /// Explicit client-local players. `None` is the standalone/headless
     /// default where every registered player has local control.
     local_players: Option<HashSet<i32>>,
+    /// The process-local singleton script-query edit line. Player query
+    /// registration is synchronized and saved; this presentation state is
+    /// deliberately runtime-only like C++ `Game.MessageInput`.
+    active_message_board_input: Option<ActiveMessageBoardInput>,
     /// The C++ master object list (`::Objects`) kept in EXEC order:
     /// C4Game::ExecObjects walks the list from the BACK (C4Game.cpp:1582),
     /// so this vec is the C4ObjectList REVERSED — index 0 executes first.
@@ -14546,6 +14550,7 @@ impl Engine {
             control_host: true,
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             local_players: None,
+            active_message_board_input: None,
             exec_list: Vec::new(),
             pending_object_order_commands: Vec::new(),
             exec_cursor: None,
@@ -16587,6 +16592,13 @@ impl Engine {
             .players
             .remove(&id)
             .ok_or(EngineError::UnknownPlayer(id))?;
+        if self
+            .active_message_board_input
+            .as_ref()
+            .is_some_and(|input| input.player == id)
+        {
+            self.active_message_board_input = None;
+        }
         for crew in departing_crew {
             if self.find_object_index(crew).is_some_and(|index| {
                 self.objects[index].state.status.is_active()
@@ -17433,6 +17445,10 @@ impl Engine {
         self.local_players = Some(players.into_iter().collect());
     }
 
+    pub fn active_message_board_input(&self) -> Option<&ActiveMessageBoardInput> {
+        self.active_message_board_input.as_ref()
+    }
+
     pub fn environment(&self) -> EnvironmentSettings {
         self.environment
     }
@@ -17798,6 +17814,7 @@ impl Engine {
         .with_network_game(self.network_game)
         .with_control_host(self.control_host, Rc::clone(&self.player_info_updates))
         .with_local_players(local_players)
+        .with_active_message_board_input(self.active_message_board_input.clone())
         .with_player_info_ids(
             self.round_results
                 .players
@@ -20896,6 +20913,10 @@ impl Engine {
         self.update_player_view(id);
         self.execute_player_control_and_menu(id)?;
 
+        let message_query_status_normal = self
+            .players
+            .get(&id)
+            .is_some_and(|player| player.status() == PlayerStatus::Active);
         let normal_status = self.players.get(&id).is_some_and(|player| {
             matches!(
                 player.status(),
@@ -20948,7 +20969,43 @@ impl Engine {
             }
         }
 
+        // C4Player::ExecMsgBoardQueries runs after Tick35 production/value/
+        // elimination work, and only for a normal local player. One global
+        // C4ChatInputDialog serializes prompts across all local players.
+        if self.frame % 35 == 0 && message_query_status_normal {
+            self.open_next_message_board_input(id);
+        }
+
         Ok(self.finish_player_execute_delays(id))
+    }
+
+    fn open_next_message_board_input(&mut self, player_id: i32) {
+        if self.active_message_board_input.is_some()
+            || self
+                .local_players
+                .as_ref()
+                .is_some_and(|players| !players.contains(&player_id))
+        {
+            return;
+        }
+        let query = self
+            .players
+            .get(&player_id)
+            .and_then(|player| {
+                player
+                    .message_board_queries()
+                    .iter()
+                    .find(|query| !query.answered)
+            })
+            .cloned();
+        if let Some(query) = query {
+            self.active_message_board_input = Some(ActiveMessageBoardInput {
+                player: player_id,
+                target: query.target,
+                prompt: query.prompt,
+                uppercase: query.uppercase,
+            });
+        }
     }
 
     pub(crate) fn update_player_view(&mut self, player_id: i32) {
@@ -24774,6 +24831,7 @@ impl Engine {
     }
 
     pub fn restore_state(&mut self, state: &EngineState) -> Result<(), EngineError> {
+        self.active_message_board_input = None;
         for object in &state.objects {
             if !self
                 .definitions
@@ -26543,6 +26601,26 @@ impl Engine {
                 PlayerCommand::SetMaxPlayer { max_players } => {
                     self.max_players = Some(max_players);
                 }
+                PlayerCommand::CallMessageBoard { player_id, query } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.call_message_board(query);
+                    }
+                }
+                PlayerCommand::AbortMessageBoard { player_id, target } => {
+                    if self.active_message_board_input.as_ref().is_some_and(|input| {
+                        input.player == player_id && input.target == target
+                    }) {
+                        self.active_message_board_input = None;
+                    }
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.remove_message_board_query(target);
+                    }
+                }
+                PlayerCommand::RemoveMessageBoardQuery { player_id, target } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.remove_message_board_query(target);
+                    }
+                }
                 PlayerCommand::SetPlayerTeam {
                     player_id,
                     team,
@@ -26747,6 +26825,13 @@ impl Engine {
                     }
                 }
                 PlayerCommand::ClearObjectPointers { object } => {
+                    if self
+                        .active_message_board_input
+                        .as_ref()
+                        .is_some_and(|input| input.target == Some(object))
+                    {
+                        self.active_message_board_input = None;
+                    }
                     let owners: Vec<i32> = self.players.keys().copied().collect();
                     for owner in owners {
                         let removed_cursor = self.crew_cursor(owner) == Some(object);
@@ -36687,6 +36772,17 @@ impl Engine {
                 .collect();
             let owners: Vec<i32> = self.players.keys().copied().collect();
             for object in &destroyed {
+                // C4MessageInput::ClearPointers closes a script type-in whose
+                // callback object is being removed (C4MessageInput.cpp:737-742).
+                // Clear the process-local dialog as part of this ordinary
+                // detach path as well as the explicit host-command path.
+                if self
+                    .active_message_board_input
+                    .as_ref()
+                    .is_some_and(|input| input.target == Some(*object))
+                {
+                    self.active_message_board_input = None;
+                }
                 for owner in &owners {
                     let removed_cursor = self.crew_cursor(*owner) == Some(*object);
                     if removed_cursor {

@@ -452,6 +452,24 @@ pub enum PlayerCommand {
     /// `LoadScenarioSection`, it uses the existing ordered player-command
     /// outcome channel only as script-to-engine transport.
     SetMaxPlayer { max_players: i32 },
+    /// Append a `C4MessageBoardQuery` after removing the first query for the
+    /// same callback object from this player.
+    CallMessageBoard {
+        player_id: i32,
+        query: crate::MessageBoardQuery,
+    },
+    /// Close an exact active script input and remove the first matching
+    /// player query. Emitted for AbortMessageBoard even when no query exists,
+    /// because the presentation line may still be open for an answered query.
+    AbortMessageBoard {
+        player_id: i32,
+        target: Option<ObjectId>,
+    },
+    /// Remove one query while executing OnMessageBoardAnswer.
+    RemoveMessageBoardQuery {
+        player_id: i32,
+        target: Option<ObjectId>,
+    },
     /// `FnSetPlayerTeam`'s complete, callback-approved team transition.
     /// The host has already made every field visible to the still-running
     /// VM; this payload lets the authoritative engine repeat the transition
@@ -1067,6 +1085,7 @@ pub struct HostWorldContext {
     player_order: Rc<Vec<i32>>,
     teams: Rc<Vec<TeamInfo>>,
     local_players: Rc<HashSet<i32>>,
+    active_message_board_input: Option<crate::ActiveMessageBoardInput>,
     /// Legacy selection projection retained only for fixture/FFI contexts
     /// that name crew ids without providing corresponding world objects.
     crew_selection: Rc<HashMap<i32, CrewSelectionState>>,
@@ -1168,6 +1187,7 @@ impl Default for HostWorldContext {
             player_order: Rc::new(Vec::new()),
             teams: Rc::new(Vec::new()),
             local_players: Rc::new(HashSet::new()),
+            active_message_board_input: None,
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
             league_game: false,
@@ -1364,6 +1384,7 @@ impl HostWorldContext {
             sectors,
             transfer_zones: Rc::new(transfer_zones),
             local_players: Rc::new(player_ids.iter().copied().collect()),
+            active_message_board_input: None,
             player_order: Rc::new(player_ids),
             player_info_ids: Rc::new(player_info_ids),
             players: Rc::new(players),
@@ -1453,6 +1474,18 @@ impl HostWorldContext {
     {
         self.local_players = Rc::new(players.into_iter().collect());
         self
+    }
+
+    pub(crate) fn with_active_message_board_input(
+        mut self,
+        input: Option<crate::ActiveMessageBoardInput>,
+    ) -> Self {
+        self.active_message_board_input = input;
+        self
+    }
+
+    fn active_message_board_input(&self) -> Option<&crate::ActiveMessageBoardInput> {
+        self.active_message_board_input.as_ref()
     }
 
     pub(crate) fn with_player_info_ids<I>(mut self, ids: I) -> Self
@@ -2637,6 +2670,146 @@ fn set_max_player(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     });
     Ok(Value::Int(1))
+}
+
+/// `FnCallMessageBoard` (C4Script.cpp:3575-3585): register one player query,
+/// replacing the first query for the same callback object and appending the
+/// replacement at the list tail.
+fn call_message_board(args: &[Value]) -> Result<Value, RuntimeError> {
+    let explicit_target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "CallMessageBoard",
+        "callback object",
+    )?;
+    let uppercase = value_to_bool(
+        args.get(1).unwrap_or(&Value::Nil),
+        "CallMessageBoard",
+        "uppercase",
+    )?;
+    let prompt = parse_optional_string(args.get(2), "CallMessageBoard", "query")?
+        .unwrap_or_default();
+    let player_id = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "CallMessageBoard",
+        "player",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let target = explicit_target.or(context.script_object_context);
+        if target.is_some_and(|target| !context.object_status_present(target)) {
+            return Ok(Value::Bool(false));
+        }
+        let query = crate::MessageBoardQuery::new(target, prompt, uppercase);
+        let Some(player) = context.player_state_mut(player_id) else {
+            return Ok(Value::Bool(false));
+        };
+        player.call_message_board(query.clone());
+        context.record_player_command(PlayerCommand::CallMessageBoard { player_id, query });
+        Ok(Value::Bool(true))
+    })
+}
+
+/// `FnAbortMessageBoard` (C4Script.cpp:3587-3597). Local non-network
+/// cancellation synchronously executes an empty answer before the outer
+/// Remove call, so an active query closes/removes but the builtin returns
+/// false; network cancellation defers that answer and returns the Remove
+/// result.
+fn abort_message_board(args: &[Value]) -> Result<Value, RuntimeError> {
+    let explicit_target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "AbortMessageBoard",
+        "callback object",
+    )?;
+    let player_id = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "AbortMessageBoard",
+        "player",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let target = explicit_target.or(context.script_object_context);
+        if context.player_state(player_id).is_none() {
+            return Ok(Value::Bool(false));
+        }
+        let active_local_cancel = !context.world.network_game()
+            && context
+                .world
+                .active_message_board_input()
+                .is_some_and(|input| input.player == player_id && input.target == target);
+        let removed = context
+            .player_state_mut(player_id)
+            .is_some_and(|player| player.remove_message_board_query(target));
+        context.record_player_command(PlayerCommand::AbortMessageBoard { player_id, target });
+        Ok(Value::Bool(removed && !active_local_cancel))
+    })
+}
+
+/// `FnOnMessageBoardAnswer` (C4Script.cpp:3599-3613): consume exactly one
+/// query before dispatching `InputCallback(answer, player)`.
+fn on_message_board_answer(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "OnMessageBoardAnswer",
+        "callback object",
+    )?;
+    let player_id = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "OnMessageBoardAnswer",
+        "player",
+    )?;
+    let answer = parse_optional_string(args.get(2), "OnMessageBoardAnswer", "answer")?
+        .unwrap_or_default();
+
+    let removed = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        let removed = context
+            .player_state_mut(player_id)
+            .is_some_and(|player| player.remove_message_board_query(target));
+        if removed {
+            context.record_player_command(PlayerCommand::RemoveMessageBoardQuery {
+                player_id,
+                target,
+            });
+        }
+        removed
+    });
+    if !removed {
+        return Ok(Value::Bool(false));
+    }
+    if answer.is_empty() {
+        return Ok(Value::Bool(true));
+    }
+
+    let callback_args = [Value::String(answer), Value::Int(player_id)];
+    let callback = match target {
+        Some(target) => call_world_object_script_function(target, "InputCallback", &callback_args),
+        None => {
+            let script = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.world.scenario_script().cloned())
+            });
+            script.and_then(|script| {
+                call_scoped_script_function(script, "InputCallback", &callback_args)
+            })
+        }
+    };
+    match callback {
+        Some(Ok(value)) => Ok(Value::Bool(value_raw_truthy(&value))),
+        Some(Err(error)) => Err(error),
+        None => Ok(Value::Bool(false)),
+    }
 }
 
 fn get_player_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -10197,6 +10370,9 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerTeam", get_player_team);
     script.register_host_function("SetPlayerTeam", set_player_team);
     script.register_host_function("SetMaxPlayer", set_max_player);
+    script.register_host_function("CallMessageBoard", call_message_board);
+    script.register_host_function("AbortMessageBoard", abort_message_board);
+    script.register_host_function("OnMessageBoardAnswer", on_message_board_answer);
     script.register_host_function("GetTeamConfig", get_team_config);
     script.register_host_function("GetTeamCount", get_team_count);
     script.register_host_function("GetTeamByIndex", get_team_by_index);
@@ -37018,6 +37194,7 @@ mod tests {
     }
 
     const EXPECTED_HOST_FUNCTIONS: &[&str] = &[
+        "AbortMessageBoard",
         "Abs",
         "ActIdle",
         "AddCommand",
@@ -37042,6 +37219,7 @@ mod tests {
         "Bubble",
         "C4Id",
         "Call",
+        "CallMessageBoard",
         "CastAny",
         "CastBackParticles",
         "CastBool",
@@ -37288,6 +37466,7 @@ mod tests {
         "ObjectNumber",
         "ObjectSetAction",
         "OnFire",
+        "OnMessageBoardAnswer",
         "Or",
         "PathFree",
         "PlaceAnimal",

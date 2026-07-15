@@ -27,6 +27,7 @@ mod hangle_movement;
 mod legacy_scenario_loading;
 mod load_scenario_section;
 mod manifest_definitions;
+mod message_board_queries;
 mod object_visibility;
 mod real_clonk_hangle;
 mod real_scenario_harness;
