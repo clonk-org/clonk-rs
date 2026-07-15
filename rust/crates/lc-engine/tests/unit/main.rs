@@ -504,6 +504,275 @@ mod tests {
         );
     }
 
+    fn free_rect_test_engine(
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+        densities: Vec<i32>,
+        script_body: &str,
+    ) -> Engine {
+        let mut engine = Engine::with_seed(23);
+        let slots = densities.len();
+        let grid = landscape::PixelGrid::new(
+            width,
+            height,
+            bytes,
+            densities,
+            vec![None; slots],
+            vec![None; slots],
+        );
+        let mut world = Landscape::new(width, vec![height as i32; width as usize])
+            .expect("FreeRect landscape builds");
+        world.set_world_height(height as i32);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+        engine
+            .load_scenario_script_with_convention(
+                "FreeRect density probe",
+                &format!("#strict 2\nfunc Probe() {{ {script_body} }}"),
+                true,
+            )
+            .expect("FreeRect probe loads");
+        engine
+    }
+
+    #[test]
+    fn free_rect_density_switch_bands_and_exact_density_match_cpp() {
+        let cases = [
+            (
+                "C4M_Liquid",
+                vec![1, 0, 0, 0, 5, 6, 7, 8, 9],
+            ),
+            (
+                "C4M_Solid",
+                vec![1, 2, 3, 4, 0, 0, 7, 8, 9],
+            ),
+            (
+                "C4M_Vehicle",
+                vec![1, 2, 3, 4, 5, 6, 0, 0, 9],
+            ),
+            ("37", vec![1, 2, 0, 4, 5, 6, 7, 8, 9]),
+        ];
+        for (density, expected) in cases {
+            let mut engine = free_rect_test_engine(
+                9,
+                1,
+                (1_u8..=9).collect(),
+                vec![0, 24, 25, 37, 49, 50, 99, 100, 1000, 1001],
+                &format!("FreeRect(0, 0, 9, 1, {density});"),
+            );
+
+            engine
+                .call_scenario_script_function("Probe", Vec::new())
+                .expect("density-filtered FreeRect runs");
+            assert_eq!(
+                engine.debug_landscape_plane().expect("pixel plane exists").2,
+                expected,
+                "FreeRect density selector {density}"
+            );
+        }
+    }
+
+    #[test]
+    fn free_rect_omitted_and_zero_density_use_plain_clear_all() {
+        let mut engine = free_rect_test_engine(
+            3,
+            2,
+            vec![1, 2, 3, 1, 2, 3],
+            vec![0, 25, 50, 100],
+            "FreeRect(0, 0, 3, 1); FreeRect(0, 1, 3, 1, 0);",
+        );
+
+        engine
+            .call_scenario_script_function("Probe", Vec::new())
+            .expect("plain FreeRect forms run");
+        assert_eq!(
+            engine.debug_landscape_plane().expect("pixel plane exists").2,
+            vec![0; 6]
+        );
+    }
+
+    #[test]
+    fn free_rect_density_advances_rnd3_for_every_zero_width_row() {
+        let mut engine = free_rect_test_engine(
+            1,
+            20,
+            vec![1; 20],
+            vec![0, 25],
+            "FreeRect(0, 0, 0, 20, C4M_Solid);",
+        );
+        let mut expected_rng = engine.rng.clone();
+        let mut saw_zero_first_draw = false;
+        let mut saw_nonzero_first_draw = false;
+        for _ in 0..20 {
+            if expected_rng.rnd3() != 0 {
+                saw_nonzero_first_draw = true;
+                expected_rng.rnd3();
+            } else {
+                saw_zero_first_draw = true;
+            }
+        }
+        assert!(saw_zero_first_draw, "fixture covers the one-draw row arm");
+        assert!(
+            saw_nonzero_first_draw,
+            "fixture covers the two-draw row arm"
+        );
+
+        engine
+            .call_scenario_script_function("Probe", Vec::new())
+            .expect("zero-width density FreeRect runs");
+
+        assert_eq!(
+            engine.debug_landscape_plane().expect("pixel plane exists").2,
+            vec![1; 20]
+        );
+        assert_eq!(
+            engine.rng, expected_rng,
+            "every row consumes one Rnd3 and a second exactly when the first is nonzero"
+        );
+    }
+
+    #[test]
+    fn free_rect_is_visible_to_same_call_landscape_queries() {
+        let mut engine = free_rect_test_engine(
+            2,
+            1,
+            vec![1, 1],
+            vec![0, 50],
+            "if (GBackSolid(0, 0)) FreeRect(0, 0, 1, 1, C4M_Solid); \
+             if (!GBackSolid(0, 0)) FreeRect(1, 0, 1, 1, C4M_Solid);",
+        );
+        assert_eq!(engine.debug_landscape_density(0, 0), Some(50));
+
+        engine
+            .call_scenario_script_function("Probe", Vec::new())
+            .expect("same-call landscape query runs");
+        assert_eq!(
+            engine.debug_landscape_plane().expect("pixel plane exists").2,
+            vec![0, 0],
+            "the second clear proves GBackSolid saw the first synchronous clear"
+        );
+    }
+
+    #[test]
+    fn free_rect_column_fallback_ignores_dig_free_and_clears_liquids() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Granite]
+            Name=Granite
+            Density=80
+            DigFree=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+            DigFree=0
+        "#,
+        )
+        .expect("FreeRect column materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let granite = materials.id_of("Granite").expect("Granite exists");
+        let water = materials.id_of("Water").expect("Water exists");
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+        let mut world = Landscape::flat_with_material(4, 5, Some(granite));
+        world.set_world_height(10);
+        world.set_solid_material(2, Some(water));
+        world.set_liquid_column(
+            3,
+            vec![LiquidSegment::with_material(2, 4, Some(water))],
+        );
+        engine.set_landscape(world);
+        engine
+            .load_scenario_script_with_convention(
+                "FreeRect column probe",
+                "#strict 2\nfunc Probe() {\n\
+                 FreeRect(0, 5, 1, 3, C4M_Solid);\n\
+                 FreeRect(1, 5, 1, 3);\n\
+                 FreeRect(2, 5, 1, 3, C4M_Solid);\n\
+                 FreeRect(3, 2, 1, 2, C4M_Liquid);\n\
+                 }",
+                true,
+            )
+            .expect("FreeRect column probe loads");
+
+        engine
+            .call_scenario_script_function("Probe", Vec::new())
+            .expect("FreeRect column probe runs");
+        let landscape = engine.landscape().expect("column landscape remains");
+        assert_eq!(
+            landscape.surface(),
+            [8, 8, 5, 5],
+            "both clear arms ignore Material.DigFree while density filtering survives"
+        );
+        assert_eq!(landscape.liquid_material_at(3, 2), None);
+        assert_eq!(landscape.liquid_material_at(3, 3), None);
+        assert_eq!(landscape.liquid_material_at(3, 4), Some(water));
+    }
+
+    #[test]
+    fn free_rect_consumes_rnd3_before_next_same_call_native() {
+        let mut source = Definition::from_script(
+            "FRNG",
+            "FreeRect RNG source",
+            "#strict 2\npublic func Probe() {\n\
+             FreeRect(0, 0, 0, 1, C4M_Solid);\n\
+             return Split2Components();\n\
+             }",
+        )
+        .expect("FreeRect RNG source compiles");
+        source.set_components(vec![DefinitionComponent {
+            id: "PART".to_string(),
+            count: 1,
+        }]);
+        let mut part =
+            Definition::from_script("PART", "FreeRect RNG part", "").expect("PART compiles");
+        part.set_rotateable(1);
+
+        let mut engine = Engine::with_seed(2);
+        engine.register_definition(source).expect("source registers");
+        engine.register_definition(part).expect("PART registers");
+        engine.set_landscape(Landscape::flat(1, 1));
+        let source = engine
+            .spawn_object(SpawnConfig::new("FRNG"))
+            .expect("source spawns");
+
+        let mut expected_rng = engine.rng.clone();
+        if expected_rng.rnd3() != 0 {
+            expected_rng.rnd3();
+        }
+        let expected_rdir = expected_rng.rnd3();
+        let expected_ydir = expected_rng.rnd3();
+        let expected_xdir = expected_rng.rnd3();
+        let expected_rotation = expected_rng.random(360);
+        assert_eq!(
+            (expected_rdir, expected_ydir, expected_xdir),
+            (0, 1, -1),
+            "seed fixture distinguishes synchronous from deferred ordering"
+        );
+
+        let source_index = engine.find_object_index(source).expect("source exists");
+        assert_eq!(
+            engine
+                .call_object_function(source_index, "Probe", Vec::new())
+                .expect("FreeRect then Split2Components runs"),
+            Value::Bool(true)
+        );
+        let piece = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "PART")
+            .expect("component piece exists");
+        assert_eq!(
+            piece.fixed_velocity,
+            FixedVec2::from_ints(expected_xdir, expected_ydir)
+        );
+        assert_eq!(piece.rotation_velocity, itofix(expected_rdir));
+        assert_eq!(piece.state.rotation, expected_rotation);
+        assert_eq!(engine.rng.rnd3_ptr(), 5, "FreeRect draws are not replayed");
+        assert_eq!(engine.rng, expected_rng);
+    }
+
     #[test]
     fn blast_cast_fan_out_matches_the_cpp_evaluate_loop() -> Result<(), EngineError> {
         // C4Landscape::BlastFree evaluate loop (C4Landscape.cpp:1065-1079):

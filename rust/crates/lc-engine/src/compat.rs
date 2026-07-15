@@ -13367,6 +13367,14 @@ pub enum LandscapeOperation {
         width: i32,
         height: i32,
     },
+    /// FnFreeRect's nonzero iFreeDensity arm ->
+    /// C4Landscape::ClearRectDensity (C4Script.cpp:3119-3125).
+    ClearRectDensity {
+        origin: Vector2,
+        width: i32,
+        height: i32,
+        density: i32,
+    },
     /// `C4Game::CreateObjectConstruction(..., fTerrain=true)` prepares the
     /// footprint before `NewObject` and its Construction callback
     /// (C4Game.cpp:1191-1230).
@@ -22620,9 +22628,8 @@ fn dig_free(args: &[Value]) -> Result<Value, RuntimeError> {
 
 /// FnFreeRect (C4Script.cpp:3125-3131): clears the landscape rect in
 /// GLOBAL coordinates (no caller offset, unlike DigFree*) without
-/// producing dug-out material. The density-filtered form
-/// (iFreeDensity -> ClearRectDensity) clears everything in the column
-/// model (PORT_STATUS).
+/// producing dug-out material. A nonzero fifth argument selects C++'s
+/// density-filtered ClearRectDensity arm.
 /// FnScriptGo (C4Script.cpp:2782-2786): switches the scenario script
 /// counter gate (Game.Script.Go) that drives the timed Script%d
 /// sections (C4GameScriptHost::Execute, C4ScriptHost.cpp:222-232).
@@ -22832,19 +22839,22 @@ fn free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
     let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "FreeRect", "y")?;
     let width = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "FreeRect", "wdt")?;
     let height = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "FreeRect", "hgt")?;
-    if width <= 0 || height <= 0 {
-        return Ok(Value::Nil);
-    }
+    let density = value_to_i32(
+        args.get(4).unwrap_or(&Value::Nil),
+        "FreeRect",
+        "free_density",
+    )?;
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return Ok(Value::Nil);
         };
-        context.register_landscape_operation(LandscapeOperation::ClearRect {
-            origin: Vector2::new(x, y),
+        context.preview_clear_rect(
+            Vector2::new(x, y),
             width,
             height,
-        });
+            (density != 0).then_some(density),
+        )?;
         Ok(Value::Nil)
     })
 }
@@ -34262,6 +34272,56 @@ impl EffectHostContext {
 
     fn register_landscape_operation(&mut self, operation: LandscapeOperation) {
         self.pending_landscape_ops.push(operation);
+    }
+
+    /// Run FnFreeRect against this callback's private COW landscape before
+    /// returning to script. C++ mutates Surface8 synchronously, so later
+    /// GBack*/GetMaterial calls in the same callback must see the clear. The
+    /// queued operation folds the same mutation into the authoritative engine
+    /// after the VM returns; its Rnd3 reads have already happened here.
+    fn preview_clear_rect(
+        &mut self,
+        origin: Vector2,
+        width: i32,
+        height: i32,
+        density: Option<i32>,
+    ) -> Result<(), RuntimeError> {
+        let materials = self.world.materials.clone().unwrap_or_default();
+        let landscape_height = self
+            .world
+            .landscape_ref()
+            .map(Landscape::estimated_height)
+            .unwrap_or(0);
+        for row in origin.y..origin.y.saturating_add(height) {
+            if let Some(landscape) = self.world.landscape.as_mut() {
+                crate::Engine::mutate_clear_rect_landscape_row(
+                    Rc::make_mut(landscape),
+                    materials.as_ref(),
+                    origin.x,
+                    row,
+                    width,
+                    density,
+                    landscape_height,
+                );
+            }
+            if draw_context_rnd3()? != 0 {
+                draw_context_rnd3()?;
+            }
+        }
+        self.register_landscape_operation(match density {
+            Some(density) => LandscapeOperation::ClearRectDensity {
+                origin,
+                width,
+                height,
+                density,
+            },
+            None => LandscapeOperation::ClearRect {
+                origin,
+                width,
+                height,
+            },
+        });
+        Ok(())
     }
 
     /// Apply FnExtractLiquid's landscape half to this callback's private

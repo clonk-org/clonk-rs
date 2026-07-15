@@ -37005,7 +37005,13 @@ impl Engine {
                     origin,
                     width,
                     height,
-                } => self.execute_clear_rect_operation(origin, width, height),
+                } => self.execute_clear_rect_operation(origin, width, height, None),
+                LandscapeOperation::ClearRectDensity {
+                    origin,
+                    width,
+                    height,
+                    density,
+                } => self.execute_clear_rect_operation(origin, width, height, Some(density)),
                 LandscapeOperation::PrepareConstructionTerrain {
                     center_x,
                     bottom_y,
@@ -37372,38 +37378,90 @@ impl Engine {
         self.apply_dig_removal_counts(removal_counts, requested, by_object);
     }
 
-    /// `Landscape::ClearRect` (FnFreeRect, C4Script.cpp:3125-3131): the
-    /// columns clear like a dig but nothing is dug OUT — no material
-    /// accounting, no PXS.
-    fn execute_clear_rect_operation(&mut self, origin: Vector2, width: i32, height: i32) {
-        if width <= 0 || height <= 0 {
+    /// `Landscape::ClearRect/ClearRectDensity` (FnFreeRect, C4Script.cpp:
+    /// 3119-3125): clear outright without dug-out material accounting or PXS.
+    fn execute_clear_rect_operation(
+        &mut self,
+        origin: Vector2,
+        width: i32,
+        height: i32,
+        density: Option<i32>,
+    ) {
+        if height <= 0 {
             return;
         }
         let materials = self.materials.clone();
         let Some(landscape) = self.landscape.as_mut() else {
             return;
         };
+        let landscape_height = landscape.estimated_height();
+        for row in origin.y..origin.y.saturating_add(height) {
+            Self::mutate_clear_rect_landscape_row(
+                landscape,
+                &materials,
+                origin.x,
+                row,
+                width,
+                density,
+                landscape_height,
+            );
+        }
+    }
+
+    /// One source row of C4Landscape::ClearRect/ClearRectDensity. The caller
+    /// owns row ordering because FnFreeRect interleaves each completed row
+    /// with `if (Rnd3()) Rnd3()` before script execution resumes.
+    pub(crate) fn mutate_clear_rect_landscape_row(
+        landscape: &mut Landscape,
+        materials: &MaterialSet,
+        x: i32,
+        y: i32,
+        width: i32,
+        density: Option<i32>,
+        landscape_height: i32,
+    ) {
+        let density_range = density.map(|density| match density {
+            C4M_VEHICLE => (C4M_VEHICLE, 1000),
+            C4M_SOLID => (C4M_SOLID, C4M_VEHICLE - 1),
+            C4M_SEMI_SOLID => (C4M_SEMI_SOLID, C4M_SOLID - 1),
+            0 => (0, C4M_SEMI_SOLID - 1),
+            density => (density, density),
+        });
         if landscape.pixel_grid().is_some() {
-            // C4Landscape::ClearRect (C4Landscape.cpp:2184-2194):
-            // per-pixel ClearPix with NO diggable gate; each row spins
-            // the Rnd3 ring `if (Rnd3()) Rnd3();`.
-            for cy in origin.y..origin.y.saturating_add(height) {
-                for cx in origin.x..origin.x.saturating_add(width) {
-                    landscape.clear_pix(cx, cy);
-                }
-                if self.rng.rnd3() != 0 {
-                    self.rng.rnd3();
+            // ClearPix has no DigFree gate. Density selection uses the exact
+            // inclusive Pix2Dens band before each in-bounds write.
+            for column in x..x.saturating_add(width) {
+                let matches = density_range.is_none_or(|(minimum, maximum)| {
+                    (minimum..=maximum).contains(&landscape.density_at(column, y, materials))
+                });
+                if matches {
+                    landscape.clear_pix(column, y);
                 }
             }
-        } else {
-            let landscape_width = landscape.width() as i32;
-            let bottom = origin.y.saturating_add(height);
-            for offset in 0..width {
-                let column = origin.x.saturating_add(offset);
-                if column < 0 || column >= landscape_width {
-                    continue;
-                }
-                let _ = Self::dig_column(&materials, landscape, column, bottom);
+            return;
+        }
+
+        // Column-only fixtures retain no arbitrary pixel plane, but they can
+        // faithfully clear liquid segments and the exposed solid surface.
+        // ClearPix ignores DigFree, so do not route this through dig_column.
+        if y < 0 || y >= landscape_height {
+            return;
+        }
+        let landscape_width = landscape.width() as i32;
+        for column in x..x.saturating_add(width) {
+            if column < 0 || column >= landscape_width {
+                continue;
+            }
+            let matches = density_range.is_none_or(|(minimum, maximum)| {
+                (minimum..=maximum).contains(&landscape.density_at(column, y, materials))
+            });
+            if !matches {
+                continue;
+            }
+            if landscape.is_liquid_at(column, y) {
+                landscape.remove_liquid_at(column, y);
+            } else if landscape.is_solid_at(column, y) {
+                landscape.ensure_surface_at_least(column, y.saturating_add(1));
             }
         }
     }
