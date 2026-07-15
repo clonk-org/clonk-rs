@@ -46,6 +46,7 @@ mod real_tutorial10_virtual_play;
 mod real_tutorial_campaign;
 mod script_counter;
 mod script_goto;
+mod set_mat_adjust;
 mod set_picture;
 mod sim_flight;
 mod swim_movement;

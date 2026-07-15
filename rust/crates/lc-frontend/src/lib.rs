@@ -2694,8 +2694,15 @@ impl GraphicsSystem {
         landscape: Option<&Landscape>,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) -> bool {
-        let Some(grid) = landscape.and_then(|landscape| landscape.pixel_grid()) else {
+        let Some(landscape) = landscape else {
             return false;
+        };
+        let Some(grid) = landscape.pixel_grid() else {
+            return false;
+        };
+        let blit = SpriteBlitState {
+            mode: 0,
+            modulation: (landscape.modulation() != 0).then_some(landscape.modulation()),
         };
         if self.material_textures.is_empty() || self.material_render_info.is_empty() {
             return false;
@@ -2857,29 +2864,25 @@ impl GraphicsSystem {
                     cache_pixels[src + 2],
                     cache_pixels[src + 3],
                 );
-                if let Some(gamma) = gamma {
-                    if color.a == 255 {
-                        let _ = self.surface.set_pixel(
-                            screen_x,
-                            screen_y,
-                            gamma_encode_fragment(color, gamma),
-                        );
-                        continue;
-                    }
+                let source = prepare_sprite_fragment(color, None, None, blit);
+                if source.alpha() == 0 {
+                    continue;
+                }
+                let destination = if source.alpha() == 255 {
+                    Color::transparent()
+                } else {
                     #[cfg(test)]
-                    LANDSCAPE_DESTINATION_SAMPLES
-                        .with(|samples| samples.set(samples.get() + 1));
-                    let destination = self
+                    if gamma.is_some() {
+                        LANDSCAPE_DESTINATION_SAMPLES
+                            .with(|samples| samples.set(samples.get() + 1));
+                    }
+                    self
                         .surface
                         .get_pixel(screen_x, screen_y)
-                        .unwrap_or_default();
-                    let blended = gamma_blend_fragment_over(color, destination, gamma);
-                    let _ = self.surface.set_pixel(screen_x, screen_y, blended);
-                } else if color.a == 255 {
-                    let _ = self.surface.set_pixel(screen_x, screen_y, color);
-                } else {
-                    let _ = self.surface.blend_pixel(screen_x, screen_y, color);
-                }
+                        .unwrap_or_default()
+                };
+                let output = composite_sprite_fragment(source, destination, blit, gamma);
+                let _ = self.surface.set_pixel(screen_x, screen_y, output);
             }
         }
         true
@@ -2899,8 +2902,18 @@ impl GraphicsSystem {
             Self::ground_color_for_temperature(ambient_temperature),
             lighting,
         );
-        let ground_color =
-            gamma.map_or(ground_color, |gamma| gamma_encode_fragment(ground_color, gamma));
+        let blit = SpriteBlitState {
+            mode: 0,
+            modulation: landscape
+                .map(Landscape::modulation)
+                .filter(|modulation| *modulation != 0),
+        };
+        let source = prepare_sprite_fragment(ground_color, None, None, blit);
+        if source.alpha() == 0 {
+            return false;
+        }
+        let opaque_output = (source.alpha() == 255)
+            .then(|| composite_sprite_fragment(source, Color::transparent(), blit, gamma));
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let surface_height = self.surface_height as i32;
         let max_world_x = self.world_width.saturating_sub(1).max(0);
@@ -2918,7 +2931,16 @@ impl GraphicsSystem {
                 continue;
             }
             for y in ground_screen..surface_height {
-                let _ = self.surface.set_pixel(screen_x, y as u32, ground_color);
+                let output = if let Some(output) = opaque_output {
+                    output
+                } else {
+                    let destination = self
+                        .surface
+                        .get_pixel(screen_x, y as u32)
+                        .unwrap_or_default();
+                    composite_sprite_fragment(source, destination, blit, gamma)
+                };
+                let _ = self.surface.set_pixel(screen_x, y as u32, output);
             }
         }
         false
@@ -2942,6 +2964,14 @@ impl GraphicsSystem {
             Self::liquid_color_for_temperature(ambient_temperature),
             lighting,
         );
+        let blit = SpriteBlitState {
+            mode: 0,
+            modulation: (landscape.modulation() != 0).then_some(landscape.modulation()),
+        };
+        let source = prepare_sprite_fragment(base_color, None, None, blit);
+        if source.alpha() == 0 {
+            return;
+        }
 
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let surface_width = self.surface_width as i32;
@@ -2972,15 +3002,9 @@ impl GraphicsSystem {
                 for screen_y in start..=end {
                     let x = screen_x as u32;
                     let y = screen_y as u32;
-                    let blended = match (self.surface.get_pixel(x, y), gamma) {
-                        (Some(existing), Some(gamma)) => {
-                            gamma_blend_fragment_over(base_color, existing, gamma)
-                        }
-                        (Some(existing), None) => blend_color_over(base_color, existing),
-                        (None, Some(gamma)) => gamma_encode_fragment(base_color, gamma),
-                        (None, None) => base_color,
-                    };
-                    let _ = self.surface.set_pixel(x, y, blended);
+                    let destination = self.surface.get_pixel(x, y).unwrap_or_default();
+                    let output = composite_sprite_fragment(source, destination, blit, gamma);
+                    let _ = self.surface.set_pixel(x, y, output);
                 }
             }
         }
@@ -13676,6 +13700,135 @@ mod tests {
             graphics.surface().get_pixel(0, 0),
             Some(Color::new(125, 150, 175, 255))
         );
+    }
+
+    #[test]
+    fn landscape_modulation_uses_the_blit_pipeline_for_textured_and_fallback_landscapes() {
+        const MODULATION: u32 = 0x4080_40ff;
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+        let background = Color::opaque(20, 40, 60);
+        let blit = |modulation| SpriteBlitState {
+            mode: 0,
+            modulation: (modulation != 0).then_some(modulation),
+        };
+        let with_modulation = |landscape: Landscape, modulation: u32| {
+            let mut value = serde_json::to_value(landscape).expect("landscape serializes");
+            value["modulation"] = serde_json::json!(modulation);
+            serde_json::from_value::<Landscape>(value).expect("modulated landscape decodes")
+        };
+
+        let render_textured = |modulation| {
+            let landscape: Landscape = serde_json::from_value(serde_json::json!({
+                "width": 1,
+                "surface": [1],
+                "modulation": modulation,
+                "world_height": 1,
+                "pixels": {
+                    "width": 1,
+                    "height": 1,
+                    "bytes": "01",
+                    "texture_names": [null, "Rough"],
+                    "densities": [0, 50],
+                    "material_names": [null, "Earth"]
+                }
+            }))
+            .expect("pixel landscape");
+            let mut graphics = GraphicsSystem::new(
+                1,
+                1,
+                1,
+                "modulated landscape",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.set_material_textures(Arc::new(HashMap::from([(
+                "rough".to_string(),
+                ImageData::new(1, 1, vec![255, 255, 255, 255]),
+            )])));
+            graphics.set_material_render_info(Arc::new(HashMap::from([(
+                "earth".to_string(),
+                MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50),
+            )])));
+            graphics.landscape_cache = Some(LandscapeRenderCache {
+                grid: landscape.pixel_grid().expect("pixel grid").clone(),
+                width: 1,
+                height: 1,
+                pixels: vec![96, 144, 208, 255],
+            });
+            graphics
+                .surface_mut()
+                .set_pixel(0, 0, background)
+                .expect("background pixel");
+            assert!(graphics.draw_ground_textured(Some(&landscape), Some(&gamma)));
+            graphics.surface().get_pixel(0, 0).expect("drawn pixel")
+        };
+
+        for modulation in [0, MODULATION] {
+            let source = Color::new(96, 144, 208, 255);
+            let expected = composite_sprite_fragment(
+                prepare_sprite_fragment(source, None, None, blit(modulation)),
+                background,
+                blit(modulation),
+                Some(&gamma),
+            );
+            assert_eq!(render_textured(modulation), expected);
+        }
+        assert_ne!(render_textured(0), render_textured(MODULATION));
+
+        let render_fallback = |modulation| {
+            let mut landscape = Landscape::flat(1, 1);
+            landscape.set_liquid_column(0, vec![LiquidSegment::new(0, 0)]);
+            let landscape = with_modulation(landscape, modulation);
+            let mut graphics = GraphicsSystem::new(
+                1,
+                2,
+                2,
+                "modulated fallback landscape",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.surface_mut().fill(background);
+            assert!(!graphics.draw_ground(0, Some(&landscape), 1.0, Some(&gamma)));
+            graphics.draw_liquids(0, Some(&landscape), 1.0, Some(&gamma));
+            (
+                graphics.surface().get_pixel(0, 0).expect("liquid pixel"),
+                graphics.surface().get_pixel(0, 1).expect("ground pixel"),
+            )
+        };
+
+        for modulation in [0, MODULATION] {
+            let liquid = GraphicsSystem::apply_lighting(
+                GraphicsSystem::liquid_color_for_temperature(0),
+                1.0,
+            );
+            let ground = GraphicsSystem::apply_lighting(
+                GraphicsSystem::ground_color_for_temperature(0),
+                1.0,
+            );
+            let expected_liquid = composite_sprite_fragment(
+                prepare_sprite_fragment(liquid, None, None, blit(modulation)),
+                background,
+                blit(modulation),
+                Some(&gamma),
+            );
+            let expected_ground = composite_sprite_fragment(
+                prepare_sprite_fragment(ground, None, None, blit(modulation)),
+                background,
+                blit(modulation),
+                Some(&gamma),
+            );
+            assert_eq!(
+                render_fallback(modulation),
+                (expected_liquid, expected_ground)
+            );
+        }
+        assert_ne!(render_fallback(0), render_fallback(MODULATION));
     }
 
     #[test]

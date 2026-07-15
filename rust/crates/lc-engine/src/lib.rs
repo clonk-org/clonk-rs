@@ -35816,6 +35816,13 @@ impl Engine {
                         .get_or_insert_with(|| SkyState::new(SkySettings::default()))
                         .apply_modulation(modulation, back_color);
                 }
+                LandscapeOperation::MatAdjust { modulation } => {
+                    // FnSetMatAdjust -> C4Landscape::SetModulation
+                    // (C4Script.cpp:4626-4630; C4Landscape.h:200-205).
+                    if let Some(landscape) = &mut self.landscape {
+                        landscape.set_modulation(modulation);
+                    }
+                }
                 LandscapeOperation::SkyParallax {
                     mode,
                     par_x,

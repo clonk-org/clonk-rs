@@ -1,4 +1,4 @@
-use lc_engine::{Definition, SpawnConfig, Vector2};
+use lc_engine::{SpawnConfig, Vector2};
 use lc_script::Value;
 
 use crate::support::real_scenario::load_installed_scenario;
@@ -6,20 +6,6 @@ use crate::support::real_scenario::load_installed_scenario;
 #[test]
 fn gold_rush_do_change_section_loads_ash_city_landscape() {
     let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
-    // SetMatAdjust is a separate, pre-existing host gap reached immediately
-    // before/after the section call. Supply only that unrelated native so
-    // this regression can execute the shipped ChangeSection/DoChangeSection
-    // path and isolate LoadScenarioSection.
-    engine
-        .register_definition(
-            Definition::from_script(
-                "LSST",
-                "LoadScenarioSection test support",
-                "#strict\nglobal func SetMatAdjust() { return true; }",
-            )
-            .expect("the isolated SetMatAdjust test support compiles"),
-        )
-        .expect("the isolated SetMatAdjust test support registers");
     // SaveObjects expects the campaign wagon created by InitializePlayer.
     // A playerless, empty wagon keeps this test focused on the section
     // boundary instead of recursively staging a complete campaign inventory.

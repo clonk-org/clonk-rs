@@ -10304,6 +10304,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("ShakeObjects", shake_objects);
     script.register_host_function("SetSkyParallax", set_sky_parallax);
     script.register_host_function("SetSkyAdjust", set_sky_adjust);
+    script.register_host_function("SetMatAdjust", set_mat_adjust);
     script.register_host_function("GetSkyAdjust", get_sky_adjust);
     script.register_host_function("SetGamma", set_gamma);
     script.register_host_function("ResetGamma", reset_gamma);
@@ -12717,6 +12718,9 @@ pub enum LandscapeOperation {
     /// FnSetSkyAdjust (C4Script.cpp:4620-4624) -> C4Sky::SetModulation
     /// (C4Sky.cpp:238-244).
     SkyAdjust { modulation: u32, back_color: u32 },
+    /// FnSetMatAdjust (C4Script.cpp:4626-4630) ->
+    /// C4Landscape::SetModulation.
+    MatAdjust { modulation: u32 },
     /// FnSetSkyParallax (C4Script.cpp:4955-4970) — Sky is a C4Landscape
     /// member; the raw int args carry the SkyPar_KEEP magic through to
     /// `SkyState::apply_parallax`.
@@ -21619,6 +21623,24 @@ fn get_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
             context.sky_adjustment.modulation
         };
         Ok(Value::Int(raw as i32))
+    })
+}
+
+/// FnSetMatAdjust (C4Script.cpp:4626-4630): overwrite the raw landscape
+/// blit modulation. Zero restores normal drawing.
+fn set_mat_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
+    let modulation =
+        value_to_i32(args.first().unwrap_or(&Value::Nil), "SetMatAdjust", "adjust")? as u32;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetMatAdjust requires an active engine context"))?;
+        if let Some(landscape) = context.world.landscape.as_mut() {
+            Rc::make_mut(landscape).set_modulation(modulation);
+        }
+        context.register_landscape_operation(LandscapeOperation::MatAdjust { modulation });
+        Ok(Value::Nil)
     })
 }
 
@@ -37017,6 +37039,7 @@ mod tests {
         "SetKiller",
         "SetLength",
         "SetMass",
+        "SetMatAdjust",
         "SetMaxPlayer",
         "SetMenuDecoration",
         "SetMenuSize",

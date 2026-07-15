@@ -996,6 +996,10 @@ pub struct LiquidSegment {
 pub struct Landscape {
     width: u32,
     surface: Vec<i32>,
+    /// C4Landscape::Modulation: raw landscape blit modulation. Zero keeps
+    /// normal drawing; any other value is applied during presentation.
+    #[serde(default, skip_serializing_if = "crate::u32_is_zero")]
+    modulation: u32,
     #[serde(default)]
     liquids: Vec<LiquidColumn>,
     #[serde(default)]
@@ -1238,6 +1242,7 @@ impl Landscape {
         Ok(Self {
             width,
             surface,
+            modulation: 0,
             liquids: vec![LiquidColumn::default(); size],
             solid_materials: vec![default_material; size],
             default_solid_material: default_material,
@@ -1258,6 +1263,14 @@ impl Landscape {
 
     pub fn width(&self) -> u32 {
         self.width
+    }
+
+    pub fn modulation(&self) -> u32 {
+        self.modulation
+    }
+
+    pub(crate) fn set_modulation(&mut self, modulation: u32) {
+        self.modulation = modulation;
     }
 
     pub fn scan_x(&self) -> u32 {
@@ -3997,6 +4010,8 @@ impl<'de> Deserialize<'de> for Landscape {
             width: u32,
             surface: Vec<i32>,
             #[serde(default)]
+            modulation: u32,
+            #[serde(default)]
             liquids: Vec<LiquidColumn>,
             #[serde(default)]
             solid_materials: Vec<Option<MaterialId>>,
@@ -4055,6 +4070,7 @@ impl<'de> Deserialize<'de> for Landscape {
         let mut landscape =
             Landscape::with_default_material(data.width, data.surface, data.default_solid_material)
                 .map_err(|error| D::Error::custom(error.to_string()))?;
+        landscape.modulation = data.modulation;
         landscape.liquids = data.liquids;
         landscape.solid_materials = data.solid_materials;
         landscape.default_liquid_material = data.default_liquid_material;
