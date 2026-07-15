@@ -1861,6 +1861,17 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
             "centipixel crew sum over the player's crew list"
         );
         assert_eq!(packet.object_count, 1);
+        assert_eq!(
+            packet.object_enumeration_index, 1,
+            "ObjectEnumerationIndex is the last assigned object number"
+        );
+        let initial_network_data = InitialNetworkGameData::from_engine(&engine)
+            .expect("modeled engine state captures as initial network data");
+        assert_eq!(
+            packet.object_enumeration_index,
+            initial_network_data.object_enumeration_index,
+            "sync-check and Game.txt report the same C++ allocator high-water mark"
+        );
 
         // ControlRate gating: with rate 2, ControlTick advances on even frames.
         let mut gated = Engine::with_seed(81);
