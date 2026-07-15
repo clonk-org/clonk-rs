@@ -30,15 +30,16 @@ use crate::transfer::TransferZoneTable;
 use crate::{LiquidSegment, PlayerViewport};
 use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionState, ActionUpdate,
-    AudioCommand, CommandDirection, CrewInfoLink, CrewObjectInfo, CrewSelectionState, DefinitionId,
-    DefinitionRect, Direction, DrawTransform, EnvironmentSettings, FloatVector2,
+    AudioCommand, ChangeDefContentsSort, CommandDirection, CrewInfoLink, CrewObjectInfo,
+    CrewSelectionState, DefinitionId, DefinitionRect, Direction, DrawTransform,
+    EnvironmentSettings, FloatVector2,
     GraphicsOverlayMode, Landscape,
     MenuRequest, MenuRequestKind, ObjectBaseGraphics, ObjectGraphicsOverlay, ObjectId, ObjectState,
     ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer,
     ParticleScope, PathFinder, PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState,
     QueuedCommand, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig, ScoreboardState,
     TeamConfiguration, TeamInfo, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
-    CATEGORY_SORT_LIMIT,
+    C4D_BORDER_BOTTOM, C4D_BORDER_LAYER, C4D_BORDER_SIDES, C4D_BORDER_TOP, CATEGORY_SORT_LIMIT,
     CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY,
     FULL_CON, OWNER_NONE,
 };
@@ -99,6 +100,9 @@ const LEGACY_MAX_ARRAY_SIZE: i32 = 1_000_000;
 pub(crate) struct HostWorldObject {
     pub id: ObjectId,
     definition_id: DefinitionId,
+    /// Runtime-only C4Object::Unsorted flag. It is intentionally absent
+    /// from saves, but live Enter/Add calls must still see it.
+    unsorted: bool,
     status: ObjectStatus,
     alive: bool,
     /// C4Object::InLiquid (the cached flag FnInLiquid reads).
@@ -215,6 +219,12 @@ pub(crate) struct DefinitionMetadata {
     /// C4PortraitGraphics::Get compares these case-insensitively.
     pub portrait_names: Vec<String>,
     pub category: i32,
+    /// DefCore `BorderBound`, consulted synchronously by Exit's BoundsCheck
+    /// before the requested position is installed.
+    pub border_bound: i32,
+    /// DefCore `ContactCalls`; TargetBounds invokes Contact* only when this
+    /// legacy switch is enabled on the definition live at the call site.
+    pub contact_function_calls: bool,
     /// DefCore `BlitMode`, used by SetObjectBlitMode(0).
     pub blit_mode: u32,
     pub ocf_base: u32,
@@ -767,6 +777,7 @@ impl HostWorldObject {
         Self {
             id,
             definition_id: definition_id.into(),
+            unsorted: false,
             status,
             alive: true,
             in_liquid: false,
@@ -818,6 +829,11 @@ impl HostWorldObject {
 
     pub(crate) fn with_commands(mut self, commands: Vec<CommandView>) -> Self {
         self.commands = commands;
+        self
+    }
+
+    pub(crate) fn with_unsorted(mut self, unsorted: bool) -> Self {
+        self.unsorted = unsorted;
         self
     }
 
@@ -1741,6 +1757,17 @@ impl HostWorldContext {
 
     pub(crate) fn get(&self, id: ObjectId) -> Option<&HostWorldObject> {
         self.objects.get(&id)
+    }
+
+    /// Update the callback-visible identity of a live command target while
+    /// one engine-owned effect batch is still running. C++
+    /// OnObjectChangedDef refreshes effect callback functions immediately;
+    /// a cloned HostWorldContext otherwise keeps resolving the old script.
+    pub(crate) fn preview_object_change_def(&mut self, id: ObjectId, definition_id: &str) {
+        if let Some(object) = Rc::make_mut(&mut self.objects).get_mut(&id) {
+            object.definition_id = definition_id.to_string();
+            object.unsorted = true;
+        }
     }
 
     pub(crate) fn object_ids(&self) -> &[ObjectId] {
@@ -6442,11 +6469,10 @@ fn set_solid_mask(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnChangeDef (C4Script.cpp) -> C4Object::ChangeDef
-/// (C4Object.cpp:1180-1231): swap the target to a new definition in
-/// place. Routed through the pending update; the engine fold performs
-/// the swap (action to ActIdle, shape/vertices/category from the new
-/// def, solid mask reset).
+/// FnChangeDef (C4Script.cpp) -> C4Object::ChangeDef. The lifecycle is
+/// synchronous: a contained object silently exits at (0,0), the old action
+/// resets, the new definition becomes callback-visible, and RejectEntrance
+/// decides whether a no-calls Enter restores the saved container.
 fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
     let new_id = match args.first() {
         Some(Value::String(id)) | Some(Value::C4Id(id)) if !id.is_empty() => id.clone(),
@@ -6459,40 +6485,92 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_ref()
             .and_then(|context| context.script_object_context)
     });
-    if let Some(target) = target {
-        if Some(target) != active {
-            return match call_world_object_function(target, "ChangeDef", &[Value::C4Id(new_id)]) {
-                Some(result) => result,
-                None => Ok(Value::Bool(false)),
-            };
-        }
+    // The optional object argument selects the native receiver; it does not
+    // perform a second script lookup on that object's definition. A script
+    // function also named ChangeDef therefore cannot shadow FnChangeDef.
+    let target = target.or(active);
+    let Some(target) = target else {
+        return Ok(Value::Bool(false));
+    };
+    Ok(Value::Bool(change_def_live(target, &new_id)?))
+}
+
+/// Native host-side C4Object::ChangeDef used both by FnChangeDef and
+/// BurnTurnTo. It bypasses script function resolution but keeps every
+/// callback that the C++ object method itself performs.
+fn change_def_live(target: ObjectId, new_id: &str) -> Result<bool, RuntimeError> {
+    let known = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        context.definition_metadata(new_id).is_some() && context.ensure_object_scope(target)
+    });
+    if !known {
+        return Ok(false);
     }
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
+        if let Some(scope) = borrow
+            .as_mut()
+            .and_then(|context| context.object_scope_mut(target))
+        {
+            // This marker describes the most recent ChangeDef lifecycle,
+            // not merely an initial Exit. A later failed re-entry must clear
+            // an earlier successful marker in the same staged update.
+            scope.pending_update.change_def_reinsert = false;
+            scope.pending_update.change_def_contents_sort = None;
+            scope.pending_update.change_def_reset_action_time = false;
+        }
+    });
+
+    let previous_container = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.get_world_object(target))
+            .and_then(|object| object.container())
+    });
+    if let Some(previous) = previous_container {
+        let _ = exit_object_at_position_with_calls(target, Vector2::ZERO, false)?;
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            context.relink_content_after_exit(previous, target);
+        });
+    }
+
+    // SetAction(ActIdle) runs on the OLD definition, including its ordinary
+    // Start/Abort callbacks. NoOtherAction may reject it, but ChangeDef then
+    // forcibly stores ActIdle before swapping Def.
+    let action_was_idle = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_scope(target))
+            .is_some_and(|object| object.effective_action_name() == "Idle")
+    });
+    let action_applied = native_set_action_by_name(target, "Idle")?;
+
+    let staged = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
+            return false;
         };
-        let Some(new_blit_mode) = context
-            .world
-            .definition_metadata(&new_id)
-            .map(|metadata| metadata.blit_mode)
-        else {
-            return Ok(Value::Bool(false)); // C4Id2Def miss
-        };
-        let Some(object_id) = context.object_context().map(|object| object.id()) else {
-            return Ok(Value::Bool(false));
+        let Some(metadata) = context.definition_metadata(new_id).cloned() else {
+            return false;
         };
         let current_color = context
-            .object_context()
+            .object_scope(target)
             .and_then(|object| object.pending_update.color)
             .or_else(|| {
                 context
-                    .get_world_object(object_id)
+                    .get_world_object(target)
                     .and_then(|object| object.full_state().map(|state| state.color))
             })
             .unwrap_or(0);
-        let owner = context.object_context().map(ObjectScopeContext::owner);
-        let changed_color = if !context.world.definition_color_by_owner(&new_id) {
+        let owner = context.object_scope(target).map(ObjectScopeContext::owner);
+        let changed_color = if !context.world.definition_color_by_owner(new_id) {
             Some(0)
         } else if current_color == 0 {
             owner.and_then(|owner| {
@@ -6508,31 +6586,35 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
             None
         };
         let follows_definition = context
-            .object_blit_mode(object_id)
+            .object_blit_mode(target)
             .is_none_or(|mode| mode & GFX_BLIT_CUSTOM == 0);
         let had_pending_blit = context
-            .object_context()
+            .object_scope(target)
             .is_some_and(|object| object.pending_update.blit_mode.is_some());
-        let Some(object) = context.object_context_mut() else {
-            return Ok(Value::Bool(false));
+        let pre_swap_contents_sort = context.get_world_object(target).and_then(|object| {
+            object.container().map(|container| ChangeDefContentsSort {
+                container,
+                category: object.category,
+                definition_id: object.definition_id().to_string(),
+                unsorted: object.unsorted,
+            })
+        });
+        let Some(object) = context.object_scope_mut(target) else {
+            return false;
         };
-        object.pending_update.change_def = Some(new_id);
-        // C4Object::ChangeDef copies the new definition SolidMask before any
-        // later script statement runs (C4Object.cpp:1205-1223). Discard a
-        // SetSolidMask staged earlier in this same call; a later one writes
-        // the override back and therefore still wins.
-        object.pending_update.solid_mask_override = None;
-        // C4Object::ChangeDef resets pGraphics to the new definition at the
-        // call site. This preserves ordering: later SetGraphics wins, while
-        // an earlier SetGraphics is discarded (C4Object.cpp:1222).
-        object.set_base_graphics(None);
-        if let Some(color) = changed_color {
-            object.pending_update.color = Some(color);
+
+        if let Some(sort) = pre_swap_contents_sort {
+            object.pending_update.change_def_reinsert = true;
+            object.pending_update.change_def_contents_sort = Some(sort);
         }
-        // ChangeDef resets and then forcibly leaves the object in ActIdle
-        // before swapping definitions (C4Object.cpp:1214-1215). A later
-        // SetAction in the same script call may overwrite this with an action
-        // from the new definition.
+        // SetAction resets Time only when Act actually changes. Its boolean
+        // return means success, not change; ChangeDef while already Idle
+        // preserves a nonzero saved/reentrant Time like C++.
+        object.pending_update.change_def_reset_action_time = action_applied && !action_was_idle;
+
+        // C++ writes Action.Act=ActIdle unconditionally after SetAction and
+        // all of its callbacks. If an AbortCall selected another action, its
+        // Time/Data/Phase/targets remain, but the action slot becomes Idle.
         let action = object
             .pending_update
             .action
@@ -6540,18 +6622,47 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
         action.set_name("Idle".to_string());
         action.set_force(true);
         action.callbacks_dispatched = true;
-        object.reset_action_ticks();
-        object.set_action_phase(0);
-        object.reset_action_data();
         object.update_effective_action("Idle");
-        // A preceding SetObjectBlitMode already staged a write, so update that
-        // write to the new default. A pure ChangeDef needs no separate write:
-        // the engine's definition swap applies the default atomically.
-        if follows_definition && had_pending_blit {
-            object.pending_update.blit_mode = Some(new_blit_mode);
+
+        // Earlier graphics/mask writes are overwritten at the exact swap
+        // point; later statements can stage new overrides normally.
+        object.pending_update.solid_mask_override = None;
+        object.set_base_graphics(None);
+        if let Some(color) = changed_color {
+            object.pending_update.color = Some(color);
         }
-        Ok(Value::Bool(true))
-    })
+        if follows_definition && had_pending_blit {
+            object.pending_update.blit_mode = Some(metadata.blit_mode);
+        }
+        object.install_definition_preview(new_id, &metadata);
+        true
+    });
+    if !staged {
+        return Ok(false);
+    }
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            let _ = refresh_live_object_ocf(context, target);
+        }
+    });
+
+    if let Some(previous) = previous_container {
+        // Return value intentionally ignored: C4Object::ChangeDef succeeds
+        // even when new-def RejectEntrance or later Enter checks veto.
+        if enter_object_live_with_calls(target, previous, false)? {
+            HOST_CONTEXT.with(|cell| {
+                let mut borrow = cell.borrow_mut();
+                if let Some(scope) = borrow
+                    .as_mut()
+                    .and_then(|context| context.object_scope_mut(target))
+                {
+                    scope.pending_update.change_def_reinsert = true;
+                    scope.pending_update.change_def_contents_sort = None;
+                }
+            });
+        }
+    }
+    Ok(true)
 }
 
 /// FnGetPlrDownDouble (C4Script.cpp:2618-2622): the player's live
@@ -6776,6 +6887,67 @@ fn preview_object_is_present(target: ObjectId) -> bool {
     })
 }
 
+/// Synchronous host-side portion of C4Object::SetOCF that depends on live
+/// motion/containment/terrain. Definition-static bits remain in the cached
+/// seed; every field this helper rebuilds is cleared first like C++.
+fn refresh_live_object_ocf(context: &mut EffectHostContext, target: ObjectId) -> bool {
+    if !context.ensure_object_scope(target) {
+        return false;
+    }
+    let Some((position, container)) = context
+        .object_scope(target)
+        .map(|scope| (scope.effective_position(), scope.container()))
+    else {
+        return false;
+    };
+    let solid_center = context
+        .landscape_ref()
+        .is_some_and(|landscape| landscape.is_solid_at(position.x, position.y));
+    let semi_above = context.landscape_ref().is_some_and(|landscape| {
+        landscape.is_semi_solid_at(position.x, position.y.saturating_sub(1))
+    });
+    let solid_above = context.landscape_ref().is_some_and(|landscape| {
+        landscape.is_solid_at(position.x, position.y.saturating_sub(1))
+    });
+    let semi_high = context.landscape_ref().is_some_and(|landscape| {
+        landscape.is_semi_solid_at(position.x, position.y.saturating_sub(8))
+    });
+    let container_allows_get = container.is_some_and(|container| {
+        let grab_get = context
+            .object_effective_definition_id(container)
+            .and_then(|id| context.definition_metadata(&id))
+            .is_some_and(|metadata| metadata.grab_put_get & 2 != 0);
+        let entrance = context
+            .object_scope(container)
+            .map(ObjectScopeContext::ocf)
+            .or_else(|| context.get_world_object(container).map(|object| object.ocf()))
+            .is_some_and(|mask| mask & ocf::ENTRANCE != 0);
+        grab_get || entrance
+    });
+
+    let Some(scope) = context.object_scope_mut(target) else {
+        return false;
+    };
+    scope.refresh_cached_ocf();
+    let mut mask = scope.cached_ocf.unwrap_or(ocf::NORMAL);
+    mask &= !(ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE);
+    if container.is_none() {
+        if solid_center {
+            mask |= ocf::IN_SOLID;
+        }
+        if !semi_above {
+            mask |= ocf::IN_FREE;
+        }
+    }
+    if (container.is_none() || container_allows_get)
+        && (!semi_above || (!solid_above && !semi_high))
+    {
+        mask |= ocf::AVAILABLE;
+    }
+    scope.cached_ocf = Some(mask);
+    true
+}
+
 fn refresh_container_collection_ocf(context: &mut EffectHostContext, container: ObjectId) {
     let available = context.get_world_object(container).is_some_and(|object| {
         object.collection_enabled
@@ -6784,7 +6956,7 @@ fn refresh_container_collection_ocf(context: &mut EffectHostContext, container: 
                 .collection_limit
                 .is_none_or(|limit| object.contents().len() < limit as usize)
     });
-    if !context.ensure_object_scope(container) {
+    if !refresh_live_object_ocf(context, container) {
         return;
     }
     if let Some(scope) = context.object_scope_mut(container) {
@@ -6806,6 +6978,245 @@ fn refresh_container_collection_ocf(context: &mut EffectHostContext, container: 
 /// script `Exit` wrapper, these receive no caller-relative or Shape.y
 /// adjustment.
 fn exit_object_at_position(target: ObjectId, position: Vector2) -> Result<bool, RuntimeError> {
+    exit_object_at_position_with_calls(target, position, true)
+}
+
+fn live_object_bounds_shape(
+    context: &EffectHostContext,
+    target: ObjectId,
+) -> Option<DefinitionRect> {
+    if let Some(shape) = live_object_shape(context, target) {
+        return Some(shape);
+    }
+    let object = context.get_world_object(target)?;
+    let vertices = context
+        .object_scope(target)
+        .map(|scope| scope.vertices().to_vec())
+        .unwrap_or_else(|| object.vertices.clone());
+    host_vertex_bounds_rect(Vector2::ZERO, &vertices)
+}
+
+fn live_exit_layer_bounds(
+    context: &EffectHostContext,
+    target: ObjectId,
+    horizontal: bool,
+) -> Option<(i32, i32)> {
+    let object = context.get_world_object(target)?;
+    let definition_id = context.object_effective_definition_id(target)?;
+    let metadata = context.definition_metadata(&definition_id)?;
+    let action_name = context
+        .object_scope(target)
+        .map(ObjectScopeContext::effective_action_name)
+        .unwrap_or(object.action_name.as_str());
+    let procedure = metadata.action_library.procedure_for_action(action_name);
+    if !action_name.is_empty()
+        && action_name != "Idle"
+        && matches!(procedure, ActionProcedure::Attach)
+    {
+        return None;
+    }
+
+    let layer_id = context.object_layer(target)?;
+    let layer = context.get_world_object(layer_id)?;
+    let layer_definition_id = context.object_effective_definition_id(layer_id)?;
+    let layer_metadata = context.definition_metadata(&layer_definition_id)?;
+    if layer_metadata.border_bound & C4D_BORDER_LAYER == 0 {
+        return None;
+    }
+    let object_shape = live_object_bounds_shape(context, target).unwrap_or_default();
+    let layer_shape = live_object_bounds_shape(context, layer_id).unwrap_or_default();
+    let is_static = object.category & crate::CATEGORY_STATIC_BACK != 0;
+    let (layer_origin, layer_size, shape_offset) = if horizontal {
+        (
+            layer.position.x.saturating_add(layer_shape.x),
+            layer_shape.width,
+            object_shape.x,
+        )
+    } else {
+        (
+            layer.position.y.saturating_add(layer_shape.y),
+            layer_shape.height,
+            object_shape.y,
+        )
+    };
+    let low = if is_static {
+        layer_origin
+    } else {
+        layer_origin.saturating_sub(shape_offset)
+    };
+    let high = if is_static {
+        layer_origin.saturating_add(layer_size)
+    } else {
+        layer_origin
+            .saturating_add(layer_size)
+            .saturating_add(shape_offset)
+    };
+    Some((low, high))
+}
+
+fn run_live_exit_bound_contact(target: ObjectId, cnat: u32) {
+    let calls_enabled = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        let definition_id = context.object_effective_definition_id(target);
+        let calls_enabled = definition_id
+            .as_deref()
+            .and_then(|id| context.definition_metadata(id))
+            .is_some_and(|metadata| metadata.contact_function_calls);
+        if !context.ensure_object_scope(target) {
+            return false;
+        }
+        if let Some(scope) = context.object_scope_mut(target) {
+            let component = if cnat == CNAT_LEFT || cnat == CNAT_RIGHT {
+                VelocityComponent::X
+            } else {
+                VelocityComponent::Y
+            };
+            scope.set_fixed_velocity_component(component, C4Fixed::ZERO);
+        }
+        calls_enabled
+    });
+    if calls_enabled {
+        if let Some(function) = crate::contact_callback_name(cnat) {
+            let _ = call_object_own_fail_safe(target, function, &[]);
+        }
+    }
+}
+
+fn apply_live_exit_target_bounds(
+    target: ObjectId,
+    coordinate: &mut i32,
+    low: i32,
+    high: i32,
+    low_cnat: u32,
+    high_cnat: u32,
+) {
+    // These are deliberately independent, matching C4Object::TargetBounds.
+    if *coordinate < low {
+        *coordinate = low;
+        run_live_exit_bound_contact(target, low_cnat);
+    }
+    if *coordinate > high {
+        *coordinate = high;
+        run_live_exit_bound_contact(target, high_cnat);
+    }
+}
+
+fn bounds_check_live_exit(target: ObjectId, position: &mut Vector2) {
+    let layer_side = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| live_exit_layer_bounds(context, target, true))
+    });
+    if let Some((low, high)) = layer_side {
+        apply_live_exit_target_bounds(
+            target,
+            &mut position.x,
+            low,
+            high,
+            CNAT_LEFT,
+            CNAT_RIGHT,
+        );
+    }
+
+    let landscape_side = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let definition_id = context.object_effective_definition_id(target)?;
+        let metadata = context.definition_metadata(&definition_id)?;
+        if metadata.border_bound & C4D_BORDER_SIDES == 0 {
+            return None;
+        }
+        let shape_x = live_object_bounds_shape(context, target)
+            .map(|shape| shape.x)
+            .unwrap_or(0);
+        let width = i32::try_from(context.landscape_ref()?.width()).ok()?;
+        Some((-shape_x, width.saturating_add(shape_x)))
+    });
+    if let Some((low, high)) = landscape_side {
+        apply_live_exit_target_bounds(
+            target,
+            &mut position.x,
+            low,
+            high,
+            CNAT_LEFT,
+            CNAT_RIGHT,
+        );
+    }
+
+    let layer_vertical = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| live_exit_layer_bounds(context, target, false))
+    });
+    if let Some((low, high)) = layer_vertical {
+        apply_live_exit_target_bounds(
+            target,
+            &mut position.y,
+            low,
+            high,
+            CNAT_TOP,
+            CNAT_BOTTOM,
+        );
+    }
+
+    let top = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let definition_id = context.object_effective_definition_id(target)?;
+        let metadata = context.definition_metadata(&definition_id)?;
+        if metadata.border_bound & C4D_BORDER_TOP == 0 {
+            return None;
+        }
+        let shape_y = live_object_bounds_shape(context, target)
+            .map(|shape| shape.y)
+            .unwrap_or(0);
+        Some((-shape_y, 1_000_000))
+    });
+    if let Some((low, high)) = top {
+        apply_live_exit_target_bounds(
+            target,
+            &mut position.y,
+            low,
+            high,
+            CNAT_TOP,
+            CNAT_BOTTOM,
+        );
+    }
+
+    let bottom = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let definition_id = context.object_effective_definition_id(target)?;
+        let metadata = context.definition_metadata(&definition_id)?;
+        if metadata.border_bound & C4D_BORDER_BOTTOM == 0 {
+            return None;
+        }
+        let shape_y = live_object_bounds_shape(context, target)
+            .map(|shape| shape.y)
+            .unwrap_or(0);
+        let height = context.landscape_ref()?.estimated_height();
+        Some((-1_000_000, height.saturating_add(shape_y)))
+    });
+    if let Some((low, high)) = bottom {
+        apply_live_exit_target_bounds(
+            target,
+            &mut position.y,
+            low,
+            high,
+            CNAT_TOP,
+            CNAT_BOTTOM,
+        );
+    }
+}
+
+fn exit_object_at_position_with_calls(
+    target: ObjectId,
+    mut position: Vector2,
+    f_calls: bool,
+) -> Result<bool, RuntimeError> {
     let previous = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
@@ -6816,8 +7227,34 @@ fn exit_object_at_position(target: ObjectId, position: Vector2) -> Result<bool, 
         }
         let scope = context.object_scope_mut(target)?;
         let previous = scope.container()?;
-        scope.set_container(None);
-        scope.refresh_cached_ocf();
+        // Raw unlink first. Contained is null for BoundsCheck, but C++ does
+        // not close the menu or refresh this object's OCF until afterward.
+        scope.current_container = None;
+        scope.pending_update.container = Some(None);
+        scope.pending_update.construction_preserves_fixed_position = false;
+        scope.exit_bounds_in_progress = true;
+        refresh_container_collection_ocf(context, previous);
+        Some(previous)
+    });
+    let Some(previous) = previous else {
+        return Ok(false);
+    };
+
+    bounds_check_live_exit(target, &mut position);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        let definition_metadata = context
+            .object_effective_definition_id(target)
+            .and_then(|id| context.definition_metadata(&id).cloned())
+            .unwrap_or_default();
+        let Some(scope) = context.object_scope_mut(target) else {
+            return;
+        };
+        scope.exit_bounds_in_progress = false;
         // Exit assigns x/y even when unchanged and thereby snaps fix_x/y.
         scope.current_position = position;
         scope.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
@@ -6829,21 +7266,30 @@ fn exit_object_at_position(target: ObjectId, position: Vector2) -> Result<bool, 
         scope.set_rotation_velocity(C4Fixed::ZERO);
         scope.set_mobile(true);
         scope.current_in_liquid = false;
-        refresh_container_collection_ocf(context, previous);
-        Some(previous)
+        // Bounds callbacks may have opened a menu; Exit closes it afterward.
+        scope.pending_update.menu = Some(None);
+        // UpdateFace(true) rebuilds an ordinary C4Shape from Def after the
+        // BoundsCheck callbacks consumed the old live SetShape rectangle.
+        // Line shapes keep their independent geometry.
+        if definition_metadata.line == 0 {
+            scope.pending_update.shape_override = Some(None);
+        }
+        scope.refresh_shape_preview(&definition_metadata);
     });
-    let Some(previous) = previous else {
-        return Ok(false);
-    };
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            let _ = refresh_live_object_ocf(context, target);
+        }
+    });
 
-    if object_is_present(previous) {
+    if f_calls && object_is_present(previous) {
         call_object_own_fail_safe(
             previous,
             "Ejection",
             &[object_reference_value(target)],
         );
     }
-    if object_is_present(target) {
+    if f_calls && object_is_present(target) {
         call_object_own_fail_safe(
             target,
             "Departure",
@@ -6876,6 +7322,17 @@ fn exit_object_at_current_position(target: ObjectId) -> Result<bool, RuntimeErro
 /// Collection and Hit tail. This is the path used by CreateContents and
 /// Split2Components and must finish its callbacks before their next step.
 fn enter_object_live(target: ObjectId, container: ObjectId) -> Result<bool, RuntimeError> {
+    enter_object_live_with_calls(target, container, true)
+}
+
+/// C4Object::Enter's `fCalls` controls only Collection2/Entrance. The
+/// RejectEntrance query, a transfer's ordinary callback-enabled Exit,
+/// CopyMotion and base auto-sale all run in both modes.
+fn enter_object_live_with_calls(
+    target: ObjectId,
+    container: ObjectId,
+    f_calls: bool,
+) -> Result<bool, RuntimeError> {
     if target == container || !object_is_present(target) || !object_is_present(container) {
         return Ok(false);
     }
@@ -6974,7 +7431,6 @@ fn enter_object_live(target: ObjectId, container: ObjectId) -> Result<bool, Runt
         // CopyMotion does not mobilize; the generic fixed-dir update does,
         // so carry the pre-Enter native flag explicitly over that fold.
         scope.set_mobile(was_mobile);
-        scope.refresh_cached_ocf();
         let nonliving = !(scope.alive() && scope.category() & crate::CATEGORY_LIVING != 0);
         if let Some(spawn) = context
             .pending_spawns
@@ -6989,6 +7445,7 @@ fn enter_object_live(target: ObjectId, container: ObjectId) -> Result<bool, Runt
                 spawn.controller = Some(controller);
             }
         }
+        let _ = refresh_live_object_ocf(context, target);
         refresh_container_collection_ocf(context, container);
         true
     });
@@ -6996,25 +7453,27 @@ fn enter_object_live(target: ObjectId, container: ObjectId) -> Result<bool, Runt
         return Ok(false);
     }
 
-    call_object_own_fail_safe(
-        container,
-        "Collection2",
-        &[object_reference_value(target)],
-    );
-    let entrance_container = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
-        let current = context.get_world_object(target)?.container()?;
-        let current_live = context
-            .get_world_object(current)
-            .is_some_and(|object| object.is_present());
-        let original_live = context
-            .get_world_object(container)
-            .is_some_and(|object| object.is_present());
-        (current_live && original_live).then_some(current)
-    });
-    if let Some(current) = entrance_container {
-        call_object_own_fail_safe(target, "Entrance", &[object_reference_value(current)]);
+    if f_calls {
+        call_object_own_fail_safe(
+            container,
+            "Collection2",
+            &[object_reference_value(target)],
+        );
+        let entrance_container = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            let current = context.get_world_object(target)?.container()?;
+            let current_live = context
+                .get_world_object(current)
+                .is_some_and(|object| object.is_present());
+            let original_live = context
+                .get_world_object(container)
+                .is_some_and(|object| object.is_present());
+            (current_live && original_live).then_some(current)
+        });
+        if let Some(current) = entrance_container {
+            call_object_own_fail_safe(target, "Entrance", &[object_reference_value(current)]);
+        }
     }
     auto_sell_after_enter(target, container)?;
     Ok(true)
@@ -8384,16 +8843,8 @@ fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
         // The SUBJECT's live Shape.y (C4Script.cpp:385): a same-call
         // SetShape override wins over the def shape. Read it only after the
         // attach AbortCall, which may change the shape or definition.
-        let shape_y = context
-            .object_scope(target)
-            .and_then(|scope| scope.pending_update.shape_override)
+        let shape_y = live_object_shape(context, target)
             .map(|shape| shape.y)
-            .or_else(|| {
-                effective_definition_id(context, target)
-                    .and_then(|id| context.world.definition_metadata(&id))
-                    .and_then(|metadata| metadata.shape)
-                    .map(|shape| shape.y)
-            })
             .unwrap_or(0);
         if !context.ensure_object_scope(target) {
             return None;
@@ -18593,13 +19044,14 @@ fn fire_effect_start_core(
         NoFire { blasted: bool },
         Ignite,
     }
-    let stage = HOST_CONTEXT.with(|cell| -> Result<FireStage, RuntimeError> {
+    let (stage, burn_turn_to) = HOST_CONTEXT.with(
+        |cell| -> Result<(FireStage, Option<String>), RuntimeError> {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return Ok(FireStage::Deny);
+            return Ok((FireStage::Deny, None));
         };
         if !context.ensure_object_scope(target) {
-            return Ok(FireStage::Deny);
+            return Ok((FireStage::Deny, None));
         }
         // fail if already on fire (C4Effect.cpp:567)
         let already_burning = context
@@ -18612,7 +19064,7 @@ fn fire_effect_start_core(
                     .unwrap_or(false)
             });
         if already_burning {
-            return Ok(FireStage::Deny);
+            return Ok((FireStage::Deny, None));
         }
         // get associated effect (C4Effect.cpp:569-571)
         let entry_exists = context.object_scope(target).is_some_and(|scope| {
@@ -18623,7 +19075,7 @@ fn fire_effect_start_core(
                 .any(|effect| effect.number == fire_number)
         });
         if !entry_exists {
-            return Ok(FireStage::Deny);
+            return Ok((FireStage::Deny, None));
         }
         // In extinguishing material: no fire caused, checked BEFORE the
         // FirePhase draw (C4Effect.cpp:574-583).
@@ -18644,23 +19096,22 @@ fn fire_effect_start_core(
             .map(|metadata| metadata.fire.clone())
             .unwrap_or_default();
         // BurnTurnTo: blasts changedef in water too (C4Effect.cpp:579-585).
-        if fire_caused || blasted {
-            if let Some(turn_to) = fire_meta.burn_turn_to.as_ref() {
-                if context.world.definition_metadata(turn_to).is_some() {
-                    if let Some(scope) = context.object_scope_mut(target) {
-                        scope.pending_update.change_def = Some(turn_to.clone());
-                    }
-                }
-            }
-        }
+        let turn_to = (fire_caused || blasted)
+            .then(|| fire_meta.burn_turn_to)
+            .flatten()
+            .filter(|turn_to| context.world.definition_metadata(turn_to).is_some());
         if !fire_caused {
-            return Ok(FireStage::NoFire { blasted });
+            return Ok((FireStage::NoFire { blasted }, turn_to));
         }
-        Ok(FireStage::Ignite)
+        Ok((FireStage::Ignite, turn_to))
     })?;
 
     if matches!(&stage, FireStage::Deny) {
         return Ok(-1);
+    }
+
+    if let Some(turn_to) = burn_turn_to {
+        let _ = change_def_live(target, &turn_to)?;
     }
 
     // ChangeDef above is immediately live in C++. Re-read the effective
@@ -26467,6 +26918,8 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
+                border_bound: 0,
+                contact_function_calls: false,
                 blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
@@ -26882,6 +27335,8 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     category: context
                         .definition_category(definition)
                         .unwrap_or(DEFAULT_CATEGORY),
+                    border_bound: 0,
+                    contact_function_calls: false,
                     blit_mode: 0,
                     ocf_base: ocf::NORMAL,
                     crew_member: false,
@@ -27956,6 +28411,8 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
+                border_bound: 0,
+                contact_function_calls: false,
                 blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
@@ -31376,16 +31833,20 @@ fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
 /// The live `C4Object::Shape` reflected by GetObjectVal. Same-call SetShape
 /// and persisted shape overrides win over the definition-derived shape.
 fn live_object_shape(context: &EffectHostContext, target: ObjectId) -> Option<DefinitionRect> {
-    if let Some(shape) = context
+    let pending_override = context
         .object_scope(target)
-        .and_then(|scope| scope.pending_update.shape_override)
-        .or_else(|| {
-            context
+        .and_then(|scope| scope.pending_update.shape_override);
+    match pending_override {
+        Some(Some(shape)) => return Some(shape),
+        Some(None) => {}
+        None => {
+            if let Some(shape) = context
                 .get_world_object(target)
                 .and_then(|object| object.full_state().and_then(|state| state.shape_override))
-        })
-    {
-        return Some(shape);
+            {
+                return Some(shape);
+            }
+        }
     }
 
     let scope = context.object_scope(target);
@@ -31588,17 +32049,22 @@ fn set_shape(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetShape requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
         };
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
-        object.pending_update.shape_override = Some(DefinitionRect::new(x, y, width, height));
-        Ok(Value::Bool(true))
+        Ok(Value::Bool(
+            context
+                .object_scope_mut(target)
+                .map(|object| {
+                    object.pending_update.shape_override =
+                        Some(Some(DefinitionRect::new(x, y, width, height)));
+                })
+                .is_some(),
+        ))
     })
 }
 
@@ -32125,6 +32591,10 @@ fn set_category(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         object.set_category(category);
+        object.unsorted = true;
+        // C4Object::SetCategory immediately calls Resort(), which leaves the
+        // link in place but arms the post-CrossCheck global unsorted sweep.
+        context.record_object_order_command(ObjectOrderCommand::ResortObject(target));
         Ok(Value::Bool(true))
     })
 }
@@ -32784,6 +33254,11 @@ fn resort(args: &[Value]) -> Result<Value, RuntimeError> {
             let resolves = context.object_scope(target).is_some()
                 || context.get_world_object(target).is_some();
             if resolves {
+                if context.ensure_object_scope(target) {
+                    if let Some(scope) = context.object_scope_mut(target) {
+                        scope.unsorted = true;
+                    }
+                }
                 context.record_object_order_command(ObjectOrderCommand::ResortObject(target));
             }
         } else {
@@ -34103,6 +34578,10 @@ struct EffectHostContext {
     /// clears `Contained` at the end of the child's own cleanup
     /// (C4Object.cpp:287-306).
     unlinked_content_links: HashSet<(ObjectId, ObjectId)>,
+    /// Contents links that were removed and may be re-added during this
+    /// call. Unlike `unlinked_content_links`, these are omitted from the
+    /// snapshot base but remain eligible for the live Enter-growth pass.
+    relinked_content_links: HashSet<(ObjectId, ObjectId)>,
     world: HostWorldContext,
     /// Mutable C4Def metadata preview for this synchronous VM session.
     /// Definition writes are folded into Engine after the callback returns,
@@ -34313,6 +34792,8 @@ impl EffectHostContext {
         });
         if let Some(scope) = object.as_mut() {
             if let Some(world_object) = world.get(scope.id()) {
+                scope.unsorted = world_object.unsorted;
+                scope.staged_own_vertices = world_object.own_vertices;
                 scope
                     .live_commands
                     .restore_from_snapshot(&world_object.command_stack);
@@ -34365,6 +34846,7 @@ impl EffectHostContext {
             session_local_cells: HashMap::new(),
             removed_object_references: HashSet::new(),
             unlinked_content_links: HashSet::new(),
+            relinked_content_links: HashSet::new(),
             nested_order: Vec::new(),
             foreign_local_cells: HashMap::new(),
         }
@@ -34687,6 +35169,10 @@ impl EffectHostContext {
         // the suspended caller (Winchester.c4d/Script.c:292,
         // Cowboy.c4d/Script.c:442-443).
         if let Some(scope) = self.object_scope(id) {
+            if let Some(definition_id) = scope.pending_update.change_def.as_ref() {
+                object.definition_id = definition_id.clone();
+            }
+            object.unsorted = scope.unsorted;
             object.status = if scope.destroy {
                 ObjectStatus::Deleted
             } else {
@@ -34731,7 +35217,7 @@ impl EffectHostContext {
             // the foreign GetEnergy stale read is pinned by existing
             // behavior — do not overlay without a differential test
             // (PORT_STATUS, Script host model).
-            object.ocf = scope.staged_ocf(object.ocf);
+            object.ocf = scope.staged_ocf(scope.ocf());
         }
         // The snapshot contents list re-checks each child's live state:
         // C4Object::Exit removes the child from its container's Contents
@@ -34742,6 +35228,7 @@ impl EffectHostContext {
         if !object.contents.is_empty() {
             object.contents.retain(|child_id| {
                 !self.unlinked_content_links.contains(&(id, *child_id))
+                    && !self.relinked_content_links.contains(&(id, *child_id))
                     && self
                         .object_scope(*child_id)
                         .map(|scope| {
@@ -35096,13 +35583,31 @@ impl EffectHostContext {
         match self.object_scope(id) {
             Some(scope) => {
                 let definition_id = scope
-                    .definition_id
+                    .pending_update
+                    .change_def
                     .clone()
+                    .or_else(|| scope.definition_id.clone())
                     .or_else(|| snapshot.as_ref().map(|(_, def)| def.clone()))?;
                 Some((scope.current_category, definition_id))
             }
             None => snapshot,
         }
+    }
+
+    fn contents_object_unsorted(&self, id: ObjectId) -> bool {
+        self.object_scope(id)
+            .map(|scope| scope.unsorted)
+            .or_else(|| self.pending_objects.get(&id).map(|object| object.unsorted))
+            .or_else(|| self.world.get(id).map(|object| object.unsorted))
+            .unwrap_or(false)
+    }
+
+    fn contents_object_is_present(&self, id: ObjectId) -> bool {
+        self.object_scope(id)
+            .map(|scope| !scope.destroy && scope.status != ObjectStatus::Deleted)
+            .or_else(|| self.pending_objects.get(&id).map(HostWorldObject::is_present))
+            .or_else(|| self.world.get(id).map(|object| object.is_present()))
+            .unwrap_or(false)
     }
 
     /// C4ObjectList::Add stContents sort-in (C4ObjectList.cpp:104-152):
@@ -35120,31 +35625,49 @@ impl EffectHostContext {
             .definition_metadata(&definition_id)
             .map(|metadata| metadata.line != 0)
             .unwrap_or(false);
-        if is_line {
+        if is_line || self.contents_object_unsorted(child) {
             return contents.len();
         }
         let sort_category = category & crate::CATEGORY_SORT_LIMIT;
+        let mut predecessor = None;
+        let mut found_cluster = false;
         if category & crate::CATEGORY_STATIC_BACK == 0 {
-            let cluster_position = contents.iter().position(|other| {
-                self.contents_sort_key(*other)
-                    .is_some_and(|(other_category, other_definition)| {
-                        other_category & crate::CATEGORY_SORT_LIMIT == sort_category
-                            && other_definition == definition_id
-                    })
-            });
-            if let Some(position) = cluster_position {
-                return position;
+            for (position, &other) in contents.iter().enumerate() {
+                if !self.contents_object_is_present(other)
+                    || self.contents_object_unsorted(other)
+                {
+                    continue;
+                }
+                let Some((other_category, other_definition)) = self.contents_sort_key(other) else {
+                    continue;
+                };
+                if other_category & crate::CATEGORY_SORT_LIMIT == sort_category
+                    && other_definition == definition_id
+                {
+                    found_cluster = true;
+                    break;
+                }
+                predecessor = Some(position);
             }
         }
-        contents
-            .iter()
-            .position(|other| {
-                self.contents_sort_key(*other)
-                    .is_some_and(|(other_category, _)| {
-                        other_category & crate::CATEGORY_SORT_LIMIT <= sort_category
-                    })
-            })
-            .unwrap_or(contents.len())
+        if !found_cluster {
+            predecessor = None;
+            for (position, &other) in contents.iter().enumerate() {
+                if !self.contents_object_is_present(other)
+                    || self.contents_object_unsorted(other)
+                {
+                    continue;
+                }
+                let Some((other_category, _)) = self.contents_sort_key(other) else {
+                    continue;
+                };
+                if other_category & crate::CATEGORY_SORT_LIMIT <= sort_category {
+                    break;
+                }
+                predecessor = Some(position);
+            }
+        }
+        predecessor.map_or(0, |position| position + 1)
     }
 
     /// Drops a spawn queued in THIS call before it materializes. The id
@@ -35226,6 +35749,10 @@ impl EffectHostContext {
 
     fn unlink_content_for_removal(&mut self, parent: ObjectId, child: ObjectId) {
         self.unlinked_content_links.insert((parent, child));
+    }
+
+    fn relink_content_after_exit(&mut self, parent: ObjectId, child: ObjectId) {
+        self.relinked_content_links.insert((parent, child));
     }
 
     fn clear_removed_references_in_locals(&self, locals: &mut HashMap<String, Value>) {
@@ -35433,6 +35960,8 @@ impl EffectHostContext {
         scope.current_mobile = state.mobile;
         scope.current_t_attach = state.t_attach;
         scope.current_contact_density = state.contact_density;
+        scope.unsorted = object.unsorted;
+        scope.staged_own_vertices = object.own_vertices;
         scope.walk_rotation.t_attach = state.t_attach;
         scope.definition_id = Some(object.definition_id().to_string());
         scope
@@ -36821,7 +37350,14 @@ impl EffectScopeContext {
 struct ObjectScopeContext {
     id: ObjectId,
     definition_id: Option<String>,
+    /// Live C4Object::Unsorted flag. ChangeDef sets it immediately and it
+    /// changes every subsequent C4ObjectList::Add position in this call.
+    unsorted: bool,
     current_container: Option<ObjectId>,
+    /// Between Exit's raw contents unlink and its post-BoundsCheck tail,
+    /// `Contained` is already null but the object's cached OCF and menu are
+    /// deliberately still stale (C4Object.cpp:1549-1557).
+    exit_bounds_in_progress: bool,
     status: ObjectStatus,
     effects: EffectScopeContext,
     pending_update: ObjectUpdate,
@@ -36959,7 +37495,9 @@ impl ObjectScopeContext {
         Self {
             definition_id: None,
             id,
+            unsorted: false,
             current_container: container,
+            exit_bounds_in_progress: false,
             status,
             effects: EffectScopeContext::new(effects),
             pending_update: ObjectUpdate::default(),
@@ -37022,6 +37560,67 @@ impl ObjectScopeContext {
             physical_changes,
             definition_physical,
             walk_rotation: WalkRotationSeed::default(),
+        }
+    }
+
+    /// Install the callback-visible half of C4Object::ChangeDef after the
+    /// old-definition SetAction(ActIdle) phase. Runtime Category and the
+    /// live ContactDensity are object fields and intentionally survive.
+    fn install_definition_preview(
+        &mut self,
+        definition_id: &str,
+        metadata: &DefinitionMetadata,
+    ) {
+        self.pending_update.change_def = Some(definition_id.to_string());
+        self.definition_id = Some(definition_id.to_string());
+        self.unsorted = true;
+        self.action_library = metadata.action_library.clone();
+        self.current_action_blocks_other_actions = self
+            .action_library
+            .blocks_other_actions(&self.current_action_name);
+        self.definition_physical = metadata.physical;
+        self.ocf_base = metadata.ocf_base;
+        self.crew_member = metadata.crew_member;
+        self.walk_rotation.rotateable = metadata.rotateable;
+
+        if metadata.rotateable == 0 {
+            self.current_rotation = 0;
+            self.current_fixed_rotation = C4Fixed::ZERO;
+            self.current_rotation_velocity = C4Fixed::ZERO;
+            self.pending_update.rotation = Some(0);
+            self.pending_update.rotation_velocity = Some(C4Fixed::ZERO);
+        }
+
+        if metadata.line == 0 {
+            self.pending_update.shape_override = Some(None);
+        }
+        self.refresh_shape_preview(metadata);
+
+        // SetOCF runs after the definition swap. Drop the old cached mask so
+        // same-call GetOCF/RejectEntrance code derives from the new Def.
+        self.cached_ocf = None;
+        let mask = self.staged_ocf(self.ocf());
+        self.cached_ocf = Some(mask);
+    }
+
+    fn refresh_shape_preview(&mut self, metadata: &DefinitionMetadata) {
+        // C4Object::UpdateShape returns immediately for line defs. Ordinary
+        // definitions copy the current definition shape while fOwnVertices
+        // restores the object's private backup.
+        if metadata.line == 0 {
+            let base = if self.staged_own_vertices {
+                self.shape_vertices.own_original_vertices()
+            } else {
+                metadata.vertices.clone()
+            };
+            let vertices = crate::transformed_shape_vertices(
+                &base,
+                self.construction(),
+                metadata.stretch_growth,
+                metadata.rotateable,
+                self.rotation(),
+            );
+            self.shape_vertices.replace_active(&vertices);
         }
     }
 
@@ -37559,7 +38158,7 @@ impl ObjectScopeContext {
     /// and landscape gates stay unevaluated here).
     fn staged_ocf(&self, base: u32) -> u32 {
         let mut mask = base;
-        if self.pending_update.container.is_some() {
+        if self.pending_update.container.is_some() && !self.exit_bounds_in_progress {
             // OCF_NotContained / OCF_Available (SetOCF, C4Object.cpp:
             // 611-618; Available's open-entrance arm is unmodeled).
             if self.container().is_some() {
@@ -37611,6 +38210,7 @@ impl ObjectScopeContext {
         if self.container() == container {
             return;
         }
+        self.exit_bounds_in_progress = false;
         self.current_container = container;
         self.pending_update.container = Some(container);
         // Enter/Exit copy or explicitly assign position and therefore
@@ -37624,7 +38224,20 @@ impl ObjectScopeContext {
 
     fn refresh_cached_ocf(&mut self) {
         let base = self.ocf();
-        self.cached_ocf = Some(self.staged_ocf(base));
+        let mut mask = self.staged_ocf(base);
+        // SetOCF recomputes these object-state bits from scratch. Ordinary
+        // SetXDir/SetYDir do not call this helper, while Exit/Enter/SetAction
+        // do, preserving the C++ timing of stale versus refreshed masks.
+        mask &= !(ocf::HIT_SPEED1
+            | ocf::HIT_SPEED2
+            | ocf::HIT_SPEED3
+            | ocf::HIT_SPEED4
+            | ocf::IN_LIQUID);
+        mask |= crate::movement_hit_speed_flags(self.fixed_velocity());
+        if self.in_liquid() && self.container().is_none() {
+            mask |= ocf::IN_LIQUID;
+        }
+        self.cached_ocf = Some(mask);
     }
 
     fn mark_destroy(&mut self) {
@@ -45090,6 +45703,8 @@ func ProbeBadIndex(id) {
                 name: String::new(),
                 portrait_names: Vec::new(),
                 category: 0x1,
+                border_bound: 0,
+                contact_function_calls: false,
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
@@ -45146,6 +45761,8 @@ func ProbeBadIndex(id) {
                     name: String::new(),
                     portrait_names: Vec::new(),
                     category: 0x1,
+                    border_bound: 0,
+                    contact_function_calls: false,
                     blit_mode: 0,
                     ocf_base: 0,
                     crew_member: false,
@@ -45180,6 +45797,8 @@ func ProbeBadIndex(id) {
                     name: String::new(),
                     portrait_names: Vec::new(),
                     category: 0x2,
+                    border_bound: 0,
+                    contact_function_calls: false,
                     blit_mode: 0,
                     ocf_base: 0,
                     crew_member: false,
@@ -45238,6 +45857,8 @@ func ProbeBadIndex(id) {
                 name: String::new(),
                 portrait_names: Vec::new(),
                 category: 0x1,
+                border_bound: 0,
+                contact_function_calls: false,
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
@@ -45308,6 +45929,8 @@ func ProbeBadIndex(id) {
                 name: String::new(),
                 portrait_names: Vec::new(),
                 category: 0x1,
+                border_bound: 0,
+                contact_function_calls: false,
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
@@ -45388,6 +46011,8 @@ func ProbeBadIndex(id) {
             name: String::new(),
             portrait_names: Vec::new(),
             category: 0,
+            border_bound: 0,
+            contact_function_calls: false,
             blit_mode: 0,
             ocf_base: 0,
             crew_member: false,
@@ -46507,6 +47132,8 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 name: String::new(),
                 portrait_names: Vec::new(),
                 category: 1,
+                border_bound: 0,
+                contact_function_calls: false,
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
@@ -46654,6 +47281,8 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 name: String::new(),
                 portrait_names: Vec::new(),
                 category: 1,
+                border_bound: 0,
+                contact_function_calls: false,
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
@@ -46725,6 +47354,8 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 name: String::new(),
                 portrait_names: Vec::new(),
                 category: 1,
+                border_bound: 0,
+                contact_function_calls: false,
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
@@ -56631,6 +57262,8 @@ public func SeedFull()
                 name: String::new(),
                 portrait_names: Vec::new(),
                 category: crate::CATEGORY_STRUCTURE,
+                border_bound: 0,
+                contact_function_calls: false,
                 blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
@@ -56847,6 +57480,8 @@ protected func Construction()
             name: String::new(),
             portrait_names: Vec::new(),
             category: crate::CATEGORY_STRUCTURE,
+            border_bound: 0,
+            contact_function_calls: false,
             blit_mode: 0,
             ocf_base: ocf::NORMAL,
             crew_member: false,

@@ -3656,10 +3656,48 @@ impl ObjectState {
         if let Some(command_direction) = delta.command_direction {
             self.command_direction = command_direction;
         }
+        let raw_change_def_idle = delta.change_def.is_some()
+            && delta.action.as_ref().is_some_and(|action| {
+                action.force
+                    && action.callbacks_dispatched
+                    && action.name.as_deref() == Some("Idle")
+            });
         if let Some(action) = &delta.action {
             let requested_name_change = action.name.is_some();
             let previous_action = self.action.clone();
-            let result = self.action.apply_update_with_library(action, library);
+            let result = if raw_change_def_idle {
+                // C4Object::ChangeDef's post-callback `Action.Act=ActIdle`
+                // writes the action slot only. Apply the already-staged
+                // callback payload without ActionState's ordinary implicit
+                // name-change resets or new-library reconciliation.
+                if let Some(name) = &action.name {
+                    self.action.name = name.clone();
+                }
+                if delta.change_def_reset_action_time {
+                    self.action.time = 0;
+                }
+                if let Some(phase) = action.phase {
+                    self.action.phase = phase;
+                    if action.ticks.is_none() {
+                        self.action.ticks = 0;
+                    }
+                }
+                if let Some(ticks) = action.ticks {
+                    self.action.ticks = ticks;
+                }
+                if let Some(data) = action.data {
+                    self.action.data = data;
+                }
+                if let Some(target) = action.target {
+                    self.action.target = target;
+                }
+                if let Some(target2) = action.target2 {
+                    self.action.target2 = target2;
+                }
+                ActionUpdateResult::Applied
+            } else {
+                self.action.apply_update_with_library(action, library)
+            };
             if matches!(result, ActionUpdateResult::Applied) {
                 action_change = Some(ActionChange {
                     previous: previous_action,
@@ -3728,6 +3766,9 @@ impl ObjectState {
         if let Some(menu) = &delta.menu {
             self.menu = menu.clone();
         }
+        if let Some(shape_override) = delta.shape_override {
+            self.shape_override = shape_override;
+        }
         if let Some(alive) = delta.alive {
             self.alive = alive;
         }
@@ -3778,7 +3819,9 @@ impl ObjectState {
             self.physical_changes = physicals.changes.clone();
         }
 
-        self.action.reconcile_with_library(library);
+        if !raw_change_def_idle {
+            self.action.reconcile_with_library(library);
+        }
         ApplyDeltaOutcome {
             energy_died,
             container_change,
@@ -3793,8 +3836,22 @@ impl ObjectState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[doc(hidden)]
+pub struct ChangeDefContentsSort {
+    pub container: ObjectId,
+    pub category: i32,
+    pub definition_id: DefinitionId,
+    pub unsorted: bool,
+}
+
 #[derive(Debug, Default, Clone, PartialEq)]
 struct ObjectDelta {
+    /// Non-field operation carried through callback/command aggregation.
+    change_def: Option<String>,
+    change_def_reinsert: bool,
+    change_def_contents_sort: Option<ChangeDefContentsSort>,
+    change_def_reset_action_time: bool,
     /// Some(Some(name)) sets C4Object::CustomName; Some(None) clears it.
     custom_name: Option<Option<String>>,
     /// Some(Some(object)) sets C4Object::pLayer; Some(None) clears it.
@@ -3815,6 +3872,9 @@ struct ObjectDelta {
     /// Script menu write-through (FnCreateMenu/FnCloseMenu et al.):
     /// Some(None) = closed, Some(Some(_)) = open/replaced.
     menu: Option<Option<ObjectMenuState>>,
+    /// Some(Some(rect)) installs SetShape; Some(None) is UpdateShape's
+    /// explicit restoration of the definition shape.
+    shape_override: Option<Option<DefinitionRect>>,
     position: Option<Vector2>,
     velocity: Option<Vector2>,
     /// Sub-pixel velocity in 16.16 fixed-point. When present, this takes
@@ -3903,6 +3963,15 @@ struct ObjectDelta {
 
 impl ObjectDelta {
     fn merge_update(&mut self, update: ObjectUpdate) {
+        let changes_definition = update.change_def.is_some();
+        if let Some(change_def) = update.change_def.as_ref() {
+            self.change_def = Some(change_def.clone());
+        }
+        if changes_definition {
+            self.change_def_reinsert = update.change_def_reinsert;
+            self.change_def_contents_sort = update.change_def_contents_sort.clone();
+            self.change_def_reset_action_time = update.change_def_reset_action_time;
+        }
         let writes_construction = update.construction.is_some();
         let construction_via_docon = update.construction_via_docon;
         let construction_preserves_fixed_position =
@@ -4036,6 +4105,9 @@ impl ObjectDelta {
         if let Some(menu) = update.menu {
             self.menu = Some(menu);
         }
+        if let Some(shape_override) = update.shape_override {
+            self.shape_override = Some(shape_override);
+        }
 
         if let Some(alive) = update.alive {
             self.alive = Some(alive);
@@ -4091,6 +4163,10 @@ impl ObjectDelta {
 impl From<ObjectUpdate> for ObjectDelta {
     fn from(update: ObjectUpdate) -> Self {
         Self {
+            change_def: update.change_def,
+            change_def_reinsert: update.change_def_reinsert,
+            change_def_contents_sort: update.change_def_contents_sort,
+            change_def_reset_action_time: update.change_def_reset_action_time,
             custom_name: update.custom_name,
             layer: update.layer,
             visibility: update.visibility,
@@ -4137,6 +4213,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             portrait_name: update.portrait_name,
             solid_mask_override: update.solid_mask_override,
             menu: update.menu,
+            shape_override: update.shape_override,
             alive: update.alive,
             entrance_status: update.entrance_status,
             container: update.container,
@@ -4200,6 +4277,25 @@ pub struct ObjectUpdate {
     /// C4Object.cpp:1180-1231).
     #[serde(default)]
     pub change_def: Option<String>,
+    /// A contained ChangeDef disturbed this object's contents link. The
+    /// final container may equal the pre-call value, so an ordinary Option
+    /// delta would otherwise collapse the mandatory remove/re-add (and its
+    /// C++ Unsorted tail placement) into a no-op.
+    #[serde(default, skip_serializing_if = "is_false")]
+    #[doc(hidden)]
+    pub change_def_reinsert: bool,
+    /// Sort key of a contents link established by an old-definition action
+    /// callback before ChangeDef swaps Def. A vetoed final Enter leaves that
+    /// exact link in place rather than re-adding it as Unsorted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[doc(hidden)]
+    pub change_def_contents_sort: Option<ChangeDefContentsSort>,
+    /// The ordinary SetAction(ActIdle) phase of ChangeDef succeeded, so its
+    /// action-name transition reset C4Action::Time before the unconditional
+    /// raw ActIdle slot overwrite.
+    #[serde(default, skip_serializing_if = "is_false")]
+    #[doc(hidden)]
+    pub change_def_reset_action_time: bool,
     pub position: Option<Vector2>,
     pub velocity: Option<Vector2>,
     /// Sub-pixel velocity in 16.16 fixed-point, set by precision-aware script
@@ -4368,9 +4464,14 @@ pub struct ObjectUpdate {
     /// SetClrModulation's raw C4Object::ColorMod overwrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_modulation: Option<u32>,
-    /// SetShape (C4Script.cpp:5182-5196).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shape_override: Option<DefinitionRect>,
+    /// SetShape / UpdateShape: Some(Some(rect)) installs an override;
+    /// Some(None) clears it when UpdateFace(true) rebuilds a non-line shape.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_double_option"
+    )]
+    pub shape_override: Option<Option<DefinitionRect>>,
     /// Rotate the contents list cyclically so this id becomes the front —
     /// C4ObjectList::ShiftContents (C4ObjectList.cpp:815-833), the
     /// FnShiftContents/DirectComContents write path.
@@ -4598,7 +4699,11 @@ impl ObjectUpdate {
             && self.color.is_none()
             && self.color_modulation.is_none()
             && self.solid_mask_override.is_none()
+            && self.shape_override.is_none()
             && self.change_def.is_none()
+            && !self.change_def_reinsert
+            && self.change_def_contents_sort.is_none()
+            && !self.change_def_reset_action_time
             && self.position.is_none()
             && self.velocity.is_none()
             && self.fixed_velocity.is_none()
@@ -4787,6 +4892,16 @@ pub struct Object {
     #[doc(hidden)] pub id: ObjectId,
     #[doc(hidden)] pub definition_id: DefinitionId,
     #[doc(hidden)] pub state: ObjectState,
+    /// C4Object::Unsorted is a transient, non-savegame flag. ChangeDef sets
+    /// it without requesting a sweep; a later C4Object::Resort request (or
+    /// Objects.Synchronize) clears it while remove/re-adding the main-list
+    /// link. C4ObjectList::Add also treats the flag as a sort override for
+    /// contents links.
+    #[doc(hidden)] pub unsorted: bool,
+    /// Deferred contents-link key for a link established during ChangeDef's
+    /// old-action callbacks. It is consumed by the engine-side list fold and
+    /// is transient like `Unsorted`.
+    change_def_contents_sort: Option<ChangeDefContentsSort>,
     #[doc(hidden)] pub fixed_position: FixedVec2,
     #[doc(hidden)] pub fixed_velocity: FixedVec2,
     /// 16.16 fixed-point rotation accumulator (C++ `fix_r`, `C4Object.h:149`).
@@ -4893,6 +5008,8 @@ struct CommandQueueOutcome {
     container_updates: Vec<ContainerUpdateRecord>,
     command_events: Vec<CommandEvent>,
     particles: Vec<ParticleCommand>,
+    definition_changed: bool,
+    change_def_reinsert: bool,
 }
 
 /// Record a fixed-point vector in a snapshot only when it carries sub-pixel
@@ -4921,6 +5038,8 @@ impl Object {
         Self {
             id,
             definition_id,
+            unsorted: false,
+            change_def_contents_sort: None,
             fixed_position,
             fixed_velocity,
             fixed_rotation,
@@ -5015,13 +5134,15 @@ impl Object {
 
     #[doc(hidden)]
     pub fn current_shape_rect(&self) -> Option<DefinitionRect> {
-        transformed_shape_rect(
-            self.shape_template.rect,
-            self.state.construction,
-            self.shape_template.stretch_growth,
-            self.shape_template.rotateable,
-            self.state.rotation,
-        )
+        self.state.shape_override.or_else(|| {
+            transformed_shape_rect(
+                self.shape_template.rect,
+                self.state.construction,
+                self.shape_template.stretch_growth,
+                self.shape_template.rotateable,
+                self.state.rotation,
+            )
+        })
     }
 
     fn refresh_shape_after_state_change(
@@ -5140,6 +5261,9 @@ impl Object {
         delta: &ObjectDelta,
         action_library: &ActionLibrary,
     ) -> ApplyDeltaOutcome {
+        if delta.change_def.is_some() {
+            self.change_def_contents_sort = delta.change_def_contents_sort.clone();
+        }
         let previous_rect = self.current_shape_rect();
         let previous_construction = self.state.construction;
         let shape_changed =
@@ -6224,6 +6348,8 @@ impl Object {
         materials: &MaterialSet,
         mut landscape: Option<&mut Landscape>,
         action_library: &ActionLibrary,
+        definitions: &HashMap<DefinitionId, Definition>,
+        players: &HashMap<i32, Player>,
     ) -> CommandQueueOutcome {
         let mut outcome = CommandQueueOutcome::default();
         loop {
@@ -6242,7 +6368,34 @@ impl Object {
 
             let command = self.command_queue.pop_front().expect("front exists");
             let delta: ObjectDelta = command.update.into();
-            let delta_outcome = self.apply_delta(&delta, action_library);
+            if let Some(new_def) = delta.change_def.as_deref() {
+                if let Some(definition) = definitions.get(new_def) {
+                    let owner_color = players
+                        .get(&self.state.owner)
+                        .and_then(Player::color)
+                        .map(|color| {
+                            u32::from(color.r) << 16
+                                | u32::from(color.g) << 8
+                                | u32::from(color.b)
+                        });
+                    Engine::apply_change_object_def_to_object(
+                        self,
+                        new_def,
+                        definition,
+                        materials.len(),
+                        owner_color,
+                    );
+                    outcome.definition_changed = true;
+                }
+            }
+            if delta.change_def.is_some() {
+                outcome.change_def_reinsert = delta.change_def_reinsert;
+            }
+            let current_action_library = definitions
+                .get(&self.definition_id)
+                .map(Definition::action_library)
+                .unwrap_or(action_library);
+            let delta_outcome = self.apply_delta(&delta, current_action_library);
             let callbacks_dispatched = delta
                 .action
                 .as_ref()
@@ -17949,6 +18102,8 @@ impl Engine {
                                 .map(str::to_string)
                                 .collect(),
                             category: definition.category(),
+                            border_bound: definition.border_bound(),
+                            contact_function_calls: definition.contact_function_calls(),
                             blit_mode: definition.blit_mode(),
                             ocf_base: definition.ocf_base(),
                             crew_member: definition.is_crew(),
@@ -18103,6 +18258,7 @@ impl Engine {
                     object.state.container,
                     object.state.draw_transform,
                 )
+                .with_unsorted(object.unsorted)
                 .with_fixed_motion(object.fixed_position, object.fixed_velocity)
                 .with_fixed_rotation(object.fixed_rotation)
                 .with_rotation_velocity(object.rotation_velocity)
@@ -19765,8 +19921,7 @@ impl Engine {
             .objects
             .get(index)
             .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?
-            .state
-            .clone();
+            .script_state_snapshot();
         let definition = self
             .definitions
             .get(definition_id)
@@ -22178,28 +22333,24 @@ impl Engine {
         let mut exec_list = std::mem::take(&mut self.exec_list);
         exec_list.retain(|&id| self.find_object_index(id).is_some());
         self.exec_list = exec_list;
-        // Enforce the master-list category invariant every tick: the C++
-        // list is maintained sorted by Add/Resort; a stable bracket sort
-        // is idempotent for rule-inserted entries and repairs loaded
-        // appends that arrive after the load-time FixObjectOrder (the
-        // bridge streams Objects.txt objects in phases).
-        self.fix_exec_list_order();
         let mut exec_order: Vec<usize> = self
             .exec_list
             .iter()
             .filter_map(|&id| self.find_object_index(id))
             .collect();
-        if exec_order.len() < self.objects.len() {
-            let listed: HashSet<usize> = exec_order.iter().copied().collect();
-            for idx in 0..self.objects.len() {
-                if !listed.contains(&idx) {
-                    tracing::warn!(
-                        object = self.objects[idx].id.as_u64(),
-                        "object missing from exec_list; appending"
-                    );
-                    self.insert_exec_link(self.exec_list.len(), self.objects[idx].id);
-                    exec_order.push(idx);
-                }
+        let listed: HashSet<usize> = exec_order.iter().copied().collect();
+        for idx in 0..self.objects.len() {
+            let object = &self.objects[idx];
+            // Inactive objects belong only to C4GameObjects::InactiveObjects;
+            // deleted/destroyed objects must never be repaired back into the
+            // executable main list after ResortUnsorted removed their link.
+            if !object.destroyed && object.state.status.is_active() && !listed.contains(&idx) {
+                tracing::warn!(
+                    object = object.id.as_u64(),
+                    "active object missing from exec_list; appending"
+                );
+                self.insert_exec_link(self.exec_list.len(), object.id);
+                exec_order.push(idx);
             }
         }
         // Command scans walk `Game.Objects` from First to Next, while
@@ -22275,17 +22426,10 @@ impl Engine {
             command_snapshots
                 .entry(current_id)
                 .or_insert_with(|| self.live_command_snapshot(idx));
-            let definition_id = self.objects[idx].definition_id.clone();
+            let (mut definition_id, mut action_library) =
+                self.object_definition_context(idx)?;
             let previous_action_state = self.objects[idx].state.action.clone();
             let previous_action_name = previous_action_state.name.clone();
-            let action_library = {
-                let definition = self
-                    .definitions
-                    .get(&definition_id)
-                    .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                let definitions_ref = &self.definitions;
-                definition.action_library().clone()
-            };
             let mut landscape_slot = self.landscape.take();
             let (
                 queued_spawns,
@@ -22293,6 +22437,8 @@ impl Engine {
                 queue_events,
                 container_updates,
                 command_events,
+                queue_definition_changed,
+                queue_change_def_reinsert,
                 (
                     object_id,
                     previous_owner,
@@ -22344,6 +22490,8 @@ impl Engine {
                     &self.materials,
                     landscape_slot.as_mut(),
                     &action_library,
+                    &self.definitions,
+                    &self.players,
                 );
                 let new_owner = object.state.owner;
                 let new_crew = object.state.crew_member;
@@ -22354,6 +22502,8 @@ impl Engine {
                     outcome.effect_events,
                     outcome.container_updates,
                     outcome.command_events,
+                    outcome.definition_changed,
+                    outcome.change_def_reinsert,
                     (
                         object.id,
                         previous_owner,
@@ -22379,8 +22529,17 @@ impl Engine {
                 new_crew,
             );
 
+            if queue_definition_changed {
+                self.update_sector_for_index(idx);
+                self.update_solid_mask(idx);
+                self.refresh_object_ocf(idx);
+            }
+
             for update in container_updates {
                 self.apply_container_change(update.object_id, update.previous, update.new, false)?;
+            }
+            if queue_change_def_reinsert {
+                self.reinsert_change_def_contents_link(object_id)?;
             }
 
             for event in command_events {
@@ -22389,6 +22548,7 @@ impl Engine {
 
             if !queue_events.is_empty() {
                 let object_id = self.objects[idx].id;
+                let previous_container = self.objects[idx].state.container;
                 let global_view = self.global_effects.clone();
                 let rng_state = self.rng.clone();
                 let world = self.host_world_context();
@@ -22405,6 +22565,7 @@ impl Engine {
                     effect_spawns,
                     effect_other_objects,
                     effect_solid_mask_changed,
+                    effect_change_def_reinsert,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -22478,12 +22639,30 @@ impl Engine {
                     self.apply_global_effect_commands(&global_cmds);
                 }
                 self.apply_particle_commands(emitted_particles);
+                let new_container = self.objects[idx].state.container;
+                if previous_container != new_container {
+                    self.apply_container_change(
+                        object_id,
+                        previous_container,
+                        new_container,
+                        false,
+                    )?;
+                }
+                if effect_change_def_reinsert.unwrap_or(false) {
+                    self.reinsert_change_def_contents_link(object_id)?;
+                }
             }
 
             self.finish_object_command_execution(object_id)?;
             let Some(idx) = self.find_object_index(object_id) else {
                 continue;
             };
+            // ExecuteCommand and its synchronous callbacks run before every
+            // later C4Object::Execute stage. ChangeDef therefore changes the
+            // live Def/ActMap used by ExecAction, movement, effects and Timer
+            // in this same frame — including a swap from queue effects or
+            // ControlCommandFinished rather than the direct queued delta.
+            action_library = self.object_definition_context(idx)?.1;
 
             if !queued_spawns.is_empty() {
                 spawn_requests.extend(queued_spawns);
@@ -22644,6 +22823,7 @@ impl Engine {
             if self.objects[idx].destroyed {
                 continue;
             }
+            (definition_id, action_library) = self.object_definition_context(idx)?;
             dbg_stage(&self.objects[idx], "PREMOVE");
 
             // C4Object::ExecMovement (C4Movement.cpp:553-616): contained
@@ -22743,6 +22923,7 @@ impl Engine {
             // Exit/DoCon; the end-of-exec update covers the net state).
             self.update_solid_mask(idx);
             self.update_sector_for_index(idx);
+            definition_id = self.objects[idx].definition_id.clone();
             // Script effect timers execute HERE in C++ — pEffects->Execute
             // follows ExecAction and ExecMovement inside C4Object::Execute
             // (C4Object.cpp:1069-1090): an action set by a timer callback
@@ -22763,10 +22944,9 @@ impl Engine {
             // beneath it, AddFunc C4Script.cpp:6995).
             let mut segment: Vec<EffectEvent> = Vec::new();
             for event in timer_events {
-                let engine_fire = event.effect.name == C4FX_FIRE
-                    && matches!(event.kind, EffectEventKind::Timer)
-                    && !self.effect_has_script_callback(&event.effect, &definition_id, "Timer");
-                if !engine_fire {
+                let is_fire_timer = event.effect.name == C4FX_FIRE
+                    && matches!(event.kind, EffectEventKind::Timer);
+                if !is_fire_timer {
                     segment.push(event);
                     continue;
                 }
@@ -22781,6 +22961,11 @@ impl Engine {
                     || !self.objects[idx].state.status.is_active()
                 {
                     break;
+                }
+                definition_id = self.objects[idx].definition_id.clone();
+                if self.effect_has_script_callback(&event.effect, &definition_id, "Timer") {
+                    segment.push(event);
+                    continue;
                 }
                 // An earlier callback may have killed this fire mid-batch —
                 // C4Effect::Execute skips dead entries (C4Effect.cpp:326-336).
@@ -22830,6 +23015,7 @@ impl Engine {
                             incinerating,
                         )?;
                         self.refresh_object_ocf(idx);
+                        definition_id = self.objects[idx].definition_id.clone();
                         if !started {
                             // the denied Start kills the entry without a
                             // Stop call (C4Effect ctor, C4Effect.cpp:128-131)
@@ -22839,6 +23025,7 @@ impl Engine {
                     }
                     let stop_events = self.exec_object_fire(idx, frame, entry.number);
                     segment.extend(stop_events);
+                    definition_id = self.objects[idx].definition_id.clone();
                 }
             }
             if !segment.is_empty()
@@ -22861,6 +23048,7 @@ impl Engine {
             if self.objects[idx].destroyed || !self.objects[idx].state.status.is_active() {
                 continue;
             }
+            definition_id = self.objects[idx].definition_id.clone();
 
             // Def TimerCall (C4Object::Execute, C4Object.cpp:1085-1091):
             // Timer++ every Execute; reaching Def->Timer resets the counter
@@ -22902,6 +23090,7 @@ impl Engine {
                     continue;
                 }
             }
+            (definition_id, action_library) = self.object_definition_context(idx)?;
 
             // C4Object::Execute advances its active menu immediately after
             // TimerCall (C4Object.cpp:1085-1093; C4Menu.cpp:990-1000).
@@ -22979,6 +23168,19 @@ impl Engine {
                 script_go,
                 script_counter,
             } = command;
+
+            let change_def = delta.change_def.clone();
+            let change_def_reinsert = delta.change_def_reinsert;
+
+            let action_library = change_def
+                .as_deref()
+                .and_then(|new_def| {
+                    self.apply_change_object_def(idx, new_def);
+                    self.definitions
+                        .get(&self.objects[idx].definition_id)
+                        .map(|definition| definition.action_library().clone())
+                })
+                .unwrap_or(action_library);
 
             if let Some(go) = script_go {
                 self.scenario_script_go = go;
@@ -23089,6 +23291,13 @@ impl Engine {
             if let Some((previous_container, new_container)) = container_change {
                 self.apply_container_change(object_id, previous_container, new_container, false)?;
             }
+            if change_def_reinsert {
+                self.reinsert_change_def_contents_link(object_id)?;
+            }
+            if change_def.is_some() {
+                self.update_solid_mask(idx);
+                self.refresh_object_ocf(idx);
+            }
 
             self.apply_particle_commands(particles);
             if !transfer_zones.is_empty() {
@@ -23115,6 +23324,7 @@ impl Engine {
                     effect_spawns,
                     effect_other_objects,
                     effect_solid_mask_changed,
+                    effect_change_def_reinsert,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -23193,6 +23403,9 @@ impl Engine {
                 self.apply_particle_commands(emitted_particles);
                 if previous_container != new_container {
                     self.apply_container_change(object_id, previous_container, new_container, false)?;
+                }
+                if effect_change_def_reinsert.unwrap_or(false) {
+                    self.reinsert_change_def_contents_link(object_id)?;
                 }
             }
             self.update_sector_for_index(idx);
@@ -23446,6 +23659,7 @@ impl Engine {
             portrait_name,
             solid_mask_override: update_solid_mask,
             change_def,
+            change_def_reinsert,
             alive,
             container,
             live_vertices,
@@ -23477,14 +23691,14 @@ impl Engine {
         };
 
         let mut energy_died = false;
-        let mut solid_mask_refresh = rotation.is_some();
+        let mut solid_mask_refresh = rotation.is_some() || change_def.is_some();
         // FnChangeDef swaps INLINE (C4Object.cpp:1205-1231): apply it
         // BEFORE the staged fields so an action write in the same update
         // resolves against the NEW def's ActMap.
         let action_library = change_def
             .as_ref()
             .and_then(|new_def| {
-                self.change_object_def(index, new_def);
+                self.apply_change_object_def(index, new_def);
                 self.definitions
                     .get(&self.objects[index].definition_id)
                     .map(|definition| definition.action_library().clone())
@@ -23683,7 +23897,7 @@ impl Engine {
                 object.state.color_modulation = color_modulation;
             }
             if let Some(shape_override) = update_shape_override {
-                object.state.shape_override = Some(shape_override);
+                object.state.shape_override = shape_override;
             }
             if let Some(status) = status {
                 object.apply_status(status);
@@ -23798,6 +24012,9 @@ impl Engine {
         );
         if let Some((previous_container, new_container)) = container_change {
             self.apply_container_change(object_id, previous_container, new_container, false)?;
+        }
+        if change_def_reinsert {
+            self.reinsert_change_def_contents_link(object_id)?;
         }
         // Host-driven changes are SetOCF events (SetAlive C4Object.h:361,
         // DoCon C4Object.cpp:1417, status C4Object.cpp:4139).
@@ -24332,8 +24549,13 @@ impl Engine {
         let solid_mask_changed = object_update
             .as_ref()
             .is_some_and(|update| {
-                update.solid_mask_override.is_some() || update.rotation.is_some()
+                update.change_def.is_some()
+                    || update.solid_mask_override.is_some()
+                    || update.rotation.is_some()
             });
+        let mut change_def_reinsert = object_update
+            .as_ref()
+            .is_some_and(|update| update.change_def_reinsert);
 
         // FnChangeDef swaps the definition INLINE at the call site
         // (C4Object::ChangeDef, C4Object.cpp:1205-1231, incl. the
@@ -24346,7 +24568,7 @@ impl Engine {
             .as_ref()
             .and_then(|update| update.change_def.clone())
             .and_then(|new_def| {
-                self.change_object_def(index, &new_def);
+                self.apply_change_object_def(index, &new_def);
                 self.definitions
                     .get(&self.objects[index].definition_id)
                     .map(|definition| definition.action_library().clone())
@@ -24380,8 +24602,6 @@ impl Engine {
                 if let Some(change) = outcome.container_change {
                     container_changes.push(change);
                 }
-            } else {
-                object.state.action.reconcile_with_library(action_library);
             }
 
             if !command_operations.is_empty() {
@@ -24471,6 +24691,7 @@ impl Engine {
                 effect_spawns,
                 effect_other_objects,
                 nested_effect_solid_mask_changed,
+                nested_effect_change_def_reinsert,
                 effect_next_object_id,
                 triggered_game_over,
                 effect_script_go,
@@ -24495,6 +24716,9 @@ impl Engine {
             self.rng = new_rng;
             self.audio_registry = audio_state;
             effect_solid_mask_changed |= nested_effect_solid_mask_changed;
+            if let Some(marker) = nested_effect_change_def_reinsert {
+                change_def_reinsert = marker;
+            }
             self.sync_next_object_id(effect_next_object_id);
             if !effect_spawns.is_empty() {
                 self.process_spawn_queue(effect_spawns)?;
@@ -24543,6 +24767,9 @@ impl Engine {
 
         for (previous, new) in container_changes {
             self.apply_container_change(object_id, previous, new, false)?;
+        }
+        if change_def_reinsert {
+            self.reinsert_change_def_contents_link(object_id)?;
         }
 
         if solid_mask_changed
@@ -24627,8 +24854,14 @@ impl Engine {
                 .update
                 .as_ref()
                 .is_some_and(|update| {
-                    update.solid_mask_override.is_some() || update.rotation.is_some()
+                    update.change_def.is_some()
+                        || update.solid_mask_override.is_some()
+                        || update.rotation.is_some()
                 });
+            let mut change_def_reinsert = outcome
+                .update
+                .as_ref()
+                .is_some_and(|update| update.change_def_reinsert);
             let refresh_ocf = outcome
                 .update
                 .as_ref()
@@ -24655,7 +24888,7 @@ impl Engine {
                 .as_ref()
                 .and_then(|update| update.change_def.clone())
                 .and_then(|new_def| {
-                    self.change_object_def(index, &new_def);
+                    self.apply_change_object_def(index, &new_def);
                     self.definitions
                         .get(&self.objects[index].definition_id)
                         .map(|definition| definition.action_library().clone())
@@ -24767,6 +25000,7 @@ impl Engine {
                     effect_spawns,
                     effect_other_objects,
                     nested_effect_solid_mask_changed,
+                    nested_effect_change_def_reinsert,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -24791,6 +25025,9 @@ impl Engine {
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
                 effect_solid_mask_changed |= nested_effect_solid_mask_changed;
+                if let Some(marker) = nested_effect_change_def_reinsert {
+                    change_def_reinsert = marker;
+                }
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
@@ -24843,6 +25080,9 @@ impl Engine {
 
             for (previous, new) in container_changes {
                 self.apply_container_change(object_id, previous, new, false)?;
+            }
+            if change_def_reinsert {
+                self.reinsert_change_def_contents_link(object_id)?;
             }
             if let Some(construction) = delayed_docon_construction {
                 let change = construction - self.objects[index].state.construction;
@@ -26002,6 +26242,7 @@ impl Engine {
         events: Vec<EffectEvent>,
     ) -> Result<(), EngineError> {
         let object_id = self.objects[idx].id;
+        let previous_container = self.objects[idx].state.container;
         let global_view = self.global_effects.clone();
         let rng_state = self.rng.clone();
         let world = self.host_world_context();
@@ -26018,6 +26259,7 @@ impl Engine {
             effect_spawns,
             effect_other_objects,
             effect_solid_mask_changed,
+            effect_change_def_reinsert,
             effect_next_object_id,
             triggered_game_over,
             effect_script_go,
@@ -26091,6 +26333,13 @@ impl Engine {
             self.apply_global_effect_commands(&global_cmds);
         }
         self.apply_particle_commands(emitted_particles);
+        let new_container = self.objects[idx].state.container;
+        if previous_container != new_container {
+            self.apply_container_change(object_id, previous_container, new_container, false)?;
+        }
+        if effect_change_def_reinsert.unwrap_or(false) {
+            self.reinsert_change_def_contents_link(object_id)?;
+        }
         Ok(())
     }
 
@@ -26122,6 +26371,7 @@ impl Engine {
             Vec<SpawnConfig>,
             Vec<compat::NestedObjectOutcome>,
             bool,
+            Option<bool>,
             u64,
             bool,
             Option<bool>,
@@ -26146,6 +26396,7 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 false,
+                None,
                 next_object_id,
                 false,
                 None,
@@ -26179,6 +26430,7 @@ impl Engine {
         // CALLER applies them via apply_nested_object_outcomes.
         let mut pending_other_objects = Vec::new();
         let mut solid_mask_changed = false;
+        let mut change_def_reinsert = None;
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
         let mut script_counter_requested: Option<i32> = None;
@@ -26298,7 +26550,8 @@ impl Engine {
                         &event.effect,
                         &world,
                         definitions,
-                        definition,
+                        Some((object_id, object.definition_id.as_str())),
+                        definitions.get(&object.definition_id).unwrap_or(definition),
                     )
                     .has_effect_callback(&event.effect.name, "Start");
                     if has_start {
@@ -26387,7 +26640,13 @@ impl Engine {
                 );
             }
             let dispatch_definition =
-                resolve_effect_dispatch_definition(&event.effect, &world, definitions, definition);
+                resolve_effect_dispatch_definition(
+                    &event.effect,
+                    &world,
+                    definitions,
+                    Some((object_id, object.definition_id.as_str())),
+                    definitions.get(&object.definition_id).unwrap_or(definition),
+                );
             // Engine-internal fire callbacks: when no script overload
             // shadows the engine function (AddFunc C4Script.cpp:6994-6996),
             // Fx*Stop clears the OnFire flag — real and temp removals alike
@@ -26697,6 +26956,15 @@ impl Engine {
                 pending_spawns.extend(spawns);
             }
             if !event_other_objects.is_empty() {
+                for nested in &event_other_objects {
+                    if let Some(new_definition) = nested
+                        .update
+                        .as_ref()
+                        .and_then(|update| update.change_def.as_deref())
+                    {
+                        world.preview_object_change_def(nested.object_id, new_definition);
+                    }
+                }
                 pending_other_objects.extend(event_other_objects);
             }
             world = world.with_next_object_id(next_object_id);
@@ -26720,7 +26988,8 @@ impl Engine {
             }
 
             if let Some(update) = object_update {
-                solid_mask_changed |= update.solid_mask_override.is_some()
+                solid_mask_changed |= update.change_def.is_some()
+                    || update.solid_mask_override.is_some()
                     || update.base_graphics.is_some()
                     || update.position.is_some()
                     || update.construction.is_some()
@@ -26728,12 +26997,40 @@ impl Engine {
                     || update.rotation.is_some();
                 let mut delta = ObjectDelta::default();
                 delta.merge_update(update);
+                let definition_changed = delta.change_def.is_some();
+                let callback_action_library = if let Some(new_def) = delta.change_def.as_deref() {
+                    let new_definition = definitions
+                        .get(new_def)
+                        .ok_or_else(|| EngineError::UnknownDefinition(new_def.to_string()))?;
+                    let material_capacity = object.material_contents.len();
+                    Self::apply_change_object_def_to_object(
+                        object,
+                        new_def,
+                        new_definition,
+                        material_capacity,
+                        None,
+                    );
+                    new_definition.action_library()
+                } else {
+                    definitions
+                        .get(&object.definition_id)
+                        .unwrap_or(definition)
+                        .action_library()
+                };
+                if definition_changed {
+                    change_def_reinsert = Some(delta.change_def_reinsert);
+                }
                 let callbacks_dispatched = delta
                     .action
                     .as_ref()
                     .map(|action| action.callbacks_dispatched)
                     .unwrap_or(false);
-                let outcome = object.apply_delta(&delta, definition.action_library());
+                let outcome = object.apply_delta(&delta, callback_action_library);
+                if definition_changed {
+                    if let Some(current_definition) = definitions.get(&object.definition_id) {
+                        object.state.ocf = current_definition.compute_ocf(&object.state);
+                    }
+                }
                 if let Some(change) = outcome.action_change {
                     if !callbacks_dispatched {
                         object.record_action_event(change.previous, ActionTransitionKind::Forced);
@@ -26830,6 +27127,7 @@ impl Engine {
             pending_spawns,
             pending_other_objects,
             solid_mask_changed,
+            change_def_reinsert,
             next_object_id,
             game_over_requested,
             script_go_requested,
@@ -28198,8 +28496,12 @@ impl Engine {
         let contact_game_over_triggered = self.game_over_triggered;
         let mut contact_outcomes = Vec::new();
         let mut contact_container_changes = Vec::new();
+        let mut contact_change_def_reinserts = HashMap::new();
+        let mut contact_change_def_solid_mask = false;
         let mut contact_selection_changes = Vec::new();
         let contact_function_calls_enabled = movement.contact_function_calls;
+        let contact_definitions = &self.definitions;
+        let contact_material_capacity = self.materials.len();
         let mut movement_outcome = {
             let definition_for_contact = definition_for_contact.as_ref();
             let mut run_contact_callback = |object: &mut Object,
@@ -28208,7 +28510,7 @@ impl Engine {
                 if !contact_function_calls_enabled {
                     return Ok(());
                 }
-                let Some(definition) = definition_for_contact else {
+                let Some(initial_definition) = definition_for_contact else {
                     return Ok(());
                 };
                 for cnat in [CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, CNAT_BOTTOM] {
@@ -28218,6 +28520,9 @@ impl Engine {
                     let Some(function_name) = contact_callback_name(cnat) else {
                         continue;
                     };
+                    let definition = contact_definitions
+                        .get(&object.definition_id)
+                        .unwrap_or(initial_definition);
                     // C4Object::Call with no matching Contact* function is
                     // a no-op. In particular it must not run the outcome
                     // fold and its SetOCF emulation: C++ keeps Execute's
@@ -28265,7 +28570,38 @@ impl Engine {
                             .map(|action| action.callbacks_dispatched)
                             .unwrap_or(false);
                         let delta: ObjectDelta = update.into();
-                        let apply_outcome = object.apply_delta(&delta, action_library);
+                        let definition_changed = delta.change_def.is_some();
+                        let callback_action_library = if let Some(new_def) = delta.change_def.as_deref() {
+                            let definition = contact_definitions
+                                .get(new_def)
+                                .ok_or_else(|| EngineError::UnknownDefinition(new_def.to_string()))?;
+                            Self::apply_change_object_def_to_object(
+                                object,
+                                new_def,
+                                definition,
+                                contact_material_capacity,
+                                None,
+                            );
+                            contact_change_def_solid_mask = true;
+                            definition.action_library()
+                        } else {
+                            contact_definitions
+                                .get(&object.definition_id)
+                                .unwrap_or(initial_definition)
+                                .action_library()
+                        };
+                        if definition_changed {
+                            contact_change_def_reinserts
+                                .insert(object.id, delta.change_def_reinsert);
+                        }
+                        let apply_outcome = object.apply_delta(&delta, callback_action_library);
+                        if definition_changed {
+                            if let Some(current_definition) =
+                                contact_definitions.get(&object.definition_id)
+                            {
+                                object.state.ocf = current_definition.compute_ocf(&object.state);
+                            }
+                        }
                         if preserves_position {
                             object.state.position = previous_position;
                         }
@@ -28291,8 +28627,6 @@ impl Engine {
                                 new_crew_member,
                             ));
                         }
-                    } else {
-                        object.state.action.reconcile_with_library(action_library);
                     }
 
                     contact_outcomes.push(outcome);
@@ -28352,13 +28686,31 @@ impl Engine {
         for (changed_object_id, previous, new) in contact_container_changes {
             self.apply_container_change(changed_object_id, previous, new, false)?;
         }
+        for (changed_object_id, reinsert) in contact_change_def_reinserts {
+            if reinsert {
+                self.reinsert_change_def_contents_link(changed_object_id)?;
+            }
+        }
+        if contact_change_def_solid_mask {
+            self.update_solid_mask(idx);
+        }
         for outcome in contact_outcomes {
+            let Some(current_index) = self.find_object_index(object_id) else {
+                break;
+            };
+            let current_definition_id = self.objects[current_index].definition_id.clone();
+            let current_action_library = self
+                .definitions
+                .get(&current_definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(current_definition_id.clone()))?
+                .action_library()
+                .clone();
             self.apply_callback_outcome(
-                idx,
+                current_index,
                 outcome,
-                action_library,
+                &current_action_library,
                 object_id,
-                definition_id,
+                &current_definition_id,
                 false,
             )?;
         }
@@ -32788,7 +33140,7 @@ impl Engine {
             .and_then(|definition| definition.burn_turn_to().map(str::to_string));
         // BurnTurnTo: blasts changedef in water too (C4Effect.cpp:579-585)
         if let Some(target) = burn_turn_to.filter(|_| fire_caused || blasted) {
-            self.change_object_def(idx, &target);
+            let _ = self.change_object_def_live(idx, &target)?;
         }
         // ChangeDef is live before both guarded blocks. Eject through real
         // Enter/Exit so the controller assignment and callbacks occur in
@@ -34131,43 +34483,83 @@ impl Engine {
         Ok(())
     }
 
-    /// Minimal `C4Object::ChangeDef` (C4Object.cpp:1180-1228): swap the
-    /// definition, reset the action to the new library's default, refresh
-    /// the shape template and vertices from the new definition. Mass, color,
-    /// and effect-pointer updates are still open.
-    fn change_object_def(&mut self, idx: usize, new_def: &str) {
+    fn object_definition_context(
+        &self,
+        index: usize,
+    ) -> Result<(DefinitionId, ActionLibrary), EngineError> {
+        let definition_id = self.objects[index].definition_id.clone();
+        let action_library = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?
+            .action_library()
+            .clone();
+        Ok((definition_id, action_library))
+    }
+
+    /// Definition-swap half of `C4Object::ChangeDef`. Script-host outcomes
+    /// have already performed the synchronous Exit/RejectEntrance/Enter
+    /// lifecycle; engine-owned callers use `change_object_def_live` below.
+    fn apply_change_object_def(&mut self, idx: usize, new_def: &str) {
         let Some(definition) = self.definitions.get(new_def) else {
             return;
         };
-        let action_state = definition.default_action_state();
+        let material_capacity = self.materials.len();
+        let owner_color = self.players
+            .get(&self.objects[idx].state.owner)
+            .and_then(Player::color)
+            .map(|color| {
+                u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
+            });
+        Self::apply_change_object_def_to_object(
+            &mut self.objects[idx],
+            new_def,
+            definition,
+            material_capacity,
+            owner_color,
+        );
+    }
+
+    fn apply_change_object_def_to_object(
+        object: &mut Object,
+        new_def: &str,
+        definition: &Definition,
+        material_capacity: usize,
+        owner_color: Option<u32>,
+    ) {
         let vertices = definition.shape_vertices().to_vec();
         let template = ObjectShapeTemplate::new(
             vertices.clone(),
             definition.shape_rect(),
             definition.stretch_growth(),
             definition.rotateable(),
-        );
-        let category = definition.category();
+        )
+        .with_line(definition.line());
         let blit_mode = definition.blit_mode();
         let rotateable = definition.rotateable();
-        let material_capacity = self.materials.len();
-        let object = &mut self.objects[idx];
+        let previous_rect = object.current_shape_rect();
+        let previous_construction = object.state.construction;
         object.definition_id = new_def.to_string();
+        object.unsorted = true;
         object.state.base_graphics = None;
-        object.state.action = action_state;
-        object.state.category = category;
+        // Category is an object field, initialized from Def only in Init.
+        // C4Object::ChangeDef deliberately preserves it.
         // C4Object::ChangeDef follows the new definition's mode unless a
         // script explicitly marked the old mode custom (C4Object.cpp:1231).
         if object.state.blit_mode & 128 == 0 {
             object.state.blit_mode = blit_mode;
         }
-        object.state.vertices = vertices;
-        object
-            .state
-            .shape_vertices
-            .replace_active(&object.state.vertices);
+        if !definition.color_by_owner() {
+            object.state.color = 0;
+        } else if object.state.color == 0 {
+            if let Some(color) = owner_color {
+                object.state.color = color;
+            }
+        }
         object.shape_template = template;
-        object.own_shape_vertices = None;
+        if definition.line() == 0 {
+            object.state.shape_override = None;
+        }
         // SolidMask falls back to the NEW def default (C4Object.cpp:1213)
         object.state.solid_mask_override = None;
         // Non-rotateable defs reset rotation (C4Object.cpp:1211)
@@ -34176,7 +34568,74 @@ impl Engine {
             object.fixed_rotation = C4Fixed::ZERO;
             object.rotation_velocity = C4Fixed::ZERO;
         }
+        // UpdateFace(true) rebuilds against the new template but preserves
+        // fOwnVertices. Line definitions keep their independent live shape.
+        object.refresh_shape_after_state_change(
+            previous_construction,
+            previous_rect,
+            false,
+        );
         object.ensure_material_capacity(material_capacity);
+        // ChangeDef finishes with SetOCF before returning to script. Keep the
+        // raw helper callback-visible even in folds that do not own an
+        // Engine index yet (Construction/Initialize/effect/contact paths).
+        object.state.ocf = definition.compute_ocf(&object.state);
+    }
+
+    /// Full engine-owned C4Object::ChangeDef lifecycle. This is required by
+    /// native BurnTurnTo; script-host changes have already executed the same
+    /// callbacks synchronously and use `apply_change_object_def` at fold.
+    fn change_object_def_live(
+        &mut self,
+        idx: usize,
+        new_def: &str,
+    ) -> Result<bool, EngineError> {
+        if !self.definitions.contains_key(new_def) {
+            return Ok(false);
+        }
+        let object_id = self.objects[idx].id;
+        let previous_container = self.exit_object_for_change_def(object_id)?;
+
+        if let Some(current_index) = self.find_object_index(object_id) {
+            // BoundsCheck Contact* callbacks run before the outer
+            // ChangeDef's SetAction and may themselves ChangeDef. C++ reads
+            // `Def` only after Exit returns, so the action transition must
+            // use the definition live now rather than the pre-Exit one.
+            let old_definition_id = self.objects[current_index].definition_id.clone();
+            // Ordinary old-definition SetAction(ActIdle), including callback
+            // order. The subsequent raw swap enforces Idle even if
+            // NoOtherAction rejected this transition.
+            let _ = tolerate_script_error(self.action_with_calls(
+                current_index,
+                &old_definition_id,
+                "Idle",
+            ))?;
+            if let Some(current_index) = self.find_object_index(object_id) {
+                // The assignment is unconditional, even when SetAction
+                // succeeded and its AbortCall selected another action.
+                // Only Act is overwritten; callback-written Time/Data/Phase
+                // and targets survive (C4Object.cpp:1217-1218).
+                self.objects[current_index].state.action.name = "Idle".to_string();
+            }
+        }
+
+        let Some(current_index) = self.find_object_index(object_id) else {
+            return Ok(true);
+        };
+        self.apply_change_object_def(current_index, new_def);
+        self.update_solid_mask(current_index);
+        self.update_sector_for_index(current_index);
+        self.refresh_object_ocf(current_index);
+
+        if let Some(container) = previous_container {
+            let _ = self.try_object_enter_with_reject_collect_and_calls(
+                object_id,
+                container,
+                false,
+                false,
+            )?;
+        }
+        Ok(true)
     }
 
     /// AssignDeath's ordinary SetActionByName("Dead") transition.
@@ -34545,13 +35004,10 @@ impl Engine {
     /// invokes clearance only when its `SyncClear` flag is set, and does so
     /// after synchronization (`C4Control.cpp:537-543`).
     fn game_synchronize(&mut self, save_player_files: bool) -> Result<(), EngineError> {
-        // Loaded objects appended in file order get their category
-        // brackets fixed before the first tick (FixObjectOrder runs
-        // right after Objects.txt load, C4GameObjects.cpp:663).
-        self.fix_exec_list_order();
         // Objects.Synchronize resolves SetObjectOrder calls queued by
         // scenario/object initialization before InitPlayers (C4Game.cpp:3720;
         // C4GameObjects.cpp:250-260).
+        self.resort_all_unsorted();
         self.execute_object_order_commands();
         self.rng = LcgRng::seed_from_u64(self.random_seed);
         self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
@@ -35136,9 +35592,9 @@ impl Engine {
     /// back and ExecObjects walks it in reverse (C4Game.cpp:1582), so the
     /// exec view sorts category-ASCENDING; the bubble pass preserves
     /// relative order within a bracket (Objects.txt file order). Loaded
-    /// entries append in file order and are bracket-sorted here; runtime
-    /// Add-rule inserts never violate bracket order, so re-running this
-    /// is idempotent for them.
+    /// entries append in file order and are bracket-sorted here. This is a
+    /// load/restore repair only: C++ never normalizes runtime categories or
+    /// silently relocates ChangeDef's Unsorted link on a later frame.
     fn fix_exec_list_order(&mut self) {
         if std::env::var("LC_EXECDBG").is_ok() {
             crate::rng::rng_trace_line(&format!(
@@ -35151,6 +35607,13 @@ impl Engine {
             let Some(index) = self.find_object_index(id) else {
                 continue;
             };
+            let object = &self.objects[index];
+            // Unsorted/dead links are holes in FixObjectOrder; inactive
+            // objects belong to C4GameObjects::InactiveObjects and likewise
+            // cannot participate in the main-list repair.
+            if object.destroyed || !object.state.status.is_active() || object.unsorted {
+                continue;
+            }
             let raw = self.objects[index].state.category;
             let masked = raw & CATEGORY_SORT_LIMIT;
             let sort_bit = if masked == 0 {
@@ -35166,8 +35629,22 @@ impl Engine {
             };
             keyed.push((sort_bit, position, id));
         }
+        let positions = keyed
+            .iter()
+            .map(|&(_, position, _)| position)
+            .collect::<Vec<_>>();
         keyed.sort_by_key(|&(sort_bit, position, _)| (sort_bit, position));
-        self.exec_list = keyed.into_iter().map(|(_, _, id)| id).collect();
+        let sorted_ids = keyed
+            .into_iter()
+            .map(|(_, _, id)| id)
+            .collect::<Vec<_>>();
+        for (position, id) in positions.into_iter().zip(sorted_ids) {
+            self.exec_list[position] = id;
+        }
+        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        if let Some(sectors) = self.sectors.as_mut() {
+            sectors.set_master_order(master_order);
+        }
     }
 
     /// C4GameObjects::ExecuteResorts (C4GameObjects.cpp:874-886). Requests
@@ -35195,31 +35672,22 @@ impl Engine {
             .collect();
         let has_object_resorts = !resort_objects.is_empty();
 
-        // Preserve SetObjectOrder's existing load/category normalization when
-        // it is the only kind of request. Explicit Resort commands carry the
-        // exact C++ category operation below and must not normalize multi-bit
-        // sort categories.
-        if has_relative && !sort_all && resort_objects.is_empty() {
-            self.fix_exec_list_order();
+        // C4Object::Resort sets both the object's Unsorted bit and the one
+        // global `fResortAnyObject` trigger. Once that trigger fires,
+        // ResortUnsorted scans *every* previously flagged object — notably
+        // ChangeDef objects, which set Unsorted without setting the trigger.
+        for object in &resort_objects {
+            if let Some(index) = self.find_object_index(*object) {
+                self.objects[index].unsorted = true;
+            }
         }
+
         if sort_all {
             self.sort_exec_list_by_category();
         }
 
-        // C4GameObjects::ResortUnsorted scans the main list First -> Next.
-        // `exec_list` is that list reversed, and duplicate Resort calls only
-        // set the same boolean flag.
-        let resort_order = self
-            .exec_list
-            .iter()
-            .rev()
-            .copied()
-            .filter(|object| resort_objects.contains(object))
-            .collect::<Vec<_>>();
-        let mut unprocessed_resorts = resort_objects;
-        for object in resort_order {
-            unprocessed_resorts.remove(&object);
-            self.resort_object(object, &unprocessed_resorts);
+        if has_object_resorts {
+            self.resort_all_unsorted();
         }
 
         // C4ObjResort nodes are pushed at the list head: newest first.
@@ -35240,6 +35708,34 @@ impl Engine {
         }
     }
 
+    /// C4GameObjects::ResortUnsorted, scanning main-list First -> Next.
+    /// `exec_list` is the reverse view; each object is cleared immediately
+    /// before its Add, while later flagged peers remain invisible to both
+    /// insertion scans.
+    fn resort_all_unsorted(&mut self) {
+        let resort_order = self
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .filter(|object| {
+                self.find_object_index(*object)
+                    .is_some_and(|index| {
+                        let object = &self.objects[index];
+                        object.unsorted && object.state.status != ObjectStatus::Inactive
+                    })
+            })
+            .collect::<Vec<_>>();
+        let mut unprocessed_resorts = resort_order.iter().copied().collect::<HashSet<_>>();
+        for object in resort_order {
+            unprocessed_resorts.remove(&object);
+            if let Some(index) = self.find_object_index(object) {
+                self.objects[index].unsorted = false;
+            }
+            self.resort_object(object, &unprocessed_resorts);
+        }
+    }
+
     fn sort_exec_list_by_category(&mut self) {
         let mut keyed = self
             .exec_list
@@ -35247,27 +35743,52 @@ impl Engine {
             .enumerate()
             .filter_map(|(position, &id)| {
                 let index = self.find_object_index(id)?;
+                // C4GameObjects keeps inactive objects in a separate list;
+                // preserve their physical slots in Rust's unified view.
+                if self.objects[index].state.status == ObjectStatus::Inactive {
+                    return None;
+                }
                 let category = self.objects[index].state.category & CATEGORY_SORT_LIMIT;
                 Some((category, position, id))
             })
             .collect::<Vec<_>>();
+        let positions = keyed
+            .iter()
+            .map(|&(_, position, _)| position)
+            .collect::<Vec<_>>();
         keyed.sort_by_key(|&(category, position, _)| (category, position));
-        self.exec_list = keyed.into_iter().map(|(_, _, id)| id).collect();
+        for (position, id) in positions
+            .into_iter()
+            .zip(keyed.into_iter().map(|(_, _, id)| id))
+        {
+            self.exec_list[position] = id;
+        }
+        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        if let Some(sectors) = self.sectors.as_mut() {
+            sectors.set_master_order(master_order);
+        }
     }
 
     fn resort_object(&mut self, object: ObjectId, still_unsorted: &HashSet<ObjectId>) {
         let Some(object_index) = self.find_object_index(object) else {
             return;
         };
-        if self.objects[object_index].destroyed
-            || !self.objects[object_index].state.status.is_active()
-        {
+        if self.objects[object_index].state.status == ObjectStatus::Inactive {
             return;
         }
         let Some(position) = self.exec_list.iter().position(|&id| id == object) else {
             return;
         };
         self.exec_list.remove(position);
+        if self.objects[object_index].destroyed
+            || self.objects[object_index].state.status == ObjectStatus::Deleted
+        {
+            let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+            if let Some(sectors) = self.sectors.as_mut() {
+                sectors.set_master_order(master_order);
+            }
+            return;
+        }
         self.insert_into_exec_list_ignoring(object, false, Some(still_unsorted));
     }
 
@@ -35478,32 +35999,58 @@ impl Engine {
         loaded: bool,
         ignored: Option<&HashSet<ObjectId>>,
     ) {
-        if loaded {
-            self.insert_exec_link(self.exec_list.len(), id);
-            return;
-        }
         let Some(index) = self.find_object_index(id) else {
             return;
         };
-        let is_line = |engine: &Self, idx: usize| {
-            engine
-                .definitions
-                .get(&engine.objects[idx].definition_id)
-                .map(|definition| definition.line() != 0)
-                .unwrap_or(false)
-        };
-        if is_line(self, index) {
-            self.insert_exec_link(0, id);
-            return;
+        let object = &self.objects[index];
+        let is_line = self
+            .definitions
+            .get(&object.definition_id)
+            .is_some_and(|definition| definition.line() != 0);
+        let position = self.exec_insert_position(
+            Some(id),
+            loaded,
+            object.unsorted,
+            is_line,
+            object.state.category,
+            &object.definition_id,
+            ignored,
+        );
+        self.insert_exec_link(position, id);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_insert_position(
+        &self,
+        id: Option<ObjectId>,
+        loaded: bool,
+        unsorted: bool,
+        is_line: bool,
+        category: i32,
+        definition_id: &str,
+        ignored: Option<&HashSet<ObjectId>>,
+    ) -> usize {
+        if loaded {
+            return self.exec_list.len();
         }
-        let category = self.objects[index].state.category;
+        if is_line || unsorted {
+            return 0;
+        }
         let sort_category = category & CATEGORY_SORT_LIMIT;
-        let definition_id = self.objects[index].definition_id.clone();
+        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
         // The scans consider live sorted links only (Status && !Unsorted,
-        // :156,:168); rust prunes removed objects from the list, and the
-        // transient Unsorted resort flag is not modeled.
+        // :156,:168). Runtime removals are pruned separately.
         let live_index = |engine: &Self, other: ObjectId| {
-            (other != id && ignored.is_none_or(|ignored| !ignored.contains(&other)))
+            (id != Some(other)
+                && ignored.is_none_or(|ignored| !ignored.contains(&other))
+                && engine
+                    .find_object_index(other)
+                    .is_some_and(|index| {
+                        let object = &engine.objects[index];
+                        !object.destroyed
+                            && object.state.status.is_active()
+                            && !object.unsorted
+                    }))
                 .then(|| engine.find_object_index(other))
                 .flatten()
                 .filter(|&other_index| {
@@ -35511,28 +36058,42 @@ impl Engine {
                     !object.destroyed && object.state.status == ObjectStatus::Normal
                 })
         };
+        let mut predecessor = None;
+        let mut found_cluster = false;
         if category & CATEGORY_STATIC_BACK == 0 {
-            let cluster_position = self.exec_list.iter().rposition(|&other| {
-                live_index(self, other).is_some_and(|other_index| {
+            for (position, &other) in master_order.iter().enumerate() {
+                let Some(other_index) = live_index(self, other) else {
+                    continue;
+                };
+                let matches = {
                     let object = &self.objects[other_index];
                     object.state.category & CATEGORY_SORT_LIMIT == sort_category
                         && object.definition_id == definition_id
-                })
-            });
-            if let Some(position) = cluster_position {
-                self.insert_exec_link(position + 1, id);
-                return;
+                };
+                if matches {
+                    found_cluster = true;
+                    break;
+                }
+                predecessor = Some(position);
             }
         }
-        let bracket_position = self.exec_list.iter().rposition(|&other| {
-            live_index(self, other).is_some_and(|other_index| {
-                self.objects[other_index].state.category & CATEGORY_SORT_LIMIT <= sort_category
-            })
-        });
-        match bracket_position {
-            Some(position) => self.insert_exec_link(position + 1, id),
-            None => self.insert_exec_link(0, id),
+        if !found_cluster {
+            predecessor = None;
+            for (position, &other) in master_order.iter().enumerate() {
+                let Some(other_index) = live_index(self, other) else {
+                    continue;
+                };
+                if self.objects[other_index].state.category & CATEGORY_SORT_LIMIT <= sort_category {
+                    break;
+                }
+                predecessor = Some(position);
+            }
         }
+        // C++ inserts at cPrev->Next, not immediately before the qualifying
+        // live link. Dead/Unsorted links skipped after cPrev therefore stay
+        // after the newcomer. `exec_list` is the reverse of this master view.
+        let master_position = predecessor.map_or(0, |position| position + 1);
+        master_order.len() - master_position
     }
 
     #[doc(hidden)]
@@ -35576,7 +36137,7 @@ impl Engine {
         let definition = self.definitions.get(&layer.definition_id)?;
         Some(LayerMovementBounds {
             position: layer.position_pixels(),
-            shape_rect: definition.shape_rect()?,
+            shape_rect: layer.current_shape_rect()?,
             border_bound: definition.border_bound(),
         })
     }
@@ -36366,42 +36927,78 @@ impl Engine {
     /// - pass 2 (:164-173): insert before the forward-first live entry
     ///   whose (Category & C4D_SortLimit) <= the entering object's; with
     ///   no such entry the object appends at the tail.
-    /// The transient `Unsorted` flag is not modeled (same note as
-    /// `insert_into_exec_list`); rust contents hold live objects only.
+    /// Unsorted objects (including ChangeDef between the swap and a later
+    /// global resort sweep) append, and sorted insertions ignore unsorted
+    /// peers in both scans.
     fn contents_insert_position(&self, container_index: usize, object_index: usize) -> usize {
+        let object = &self.objects[object_index];
+        self.contents_insert_position_for(
+            container_index,
+            object.state.category,
+            &object.definition_id,
+            object.unsorted,
+        )
+    }
+
+    fn contents_insert_position_for(
+        &self,
+        container_index: usize,
+        category: i32,
+        definition_id: &str,
+        unsorted: bool,
+    ) -> usize {
         let contents = &self.objects[container_index].state.contents;
         let is_line = self
             .definitions
-            .get(&self.objects[object_index].definition_id)
-            .map(|definition| definition.line() != 0)
-            .unwrap_or(false);
-        if is_line {
+            .get(definition_id)
+            .is_some_and(|definition| definition.line() != 0);
+        if is_line || unsorted {
             return contents.len();
         }
-        let category = self.objects[object_index].state.category;
         let sort_category = category & CATEGORY_SORT_LIMIT;
-        let definition_id = &self.objects[object_index].definition_id;
+        let mut predecessor = None;
+        let mut found_cluster = false;
         if category & CATEGORY_STATIC_BACK == 0 {
-            let cluster_position = contents.iter().position(|&other| {
-                self.find_object_index(other).is_some_and(|other_index| {
-                    let object = &self.objects[other_index];
-                    object.state.category & CATEGORY_SORT_LIMIT == sort_category
-                        && object.definition_id == *definition_id
-                })
-            });
-            if let Some(position) = cluster_position {
-                return position;
+            for (position, &other) in contents.iter().enumerate() {
+                let Some(other_index) = self.find_object_index(other) else {
+                    continue;
+                };
+                let object = &self.objects[other_index];
+                if object.destroyed
+                    || object.state.status == ObjectStatus::Deleted
+                    || object.unsorted
+                {
+                    continue;
+                }
+                if object.state.category & CATEGORY_SORT_LIMIT == sort_category
+                    && object.definition_id == definition_id
+                {
+                    found_cluster = true;
+                    break;
+                }
+                predecessor = Some(position);
             }
         }
-        contents
-            .iter()
-            .position(|&other| {
-                self.find_object_index(other).is_some_and(|other_index| {
-                    self.objects[other_index].state.category & CATEGORY_SORT_LIMIT
-                        <= sort_category
-                })
-            })
-            .unwrap_or(contents.len())
+        if !found_cluster {
+            predecessor = None;
+            for (position, &other) in contents.iter().enumerate() {
+                let Some(other_index) = self.find_object_index(other) else {
+                    continue;
+                };
+                let object = &self.objects[other_index];
+                if object.destroyed
+                    || object.state.status == ObjectStatus::Deleted
+                    || object.unsorted
+                {
+                    continue;
+                }
+                if object.state.category & CATEGORY_SORT_LIMIT <= sort_category {
+                    break;
+                }
+                predecessor = Some(position);
+            }
+        }
+        predecessor.map_or(0, |position| position + 1)
     }
 
     /// `loaded`: a compiled load rebuilds contents verbatim — C4ObjectList::
@@ -36533,6 +37130,54 @@ impl Engine {
         Ok(())
     }
 
+    /// Fold the contents-link remove/add that cannot be represented by a
+    /// final container delta when ChangeDef exits and successfully re-enters
+    /// the same parent. Motion and object fields already contain the host's
+    /// final, correctly ordered writes; this method changes only list/mass-
+    /// derived state.
+    fn reinsert_change_def_contents_link(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<(), EngineError> {
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        let sort_override = self.objects[object_index].change_def_contents_sort.take();
+        let Some(container_id) = self.objects[object_index].state.container else {
+            return Ok(());
+        };
+        // The initial silent Exit always mobilizes and clears InLiquid. A
+        // final same-container relation would otherwise collapse that state
+        // transition along with the container delta.
+        self.objects[object_index].state.mobile = true;
+        self.objects[object_index].state.in_liquid = false;
+        let Some(container_index) = self.find_object_index(container_id) else {
+            return Ok(());
+        };
+        self.objects[container_index]
+            .state
+            .contents
+            .retain(|&child| child != object_id);
+        let position = sort_override
+            .filter(|sort| sort.container == container_id)
+            .map(|sort| {
+                self.contents_insert_position_for(
+                    container_index,
+                    sort.category,
+                    &sort.definition_id,
+                    sort.unsorted,
+                )
+            })
+            .unwrap_or_else(|| self.contents_insert_position(container_index, object_index));
+        self.objects[container_index]
+            .state
+            .contents
+            .insert(position, object_id);
+        self.refresh_object_ocf(container_index);
+        self.refresh_object_ocf(object_index);
+        Ok(())
+    }
+
     /// Engine-owned `C4Object::Exit(x, y)` at the object's current integer
     /// position. The containment change and motion reset are live before
     /// Ejection and Departure, and both callbacks are fail-safe.
@@ -36566,6 +37211,9 @@ impl Engine {
             object.state.mobile = true;
             object.state.in_liquid = false;
             object.state.menu = None;
+            if object.shape_template.line == 0 {
+                object.state.shape_override = None;
+            }
             object.refresh_shape_after_state_change(
                 previous_construction,
                 previous_rect,
@@ -36600,6 +37248,266 @@ impl Engine {
         Ok(self
             .find_object_index(object_id)
             .is_some_and(|index| self.objects[index].state.container.is_none()))
+    }
+
+    /// ChangeDef's initial `Exit(0,0,0,0,0,0,false)`: the normal state and
+    /// list updates, but no Ejection/Departure callbacks.
+    fn apply_change_def_exit_target_bounds(
+        &mut self,
+        object_id: ObjectId,
+        coordinate: &mut i32,
+        low: i32,
+        high: i32,
+        low_cnat: u32,
+        high_cnat: u32,
+    ) -> Result<(), EngineError> {
+        // C4Object::TargetBounds uses two independent `if`s. Inverted
+        // bounds can therefore clamp/call at both ends; an `else if` would
+        // observably lose the second Contact callback.
+        if *coordinate < low {
+            *coordinate = low;
+            if let Some(index) = self.find_object_index(object_id) {
+                let object = &mut self.objects[index];
+                if low_cnat == CNAT_LEFT {
+                    object.fixed_velocity.x = C4Fixed::ZERO;
+                } else {
+                    object.fixed_velocity.y = C4Fixed::ZERO;
+                }
+                object.state.velocity = object.velocity_pixels();
+            }
+            if let Some(index) = self.find_object_index(object_id) {
+                self.dispatch_contact_callbacks(index, low_cnat)?;
+            }
+        }
+        if *coordinate > high {
+            *coordinate = high;
+            if let Some(index) = self.find_object_index(object_id) {
+                let object = &mut self.objects[index];
+                if high_cnat == CNAT_RIGHT {
+                    object.fixed_velocity.x = C4Fixed::ZERO;
+                } else {
+                    object.fixed_velocity.y = C4Fixed::ZERO;
+                }
+                object.state.velocity = object.velocity_pixels();
+            }
+            if let Some(index) = self.find_object_index(object_id) {
+                self.dispatch_contact_callbacks(index, high_cnat)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn change_def_exit_layer_bounds(
+        &self,
+        object_id: ObjectId,
+        horizontal: bool,
+    ) -> Option<(i32, i32)> {
+        let index = self.find_object_index(object_id)?;
+        let object = self.objects.get(index)?;
+        let definition = self.definitions.get(&object.definition_id)?;
+        let layer = self.layer_movement_bounds_for(index)?;
+        if layer.border_bound & C4D_BORDER_LAYER == 0 {
+            return None;
+        }
+        let action_name = object.state.action.name.as_str();
+        let procedure = definition
+            .action_library()
+            .procedure_for_action(action_name);
+        // C++'s numeric `Action.Act <= ActIdle` arm keeps None/Idle inside
+        // layer bounds even if a synthetic Idle map names DFA_ATTACH.
+        if !action_name.is_empty()
+            && action_name != "Idle"
+            && matches!(procedure, ActionProcedure::Attach)
+        {
+            return None;
+        }
+        let shape = object.current_shape_rect().unwrap_or_default();
+        let is_static = object.state.category & CATEGORY_STATIC_BACK != 0;
+        let (layer_origin, layer_size, shape_offset) = if horizontal {
+            (
+                layer.position.x.saturating_add(layer.shape_rect.x),
+                layer.shape_rect.width,
+                shape.x,
+            )
+        } else {
+            (
+                layer.position.y.saturating_add(layer.shape_rect.y),
+                layer.shape_rect.height,
+                shape.y,
+            )
+        };
+        let low = if is_static {
+            layer_origin
+        } else {
+            layer_origin.saturating_sub(shape_offset)
+        };
+        let high = if is_static {
+            layer_origin.saturating_add(layer_size)
+        } else {
+            layer_origin
+                .saturating_add(layer_size)
+                .saturating_add(shape_offset)
+        };
+        Some((low, high))
+    }
+
+    /// `Exit` calls BoundsCheck after unlinking containment but before it
+    /// installs the requested position/motion. Each arm re-reads live state:
+    /// a Contact callback may change Def, Shape, Layer or Action before the
+    /// next arm runs (C4Movement.cpp:128-216).
+    fn bounds_check_for_change_def_exit(
+        &mut self,
+        object_id: ObjectId,
+        target: &mut Vector2,
+    ) -> Result<(), EngineError> {
+        if let Some((low, high)) = self.change_def_exit_layer_bounds(object_id, true) {
+            self.apply_change_def_exit_target_bounds(
+                object_id,
+                &mut target.x,
+                low,
+                high,
+                CNAT_LEFT,
+                CNAT_RIGHT,
+            )?;
+        }
+
+        let side_bounds = self.find_object_index(object_id).and_then(|index| {
+            let object = self.objects.get(index)?;
+            let definition = self.definitions.get(&object.definition_id)?;
+            if definition.border_bound() & C4D_BORDER_SIDES == 0 {
+                return None;
+            }
+            let shape_x = object.current_shape_rect().map(|shape| shape.x).unwrap_or(0);
+            let width = self
+                .landscape
+                .as_ref()
+                .and_then(|landscape| i32::try_from(landscape.width()).ok())?;
+            Some((-shape_x, width.saturating_add(shape_x)))
+        });
+        if let Some((low, high)) = side_bounds {
+            self.apply_change_def_exit_target_bounds(
+                object_id,
+                &mut target.x,
+                low,
+                high,
+                CNAT_LEFT,
+                CNAT_RIGHT,
+            )?;
+        }
+
+        if let Some((low, high)) = self.change_def_exit_layer_bounds(object_id, false) {
+            self.apply_change_def_exit_target_bounds(
+                object_id,
+                &mut target.y,
+                low,
+                high,
+                CNAT_TOP,
+                CNAT_BOTTOM,
+            )?;
+        }
+
+        let top_bounds = self.find_object_index(object_id).and_then(|index| {
+            let object = self.objects.get(index)?;
+            let definition = self.definitions.get(&object.definition_id)?;
+            if definition.border_bound() & C4D_BORDER_TOP == 0 {
+                return None;
+            }
+            let shape_y = object.current_shape_rect().map(|shape| shape.y).unwrap_or(0);
+            Some((-shape_y, 1_000_000))
+        });
+        if let Some((low, high)) = top_bounds {
+            self.apply_change_def_exit_target_bounds(
+                object_id,
+                &mut target.y,
+                low,
+                high,
+                CNAT_TOP,
+                CNAT_BOTTOM,
+            )?;
+        }
+
+        let bottom_bounds = self.find_object_index(object_id).and_then(|index| {
+            let object = self.objects.get(index)?;
+            let definition = self.definitions.get(&object.definition_id)?;
+            if definition.border_bound() & C4D_BORDER_BOTTOM == 0 {
+                return None;
+            }
+            let shape_y = object.current_shape_rect().map(|shape| shape.y).unwrap_or(0);
+            let height = self
+                .landscape
+                .as_ref()
+                .map(|landscape| landscape.estimated_height())?;
+            Some((-1_000_000, height.saturating_add(shape_y)))
+        });
+        if let Some((low, high)) = bottom_bounds {
+            self.apply_change_def_exit_target_bounds(
+                object_id,
+                &mut target.y,
+                low,
+                high,
+                CNAT_TOP,
+                CNAT_BOTTOM,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn exit_object_for_change_def(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<Option<ObjectId>, EngineError> {
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(None);
+        };
+        let Some(previous) = self.objects[object_index].state.container else {
+            return Ok(None);
+        };
+        // Raw first half of Exit: remove the old contents link and update
+        // only the parent. The moving object's own cached OCF, menu, Mobile
+        // and InLiquid are intentionally stale during BoundsCheck Contact*
+        // callbacks; Exit writes them only after BoundsCheck returns.
+        if let Some(previous_index) = self.find_object_index(previous) {
+            self.objects[previous_index]
+                .state
+                .contents
+                .retain(|&child| child != object_id);
+            self.refresh_object_ocf(previous_index);
+        }
+        if let Some(object_index) = self.find_object_index(object_id) {
+            self.objects[object_index].state.container = None;
+        }
+
+        let mut target = Vector2::ZERO;
+        self.bounds_check_for_change_def_exit(object_id, &mut target)?;
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(Some(previous));
+        };
+        {
+            let object = &mut self.objects[object_index];
+            let previous_rect = object.current_shape_rect();
+            let previous_construction = object.state.construction;
+            object.set_position(target);
+            object.state.rotation = 0;
+            object.fixed_rotation = C4Fixed::ZERO;
+            object.fixed_velocity = FixedVec2::ZERO;
+            object.state.velocity = Vector2::ZERO;
+            object.rotation_velocity = C4Fixed::ZERO;
+            object.state.mobile = true;
+            object.state.in_liquid = false;
+            object.state.menu = None;
+            if object.shape_template.line == 0 {
+                object.state.shape_override = None;
+            }
+            object.refresh_shape_after_state_change(
+                previous_construction,
+                previous_rect,
+                false,
+            );
+        }
+        self.update_solid_mask(object_index);
+        self.update_sector_for_index(object_index);
+        self.refresh_object_ocf(object_index);
+        Ok(Some(previous))
     }
 
     /// The callback tail shared by every engine-owned successful Enter.
@@ -36665,6 +37573,21 @@ impl Engine {
         object_id: ObjectId,
         target_id: ObjectId,
         query_reject_collect: bool,
+    ) -> Result<ObjectEnterOutcome, EngineError> {
+        self.try_object_enter_with_reject_collect_and_calls(
+            object_id,
+            target_id,
+            query_reject_collect,
+            true,
+        )
+    }
+
+    fn try_object_enter_with_reject_collect_and_calls(
+        &mut self,
+        object_id: ObjectId,
+        target_id: ObjectId,
+        query_reject_collect: bool,
+        f_calls: bool,
     ) -> Result<ObjectEnterOutcome, EngineError> {
         if object_id == target_id {
             return Ok(ObjectEnterOutcome::Failed);
@@ -36786,7 +37709,9 @@ impl Engine {
         }
 
         self.apply_container_change(object_id, None, Some(target_id), false)?;
-        self.run_object_enter_callbacks(object_id, target_id)?;
+        if f_calls {
+            self.run_object_enter_callbacks(object_id, target_id)?;
+        }
 
         // Collection2 and Entrance may both move the entering object. C++
         // re-reads Contained after the callbacks, still requires the original
@@ -40092,6 +41017,15 @@ impl Engine {
                 pending_spawns.extend(spawns);
             }
             if !event_other_objects.is_empty() {
+                for nested in &event_other_objects {
+                    if let Some(new_definition) = nested
+                        .update
+                        .as_ref()
+                        .and_then(|update| update.change_def.as_deref())
+                    {
+                        world.preview_object_change_def(nested.object_id, new_definition);
+                    }
+                }
                 pending_other_objects.extend(event_other_objects);
             }
             world = world.with_next_object_id(next_object_id);
@@ -40587,7 +41521,21 @@ impl Engine {
             .map(|definition| definition.physical().breath)
             .unwrap_or_default();
         object.ensure_material_capacity(self.materials.len());
+        // C4Game::NewObject links the original definition/category into the
+        // main list before Construction/Initialize run. A callback ChangeDef
+        // only marks that existing link Unsorted; it must not use the final
+        // definition (or append position) until a later ResortUnsorted.
+        let initial_exec_position = self.exec_insert_position(
+            Some(id),
+            loaded,
+            false,
+            definition_line != 0,
+            initial_category,
+            &definition_id,
+            None,
+        );
         let mut container_changes = Vec::new();
+        let mut change_def_reinsert = false;
         if let Some(container_id) = container {
             object.state.container = Some(container_id);
             container_changes.push((None, Some(container_id)));
@@ -40719,7 +41667,44 @@ impl Engine {
             if destroy {
                 destroy_requested = true;
             }
-            let outcome = object.apply_delta(&delta, &action_library);
+            let change_def = delta.change_def.clone();
+            let callback_change_def_reinsert = delta.change_def_reinsert;
+            let callback_action_library = if let Some(new_def) = change_def.as_deref() {
+                let definition = self
+                    .definitions
+                    .get(new_def)
+                    .ok_or_else(|| EngineError::UnknownDefinition(new_def.to_string()))?;
+                let owner_color = self.players
+                    .get(&object.state.owner)
+                    .and_then(Player::color)
+                    .map(|color| {
+                        u32::from(color.r) << 16
+                            | u32::from(color.g) << 8
+                            | u32::from(color.b)
+                    });
+                Self::apply_change_object_def_to_object(
+                    &mut object,
+                    new_def,
+                    definition,
+                    self.materials.len(),
+                    owner_color,
+                );
+                definition.action_library().clone()
+            } else {
+                self.definitions
+                    .get(&object.definition_id)
+                    .map(|definition| definition.action_library().clone())
+                    .unwrap_or_else(|| action_library.clone())
+            };
+            if change_def.is_some() {
+                change_def_reinsert = callback_change_def_reinsert;
+            }
+            let outcome = object.apply_delta(&delta, &callback_action_library);
+            if change_def.is_some() {
+                if let Some(current_definition) = self.definitions.get(&object.definition_id) {
+                    object.state.ocf = current_definition.compute_ocf(&object.state);
+                }
+            }
             // The object is not in self.objects yet, so creation-scope
             // SetAction cannot run its nested callbacks through the world
             // lookup. Keep this deferred stand-in even when the staged
@@ -40762,11 +41747,12 @@ impl Engine {
             }
         }
 
+        let initialize_definition_id = object.definition_id.clone();
         if !loaded
             && !initialized
             && self
                 .definitions
-                .get(&definition_id)
+                .get(&initialize_definition_id)
                 .map(|definition| definition.has_initialize)
                 .unwrap_or(false)
         {
@@ -40775,7 +41761,7 @@ impl Engine {
             // draw (C4Object.cpp:4154-4182 passes none).
             let c4_convention = self
                 .definitions
-                .get(&definition_id)
+                .get(&initialize_definition_id)
                 .map(|definition| definition.c4_callback_args)
                 .unwrap_or(false);
             let random = if c4_convention {
@@ -40815,7 +41801,7 @@ impl Engine {
             ) = {
                 let definition = self
                     .definitions
-                    .get(&definition_id)
+                    .get(&initialize_definition_id)
                     .expect("definition must exist");
                 definition.call_initialize(
                     &object.state,
@@ -40869,7 +41855,44 @@ impl Engine {
             if destroy {
                 destroy_requested = true;
             }
-            let outcome = object.apply_delta(&delta, &action_library);
+            let change_def = delta.change_def.clone();
+            let callback_change_def_reinsert = delta.change_def_reinsert;
+            let callback_action_library = if let Some(new_def) = change_def.as_deref() {
+                let definition = self
+                    .definitions
+                    .get(new_def)
+                    .ok_or_else(|| EngineError::UnknownDefinition(new_def.to_string()))?;
+                let owner_color = self.players
+                    .get(&object.state.owner)
+                    .and_then(Player::color)
+                    .map(|color| {
+                        u32::from(color.r) << 16
+                            | u32::from(color.g) << 8
+                            | u32::from(color.b)
+                    });
+                Self::apply_change_object_def_to_object(
+                    &mut object,
+                    new_def,
+                    definition,
+                    self.materials.len(),
+                    owner_color,
+                );
+                definition.action_library().clone()
+            } else {
+                self.definitions
+                    .get(&object.definition_id)
+                    .map(|definition| definition.action_library().clone())
+                    .unwrap_or_else(|| action_library.clone())
+            };
+            if change_def.is_some() {
+                change_def_reinsert = callback_change_def_reinsert;
+            }
+            let outcome = object.apply_delta(&delta, &callback_action_library);
+            if change_def.is_some() {
+                if let Some(current_definition) = self.definitions.get(&object.definition_id) {
+                    object.state.ocf = current_definition.compute_ocf(&object.state);
+                }
+            }
             // See the Construction fold above: this pre-insertion scope still
             // owes the Start/Abort pair despite callbacks_dispatched.
             if let Some(change) = outcome.action_change {
@@ -40911,9 +41934,10 @@ impl Engine {
         }
 
         if !effect_events.is_empty() {
+            let effect_definition_id = object.definition_id.clone();
             let definition = self
                 .definitions
-                .get(&definition_id)
+                .get(&effect_definition_id)
                 .expect("definition must exist");
             let definitions_ref = &self.definitions;
             let global_view = self.global_effects.clone();
@@ -40933,6 +41957,7 @@ impl Engine {
                 effect_spawns,
                 effect_other_objects,
                 _effect_solid_mask_changed,
+                effect_change_def_reinsert,
                 effect_next_object_id,
                 triggered_game_over,
                 effect_script_go,
@@ -40956,6 +41981,9 @@ impl Engine {
             )?;
             self.rng = new_rng;
             self.audio_registry = audio_state;
+            if let Some(marker) = effect_change_def_reinsert {
+                change_def_reinsert = marker;
+            }
             self.sync_next_object_id(effect_next_object_id);
             additional_spawns.extend(effect_spawns);
             pending_nested_outcomes.extend(
@@ -41008,7 +42036,7 @@ impl Engine {
         let new_id = object.id;
         self.objects.push(object);
         self.note_objects_changed();
-        self.insert_into_exec_list(new_id, loaded);
+        self.insert_exec_link(initial_exec_position.min(self.exec_list.len()), new_id);
         if self.find_object_index(new_id).is_some_and(|index| {
             self.objects[index].state.status == ObjectStatus::Inactive
         }) {
@@ -41047,6 +42075,9 @@ impl Engine {
         self.update_solid_mask(index);
         for (previous, new) in container_changes {
             self.apply_container_change(id, previous, new, loaded)?;
+        }
+        if change_def_reinsert {
+            self.reinsert_change_def_contents_link(id)?;
         }
         if loaded {
             // Loaded Contained placement is denumeration, not Enter — the
@@ -41508,6 +42539,8 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     name: String::new(),
                     portrait_names: Vec::new(),
                     category: *category,
+                    border_bound: 0,
+                    contact_function_calls: false,
                     blit_mode: 0,
                     ocf_base: OCF_NORMAL,
                     crew_member: false,
@@ -41867,12 +42900,22 @@ fn resolve_effect_dispatch_definition<'a>(
     effect: &EffectState,
     world: &HostWorldContext,
     definitions: &'a HashMap<DefinitionId, Definition>,
+    live_host: Option<(ObjectId, &str)>,
     fallback: &'a Definition,
 ) -> &'a Definition {
     effect
         .command_target
-        .and_then(|target| world.get(ObjectId::new(target as u64)))
-        .map(|target| target.definition_id().to_string())
+        .and_then(|target| {
+            let target_id = ObjectId::new(target as u64);
+            live_host
+                .filter(|(host_id, _)| *host_id == target_id)
+                .map(|(_, definition_id)| definition_id.to_string())
+                .or_else(|| {
+                    world
+                        .get(target_id)
+                        .map(|target| target.definition_id().to_string())
+                })
+        })
         .or_else(|| effect.command_id.clone())
         .and_then(|def_id| definitions.get(&def_id))
         .unwrap_or(fallback)

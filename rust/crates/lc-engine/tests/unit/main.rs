@@ -2212,6 +2212,312 @@ func Entrance(pContainer)
     }
 
     #[test]
+    fn contained_burn_turn_to_runs_the_change_def_lifecycle_on_both_fire_paths(
+    ) -> Result<(), EngineError> {
+        // FnFxFireStart calls ChangeDef before ejecting contents
+        // (C4Effect.cpp:579-594). A contained object therefore silently
+        // exits at (0,0), resets its old action, swaps definitions, asks the
+        // NEW RejectEntrance and, when accepted, silently re-enters the saved
+        // parent at the Unsorted stContents tail (C4Object.cpp:1207-1254).
+        for via_script in [false, true] {
+            for reject_reentry in [false, true] {
+                let path = if via_script { "compat" } else { "engine" };
+                let reentry = if reject_reentry { "veto" } else { "accept" };
+                let label = format!("{path}/{reentry}");
+                let mut engine = Engine::with_seed(98);
+                engine.register_player(PlayerConfig::new(5, "Parent owner"))?;
+                engine.register_player(PlayerConfig::new(7, "Incinerator"))?;
+                engine.register_definition(Definition::from_script(
+                    "ACTR",
+                    "Actor",
+                    "#strict\nfunc Ignite(pTarget) { return Incinerate(pTarget); }\n",
+                )?)?;
+
+                let mut parent_definition = Definition::from_script(
+                    "PRNT",
+                    "Parent",
+                    r#"#strict
+local ejection_count, collection_count;
+func Ejection(pObject) { ejection_count += 1; return(1); }
+func Collection2(pObject) { collection_count += 1; return(1); }
+"#,
+                )?;
+                parent_definition.set_c4_callback_convention(true);
+                engine.register_definition(parent_definition)?;
+
+                let mut burner_definition = Definition::from_script(
+                    "BURN",
+                    "Burner",
+                    r#"#strict
+local abort_count, departure_count;
+func OldAbort() { abort_count += 1; return(1); }
+func Departure(pContainer) { departure_count += 1; return(1); }
+"#,
+                )?;
+                burner_definition.set_c4_callback_convention(true);
+                burner_definition.set_category(CATEGORY_OBJECT);
+                burner_definition.set_burn_turn_to(Some("ASH1".to_string()));
+                burner_definition.configure_actions(
+                    Some("Idle".to_string()),
+                    HashMap::from([
+                        ("Idle".to_string(), ActionSpec::default()),
+                        (
+                            "Work".to_string(),
+                            ActionSpec::default().with_abort_call("OldAbort"),
+                        ),
+                    ]),
+                );
+                engine.register_definition(burner_definition)?;
+
+                let reject_result = i32::from(reject_reentry);
+                let mut ash_definition = Definition::from_script(
+                    "ASH1",
+                    "Ash",
+                    &format!(
+                        r#"#strict
+local reject_count, entrance_count, ejection_count;
+func RejectEntrance(pContainer) {{ reject_count += 1; return({reject_result}); }}
+func Entrance(pContainer) {{ entrance_count += 1; return(1); }}
+func Ejection(pObject) {{ ejection_count += 1; return(1); }}
+"#
+                    ),
+                )?;
+                ash_definition.set_c4_callback_convention(true);
+                ash_definition.set_category(CATEGORY_STRUCTURE);
+                ash_definition.set_rotateable(1);
+                engine.register_definition(ash_definition)?;
+
+                let mut peer_definition = simple_definition("PEER");
+                peer_definition.set_category(CATEGORY_VEHICLE);
+                engine.register_definition(peer_definition)?;
+                let mut content_definition = Definition::from_script(
+                    "ITEM",
+                    "Item",
+                    r#"#strict
+local departure_count, entrance_count;
+func Departure(pContainer) { departure_count += 1; return(1); }
+func Entrance(pContainer) { entrance_count += 1; return(1); }
+"#,
+                )?;
+                content_definition.set_c4_callback_convention(true);
+                content_definition.set_category(CATEGORY_VEHICLE);
+                engine.register_definition(content_definition)?;
+
+                let actor = engine.spawn_object(
+                    SpawnConfig::new("ACTR")
+                        .with_category(CATEGORY_OBJECT)
+                        .with_controller(7),
+                )?;
+                let parent_position = Vector2::new(80, 40);
+                let parent_velocity = FixedVec2::new(
+                    C4Fixed::from_raw(itofix(3).val() + 321),
+                    C4Fixed::from_raw(itofix(-4).val() - 654),
+                );
+                let parent = engine.spawn_object(
+                    SpawnConfig::new("PRNT")
+                        .with_position(parent_position)
+                        .with_fixed_position(FixedVec2::new(
+                            C4Fixed::from_raw(itofix(80).val() + 123),
+                            C4Fixed::from_raw(itofix(40).val() + 456),
+                        ))
+                        .with_fixed_velocity(parent_velocity)
+                        .with_rotation_velocity(C4Fixed::from_raw(777))
+                        .with_controller(5)
+                        .with_local_vars(HashMap::from([
+                            ("ejection_count".to_string(), Value::Int(0)),
+                            ("collection_count".to_string(), Value::Int(0)),
+                        ])),
+                )?;
+                let peer_a = engine.spawn_object(
+                    SpawnConfig::new("PEER")
+                        .with_category(CATEGORY_VEHICLE)
+                        .with_container(parent),
+                )?;
+                let peer_b = engine.spawn_object(
+                    SpawnConfig::new("PEER")
+                        .with_category(CATEGORY_VEHICLE)
+                        .with_container(parent),
+                )?;
+                let burner = engine.spawn_object(
+                    SpawnConfig::new("BURN")
+                        .with_category(CATEGORY_VEHICLE)
+                        .with_container(parent)
+                        .with_action(ActionState::new("Work"))
+                        .with_local_vars(HashMap::from([
+                            ("abort_count".to_string(), Value::Int(0)),
+                            ("departure_count".to_string(), Value::Int(0)),
+                            ("reject_count".to_string(), Value::Int(0)),
+                            ("entrance_count".to_string(), Value::Int(0)),
+                            ("ejection_count".to_string(), Value::Int(0)),
+                        ])),
+                )?;
+                let content = engine.spawn_object(
+                    SpawnConfig::new("ITEM")
+                        .with_category(CATEGORY_VEHICLE)
+                        .with_container(burner)
+                        .with_controller(2)
+                        .with_local_vars(HashMap::from([
+                            ("departure_count".to_string(), Value::Int(0)),
+                            ("entrance_count".to_string(), Value::Int(0)),
+                        ])),
+                )?;
+
+                let parent_idx = engine.find_object_index(parent).expect("parent exists");
+                assert_eq!(
+                    engine.objects[parent_idx].state.contents,
+                    vec![burner, peer_b, peer_a],
+                    "{label}: fixture starts with the burner at the sorted front"
+                );
+                let burner_idx = engine.find_object_index(burner).expect("burner exists");
+                {
+                    let burner = &mut engine.objects[burner_idx];
+                    burner.fixed_velocity = FixedVec2::new(itofix(8), itofix(9));
+                    burner.state.velocity = Vector2::new(8, 9);
+                    burner.state.rotation = 27;
+                    burner.fixed_rotation = itofix(27);
+                    burner.rotation_velocity = itofix(6);
+                    burner.state.mobile = false;
+                    burner.state.in_liquid = true;
+                }
+
+                if via_script {
+                    let actor_idx = engine.find_object_index(actor).expect("actor exists");
+                    assert_eq!(
+                        engine.call_object_function(
+                            actor_idx,
+                            "Ignite",
+                            vec![object_reference_value(burner)],
+                        )?,
+                        Value::Bool(true),
+                        "{label}: ignition succeeds"
+                    );
+                } else {
+                    let burner_idx = engine.find_object_index(burner).expect("burner exists");
+                    assert!(
+                        engine.incinerate_object(burner_idx, 7, false, None)?,
+                        "{label}: ignition succeeds"
+                    );
+                }
+
+                let burner_idx = engine.find_object_index(burner).expect("burner remains");
+                let burner_state = &engine.objects[burner_idx];
+                assert_eq!(burner_state.definition_id, "ASH1", "{label}: BurnTurnTo");
+                assert_eq!(
+                    burner_state.state.category, CATEGORY_VEHICLE,
+                    "{label}: ChangeDef preserves the object's category"
+                );
+                assert!(burner_state.state.on_fire, "{label}: fire starts");
+                assert!(
+                    burner_state.state.contents.is_empty(),
+                    "{label}: content leaves"
+                );
+                for (name, expected, message) in [
+                    ("abort_count", 1, "old-action AbortCall runs exactly once"),
+                    ("departure_count", 0, "silent Exit suppresses Departure"),
+                    ("reject_count", 1, "new RejectEntrance runs exactly once"),
+                    ("entrance_count", 0, "silent Enter suppresses Entrance"),
+                    (
+                        "ejection_count",
+                        1,
+                        "only the later content Exit calls Ejection",
+                    ),
+                ] {
+                    assert_eq!(
+                        burner_state.state.local_vars.get(name),
+                        Some(&Value::Int(expected)),
+                        "{label}: {message}"
+                    );
+                }
+                assert_eq!(
+                    burner_state.state.rotation, 0,
+                    "{label}: silent Exit clears r"
+                );
+                assert_eq!(burner_state.fixed_rotation, C4Fixed::ZERO);
+                assert_eq!(
+                    burner_state.rotation_velocity,
+                    C4Fixed::ZERO,
+                    "{label}: CopyMotion does not replace the cleared rdir"
+                );
+                assert!(burner_state.state.mobile, "{label}: silent Exit mobilizes");
+                assert!(
+                    !burner_state.state.in_liquid,
+                    "{label}: silent Exit clears InLiquid"
+                );
+
+                let parent_idx = engine.find_object_index(parent).expect("parent remains");
+                let parent_state = &engine.objects[parent_idx].state;
+                assert_eq!(
+                    parent_state.local_vars.get("ejection_count"),
+                    Some(&Value::Int(0)),
+                    "{label}: silent ChangeDef exit does not call parent Ejection"
+                );
+                assert_eq!(
+                    parent_state.local_vars.get("collection_count"),
+                    Some(&Value::Int(i32::from(!reject_reentry))),
+                    "{label}: only an accepted content transfer calls Collection2"
+                );
+
+                let content_idx = engine.find_object_index(content).expect("content remains");
+                let content_object = &engine.objects[content_idx];
+                let content_state = &content_object.state;
+                assert_eq!(
+                    content_state.local_vars.get("departure_count"),
+                    Some(&Value::Int(1)),
+                    "{label}: fire ejection runs Departure once"
+                );
+                assert_eq!(
+                    content_state.local_vars.get("entrance_count"),
+                    Some(&Value::Int(i32::from(!reject_reentry))),
+                    "{label}: content Entrance follows only an accepted parent transfer"
+                );
+
+                if reject_reentry {
+                    assert_eq!(
+                        burner_state.state.container, None,
+                        "{label}: veto leaves outside"
+                    );
+                    assert_eq!(burner_state.state.position, Vector2::ZERO);
+                    assert_eq!(burner_state.fixed_position, FixedVec2::ZERO);
+                    assert_eq!(burner_state.fixed_velocity, FixedVec2::ZERO);
+                    assert_eq!(parent_state.contents, vec![peer_b, peer_a]);
+                    assert_eq!(
+                        content_state.container, None,
+                        "{label}: content exits to world"
+                    );
+                    assert_eq!(content_state.position, parent_position);
+                    assert_eq!(content_object.fixed_velocity, FixedVec2::ZERO);
+                    assert_eq!(
+                        content_state.controller, 7,
+                        "{label}: fire cause is retained"
+                    );
+                } else {
+                    assert_eq!(burner_state.state.container, Some(parent));
+                    assert_eq!(burner_state.state.position, parent_position);
+                    assert_eq!(
+                        burner_state.fixed_position,
+                        FixedVec2::from_ints(parent_position.x, parent_position.y),
+                        "{label}: CopyMotion snaps fix_x/fix_y to integer parent position"
+                    );
+                    assert_eq!(burner_state.fixed_velocity, parent_velocity);
+                    assert_eq!(
+                        parent_state.contents,
+                        vec![content, peer_b, peer_a, burner],
+                        "{label}: content sorts first and Unsorted burner remains at tail"
+                    );
+                    assert_eq!(content_state.container, Some(parent));
+                    assert_eq!(content_state.position, parent_position);
+                    assert_eq!(content_object.fixed_velocity, parent_velocity);
+                    assert_eq!(
+                        content_state.controller, 5,
+                        "{label}: parent adopts content"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn incinerate_object_matches_cpp_start_semantics() -> Result<(), EngineError> {
         // C4Object::Incinerate (C4Object.cpp:1230-1241) + fxFireStart core
         // (C4Effect.cpp:560-641): already burning → false; dead livings don't
@@ -27299,6 +27605,1124 @@ func Switch() {
     }
 
     #[test]
+    fn contained_change_def_silently_reenters_at_the_unsorted_contents_tail_like_cpp(
+    ) -> Result<(), EngineError> {
+        // C4Object::ChangeDef first performs Exit(..., false), marks the
+        // object Unsorted, and then Enter(old_container, false)
+        // (C4Object.cpp:1207-1254). The second false suppresses the normal
+        // exit/entry callbacks, but Enter still queries the NEW definition's
+        // RejectEntrance. Because Unsorted is already set, stContents Add
+        // appends the object instead of category/id sorting it.
+        let container_script = r#"#strict
+local ejection_count, departure_count, collection_count, entrance_count;
+protected func Ejection(pObject) { ejection_count += 1; return(1); }
+protected func Collection2(pObject) { collection_count += 1; return(1); }
+public func NoteDeparture() { departure_count += 1; return(1); }
+public func NoteEntrance() { entrance_count += 1; return(1); }
+"#;
+        let old_script = r#"#strict
+public func Swap() { return(ChangeDef(NEWD)); }
+protected func Departure(pContainer) { pContainer->NoteDeparture(); return(1); }
+"#;
+        let new_script = r#"#strict
+local reject_count;
+protected func RejectEntrance(pContainer) { reject_count += 1; return(0); }
+protected func Entrance(pContainer) { pContainer->NoteEntrance(); return(1); }
+"#;
+
+        let mut container = Definition::from_script("CONT", "Container", container_script)?;
+        container.set_c4_callback_convention(true);
+        let mut old = Definition::from_script("OLDD", "Old", old_script)?;
+        old.set_category(CATEGORY_OBJECT);
+        old.set_c4_callback_convention(true);
+        let mut new = Definition::from_script("NEWD", "New", new_script)?;
+        new.set_category(CATEGORY_STRUCTURE);
+        new.set_c4_callback_convention(true);
+        let mut peer = simple_definition("PEER");
+        peer.set_category(CATEGORY_VEHICLE);
+
+        let mut engine = Engine::with_seed(3);
+        engine.register_definition(container)?;
+        engine.register_definition(old)?;
+        engine.register_definition(new)?;
+        engine.register_definition(peer)?;
+
+        let container_fix = FixedVec2::new(
+            C4Fixed::from_raw(itofix(37).val() + 123),
+            C4Fixed::from_raw(itofix(49).val() + 456),
+        );
+        let container_velocity = FixedVec2::new(itofix(3), itofix(-4));
+        let container_rdir = C4Fixed::from_raw(777);
+        let container = engine.spawn_object(
+            SpawnConfig::new("CONT")
+                .with_category(CATEGORY_STRUCTURE)
+                .with_position(Vector2::new(37, 49))
+                .with_fixed_position(container_fix)
+                .with_fixed_velocity(container_velocity)
+                .with_rotation_velocity(container_rdir)
+                .with_mobile(true)
+                .with_local_vars(HashMap::from([
+                    ("ejection_count".to_string(), Value::Int(0)),
+                    ("departure_count".to_string(), Value::Int(0)),
+                    ("collection_count".to_string(), Value::Int(0)),
+                    ("entrance_count".to_string(), Value::Int(0)),
+                ])),
+        )?;
+        let peer_a = engine.spawn_object(
+            SpawnConfig::new("PEER")
+                .with_category(CATEGORY_VEHICLE)
+                .with_container(container),
+        )?;
+        let peer_b = engine.spawn_object(
+            SpawnConfig::new("PEER")
+                .with_category(CATEGORY_VEHICLE)
+                .with_container(container),
+        )?;
+        let changed = engine.spawn_object(
+            SpawnConfig::new("OLDD")
+                .with_category(CATEGORY_VEHICLE)
+                .with_container(container),
+        )?;
+
+        let container_idx = engine
+            .find_object_index(container)
+            .expect("container exists");
+        assert_eq!(
+            engine.objects[container_idx].state.contents,
+            vec![changed, peer_b, peer_a],
+            "the fixture starts with the changed object at the sorted front"
+        );
+
+        let changed_idx = engine.find_object_index(changed).expect("object exists");
+        engine.objects[changed_idx].fixed_velocity = FixedVec2::new(itofix(8), itofix(9));
+        engine.objects[changed_idx].rotation_velocity = itofix(6);
+        engine.objects[changed_idx].state.mobile = false;
+        engine.objects[changed_idx].state.in_liquid = true;
+        assert_eq!(
+            engine.call_object_function(changed_idx, "Swap", Vec::new())?,
+            Value::Bool(true)
+        );
+
+        let changed_idx = engine.find_object_index(changed).expect("object remains");
+        let changed_object = &engine.objects[changed_idx];
+        assert_eq!(changed_object.definition_id, "NEWD");
+        assert_eq!(
+            changed_object.state.category, CATEGORY_VEHICLE,
+            "ChangeDef preserves the live C4Object::Category"
+        );
+        assert_eq!(changed_object.state.container, Some(container));
+        assert_eq!(changed_object.state.position, Vector2::new(37, 49));
+        assert_eq!(
+            changed_object.fixed_position,
+            FixedVec2::new(itofix(37), itofix(49)),
+            "Enter CopyMotion snaps FixX/FixY to the container's integer position"
+        );
+        assert_eq!(changed_object.fixed_velocity, container_velocity);
+        assert_eq!(
+            changed_object.rotation_velocity,
+            C4Fixed::ZERO,
+            "CopyMotion copies xdir/ydir only; the silent Exit's zero rdir survives"
+        );
+        assert!(
+            changed_object.state.mobile,
+            "the silent Exit still mobilizes"
+        );
+        assert!(
+            !changed_object.state.in_liquid,
+            "the silent Exit clears InLiquid"
+        );
+        assert_eq!(
+            changed_object.state.local_vars.get("reject_count"),
+            Some(&Value::Int(1)),
+            "the NEW definition's RejectEntrance runs synchronously"
+        );
+
+        let container_idx = engine
+            .find_object_index(container)
+            .expect("container remains");
+        let container_state = &engine.objects[container_idx].state;
+        assert_eq!(
+            container_state.contents,
+            vec![peer_b, peer_a, changed],
+            "Unsorted bypasses stContents sorting and appends at the forward tail"
+        );
+        for callback in [
+            "ejection_count",
+            "departure_count",
+            "collection_count",
+            "entrance_count",
+        ] {
+            assert_eq!(
+                container_state.local_vars.get(callback),
+                Some(&Value::Int(0)),
+                "ChangeDef's silent exit/re-entry suppresses {callback}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn contained_change_def_reject_entrance_leaves_the_object_at_the_silent_exit_state(
+    ) -> Result<(), EngineError> {
+        let container_script = r#"#strict
+local ejection_count, departure_count, collection_count, entrance_count;
+protected func Ejection(pObject) { ejection_count += 1; return(1); }
+protected func Collection2(pObject) { collection_count += 1; return(1); }
+public func NoteDeparture() { departure_count += 1; return(1); }
+public func NoteEntrance() { entrance_count += 1; return(1); }
+"#;
+        let old_script = r#"#strict
+public func Swap() { return(ChangeDef(NEWD)); }
+protected func Departure(pContainer) { pContainer->NoteDeparture(); return(1); }
+"#;
+        let new_script = r#"#strict
+local reject_count;
+protected func RejectEntrance(pContainer) { reject_count += 1; return(1); }
+protected func Entrance(pContainer) { pContainer->NoteEntrance(); return(1); }
+"#;
+
+        let mut container = Definition::from_script("CONT", "Container", container_script)?;
+        container.set_c4_callback_convention(true);
+        let mut old = Definition::from_script("OLDD", "Old", old_script)?;
+        old.set_c4_callback_convention(true);
+        let mut new = Definition::from_script("NEWD", "New", new_script)?;
+        new.set_rotateable(1);
+        new.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(4);
+        engine.register_definition(container)?;
+        engine.register_definition(old)?;
+        engine.register_definition(new)?;
+        let container = engine.spawn_object(
+            SpawnConfig::new("CONT")
+                .with_position(Vector2::new(50, 60))
+                .with_fixed_velocity(FixedVec2::new(itofix(2), itofix(-3)))
+                .with_rotation_velocity(itofix(4))
+                .with_local_vars(HashMap::from([
+                    ("ejection_count".to_string(), Value::Int(0)),
+                    ("departure_count".to_string(), Value::Int(0)),
+                    ("collection_count".to_string(), Value::Int(0)),
+                    ("entrance_count".to_string(), Value::Int(0)),
+                ])),
+        )?;
+        let changed = engine.spawn_object(
+            SpawnConfig::new("OLDD")
+                .with_category(CATEGORY_OBJECT)
+                .with_container(container),
+        )?;
+        let changed_idx = engine.find_object_index(changed).expect("object exists");
+        engine.objects[changed_idx].state.position = Vector2::new(91, 92);
+        engine.objects[changed_idx].fixed_position = FixedVec2::new(itofix(91), itofix(92));
+        engine.objects[changed_idx].fixed_velocity = FixedVec2::new(itofix(8), itofix(-9));
+        engine.objects[changed_idx].state.rotation = 27;
+        engine.objects[changed_idx].fixed_rotation = itofix(27);
+        engine.objects[changed_idx].rotation_velocity = itofix(5);
+        engine.objects[changed_idx].state.mobile = false;
+        engine.objects[changed_idx].state.in_liquid = true;
+
+        assert_eq!(
+            engine.call_object_function(changed_idx, "Swap", Vec::new())?,
+            Value::Bool(true),
+            "ChangeDef succeeds even when its attempted re-entry is vetoed"
+        );
+
+        let changed_idx = engine.find_object_index(changed).expect("object remains");
+        let changed_object = &engine.objects[changed_idx];
+        assert_eq!(changed_object.definition_id, "NEWD");
+        assert_eq!(changed_object.state.container, None);
+        assert_eq!(changed_object.state.position, Vector2::ZERO);
+        assert_eq!(changed_object.fixed_position, FixedVec2::ZERO);
+        assert_eq!(changed_object.fixed_velocity, FixedVec2::ZERO);
+        assert_eq!(changed_object.state.rotation, 0);
+        assert_eq!(changed_object.fixed_rotation, C4Fixed::ZERO);
+        assert_eq!(changed_object.rotation_velocity, C4Fixed::ZERO);
+        assert!(changed_object.state.mobile);
+        assert!(!changed_object.state.in_liquid);
+        assert_eq!(
+            changed_object.state.local_vars.get("reject_count"),
+            Some(&Value::Int(1)),
+            "the veto came from the NEW definition"
+        );
+
+        let container_idx = engine
+            .find_object_index(container)
+            .expect("container remains");
+        let container_state = &engine.objects[container_idx].state;
+        assert!(container_state.contents.is_empty());
+        for callback in [
+            "ejection_count",
+            "departure_count",
+            "collection_count",
+            "entrance_count",
+        ] {
+            assert_eq!(
+                container_state.local_vars.get(callback),
+                Some(&Value::Int(0)),
+                "a vetoed ChangeDef transfer still suppresses {callback}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn contained_change_def_silent_exit_runs_old_bounds_contacts_before_action_and_swap(
+    ) -> Result<(), EngineError> {
+        // ChangeDef's Exit(0,0,...,false) still calls BoundsCheck. With the
+        // OLD definition's side/top BorderBound and negative shape origin,
+        // it clamps the target to (4,3). TargetBounds invokes ContactLeft and
+        // ContactTop even though fCalls=false: containment is already cleared,
+        // position is still the pre-exit value, and each velocity component is
+        // zeroed immediately before its corresponding callback. Only after
+        // both contacts does Exit assign the clamped position; then the old
+        // action AbortCall and new-definition RejectEntrance run.
+        const SHARED_LOCALS: &str = r#"
+local order;
+local left_x, left_y, left_xdir, left_ydir, left_contained;
+local top_x, top_y, top_xdir, top_ydir, top_contained;
+local abort_x, abort_y, abort_contained;
+local reject_x, reject_y, reject_contained;
+local departure_calls, entrance_calls;
+"#;
+        let old_script = format!(
+            r#"#strict
+{SHARED_LOCALS}
+protected func ContactLeft()
+{{
+    order = order * 10 + 1;
+    left_x = GetX(); left_y = GetY();
+    left_xdir = GetXDir(); left_ydir = GetYDir();
+    left_contained = !!Contained();
+    return(0);
+}}
+protected func ContactTop()
+{{
+    order = order * 10 + 2;
+    top_x = GetX(); top_y = GetY();
+    top_xdir = GetXDir(); top_ydir = GetYDir();
+    top_contained = !!Contained();
+    return(0);
+}}
+protected func OldAbort(int old_phase)
+{{
+    order = order * 10 + 3;
+    abort_x = GetX(); abort_y = GetY(); abort_contained = !!Contained();
+    return(1);
+}}
+protected func Departure(pContainer) {{ departure_calls += 1; return(1); }}
+public func Swap() {{ return(ChangeDef(NEWD)); }}
+"#
+        );
+        let new_script = format!(
+            r#"#strict
+{SHARED_LOCALS}
+protected func RejectEntrance(pContainer)
+{{
+    order = order * 10 + 4;
+    reject_x = GetX(); reject_y = GetY(); reject_contained = !!Contained();
+    return(1);
+}}
+protected func Entrance(pContainer) {{ entrance_calls += 1; return(1); }}
+"#
+        );
+        let mut old = Definition::from_script("OLDD", "Old", &old_script)?;
+        old.set_c4_callback_convention(true);
+        old.set_shape_rect(Some(DefinitionRect::new(-4, -3, 8, 6)));
+        old.set_border_bound(C4D_BORDER_SIDES | C4D_BORDER_TOP);
+        old.set_contact_function_calls(true);
+        old.configure_actions(
+            None,
+            HashMap::from([(
+                "Work".to_string(),
+                ActionSpec::default().with_abort_call("OldAbort"),
+            )]),
+        );
+        let mut new = Definition::from_script("NEWD", "New", &new_script)?;
+        new.set_c4_callback_convention(true);
+        let mut container = Definition::from_script(
+            "CONT",
+            "Container",
+            "#strict\nlocal ejection_calls; protected func Ejection(pObject) { ejection_calls += 1; return(1); }\n",
+        )?;
+        container.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(44);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.register_definition(container)?;
+        engine.register_definition(old)?;
+        engine.register_definition(new)?;
+        let container = engine.spawn_object(
+            SpawnConfig::new("CONT")
+                .with_position(Vector2::new(30, 40))
+                .with_local_vars(HashMap::from([(
+                    "ejection_calls".to_string(),
+                    Value::Int(0),
+                )])),
+        )?;
+        let changed = engine.spawn_object(
+            SpawnConfig::new("OLDD")
+                .with_container(container)
+                .with_action(ActionState::new("Work"))
+                .with_local_vars(HashMap::from([
+                    ("departure_calls".to_string(), Value::Int(0)),
+                    ("entrance_calls".to_string(), Value::Int(0)),
+                ])),
+        )?;
+        let changed_index = engine.find_object_index(changed).expect("object exists");
+        engine.objects[changed_index].set_fixed_velocity(FixedVec2::new(itofix(8), itofix(9)));
+
+        assert_eq!(
+            engine.call_object_function(changed_index, "Swap", Vec::new())?,
+            Value::Bool(true)
+        );
+
+        let changed_index = engine.find_object_index(changed).expect("object remains");
+        let changed_object = &engine.objects[changed_index];
+        assert_eq!(changed_object.definition_id, "NEWD");
+        assert_eq!(changed_object.state.container, None);
+        assert_eq!(changed_object.state.position, Vector2::new(4, 3));
+        assert_eq!(
+            changed_object.fixed_position,
+            FixedVec2::new(itofix(4), itofix(3))
+        );
+        assert_eq!(changed_object.fixed_velocity, FixedVec2::ZERO);
+        let locals = &changed_object.state.local_vars;
+        for (name, expected) in [
+            ("order", 1234),
+            ("left_x", 30),
+            ("left_y", 40),
+            ("left_xdir", 0),
+            ("left_ydir", 90),
+            ("top_x", 30),
+            ("top_y", 40),
+            ("top_xdir", 0),
+            ("top_ydir", 0),
+            ("abort_x", 4),
+            ("abort_y", 3),
+            ("reject_x", 4),
+            ("reject_y", 3),
+            ("departure_calls", 0),
+            ("entrance_calls", 0),
+        ] {
+            assert_eq!(locals.get(name), Some(&Value::Int(expected)), "{name}");
+        }
+        for name in [
+            "left_contained",
+            "top_contained",
+            "abort_contained",
+            "reject_contained",
+        ] {
+            assert_eq!(locals.get(name), Some(&Value::Bool(false)), "{name}");
+        }
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container remains");
+        assert!(engine.objects[container_index].state.contents.is_empty());
+        assert_eq!(
+            engine.objects[container_index]
+                .state
+                .local_vars
+                .get("ejection_calls"),
+            Some(&Value::Int(0)),
+            "fCalls=false suppresses Ejection while BoundsCheck contacts still run"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn contained_burn_turn_to_runs_old_bounds_contacts_before_definition_swap(
+    ) -> Result<(), EngineError> {
+        // Native FnFxFireStart reaches the same C4Object::ChangeDef method as
+        // the script host. Its silent Exit must use OLDD's Shape/BorderBound,
+        // call Left then Top while the object is already uncontained but still
+        // at its pre-exit position, and only then install the clamped target,
+        // reset the old action, swap Def, and query NEWD::RejectEntrance.
+        const LOCALS: &str = r#"
+local order;
+local left_x, left_y, left_xdir, left_ydir, left_contained;
+local top_x, top_y, top_xdir, top_ydir, top_contained;
+local abort_x, abort_y, reject_x, reject_y;
+local departure_calls, entrance_calls;
+"#;
+        let old_script = format!(
+            r#"#strict
+{LOCALS}
+protected func ContactLeft()
+{{
+    order = order * 10 + 1;
+    left_x = GetX(); left_y = GetY();
+    left_xdir = GetXDir(); left_ydir = GetYDir();
+    left_contained = !!Contained();
+    return(0);
+}}
+protected func ContactTop()
+{{
+    order = order * 10 + 2;
+    top_x = GetX(); top_y = GetY();
+    top_xdir = GetXDir(); top_ydir = GetYDir();
+    top_contained = !!Contained();
+    return(0);
+}}
+protected func OldAbort(int old_phase)
+{{
+    order = order * 10 + 3;
+    abort_x = GetX(); abort_y = GetY();
+    return(1);
+}}
+protected func Departure(pContainer) {{ departure_calls += 1; return(1); }}
+"#
+        );
+        let new_script = format!(
+            r#"#strict
+{LOCALS}
+protected func RejectEntrance(pContainer)
+{{
+    order = order * 10 + 4;
+    reject_x = GetX(); reject_y = GetY();
+    return(1);
+}}
+protected func Entrance(pContainer) {{ entrance_calls += 1; return(1); }}
+"#
+        );
+        let mut old = Definition::from_script("OLDD", "Old", &old_script)?;
+        old.set_c4_callback_convention(true);
+        old.set_shape_rect(Some(DefinitionRect::new(-5, -2, 10, 4)));
+        old.set_border_bound(C4D_BORDER_SIDES | C4D_BORDER_TOP);
+        old.set_contact_function_calls(true);
+        old.set_burn_turn_to(Some("NEWD".to_string()));
+        old.configure_actions(
+            None,
+            HashMap::from([(
+                "Work".to_string(),
+                ActionSpec::default().with_abort_call("OldAbort"),
+            )]),
+        );
+        let mut new = Definition::from_script("NEWD", "New", &new_script)?;
+        new.set_c4_callback_convention(true);
+        new.set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2)));
+        let mut container = Definition::from_script(
+            "CONT",
+            "Container",
+            "#strict\nlocal ejection_calls; protected func Ejection(pObject) { ejection_calls += 1; return(1); }\n",
+        )?;
+        container.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(45);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.register_definition(container)?;
+        engine.register_definition(old)?;
+        engine.register_definition(new)?;
+        let container = engine.spawn_object(
+            SpawnConfig::new("CONT")
+                .with_position(Vector2::new(25, 35))
+                .with_local_vars(HashMap::from([(
+                    "ejection_calls".to_string(),
+                    Value::Int(0),
+                )])),
+        )?;
+        let burner = engine.spawn_object(
+            SpawnConfig::new("OLDD")
+                .with_container(container)
+                .with_action(ActionState::new("Work"))
+                .with_local_vars(HashMap::from([
+                    ("departure_calls".to_string(), Value::Int(0)),
+                    ("entrance_calls".to_string(), Value::Int(0)),
+                ])),
+        )?;
+        let burner_index = engine.find_object_index(burner).expect("burner exists");
+        engine.objects[burner_index].set_fixed_velocity(FixedVec2::new(itofix(6), itofix(7)));
+
+        assert!(engine.incinerate_object(burner_index, 1, false, None)?);
+
+        let burner_index = engine.find_object_index(burner).expect("burner remains");
+        let burner_object = &engine.objects[burner_index];
+        assert_eq!(burner_object.definition_id, "NEWD");
+        assert!(burner_object.state.on_fire);
+        assert_eq!(burner_object.state.container, None);
+        assert_eq!(burner_object.state.position, Vector2::new(5, 2));
+        assert_eq!(
+            burner_object.fixed_position,
+            FixedVec2::new(itofix(5), itofix(2))
+        );
+        assert_eq!(burner_object.fixed_velocity, FixedVec2::ZERO);
+        let locals = &burner_object.state.local_vars;
+        for (name, expected) in [
+            ("order", 1234),
+            ("left_x", 25),
+            ("left_y", 35),
+            ("left_xdir", 0),
+            ("left_ydir", 70),
+            ("top_x", 25),
+            ("top_y", 35),
+            ("top_xdir", 0),
+            ("top_ydir", 0),
+            ("abort_x", 5),
+            ("abort_y", 2),
+            ("reject_x", 5),
+            ("reject_y", 2),
+            ("departure_calls", 0),
+            ("entrance_calls", 0),
+        ] {
+            assert_eq!(locals.get(name), Some(&Value::Int(expected)), "{name}");
+        }
+        for name in ["left_contained", "top_contained"] {
+            assert_eq!(locals.get(name), Some(&Value::Bool(false)), "{name}");
+        }
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container remains");
+        assert!(engine.objects[container_index].state.contents.is_empty());
+        assert_eq!(
+            engine.objects[container_index]
+                .state
+                .local_vars
+                .get("ejection_calls"),
+            Some(&Value::Int(0))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn contained_change_def_bounds_use_live_shape_then_updateface_restores_definition_shape_on_both_paths(
+    ) -> Result<(), EngineError> {
+        // BoundsCheck consumes the live C4Object::Shape, including a
+        // preceding SetShape, rather than reconstructing Def->Shape. Exit's
+        // later UpdateFace(true) then restores the current definition shape
+        // before ChangeDef performs SetAction(ActIdle); the definition swap
+        // performs another UpdateFace before NEWD::RejectEntrance. Exercise
+        // both the same-call script host path and native BurnTurnTo path.
+        for via_burn_turn_to in [false, true] {
+            let path = if via_burn_turn_to {
+                "native BurnTurnTo"
+            } else {
+                "script ChangeDef"
+            };
+            const SHAPE_LOCALS: &str = r#"
+local abort_width, abort_height, abort_x, abort_y;
+local reject_width, reject_height, reject_x, reject_y;
+"#;
+            let old_script = format!(
+                r#"#strict
+{SHAPE_LOCALS}
+public func Prime(bool do_swap)
+{{
+    SetShape(-7, -8, 14, 16);
+    if (do_swap) return(ChangeDef(NEWD));
+    return(1);
+}}
+protected func OldAbort(int old_phase)
+{{
+    abort_width = GetObjectVal("Width");
+    abort_height = GetObjectVal("Height");
+    abort_x = GetObjectVal("Offset", nil, nil, 0);
+    abort_y = GetObjectVal("Offset", nil, nil, 1);
+    return(1);
+}}
+"#
+            );
+            let new_script = format!(
+                r#"#strict
+{SHAPE_LOCALS}
+protected func RejectEntrance(pContainer)
+{{
+    reject_width = GetObjectVal("Width");
+    reject_height = GetObjectVal("Height");
+    reject_x = GetObjectVal("Offset", nil, nil, 0);
+    reject_y = GetObjectVal("Offset", nil, nil, 1);
+    return(1);
+}}
+"#
+            );
+
+            let mut old = Definition::from_script("OLDD", "Old", &old_script)?;
+            old.set_c4_callback_convention(true);
+            old.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
+            old.set_border_bound(C4D_BORDER_SIDES | C4D_BORDER_TOP);
+            old.set_burn_turn_to(Some("NEWD".to_string()));
+            old.configure_actions(
+                None,
+                HashMap::from([(
+                    "Work".to_string(),
+                    ActionSpec::default().with_abort_call("OldAbort"),
+                )]),
+            );
+            let mut new = Definition::from_script("NEWD", "New", &new_script)?;
+            new.set_c4_callback_convention(true);
+            new.set_shape_rect(Some(DefinitionRect::new(-1, -4, 2, 8)));
+            let container = simple_definition("CONT");
+
+            let mut engine = Engine::with_seed(52);
+            engine.set_landscape(Landscape::flat(100, 100));
+            engine.register_definition(container)?;
+            engine.register_definition(old)?;
+            engine.register_definition(new)?;
+            let container = engine
+                .spawn_object(SpawnConfig::new("CONT").with_position(Vector2::new(30, 40)))?;
+            let changed = engine.spawn_object(
+                SpawnConfig::new("OLDD")
+                    .with_container(container)
+                    .with_action(ActionState::new("Work")),
+            )?;
+            let changed_index = engine.find_object_index(changed).expect("object exists");
+            if via_burn_turn_to {
+                assert_eq!(
+                    engine.call_object_function(
+                        changed_index,
+                        "Prime",
+                        vec![Value::Bool(false)],
+                    )?,
+                    Value::Int(1),
+                    "{path}: SetShape primes the live object shape"
+                );
+                let changed_index = engine.find_object_index(changed).expect("object remains");
+                assert!(engine.incinerate_object(changed_index, 1, false, None)?);
+            } else {
+                assert_eq!(
+                    engine.call_object_function(changed_index, "Prime", vec![Value::Bool(true)],)?,
+                    Value::Bool(true),
+                    "{path}: same-call SetShape + ChangeDef succeeds"
+                );
+            }
+
+            let changed_index = engine.find_object_index(changed).expect("object remains");
+            let object = &engine.objects[changed_index];
+            assert_eq!(object.definition_id, "NEWD", "{path}: definition changes");
+            assert_eq!(object.state.container, None, "{path}: re-entry is vetoed");
+            assert_eq!(
+                object.state.position,
+                Vector2::new(7, 8),
+                "{path}: BoundsCheck clamps with live SetShape offsets"
+            );
+            assert_eq!(
+                object.state.shape_override, None,
+                "{path}: non-line UpdateFace(true) discards SetShape geometry"
+            );
+            for (name, expected) in [
+                ("abort_width", 4),
+                ("abort_height", 6),
+                ("abort_x", -2),
+                ("abort_y", -3),
+                ("reject_width", 2),
+                ("reject_height", 8),
+                ("reject_x", -1),
+                ("reject_y", -4),
+            ] {
+                assert_eq!(
+                    object.state.local_vars.get(name),
+                    Some(&Value::Int(expected)),
+                    "{path}: {name}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn contained_change_def_bounds_preserve_then_refresh_ocf_at_cpp_boundaries_on_both_paths(
+    ) -> Result<(), EngineError> {
+        // The old container receives a full SetOCF after its contents link is
+        // removed and before BoundsCheck. The moving target deliberately does
+        // not: ContactLeft observes its cached contained/high-speed mask even
+        // though xdir is already zero. Exit's tail then installs the clamped
+        // surface position and zero dirs and performs a full target SetOCF,
+        // so OldAbort observes the recomputed terrain/availability mask.
+        for via_burn_turn_to in [false, true] {
+            let path = if via_burn_turn_to {
+                "native BurnTurnTo"
+            } else {
+                "script ChangeDef"
+            };
+            const OCF_LOCALS: &str = r#"
+local home;
+local contact_ocf, contact_xdir, parent_ocf;
+local abort_ocf, reject_ocf;
+"#;
+            let old_script = format!(
+                r#"#strict
+{OCF_LOCALS}
+public func Swap() {{ return(ChangeDef(NEWD)); }}
+protected func ContactLeft()
+{{
+    contact_ocf = GetOCF();
+    contact_xdir = GetXDir();
+    parent_ocf = GetOCF(home);
+    return(0);
+}}
+protected func ContactTop() {{ return(0); }}
+protected func OldAbort(int old_phase)
+{{
+    abort_ocf = GetOCF();
+    return(1);
+}}
+"#
+            );
+            let new_script = format!(
+                r#"#strict
+{OCF_LOCALS}
+protected func RejectEntrance(pContainer)
+{{
+    reject_ocf = GetOCF();
+    return(1);
+}}
+"#
+            );
+
+            let mut container = simple_definition("CONT");
+            // Put-only and no Entrance: the contained target starts without
+            // OCF_Available, making the stale-vs-post-Exit boundary explicit.
+            container.set_grab_put_get(1);
+            let mut old = Definition::from_script("OLDD", "Old", &old_script)?;
+            old.set_c4_callback_convention(true);
+            old.set_shape_rect(Some(DefinitionRect::new(-4, -60, 8, 120)));
+            old.set_border_bound(C4D_BORDER_SIDES | C4D_BORDER_TOP);
+            old.set_contact_function_calls(true);
+            old.set_burn_turn_to(Some("NEWD".to_string()));
+            old.configure_actions(
+                None,
+                HashMap::from([(
+                    "Work".to_string(),
+                    ActionSpec::default().with_abort_call("OldAbort"),
+                )]),
+            );
+            let mut new = Definition::from_script("NEWD", "New", &new_script)?;
+            new.set_c4_callback_convention(true);
+
+            let mut engine = Engine::with_seed(53);
+            // At y=60 the center is solid while y-1 is free: SetOCF must set
+            // both InSolid and InFree, and the free-above clause sets Available.
+            engine.set_landscape(Landscape::flat(100, 60));
+            engine.register_definition(container)?;
+            engine.register_definition(old)?;
+            engine.register_definition(new)?;
+            let container = engine
+                .spawn_object(SpawnConfig::new("CONT").with_position(Vector2::new(30, 40)))?;
+            let changed = engine.spawn_object(
+                SpawnConfig::new("OLDD")
+                    .with_container(container)
+                    .with_action(ActionState::new("Work"))
+                    .with_local_vars(HashMap::from([(
+                        "home".to_string(),
+                        compat::object_reference_value(container),
+                    )])),
+            )?;
+
+            let container_index = engine
+                .find_object_index(container)
+                .expect("container exists");
+            assert_eq!(
+                engine.object_ocf_at_index(container_index) & ocf::HIT_SPEED4,
+                0,
+                "{path}: parent OCF starts without HitSpeed4"
+            );
+            engine.objects[container_index]
+                .set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(9)));
+            assert_eq!(
+                engine.object_ocf_at_index(container_index) & ocf::HIT_SPEED4,
+                0,
+                "{path}: changing velocity alone leaves the parent cache stale"
+            );
+
+            let changed_index = engine.find_object_index(changed).expect("object exists");
+            engine.objects[changed_index]
+                .set_fixed_velocity(FixedVec2::new(itofix(9), C4Fixed::ZERO));
+            engine.refresh_object_ocf(changed_index);
+            let cached_before = engine.object_ocf_at_index(changed_index);
+            assert_ne!(cached_before & ocf::HIT_SPEED4, 0);
+            assert_eq!(
+                cached_before
+                    & (ocf::NOT_CONTAINED | ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE),
+                0,
+                "{path}: put-only containment hides all outside-only bits"
+            );
+
+            if via_burn_turn_to {
+                assert!(engine.incinerate_object(changed_index, 1, false, None)?);
+            } else {
+                assert_eq!(
+                    engine.call_object_function(changed_index, "Swap", Vec::new())?,
+                    Value::Bool(true)
+                );
+            }
+
+            let changed_index = engine.find_object_index(changed).expect("object remains");
+            let object = &engine.objects[changed_index];
+            assert_eq!(object.state.position, Vector2::new(4, 60), "{path}: clamp");
+            let local_mask = |name: &str| -> u32 {
+                match object.state.local_vars.get(name) {
+                    Some(Value::Int(value)) => *value as u32,
+                    other => panic!("{path}: expected integer {name}, got {other:?}"),
+                }
+            };
+            let contact_ocf = local_mask("contact_ocf");
+            assert_ne!(
+                contact_ocf & ocf::HIT_SPEED4,
+                0,
+                "{path}: Contact sees the target's stale cached HitSpeed4"
+            );
+            assert_eq!(
+                contact_ocf & (ocf::NOT_CONTAINED | ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE),
+                0,
+                "{path}: Contact still sees the cached contained OCF"
+            );
+            assert_eq!(
+                object.state.local_vars.get("contact_xdir"),
+                Some(&Value::Int(0)),
+                "{path}: TargetBounds zeroes xdir before Contact"
+            );
+            assert_ne!(
+                local_mask("parent_ocf") & ocf::HIT_SPEED4,
+                0,
+                "{path}: the old parent's pre-Contact SetOCF is a full refresh"
+            );
+
+            for callback in ["abort_ocf", "reject_ocf"] {
+                let refreshed = local_mask(callback);
+                assert_eq!(
+                    refreshed & ocf::HIT_SPEED4,
+                    0,
+                    "{path}: {callback} sees zero-dir HitSpeed refresh"
+                );
+                assert_eq!(
+                    refreshed
+                        & (ocf::NOT_CONTAINED | ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE),
+                    ocf::NOT_CONTAINED | ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE,
+                    "{path}: {callback} sees the full post-Exit position/container refresh"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn change_def_waits_for_a_later_global_unsorted_sweep_then_uses_the_new_def_cluster(
+    ) -> Result<(), EngineError> {
+        // ChangeDef sets C4Object::Unsorted but (unlike C4Object::Resort)
+        // does not set Game.fResortAnyObject. Its master-list slot therefore
+        // survives until some unrelated Resort requests the global
+        // ResortUnsorted scan; the eventual re-add uses the NEW definition
+        // while preserving the object's independently stored Category.
+        let mut old = Definition::from_script(
+            "OLDD",
+            "Old",
+            "#strict\npublic func Swap() { return(ChangeDef(NEWD)); }\n",
+        )?;
+        old.set_category(CATEGORY_OBJECT);
+        let mut new = simple_definition("NEWD");
+        new.set_category(CATEGORY_STRUCTURE);
+        let trigger = Definition::from_script(
+            "TRIG",
+            "Trigger",
+            "#strict\npublic func Wake() { Resort(); return(1); }\n",
+        )?;
+
+        let mut engine = Engine::with_seed(5);
+        engine.register_definition(old)?;
+        engine.register_definition(new)?;
+        engine.register_definition(simple_definition("SEPR"))?;
+        engine.register_definition(trigger)?;
+
+        let changed =
+            engine.spawn_object(SpawnConfig::new("OLDD").with_category(CATEGORY_OBJECT))?;
+        let separator =
+            engine.spawn_object(SpawnConfig::new("SEPR").with_category(CATEGORY_OBJECT))?;
+        let new_peer =
+            engine.spawn_object(SpawnConfig::new("NEWD").with_category(CATEGORY_OBJECT))?;
+        let trigger =
+            engine.spawn_object(SpawnConfig::new("TRIG").with_category(CATEGORY_STATIC_BACK))?;
+        let before = vec![trigger, changed, separator, new_peer];
+        assert_eq!(engine.debug_exec_order(), before);
+
+        let changed_idx = engine
+            .find_object_index(changed)
+            .expect("old object exists");
+        assert_eq!(
+            engine.call_object_function(changed_idx, "Swap", Vec::new())?,
+            Value::Bool(true)
+        );
+        let changed_idx = engine
+            .find_object_index(changed)
+            .expect("changed object remains");
+        assert_eq!(engine.objects[changed_idx].definition_id, "NEWD");
+        assert_eq!(
+            engine.objects[changed_idx].state.category, CATEGORY_OBJECT,
+            "ChangeDef does not copy the new definition's Category"
+        );
+        assert_eq!(
+            engine.debug_exec_order(),
+            before,
+            "ChangeDef marks Unsorted without immediately moving the master-list link"
+        );
+        engine.execute_object_order_commands();
+        assert_eq!(
+            engine.debug_exec_order(),
+            before,
+            "ChangeDef alone does not request the global ResortUnsorted scan"
+        );
+
+        let trigger_idx = engine.find_object_index(trigger).expect("trigger exists");
+        engine.call_object_function(trigger_idx, "Wake", Vec::new())?;
+        assert_eq!(engine.debug_exec_order(), before, "Resort is deferred");
+        engine.execute_object_order_commands();
+        assert_eq!(
+            engine.debug_exec_order(),
+            vec![trigger, separator, new_peer, changed],
+            "the unrelated Resort sweeps every Unsorted object and ChangeDef's re-add joins NEWD"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn change_def_unsorted_link_survives_a_frame_until_an_explicit_resort(
+    ) -> Result<(), EngineError> {
+        // ChangeDef sets Unsorted without setting fResortAnyObject. In
+        // particular, the per-frame execution setup must not run the
+        // post-load FixObjectOrder pass over that link. Use a legitimate raw
+        // multi-bit sort category so an accidental FixObjectOrder call is
+        // observable both as a category rewrite and as a link move.
+        let mut old = Definition::from_script(
+            "OLDD",
+            "Old",
+            "#strict\npublic func Swap() { return(ChangeDef(NEWD)); }\n",
+        )?;
+        old.set_category(CATEGORY_LIVING | CATEGORY_OBJECT);
+        let new = simple_definition("NEWD");
+        let trigger = Definition::from_script(
+            "TRIG",
+            "Trigger",
+            "#strict\npublic func Wake() { Resort(); return(1); }\n",
+        )?;
+
+        let mut engine = Engine::with_seed(51);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.register_definition(old)?;
+        engine.register_definition(new)?;
+        engine.register_definition(simple_definition("ANCH"))?;
+        engine.register_definition(trigger)?;
+
+        let trigger =
+            engine.spawn_object(SpawnConfig::new("TRIG").with_category(CATEGORY_STATIC_BACK))?;
+        let anchor =
+            engine.spawn_object(SpawnConfig::new("ANCH").with_category(CATEGORY_OBJECT))?;
+        let raw_category = CATEGORY_LIVING | CATEGORY_OBJECT;
+        let changed = engine.spawn_object(SpawnConfig::new("OLDD").with_category(raw_category))?;
+        let fixed_link = vec![trigger, anchor, changed];
+        assert_eq!(engine.debug_exec_order(), fixed_link);
+
+        let changed_index = engine
+            .find_object_index(changed)
+            .expect("changed object exists");
+        assert_eq!(
+            engine.call_object_function(changed_index, "Swap", Vec::new())?,
+            Value::Bool(true)
+        );
+        assert!(engine.objects[changed_index].unsorted);
+
+        engine.tick()?;
+        let changed_index = engine
+            .find_object_index(changed)
+            .expect("changed object remains");
+        assert_eq!(
+            engine.debug_exec_order(),
+            fixed_link,
+            "a frame boundary does not move a ChangeDef-only Unsorted link"
+        );
+        assert_eq!(
+            engine.objects[changed_index].state.category, raw_category,
+            "runtime categories are not normalized by the post-load repair"
+        );
+        assert!(
+            engine.objects[changed_index].unsorted,
+            "ChangeDef alone does not arm the global Unsorted sweep"
+        );
+
+        let trigger_index = engine.find_object_index(trigger).expect("trigger remains");
+        engine.call_object_function(trigger_index, "Wake", Vec::new())?;
+        engine.execute_object_order_commands();
+        let changed_index = engine
+            .find_object_index(changed)
+            .expect("changed object remains");
+        assert!(
+            !engine.objects[changed_index].unsorted,
+            "an explicit Resort finally consumes the ChangeDef flag"
+        );
+        assert_eq!(engine.debug_exec_order(), fixed_link);
+        Ok(())
+    }
+
+    #[test]
+    fn construction_change_def_keeps_the_original_spawn_link_until_a_later_resort(
+    ) -> Result<(), EngineError> {
+        // C4Game::NewObject adds the fresh object to Game.Objects using its
+        // original definition/category before Construction runs. A ChangeDef
+        // in Construction only marks that existing link Unsorted; it must not
+        // be re-added at the forward tail until some later Resort sets the
+        // global fResortAnyObject trigger.
+        let mut old = Definition::from_script(
+            "OLDD",
+            "Old",
+            "#strict\nprotected func Construction() { ChangeDef(NEWD); }\n",
+        )?;
+        old.set_c4_callback_convention(true);
+        old.set_category(CATEGORY_OBJECT);
+        let mut new = simple_definition("NEWD");
+        new.set_category(CATEGORY_STRUCTURE);
+        let trigger = Definition::from_script(
+            "TRIG",
+            "Trigger",
+            "#strict\npublic func Wake() { Resort(); return(1); }\n",
+        )?;
+
+        let mut engine = Engine::with_seed(6);
+        engine.register_definition(old)?;
+        engine.register_definition(new)?;
+        engine.register_definition(simple_definition("SEPR"))?;
+        engine.register_definition(trigger)?;
+
+        let trigger =
+            engine.spawn_object(SpawnConfig::new("TRIG").with_category(CATEGORY_STATIC_BACK))?;
+        let new_peer =
+            engine.spawn_object(SpawnConfig::new("NEWD").with_category(CATEGORY_OBJECT))?;
+        let separator =
+            engine.spawn_object(SpawnConfig::new("SEPR").with_category(CATEGORY_OBJECT))?;
+        let changed =
+            engine.spawn_object(SpawnConfig::new("OLDD").with_category(CATEGORY_OBJECT))?;
+
+        let before_sweep = vec![trigger, new_peer, separator, changed];
+        let changed_index = engine.find_object_index(changed).expect("object exists");
+        assert_eq!(engine.objects[changed_index].definition_id, "NEWD");
+        assert_eq!(
+            engine.objects[changed_index].state.category,
+            CATEGORY_OBJECT
+        );
+        assert!(engine.objects[changed_index].unsorted);
+        assert_eq!(
+            engine.debug_exec_order(),
+            before_sweep,
+            "Construction ChangeDef keeps the link inserted for OLDD"
+        );
+        engine.execute_object_order_commands();
+        assert_eq!(
+            engine.debug_exec_order(),
+            before_sweep,
+            "ChangeDef alone does not arm the global unsorted sweep"
+        );
+
+        let trigger_index = engine.find_object_index(trigger).expect("trigger exists");
+        engine.call_object_function(trigger_index, "Wake", Vec::new())?;
+        assert_eq!(
+            engine.debug_exec_order(),
+            before_sweep,
+            "Resort is deferred"
+        );
+        engine.execute_object_order_commands();
+        assert_eq!(
+            engine.debug_exec_order(),
+            vec![trigger, new_peer, changed, separator],
+            "the later sweep re-adds the object into NEWD's cluster"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn change_def_self_arrow_resolves_the_new_definition_inline() {
         // AB_CALLFS reads pDestObj->Def when the instruction executes. The
         // old callback remains on the stack after ChangeDef, but an explicit
@@ -28479,6 +29903,300 @@ protected func TumbleStart()
             Some(77),
             "shape/vertices rebuilt from the NEW def (UpdateFace)"
         );
+    }
+
+    #[test]
+    fn foreign_target_change_def_cannot_be_shadowed_by_target_script() {
+        // The caller has already resolved the engine FnChangeDef. C++ then
+        // invokes pObj->ChangeDef directly; it does not re-resolve a function
+        // named ChangeDef on the explicit target object.
+        let caller = Definition::from_script(
+            "CALL",
+            "Caller",
+            "#strict\nfunc Swap(pObj) { return(ChangeDef(NEWD, pObj)); }\n",
+        )
+        .expect("caller compiles");
+        let old = Definition::from_script(
+            "OLDD",
+            "Old",
+            r#"#strict
+local shadow_calls;
+func ChangeDef(id) { shadow_calls += 1; return(0); }
+"#,
+        )
+        .expect("old definition compiles");
+        let new = simple_definition("NEWD");
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        engine.register_definition(old).expect("old registers");
+        engine.register_definition(new).expect("new registers");
+
+        let target = engine
+            .spawn_object(SpawnConfig::new("OLDD"))
+            .expect("target spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        let result = engine
+            .call_object_function(
+                caller_index,
+                "Swap",
+                vec![compat::object_reference_value(target)],
+            )
+            .expect("foreign ChangeDef runs");
+
+        assert_eq!(result, Value::Bool(true));
+        let target = engine.object_snapshot(target).expect("target remains");
+        assert_eq!(target.definition_id, "NEWD");
+        assert_ne!(target.local_vars.get("shadow_calls"), Some(&Value::Int(1)));
+    }
+
+    #[test]
+    fn change_def_forced_idle_preserves_abort_callback_action_payload_on_both_paths(
+    ) -> Result<(), EngineError> {
+        // ChangeDef first performs an ordinary SetAction(ActIdle), including
+        // Old's AbortCall. The callback may select a different action and
+        // write its payload, but ChangeDef then overwrites Action.Act alone:
+        // the final action is Idle while Time/Data/Phase survive untouched.
+        for via_burn_turn_to in [false, true] {
+            let path = if via_burn_turn_to {
+                "native BurnTurnTo"
+            } else {
+                "script host"
+            };
+            let mut old = Definition::from_script(
+                "OLDD",
+                "Old",
+                r#"#strict
+local abort_calls;
+protected func OldAbort(int old_phase)
+{
+    abort_calls += 1;
+    SetAction("Other");
+    SetActionData(73);
+    SetPhase(4);
+    return(1);
+}
+public func Swap() { return(ChangeDef(NEWD)); }
+"#,
+            )?;
+            old.set_c4_callback_convention(true);
+            old.set_burn_turn_to(Some("NEWD".to_string()));
+            old.configure_actions(
+                None,
+                HashMap::from([
+                    (
+                        "Old".to_string(),
+                        ActionSpec::default()
+                            .with_length(10)
+                            .with_abort_call("OldAbort"),
+                    ),
+                    ("Other".to_string(), ActionSpec::default().with_length(10)),
+                ]),
+            );
+
+            let mut engine = Engine::with_seed(41);
+            engine.register_definition(old)?;
+            engine.register_definition(simple_definition("NEWD"))?;
+
+            let mut action = ActionState::new("Old");
+            action.time = 99;
+            action.data = 11;
+            action.phase = 7;
+            let object_id = engine.spawn_object(
+                SpawnConfig::new("OLDD")
+                    .with_action(action)
+                    .with_local_vars(HashMap::from([("abort_calls".to_string(), Value::Int(0))])),
+            )?;
+
+            let object_index = engine.find_object_index(object_id).expect("object exists");
+            if via_burn_turn_to {
+                assert!(engine.incinerate_object(object_index, 1, false, None)?);
+            } else {
+                assert_eq!(
+                    engine.call_object_function(object_index, "Swap", Vec::new())?,
+                    Value::Bool(true)
+                );
+            }
+
+            let object_index = engine.find_object_index(object_id).expect("object remains");
+            let object = &engine.objects[object_index];
+            assert_eq!(object.definition_id, "NEWD", "{path}: definition swaps");
+            assert_eq!(
+                object.state.local_vars.get("abort_calls"),
+                Some(&Value::Int(1)),
+                "{path}: the old action AbortCall runs"
+            );
+            assert_eq!(
+                object.state.action.name,
+                lc_engine::action::DEFAULT_ACTION_NAME,
+                "{path}: unconditional Action.Act=ActIdle wins"
+            );
+            assert_eq!(
+                object.state.action.time, 0,
+                "{path}: the AbortCall's SetAction time reset survives"
+            );
+            assert_eq!(
+                object.state.action.data, 73,
+                "{path}: callback-written Action.Data survives"
+            );
+            assert_eq!(
+                object.state.action.phase, 4,
+                "{path}: callback-written Action.Phase survives"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn change_def_from_idle_preserves_time_but_resets_phase_on_both_paths(
+    ) -> Result<(), EngineError> {
+        // SetAction(ActIdle) only resets Action.Time when the action slot
+        // changes. Starting from built-in Idle therefore preserves nonzero
+        // Time (and Data), while SetAction's unconditional Phase/PhaseDelay
+        // reset still runs before ChangeDef's raw Action.Act=ActIdle write.
+        for via_burn_turn_to in [false, true] {
+            let path = if via_burn_turn_to {
+                "native BurnTurnTo"
+            } else {
+                "script host"
+            };
+            let mut old = Definition::from_script(
+                "OLDD",
+                "Old",
+                "#strict\npublic func Swap() { return(ChangeDef(NEWD)); }\n",
+            )?;
+            old.set_burn_turn_to(Some("NEWD".to_string()));
+
+            let mut engine = Engine::with_seed(43);
+            engine.register_definition(old)?;
+            engine.register_definition(simple_definition("NEWD"))?;
+            let object_id = engine.spawn_object(SpawnConfig::new("OLDD"))?;
+            let object_index = engine.find_object_index(object_id).expect("object exists");
+            {
+                let action = &mut engine.objects[object_index].state.action;
+                assert_eq!(action.name, lc_engine::action::DEFAULT_ACTION_NAME);
+                action.time = 77;
+                action.data = 19;
+                action.phase = 5;
+                action.ticks = 3;
+            }
+
+            if via_burn_turn_to {
+                assert!(engine.incinerate_object(object_index, 1, false, None)?);
+            } else {
+                assert_eq!(
+                    engine.call_object_function(object_index, "Swap", Vec::new())?,
+                    Value::Bool(true)
+                );
+            }
+
+            let object_index = engine.find_object_index(object_id).expect("object remains");
+            let object = &engine.objects[object_index];
+            assert_eq!(object.definition_id, "NEWD", "{path}: definition swaps");
+            assert_eq!(
+                object.state.action.name,
+                lc_engine::action::DEFAULT_ACTION_NAME,
+                "{path}: action remains built-in Idle"
+            );
+            assert_eq!(
+                object.state.action.time, 77,
+                "{path}: same-slot SetAction preserves Action.Time"
+            );
+            assert_eq!(
+                object.state.action.data, 19,
+                "{path}: same-procedure SetAction preserves Action.Data"
+            );
+            assert_eq!(
+                object.state.action.phase, 0,
+                "{path}: SetAction still clears Action.Phase"
+            );
+            assert_eq!(
+                object.state.action.ticks, 0,
+                "{path}: SetAction still clears Action.PhaseDelay"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn change_def_veto_after_abort_enter_keeps_the_pre_swap_contents_link(
+    ) -> Result<(), EngineError> {
+        // ChangeDef saves HOME, silently exits it, and runs Old's AbortCall.
+        // That callback enters STAY while the old definition is still live,
+        // so stContents places the object in OLDD's sorted cluster. The new
+        // definition then vetoes the attempted return to HOME before Enter
+        // can exit STAY. No post-fold ChangeDef marker may reappend the object.
+        let mut old = Definition::from_script(
+            "OLDD",
+            "Old",
+            r#"#strict
+local stay;
+protected func OldAbort(int old_phase) { return(Enter(stay)); }
+public func Swap() { return(ChangeDef(NEWD)); }
+"#,
+        )?;
+        old.set_c4_callback_convention(true);
+        old.configure_actions(
+            None,
+            HashMap::from([(
+                "Old".to_string(),
+                ActionSpec::default().with_abort_call("OldAbort"),
+            )]),
+        );
+        let mut new = Definition::from_script(
+            "NEWD",
+            "New",
+            "#strict\nprotected func RejectEntrance(pContainer) { return(1); }\n",
+        )?;
+        new.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(42);
+        engine.register_definition(simple_definition("HOME"))?;
+        engine.register_definition(simple_definition("STAY"))?;
+        engine.register_definition(old)?;
+        engine.register_definition(new)?;
+
+        let home = engine.spawn_object(SpawnConfig::new("HOME"))?;
+        let stay = engine.spawn_object(SpawnConfig::new("STAY"))?;
+        let peer = engine.spawn_object(
+            SpawnConfig::new("OLDD")
+                .with_category(CATEGORY_OBJECT)
+                .with_container(stay),
+        )?;
+        let changed = engine.spawn_object(
+            SpawnConfig::new("OLDD")
+                .with_category(CATEGORY_OBJECT)
+                .with_container(home)
+                .with_action(ActionState::new("Old"))
+                .with_local_vars(HashMap::from([(
+                    "stay".to_string(),
+                    object_reference_value(stay),
+                )])),
+        )?;
+
+        let changed_index = engine.find_object_index(changed).expect("object exists");
+        assert_eq!(
+            engine.call_object_function(changed_index, "Swap", Vec::new())?,
+            Value::Bool(true)
+        );
+
+        let changed_index = engine.find_object_index(changed).expect("object remains");
+        assert_eq!(engine.objects[changed_index].definition_id, "NEWD");
+        assert_eq!(engine.objects[changed_index].state.container, Some(stay));
+        let home_index = engine.find_object_index(home).expect("home remains");
+        assert!(engine.objects[home_index].state.contents.is_empty());
+        let stay_index = engine.find_object_index(stay).expect("stay remains");
+        assert_eq!(
+            engine.objects[stay_index].state.contents,
+            vec![changed, peer],
+            "the old-definition Enter link stays in place after the saved-container veto"
+        );
+        Ok(())
     }
 
     // DFA_CONNECT (C4Object.cpp:5341-5420): a Line object's first vertex
@@ -44342,6 +46060,171 @@ func ResortExplicit(object target) { Resort(target); }
             engine.debug_exec_order(),
             vec![b, a2, a1],
             "still-unsorted peers are ignored during each C++ re-add"
+        );
+    }
+
+    #[test]
+    fn inactive_exec_list_holes_do_not_participate_in_add_or_unsorted_sweeps() {
+        // C4OS_INACTIVE objects live in C4GameObjects::InactiveObjects, not
+        // the main list. Rust keeps their ids as inert exec-list holes, so a
+        // runtime Add must ignore them as cluster candidates and the main
+        // ResortUnsorted sweep must neither move nor clear them.
+        let mut engine = Engine::with_seed(0);
+        for id in ["LOWR", "SAME", "HIGH"] {
+            engine
+                .register_definition(simple_definition(id))
+                .expect("registers");
+        }
+
+        let low = engine
+            .spawn_object(SpawnConfig::new("LOWR").with_category(CATEGORY_STATIC_BACK))
+            .expect("low object spawns");
+        let inactive = engine
+            .spawn_object(
+                SpawnConfig::new("SAME")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_status(ObjectStatus::Inactive)
+                    .with_loaded(true),
+            )
+            .expect("inactive object loads into an inert hole");
+        let high = engine
+            .spawn_object(SpawnConfig::new("HIGH").with_category(CATEGORY_OBJECT))
+            .expect("high object spawns");
+        assert_eq!(engine.debug_exec_order(), vec![low, inactive, high]);
+
+        let newcomer = engine
+            .spawn_object(SpawnConfig::new("SAME").with_category(CATEGORY_OBJECT))
+            .expect("active same-definition object spawns");
+        let active_order = engine
+            .debug_exec_order()
+            .into_iter()
+            .filter(|id| {
+                engine
+                    .find_object_index(*id)
+                    .is_some_and(|index| engine.objects[index].state.status.is_active())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            active_order,
+            vec![low, high, newcomer],
+            "an inactive same-def hole is not a main-list cluster candidate"
+        );
+
+        let inactive_position = engine
+            .debug_exec_order()
+            .iter()
+            .position(|id| *id == inactive)
+            .expect("inactive hole is represented");
+        let inactive_index = engine
+            .find_object_index(inactive)
+            .expect("inactive object remains addressable");
+        engine.objects[inactive_index].unsorted = true;
+        engine
+            .pending_object_order_commands
+            .push(ObjectOrderCommand::ResortObject(high));
+        engine.execute_object_order_commands();
+
+        let inactive_index = engine
+            .find_object_index(inactive)
+            .expect("inactive object remains addressable");
+        assert_eq!(
+            engine
+                .debug_exec_order()
+                .iter()
+                .position(|id| *id == inactive),
+            Some(inactive_position),
+            "the main-list sweep leaves the inactive hole in place"
+        );
+        assert!(
+            engine.objects[inactive_index].unsorted,
+            "the main-list sweep does not consume an inactive object's flag"
+        );
+
+        // The no-object Resort path calls SortByCategory on Game.Objects
+        // only. Give the inactive hole a deliberately low raw category: it
+        // still must not be included in that stable main-list sort.
+        engine.objects[inactive_index].state.category = 0;
+        let inactive_position = engine
+            .debug_exec_order()
+            .iter()
+            .position(|id| *id == inactive)
+            .expect("inactive hole remains represented");
+        engine
+            .pending_object_order_commands
+            .push(ObjectOrderCommand::SortByCategory);
+        engine.execute_object_order_commands();
+        assert_eq!(
+            engine
+                .debug_exec_order()
+                .iter()
+                .position(|id| *id == inactive),
+            Some(inactive_position),
+            "global SortByCategory also leaves inactive holes fixed"
+        );
+    }
+
+    #[test]
+    fn contents_add_inserts_after_the_last_sorted_predecessor_before_an_unsorted_peer() {
+        // C4ObjectList::Add skips Unsorted links while comparing categories,
+        // but inserts at cPrev->Next. An Unsorted link between the last sorted
+        // predecessor and the qualifying successor therefore remains AFTER
+        // the newcomer; inserting directly at the successor would be too late.
+        let mut engine = Engine::with_seed(0);
+        for id in ["CONT", "HIGH", "UNST", "LOWR", "NEWW"] {
+            engine
+                .register_definition(simple_definition(id))
+                .expect("registers");
+        }
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        let high = engine
+            .spawn_object(
+                SpawnConfig::new("HIGH")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(container),
+            )
+            .expect("high child spawns");
+        let unsorted = engine
+            .spawn_object(
+                SpawnConfig::new("UNST")
+                    .with_category(CATEGORY_LIVING)
+                    .with_container(container),
+            )
+            .expect("intervening child spawns");
+        let low = engine
+            .spawn_object(
+                SpawnConfig::new("LOWR")
+                    .with_category(CATEGORY_STRUCTURE)
+                    .with_container(container),
+            )
+            .expect("low child spawns");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container exists");
+        assert_eq!(
+            engine.objects[container_index].state.contents,
+            vec![high, unsorted, low]
+        );
+
+        let unsorted_index = engine
+            .find_object_index(unsorted)
+            .expect("intervening child exists");
+        engine.objects[unsorted_index].unsorted = true;
+        let newcomer = engine
+            .spawn_object(
+                SpawnConfig::new("NEWW")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_container(container),
+            )
+            .expect("new child spawns");
+
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container remains");
+        assert_eq!(
+            engine.objects[container_index].state.contents,
+            vec![high, newcomer, unsorted, low]
         );
     }
 
