@@ -37077,7 +37077,7 @@ impl Engine {
             return;
         }
 
-        let (position, bottom, owner) = {
+        let (creator, position, bottom, layer) = {
             let object = &self.objects[idx];
             let position = object.state.position;
             let bottom = object
@@ -37090,7 +37090,7 @@ impl Engine {
                         .saturating_add(shape.y)
                         .saturating_add(shape.height)
                 });
-            (position, bottom, object.state.owner)
+            (object.id, position, bottom, object.state.layer)
         };
 
         let mut spawn_definitions: Vec<DefinitionId> = Vec::new();
@@ -37126,11 +37126,14 @@ impl Engine {
             if !self.definitions.contains_key(&definition_id) {
                 continue;
             }
-            let config = SpawnConfig::new(definition_id)
+            let mut config = SpawnConfig::new(definition_id)
                 .with_position(spawn_position)
-                .with_owner(owner)
+                .with_owner(OWNER_NONE)
                 .with_rotation(rotation);
-            if let Err(error) = self.spawn_object(config) {
+            if let Some(layer) = layer {
+                config = config.with_layer(layer);
+            }
+            if let Err(error) = self.spawn_object_with_initial_lifecycle(config, Some(creator)) {
                 let _ = self.defer_runtime_flash_boundary(error);
             }
         }

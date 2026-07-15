@@ -8558,8 +8558,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     #[test]
     fn dig2object_rotation_uses_one_cpp_random_draw() {
         // C4Object::DigOutMaterialCast passes Random(360) to CreateObject
-        // (C4Object.cpp:4017-4030). This seed makes gen_range reject its
-        // first raw RngCore sample, exposing the extra ledger draw.
+        // with the digger as creator and NO_OWNER (C4Object.cpp:4017-4030).
+        // The creator supplies the layer and Construction argument. This
+        // seed makes gen_range reject its first raw RngCore sample, exposing
+        // the extra ledger draw.
         const SEED: u32 = 28;
 
         let material_source = r#"
@@ -8580,12 +8582,19 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine
             .register_definition(digger_definition)
             .expect("digger registers");
-        let mut gem_definition =
-            Definition::from_script("GEM_", "Gem", "").expect("gem compiles");
+        let mut gem_definition = Definition::from_script(
+            "GEM_",
+            "Gem",
+            "#strict 2\nlocal creator_seen;\nfunc Construction(pCreator) { creator_seen = pCreator; }\n",
+        )
+        .expect("gem compiles");
         gem_definition.set_rotateable(1);
         engine
             .register_definition(gem_definition)
             .expect("gem registers");
+        engine
+            .register_definition(simple_definition("LAYR"))
+            .expect("layer registers");
         engine.set_materials(materials);
 
         let mut pixels = vec![0_u8; 25];
@@ -8606,10 +8615,15 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         landscape.set_pixel_grid(grid);
         engine.set_landscape(landscape);
 
+        let layer = engine
+            .spawn_object(SpawnConfig::new("LAYR").with_loaded(true))
+            .expect("layer spawns");
         let digger = engine
             .spawn_object(
                 SpawnConfig::new("DGRR")
                     .with_position(Vector2::new(2, 2))
+                    .with_owner(7)
+                    .with_layer(layer)
                     .with_loaded(true),
             )
             .expect("digger spawns");
@@ -8634,6 +8648,14 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("Dig2Object conversion spawns a gem");
         assert_eq!(spawned.rotation, expected_rotation);
         assert_eq!(spawned.position, Vector2::new(2, 11));
+        assert_eq!(spawned.owner, OWNER_NONE);
+        assert_eq!(spawned.controller, OWNER_NONE);
+        assert_eq!(spawned.layer, Some(layer));
+        assert_eq!(
+            spawned.local_vars.get("creator_seen"),
+            Some(&object_reference_value(digger)),
+            "Dig2Object Construction receives the digger as creator"
+        );
         assert_eq!(snapshot.rng.hold, expected_hold);
         assert_eq!(snapshot.rng.count, before.count + 1);
     }
