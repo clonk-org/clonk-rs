@@ -13616,6 +13616,21 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         idx += 1;
     }
 
+    // C4Effect::AssignCallbackFunctions immediately resolves an object
+    // command target and overwrites idCommandTarget with that object's
+    // current definition for save/runtime-join safety (C4Effect.cpp:31-57).
+    if let Some(target) = command_target {
+        if let Some(definition) = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| {
+                    context.object_effective_definition_id(ObjectId::new(target as u64))
+                })
+        }) {
+            command_target_id = Some(definition);
+        }
+    }
+
     // Priority-1 effects skip C4Effect::Check entirely (C4Effect.cpp:170).
     // Global and live-object additions negotiate and start synchronously,
     // before AddEffect returns (C4Effect.cpp:97-136). Synthetic proplist
@@ -13989,14 +14004,26 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
             1 => Value::String(effect.name.clone()),
             2 => Value::Int(effect.priority.abs()),
             3 => Value::Int(effect.interval),
-            4 => effect.command_target.map(Value::Int).unwrap_or(Value::Nil),
-            5 => effect
-                .command_id
-                .as_ref()
-                .map(|id| Value::String(id.clone()))
+            4 => effect
+                .command_target
+                .map(|target| object_reference_value(ObjectId::new(target as u64)))
                 .unwrap_or(Value::Nil),
+            5 => {
+                let live_id = effect.command_target.and_then(|target| {
+                    HOST_CONTEXT.with(|cell| {
+                        cell.borrow().as_ref().and_then(|context| {
+                            context
+                                .object_effective_definition_id(ObjectId::new(target as u64))
+                        })
+                    })
+                });
+                live_id
+                    .or_else(|| effect.command_id.clone())
+                    .map(Value::C4Id)
+                    .unwrap_or(Value::Nil)
+            }
             6 => Value::Int(effect.timer),
-            _ => build_effect_value(effect),
+            _ => Value::Nil,
         })
         .unwrap_or(Value::Nil))
 }
@@ -32044,26 +32071,6 @@ fn extract_effects_from_state(state: &Value) -> Result<Vec<EffectState>, Runtime
     }
 }
 
-fn build_effect_value(effect: &EffectState) -> Value {
-    let mut map = IndexMap::with_capacity(6);
-    map.insert("number".into(), Value::Int(effect.number));
-    map.insert("name".into(), Value::String(effect.name.clone()));
-    map.insert("priority".into(), Value::Int(effect.priority));
-    map.insert("interval".into(), Value::Int(effect.interval));
-    map.insert("timer".into(), Value::Int(effect.timer));
-    if let Some(target) = effect.command_target {
-        map.insert("command_target".into(), Value::Int(target));
-    }
-    if let Some(id) = &effect.command_id {
-        map.insert("command_target_id".into(), Value::String(id.clone()));
-    }
-    if !effect.vars().is_empty() {
-        let vars = effect.vars().iter().map(effect_var_to_value).collect();
-        map.insert("vars".into(), Value::Array(vars));
-    }
-    Value::Proplist(map)
-}
-
 fn value_to_effect_var(value: &Value) -> EffectVarValue {
     match value {
         Value::Int(value) => EffectVarValue::Int(*value),
@@ -49460,7 +49467,7 @@ func Probe(object other)
             ])
         });
         let value = result.expect("GetEffect command target succeeds");
-        assert_eq!(value, Value::Int(7));
+        assert_eq!(value, Value::Object(7));
 
         let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
             add_effect(&[
@@ -49479,7 +49486,68 @@ func Probe(object other)
             ])
         });
         let value = result.expect("GetEffect command id succeeds");
-        assert_eq!(value, Value::String("BARL".into()));
+        assert_eq!(value, Value::C4Id("BARL".into()));
+    }
+
+    #[test]
+    fn get_effect_command_metadata_keeps_object_and_c4id_types() {
+        let command_script = r#"#strict 2
+public func Ping() { return 42; }
+public func Probe(object carrier)
+{
+    AddEffect("Typed", carrier, 100, 0, this(), BARL);
+    var target = GetEffect("Typed", carrier, 0, 4);
+    var same = target == this(), ping = target->Ping();
+    var initial_id = GetEffect("Typed", carrier, 0, 5) == CMND;
+    ChangeDef(NEWD);
+    return [same, ping, initial_id,
+            GetEffect("Typed", carrier, 0, 5) == NEWD,
+            GetEffect("Typed", carrier, 0, 7)];
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(
+                crate::Definition::from_script("CMND", "Command target", command_script)
+                    .expect("command target compiles"),
+            )
+            .expect("command target registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("HOLD", "Effect holder", "#strict 2")
+                    .expect("effect holder compiles"),
+            )
+            .expect("effect holder registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("NEWD", "Changed command target", "#strict 2")
+                    .expect("changed command target compiles"),
+            )
+            .expect("changed command target registers");
+        let command = engine
+            .spawn_object(crate::SpawnConfig::new("CMND"))
+            .expect("command target spawns");
+        let holder = engine
+            .spawn_object(crate::SpawnConfig::new("HOLD"))
+            .expect("effect holder spawns");
+        let command_index = engine.find_object_index(command).expect("command target exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    command_index,
+                    "Probe",
+                    vec![object_reference_value(holder)],
+                )
+                .expect("typed GetEffect probe runs"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(42),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Nil,
+            ])
+        );
     }
 
     #[test]
@@ -49505,7 +49573,7 @@ func Probe(object other)
             ])
         });
         let value = result.expect("GetEffect command id succeeds");
-        assert_eq!(value, Value::String("BARL".into()));
+        assert_eq!(value, Value::C4Id("BARL".into()));
     }
 
     #[test]
