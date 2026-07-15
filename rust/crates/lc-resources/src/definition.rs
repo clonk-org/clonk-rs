@@ -468,6 +468,9 @@ pub struct DefCore {
     pub contact_function_calls: bool,
     pub collection: Option<PictureRect>,
     pub collection_limit: Option<u32>,
+    /// `Fragile` (C4Def.cpp:393): any nonzero value prevents Put from
+    /// choosing the outdoor throw-in path.
+    pub fragile: bool,
     /// ContactIncinerate=N: 1-in-N chance of catching fire on contact with a
     /// burning object (CrossCheck pass 1, C4GameObjects.cpp:121-125); 0 = not
     /// inflammable.
@@ -842,6 +845,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut contact_function_calls = false;
     let mut collection: Option<PictureRect> = None;
     let mut collection_limit: Option<u32> = None;
+    let mut fragile = false;
     let mut contact_incinerate: i32 = 0;
     let mut blast_incinerate: i32 = 0;
     let mut contain_blast: i32 = 0;
@@ -1064,6 +1068,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "collection" => {
                 collection = parse_rect(value).filter(|rect| rect.width > 0 && rect.height > 0);
+            }
+            "fragile" => {
+                fragile = parse_i32(value).unwrap_or(0) != 0;
             }
             "contactincinerate" => {
                 contact_incinerate = parse_i32(value).unwrap_or(0).max(0);
@@ -1295,6 +1302,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         contact_function_calls,
         collection,
         collection_limit,
+        fragile,
         contact_incinerate,
         blast_incinerate,
         contain_blast,
@@ -3505,6 +3513,17 @@ Attach=1
         );
         assert_eq!(parsed.collection_limit, Some(3));
         assert!(parsed.collectible);
+    }
+
+    #[test]
+    fn parse_def_core_fragile_uses_nonzero_truthiness_and_defaults_false() {
+        let parsed = parse_def_core(b"[DefCore]\nid=BOOM\nFragile=-2\n")
+            .expect("Fragile DefCore parses");
+        assert!(parsed.fragile);
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=SAFE\n")
+            .expect("default DefCore parses");
+        assert!(!defaulted.fragile);
     }
 
     #[test]

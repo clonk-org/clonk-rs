@@ -170,6 +170,13 @@ pub struct CommandDefinitionSnapshot {
     /// Positive DefCore `CollectionLimit`; `None` means unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection_limit: Option<u32>,
+    /// DefCore collection area relative to the target object's position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection_rect: Option<DefinitionRect>,
+    /// DefCore `Fragile`; any nonzero source value disables Put's outdoor
+    /// throw-in path for this item definition.
+    #[serde(default)]
+    pub fragile: bool,
     #[serde(default)]
     pub can_chop: bool,
     #[serde(default)]
@@ -3240,55 +3247,67 @@ mod tests {
     }
 
     #[test]
-    fn put_transfers_item_into_nearby_target_container() {
+    fn put_requested_definition_missing_fails_without_fallback() {
         let actor_id = ObjectId::new(590);
         let item_id = ObjectId::new(591);
         let container_id = ObjectId::new(592);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(50, 50);
         actor.contents = vec![item_id];
-        actor.command_direction = CommandDirection::Right;
 
         let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "ROCK".into();
         item.container = Some(actor_id);
-        item.position = actor.position;
 
-        let mut target_container = snapshot_with_id(container_id.as_u64());
-        target_container.position = Vector2::new(54, 48);
-        target_container.collectible = false;
+        let target_container = snapshot_with_id(container_id.as_u64());
 
-        let mut objects = HashMap::new();
-        objects.insert(actor.id, actor);
-        objects.insert(item.id, item);
-        objects.insert(target_container.id, target_container.clone());
+        let objects = HashMap::from([
+            (actor.id, actor.clone()),
+            (item.id, item),
+            (target_container.id, target_container),
+        ]);
 
-        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
-        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 0);
         let mut state = PutState::from_request(
-            &CommandRequest::new(CommandId::Put).with_target(Some(container_id)),
+            &CommandRequest::new(CommandId::Put)
+                .with_target(Some(container_id))
+                .with_data(CommandData::Text("WOOD".into())),
         )
         .expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.status, CommandStatus::Failed);
         assert!(result.update.is_none());
         assert!(result.operations.is_empty());
-        assert_eq!(result.events.len(), 1);
-        match &result.events[0] {
-            CommandEvent::ApplyObjectUpdate { object_id, update } => {
-                assert_eq!(*object_id, item_id);
-                assert_eq!(update.container, Some(Some(container_id)));
-                assert_eq!(update.position, Some(target_container.position));
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
+        assert!(result.events.is_empty());
+
+        let mut empty_actor = actor;
+        empty_actor.contents.clear();
+        let empty_objects = HashMap::from([
+            (empty_actor.id, empty_actor.clone()),
+            (container_id, snapshot_with_id(container_id.as_u64())),
+        ]);
+        let empty_ctx = move_to_ctx_at_frame(
+            &empty_actor,
+            &empty_objects,
+            &players,
+            &definitions,
+            1,
+        );
+        let mut empty_state = PutState::from_request(
+            &CommandRequest::new(CommandId::Put)
+                .with_target(Some(container_id))
+                .with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+        assert_eq!(empty_state.step(&empty_ctx).status, CommandStatus::Failed);
     }
 
     #[test]
-    fn put_inside_target_container_ignores_center_distance() {
+    fn put_inside_target_uses_live_object_com_put() {
         let actor_id = ObjectId::new(600);
         let item_id = ObjectId::new(601);
         let container_id = ObjectId::new(602);
@@ -3304,8 +3323,6 @@ mod tests {
 
         let mut target_container = snapshot_with_id(container_id.as_u64());
         target_container.position = Vector2::new(54, 80);
-        target_container.collectible = false;
-        target_container.alive = false;
 
         let mut objects = HashMap::new();
         objects.insert(actor.id, actor.clone());
@@ -3339,15 +3356,16 @@ mod tests {
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty());
-        assert_eq!(result.events.len(), 1);
-        match &result.events[0] {
-            CommandEvent::ApplyObjectUpdate { object_id, update } => {
-                assert_eq!(*object_id, item_id);
-                assert_eq!(update.container, Some(Some(container_id)));
-                assert_eq!(update.position, Some(target_container.position));
-            }
-            other => panic!("unexpected event: {:?}", other),
-        }
+        assert_eq!(
+            result.events,
+            vec![CommandEvent::ObjectComPut {
+                actor_id,
+                target_id: container_id,
+                object_id: item_id,
+                ungrab_on_success: false,
+            }]
+        );
+        state.put_pending = false; // the engine event resolver clears this
 
         objects
             .get_mut(&item_id)
@@ -3425,70 +3443,86 @@ mod tests {
     }
 
     #[test]
-    fn put_requests_move_when_far_from_target() {
+    fn put_waits_only_for_nearby_uncontained_hit_speed_item() {
         let actor_id = ObjectId::new(620);
         let item_id = ObjectId::new(621);
         let container_id = ObjectId::new(622);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.position = Vector2::new(0, 0);
-        actor.contents = vec![item_id];
-        actor.command_direction = CommandDirection::Right;
 
         let mut item = snapshot_with_id(item_id.as_u64());
-        item.container = Some(actor_id);
+        item.position = Vector2::new(79, 0);
+        item.ocf |= ocf::HIT_SPEED1;
 
-        let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(80, 0);
+        let container = snapshot_with_id(container_id.as_u64());
 
-        let mut objects = HashMap::new();
-        objects.insert(actor.id, actor.clone());
-        objects.insert(item.id, item);
-        objects.insert(container.id, container);
+        let mut objects = HashMap::from([
+            (actor.id, actor.clone()),
+            (item.id, item),
+            (container.id, container),
+        ]);
 
-        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
-        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let ctx = CommandRuntimeContext {
-            landscape: None,
-            frame: 0,
-            position: actor_snapshot.position,
-            object: actor_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
+        let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 0);
 
         let mut state = PutState::from_request(
-            &CommandRequest::new(CommandId::Put).with_target(Some(container_id)),
+            &CommandRequest::new(CommandId::Put)
+                .with_target(Some(container_id))
+                .with_target2(Some(item_id)),
         )
         .expect("state created");
 
-        let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Running);
-        assert!(result.update.is_none());
-        assert!(
-            result.operations.iter().any(|operation| match operation {
-                CommandOperation::PushFront(request) => request.id == CommandId::MoveTo,
-                _ => false,
-            }),
-            "put should request movement when far from container"
-        );
+        for _ in 0..2 {
+            let waiting = state.step(&ctx);
+            assert_eq!(waiting.status, CommandStatus::Running);
+            assert!(waiting.operations.is_empty());
+            assert!(waiting.events.is_empty());
+        }
+        drop(ctx);
+
+        for (position, contained, hit_speed) in [
+            (Vector2::new(80, 0), None, true),
+            (Vector2::new(79, 0), Some(ObjectId::new(999)), true),
+            (Vector2::new(79, 0), None, false),
+        ] {
+            let item = objects.get_mut(&item_id).expect("item present");
+            item.position = position;
+            item.container = contained;
+            if hit_speed {
+                item.ocf |= ocf::HIT_SPEED1;
+            } else {
+                item.ocf &= !ocf::HIT_SPEED1;
+            }
+            let actor_snapshot = objects.get(&actor_id).expect("actor present");
+            let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 1);
+            let mut state = PutState::from_request(
+                &CommandRequest::new(CommandId::Put)
+                    .with_target(Some(container_id))
+                    .with_target2(Some(item_id)),
+            )
+            .expect("state created");
+            let get = state.step(&ctx);
+            assert_eq!(
+                get.operations,
+                vec![CommandOperation::PushFront(
+                    CommandRequest::new(CommandId::Get)
+                        .with_target(Some(item_id))
+                        .with_update_interval(40)
+                        .with_mode(CommandMode::SilentSub)
+                )]
+            );
+        }
     }
 
     #[test]
-    fn put_stops_digging_only_after_a_carried_item_is_ready() {
-        // C4Command::Put resolves/already-put/acquire/contained-target branches
-        // before its DFA_DIG ObjectComStop (C4Command.cpp:1386-1439).
+    fn put_contained_target_fails_before_dig_stop() {
         let actor_id = ObjectId::new(623);
         let item_id = ObjectId::new(624);
         let container_id = ObjectId::new(625);
+        let outer_id = ObjectId::new(626);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.action_procedure = ActionProcedure::Dig;
@@ -3499,54 +3533,339 @@ mod tests {
         item.container = Some(actor_id);
 
         let mut container = snapshot_with_id(container_id.as_u64());
-        container.position = Vector2::new(80, 0);
+        container.container = Some(outer_id);
+        let outer = snapshot_with_id(outer_id.as_u64());
 
         let players = HashMap::new();
         let definitions = HashMap::new();
-
-        let mut actor_without_item = actor.clone();
-        actor_without_item.contents.clear();
-        let no_item_objects = HashMap::from([
-            (actor_id, actor_without_item.clone()),
-            (container_id, container.clone()),
-        ]);
-        let no_item_ctx = move_to_ctx_at_frame(
-            &actor_without_item,
-            &no_item_objects,
-            &players,
-            &definitions,
-            0,
-        );
-        let mut no_item = PutState::from_request(
-            &CommandRequest::new(CommandId::Put).with_target(Some(container_id)),
-        )
-        .expect("state created");
-        let early = no_item.step(&no_item_ctx);
-        assert_eq!(early.status, CommandStatus::Completed);
-        assert!(early.update.is_none(), "early completion must not stop DIG");
-
         let objects = HashMap::from([
             (actor_id, actor.clone()),
             (item_id, item),
             (container_id, container),
+            (outer_id, outer),
         ]);
-        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 1);
-        let mut ready = PutState::from_request(
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let mut state = PutState::from_request(
             &CommandRequest::new(CommandId::Put).with_target(Some(container_id)),
         )
         .expect("state created");
-        let result = ready.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Running);
-        let update = result.update.expect("ready DIG Put calls ObjectComStop");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result.update.is_none());
+        assert!(result.operations.is_empty());
+        assert!(result.events.is_empty());
+    }
+
+    #[test]
+    fn put_collection_queues_throw_at_definition_center_with_live_gravity() {
+        let actor_id = ObjectId::new(627);
+        let item_id = ObjectId::new(628);
+        let target_id = ObjectId::new(629);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(40, 99);
+        actor.contents = vec![item_id];
+        actor.physical.throw = 50_000;
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "ITEM".into();
+        item.container = Some(actor_id);
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.definition_id = "TARG".into();
+        target.position = Vector2::new(105, 75);
+        target.ocf |= ocf::COLLECTION | ocf::ENTRANCE;
+
+        let objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (item_id, item),
+            (target_id, target),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::from([
+            (
+                "ITEM".into(),
+                CommandDefinitionSnapshot {
+                    fragile: false,
+                    ..CommandDefinitionSnapshot::default()
+                },
+            ),
+            (
+                "TARG".into(),
+                CommandDefinitionSnapshot {
+                    collection_rect: Some(DefinitionRect::new(-15, -15, 20, 20)),
+                    ..CommandDefinitionSnapshot::default()
+                },
+            ),
+        ]);
+        let mut landscape = crate::Landscape::flat(200, 100);
+        landscape.set_world_height(150);
+        let ctx = CommandRuntimeContext {
+            landscape: Some(&landscape),
+            frame: 0,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+
+        let request = CommandRequest::new(CommandId::Put)
+            .with_target(Some(target_id))
+            .with_target2(Some(item_id));
+        let mut state = PutState::from_request(&request).expect("Put state");
+        let result = state.step_with_gravity(&ctx, math::fixed100(20));
         assert_eq!(
-            update.action.and_then(|action| action.name),
-            Some("Idle".into())
+            result.operations,
+            vec![CommandOperation::PushFront(
+                CommandRequest::new(CommandId::Throw)
+                    .with_target(Some(item_id))
+                    .with_tx(Some(100))
+                    .with_ty(Some(70))
+                    .with_update_interval(5)
+                    .with_mode(CommandMode::SilentSub)
+            )]
         );
-        assert!(matches!(
-            result.operations.first(),
-            Some(CommandOperation::PushFront(request)) if request.id == CommandId::MoveTo
-        ));
+        assert!(result.events.is_empty(), "Put must not teleport the item");
+
+        let mut high_gravity = PutState::from_request(&request).expect("Put state");
+        let fallback = high_gravity.step_with_gravity(&ctx, math::fixed100(40));
+        assert_eq!(
+            fallback.operations,
+            vec![CommandOperation::PushFront(
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(target_id))
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::SilentSub)
+            )],
+            "Put's preflight must use the scenario gravity"
+        );
+
+        let mut equal_distance_objects = objects.clone();
+        equal_distance_objects
+            .get_mut(&target_id)
+            .expect("target present")
+            .position = Vector2::new(94, 99);
+        let mut equal_distance_definitions = definitions.clone();
+        equal_distance_definitions
+            .get_mut("TARG")
+            .expect("target definition present")
+            .collection_rect = Some(DefinitionRect::new(0, -39, 12, 20));
+        let equal_distance_ctx = CommandRuntimeContext {
+            landscape: Some(&landscape),
+            frame: 1,
+            position: actor.position,
+            object: equal_distance_objects
+                .get(&actor_id)
+                .expect("actor present"),
+            objects: &equal_distance_objects,
+            players: &players,
+            definitions: &equal_distance_definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut equal_distance = PutState::from_request(&request).expect("Put state");
+        let strict_fallback =
+            equal_distance.step_with_gravity(&equal_distance_ctx, math::fixed100(20));
+        assert_eq!(
+            strict_fallback.operations,
+            vec![CommandOperation::PushFront(
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(target_id))
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::SilentSub)
+            )],
+            "a throwing position equally far from the actor is not closer"
+        );
+        drop(equal_distance_ctx);
+
+        equal_distance_objects
+            .get_mut(&target_id)
+            .expect("target present")
+            .ocf &= !ocf::ENTRANCE;
+        let no_route_ctx = CommandRuntimeContext {
+            landscape: Some(&landscape),
+            frame: 2,
+            position: actor.position,
+            object: equal_distance_objects
+                .get(&actor_id)
+                .expect("actor present"),
+            objects: &equal_distance_objects,
+            players: &players,
+            definitions: &equal_distance_definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut no_route = PutState::from_request(&request).expect("Put state");
+        let no_route = no_route.step_with_gravity(&no_route_ctx, math::fixed100(20));
+        assert_eq!(no_route.status, CommandStatus::Running);
+        assert!(no_route.operations.is_empty());
+        assert!(no_route.events.is_empty());
+    }
+
+    #[test]
+    fn put_fragile_item_uses_grab_put_before_entrance_and_arms_ty() {
+        let actor_id = ObjectId::new(630);
+        let item_id = ObjectId::new(631);
+        let target_id = ObjectId::new(632);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(40, 99);
+        actor.contents = vec![item_id];
+        actor.physical.throw = 50_000;
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "FRAG".into();
+        item.container = Some(actor_id);
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.definition_id = "TARG".into();
+        target.position = Vector2::new(105, 75);
+        target.ocf |= ocf::COLLECTION | ocf::ENTRANCE;
+
+        let mut objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (item_id, item),
+            (target_id, target),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::from([
+            (
+                "FRAG".into(),
+                CommandDefinitionSnapshot {
+                    fragile: true,
+                    ..CommandDefinitionSnapshot::default()
+                },
+            ),
+            (
+                "TARG".into(),
+                CommandDefinitionSnapshot {
+                    collection_rect: Some(DefinitionRect::new(-15, -15, 20, 20)),
+                    grab_put_get: crate::GRAB_PUT_GET_PUT,
+                    ..CommandDefinitionSnapshot::default()
+                },
+            ),
+        ]);
+        let mut landscape = crate::Landscape::flat(200, 100);
+        landscape.set_world_height(150);
+        let ctx = CommandRuntimeContext {
+            landscape: Some(&landscape),
+            frame: 0,
+            position: objects.get(&actor_id).expect("actor present").position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+
+        let mut state = PutState::from_request(
+            &CommandRequest::new(CommandId::Put)
+                .with_target(Some(target_id))
+                .with_target2(Some(item_id)),
+        )
+        .expect("Put state");
+        let grab = state.step_with_gravity(&ctx, math::fixed100(20));
+        assert_eq!(
+            grab.operations,
+            vec![CommandOperation::PushFront(
+                CommandRequest::new(CommandId::Grab)
+                    .with_target(Some(target_id))
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::SilentSub)
+            )]
+        );
+        assert_eq!(state.put_ty, 1);
+        drop(ctx);
+
+        let actor = objects.get_mut(&actor_id).expect("actor present");
+        actor.action_procedure = ActionProcedure::Push;
+        actor.action_target = Some(target_id);
+        let ctx = CommandRuntimeContext {
+            landscape: Some(&landscape),
+            frame: 1,
+            position: objects.get(&actor_id).expect("actor present").position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let put = state.step_with_gravity(&ctx, math::fixed100(20));
+        assert_eq!(
+            put.events,
+            vec![CommandEvent::ObjectComPut {
+                actor_id,
+                target_id,
+                object_id: item_id,
+                ungrab_on_success: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn put_wrong_push_target_ungrabs_before_exiting_own_container() {
+        let actor_id = ObjectId::new(633);
+        let item_id = ObjectId::new(634);
+        let target_id = ObjectId::new(635);
+        let own_container_id = ObjectId::new(636);
+        let pushed_id = ObjectId::new(637);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(own_container_id);
+        actor.contents = vec![item_id];
+        actor.action_procedure = ActionProcedure::Push;
+        actor.action_target = Some(pushed_id);
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+        let objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (item_id, item),
+            (target_id, snapshot_with_id(target_id.as_u64())),
+            (
+                own_container_id,
+                snapshot_with_id(own_container_id.as_u64()),
+            ),
+            (pushed_id, snapshot_with_id(pushed_id.as_u64())),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let mut state = PutState::from_request(
+            &CommandRequest::new(CommandId::Put)
+                .with_target(Some(target_id))
+                .with_target2(Some(item_id)),
+        )
+        .expect("Put state");
+
+        let result = state.step(&ctx);
+        assert_eq!(
+            result.operations,
+            vec![CommandOperation::PushFront(
+                CommandRequest::new(CommandId::UnGrab)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::SilentSub)
+            )]
+        );
     }
 
     #[test]
@@ -10880,7 +11199,7 @@ mod tests {
     }
 
     #[test]
-    fn command_stack_put_transfers_item_into_container() {
+    fn command_stack_put_resolves_live_object_com_put_attempt() {
         let actor_id = ObjectId::new(20);
         let item_id = ObjectId::new(21);
         let container_id = ObjectId::new(22);
@@ -10889,6 +11208,7 @@ mod tests {
         actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
         actor.collectible = false;
         actor.position = Vector2::new(0, 0);
+        actor.container = Some(container_id);
         actor.contents.push(item_id);
 
         let mut item = snapshot_with_id(item_id.as_u64());
@@ -10942,19 +11262,16 @@ mod tests {
         let result = stack.step(&ctx).expect("put evaluates");
         assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty());
-        assert_eq!(result.events.len(), 1);
-        match &result.events[0] {
-            CommandEvent::ApplyObjectUpdate { object_id, update } => {
-                assert_eq!(*object_id, item_id);
-                assert_eq!(
-                    update.container,
-                    Some(Some(container_id)),
-                    "item should enter destination container"
-                );
-                assert_eq!(update.position, Some(container.position));
-            }
-            other => panic!("unexpected put event: {:?}", other),
-        }
+        assert_eq!(
+            result.events,
+            vec![CommandEvent::ObjectComPut {
+                actor_id,
+                target_id: container_id,
+                object_id: item_id,
+                ungrab_on_success: false,
+            }]
+        );
+        assert!(stack.resolve_put_attempt(true).is_none());
 
         assert_eq!(stack.len(), 1, "Put finishes on the following execute");
         objects
@@ -12204,6 +12521,18 @@ pub enum CommandEvent {
         actor_id: ObjectId,
         object_id: ObjectId,
     },
+    /// Run ObjectComPut as one live ordered operation. Enter rejection,
+    /// collection callbacks, and helper failure must resolve against the
+    /// exact Put command that emitted the attempt (C4ObjectCom.cpp:591-622;
+    /// C4Command.cpp:1439-1503).
+    ObjectComPut {
+        actor_id: ObjectId,
+        target_id: ObjectId,
+        object_id: ObjectId,
+        /// Put's internal Ty flag: a target grabbed solely for this command
+        /// is released after a successful helper call.
+        ungrab_on_success: bool,
+    },
     /// ObjectComThrow -> ObjectActionThrow is one ordered operation: the
     /// action transition must succeed before Random(360) and C4Object::Exit
     /// run (C4ObjectCom.cpp:120-137).
@@ -12821,8 +13150,9 @@ impl CommandStack {
     }
 
     /// Engine execution supplies the live scenario gravity separately from
-    /// the object/landscape command snapshots. Only ballistic Throw consumes
-    /// it; the public fixture seam above retains default-physics behavior.
+    /// the object/landscape command snapshots. Ballistic Throw and Put's
+    /// throw-in preflight consume it; the public fixture seam above retains
+    /// default-physics behavior.
     pub(crate) fn execute_front_with_gravity(
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
@@ -13132,6 +13462,27 @@ impl CommandStack {
         }
 
         Some(GetAttemptResolution { feedback })
+    }
+
+    /// Resolve only the Put command which emitted ObjectComPut. Collection
+    /// callbacks may have replaced or reordered the command stack while the
+    /// helper ran, so a plain front-command check is insufficient.
+    pub(crate) fn resolve_put_attempt(
+        &mut self,
+        succeeded: bool,
+    ) -> Option<CommandFailureFeedback> {
+        let index = self.entries.iter().position(|entry| {
+            matches!(&entry.state, CommandState::Put(state) if state.put_pending)
+        })?;
+        if let CommandState::Put(state) = &mut self.entries[index].state {
+            state.put_pending = false;
+        }
+        if succeeded {
+            return None;
+        }
+
+        self.entries[index].finished = Some(CommandStatus::Failed);
+        self.record_failure_at(index)
     }
 
     pub fn set_acquire_script_result(&mut self, result: AcquireScriptResult) -> bool {
@@ -15827,10 +16178,13 @@ struct PutState {
     #[serde(default)]
     remaining_count: i32,
     update_interval: u32,
-    last_move_order: Option<u64>,
-    get_requested: bool,
-    exit_requested: bool,
-    ungrab_requested: bool,
+    /// C4Command::Put reuses Ty as a reminder to let go after it grabbed a
+    /// GrabPut target itself.
+    #[serde(default)]
+    put_ty: i32,
+    /// A live ObjectComPut event is being resolved synchronously.
+    #[serde(default)]
+    put_pending: bool,
 }
 
 impl PutState {
@@ -15842,10 +16196,8 @@ impl PutState {
             definition_id: command_data_to_definition_id(&request.data),
             remaining_count: request.tx.unwrap_or(0),
             update_interval: request.update_interval.max(1),
-            last_move_order: None,
-            get_requested: false,
-            exit_requested: false,
-            ungrab_requested: false,
+            put_ty: request.ty.unwrap_or(0),
+            put_pending: false,
         })
     }
 
@@ -15866,24 +16218,13 @@ impl PutState {
         )
     }
 
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
-        }
-    }
-
     fn resolve_item<'a>(
         &mut self,
         ctx: &'a CommandRuntimeContext<'a>,
-    ) -> Option<(ObjectId, &'a CommandObjectSnapshot)> {
+    ) -> Result<Option<(ObjectId, &'a CommandObjectSnapshot)>, ()> {
         if let Some(item_id) = self.requested_item {
             if let Some(snapshot) = ctx.resolve(item_id) {
-                return Some((item_id, snapshot));
+                return Ok(Some((item_id, snapshot)));
             }
             self.requested_item = None;
         }
@@ -15893,28 +16234,39 @@ impl PutState {
                 if let Some(snapshot) = ctx.resolve(*object_id) {
                     if &snapshot.definition_id == definition_id {
                         self.requested_item = Some(*object_id);
-                        return Some((*object_id, snapshot));
+                        return Ok(Some((*object_id, snapshot)));
                     }
                 }
             }
+            // A requested definition is a hard requirement. C++ finishes
+            // unsuccessfully instead of falling back to arbitrary contents.
+            return Err(());
         }
 
         if let Some(object_id) = ctx.object.contents.first().copied() {
             if let Some(snapshot) = ctx.resolve(object_id) {
                 self.requested_item = Some(object_id);
-                return Some((object_id, snapshot));
+                return Ok(Some((object_id, snapshot)));
             }
         }
 
-        None
+        Ok(None)
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        if ctx.object.container.is_none() {
-            self.exit_requested = false;
-        }
-        if ctx.object.action_procedure != ActionProcedure::Push {
-            self.ungrab_requested = false;
+        self.step_with_gravity(
+            ctx,
+            crate::PhysicsSettings::default().gravity_as_c4fixed(),
+        )
+    }
+
+    fn step_with_gravity(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+    ) -> CommandStepResult {
+        if self.put_pending {
+            return CommandStepResult::running(None);
         }
 
         let container_snapshot = match ctx.resolve(self.container) {
@@ -15923,8 +16275,9 @@ impl PutState {
         };
 
         let (item_id, item_snapshot) = match self.resolve_item(ctx) {
-            Some(value) => value,
-            None => return CommandStepResult::completed(None),
+            Ok(Some(value)) => value,
+            Ok(None) => return CommandStepResult::completed(None),
+            Err(()) => return CommandStepResult::failed(None),
         };
 
         if item_snapshot.container == Some(self.container) {
@@ -15941,92 +16294,155 @@ impl PutState {
         }
 
         if item_snapshot.container != Some(ctx.object.id) {
-            if !self.get_requested {
-                self.get_requested = true;
-                let mut result = CommandStepResult::running(None);
-                let request = CommandRequest::new(CommandId::Get)
-                    .with_target(Some(item_id))
-                    .with_update_interval(40)
-                    .with_mode(CommandMode::SilentSub);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
+            // A nearby uncontained object with impact speed is still in
+            // flight. The C++ command waits instead of chasing it.
+            if item_snapshot.container.is_none()
+                && c4_distance(
+                    ctx.position.x,
+                    ctx.position.y,
+                    item_snapshot.position.x,
+                    item_snapshot.position.y,
+                ) < 80
+                && item_snapshot.ocf & ocf::HIT_SPEED1 != 0
+            {
+                return CommandStepResult::running(None);
             }
-            return CommandStepResult::running(None);
-        }
-        self.get_requested = false;
 
-        // C4Command::Put calls ObjectComStop only after the item is confirmed
-        // in the actor's contents and the target is known to be uncontained
-        // (C4Command.cpp:1420-1439). L118 owns the contained-target failure.
-        let update = if container_snapshot.container.is_none() {
-            self.prepare_update(ctx)
-        } else {
-            None
-        };
-
-        if let Some(container_id) = ctx.object.container {
-            if container_id != self.container {
-                if !self.exit_requested {
-                    self.exit_requested = true;
-                    let mut result = CommandStepResult::running(update.clone());
-                    let request = CommandRequest::new(CommandId::Exit)
-                        .with_update_interval(50)
-                        .with_mode(CommandMode::SilentSub);
-                    result.operations.push(CommandOperation::PushFront(request));
-                    return result;
-                }
-                return CommandStepResult::running(update);
-            }
+            let request = CommandRequest::new(CommandId::Get)
+                .with_target(Some(item_id))
+                .with_update_interval(40)
+                .with_mode(CommandMode::SilentSub);
+            return CommandStepResult::running(None)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
         }
 
-        if ctx.object.action_procedure == ActionProcedure::Push
-            && ctx.object.action_target != Some(self.container)
+        // A contained target cannot receive a Put. This precedes the DIG
+        // stop and all navigation branches (C4Command.cpp:1431-1436).
+        if container_snapshot.container.is_some() {
+            return CommandStepResult::failed(None);
+        }
+
+        let update = self.prepare_update(ctx);
+        let p_grabbing = (ctx.object.action_procedure == ActionProcedure::Push)
+            .then_some(ctx.object.action_target)
+            .flatten();
+
+        if p_grabbing.is_some() && p_grabbing != Some(self.container) {
+            let request = CommandRequest::new(CommandId::UnGrab)
+                .with_update_interval(50)
+                .with_mode(CommandMode::SilentSub);
+            return CommandStepResult::running(update)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+
+        if ctx.object.container == Some(self.container) {
+            self.put_pending = true;
+            return CommandStepResult::running(update).with_events(vec![
+                CommandEvent::ObjectComPut {
+                    actor_id: ctx.object.id,
+                    target_id: self.container,
+                    object_id: item_id,
+                    ungrab_on_success: false,
+                },
+            ]);
+        }
+
+        if ctx.object.container.is_some() {
+            let request = CommandRequest::new(CommandId::Exit)
+                .with_update_interval(50)
+                .with_mode(CommandMode::SilentSub);
+            return CommandStepResult::running(update)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+
+        let target_definition = ctx.definition(&container_snapshot.definition_id);
+        let item_is_fragile = ctx
+            .definition(&item_snapshot.definition_id)
+            .is_some_and(|definition| definition.fragile);
+        if container_snapshot.ocf & ocf::COLLECTION != 0
+            && !item_is_fragile
+            && p_grabbing != Some(self.container)
         {
-            if !self.ungrab_requested {
-                self.ungrab_requested = true;
-                let mut result = CommandStepResult::running(update.clone());
-                let request = CommandRequest::new(CommandId::UnGrab)
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::SilentSub);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
-            }
-            return CommandStepResult::running(update);
-        } else if ctx.object.action_procedure != ActionProcedure::Push {
-            self.ungrab_requested = false;
-        }
-
-        // A Clonk already inside the target puts directly even when the
-        // object centers exceed the outdoor range gate
-        // (C4Command.cpp:1439-1447).
-        if ctx.object.container != Some(self.container) {
-            const PUT_RANGE_HORIZONTAL: i32 = 12;
-            const PUT_RANGE_VERTICAL: i32 = 18;
-            let dx = container_snapshot.position.x - ctx.position.x;
-            let dy = container_snapshot.position.y - ctx.position.y;
-            if dx.abs() > PUT_RANGE_HORIZONTAL || dy.abs() > PUT_RANGE_VERTICAL {
-                if self.should_issue_move(ctx.frame) {
-                    let mut result = CommandStepResult::running(update.clone());
-                    let request = CommandRequest::new(CommandId::MoveTo)
-                        .with_target(Some(self.container))
-                        .with_update_interval(15)
+            if let Some(collection) =
+                target_definition.and_then(|definition| definition.collection_rect)
+            {
+                let target_position = Vector2::new(
+                    container_snapshot.position.x + collection.x + collection.width / 2,
+                    container_snapshot.position.y + collection.y + collection.height / 2,
+                );
+                let throw_force = math::val_by_physical(400, ctx.object.physical.throw);
+                let target_distance = c4_distance(
+                    ctx.position.x,
+                    ctx.position.y,
+                    container_snapshot.position.x,
+                    container_snapshot.position.y,
+                );
+                let throwing_position_found = ctx.landscape.is_some_and(|landscape| {
+                    [1, -1].into_iter().any(|direction| {
+                        landscape
+                            .find_throwing_position(
+                                target_position,
+                                FixedVec2::new(throw_force * direction, -throw_force),
+                                ctx.object.shape_height,
+                                gravity,
+                            )
+                            .is_some_and(|position| {
+                                c4_distance(
+                                    position.x,
+                                    position.y,
+                                    ctx.position.x,
+                                    ctx.position.y,
+                                ) < target_distance
+                            })
+                    })
+                });
+                if throwing_position_found {
+                    let request = CommandRequest::new(CommandId::Throw)
+                        .with_target(Some(item_id))
+                        .with_tx(Some(target_position.x))
+                        .with_ty(Some(target_position.y))
+                        .with_update_interval(5)
                         .with_mode(CommandMode::SilentSub);
-                    result.operations.push(CommandOperation::PushFront(request));
-                    return result;
+                    return CommandStepResult::running(update)
+                        .with_operations(vec![CommandOperation::PushFront(request)]);
                 }
-                return CommandStepResult::running(update);
             }
         }
 
-        let mut item_update = ObjectUpdate::new();
-        item_update.container = Some(Some(self.container));
-        item_update.position = Some(container_snapshot.position);
-        item_update.velocity = Some(Vector2::ZERO);
+        if target_definition
+            .is_some_and(|definition| definition.grab_put_get & crate::GRAB_PUT_GET_PUT != 0)
+        {
+            if p_grabbing == Some(self.container) {
+                self.put_pending = true;
+                return CommandStepResult::running(update).with_events(vec![
+                    CommandEvent::ObjectComPut {
+                        actor_id: ctx.object.id,
+                        target_id: self.container,
+                        object_id: item_id,
+                        ungrab_on_success: self.put_ty != 0,
+                    },
+                ]);
+            }
 
-        CommandStepResult::running(update).with_events(vec![CommandEvent::ApplyObjectUpdate {
-            object_id: item_id,
-            update: item_update,
-        }])
+            self.put_ty = 1;
+            let request = CommandRequest::new(CommandId::Grab)
+                .with_target(Some(self.container))
+                .with_update_interval(50)
+                .with_mode(CommandMode::SilentSub);
+            return CommandStepResult::running(update)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+
+        if container_snapshot.ocf & ocf::ENTRANCE != 0 {
+            let request = CommandRequest::new(CommandId::Enter)
+                .with_target(Some(self.container))
+                .with_update_interval(50)
+                .with_mode(CommandMode::SilentSub);
+            return CommandStepResult::running(update)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+
+        CommandStepResult::running(update)
     }
 }
 
@@ -18357,8 +18773,8 @@ impl CommandState {
     /// MoveTo's InitEvaluation absorption/adjust (C4Command.cpp:
     /// 1634-1643), Acquire's 500/250 range defaults (:1666-1670) and
     /// Construct's found-site write (:1757-1766), plus Put's resolved
-    /// Target2 and remaining Tx count (:1384-1418). Put's Ty reminder flag
-    /// is unmodeled.
+    /// Target2, remaining Tx count, and internal Ty reminder flag
+    /// (:1384-1504).
     fn apply_live_overrides(&self, view: &mut CommandView) {
         match self {
             CommandState::MoveTo(state) => {
@@ -18381,6 +18797,9 @@ impl CommandState {
             CommandState::Put(state) => {
                 view.tx = (state.remaining_count != 0).then_some(state.remaining_count);
                 view.target2 = state.requested_item;
+                if state.put_ty != 0 {
+                    view.ty = Some(state.put_ty);
+                }
             }
             _ => {}
         }
@@ -18700,7 +19119,7 @@ impl ActiveCommand {
             CommandState::UnGrab(state) => state.step(ctx),
             CommandState::Jump(state) => state.step(ctx),
             CommandState::Wait(state) => state.step(ctx),
-            CommandState::Put(state) => state.step(ctx),
+            CommandState::Put(state) => state.step_with_gravity(ctx, gravity),
             CommandState::Drop(state) => state.step(ctx),
             CommandState::Get(state) => state.step(ctx),
             CommandState::Dig(state) => state.step(ctx),

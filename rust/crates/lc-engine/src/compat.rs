@@ -226,6 +226,9 @@ pub(crate) struct DefinitionFireMetadata {
     /// Positive Collection rect enables OCF_Collection when construction,
     /// capacity, action and delay gates pass.
     pub collection_rect: Option<DefinitionRect>,
+    /// DefCore `Fragile`; Put does not throw these items into collection
+    /// areas.
+    pub fragile: bool,
     /// Positive Entrance rect enables OCF_Entrance at FullCon.
     pub entrance_rect: Option<DefinitionRect>,
     /// DefCore RotatedEntrance rotation cutoff.
@@ -37375,6 +37378,8 @@ impl EffectHostContext {
                         collection_limit: u32::try_from(metadata.collection_limit)
                             .ok()
                             .filter(|limit| *limit > 0),
+                        collection_rect: metadata.fire.collection_rect,
+                        fragile: metadata.fire.fragile,
                         can_chop: metadata.action_library.specs().iter().any(|(_, spec)| {
                             spec.procedure
                                 .as_deref()

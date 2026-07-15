@@ -8575,6 +8575,9 @@ pub struct Definition {
     contact_function_calls: bool,
     collection_rect: Option<DefinitionRect>,
     collection_limit: Option<u32>,
+    /// DefCore `Fragile`; outdoor Put must not throw these objects into a
+    /// target's collection area.
+    fragile: bool,
     collectible: bool,
     /// DefCore `NoGet` (src/C4Def.cpp:412): omit this definition from
     /// manual get/activate menus when set to any nonzero value.
@@ -8824,6 +8827,7 @@ impl Definition {
             contact_function_calls: false,
             collection_rect: None,
             collection_limit: None,
+            fragile: false,
             collectible: false,
             no_get: false,
             grab_put_get: 0,
@@ -9178,6 +9182,7 @@ impl Definition {
         definition.set_contact_function_calls(resource.core.contact_function_calls);
         definition.set_collection_rect(resource.core.collection.map(DefinitionRect::from));
         definition.set_collection_limit(resource.core.collection_limit);
+        definition.set_fragile(resource.core.fragile);
         definition.set_fire_properties(
             resource.core.contact_incinerate,
             resource.core.no_burn_decay,
@@ -10261,6 +10266,14 @@ impl Definition {
 
     pub fn set_collection_limit(&mut self, limit: Option<u32>) {
         self.collection_limit = limit.and_then(|value| if value > 0 { Some(value) } else { None });
+    }
+
+    pub fn fragile(&self) -> bool {
+        self.fragile
+    }
+
+    pub fn set_fragile(&mut self, fragile: bool) {
+        self.fragile = fragile;
     }
 
     pub fn is_collectible(&self) -> bool {
@@ -19086,6 +19099,7 @@ impl Engine {
                                 no_get: definition.no_get(),
                                 oversize: definition.oversize(),
                                 collection_rect: definition.collection_rect(),
+                                fragile: definition.fragile(),
                                 entrance_rect: definition.entrance_rect(),
                                 rotated_entrance: definition.rotated_entrance,
                                 attract_lightning: definition.attract_lightning,
@@ -23159,6 +23173,8 @@ impl Engine {
                     CommandDefinitionSnapshot {
                         value: definition.value(),
                         collection_limit: definition.collection_limit(),
+                        collection_rect: definition.collection_rect(),
+                        fragile: definition.fragile(),
                         can_chop: chop_action.is_some(),
                         chop_action,
                         constructable: definition.is_constructable(),
@@ -23437,6 +23453,8 @@ impl Engine {
                     CommandDefinitionSnapshot {
                         value: definition.value(),
                         collection_limit: definition.collection_limit(),
+                        collection_rect: definition.collection_rect(),
+                        fragile: definition.fragile(),
                         can_chop,
                         chop_action,
                         constructable: definition.is_constructable(),
@@ -37877,6 +37895,7 @@ impl Engine {
         definition.set_contact_function_calls(core.contact_function_calls);
         definition.set_collection_rect(core.collection.map(DefinitionRect::from));
         definition.set_collection_limit(core.collection_limit);
+        definition.set_fragile(core.fragile);
         definition.set_entrance_rect(core.entrance.map(DefinitionRect::from));
         definition.set_rotated_entrance(core.rotated_entrance);
         definition.set_fire_properties(
@@ -41463,6 +41482,33 @@ impl Engine {
                     if let Some(feedback) = resolution.and_then(|result| result.feedback) {
                         self.execute_command_failure_feedback(actor_id, feedback, message)?;
                     }
+                }
+            }
+            CommandEvent::ObjectComPut {
+                actor_id,
+                target_id,
+                object_id,
+                ungrab_on_success,
+            } => {
+                let succeeded = self.try_object_com_put(actor_id, target_id, object_id)?;
+                if succeeded && ungrab_on_success {
+                    if let Some(actor_index) = self.find_object_index(actor_id) {
+                        // Put's Ty cleanup uses AddCommand(UnGrab) with the
+                        // default zero interval, after ObjectComPut callbacks.
+                        let _ = self.objects[actor_index]
+                            .commands
+                            .push_front(CommandRequest::new(CommandId::UnGrab));
+                    }
+                }
+                let feedback = self
+                    .find_object_index(actor_id)
+                    .and_then(|index| {
+                        self.objects[index]
+                            .commands
+                            .resolve_put_attempt(succeeded)
+                    });
+                if let Some(feedback) = feedback {
+                    self.execute_command_failure_feedback(actor_id, feedback, None)?;
                 }
             }
             CommandEvent::ThrowObject {
@@ -49521,6 +49567,214 @@ mod script_control_execution_tests {
                 .expect("target remains")
                 .position,
             Vector2::new(12, 34)
+        );
+    }
+}
+
+#[cfg(test)]
+mod put_command_regression {
+    use super::*;
+
+    fn put_fixture_engine() -> Engine {
+        let actor_script = r#"#strict
+local tracked;
+protected func Put()
+{
+  tracked->Mark(5);
+  return(1);
+}
+"#;
+        let target_script = r#"#strict
+local reject;
+protected func RejectCollect(idItem, pItem)
+{
+  pItem->Mark(2);
+  return(reject);
+}
+protected func Collection2(pItem)
+{
+  pItem->Mark(3);
+  return(1);
+}
+protected func Collection(pItem, fPut)
+{
+  pItem->Mark(6);
+  return(1);
+}
+"#;
+        let item_script = r#"#strict
+local callback_order;
+public func Mark(iStep)
+{
+  callback_order = callback_order * 10 + iStep;
+  return(1);
+}
+protected func RejectEntrance(pTarget)
+{
+  Mark(1);
+  return(0);
+}
+protected func Entrance(pTarget)
+{
+  Mark(4);
+  return(1);
+}
+"#;
+
+        let mut actor =
+            Definition::from_script("ACTR", "Actor", actor_script).expect("actor compiles");
+        actor.set_c4_callback_convention(true);
+        actor.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Push".to_string(),
+                    ActionSpec::default().with_procedure("PUSH"),
+                ),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+            ]),
+        );
+        let mut target =
+            Definition::from_script("TARG", "Target", target_script).expect("target compiles");
+        target.set_c4_callback_convention(true);
+        target.set_grab_put_get(GRAB_PUT_GET_PUT);
+        let mut item =
+            Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
+        item.set_c4_callback_convention(true);
+        item.set_collectible(true);
+
+        let mut engine = Engine::with_seed(118);
+        engine
+            .register_definition(actor)
+            .expect("actor registers");
+        engine
+            .register_definition(target)
+            .expect("target registers");
+        engine.register_definition(item).expect("item registers");
+        engine
+    }
+
+    fn spawn_push_put_triplet(
+        engine: &mut Engine,
+        reject: bool,
+    ) -> (ObjectId, ObjectId, ObjectId) {
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("TARG")
+                    .with_position(Vector2::new(80, 40))
+                    .with_velocity(Vector2::new(3, -2))
+                    .with_local_vars(HashMap::from([(
+                        "reject".to_string(),
+                        Value::Int(i32::from(reject)),
+                    )])),
+            )
+            .expect("target spawns");
+        let mut push = ActionState::new("Push");
+        push.target = Some(target);
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("ACTR")
+                    .with_position(Vector2::new(20, 40))
+                    .with_action(push),
+            )
+            .expect("actor spawns");
+        let item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+            .expect("item spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index]
+            .state
+            .local_vars
+            .insert("tracked".to_string(), object_reference_value(item));
+        engine.objects[actor_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Put)
+                    .with_target(Some(target))
+                    .with_target2(Some(item))
+                    .with_ty(Some(1)),
+            )
+            .expect("Put queues");
+        (actor, item, target)
+    }
+
+    #[test]
+    fn put_event_runs_object_com_put_callbacks_and_ty_ungrab_only_on_success() {
+        let mut engine = put_fixture_engine();
+        let (actor, item, target) = spawn_push_put_triplet(&mut engine, false);
+
+        engine
+            .execute_object_command_now(actor)
+            .expect("successful Put executes");
+
+        let item_index = engine.find_object_index(item).expect("item remains");
+        let target_index = engine.find_object_index(target).expect("target remains");
+        assert_eq!(engine.objects[item_index].state.container, Some(target));
+        assert_eq!(
+            engine.objects[item_index]
+                .state
+                .local_vars
+                .get("callback_order"),
+            Some(&Value::Int(123_456)),
+            "RejectEntrance -> RejectCollect -> Collection2 -> Entrance -> Put -> Collection"
+        );
+        assert_eq!(
+            engine.objects[item_index].state.position,
+            engine.objects[target_index].state.position
+        );
+        assert_eq!(
+            engine.objects[item_index].fixed_velocity,
+            engine.objects[target_index].fixed_velocity
+        );
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        assert_eq!(
+            engine.objects[actor_index]
+                .commands
+                .snapshot()
+                .command_names(),
+            ["UnGrab", "Put"],
+            "Ty queues interval-zero UnGrab above the still-running Put"
+        );
+        assert_eq!(
+            engine.objects[actor_index]
+                .commands
+                .snapshot()
+                .command_views()[1]
+                .ty,
+            Some(1)
+        );
+
+        let (rejected_actor, rejected_item, _) =
+            spawn_push_put_triplet(&mut engine, true);
+        engine
+            .execute_object_command_now(rejected_actor)
+            .expect("rejected Put resolves");
+        let rejected_item_index = engine
+            .find_object_index(rejected_item)
+            .expect("rejected item remains");
+        assert_eq!(
+            engine.objects[rejected_item_index].state.container,
+            Some(rejected_actor)
+        );
+        assert_eq!(
+            engine.objects[rejected_item_index]
+                .state
+                .local_vars
+                .get("callback_order"),
+            Some(&Value::Int(12))
+        );
+        let rejected_actor_index = engine
+            .find_object_index(rejected_actor)
+            .expect("rejected actor remains");
+        assert!(
+            engine.objects[rejected_actor_index]
+                .commands
+                .snapshot()
+                .is_empty(),
+            "helper failure finishes Put and must not queue Ty-UnGrab"
         );
     }
 }
