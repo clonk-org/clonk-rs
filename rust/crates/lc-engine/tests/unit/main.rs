@@ -12772,7 +12772,7 @@ protected func Destruction()
     }
 
     #[test]
-    fn pull_procedure_without_target_resets_to_default() {
+    fn l073_pull_without_target_stops_in_walk_with_silent_wait() {
         let script = r#"
         global func Initialize(state, random) {
             return nil;
@@ -12787,6 +12787,10 @@ protected func Destruction()
         let mut actions = HashMap::new();
         actions.insert(
             "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
+            "Walk".to_string(),
             ActionSpec::default().with_procedure("walk"),
         );
         actions.insert(
@@ -12808,12 +12812,264 @@ protected func Destruction()
                     .with_command_direction(CommandDirection::Right),
             )
             .expect("spawn succeeds");
+        let index = engine.find_object_index(id).expect("puller exists");
+        engine.objects[index]
+            .set_fixed_velocity(FixedVec2::new(fixed100(125), fixed100(-75)));
+        engine.objects[index]
+            .commands
+            .push_back(CommandRequest::new(CommandId::MoveTo).with_tx(Some(20)))
+            .expect("tail command queues");
 
-        let snapshot = engine.tick().expect("tick succeeds");
-        let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.action.name, "Idle");
-        assert_eq!(object.velocity, Vector2::ZERO);
-        assert_eq!(object.command_direction, CommandDirection::Stop);
+        let _ = engine
+            .apply_physics_at_index(index)
+            .expect("targetless Pull resolves");
+
+        let index = engine.find_object_index(id).expect("puller remains");
+        let object = &engine.objects[index];
+        assert_eq!(object.state.action.name, "Walk");
+        assert_eq!(object.fixed_velocity, FixedVec2::ZERO);
+        assert_eq!(object.state.velocity, Vector2::ZERO);
+        assert_eq!(object.state.command_direction, CommandDirection::Stop);
+        assert_eq!(
+            object.commands.command_names(),
+            vec!["Wait".to_string(), "MoveTo".to_string()]
+        );
+        let stack = serde_json::to_value(object.commands.snapshot())
+            .expect("command stack serializes");
+        assert_eq!(stack["commands"][0]["mode"], serde_json::json!("SilentSub"));
+        assert_eq!(stack["commands"][0]["update_interval"], serde_json::json!(50));
+    }
+
+    fn l073_pull_failure_engine() -> Engine {
+        let mut puller = Definition::from_script("L73P", "Puller", "#strict")
+            .expect("puller compiles");
+        puller.set_category(CATEGORY_OBJECT);
+        puller.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        puller.set_physical(PhysicalInfo {
+            walk: 35_000,
+            push: 45_000,
+            ..PhysicalInfo::default()
+        });
+        puller.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Pull".to_string(),
+                    ActionSpec::default().with_procedure("PULL"),
+                ),
+            ]),
+        );
+
+        let wagon_script = r#"#strict
+local puller, action_seen;
+public func Arm(object actor) { puller = actor; return true; }
+protected func GrabLost()
+{
+    if (puller) action_seen = GetAction(puller);
+    return true;
+}
+"#;
+        let mut wagon = Definition::from_script("L73W", "Wagon", wagon_script)
+            .expect("wagon compiles");
+        wagon.set_category(CATEGORY_VEHICLE);
+        wagon.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        wagon.set_grab(1);
+        wagon.set_mass(200);
+
+        let mut rejected = Definition::from_script("L73R", "Ungrabable wagon", "#strict")
+            .expect("ungrabable target compiles");
+        rejected.set_category(CATEGORY_VEHICLE);
+        rejected.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        rejected.set_grab(0);
+        rejected.set_mass(200);
+
+        let container = Definition::from_script("L73C", "Container", "#strict")
+            .expect("container compiles");
+
+        let mut engine = Engine::with_seed(73);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine.register_definition(puller).expect("puller registers");
+        engine.register_definition(wagon).expect("wagon registers");
+        engine
+            .register_definition(rejected)
+            .expect("ungrabable target registers");
+        engine
+            .register_definition(container)
+            .expect("container registers");
+        engine
+    }
+
+    fn l073_spawn_puller(
+        engine: &mut Engine,
+        target: ObjectId,
+        position: Vector2,
+        container: Option<ObjectId>,
+        seed_tail: bool,
+    ) -> ObjectId {
+        let mut pull = ActionState::new("Pull");
+        pull.target = Some(target);
+        let mut config = SpawnConfig::new("L73P")
+            .with_category(CATEGORY_OBJECT)
+            .with_position(position)
+            .with_controller(7)
+            .with_action(pull)
+            .with_command_direction(CommandDirection::Right)
+            .with_fixed_velocity(FixedVec2::new(fixed100(125), fixed100(-75)))
+            .with_mobile(true);
+        if let Some(container) = container {
+            config = config.with_container(container);
+        }
+        let puller = engine.spawn_object(config).expect("puller spawns");
+        if seed_tail {
+            let index = engine.find_object_index(puller).expect("puller exists");
+            engine.objects[index]
+                .commands
+                .push_back(CommandRequest::new(CommandId::MoveTo).with_tx(Some(20)))
+                .expect("tail command queues");
+        }
+        puller
+    }
+
+    fn assert_l073_pull_stopped(
+        engine: &Engine,
+        puller: ObjectId,
+        expected_commands: &[&str],
+        label: &str,
+    ) {
+        let index = engine.find_object_index(puller).expect("puller remains");
+        let object = &engine.objects[index];
+        assert_eq!(object.state.action.name, "Walk", "{label}");
+        assert_eq!(
+            object.state.command_direction,
+            CommandDirection::Stop,
+            "{label}"
+        );
+        assert_eq!(object.fixed_velocity, FixedVec2::ZERO, "{label}");
+        assert_eq!(object.state.velocity, Vector2::ZERO, "{label}");
+        assert_eq!(
+            object.commands.command_names(),
+            expected_commands
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect::<Vec<_>>(),
+            "{label}"
+        );
+        let stack = serde_json::to_value(object.commands.snapshot())
+            .expect("command stack serializes");
+        assert_eq!(
+            stack["commands"][0]["mode"],
+            serde_json::json!("SilentSub"),
+            "{label}"
+        );
+        assert_eq!(
+            stack["commands"][0]["update_interval"],
+            serde_json::json!(50),
+            "{label}"
+        );
+    }
+
+    #[test]
+    fn l073_physical_pull_target_failures_stop_in_walk_with_silent_wait() {
+        #[derive(Clone, Copy)]
+        enum Failure {
+            InsideTarget,
+            TargetContained,
+            PushRejected,
+        }
+
+        for (label, failure) in [
+            ("puller inside target", Failure::InsideTarget),
+            ("target contained", Failure::TargetContained),
+            ("target Push rejected", Failure::PushRejected),
+        ] {
+            let mut engine = l073_pull_failure_engine();
+            let containing = matches!(failure, Failure::TargetContained)
+                .then(|| {
+                    engine
+                        .spawn_object(SpawnConfig::new("L73C"))
+                        .expect("container spawns")
+                });
+            let target_definition = if matches!(failure, Failure::PushRejected) {
+                "L73R"
+            } else {
+                "L73W"
+            };
+            let mut target_config = SpawnConfig::new(target_definition)
+                .with_category(CATEGORY_VEHICLE)
+                .with_position(Vector2::new(10, 0))
+                .with_controller(3);
+            if let Some(container) = containing {
+                target_config = target_config.with_container(container);
+            }
+            let target = engine
+                .spawn_object(target_config)
+                .expect("pull target spawns");
+            let puller_container = matches!(failure, Failure::InsideTarget).then_some(target);
+            let puller = l073_spawn_puller(
+                &mut engine,
+                target,
+                Vector2::ZERO,
+                puller_container,
+                true,
+            );
+            let index = engine.find_object_index(puller).expect("puller exists");
+
+            let _ = engine
+                .apply_physics_at_index(index)
+                .unwrap_or_else(|error| panic!("{label}: Pull failed: {error}"));
+
+            assert_l073_pull_stopped(&engine, puller, &["Wait", "MoveTo"], label);
+        }
+    }
+
+    #[test]
+    fn l073_horse_like_pull_range_loss_stops_before_grab_lost() {
+        let mut engine = l073_pull_failure_engine();
+        let wagon = engine
+            .spawn_object(
+                SpawnConfig::new("L73W")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::ZERO)
+                    .with_controller(3),
+            )
+            .expect("wagon spawns");
+        let horse = l073_spawn_puller(
+            &mut engine,
+            wagon,
+            Vector2::new(100, 0),
+            None,
+            false,
+        );
+        let wagon_index = engine.find_object_index(wagon).expect("wagon exists");
+        engine
+            .call_object_function(
+                wagon_index,
+                "Arm",
+                vec![compat::object_reference_value(horse)],
+            )
+            .expect("wagon arms loss trace");
+
+        engine.tick().expect("horse loses the distant wagon");
+
+        assert_l073_pull_stopped(&engine, horse, &["Wait"], "horse range loss");
+        let horse_index = engine.find_object_index(horse).expect("horse remains");
+        assert_eq!(engine.objects[horse_index].state.action.target, None);
+        let wagon_index = engine.find_object_index(wagon).expect("wagon remains");
+        assert_eq!(engine.objects[wagon_index].state.controller, 7);
+        assert_ne!(engine.objects[wagon_index].fixed_velocity.x, C4Fixed::ZERO);
+        assert_eq!(
+            engine.objects[wagon_index]
+                .state
+                .local_vars
+                .get("action_seen"),
+            Some(&Value::String("Walk".to_string())),
+            "GrabLost observes StopActionDelayCommand first"
+        );
     }
 
     #[test]
@@ -12932,52 +13188,212 @@ protected func Destruction()
         );
     }
 
-    #[test]
-    fn fight_procedure_without_target_resets_to_default() {
-        let script = r#"
-        global func Initialize(state, random) {
-            return nil;
-        }
-
-        global func Step(state, frame, random) {
-            return nil;
-        }
-        "#;
-
-        let mut definition = Definition::from_script("Fighter", "Fighter", script).unwrap();
-        let mut actions = HashMap::new();
-        actions.insert(
-            "Idle".to_string(),
-            ActionSpec::default().with_procedure("walk"),
+    fn l073_fight_failure_engine() -> Engine {
+        let mut fighter = Definition::from_script("L73F", "Fighter", "#strict")
+            .expect("fighter compiles");
+        fighter.set_category(CATEGORY_OBJECT);
+        fighter.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        fighter.set_shape_vertices(vec![
+            ObjectVertex::new(-8, -8),
+            ObjectVertex::new(8, -8),
+            ObjectVertex::new(8, 8),
+            ObjectVertex::new(-8, 8),
+        ]);
+        fighter.set_physical(PhysicalInfo {
+            walk: 35_000,
+            ..PhysicalInfo::default()
+        });
+        fighter.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Fight".to_string(),
+                    ActionSpec::default().with_procedure("FIGHT"),
+                ),
+            ]),
         );
-        actions.insert(
-            "Fight".to_string(),
-            ActionSpec::default().with_procedure("fight"),
-        );
-        definition.configure_actions(Some("Idle".to_string()), actions);
-        definition.set_movement_profile(
-            MovementProfile::default()
-                .with_walk_speed(6)
-                .with_walk_acceleration(3),
+
+        let mut opponent = Definition::from_script("L73O", "Opponent", "#strict")
+            .expect("opponent compiles");
+        opponent.set_category(CATEGORY_OBJECT);
+        opponent.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        opponent.set_shape_vertices(vec![
+            ObjectVertex::new(-8, -8),
+            ObjectVertex::new(8, -8),
+            ObjectVertex::new(8, 8),
+            ObjectVertex::new(-8, 8),
+        ]);
+        opponent.configure_actions(
+            Some("Fight".to_string()),
+            HashMap::from([(
+                "Fight".to_string(),
+                ActionSpec::default().with_procedure("FIGHT"),
+            )]),
         );
 
-        let mut engine = Engine::with_seed(27);
+        let mut passive = Definition::from_script("L73N", "Passive", "#strict")
+            .expect("passive target compiles");
+        passive.set_category(CATEGORY_OBJECT);
+        passive.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        passive.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([("Idle".to_string(), ActionSpec::default())]),
+        );
+
+        let container = Definition::from_script("L73D", "Closed container", "#strict")
+            .expect("container compiles");
+
+        let mut engine = Engine::with_seed(73);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine.register_definition(fighter).expect("fighter registers");
         engine
-            .register_definition(definition)
-            .expect("definition registers");
+            .register_definition(opponent)
+            .expect("opponent registers");
+        engine
+            .register_definition(passive)
+            .expect("passive target registers");
+        engine
+            .register_definition(container)
+            .expect("container registers");
+        engine
+    }
 
-        let id = engine
-            .spawn_object(
-                SpawnConfig::new("Fighter")
-                    .with_position(Vector2::new(0, 0))
-                    .with_action(ActionState::new("Fight")),
+    fn l073_spawn_fighter(
+        engine: &mut Engine,
+        target: Option<ObjectId>,
+        container: Option<ObjectId>,
+    ) -> ObjectId {
+        let mut fight = ActionState::new("Fight");
+        fight.target = target;
+        let mut config = SpawnConfig::new("L73F")
+            .with_category(CATEGORY_OBJECT)
+            .with_position(Vector2::ZERO)
+            .with_action(fight)
+            .with_command_direction(CommandDirection::Right)
+            .with_fixed_velocity(FixedVec2::new(fixed100(125), fixed100(-75)))
+            .with_mobile(true);
+        if let Some(container) = container {
+            config = config.with_container(container);
+        }
+        let fighter = engine.spawn_object(config).expect("fighter spawns");
+        let index = engine.find_object_index(fighter).expect("fighter exists");
+        engine.objects[index]
+            .commands
+            .push_back(CommandRequest::new(CommandId::MoveTo).with_tx(Some(20)))
+            .expect("tail command queues");
+        fighter
+    }
+
+    fn assert_l073_fighter_stands(engine: &Engine, fighter: ObjectId, label: &str) {
+        let index = engine.find_object_index(fighter).expect("fighter remains");
+        let object = &engine.objects[index];
+        assert_eq!(object.state.action.name, "Walk", "{label}");
+        assert_eq!(
+            object.state.command_direction,
+            CommandDirection::Stop,
+            "{label}"
+        );
+        assert_eq!(object.fixed_velocity, FixedVec2::ZERO, "{label}");
+        assert_eq!(object.state.velocity, Vector2::ZERO, "{label}");
+        assert_eq!(
+            object.commands.command_names(),
+            vec!["MoveTo".to_string()],
+            "FIGHT failure must not add PULL's delayed Wait: {label}"
+        );
+    }
+
+    #[test]
+    fn l073_fight_without_target_stands_in_walk_without_wait() {
+        let mut engine = l073_fight_failure_engine();
+        let fighter = l073_spawn_fighter(&mut engine, None, None);
+        let index = engine.find_object_index(fighter).expect("fighter exists");
+
+        let _ = engine
+            .apply_physics_at_index(index)
+            .expect("targetless Fight resolves");
+
+        assert_l073_fighter_stands(&engine, fighter, "no target");
+    }
+
+    #[test]
+    fn l073_fight_target_door_and_range_failures_stand_without_wait() {
+        #[derive(Clone, Copy)]
+        enum Failure {
+            TargetNotFighting,
+            FighterBehindClosedDoor,
+            TargetBehindClosedDoor,
+            OutOfRange,
+        }
+
+        for (label, failure) in [
+            ("target not fighting", Failure::TargetNotFighting),
+            (
+                "fighter behind closed door",
+                Failure::FighterBehindClosedDoor,
+            ),
+            (
+                "target behind closed door",
+                Failure::TargetBehindClosedDoor,
+            ),
+            ("fight target out of range", Failure::OutOfRange),
+        ] {
+            let mut engine = l073_fight_failure_engine();
+            let closed_container = matches!(
+                failure,
+                Failure::FighterBehindClosedDoor | Failure::TargetBehindClosedDoor
             )
-            .expect("fighter spawns");
+            .then(|| {
+                engine
+                    .spawn_object(
+                        SpawnConfig::new("L73D")
+                            .with_position(Vector2::ZERO)
+                            .with_entrance_status(false),
+                    )
+                    .expect("closed container spawns")
+            });
+            let target_definition = if matches!(failure, Failure::TargetNotFighting) {
+                "L73N"
+            } else {
+                "L73O"
+            };
+            let target_position = if matches!(failure, Failure::OutOfRange) {
+                Vector2::new(40, 0)
+            } else {
+                Vector2::new(10, 0)
+            };
+            let mut target_config = SpawnConfig::new(target_definition)
+                .with_category(CATEGORY_OBJECT)
+                .with_position(target_position);
+            if matches!(failure, Failure::TargetBehindClosedDoor) {
+                target_config = target_config.with_container(
+                    closed_container.expect("target has a closed container"),
+                );
+            }
+            if target_definition == "L73O" {
+                target_config = target_config.with_action(ActionState::new("Fight"));
+            }
+            let target = engine
+                .spawn_object(target_config)
+                .expect("fight target spawns");
+            let fighter_container = if matches!(failure, Failure::FighterBehindClosedDoor) {
+                closed_container
+            } else {
+                None
+            };
+            let fighter = l073_spawn_fighter(&mut engine, Some(target), fighter_container);
+            let index = engine.find_object_index(fighter).expect("fighter exists");
 
-        let snapshot = engine.tick().expect("tick succeeds");
-        let fighter = snapshot.object(id).expect("fighter present");
-        assert_eq!(fighter.action.name, "Idle");
-        assert_eq!(fighter.velocity, Vector2::ZERO);
+            let _ = engine
+                .apply_physics_at_index(index)
+                .unwrap_or_else(|error| panic!("{label}: Fight failed: {error}"));
+
+            assert_l073_fighter_stands(&engine, fighter, label);
+        }
     }
 
     #[test]
@@ -13106,7 +13522,7 @@ protected func Destruction()
     }
 
     #[test]
-    fn fight_procedure_resets_when_target_not_fighting() {
+    fn fight_procedure_stands_when_target_not_fighting() {
         let script = r#"
         global func Initialize(state, random) {
             return nil;
@@ -13121,6 +13537,10 @@ protected func Destruction()
         let mut fighter_actions = HashMap::new();
         fighter_actions.insert(
             "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        fighter_actions.insert(
+            "Walk".to_string(),
             ActionSpec::default().with_procedure("walk"),
         );
         fighter_actions.insert(
@@ -13181,7 +13601,7 @@ protected func Destruction()
         let fighter = snapshot
             .object(fighter_id)
             .expect("fighter present after tick");
-        assert_eq!(fighter.action.name, "Idle");
+        assert_eq!(fighter.action.name, "Walk");
         assert_eq!(fighter.velocity, Vector2::ZERO);
     }
 

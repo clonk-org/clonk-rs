@@ -30284,7 +30284,7 @@ impl Engine {
         }
 
         if matches!(procedure, ActionProcedure::Fight)
-            && !self.apply_fight_procedure(idx, &definition_id)
+            && !self.apply_fight_procedure(idx)?
         {
             return Ok(false);
         }
@@ -31609,29 +31609,13 @@ impl Engine {
     /// (C4ObjectCom.cpp:239-245). Re-resolve after Idle because its callbacks
     /// may remove the builder or change the definition used by Walk.
     fn object_com_stop_build(&mut self, builder_id: ObjectId) -> Result<bool, EngineError> {
-        let Some(builder_idx) = self.find_object_index(builder_id).filter(|&index| {
+        let Some(_) = self.find_object_index(builder_id).filter(|&index| {
             !self.objects[index].destroyed
                 && !matches!(self.objects[index].state.status, ObjectStatus::Deleted)
         }) else {
             return Ok(false);
         };
-        let definition_id = self.objects[builder_idx].definition_id.clone();
-        let _ = self.action_with_calls(builder_idx, &definition_id, "Idle")?;
-
-        let Some(builder_idx) = self.find_object_index(builder_id) else {
-            return Ok(false);
-        };
-        self.objects[builder_idx].state.command_direction = CommandDirection::Stop;
-        let definition_id = self.objects[builder_idx].definition_id.clone();
-        if !self.action_with_calls(builder_idx, &definition_id, "Walk")? {
-            return Ok(false);
-        }
-        if let Some(builder_idx) = self.find_object_index(builder_id) {
-            let builder = &mut self.objects[builder_idx];
-            builder.fixed_velocity = FixedVec2::ZERO;
-            builder.state.velocity = Vector2::ZERO;
-        }
-        Ok(true)
+        self.object_com_stop_live(builder_id)
     }
 
     /// Shared false return from `C4Object::Build` (C4Object.cpp:5033-5051).
@@ -32807,7 +32791,30 @@ impl Engine {
         self.update_sector_for_index(idx);
     }
 
-    /// ObjectActionStand (C4ObjectCom.cpp:41-46): ComDir Stop then Walk.
+    /// ObjectActionStand (C4ObjectCom.cpp:41-46): set ComDir Stop, then use
+    /// ordinary SetActionByName("Walk") and zero both dirs only when that
+    /// transition succeeds. Action callbacks may remove or redefine the
+    /// object, so every post-callback write resolves its stable id again.
+    fn object_action_stand_live(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<bool, EngineError> {
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        self.objects[idx].state.command_direction = CommandDirection::Stop;
+        let definition_id = self.objects[idx].definition_id.clone();
+        if !self.action_with_calls(idx, &definition_id, "Walk")? {
+            return Ok(false);
+        }
+        if let Some(idx) = self.find_object_index(object_id) {
+            let object = &mut self.objects[idx];
+            object.fixed_velocity = FixedVec2::ZERO;
+            object.state.velocity = Vector2::ZERO;
+        }
+        Ok(true)
+    }
+
     fn object_action_stand(
         &mut self,
         idx: usize,
@@ -32824,7 +32831,17 @@ impl Engine {
     }
 
     /// `ObjectComStop` (C4ObjectCom.cpp:239-245): enter ActIdle first,
-    /// then stand in Walk when that action exists.
+    /// then stand in Walk when that action exists. Both transitions are
+    /// ordinary and the Walk lookup uses the live post-Idle definition.
+    fn object_com_stop_live(&mut self, object_id: ObjectId) -> Result<bool, EngineError> {
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        let definition_id = self.objects[idx].definition_id.clone();
+        let _ = self.action_with_calls(idx, &definition_id, "Idle")?;
+        self.object_action_stand_live(object_id)
+    }
+
     fn object_com_stop_action(
         &mut self,
         idx: usize,
@@ -33350,8 +33367,9 @@ impl Engine {
         idx: usize,
         target_idx: usize,
         command_direction: CommandDirection,
-        definition_id: &DefinitionId,
+        _definition_id: &DefinitionId,
     ) -> Result<bool, EngineError> {
+        let puller_id = self.objects[idx].id;
         let physical = self.object_physical(idx);
         let position = self.objects[idx].state.position;
         let target_position = self.objects[target_idx].state.position;
@@ -33392,7 +33410,7 @@ impl Engine {
             math::val_by_physical(250, physical.push),
             false,
         )? {
-            self.reset_action_to_default(idx, definition_id, true);
+            self.stop_action_delay_command_live(puller_id)?;
             return Ok(false);
         }
         // Successful target force transfers attribution before the train
@@ -33432,14 +33450,15 @@ impl Engine {
         if !(-push_range..=sawdt - 1 + push_range).contains(&(position.x - sax))
             || !(-push_range..=sahgt - 1 + push_range).contains(&(position.y - say))
         {
-            self.reset_action_to_default(idx, definition_id, true);
-            let _ = tolerate_script_error(self.call_object_function(
-                target_idx,
-                "GrabLost",
-                Vec::new(),
-            ))?;
-            // Lose target (C4Object.cpp:5158).
-            self.objects[idx].state.action.target = None;
+            // Stop and queue the delay before notifying the actor's live
+            // target. GrabLost may trim that new Wait back to PushTo and may
+            // retarget the puller; C++ clears the resulting live target last
+            // (C4Object.cpp:5177-5181).
+            self.stop_action_delay_command_live(puller_id)?;
+            self.grab_lost(puller_id)?;
+            if let Some(puller_idx) = self.find_object_index(puller_id) {
+                self.objects[puller_idx].state.action.target = None;
+            }
             return Ok(false);
         }
         // Move to pulling position (C4Object.cpp:5164), facing by xdir,
@@ -33467,24 +33486,25 @@ impl Engine {
         movement_profile: MovementProfile,
         definition_id: &DefinitionId,
     ) -> Result<bool, EngineError> {
+        let puller_id = self.objects[idx].id;
         let Some(target_id) = self.objects[idx].state.action.target else {
-            self.reset_action_to_default(idx, definition_id, true);
+            self.stop_action_delay_command_live(puller_id)?;
             return Ok(false);
         };
 
         let Some(target_idx) = self.find_object_index(target_id) else {
-            self.reset_action_to_default(idx, definition_id, true);
+            self.stop_action_delay_command_live(puller_id)?;
             return Ok(false);
         };
 
         if target_idx == idx {
-            self.reset_action_to_default(idx, definition_id, true);
+            self.stop_action_delay_command_live(puller_id)?;
             return Ok(false);
         }
 
         let puller_container = self.objects[idx].state.container;
         if puller_container == Some(target_id) {
-            self.reset_action_to_default(idx, definition_id, true);
+            self.stop_action_delay_command_live(puller_id)?;
             return Ok(false);
         }
 
@@ -33493,12 +33513,12 @@ impl Engine {
             target.destroyed || matches!(target.state.status, ObjectStatus::Deleted)
         };
         if target_removed {
-            self.reset_action_to_default(idx, definition_id, true);
+            self.stop_action_delay_command_live(puller_id)?;
             return Ok(false);
         }
 
         if self.objects[target_idx].state.container.is_some() {
-            self.reset_action_to_default(idx, definition_id, true);
+            self.stop_action_delay_command_live(puller_id)?;
             return Ok(false);
         }
 
@@ -33561,7 +33581,11 @@ impl Engine {
         let horizontal_gap = (puller_position.x as i64 - target_position.x as i64).abs() as i32;
         let vertical_gap = (puller_position.y as i64 - target_position.y as i64).abs() as i32;
         if horizontal_gap > horizontal_gap_limit || vertical_gap > vertical_gap_limit {
-            self.reset_action_to_default(idx, definition_id, true);
+            self.stop_action_delay_command_live(puller_id)?;
+            self.grab_lost(puller_id)?;
+            if let Some(puller_idx) = self.find_object_index(puller_id) {
+                self.objects[puller_idx].state.action.target = None;
+            }
             return Ok(false);
         }
 
@@ -33599,7 +33623,7 @@ impl Engine {
             }
             std::cmp::Ordering::Equal => {
                 // Should not happen because we guard earlier, but keep the action safe.
-                self.reset_action_to_default(idx, definition_id, true);
+                self.stop_action_delay_command_live(puller_id)?;
                 return Ok(false);
             }
         }
@@ -33607,20 +33631,21 @@ impl Engine {
         Ok(true)
     }
 
-    fn apply_fight_procedure(&mut self, idx: usize, definition_id: &DefinitionId) -> bool {
+    fn apply_fight_procedure(&mut self, idx: usize) -> Result<bool, EngineError> {
+        let fighter_id = self.objects[idx].id;
         let Some(target_id) = self.objects[idx].state.action.target else {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            let _ = self.object_action_stand_live(fighter_id)?;
+            return Ok(false);
         };
 
         let Some(target_idx) = self.find_object_index(target_id) else {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            let _ = self.object_action_stand_live(fighter_id)?;
+            return Ok(false);
         };
 
         if target_idx == idx {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            let _ = self.object_action_stand_live(fighter_id)?;
+            return Ok(false);
         }
 
         let target_removed = {
@@ -33628,8 +33653,8 @@ impl Engine {
             target.destroyed || !target.state.status.is_active()
         };
         if target_removed {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            let _ = self.object_action_stand_live(fighter_id)?;
+            return Ok(false);
         }
 
         let target_definition_id = self.objects[target_idx].definition_id.clone();
@@ -33644,15 +33669,15 @@ impl Engine {
             })
             .unwrap_or_default();
         if !matches!(target_procedure, ActionProcedure::Fight) {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            let _ = self.object_action_stand_live(fighter_id)?;
+            return Ok(false);
         }
 
         let fighter_container = self.objects[idx].state.container;
         let target_container = self.objects[target_idx].state.container;
         if fighter_container != target_container {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            let _ = self.object_action_stand_live(fighter_id)?;
+            return Ok(false);
         }
 
         let fighter_position = self.objects[idx].state.position;
@@ -33704,8 +33729,8 @@ impl Engine {
         if (fighter_position.x - target_position.x).abs() > threshold
             || (fighter_position.y - target_position.y).abs() > threshold
         {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            let _ = self.object_action_stand_live(fighter_id)?;
+            return Ok(false);
         }
 
         // Other (C4Object.cpp:5235-5238): grounded fighting and Tick35
@@ -33719,7 +33744,7 @@ impl Engine {
             self.do_object_experience(fighter_id, 2);
         }
 
-        true
+        Ok(true)
     }
 
     /// `C4Object::Push` (C4Object.cpp:1758-1808): grab/containment checks,
@@ -34043,6 +34068,22 @@ impl Engine {
             .with_update_interval(50)
             .with_mode(CommandMode::SilentSub);
         let _ = self.objects[idx].commands.push_front(wait);
+        Ok(())
+    }
+
+    /// Stable-id form used when target-side callbacks may have changed the
+    /// object list or the actor's definition before the stop runs.
+    fn stop_action_delay_command_live(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<(), EngineError> {
+        let _ = self.object_com_stop_live(object_id)?;
+        let wait = CommandRequest::new(CommandId::Wait)
+            .with_update_interval(50)
+            .with_mode(CommandMode::SilentSub);
+        if let Some(idx) = self.find_object_index(object_id) {
+            let _ = self.objects[idx].commands.push_front(wait);
+        }
         Ok(())
     }
 
