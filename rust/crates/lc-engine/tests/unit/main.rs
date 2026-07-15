@@ -29453,6 +29453,205 @@ func Take(object donor) { return GrabObjectInfo(donor); }
     }
 
     #[test]
+    fn grab_object_info_moves_the_full_identity_and_rewrites_life_status() {
+        let receiver_script = r#"#strict 2
+func Take(object donor) {
+    return [GrabObjectInfo(donor), GetName(), GetRank(),
+            GetObjectInfoCoreVal("Experience", "ObjectInfo"),
+            GetName(donor), GetRank(donor),
+            GetCrewCount(0), GetCrewCount(1)];
+}
+func Try(object donor) { return GrabObjectInfo(donor); }
+func SelfOf(object target) { return GrabObjectInfo(target, target); }
+"#;
+        let donor_script = r#"#strict 2
+func RemoveAndGrabSelf() {
+    RemoveObject();
+    return GrabObjectInfo(this(), this());
+}
+"#;
+
+        let mut engine = Engine::with_seed(0);
+        let mut donor_definition =
+            Definition::from_script("DONR", "Donor definition", donor_script)
+                .expect("donor definition compiles");
+        donor_definition.set_crew_member(true);
+        engine
+            .register_definition(donor_definition)
+            .expect("donor definition registers");
+        let mut receiver_definition =
+            Definition::from_script("RCVR", "Receiver definition", receiver_script)
+                .expect("receiver definition compiles");
+        receiver_definition.set_crew_member(true);
+        engine
+            .register_definition(receiver_definition)
+            .expect("receiver definition registers");
+
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("DONR".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(JoinPlayerConfig {
+                name: "Identity owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![player_file::CrewInfo {
+                    id: "DONR".to_string(),
+                    name: "Veteran Ada".to_string(),
+                    rank: 4,
+                    experience: 8_000,
+                    total_playing_time: 17,
+                    participation: 3,
+                    in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                }],
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("identity owner joins");
+        engine
+            .register_player(PlayerConfig::new(1, "Receiver owner"))
+            .expect("receiver owner registers");
+
+        let donor = engine.player(0).expect("donor player").crew()[0];
+        let donor_info = engine
+            .crew_object_info(donor)
+            .expect("donor starts with persistent info")
+            .clone();
+        let original_link = engine.capture_state().crew_info_links[&donor];
+        let receiver = engine
+            .spawn_object(
+                SpawnConfig::new("RCVR")
+                    .with_owner(1)
+                    .with_crew_member(false)
+                    .with_alive(true),
+            )
+            .expect("live receiver spawns");
+        let receiver_index = engine.find_object_index(receiver).expect("receiver index");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    receiver_index,
+                    "Take",
+                    vec![Value::Object(donor.as_u64())],
+                )
+                .expect("live identity transfer succeeds"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::String("Veteran Ada".to_string()),
+                Value::Int(4),
+                Value::Int(8_000),
+                Value::String("Donor definition".to_string()),
+                Value::Nil,
+                Value::Int(0),
+                Value::Int(1),
+            ])
+        );
+        assert!(engine.crew_object_info(donor).is_none());
+        assert_eq!(engine.crew_object_info(receiver), Some(&donor_info));
+        assert!(engine.player(0).expect("donor player").crew().is_empty());
+        assert_eq!(engine.player(1).expect("receiver player").crew(), &[receiver]);
+        let live_state = engine.capture_state();
+        assert_eq!(live_state.crew_info_links[&receiver], original_link);
+        let live_entry =
+            &live_state.crew_info_rosters[&original_link.player_id][original_link.roster_index];
+        assert!(live_entry.in_action);
+        assert!(!live_entry.has_died);
+
+        let info_less = engine
+            .spawn_object(
+                SpawnConfig::new("DONR")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("info-less donor spawns");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    receiver_index,
+                    "SelfOf",
+                    vec![Value::Object(info_less.as_u64())],
+                )
+                .expect("active self-grab succeeds without info"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    receiver_index,
+                    "Try",
+                    vec![Value::Object(info_less.as_u64())],
+                )
+                .expect("info-less donor is rejected"),
+            Value::Bool(false)
+        );
+        assert_eq!(engine.crew_object_info(receiver), Some(&donor_info));
+
+        let info_less_index = engine
+            .find_object_index(info_less)
+            .expect("info-less donor index");
+        assert_eq!(
+            engine
+                .call_object_function(info_less_index, "RemoveAndGrabSelf", Vec::new())
+                .expect("deleted self probe completes"),
+            Value::Bool(false),
+            "C4Object::GrabInfo checks Status before its self-transfer fast path"
+        );
+
+        let dead_receiver = engine
+            .spawn_object(
+                SpawnConfig::new("RCVR")
+                    .with_owner(1)
+                    .with_crew_member(false)
+                    .with_alive(false),
+            )
+            .expect("dead receiver spawns");
+        let dead_index = engine
+            .find_object_index(dead_receiver)
+            .expect("dead receiver index");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    dead_index,
+                    "Take",
+                    vec![Value::Object(receiver.as_u64())],
+                )
+                .expect("dead receiver takes the same identity"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::String("Veteran Ada".to_string()),
+                Value::Int(4),
+                Value::Int(8_000),
+                Value::String("Receiver definition".to_string()),
+                Value::Nil,
+                Value::Int(0),
+                Value::Int(1),
+            ])
+        );
+        assert!(engine.crew_object_info(receiver).is_none());
+        assert_eq!(engine.crew_object_info(dead_receiver), Some(&donor_info));
+        assert_eq!(
+            engine.player(1).expect("receiver player").crew(),
+            &[dead_receiver],
+            "MakeCrewMember still adds a dead receiver to its owner's crew"
+        );
+        let dead_state = engine.capture_state();
+        assert_eq!(dead_state.crew_info_links[&dead_receiver], original_link);
+        let dead_entry =
+            &dead_state.crew_info_rosters[&original_link.player_id][original_link.roster_index];
+        assert!(!dead_entry.in_action);
+        assert!(dead_entry.has_died);
+    }
+
+    #[test]
     fn crew_info_owner_link_survives_save_restore_and_foreign_removal() {
         let script = r#"#strict 2
 func Setup() {

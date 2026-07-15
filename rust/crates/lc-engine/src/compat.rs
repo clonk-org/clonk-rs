@@ -16055,14 +16055,14 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(to) = to.or(active) else {
             return None;
         };
-        if from == to {
-            return Some((to, None));
-        }
         if !context.ensure_object_scope(from) || !context.ensure_object_scope(to) {
             return None;
         }
         if !context.object_status_present(from) || !context.object_status_present(to) {
             return None;
+        }
+        if from == to {
+            return Some((to, None));
         }
         let donor_has_info = context
             .object_scope(from)
