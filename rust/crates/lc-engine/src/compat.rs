@@ -14497,6 +14497,76 @@ fn temp_readd_upper_effects(
     Ok(())
 }
 
+/// `C4Effect::Kill` for an effect that was resolved from the live host
+/// context (C4Effect.cpp:365-405). The node stays linked and dead while its
+/// Stop callback runs, so same-call queries and EffectVar writes see the C++
+/// state. An accepted removal is materialized later without dispatching a
+/// second Stop; a denial restores this exact node and its callback writes.
+fn kill_effect_inline(
+    scope: EffectScope,
+    target: &Value,
+    victim: &EffectState,
+) -> Result<(), RuntimeError> {
+    let uppers = if victim.priority > 0 {
+        let effects = snapshot_effects_from_context(scope).unwrap_or_default();
+        temp_remove_upper_effects(scope, target, &effects, victim.number)?
+    } else {
+        // An inactive victim first receives Fx*Start(iTemp=2) in C++.
+        // That distinct legacy case is tracked separately; it never runs
+        // the active victim's upper-effect bracket.
+        Vec::new()
+    };
+
+    let marked_dead = with_context_mut(scope, |ctx| {
+        let (previous_priority, updated) = {
+            let effect = ctx
+                .effects
+                .iter_mut()
+                .find(|effect| effect.number == victim.number && effect.priority != 0)?;
+            let previous_priority = effect.priority;
+            effect.priority = 0;
+            (previous_priority, effect.clone())
+        };
+        ctx.commands.push(EffectCommand::update(updated.clone()));
+        Some((previous_priority, updated))
+    })?;
+
+    if let Some((previous_priority, stopped)) = marked_dead {
+        let function = format!("Fx{}Stop", stopped.name);
+        let stop_result = dispatch_effect_fx_callback_fail_safe(
+            &stopped,
+            &function,
+            &[target.clone(), Value::Int(stopped.number)],
+        );
+        if stop_result == -1 {
+            with_context_mut(scope, |ctx| {
+                let updated = {
+                    let Some(effect) = ctx
+                        .effects
+                        .iter_mut()
+                        .find(|effect| effect.number == stopped.number && effect.priority == 0)
+                    else {
+                        return;
+                    };
+                    effect.priority = previous_priority;
+                    effect.clone()
+                };
+                // This final update also carries EffectVar writes made by
+                // Fx*Stop while the node was dead.
+                ctx.commands.push(EffectCommand::update(updated));
+            })?;
+        } else {
+            with_context_mut(scope, |ctx| {
+                // Fx*Stop already ran above. Remove by effect number so a
+                // callback-added same-name peer cannot be deleted instead.
+                ctx.remove_effect(None, stopped.number.max(0) as usize, true);
+            })?;
+        }
+    }
+
+    temp_readd_upper_effects(scope, target, &uppers)
+}
+
 /// `FnCheckEffect` / `C4Effect::Check` (C4Script.cpp:5546-5556;
 /// C4Effect.cpp:271-317). Unlike AddEffect, this does not create a pending
 /// effect: it asks the selected live list synchronously and returns deny,
@@ -15038,9 +15108,10 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     let name_filter =
         effect_name_filter("RemoveEffect", args.first().unwrap_or(&Value::Nil))?.map(str::to_owned);
 
-    let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
+    let target_state = args.get(1).unwrap_or(&Value::Nil);
+    let scope = determine_scope_from_state(target_state)?;
     if matches!(scope, EffectScope::Object) {
-        match args.get(1).unwrap_or(&Value::Nil) {
+        match target_state {
             Value::Object(_) | Value::Proplist(_) => {}
             other => {
                 return Err(RuntimeError::new(format!(
@@ -15085,14 +15156,31 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
+    // Real object and global effect lists execute C4Effect::Kill inside the
+    // host call. Synthetic proplist fixtures retain the deferred command
+    // protocol because they have no live callback/world context.
+    let synchronous_kill = matches!(scope, EffectScope::Global)
+        || matches!(target_state, Value::Object(_));
+    if !no_callbacks && synchronous_kill {
+        let victim = with_context_mut(scope, |ctx| {
+            ctx.find_live_effect(name_filter.as_deref(), index)
+        })?;
+        let Some(victim) = victim else {
+            return Ok(Value::Bool(false));
+        };
+        let target = match scope {
+            EffectScope::Object => target_state.clone(),
+            EffectScope::Global => Value::Nil,
+        };
+        kill_effect_inline(scope, &target, &victim)?;
+        return Ok(Value::Bool(true));
+    }
+
     let removed = with_context_mut(scope, |ctx| {
         ctx.remove_live_effect(name_filter.as_deref(), index, no_callbacks)
     })?;
-    // C4Effect::Kill runs the resolved Fx*Stop synchronously — for the
-    // engine-internal fire that clears OnFire on the spot (FnFxFireStop,
-    // C4Effect.cpp:787). Script Fx*Stop overloads ride the deferred
-    // Stopped dispatch instead; fDoNoCalls skips the Stop entirely
-    // (C4Effect.cpp:404 vs FnRemoveEffect's no-call flag).
+    // Synthetic proplist fixtures have no callback script, but preserve the
+    // old engine-Fire projection. fDoNoCalls skips the entire Kill bracket.
     if matches!(scope, EffectScope::Object)
         && !no_callbacks
         && removed
@@ -37270,14 +37358,22 @@ impl EffectScopeContext {
         self.remove_effect_with_dead(name_filter, index, no_callbacks, false)
     }
 
-    fn remove_effect_with_dead(
-        &mut self,
+    fn find_live_effect(
+        &self,
         name_filter: Option<&str>,
         index: usize,
-        no_callbacks: bool,
-        include_dead: bool,
     ) -> Option<EffectState> {
-        let position = if let Some(name) = name_filter {
+        self.effect_position(name_filter, index, false)
+            .map(|position| self.effects[position].clone())
+    }
+
+    fn effect_position(
+        &self,
+        name_filter: Option<&str>,
+        index: usize,
+        include_dead: bool,
+    ) -> Option<usize> {
+        if let Some(name) = name_filter {
             let mut remaining = index;
             self.effects.iter().position(|effect| {
                 // FnRemoveEffect resolves named removals through the
@@ -37303,16 +37399,22 @@ impl EffectScopeContext {
             let number = i32::try_from(index).unwrap_or(i32::MAX);
             (number > 0)
                 .then(|| {
-                    self.effects
-                        .iter()
-                        .position(|effect| {
-                            effect.number == number && (include_dead || effect.priority != 0)
-                        })
+                    self.effects.iter().position(|effect| {
+                        effect.number == number && (include_dead || effect.priority != 0)
+                    })
                 })
                 .flatten()
-        };
+        }
+    }
 
-        let position = position?;
+    fn remove_effect_with_dead(
+        &mut self,
+        name_filter: Option<&str>,
+        index: usize,
+        no_callbacks: bool,
+        include_dead: bool,
+    ) -> Option<EffectState> {
+        let position = self.effect_position(name_filter, index, include_dead)?;
 
         let effect = self.effects.remove(position);
         let command = if name_filter.is_none() {

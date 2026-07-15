@@ -241,6 +241,100 @@ func FxStartDeniedStop() { ++iDeniedStops; }
 }
 
 #[test]
+fn live_object_remove_effect_finishes_kill_inline() {
+    // FnRemoveEffect calls C4Effect::Kill synchronously: upper effects are
+    // temp-stopped high-to-low, the victim Stop runs, and uppers are
+    // restarted low-to-high before the caller continues. A Stop denial
+    // restores the victim, and its RNG draw precedes the caller's next draw
+    // (C4Script.cpp:5508-5511; C4Effect.cpp:365-405,473-510).
+    let script = r#"#strict 3
+local iOrder, iStopRandom, iAfterRandom, iSawVictimVar;
+
+func Install()
+{
+  AddEffect("Victim", this(), 100, 0, this());
+  AddEffect("Upper", this(), 200, 0, this());
+  return(1);
+}
+
+func RemoveInline()
+{
+  iOrder = iStopRandom = iAfterRandom = iSawVictimVar = 0;
+  var removed = RemoveEffect("Victim", this());
+  iAfterRandom = Random(100);
+  var victim = GetEffect("Victim", this());
+  if(victim) iSawVictimVar = EffectVar(0, this(), victim);
+  iOrder = iOrder * 10 + 4;
+  return([removed, iStopRandom, iAfterRandom, iSawVictimVar, iOrder]);
+}
+
+func FxUpperStop(object target, int number, int reason, bool temp)
+{
+  if(reason == 1 && temp) iOrder = iOrder * 10 + 1;
+}
+
+func FxVictimStop(object target, int number, int reason)
+{
+  iOrder = iOrder * 10 + 2;
+  iStopRandom = Random(100);
+  EffectVar(0, target, number) = 77;
+  return(-1);
+}
+
+func FxUpperStart(object target, int number, int temp)
+{
+  if(temp == 1) iOrder = iOrder * 10 + 3;
+}
+"#;
+
+    let mut engine = Engine::with_seed(7);
+    engine
+        .register_definition(
+            Definition::from_script("FXRM", "Inline effect remover", script)
+                .expect("effect remover script compiles"),
+        )
+        .expect("effect remover definition registers");
+    let target = engine
+        .spawn_object(SpawnConfig::new("FXRM"))
+        .expect("effect remover spawns");
+    let target_index = engine
+        .find_object_index(target)
+        .expect("effect remover remains live");
+    engine
+        .call_object_function(target_index, "Install", Vec::new())
+        .expect("effects install");
+
+    let mut expected_rng = engine.debug_rng_clone();
+    let expected_stop = expected_rng.random(100);
+    let expected_after = expected_rng.random(100);
+    assert_eq!(
+        engine
+            .call_object_function(target_index, "RemoveInline", Vec::new())
+            .expect("inline removal completes"),
+        Value::Array(vec![
+            Value::Bool(true),
+            Value::Int(expected_stop),
+            Value::Int(expected_after),
+            Value::Int(77),
+            Value::Int(1234),
+        ]),
+        "the Kill bracket, denial recovery, and Stop RNG draw all finish before RemoveEffect returns"
+    );
+
+    assert_eq!(
+        engine
+            .object_snapshot(target)
+            .expect("denied target remains live")
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Victim", "Upper"],
+        "FxVictimStop's -1 restores the same effect"
+    );
+}
+
+#[test]
 fn shipped_hazard_jumper_bite_check_uses_strict1_raw_string_identity() {
     let group = Group::open(content_root().join("Hazard.c4d/Enemies.c4d/Jumper.c4d"))
         .expect("shipped Hazard Jumper group opens");
