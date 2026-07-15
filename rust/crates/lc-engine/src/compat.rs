@@ -14397,7 +14397,7 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|effects| {
             effects
                 .iter()
-                .any(|existing| existing.priority >= priority)
+                .any(|existing| existing.priority != 0 && existing.priority >= priority)
         })
         .unwrap_or(false);
     let engine_fire_start = !global_scope
@@ -34995,6 +34995,7 @@ impl EffectHostContext {
     /// deactivation must leave ordinary script values that reference the
     /// inactive object intact.
     fn clear_object_action_and_command_pointers(&mut self, target: ObjectId) {
+        let target_number = i32::try_from(target.as_u64()).ok();
         let mut object_ids = self.world.object_ids().to_vec();
         for id in self.pending_order.iter().copied() {
             if !object_ids.contains(&id) {
@@ -35011,12 +35012,23 @@ impl EffectHostContext {
                         || object.commands.iter().any(|command| {
                             command.target == Some(target) || command.target2 == Some(target)
                         })
+                        || target_number.is_some_and(|target| {
+                            object.full_state().is_some_and(|state| {
+                                state
+                                    .effects
+                                    .iter()
+                                    .any(|effect| effect.command_target == Some(target))
+                            })
+                        })
                 });
             if references_target && self.ensure_object_scope(id) {
                 if let Some(scope) = self.object_scope_mut(id) {
                     scope.clear_object_pointer(target);
                 }
             }
+        }
+        if let (Some(global), Some(target)) = (self.global.as_mut(), target_number) {
+            global.clear_command_target(target);
         }
     }
 
@@ -36614,6 +36626,22 @@ impl EffectScopeContext {
         Some(effect)
     }
 
+    /// `C4Effect::ClearPointers` (C4Effect.cpp): losing the live object
+    /// command target silently marks the effect dead and clears only that
+    /// pointer. The node (and its number/id command target) stays linked
+    /// until the list's next Execute pass.
+    fn clear_command_target(&mut self, target: i32) {
+        let mut updates = Vec::new();
+        for effect in &mut self.effects {
+            if effect.command_target == Some(target) {
+                effect.priority = 0;
+                effect.command_target = None;
+                updates.push(EffectCommand::update(effect.clone()));
+            }
+        }
+        self.commands.extend(updates);
+    }
+
     fn into_commands(self) -> Vec<EffectCommand> {
         self.commands
     }
@@ -37939,6 +37967,12 @@ impl ObjectScopeContext {
             || self.live_commands.command_views().iter().any(|command| {
                 command.target == Some(target) || command.target2 == Some(target)
             })
+            || i32::try_from(target.as_u64()).is_ok_and(|target| {
+                self.effects
+                    .effects
+                    .iter()
+                    .any(|effect| effect.command_target == Some(target))
+            })
     }
 
     fn clear_object_pointer(&mut self, target: ObjectId) {
@@ -37951,6 +37985,9 @@ impl ObjectScopeContext {
         if self.live_commands.clear_object_reference(target) {
             self.command_count = self.live_commands.len();
             self.command_stack_replaced = true;
+        }
+        if let Ok(target) = i32::try_from(target.as_u64()) {
+            self.effects.clear_command_target(target);
         }
     }
 

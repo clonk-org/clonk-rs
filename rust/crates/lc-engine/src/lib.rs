@@ -6053,6 +6053,9 @@ impl Object {
     }
 
     fn tick_effects(&mut self) -> Vec<EffectEvent> {
+        // C4Effect::Execute unlinks priority-zero nodes silently when its
+        // traversal reaches them. They must never advance or emit Stop.
+        self.state.effects.retain(|effect| effect.priority != 0);
         let mut events = Vec::new();
         for effect in &mut self.state.effects {
             if effect.advance_tick() {
@@ -25695,6 +25698,17 @@ impl Engine {
         let mut temp_wrapped_stopped: HashSet<i32> = HashSet::new();
 
         while let Some(event) = queue.pop_front() {
+            // The timer batch is collected before callbacks run. An earlier
+            // callback may have cleared this effect's command target and
+            // marked its still-linked node dead; C++'s list walk then skips
+            // that later node in the same Execute pass.
+            if matches!(event.kind, EffectEventKind::Timer)
+                && !object.state.effects.iter().any(|effect| {
+                    effect.number == event.effect.number && effect.priority != 0
+                })
+            {
+                continue;
+            }
             // C4Effect::Check (C4Effect.cpp:97-116): before a new effect
             // validates, ask all effects with iPriority >= the new priority
             // via their Fx<Name>Effect callback — except for priority-1
@@ -25720,6 +25734,7 @@ impl Engine {
                         .iter()
                         .filter(|existing| {
                             existing.number != event.effect.number
+                                && existing.priority != 0
                                 && existing.priority >= event.effect.priority
                         })
                         .cloned()
@@ -33169,6 +33184,9 @@ impl Engine {
             if change == 0 {
                 break;
             }
+            if effect.priority == 0 {
+                continue;
+            }
             let dispatch_id = effect
                 .command_target
                 .and_then(|target| self.find_object_index(ObjectId::new(target as u64)))
@@ -36848,6 +36866,9 @@ impl Engine {
             })
             .map(|object| object.id)
             .collect();
+        for object_id in &destroyed {
+            self.clear_effect_command_target(*object_id);
+        }
         for object in &self.objects {
             if (object.destroyed || matches!(object.state.status, ObjectStatus::Deleted))
                 && object.state.container.is_some()
@@ -36944,6 +36965,30 @@ impl Engine {
         }
 
         Ok(())
+    }
+
+    /// Engine-side fallback for removals that do not originate in a live
+    /// script host call. The synchronous host sweep performs the same
+    /// mutation at RemoveObject call time; this catches native/status paths
+    /// before destroyed objects are detached and global effects execute.
+    fn clear_effect_command_target(&mut self, target: ObjectId) {
+        let Ok(target) = i32::try_from(target.as_u64()) else {
+            return;
+        };
+        for object in &mut self.objects {
+            for effect in &mut object.state.effects {
+                if effect.command_target == Some(target) {
+                    effect.priority = 0;
+                    effect.command_target = None;
+                }
+            }
+        }
+        for effect in &mut self.global_effects {
+            if effect.command_target == Some(target) {
+                effect.priority = 0;
+                effect.command_target = None;
+            }
+        }
     }
 
     fn apply_global_effect_commands(&mut self, commands: &[EffectCommand]) {
@@ -38929,6 +38974,9 @@ impl Engine {
     /// `Fx*Timer(nil, iNumber, iTime)` on elapsed intervals. Callback
     /// outcomes fold exactly like the object timer batch.
     fn tick_global_effects(&mut self) -> Result<(), EngineError> {
+        // Dead nodes are unlinked by Execute without a Stop callback.
+        self.global_effects
+            .retain(|effect| effect.priority != 0);
         let mut events = Vec::new();
         for effect in &mut self.global_effects {
             if effect.advance_tick() {
@@ -39061,6 +39109,13 @@ impl Engine {
         let mut temp_wrapped_stopped: HashSet<i32> = HashSet::new();
 
         while let Some(event) = queue.pop_front() {
+            if matches!(event.kind, EffectEventKind::Timer)
+                && !global_effects.iter().any(|effect| {
+                    effect.number == event.effect.number && effect.priority != 0
+                })
+            {
+                continue;
+            }
             // C4Effect::Kill (C4Effect.cpp:365-405): the real removal is
             // bracketed by temp-deactivating all upper effects
             // (C4Effect.cpp:370-374) and reactivating them after the Stop

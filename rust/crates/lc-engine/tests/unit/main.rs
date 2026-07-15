@@ -33758,6 +33758,194 @@ func Probe(target) {
     }
 
     #[test]
+    fn removed_command_target_silently_kills_object_and_global_effects() {
+        // C4Game::ClearPointers -> C4Object/C4Effect::ClearPointers marks
+        // every foreign effect using the removed object as its command
+        // target dead without a Stop callback. The dead node remains
+        // addressable by number until the list's next Execute pass, while
+        // named lookup/counting skip it. A pure idCommandTarget is not an
+        // object pointer and must survive the sweep.
+        use std::sync::{Arc, Mutex};
+
+        let carrier_script = r#"#strict 2
+local object_no, global_no, id_no;
+
+public func Arm(pTarget) {
+    id_no = AddEffect("DefinitionBound", this(), 100, 2, nil, CMND);
+    object_no = AddEffect("ObjectBound", this(), 100, 2, pTarget);
+    global_no = AddEffect("GlobalBound", nil, 100, 2, pTarget);
+    return [object_no, global_no, id_no];
+}
+
+public func RemoveAndInspect(pTarget) {
+    RemoveObject(pTarget);
+    return [
+        GetEffect("ObjectBound", this()),
+        GetEffectCount("ObjectBound", this()),
+        GetEffect(nil, this(), object_no, 1),
+        GetEffect(nil, this(), object_no, 4),
+        GetEffect(nil, this(), object_no, 5) == CMND,
+        GetEffect("GlobalBound", nil),
+        GetEffectCount("GlobalBound", nil),
+        GetEffect(nil, nil, global_no, 1),
+        GetEffect("DefinitionBound", this()),
+        GetEffectCount(nil, this()),
+        GetEffect("DefinitionBound", this(), 0, 5) == CMND
+    ];
+}
+"#;
+        let command_target_script = r#"#strict 2
+global func FxObjectBoundTimer(pTarget, iNumber, iTime) { return 0; }
+global func FxObjectBoundDamage(pTarget, iNumber, iChange, iCause, iCausedBy) { return iChange; }
+global func FxObjectBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; }
+global func FxGlobalBoundTimer(pTarget, iNumber, iTime) { return 0; }
+global func FxGlobalBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; }
+global func FxDefinitionBoundTimer(pTarget, iNumber, iTime) { return 0; }
+global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; }
+"#;
+
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let calls = Arc::clone(&calls);
+            hooks.set_on_call(move |name, _args| {
+                calls.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let carrier = Definition::from_script("CARR", "Carrier", carrier_script)
+            .expect("carrier script compiles");
+        let mut command_target =
+            Definition::from_script("CMND", "Command target", command_target_script)
+                .expect("command-target script compiles");
+        command_target.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(carrier)
+            .expect("carrier registers");
+        engine
+            .register_definition(command_target)
+            .expect("command target registers");
+        let carrier_id = engine
+            .spawn_object(SpawnConfig::new("CARR"))
+            .expect("carrier spawns");
+        let target_id = engine
+            .spawn_object(SpawnConfig::new("CMND"))
+            .expect("command target spawns");
+        let carrier_idx = engine
+            .find_object_index(carrier_id)
+            .expect("carrier exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    carrier_idx,
+                    "Arm",
+                    vec![object_reference_value(target_id)],
+                )
+                .expect("effects install"),
+            Value::Array(vec![Value::Int(2), Value::Int(1), Value::Int(1)])
+        );
+        engine.tick().expect("first pre-removal tick succeeds");
+        engine.tick().expect("second pre-removal tick succeeds");
+        {
+            let calls = calls.lock().unwrap();
+            for callback in [
+                "FxObjectBoundTimer",
+                "FxGlobalBoundTimer",
+                "FxDefinitionBoundTimer",
+            ] {
+                assert_eq!(
+                    calls.iter().filter(|name| name.as_str() == callback).count(),
+                    1,
+                    "{callback} is live before its object target is removed"
+                );
+            }
+        }
+        calls.lock().unwrap().clear();
+
+        let carrier_idx = engine
+            .find_object_index(carrier_id)
+            .expect("carrier still exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    carrier_idx,
+                    "RemoveAndInspect",
+                    vec![object_reference_value(target_id)],
+                )
+                .expect("target removal succeeds"),
+            Value::Array(vec![
+                Value::Nil,
+                Value::Int(0),
+                Value::String("ObjectBound".into()),
+                Value::Nil,
+                Value::Bool(true),
+                Value::Nil,
+                Value::Int(0),
+                Value::String("GlobalBound".into()),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Bool(true),
+            ]),
+            "dead object/global nodes remain linked by number but disappear \
+             from live lookup; the C4ID-commanded effect stays live"
+        );
+
+        let carrier_idx = engine
+            .find_object_index(carrier_id)
+            .expect("carrier remains after removal");
+        engine
+            .change_object_damage(carrier_idx, 5, 0, -1)
+            .expect("damage traversal succeeds");
+        engine.tick().expect("first post-removal tick succeeds");
+        engine.tick().expect("second post-removal tick succeeds");
+
+        let calls = calls.lock().unwrap();
+        for callback in [
+            "FxObjectBoundTimer",
+            "FxObjectBoundDamage",
+            "FxObjectBoundStop",
+            "FxGlobalBoundTimer",
+            "FxGlobalBoundStop",
+        ] {
+            assert_eq!(
+                calls.iter().filter(|name| name.as_str() == callback).count(),
+                0,
+                "removed command target must suppress {callback}"
+            );
+        }
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|name| name.as_str() == "FxDefinitionBoundTimer")
+                .count(),
+            1,
+            "the C4ID-only command target remains scheduled"
+        );
+        drop(calls);
+
+        let carrier_idx = engine
+            .find_object_index(carrier_id)
+            .expect("carrier remains after ticks");
+        assert_eq!(
+            engine.objects[carrier_idx]
+                .state
+                .effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["DefinitionBound"],
+            "the next object Execute silently unlinks its dead node"
+        );
+        assert!(
+            engine.global_effects().is_empty(),
+            "the next global Execute silently unlinks its dead node"
+        );
+    }
+
+    #[test]
     fn effect_check_chain_denies_new_effects() {
         // C4Effect::Check (C4Effect.cpp:97-116, 167-189): before a new
         // effect validates, existing effects with iPriority >= the new
