@@ -510,14 +510,21 @@ mod tests {
         let CommandOperation::PushFront(nearest_waypoint) = &result.operations[1] else {
             panic!("nearest pathfinder operation must push MoveTo");
         };
-        let mut waypoint_state = MoveToState::from_request(nearest_waypoint);
-        let first = waypoint_state.step(&ctx);
+        let mut waypoint_stack = CommandStack::new();
+        waypoint_stack
+            .push_front(nearest_waypoint.clone())
+            .expect("waypoint queues");
+        let first = waypoint_stack.step(&ctx).expect("waypoint executes");
         assert_eq!(
             first.update.and_then(|update| update.command_direction),
             Some(CommandDirection::Right),
             "an evaluated pathfinder waypoint steers on its first Execute"
         );
-        assert_eq!(waypoint_state.update_interval, 24);
+        assert_eq!(
+            waypoint_stack.snapshot().commands[0].update_interval,
+            Some(24),
+            "the shared command lifetime decrements before waypoint steering"
+        );
     }
 
     #[test]
@@ -1208,14 +1215,18 @@ mod tests {
             .with_tx(Some(200))
             .with_ty(Some(100))
             .with_update_interval(4);
-        let mut state = MoveToState::from_request(&request);
+        let mut stack = CommandStack::new();
+        stack.push_front(request).expect("MoveTo queues");
 
         let mut walker = walking_jumper(Vector2::new(100, 100));
         let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 0);
-        assert_eq!(state.step(&ctx).status, CommandStatus::Running);
+        assert_eq!(
+            stack.step(&ctx).expect("evaluation executes").status,
+            CommandStatus::Running
+        );
 
         let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
-        let result = state.step(&ctx);
+        let result = stack.step(&ctx).expect("MoveTo executes");
         assert_eq!(
             result.update.and_then(|update| update.command_direction),
             Some(CommandDirection::Right)
@@ -1223,7 +1234,7 @@ mod tests {
 
         walker.position = Vector2::new(210, 100);
         let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 2);
-        let result = state.step(&ctx);
+        let result = stack.step(&ctx).expect("MoveTo executes again");
         assert_eq!(
             result.update.and_then(|update| update.command_direction),
             Some(CommandDirection::Left),
@@ -1231,7 +1242,11 @@ mod tests {
         );
 
         let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 3);
-        assert_eq!(state.step(&ctx).status, CommandStatus::Completed);
+        assert_eq!(
+            stack.step(&ctx).expect("interval expires").status,
+            CommandStatus::Completed
+        );
+        assert!(stack.is_empty());
     }
 
     #[test]
@@ -1729,8 +1744,10 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
-        let request = CommandRequest::new(CommandId::Wait).with_update_interval(3);
-        let mut state = WaitState::from_request(&request);
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::Wait).with_update_interval(3))
+            .expect("Wait queues");
 
         let ctx0 = CommandRuntimeContext {
             landscape: None,
@@ -1748,7 +1765,7 @@ mod tests {
             rng: None,
         };
 
-        let result0 = state.step(&ctx0);
+        let result0 = stack.step(&ctx0).expect("Wait executes");
         assert_eq!(result0.status, CommandStatus::Running);
         let update0 = result0
             .update
@@ -1773,7 +1790,7 @@ mod tests {
             rng: None,
         };
 
-        let result1 = state.step(&ctx1);
+        let result1 = stack.step(&ctx1).expect("Wait executes again");
         assert_eq!(result1.status, CommandStatus::Running);
 
         let ctx2 = CommandRuntimeContext {
@@ -1792,8 +1809,9 @@ mod tests {
             rng: None,
         };
 
-        let result2 = state.step(&ctx2);
+        let result2 = stack.step(&ctx2).expect("Wait interval expires");
         assert_eq!(result2.status, CommandStatus::Completed);
+        assert!(stack.is_empty());
     }
 
     #[test]
@@ -1931,6 +1949,62 @@ mod tests {
             }
             other => panic!("unexpected event: {:?}", other),
         }
+    }
+
+    #[test]
+    fn get_subcommand_rechecks_collection_on_next_execution() {
+        let actor_id = ObjectId::new(101);
+        let target_id = ObjectId::new(201);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        actor.collectible = false;
+        let mut item = snapshot_with_id(target_id.as_u64());
+        item.position = Vector2::new(8, 0);
+        item.collectible = true;
+        item.construction = FULL_CON;
+        let mut objects = HashMap::from([(actor_id, actor), (target_id, item)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(CommandRequest::new(CommandId::Wait))
+            .expect("base queues");
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Get)
+                    .with_target(Some(target_id))
+                    .with_update_interval(40)
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("Get queues");
+
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 4);
+        let first = stack.step(&ctx).expect("Get executes");
+        assert_eq!(
+            first.events,
+            vec![CommandEvent::GetObject {
+                actor_id,
+                object_id: target_id,
+            }]
+        );
+
+        objects
+            .get_mut(&actor_id)
+            .expect("actor present")
+            .contents
+            .push(target_id);
+        objects.get_mut(&target_id).expect("item present").container = Some(actor_id);
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 5);
+        let collected = stack.step(&ctx).expect("Get rechecks");
+        assert_eq!(collected.status, CommandStatus::Completed);
+
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 1);
+        assert_eq!(snapshot.commands[0].state.id(), Some(CommandId::Wait));
+        assert_eq!(snapshot.commands[0].failures, 0);
     }
 
     #[test]
@@ -3026,16 +3100,18 @@ mod tests {
         let mut objects = HashMap::from([(actor_id, actor), (target_id, target)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let mut state = EnterState::from_request(
-            &CommandRequest::new(CommandId::Enter)
-                .with_target(Some(target_id))
-                .with_update_interval(50),
-        )
-        .expect("state created");
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(target_id))
+                    .with_update_interval(50),
+            )
+            .expect("Enter queues");
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let first_ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 100);
-        let first = state.step(&first_ctx);
+        let first = stack.step(&first_ctx).expect("Enter executes");
         assert!(matches!(
             first.events.as_slice(),
             [CommandEvent::CallObjectFunction { function, .. }] if function == "ActivateEntrance"
@@ -3047,7 +3123,7 @@ mod tests {
             .entrance_status = true;
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let next_ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 101);
-        let next = state.step(&next_ctx);
+        let next = stack.step(&next_ctx).expect("Enter rechecks");
         assert_eq!(next.status, CommandStatus::Completed);
         assert_eq!(
             next.events,
@@ -3056,6 +3132,92 @@ mod tests {
                 container_id: target_id,
             }]
         );
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn enter_interval_expires_successfully_after_exact_execution_count() {
+        // The counter belongs to Execute, not ctx.frame. Enter(50) runs
+        // its handler 49 times, then succeeds before handler #50 even when
+        // all executions happen in the same frame (C4Command.cpp:1545-1552).
+        let actor_id = ObjectId::new(33);
+        let target_id = ObjectId::new(43);
+        let actor = snapshot_with_id(actor_id.as_u64());
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.shape = DefinitionRect::new(-10, -10, 20, 20);
+        target.ocf = ocf::ENTRANCE;
+        target.entrance_status = false;
+        let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(CommandRequest::new(CommandId::Wait))
+            .expect("base queues");
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(target_id))
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("Enter queues");
+
+        for execution in 1..=49 {
+            let actor = objects.get(&actor_id).expect("actor present");
+            let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 7);
+            let result = stack.step(&ctx).expect("Enter executes");
+            assert_eq!(result.status, CommandStatus::Running);
+            assert!(matches!(
+                result.events.as_slice(),
+                [CommandEvent::CallObjectFunction { function, .. }]
+                    if function == "ActivateEntrance"
+            ));
+
+            if execution == 17 {
+                let snapshot = stack.snapshot();
+                assert_eq!(snapshot.commands[0].update_interval, Some(33));
+                let mut restored = CommandStack::new();
+                restored.restore_from_snapshot(&snapshot);
+                stack = restored;
+            }
+        }
+
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 7);
+        let expired = stack.step(&ctx).expect("Enter expires");
+        assert_eq!(expired.status, CommandStatus::Completed);
+        assert!(expired.events.is_empty(), "expiry skips the handler");
+
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 1);
+        assert_eq!(snapshot.commands[0].state.id(), Some(CommandId::Wait));
+        assert_eq!(snapshot.commands[0].failures, 0);
+    }
+
+    #[test]
+    fn interval_one_succeeds_before_a_handler_without_interval_state() {
+        let actor_id = ObjectId::new(34);
+        let actor = snapshot_with_id(actor_id.as_u64());
+        let objects = HashMap::from([(actor_id, actor)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 9);
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Jump)
+                    .with_tx(Some(100))
+                    .with_update_interval(1),
+            )
+            .expect("Jump queues");
+        let result = stack.step(&ctx).expect("Jump expires");
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.events.is_empty(), "ObjectComJump must not run");
+        assert!(stack.is_empty());
     }
 
     #[test]
@@ -3307,6 +3469,59 @@ mod tests {
                 target_id,
             }]
         );
+    }
+
+    #[test]
+    fn grab_subcommand_rechecks_fulfilled_condition_on_next_execution() {
+        let actor_id = ObjectId::new(311);
+        let target_id = ObjectId::new(321);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(10, 10);
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(14, 12);
+        target.shape = DefinitionRect::new(4, 2, 20, 20);
+        target.ocf = ocf::GRAB | ocf::AVAILABLE;
+        let mut objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(CommandRequest::new(CommandId::Wait))
+            .expect("base queues");
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Grab)
+                    .with_target(Some(target_id))
+                    .with_update_interval(40)
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("Grab queues");
+
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 1);
+        let first = stack.step(&ctx).expect("Grab executes");
+        assert_eq!(
+            first.events,
+            vec![CommandEvent::AttemptGrab {
+                actor_id,
+                target_id,
+            }]
+        );
+        assert_eq!(stack.resolve_grab_attempt(target_id, false), Some(true));
+
+        let actor = objects.get_mut(&actor_id).expect("actor present");
+        actor.action_procedure = ActionProcedure::Push;
+        actor.action_target = Some(target_id);
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 2);
+        let fulfilled = stack.step(&ctx).expect("Grab rechecks");
+        assert_eq!(fulfilled.status, CommandStatus::Completed);
+
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 1);
+        assert_eq!(snapshot.commands[0].state.id(), Some(CommandId::Wait));
+        assert_eq!(snapshot.commands[0].failures, 0);
     }
 
     #[test]
@@ -7618,6 +7833,7 @@ mod tests {
 
         let snapshot = stack.snapshot();
         assert_eq!(snapshot.commands.len(), 1);
+        assert_eq!(snapshot.commands[0].update_interval, Some(25));
         match &snapshot.commands[0].state {
             CommandState::Buy(state) => {
                 assert_eq!(state.target, Some(base_id));
@@ -9261,6 +9477,10 @@ pub struct CommandSnapshot {
     mode: CommandMode,
     retries: i32,
     failures: i32,
+    /// C4Command::UpdateInterval after the most recent Execute. Kept on
+    /// the stack entry because it is shared by every command kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    update_interval: Option<u32>,
     /// The creating request — the base of the FnGetCommand element view
     /// (persisted so restored stacks keep their elements; pre-existing
     /// saves without it degrade to name-only views).
@@ -9279,6 +9499,7 @@ impl CommandSnapshot {
             mode: entry.mode,
             retries: entry.retries,
             failures: entry.failures,
+            update_interval: Some(entry.update_interval),
             request: entry.request.clone(),
             finished: entry.finished,
         }
@@ -10105,16 +10326,6 @@ impl MoveToState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        // C4Command::Execute treats UpdateInterval as the command's
-        // remaining lifetime, not as an evaluation throttle
-        // (C4Command.cpp:1545-1555).
-        if self.update_interval > 0 {
-            self.update_interval -= 1;
-            if self.update_interval == 0 {
-                return CommandStepResult::completed(None);
-            }
-        }
-
         // The initial-evaluation Execute consumes the frame without
         // moving (`if (InitEvaluation()) return;`, C4Command.cpp:1555).
         if !self.evaluated {
@@ -10609,7 +10820,6 @@ struct EnterState {
     target: ObjectId,
     push_target: bool,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
 }
 
@@ -10624,7 +10834,6 @@ impl EnterState {
             target,
             push_target,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_move_order: None,
         })
     }
@@ -10714,14 +10923,12 @@ impl EnterState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ExitState {
     update_interval: u32,
-    last_evaluated: Option<u64>,
 }
 
 impl ExitState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
         Ok(Self {
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
         })
     }
 
@@ -10972,7 +11179,6 @@ struct ConstructState {
     definition_id: Option<DefinitionId>,
     site: Option<Vector2>,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
     acquire_requested: bool,
     exit_requested: bool,
@@ -10993,7 +11199,6 @@ impl ConstructState {
             definition_id,
             site,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_move_order: None,
             acquire_requested: false,
             exit_requested: false,
@@ -11063,13 +11268,6 @@ impl ConstructState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < self.update_interval as u64 {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         // C4Command::Construct applies the physical capability gate before
         // both the menu-opening Data=0 path and definition validation.
         if ctx.object.physical.can_construct == 0 {
@@ -11453,7 +11651,6 @@ impl TransferState {
 struct ChopState {
     target: ObjectId,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
     ungrab_requested: bool,
 }
@@ -11464,7 +11661,6 @@ impl ChopState {
         Ok(Self {
             target,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_move_order: None,
             ungrab_requested: false,
         })
@@ -11495,14 +11691,6 @@ impl ChopState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         match ctx.definition(&ctx.object.definition_id) {
             Some(definition) if definition.can_chop => {}
             _ => {
@@ -11622,7 +11810,6 @@ impl ChopState {
 struct DigState {
     target: Vector2,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     dig_out_material: bool,
     ungrab_requested: bool,
     exit_requested: bool,
@@ -11640,7 +11827,6 @@ impl DigState {
         Ok(Self {
             target: Vector2::new(tx, ty),
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             dig_out_material,
             ungrab_requested: false,
             exit_requested: false,
@@ -11708,14 +11894,6 @@ impl DigState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         let mut pending_update: Option<ObjectUpdate> = None;
 
         if matches!(
@@ -11808,7 +11986,6 @@ struct GrabState {
     offset_x: i32,
     offset_y: i32,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
     ungrab_requested: bool,
     #[serde(default, skip_serializing_if = "crate::is_false")]
@@ -11825,7 +12002,6 @@ impl GrabState {
             offset_x: request.tx.unwrap_or(0),
             offset_y: request.ty.unwrap_or(0),
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_move_order: None,
             ungrab_requested: false,
             reject_pending: false,
@@ -11853,14 +12029,6 @@ impl GrabState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         let target = (!self.target_cleared).then_some(self.target);
         if ctx.object.action_procedure == ActionProcedure::Push
             && ctx.object.action_target == target
@@ -11963,7 +12131,6 @@ struct ActivateState {
     definition_id: Option<DefinitionId>,
     remaining: i32,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     exit_requested: bool,
     enter_requested: bool,
 }
@@ -11982,7 +12149,6 @@ impl ActivateState {
             definition_id,
             remaining,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             exit_requested: false,
             enter_requested: false,
         })
@@ -12088,14 +12254,6 @@ impl ActivateState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         if self.target.is_none() && self.definition_id.is_none() {
             let Some(container) = self.container else {
                 return CommandStepResult::failed(None);
@@ -12216,7 +12374,6 @@ struct PushToState {
     tx: Option<i32>,
     ty: Option<i32>,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
     activate_requested: bool,
     grab_requested: bool,
@@ -12232,7 +12389,6 @@ impl PushToState {
             tx: request.tx,
             ty: request.ty,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_move_order: None,
             activate_requested: false,
             grab_requested: false,
@@ -12275,14 +12431,6 @@ impl PushToState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         let update = self.prepare_update(ctx);
 
         let target_snapshot = match ctx.resolve(self.target) {
@@ -12396,26 +12544,16 @@ impl PushToState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct UnGrabState {
     update_interval: u32,
-    last_evaluated: Option<u64>,
 }
 
 impl UnGrabState {
     fn from_request(request: &CommandRequest) -> Self {
         Self {
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
         }
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         let mut needs_update = false;
         let mut update = ObjectUpdate::new();
 
@@ -12497,6 +12635,8 @@ impl JumpState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct WaitState {
+    /// Effective duration chosen from Data, Tx, then UpdateInterval. The
+    /// separately queued InitEvaluation tick remains owned by L120.
     remaining: Option<u32>,
 }
 
@@ -12529,17 +12669,6 @@ impl WaitState {
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         let update = self.prepare_update(ctx);
-
-        if let Some(remaining) = self.remaining.as_mut() {
-            if *remaining == 0 {
-                return CommandStepResult::completed(update);
-            }
-            *remaining -= 1;
-            if *remaining == 0 {
-                return CommandStepResult::completed(update);
-            }
-        }
-
         CommandStepResult::running(update)
     }
 }
@@ -12552,7 +12681,6 @@ struct PutState {
     #[serde(default)]
     remaining_count: i32,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
     get_requested: bool,
     exit_requested: bool,
@@ -12568,7 +12696,6 @@ impl PutState {
             definition_id: command_data_to_definition_id(&request.data),
             remaining_count: request.tx.unwrap_or(0),
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_move_order: None,
             get_requested: false,
             exit_requested: false,
@@ -12628,14 +12755,6 @@ impl PutState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         if ctx.object.container.is_none() {
             self.exit_requested = false;
         }
@@ -12755,7 +12874,6 @@ struct DropState {
     definition_id: Option<DefinitionId>,
     target_position: Option<Vector2>,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
     get_requested: bool,
     ungrab_requested: bool,
@@ -12779,7 +12897,6 @@ impl DropState {
             definition_id: command_data_to_definition_id(&request.data),
             target_position,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_move_order: None,
             get_requested: false,
             ungrab_requested: false,
@@ -12867,14 +12984,6 @@ impl DropState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         if ctx.object.action_procedure != ActionProcedure::Push {
             self.ungrab_requested = false;
         }
@@ -12995,7 +13104,6 @@ struct GetState {
     menu_identification: Option<i32>,
     remaining: i32,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
     exit_requested: bool,
     ungrab_requested: bool,
@@ -13029,7 +13137,6 @@ impl GetState {
             menu_identification,
             remaining,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_move_order: None,
             exit_requested: false,
             ungrab_requested: false,
@@ -13273,14 +13380,6 @@ impl GetState {
             ]);
         }
 
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         if ctx.object.container.is_none() {
             self.exit_requested = false;
         }
@@ -13441,15 +13540,7 @@ impl RetryState {
     }
 
     fn step(&mut self, _ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        if self.remaining == 0 {
-            return CommandStepResult::completed(None);
-        }
-        self.remaining -= 1;
-        if self.remaining == 0 {
-            CommandStepResult::completed(None)
-        } else {
-            CommandStepResult::running(None)
-        }
+        CommandStepResult::running(None)
     }
 }
 
@@ -13457,7 +13548,6 @@ impl RetryState {
 struct FollowState {
     target: ObjectId,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
 }
 
@@ -13467,7 +13557,6 @@ impl FollowState {
         Ok(Self {
             target,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_move_order: None,
         })
     }
@@ -13484,14 +13573,6 @@ impl FollowState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         let follower = ctx.object;
 
         if follower.crew_member && follower.owner != OWNER_NONE && !follower.selected {
@@ -13570,7 +13651,6 @@ struct ThrowState {
     tx: Option<i32>,
     ty: Option<i32>,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
     acquire_requested: bool,
     ungrab_requested: bool,
@@ -13583,7 +13663,6 @@ impl ThrowState {
             tx: request.tx,
             ty: request.ty,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_move_order: None,
             acquire_requested: false,
             ungrab_requested: false,
@@ -13617,14 +13696,6 @@ impl ThrowState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         let mut pending_update = None;
 
         if ctx.object.action_procedure == ActionProcedure::Dig {
@@ -13802,7 +13873,6 @@ impl ThrowState {
 struct AttackState {
     target: ObjectId,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
 }
 
@@ -13812,7 +13882,6 @@ impl AttackState {
         Ok(Self {
             target,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_move_order: None,
         })
     }
@@ -13829,14 +13898,6 @@ impl AttackState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         let attacker = ctx.object;
         let target = match ctx.resolve(self.target) {
             Some(snapshot) => snapshot,
@@ -14121,7 +14182,6 @@ struct AcquireState {
     range_x: i32,
     range_y: i32,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     candidate: Option<ObjectId>,
     buy_requested: bool,
     last_buy_request: Option<u64>,
@@ -14153,7 +14213,6 @@ impl AcquireState {
             range_x,
             range_y,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             candidate: None,
             buy_requested: false,
             last_buy_request: None,
@@ -14296,13 +14355,6 @@ impl AcquireState {
             }
         }
 
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-
         if !self.script_invoked {
             self.script_pending = true;
             self.script_invoked = true;
@@ -14316,8 +14368,6 @@ impl AcquireState {
             };
             return CommandStepResult::running(self.update_to_stop(ctx)).with_events(vec![event]);
         }
-
-        self.last_evaluated = Some(ctx.frame);
 
         if let Some(candidate_id) = self.candidate {
             let valid = ctx
@@ -14380,7 +14430,6 @@ struct SellState {
     preferred: Option<ObjectId>,
     remaining: i32,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_enter_request: Option<u64>,
 }
 
@@ -14396,7 +14445,6 @@ impl SellState {
             preferred: request.target2,
             remaining,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_enter_request: None,
         })
     }
@@ -14508,14 +14556,6 @@ impl SellState {
             return CommandStepResult::completed(self.update_to_stop(ctx));
         }
 
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         let update_to_stop = self.update_to_stop(ctx);
 
         if !ctx.base_sell_enabled {
@@ -14618,7 +14658,6 @@ struct BuyState {
     definition_id: DefinitionId,
     target: Option<ObjectId>,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
 }
 
@@ -14631,7 +14670,6 @@ impl BuyState {
             definition_id,
             target: request.target,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_move_order: None,
         })
     }
@@ -14807,22 +14845,6 @@ impl BuyState {
                 }),
             ]);
         }
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < self.update_interval as u64 {
-                if let Some(target_id) = self.target {
-                    if let Some(target_snapshot) = ctx.resolve(target_id) {
-                        if let Some(result) =
-                            self.try_purchase_from_explicit_target(ctx, target_id, target_snapshot)
-                        {
-                            return result;
-                        }
-                    }
-                }
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
-
         if let Some(target_id) = self.target {
             if let Some(target_snapshot) = ctx.resolve(target_id) {
                 if let Some(result) =
@@ -14906,7 +14928,6 @@ impl BuyState {
 struct HomeState {
     target: Option<ObjectId>,
     update_interval: u32,
-    last_evaluated: Option<u64>,
     last_enter_request: Option<u64>,
 }
 
@@ -14915,7 +14936,6 @@ impl HomeState {
         Ok(Self {
             target: request.target,
             update_interval: request.update_interval.max(1),
-            last_evaluated: None,
             last_enter_request: None,
         })
     }
@@ -14979,14 +14999,6 @@ impl HomeState {
         if self.is_home(ctx) {
             return CommandStepResult::completed(self.update_to_stop(ctx));
         }
-
-        let interval = self.update_interval as u64;
-        if let Some(last) = self.last_evaluated {
-            if ctx.frame.saturating_sub(last) < interval {
-                return CommandStepResult::running(None);
-            }
-        }
-        self.last_evaluated = Some(ctx.frame);
 
         let base_id = match self.resolve_base(ctx) {
             Some(id) => {
@@ -15427,6 +15439,37 @@ impl CommandState {
             _ => false,
         }
     }
+
+    /// Remaining interval stored by snapshots written before the counter
+    /// moved to ActiveCommand. Most old states only kept the original
+    /// polling interval; MoveTo, Wait and Retry actually counted it down.
+    fn legacy_update_interval(&self) -> u32 {
+        match self {
+            CommandState::MoveTo(state) => state.update_interval,
+            CommandState::Enter(state) => state.update_interval,
+            CommandState::Exit(state) => state.update_interval,
+            CommandState::Construct(state) => state.update_interval,
+            CommandState::Chop(state) => state.update_interval,
+            CommandState::Grab(state) => state.update_interval,
+            CommandState::Throw(state) => state.update_interval,
+            CommandState::UnGrab(state) => state.update_interval,
+            CommandState::Wait(state) => state.remaining.unwrap_or(0),
+            CommandState::Put(state) => state.update_interval,
+            CommandState::Drop(state) => state.update_interval,
+            CommandState::Get(state) => state.update_interval,
+            CommandState::Dig(state) => state.update_interval,
+            CommandState::Activate(state) => state.update_interval,
+            CommandState::PushTo(state) => state.update_interval,
+            CommandState::Retry(state) => state.remaining,
+            CommandState::Follow(state) => state.update_interval,
+            CommandState::Attack(state) => state.update_interval,
+            CommandState::Buy(state) => state.update_interval,
+            CommandState::Sell(state) => state.update_interval,
+            CommandState::Acquire(state) => state.update_interval,
+            CommandState::Home(state) => state.update_interval,
+            _ => 0,
+        }
+    }
 }
 
 fn denumerate_object_reference(
@@ -15461,6 +15504,9 @@ struct ActiveCommand {
     mode: CommandMode,
     retries: i32,
     failures: i32,
+    /// C4Command::UpdateInterval: a per-front-execution lifetime, not a
+    /// wall-clock polling cadence (C4Command.cpp:1545-1552).
+    update_interval: u32,
     /// The creating request, the FnGetCommand element-view base
     /// (C4Script.cpp:926-945); persisted through CommandSnapshot so
     /// restored stacks keep their elements.
@@ -15510,24 +15556,54 @@ impl ActiveCommand {
             return Err(CommandError::Unsupported);
         }
 
+        // Wait's Data/Tx override is already folded into its current Rust
+        // state. Its separate InitEvaluation tick remains owned by L120.
+        let update_interval = match &state {
+            CommandState::Wait(state) => state.remaining.unwrap_or(0),
+            _ => request.update_interval,
+        };
+
         Ok(Self {
             state,
             mode: request.mode,
             retries: request.retries.max(0),
             failures: 0,
+            update_interval,
             request: Some(request),
             finished: None,
         })
     }
 
     fn from_snapshot(snapshot: CommandSnapshot) -> Self {
+        let CommandSnapshot {
+            state,
+            mode,
+            retries,
+            failures,
+            update_interval,
+            request,
+            finished,
+        } = snapshot;
+        let remaining = update_interval.unwrap_or_else(|| {
+            if matches!(
+                state,
+                CommandState::MoveTo(_) | CommandState::Wait(_) | CommandState::Retry(_)
+            ) {
+                state.legacy_update_interval()
+            } else {
+                request
+                    .as_ref()
+                    .map_or_else(|| state.legacy_update_interval(), |request| request.update_interval)
+            }
+        });
         Self {
-            state: snapshot.state,
-            mode: snapshot.mode,
-            retries: snapshot.retries,
-            failures: snapshot.failures,
-            request: snapshot.request,
-            finished: snapshot.finished,
+            state,
+            mode,
+            retries,
+            failures,
+            update_interval: remaining,
+            request,
+            finished,
         }
     }
 
@@ -15550,6 +15626,15 @@ impl ActiveCommand {
             let update = stop_update(ctx);
             self.failures = 0;
             return CommandStepResult::failed(update);
+        }
+
+        // C4Command::Execute decrements this before InitEvaluation and the
+        // handler. Expiry is ordinary success and performs no command work.
+        if self.update_interval > 0 {
+            self.update_interval -= 1;
+            if self.update_interval == 0 {
+                return CommandStepResult::completed(None);
+            }
         }
 
         match &mut self.state {
