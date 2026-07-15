@@ -3318,6 +3318,14 @@ fn i32_is_zero(value: &i32) -> bool {
     *value == 0
 }
 
+fn default_use_fair_crew() -> bool {
+    true
+}
+
+fn default_fair_crew_strength() -> i32 {
+    1_000
+}
+
 fn i32_is_minus_one(value: &i32) -> bool {
     *value == -1
 }
@@ -6727,14 +6735,6 @@ impl Object {
 /// no-op. C++ runs lifecycle/game calls with `fPassErrors=false`: the error
 /// shows in the log, the call yields nil, and the game continues
 /// (C4AulExec.cpp:1318-1342). Non-script engine errors stay fatal.
-/// The LegacyClonk default config runs FAIR CREW (Config.General.FairCrew
-/// with DefCrewStrength=1000): crew physicals come from the def promoted
-/// to RankByExperience(strength), ignoring the info rank
-/// (C4Object::GetPhysical, C4Object.cpp:2118-2133; C4Def.cpp:860-874).
-/// Live-oracle probe: UseFairCrew=1, crew Energy 55000.
-const USE_FAIR_CREW: bool = true;
-const FAIR_CREW_STRENGTH: i32 = 1000;
-
 /// `C4RankSystem::RankByExperience` with the default curve
 /// Experience(rank) = rank^1.5 * RankBase(=1000) (C4RankSystem.cpp:226-237).
 fn fair_crew_rank(experience: i32) -> i32 {
@@ -6811,16 +6811,18 @@ pub(crate) fn promotion_updated_physical(
     physical
 }
 
-/// Resolves the info physicals installed on a joined/recruited crew member.
-/// With the LegacyClonk default fair-crew configuration, the info rank is
-/// ignored in favor of RankByExperience(FairCrewStrength).
+/// The persistent `C4ObjectInfo::Physical` installed on a joined/recruited
+/// crew member. Fair crew never overwrites this training: GetPhysical selects
+/// the definition's fair-crew projection live while the round option is on.
 pub(crate) fn crew_info_physical(definition: PhysicalInfo, info_rank: i32) -> PhysicalInfo {
-    if USE_FAIR_CREW {
-        let rank = fair_crew_rank(FAIR_CREW_STRENGTH);
-        promotion_updated_physical(definition, rank, Some(definition))
-    } else {
-        promotion_updated_physical(definition, info_rank, None)
-    }
+    promotion_updated_physical(definition, info_rank, None)
+}
+
+/// `C4Def::GetFairCrewPhysicals` without its cache: deriving this on each
+/// read keeps the Rust projection tied to the live round parameters.
+pub(crate) fn fair_crew_physical(definition: PhysicalInfo, strength: i32) -> PhysicalInfo {
+    let rank = fair_crew_rank(strength);
+    promotion_updated_physical(definition, rank, Some(definition))
 }
 
 fn tolerate_script_error<T>(result: Result<T, EngineError>) -> Result<Option<T>, EngineError> {
@@ -7960,6 +7962,14 @@ pub struct EngineState {
     /// seeded by the scenario/app when restoring an older Rust state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_players: Option<i32>,
+    /// Saved `Game.Parameters.UseFairCrew`. Older Rust states predate this
+    /// field and resume with the standalone engine's enabled default.
+    #[serde(default = "default_use_fair_crew")]
+    pub use_fair_crew: bool,
+    /// Saved `Game.Parameters.FairCrewStrength`. Older Rust states resume at
+    /// LegacyClonk's configured default strength.
+    #[serde(default = "default_fair_crew_strength")]
+    pub fair_crew_strength: i32,
     pub physics: PhysicsSettings,
     pub environment: EnvironmentSettings,
     /// C4Weather::CompileFunc persists Game.GraphicsSystem.dwGamma under
@@ -8148,6 +8158,8 @@ impl EngineState {
             frame: snapshot.frame,
             game_time: snapshot.game_time,
             max_players: None,
+            use_fair_crew: default_use_fair_crew(),
+            fair_crew_strength: default_fair_crew_strength(),
             physics,
             environment: snapshot.environment.settings,
             gamma: snapshot.environment.gamma,
@@ -13598,6 +13610,13 @@ pub struct Engine {
     /// `Game.Parameters.MaxPlayers`. `None` means the embedding app or
     /// scenario has not attached the active game-parameter value yet.
     max_players: Option<i32>,
+    /// `Game.Parameters.UseFairCrew`: when enabled, objects carrying crew
+    /// info read definition-based fair-crew physicals instead of their
+    /// persistent trained info physicals.
+    use_fair_crew: bool,
+    /// `Game.Parameters.FairCrewStrength`, interpreted through the active
+    /// rank system when deriving fair-crew physicals.
+    fair_crew_strength: i32,
     /// `Game.Parameters.IsNetworkGame`, derived from the app's active
     /// network session just as C++ copies `Game.NetworkActive` during
     /// parameter setup (C4GameParameters.cpp:429-434).
@@ -15655,6 +15674,8 @@ impl Engine {
             scenario_script_counter: 0,
             random_seed: seed,
             max_players: None,
+            use_fair_crew: true,
+            fair_crew_strength: 1_000,
             network_game: false,
             league_game: false,
             control_host: true,
@@ -17353,29 +17374,20 @@ impl Engine {
             },
         );
 
-        // C4Object::Init receives the crew pInfo: GetPhysical() resolves
-        // the INFO physicals (C4Object.cpp:2118-2133). With fair crew ON
-        // (the LegacyClonk default config: FairCrew enabled, strength
-        // 1000 — live-oracle probe read UseFairCrew=1) the def's
-        // fair-crew physicals apply instead, promoted to
-        // RankByExperience(strength) (C4Def.cpp:860-874); otherwise the
-        // info physicals promote by the info rank. In both cases,
-        // C4PhysicalInfo::PromotionUpdate applies the capability flags,
-        // Energy floor, and fair-crew training (C4InfoCore.cpp:207-222).
-        let definition_physical = self
-            .definitions
-            .get(&definition_id)
-            .map(|definition| *definition.physical())
-            .unwrap_or_default();
-        let promoted = crew_info_physical(definition_physical, info.rank);
+        // C4Object::Init receives the crew pInfo. Its persistent physicals
+        // promote by the info rank; GetPhysical selects those when fair crew
+        // is off and derives the definition's fair-crew projection from the
+        // live round strength when it is on (C4Object.cpp:2118-2133;
+        // C4Def.cpp:860-874).
+        let info_physical = info.physical;
         if let Some(index) = self.find_object_index(id) {
-            self.objects[index].state.info_physical = Some(promoted);
+            self.objects[index].state.info_physical = Some(info_physical);
             self.objects[index].state.plr_view_range = 500;
             // Init: `if (Alive) Energy = GetPhysical()->Energy`
             // (C4Object.cpp:192) — the spawn used the def physical before
             // the info attached.
             if self.objects[index].state.alive {
-                self.objects[index].state.energy = promoted.energy;
+                self.objects[index].state.energy = self.object_physical(index).energy;
             }
         }
 
@@ -17488,6 +17500,7 @@ impl Engine {
         let Some(definition) = self.definitions.get(&DefinitionId::from(id)) else {
             return false;
         };
+        let physical = crew_info_physical(*definition.physical(), 0);
         let names_source = definition
             .clonk_names()
             .map(str::to_owned)
@@ -17545,6 +17558,7 @@ impl Engine {
             name,
             rank: 0,
             experience: 0,
+            physical,
             death_count: 0,
             total_playing_time: 0,
             birthday: 0,
@@ -18802,6 +18816,26 @@ impl Engine {
         self.max_players
     }
 
+    /// Updates `Game.Parameters.UseFairCrew` for subsequent live physical
+    /// resolution. The default matches LegacyClonk's normal configuration.
+    pub fn set_use_fair_crew(&mut self, use_fair_crew: bool) {
+        self.use_fair_crew = use_fair_crew;
+    }
+
+    pub fn use_fair_crew(&self) -> bool {
+        self.use_fair_crew
+    }
+
+    /// Updates `Game.Parameters.FairCrewStrength` for subsequent live
+    /// physical resolution. The default is `Config.General.DefCrewStrength`.
+    pub fn set_fair_crew_strength(&mut self, fair_crew_strength: i32) {
+        self.fair_crew_strength = fair_crew_strength;
+    }
+
+    pub fn fair_crew_strength(&self) -> i32 {
+        self.fair_crew_strength
+    }
+
     pub fn set_league_game(&mut self, league_game: bool) {
         self.league_game = league_game;
         if league_game {
@@ -19499,6 +19533,7 @@ impl Engine {
                 .map(ScenarioScript::script_arc),
         )
         .with_network_game(self.network_game)
+        .with_fair_crew_parameters(self.use_fair_crew, self.fair_crew_strength)
         .with_control_host(self.control_host, Rc::clone(&self.player_info_updates))
         .with_local_players(local_players)
         .with_active_message_board_input(self.active_message_board_input.clone())
@@ -23623,16 +23658,7 @@ impl Engine {
                     command_direction: object.state.command_direction,
                     construction: object.state.construction,
                     direction: object.state.direction,
-                    physical: object
-                        .state
-                        .temporary_physical
-                        .or(object.state.info_physical)
-                        .or_else(|| {
-                            self.definitions
-                                .get(&object.definition_id)
-                                .map(|definition| *definition.physical())
-                        })
-                        .unwrap_or_default(),
+                    physical: self.object_physical(fallback_order),
                     owner: object.state.owner,
                     controller: object.state.controller,
                     base: object.state.base,
@@ -27031,6 +27057,8 @@ impl Engine {
             frame: self.frame,
             game_time: self.game_time,
             max_players: self.max_players,
+            use_fair_crew: self.use_fair_crew,
+            fair_crew_strength: self.fair_crew_strength,
             physics: self.physics,
             environment: self.environment,
             gamma: self.gamma,
@@ -27092,6 +27120,8 @@ impl Engine {
         if let Some(max_players) = state.max_players {
             self.max_players = Some(max_players);
         }
+        self.use_fair_crew = state.use_fair_crew;
+        self.fair_crew_strength = state.fair_crew_strength;
         self.time_go = false;
         self.physics = state.physics;
         self.environment = state.environment;
@@ -36793,18 +36823,34 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    /// The definition retained by `C4ObjectInfo::pDef`. Unlike the object's
+    /// current `Def`, this source survives `ChangeDef`.
+    fn info_definition_physical(&self, idx: usize) -> Option<PhysicalInfo> {
+        let object = &self.objects[idx];
+        let info = self.crew_object_infos.get(&object.id)?;
+        self.definitions
+            .get(&info.definition_id)
+            .map(|definition| *definition.physical())
+            .or_else(|| Some(self.definition_physical(idx)))
+    }
+
     /// `C4Object::GetPhysical` (C4Object.cpp:2118-2134): the temporary set
-    /// when temporary mode is on, else the info physicals (crew surrogate),
-    /// else the definition's `[Physical]` section. (The fair-crew path needs
-    /// the C4ObjectInfo model.)
+    /// when temporary mode is on; otherwise an object carrying crew info
+    /// resolves either its persistent info physicals or the definition's
+    /// fair-crew projection from the live round parameters. Objects without
+    /// info use the definition's `[Physical]` section.
     #[doc(hidden)]
     pub fn object_physical(&self, idx: usize) -> PhysicalInfo {
         let object = &self.objects[idx];
-        object
-            .state
-            .temporary_physical
-            .or(object.state.info_physical)
-            .unwrap_or_else(|| self.definition_physical(idx))
+        let definition = self.definition_physical(idx);
+        let permanent = match self.info_definition_physical(idx) {
+            Some(info_definition) if self.use_fair_crew => {
+                fair_crew_physical(info_definition, self.fair_crew_strength)
+            }
+            Some(info_definition) => object.state.info_physical.unwrap_or(info_definition),
+            None => definition,
+        };
+        object.state.temporary_physical.unwrap_or(permanent)
     }
 
     /// `C4Object::TrainPhysical` (C4Object.cpp:2136-2146): trains the

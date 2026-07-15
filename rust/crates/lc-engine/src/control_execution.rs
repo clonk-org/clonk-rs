@@ -2344,6 +2344,7 @@ mod tests {
             name: "Ada".to_string(),
             rank: 3,
             experience: 50,
+            physical: crate::PhysicalInfo::default(),
             death_count: 0,
             total_playing_time: 0,
             birthday: 0,

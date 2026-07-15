@@ -1241,6 +1241,10 @@ pub struct HostWorldContext {
     /// `Game.NetworkActive` session during parameter setup
     /// (C4GameParameters.cpp:429-434).
     network_game: bool,
+    /// Live fair-crew round parameters used by C4Object::GetPhysical in
+    /// synchronous and nested script callbacks.
+    use_fair_crew: bool,
+    fair_crew_strength: i32,
     /// `Game.Control.isCtrlHost()`, independent from network-game state.
     control_host: bool,
     /// Ordered player-info updates produced inside copied script contexts.
@@ -1338,6 +1342,8 @@ impl Default for HostWorldContext {
             league_game: false,
             team_configuration: TeamConfiguration::default(),
             network_game: false,
+            use_fair_crew: false,
+            fair_crew_strength: 1_000,
             control_host: true,
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             scenario_script_counter: 0,
@@ -1555,6 +1561,8 @@ impl HostWorldContext {
             league_game: false,
             team_configuration: TeamConfiguration::default(),
             network_game: false,
+            use_fair_crew: false,
+            fair_crew_strength: 1_000,
             control_host: true,
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             scenario_script_counter: 0,
@@ -1707,6 +1715,16 @@ impl HostWorldContext {
 
     pub(crate) fn with_network_game(mut self, network_game: bool) -> Self {
         self.network_game = network_game;
+        self
+    }
+
+    pub(crate) fn with_fair_crew_parameters(
+        mut self,
+        use_fair_crew: bool,
+        fair_crew_strength: i32,
+    ) -> Self {
+        self.use_fair_crew = use_fair_crew;
+        self.fair_crew_strength = fair_crew_strength;
         self
     }
 
@@ -17179,7 +17197,7 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
         if !context.ensure_object_scope(from) || !context.ensure_object_scope(to) {
             return None;
         }
-        let (donor_core, donor_link, donor_physical) = context
+        let (donor_core, donor_link, donor_physical, donor_definition_physical) = context
             .object_scope(from)
             .map(|scope| {
                 (
@@ -17203,9 +17221,10 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                     }),
                     scope.info_link(),
                     scope.info_physical,
+                    scope.info_definition_physical,
                 )
             })
-            .unwrap_or((None, None, None));
+            .unwrap_or((None, None, None, None));
         let donor_core = donor_core?;
         let donor_portrait = context
             .get_world_object(from)
@@ -17248,6 +17267,7 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
             scope.set_info_link(linked);
             scope.set_info_core(Some(donor_core.clone()));
             scope.info_physical = donor_physical;
+            scope.info_definition_physical = donor_definition_physical;
             scope.record_physicals();
             if let Some((source, name)) = donor_portrait {
                 scope.set_portrait(source, name);
@@ -17399,6 +17419,7 @@ fn recruit_or_create_crew_info(
         CrewInfoLink,
         CrewObjectInfo,
         Option<crate::player_file::CrewInfo>,
+        PhysicalInfo,
     )>,
     RuntimeError,
 > {
@@ -17437,7 +17458,7 @@ fn recruit_or_create_crew_info(
             age: entry.age,
             in_action_time: entry.in_action_time,
         };
-        return Ok(Some((link, info, None)));
+        return Ok(Some((link, info, None, entry.physical)));
     }
 
     let names_source = context
@@ -17470,6 +17491,10 @@ fn recruit_or_create_crew_info(
         None => "Clonk".to_string(),
     };
 
+    let physical = context
+        .definition_metadata(definition_id)
+        .map(|metadata| crate::crew_info_physical(metadata.physical, 0))
+        .unwrap_or_default();
     let (link, entry) = {
         let mut state = context.world.crew_info_state.borrow_mut();
         {
@@ -17501,6 +17526,7 @@ fn recruit_or_create_crew_info(
             name,
             rank: 0,
             experience: 0,
+            physical,
             death_count: 0,
             total_playing_time: 0,
             birthday: 0,
@@ -17528,7 +17554,7 @@ fn recruit_or_create_crew_info(
     if let Some(player) = context.player_state_mut(player) {
         player.crew_created = player.crew_created.wrapping_add(1);
     }
-    Ok(Some((link, info, Some(entry))))
+    Ok(Some((link, info, Some(entry), physical)))
 }
 
 /// Direct C4Player::MakeCrewMember mutation. Native callers such as Buy must
@@ -17578,19 +17604,19 @@ fn make_crew_member_live(target: ObjectId, player: i32) -> Result<bool, RuntimeE
             if object.plr_view_range() == 0 {
                 object.set_plr_view_range(500);
             }
-            if let Some((link, info, _)) = assignment.as_ref() {
+            if let Some((link, info, _, info_physical)) = assignment.as_ref() {
                 object.set_info_rank(Some(info.rank));
                 object.set_info_link(Some(*link));
                 object.set_info_core(Some(info.clone()));
-                let promoted = crate::crew_info_physical(object.definition_physical, info.rank);
-                object.info_physical = Some(promoted);
+                object.info_physical = Some(*info_physical);
+                object.info_definition_physical = Some(object.definition_physical);
                 object.record_physicals();
             }
             // C4Player::MakeCrewMember changes Controller, never Owner
             // (C4Player.cpp:1202-1204).
             object.set_controller(player);
         }
-        if let Some((link, info, created_entry)) = assignment {
+        if let Some((link, info, created_entry, _)) = assignment {
             context.record_player_command(PlayerCommand::LinkCrewInfo {
                 object_id: target,
                 link: Some(link),
@@ -36667,6 +36693,7 @@ impl EffectHostContext {
                     .or_else(|| scope.info_physical.map(|_| 0));
                 scope.current_info_link = world.crew_info_link(scope.id());
                 scope.current_info_core = world.crew_infos.get(&scope.id()).cloned();
+                scope.configure_fair_crew(&world);
                 scope.definition_id = definition_id;
                 // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358).
                 scope.cached_ocf = Some(ocf);
@@ -38179,6 +38206,7 @@ impl EffectHostContext {
             .or_else(|| scope.info_physical.map(|_| 0));
         scope.current_info_link = self.world.crew_info_link(object.id);
         scope.current_info_core = self.world.crew_infos.get(&object.id).cloned();
+        scope.configure_fair_crew(&self.world);
         scope.current_fixed_position = object.fixed_position;
         scope.current_fixed_velocity = object.fixed_velocity;
         scope.current_fixed_rotation = object.fixed_rotation;
@@ -39774,6 +39802,11 @@ struct ObjectScopeContext {
     base_graphics: Option<ObjectBaseGraphics>,
     current_draw_transform: Option<DrawTransform>,
     info_physical: Option<PhysicalInfo>,
+    /// Fair-crew selection is live round state; the source definition is
+    /// `Info->pDef`, which deliberately survives ChangeDef.
+    use_fair_crew: bool,
+    fair_crew_strength: i32,
+    info_definition_physical: Option<PhysicalInfo>,
     /// Live pObj->Info->Rank. Unlike `crew_member`, this distinguishes an
     /// object registered as crew from one that actually owns C4ObjectInfo.
     current_info_rank: Option<i32>,
@@ -39895,6 +39928,9 @@ impl ObjectScopeContext {
             base_graphics,
             current_draw_transform: draw_transform,
             info_physical,
+            use_fair_crew: false,
+            fair_crew_strength: 1_000,
+            info_definition_physical: None,
             current_info_rank: None,
             current_info_link: None,
             current_info_core: None,
@@ -40011,32 +40047,63 @@ impl ObjectScopeContext {
         self.current_info_core = info;
     }
 
-    /// `C4Object::GetPhysical` (C4Object.cpp:2118-2134): temporary set when
-    /// active (unless `permanent`), else info physicals, else definition.
-    fn resolved_physical(&self, permanent: bool) -> PhysicalInfo {
-        let temporary = (!permanent).then_some(self.temporary_physical).flatten();
-        temporary
-            .or(self.info_physical)
-            .unwrap_or(self.definition_physical)
+    fn configure_fair_crew(&mut self, world: &HostWorldContext) {
+        self.use_fair_crew = world.use_fair_crew;
+        self.fair_crew_strength = world.fair_crew_strength;
+        self.info_definition_physical = self
+            .current_info_core
+            .as_ref()
+            .and_then(|info| world.definition_metadata(info.definition_id.as_str()))
+            .map(|metadata| metadata.physical);
     }
 
-    /// `FnGetPhysical` mode dispatch (C4Script.cpp:638-688, fair crew off).
+    /// Real engine contexts carry the full info core. Legacy host fixtures
+    /// predate it and use an info-physical/rank projection while fair crew is
+    /// disabled; keep that compatibility without treating it as Info in the
+    /// live fair-crew branch.
+    fn has_physical_info(&self) -> bool {
+        self.current_info_core.is_some()
+            || (!self.use_fair_crew && self.current_info_rank.is_some())
+    }
+
+    /// `C4Object::GetPhysical` (C4Object.cpp:2118-2134): temporary set when
+    /// active (unless `permanent`), then the actual Info branch using live
+    /// fair-crew parameters, else the current definition.
+    fn resolved_physical(&self, permanent: bool) -> PhysicalInfo {
+        let temporary = (!permanent).then_some(self.temporary_physical).flatten();
+        if let Some(temporary) = temporary {
+            return temporary;
+        }
+        if self.current_info_core.is_some() {
+            let info_definition = self
+                .info_definition_physical
+                .unwrap_or(self.definition_physical);
+            if self.use_fair_crew {
+                return crate::fair_crew_physical(info_definition, self.fair_crew_strength);
+            }
+            return self.info_physical.unwrap_or(info_definition);
+        }
+        if self.has_physical_info() {
+            return self.info_physical.unwrap_or(self.definition_physical);
+        }
+        self.definition_physical
+    }
+
+    /// `FnGetPhysical` mode dispatch (C4Script.cpp:638-688).
     fn get_physical(&self, name: &str, mode: i32) -> Option<i32> {
         match mode {
             PHYS_CURRENT => self.resolved_physical(false).value_by_name(name),
             PHYS_PERMANENT => {
                 // Info objects only (C4Script.cpp:668).
-                if !self.crew_member {
+                if !self.has_physical_info() {
                     return None;
                 }
-                self.info_physical
-                    .unwrap_or(self.definition_physical)
-                    .value_by_name(name)
+                self.resolved_physical(true).value_by_name(name)
             }
             PHYS_TEMPORARY => {
                 // Info objects only, and only in temporary mode
                 // (C4Script.cpp:680-682).
-                if !self.crew_member {
+                if !self.has_physical_info() {
                     return None;
                 }
                 self.temporary_physical
@@ -40046,7 +40113,7 @@ impl ObjectScopeContext {
         }
     }
 
-    /// `FnSetPhysical` mode dispatch (C4Script.cpp:557-601, fair crew off).
+    /// `FnSetPhysical` mode dispatch (C4Script.cpp:557-601).
     fn set_physical(&mut self, name: &str, value: i32, mode: i32) -> bool {
         // Unknown names fail (C4Script.cpp:562).
         if PhysicalInfo::default().value_mut_by_name(name).is_none() {
@@ -40057,7 +40124,7 @@ impl ObjectScopeContext {
                 // Temporary mode or info objects only (C4Script.cpp:569).
                 if let Some(temporary) = self.temporary_physical.as_mut() {
                     temporary.set_by_name(name, value);
-                } else if self.crew_member {
+                } else if self.has_physical_info() && !self.use_fair_crew {
                     let definition_physical = self.definition_physical;
                     self.info_physical
                         .get_or_insert(definition_physical)
@@ -40070,7 +40137,7 @@ impl ObjectScopeContext {
             }
             PHYS_PERMANENT => {
                 // Info objects only (C4Script.cpp:576).
-                if !self.crew_member {
+                if !self.has_physical_info() || self.use_fair_crew {
                     return false;
                 }
                 let definition_physical = self.definition_physical;
@@ -43835,6 +43902,7 @@ func RenameInfo(object target, string name, bool make_valid)
             name: name.to_string(),
             rank: 0,
             experience,
+            physical: crate::PhysicalInfo::default(),
             death_count: 0,
             total_playing_time: 0,
             birthday: 0,

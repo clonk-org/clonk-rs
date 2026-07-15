@@ -74,7 +74,7 @@ use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_core::{std_config::Config, std_markup::Markup};
 use lc_engine::command::CommandId;
 use lc_engine::player_file::PlayerFile;
-use lc_engine::scenario::{LegacyDefinitionResolver, ScenarioLoaderHead};
+use lc_engine::scenario::{LegacyDefinitionResolver, ScenarioLoaderHead, ScenarioLobbyMetadata};
 use lc_engine::text_spec::{parse_text_spec, TextSpec, TextSpecIcon};
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlClientRegistry,
@@ -413,6 +413,8 @@ struct PreparedGoLoadingState {
     status: lc_network::NetworkStatus,
     local_reached: bool,
     random_seed: u64,
+    use_fair_crew: bool,
+    fair_crew_strength: i32,
     team_configuration: TeamConfiguration,
 }
 
@@ -472,6 +474,8 @@ impl ScenarioLoadingState {
         data: Scenario,
         status: lc_network::NetworkStatus,
         random_seed: u64,
+        use_fair_crew: bool,
+        fair_crew_strength: i32,
         team_configuration: TeamConfiguration,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
@@ -487,6 +491,8 @@ impl ScenarioLoadingState {
                 status,
                 local_reached: false,
                 random_seed,
+                use_fair_crew,
+                fair_crew_strength,
                 team_configuration,
             }),
             offline_startup_players: None,
@@ -6399,6 +6405,30 @@ struct ClassicHostLobbyProjection {
     fair_crew: bool,
     fair_crew_forced: bool,
     fair_crew_strength: i32,
+}
+
+/// C4GameParameters' pre-game fair-crew resolution shared by local startup
+/// and host staging: an embedded/forced value owns the flag; otherwise the
+/// current user option does. A scenario strength of zero falls back to the
+/// configured strength only for an unembedded enabled round.
+fn resolve_scenario_fair_crew_parameters(
+    metadata: &ScenarioLobbyMetadata,
+    options: &GameOptionValues,
+) -> (bool, i32) {
+    let embedded = metadata.embedded_game_parameter_values();
+    let parameters = embedded
+        .as_ref()
+        .unwrap_or_else(|| metadata.game_parameter_defaults());
+    let use_fair_crew = if embedded.is_some() || parameters.fair_crew_forced() {
+        parameters.use_fair_crew()
+    } else {
+        options.fair_crew
+    };
+    let mut fair_crew_strength = parameters.fair_crew_strength();
+    if embedded.is_none() && use_fair_crew && fair_crew_strength == 0 {
+        fair_crew_strength = options.fair_crew_strength;
+    }
+    (use_fair_crew, fair_crew_strength)
 }
 
 struct ClassicHostLobbyState {
@@ -18347,6 +18377,8 @@ impl GameApp {
             scenario_data,
             status,
             random_seed,
+            join_data.parameters.use_fair_crew,
+            join_data.parameters.fair_crew_strength,
             synchronized_team_configuration(&join_data.parameters),
         ));
         self.pending_network_join_data = None;
@@ -23635,11 +23667,17 @@ impl GameApp {
             NetworkMode::Host(_) | NetworkMode::Client(_) => None,
         });
         if let Some(prepared) = prepared {
-            let Some(random_seed) = prepared
+            let Some((random_seed, use_fair_crew, fair_crew_strength)) = prepared
                 .host_config()
                 .initial_join_snapshot
                 .as_ref()
-                .map(|snapshot| u64::from(snapshot.parameters.random_seed as u32))
+                .map(|snapshot| {
+                    (
+                        u64::from(snapshot.parameters.random_seed as u32),
+                        snapshot.parameters.use_fair_crew,
+                        snapshot.parameters.fair_crew_strength,
+                    )
+                })
             else {
                 self.status_text =
                     "Unable to start prepared host: initial JoinData is missing".to_string();
@@ -23698,6 +23736,8 @@ impl GameApp {
                 scenario_data,
                 status,
                 random_seed,
+                use_fair_crew,
+                fair_crew_strength,
                 TeamConfiguration::from(prepared.runtime_team_metadata()),
             ));
             self.mode = AppMode::Loading;
@@ -29692,15 +29732,8 @@ impl GameApp {
                         detail: format!("scenario loader backdrop is unavailable: {error}"),
                     })
                 })?;
-        let fair_crew = if embedded.is_some() || parameters.fair_crew_forced() {
-            parameters.use_fair_crew()
-        } else {
-            options.fair_crew
-        };
-        let mut fair_crew_strength = parameters.fair_crew_strength();
-        if embedded.is_none() && fair_crew && fair_crew_strength == 0 {
-            fair_crew_strength = options.fair_crew_strength;
-        }
+        let (fair_crew, fair_crew_strength) =
+            resolve_scenario_fair_crew_parameters(metadata, &options);
         let lobby = ClassicHostLobbyProjection {
             local_name,
             nick,
@@ -29921,6 +29954,11 @@ impl GameApp {
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| prepared.team_configuration);
+        let prepared_fair_crew = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .map(|prepared| (prepared.use_fair_crew, prepared.fair_crew_strength));
         let offline_startup_players = self
             .loading_state
             .as_mut()
@@ -29938,6 +29976,22 @@ impl GameApp {
             }
         }
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
+        let (use_fair_crew, fair_crew_strength) = prepared_fair_crew.unwrap_or_else(|| {
+            if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                // A client reaches activation only after JoinData installed
+                // prepared_go above. Keep standalone defaults for malformed
+                // transitional state rather than consulting local options.
+                (true, 1_000)
+            } else {
+                let options = self.scenario_game_options.values();
+                scenario_data.lobby_metadata().map_or(
+                    (options.fair_crew, options.fair_crew_strength),
+                    |metadata| resolve_scenario_fair_crew_parameters(metadata, options),
+                )
+            }
+        });
+        engine.set_use_fair_crew(use_fair_crew);
+        engine.set_fair_crew_strength(fair_crew_strength);
         engine.set_local_players([self.local_owner]);
         engine.set_max_players(
             i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
@@ -36807,6 +36861,7 @@ mod tests {
                     name: "Clonk".to_string(),
                     rank: 0,
                     experience: 0,
+                    physical: lc_engine::PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
                     birthday: 0,
@@ -36817,6 +36872,15 @@ mod tests {
                     has_died: false,
                 }],
             });
+            // Their movement timings predate live Game.Parameters and were
+            // recorded against the former engine-wide fair-crew default.
+            // Pin that round option explicitly; normal-crew activation and
+            // player-file physicals have dedicated L061 regressions.
+            let mut options = app.scenario_game_options.values().clone();
+            options.fair_crew = true;
+            options.fair_crew_strength = 1_000;
+            app.scenario_game_options =
+                GameOptionButtons::new(GameOptionContext::LocalSelector, options);
         }
         wait_for_menu(&mut app);
 
@@ -38883,6 +38947,14 @@ mod tests {
             },
         )
         .expect("initialise app");
+        app.scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::LocalSelector,
+            GameOptionValues {
+                fair_crew: true,
+                fair_crew_strength: 4_321,
+                ..GameOptionValues::default()
+            },
+        );
 
         let frontend = FrontendScenario {
             identifier: "JoinTest.c4s".to_string(),
@@ -38908,6 +38980,8 @@ mod tests {
         };
         app.activate_loaded_scenario(frontend.clone(), scenario_data)
             .expect("scenario activates");
+        assert!(app.engine.use_fair_crew());
+        assert_eq!(app.engine.fair_crew_strength(), 4_321);
 
         let expected_definition = def_dir.to_string_lossy();
         assert!(matches!(
@@ -51128,6 +51202,10 @@ mod tests {
             .expect("prepared JoinData")
             .parameters;
         let prepared_random_seed = u64::from(prepared_parameters.random_seed as u32);
+        let prepared_fair_crew = (
+            prepared_parameters.use_fair_crew,
+            prepared_parameters.fair_crew_strength,
+        );
         assert_eq!(
             app.network_control_clock,
             Some(NetworkControlClock::new(
@@ -51196,6 +51274,14 @@ mod tests {
             Some(prepared_random_seed),
             "prepared host must retain Parameters.RandomSeed for scenario activation"
         );
+        assert_eq!(
+            app.loading_state
+                .as_ref()
+                .and_then(|loading| loading.prepared_go.as_ref())
+                .map(|loading| (loading.use_fair_crew, loading.fair_crew_strength)),
+            Some(prepared_fair_crew),
+            "prepared host must retain synchronized fair-crew parameters"
+        );
 
         // FinalInit reports the host's local arrival, but OnStatusAck is what
         // starts network control after every waited-for client has reached Go
@@ -51203,6 +51289,13 @@ mod tests {
         // therefore remain behind the loading screen until that exact commit.
         app.poll_loading()
             .expect("initialize the retained prepared scenario");
+        assert_eq!(
+            (
+                app.engine.use_fair_crew(),
+                app.engine.fair_crew_strength(),
+            ),
+            prepared_fair_crew,
+        );
         assert_eq!(commands.take_status_reached(), 1);
         assert!(matches!(app.mode, AppMode::Loading));
         assert!(app.loading_state.is_some());

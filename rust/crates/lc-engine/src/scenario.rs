@@ -15398,6 +15398,19 @@ global func Step(state, frame, random)
                     name: "Henry".to_string(),
                     rank: 1,
                     experience: 120,
+                    physical: crate::PhysicalInfo {
+                        energy: 55_000,
+                        scale: 30_000,
+                        hangle: 30_000,
+                        swim: 60_000,
+                        fight: 50_000,
+                        can_scale: 1,
+                        can_hangle: 1,
+                        can_dig: 1,
+                        can_construct: 1,
+                        can_chop: 1,
+                        ..crate::PhysicalInfo::default()
+                    },
                     death_count: 0,
                     total_playing_time: 0,
                     birthday: 0,
@@ -15426,6 +15439,26 @@ global func Step(state, frame, random)
             crew.state.info_physical,
             Some(crate::PhysicalInfo {
                 energy: 55_000,
+                scale: 30_000,
+                hangle: 30_000,
+                swim: 60_000,
+                fight: 50_000,
+                can_scale: 1,
+                can_hangle: 1,
+                can_dig: 1,
+                can_construct: 1,
+                can_chop: 1,
+                ..crate::PhysicalInfo::default()
+            }),
+            "persistent info physicals remain promoted by the info rank"
+        );
+        let crew_index = engine
+            .find_object_index(crew.id)
+            .expect("crew remains in the engine");
+        assert_eq!(
+            engine.object_physical(crew_index),
+            crate::PhysicalInfo {
+                energy: 55_000,
                 scale: 33_500,
                 hangle: 33_500,
                 swim: 62_000,
@@ -15436,8 +15469,8 @@ global func Step(state, frame, random)
                 can_construct: 1,
                 can_chop: 1,
                 ..crate::PhysicalInfo::default()
-            }),
-            "FairCrewStrength=1000 promotes the full C4PhysicalInfo like C++"
+            },
+            "FairCrewStrength=1000 is selected live without overwriting Info"
         );
     }
 

@@ -6284,6 +6284,7 @@ mod tests {
             name: name.to_string(),
             rank: 0,
             experience,
+            physical: PhysicalInfo::default(),
             death_count: 0,
             total_playing_time: 0,
             birthday: 0,
@@ -7370,6 +7371,9 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
             remove_actor: bool,
         ) -> Vec<String> {
             let mut engine = Engine::new();
+            // This regression exercises the mutable Info->Physical backing.
+            // Fair crew deliberately makes that backing read-only to scripts.
+            engine.set_use_fair_crew(false);
             let mut clonk = Definition::from_script(
                 "CLNK",
                 "Clonk",

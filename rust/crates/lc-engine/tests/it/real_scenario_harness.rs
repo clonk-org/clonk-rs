@@ -4561,6 +4561,7 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
             name: name.to_owned(),
             rank: 5,
             experience: 0,
+            physical: lc_engine::PhysicalInfo::default(),
             death_count: 0,
             total_playing_time: 0,
             birthday: 0,

@@ -242,6 +242,7 @@ impl ReplayCrewInfoV1 {
             name: self.name.clone(),
             rank: self.rank,
             experience: self.experience,
+            physical: lc_engine::PhysicalInfo::default(),
             death_count: 0,
             total_playing_time: 0,
             birthday: 0,

@@ -1732,6 +1732,7 @@ func Ejection(object item)
                 name: "Veteran".to_string(),
                 rank: 0,
                 experience: 0,
+                physical: PhysicalInfo::default(),
                 death_count: 4,
                 total_playing_time: 17,
                 birthday: 0,
@@ -1827,6 +1828,7 @@ func Recruit() { return MakeCrewMember(this(), 0); }
             name: name.to_string(),
             rank: 0,
             experience: 0,
+            physical: PhysicalInfo::default(),
             death_count: 0,
             total_playing_time: 0,
             birthday: 0,
@@ -14589,6 +14591,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                     name: "Rookie".to_string(),
                     rank: 0,
                     experience: 998,
+                    physical: PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
                     birthday: 0,
@@ -16013,6 +16016,7 @@ public func RemoveCaptain(int player)
                     name: "Runner-up".to_string(),
                     rank: 1,
                     experience: 1_000,
+                    physical: PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
                     birthday: 0,
@@ -16027,6 +16031,7 @@ public func RemoveCaptain(int player)
                     name: "Captain".to_string(),
                     rank: 5,
                     experience: 5_000,
+                    physical: PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
                     birthday: 0,
@@ -25803,6 +25808,185 @@ func Stuck()
     }
 
     #[test]
+    fn object_physical_uses_promoted_info_when_fair_crew_is_off() {
+        // C4Object::GetPhysical returns Info->Physical when the round's
+        // UseFairCrew flag is false (C4Object.cpp:2149-2152). PromotionUpdate
+        // preserves trained Walk values that came from the player info.
+        let mut definition = simple_definition("CLNK");
+        definition.set_crew_member(true);
+        definition.set_physical(PhysicalInfo {
+            walk: 30_000,
+            ..PhysicalInfo::default()
+        });
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("crew definition registers");
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("CLNK".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine.set_use_fair_crew(false);
+        engine
+            .join_player(JoinPlayerConfig {
+                name: "Info owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![player_file::CrewInfo {
+                    id: "CLNK".to_string(),
+                    name: "Trained".to_string(),
+                    rank: 2,
+                    experience: 3_000,
+                    physical: PhysicalInfo {
+                        energy: 60_000,
+                        walk: 80_000,
+                        can_scale: 1,
+                        can_hangle: 1,
+                        can_dig: 1,
+                        can_construct: 1,
+                        can_chop: 1,
+                        ..PhysicalInfo::default()
+                    },
+                    death_count: 0,
+                    total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
+                    participation: 1,
+                    in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                }],
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("player joins");
+        let crew = engine.player(0).expect("player exists").crew()[0];
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        assert_eq!(engine.fair_crew_strength(), 1_000);
+        assert!(!engine.use_fair_crew());
+
+        assert_eq!(engine.object_physical(crew_index).walk, 80_000);
+    }
+
+    #[test]
+    fn object_physical_trains_fair_crew_from_live_strength() {
+        // FairCrewStrength=5000 maps to rank 2 with the default rank curve
+        // (1000, 2828, 5196). PromotionUpdate moves the four trainable
+        // physicals 2/20 of the way from the definition to C4MaxPhysical
+        // (C4Def.cpp:860-874; C4InfoCore.cpp:214-219).
+        let mut definition = Definition::from_script(
+            "OLDP",
+            "Original crew",
+            "#strict\npublic func ReadFair() { return([GetPhysical(\"Scale\"), GetPhysical(\"Scale\", 1)]); }\npublic func Swap() { return(ChangeDef(NEWP)); }\n",
+        )
+        .expect("original crew compiles");
+        definition.set_crew_member(true);
+        definition.set_physical(PhysicalInfo {
+            scale: 30_000,
+            hangle: 40_000,
+            swim: 50_000,
+            fight: 60_000,
+            ..PhysicalInfo::default()
+        });
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("crew definition registers");
+        let mut changed = Definition::from_script(
+            "NEWP",
+            "Changed crew",
+            "#strict\npublic func ReadFair() { return([GetPhysical(\"Scale\"), GetPhysical(\"Scale\", 1)]); }\n",
+        )
+        .expect("changed crew compiles");
+        changed.set_physical(PhysicalInfo {
+            scale: 90_000,
+            hangle: 90_000,
+            swim: 90_000,
+            fight: 90_000,
+            ..PhysicalInfo::default()
+        });
+        engine
+            .register_definition(changed)
+            .expect("changed definition registers");
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("OLDP".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(JoinPlayerConfig {
+                name: "Fair owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![player_file::CrewInfo {
+                    id: "OLDP".to_string(),
+                    name: "Fair".to_string(),
+                    rank: 0,
+                    experience: 0,
+                    physical: PhysicalInfo {
+                        scale: 99_000,
+                        hangle: 99_000,
+                        swim: 99_000,
+                        fight: 99_000,
+                        ..PhysicalInfo::default()
+                    },
+                    death_count: 0,
+                    total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
+                    participation: 1,
+                    in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                }],
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("player joins");
+        let crew = engine.player(0).expect("player exists").crew()[0];
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+
+        engine.set_fair_crew_strength(5_000);
+        let physical = engine.object_physical(crew_index);
+        assert_eq!(physical.scale, 37_000);
+        assert_eq!(physical.hangle, 46_000);
+        assert_eq!(physical.swim, 55_000);
+        assert_eq!(physical.fight, 64_000);
+        assert_eq!(
+            engine
+                .call_object_function(crew_index, "ReadFair", Vec::new())
+                .expect("script reads fair physicals"),
+            Value::Array(vec![Value::Int(37_000), Value::Int(37_000)])
+        );
+
+        engine
+            .call_object_function(crew_index, "Swap", Vec::new())
+            .expect("ChangeDef succeeds");
+        let crew_index = engine.find_object_index(crew).expect("crew survives");
+        assert_eq!(engine.objects[crew_index].definition_id, "NEWP");
+        assert_eq!(
+            engine.object_physical(crew_index),
+            physical,
+            "fair crew remains sourced from Info->pDef after ChangeDef"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(crew_index, "ReadFair", Vec::new())
+                .expect("changed object script reads fair physicals"),
+            Value::Array(vec![Value::Int(37_000), Value::Int(37_000)])
+        );
+    }
+
+    #[test]
     fn engine_state_retains_forced_control_style_for_later_joins() {
         // Savegame restoration preserves C4S.Head, which remains the source
         // for C4Player::ApplyForcedControl on runtime joins
@@ -25816,6 +26000,35 @@ func Stuck()
         restored.restore_state(&decoded).expect("state restores");
 
         assert_eq!(restored.capture_state().forced_control_style, Some(true));
+    }
+
+    #[test]
+    fn engine_state_retains_fair_crew_parameters_with_legacy_defaults() {
+        let mut engine = Engine::new();
+        engine.set_use_fair_crew(false);
+        engine.set_fair_crew_strength(5_000);
+
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("state serializes");
+        let decoded = EngineState::from_json_str(&encoded).expect("state deserializes");
+        let mut restored = Engine::new();
+        restored.restore_state(&decoded).expect("state restores");
+        assert!(!restored.use_fair_crew());
+        assert_eq!(restored.fair_crew_strength(), 5_000);
+
+        let mut legacy: serde_json::Value =
+            serde_json::from_str(&encoded).expect("state JSON parses");
+        let object = legacy.as_object_mut().expect("state is an object");
+        object.remove("use_fair_crew");
+        object.remove("fair_crew_strength");
+        let legacy = EngineState::from_json_str(&legacy.to_string())
+            .expect("legacy state without fair-crew fields deserializes");
+        let mut restored = Engine::new();
+        restored.restore_state(&legacy).expect("legacy state restores");
+        assert!(restored.use_fair_crew());
+        assert_eq!(restored.fair_crew_strength(), 1_000);
     }
 
     #[test]
@@ -26744,6 +26957,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
                 name: "Rookie".to_string(),
                 rank: 0,
                 experience: 0,
+                physical: PhysicalInfo::default(),
                 death_count: 0,
                 total_playing_time: 17_999,
                 birthday: 123,
@@ -29270,6 +29484,7 @@ global func InitializePlayer(int player)
                 name: name.to_string(),
                 rank,
                 experience: 0,
+                physical: PhysicalInfo::default(),
                 death_count: 0,
                 total_playing_time: 0,
                 birthday: 0,
@@ -29623,6 +29838,7 @@ func ControlUpSingle()
             name: "Existing".to_string(),
             rank: 0,
             experience: 0,
+            physical: PhysicalInfo::default(),
             death_count: 0,
             total_playing_time: 0,
             birthday: 0,
@@ -39469,6 +39685,7 @@ func RemoveAndRecruit(object target) {
                         name: "First pointer".to_string(),
                         rank: 4,
                         experience: 900,
+                        physical: PhysicalInfo::default(),
                         death_count: 0,
                         total_playing_time: 0,
                         birthday: 0,
@@ -39483,6 +39700,7 @@ func RemoveAndRecruit(object target) {
                         name: "Second pointer".to_string(),
                         rank: 4,
                         experience: 900,
+                        physical: PhysicalInfo::default(),
                         death_count: 0,
                         total_playing_time: 0,
                         birthday: 0,
@@ -39690,6 +39908,7 @@ func RemoveAndRecruit(object target) {
                     name: "Rookie".to_string(),
                     rank: 0,
                     experience: 0,
+                    physical: PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
                     birthday: 0,
@@ -39782,6 +40001,7 @@ func AwardSelf(int amount) {
                     name: "Rookie".to_string(),
                     rank: 0,
                     experience: 0,
+                    physical: PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
                     birthday: 0,
@@ -40291,6 +40511,7 @@ func RemoveAndGrabSelf() {
                     name: "Veteran Ada".to_string(),
                     rank: 4,
                     experience: 8_000,
+                    physical: PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 17,
                     birthday: 0,

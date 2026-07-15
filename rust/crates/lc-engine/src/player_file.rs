@@ -3,7 +3,7 @@
 //! C4ObjectInfoList.cpp:56-83). The join pipeline consumes this to mirror
 //! `C4Player::Load` (C4Player.cpp:1089-1107).
 
-use lc_resources::Group;
+use lc_resources::{Group, PhysicalInfo};
 use serde::{Deserialize, Serialize};
 
 use crate::scenario::ScenarioError;
@@ -23,6 +23,10 @@ pub struct CrewInfo {
     pub rank: i32,
     /// `Experience` (default 0) — GetIdle prefers the highest.
     pub experience: i32,
+    /// Persistent `C4ObjectInfoCore::Physical`, compiled from the sibling
+    /// `[Physical]` section and promotion-updated for `rank` on load.
+    #[serde(default)]
+    pub physical: PhysicalInfo,
     /// Persistent death tally (`C4ObjectInfoCore::DeathCount`).
     #[serde(default)]
     pub death_count: i32,
@@ -64,11 +68,43 @@ impl CrewInfo {
                 .and_then(|value| parse_leading_i32(&value))
                 .unwrap_or(default)
         };
+        let rank = int("ObjectInfo", "Rank", 0);
+        let mut physical = PhysicalInfo::default();
+        for name in [
+            "Energy",
+            "Breath",
+            "Walk",
+            "Jump",
+            "Scale",
+            "Hangle",
+            "Dig",
+            "Swim",
+            "Throw",
+            "Push",
+            "Fight",
+            "Magic",
+            "Float",
+            "CanScale",
+            "CanHangle",
+            "CanDig",
+            "CanConstruct",
+            "CanChop",
+            "CanFly",
+            "CorrosionResist",
+            "BreatheWater",
+        ] {
+            if let Some(value) = entry("Physical", name).and_then(|value| parse_leading_i32(&value))
+            {
+                physical.set_by_name(name, value);
+            }
+        }
+        let physical = crate::promotion_updated_physical(physical, rank, None);
         Self {
             id: entry("ObjectInfo", "id").unwrap_or_default(),
             name: entry("ObjectInfo", "Name").unwrap_or_else(|| "Clonk".to_string()),
-            rank: int("ObjectInfo", "Rank", 0),
+            rank,
             experience: int("ObjectInfo", "Experience", 0),
+            physical,
             death_count: int("ObjectInfo", "DeathCount", 0),
             total_playing_time: int("ObjectInfo", "TotalPlayingTime", 0),
             birthday: int("ObjectInfo", "Birthday", 0),
@@ -384,6 +420,13 @@ mod tests {
         assert_eq!(wipf.id, "COWB");
         assert_eq!(wipf.rank, 2);
         assert_eq!(wipf.experience, 900);
+        assert_eq!(wipf.physical.walk, 80_000);
+        assert_eq!(wipf.physical.energy, 60_000);
+        assert_eq!(wipf.physical.can_scale, 1);
+        assert_eq!(wipf.physical.can_hangle, 1);
+        assert_eq!(wipf.physical.can_dig, 1);
+        assert_eq!(wipf.physical.can_construct, 1);
+        assert_eq!(wipf.physical.can_chop, 1);
         assert_eq!(wipf.death_count, 7);
         assert_eq!(wipf.total_playing_time, 17_999);
         assert_eq!(wipf.birthday, 123);
