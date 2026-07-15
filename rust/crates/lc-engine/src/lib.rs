@@ -29022,6 +29022,9 @@ impl Engine {
             world = world.with_next_object_id(next_object_id);
 
             if !host_landscape_ops.is_empty() {
+                for operation in &host_landscape_ops {
+                    world.preview_runtime_landscape_operation(operation);
+                }
                 pending_landscape_ops.extend(host_landscape_ops);
             }
 
@@ -44548,6 +44551,23 @@ impl Engine {
                         texmap,
                     );
                 }
+                LandscapeOperation::DrawDefMap {
+                    origin,
+                    bitmap,
+                    map_width,
+                    map_height,
+                    texmap,
+                    map_creator,
+                } => {
+                    let _ = self.draw_indexed_map(
+                        origin,
+                        &bitmap,
+                        map_width,
+                        map_height,
+                        texmap,
+                    );
+                    let _ = self.replace_runtime_map_creator(map_creator.0);
+                }
                 LandscapeOperation::SyncRuntimeTexMap { texmap } => {
                     let _ = self.replace_runtime_texmap(texmap);
                 }
@@ -46776,6 +46796,9 @@ impl Engine {
             }
             world = world.with_next_object_id(next_object_id);
             if !host_landscape_ops.is_empty() {
+                for operation in &host_landscape_ops {
+                    world.preview_runtime_landscape_operation(operation);
+                }
                 pending_landscape_ops.extend(host_landscape_ops);
             }
             if !effect_player_commands.is_empty() {

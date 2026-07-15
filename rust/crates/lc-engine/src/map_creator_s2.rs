@@ -1481,36 +1481,72 @@ fn parse_and_render_s2_map(
     }
 }
 
-fn render_last_map(tree: &Tree) -> Option<lc_resources::bitmap::IndexedBitmap> {
+fn last_map(tree: &Tree) -> Option<NodeId> {
     // GetMap(nullptr): the last map entry (src/C4MapCreatorS2.cpp:786-792).
-    let map = tree.nodes[0]
+    tree.nodes[0]
         .children
         .iter()
         .rev()
         .find(|&&child| tree.overlay(child).is_some_and(|overlay| overlay.is_map))
-        .copied();
-    map.and_then(|map| {
-        let map_overlay = tree.overlay(map).expect("map overlay");
-        let (wdt, hgt) = (map_overlay.wdt, map_overlay.hgt);
-        if wdt <= 0 || hgt <= 0 {
-            return None;
-        }
+        .copied()
+}
 
-        // C4MCMap::RenderTo (src/C4MapCreatorS2.cpp:646-674).
-        let mut bytes = vec![0u8; (wdt * hgt) as usize];
-        for iy in 0..hgt {
-            for ix in 0..wdt {
-                let pix = &mut bytes[(iy * wdt + ix) as usize];
-                *pix = 0;
-                tree.render_pix(map, ix, iy, pix, Op::None, false, true);
-            }
+fn render_last_map(tree: &Tree) -> Option<lc_resources::bitmap::IndexedBitmap> {
+    render_map(tree, last_map(tree)?)
+}
+
+fn render_map(tree: &Tree, map: NodeId) -> Option<lc_resources::bitmap::IndexedBitmap> {
+    let map_overlay = tree.overlay(map)?;
+    let (wdt, hgt) = (map_overlay.wdt, map_overlay.hgt);
+    if wdt <= 0 || hgt <= 0 {
+        return None;
+    }
+
+    // C4MCMap::RenderTo (src/C4MapCreatorS2.cpp:646-674).
+    let mut bytes = vec![0u8; (wdt * hgt) as usize];
+    for iy in 0..hgt {
+        for ix in 0..wdt {
+            let pix = &mut bytes[(iy * wdt + ix) as usize];
+            *pix = 0;
+            tree.render_pix(map, ix, iy, pix, Op::None, false, true);
         }
-        Some(lc_resources::bitmap::IndexedBitmap {
-            width: wdt as u32,
-            height: hgt as u32,
-            indices: bytes,
-        })
+    }
+    Some(lc_resources::bitmap::IndexedBitmap {
+        width: wdt as u32,
+        height: hgt as u32,
+        indices: bytes,
     })
+}
+
+/// C4Landscape::DrawDefMap/C4MCMap::SetSize (C4Landscape.cpp:2672-2696;
+/// C4MapCreatorS2.cpp:676-681): resolve a map in the retained scenario
+/// creator, resize it, re-evaluate the complete tree through the live synced
+/// RNG, then render that exact map. Unlike DrawMap, this mutates the retained
+/// creator and performs no FakeLS MapWdt/MapHgt draws.
+pub(crate) fn render_named_s2_map(
+    creator: &mut MapCreatorS2State,
+    name: &str,
+    classifier: &mut MapPixelClassifier,
+    map_width: i32,
+    map_height: i32,
+    rng: &mut LcgRng,
+) -> Option<lc_resources::bitmap::IndexedBitmap> {
+    let map = if name.is_empty() {
+        last_map(&creator.tree)
+    } else {
+        creator.tree.node_by_name(0, name).filter(|&node| {
+            creator
+                .tree
+                .overlay(node)
+                .is_some_and(|overlay| overlay.is_map)
+        })
+    }?;
+
+    let map_overlay = creator.tree.overlay_mut(map)?;
+    map_overlay.wdt = map_width;
+    map_overlay.hgt = map_height;
+    creator.tree.re_evaluate(0, classifier, rng);
+    render_map(&creator.tree, map)
 }
 
 #[cfg(test)]
@@ -1633,6 +1669,47 @@ mod tests {
             2,
             "FakeLS exact MapWdt/MapHgt still evaluate with two Random(1) draws"
         );
+    }
+
+    #[test]
+    fn retained_creator_resizes_and_renders_the_requested_named_map_in_place() {
+        // DrawDefMap resolves Requested rather than the last map (Decoy),
+        // then SetSize re-evaluates the whole retained tree. Exactly three
+        // seedless overlays consume two draws each; fixed-seed Decoy nodes
+        // consume none, and there are no DrawMap FakeLS size draws.
+        let mut classifier = test_classifier();
+        let mut setup_rng = LcgRng::seed_from_u64(3);
+        let (w, h) = params();
+        let mut creator = create_s2_map_with_state(
+            "overlay Half { mat = Earth; tex = Rough; wdt = 50; }; \
+             map Requested { Half; }; \
+             map Decoy { seed = 41; overlay { mat = Earth; tex = Rough; seed = 43; }; };",
+            &mut classifier,
+            w,
+            h,
+            false,
+            1,
+            &mut setup_rng,
+        )
+        .creator;
+
+        let mut rng = LcgRng::seed_from_u64(17);
+        let before = rng.count;
+        let map = render_named_s2_map(&mut creator, "Requested", &mut classifier, 2, 2, &mut rng)
+            .expect("named map renders");
+
+        assert_eq!((map.width, map.height), (2, 2));
+        assert_eq!(map.indices, vec![2 | 0x80, 0, 2 | 0x80, 0]);
+        assert_eq!(rng.count - before, 6, "full-tree seed ledger");
+
+        let creator_before_missing = creator.clone();
+        let rng_before_missing = rng.clone();
+        assert!(
+            render_named_s2_map(&mut creator, "Missing", &mut classifier, 1, 1, &mut rng,)
+                .is_none()
+        );
+        assert_eq!(creator, creator_before_missing);
+        assert_eq!(rng, rng_before_missing);
     }
 
     #[test]

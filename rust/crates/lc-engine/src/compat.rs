@@ -2046,6 +2046,35 @@ impl HostWorldContext {
         self.landscape.as_deref()
     }
 
+    /// Thread state-bearing landscape operations across effect callbacks
+    /// that execute before the authoritative Engine fold. Pixel writes keep
+    /// the existing deferred-preview boundary, but C4TextureMap allocations
+    /// and DrawDefMap's retained creator mutation are live C++ state needed
+    /// to render later callbacks correctly.
+    pub(crate) fn preview_runtime_landscape_operation(&mut self, operation: &LandscapeOperation) {
+        match operation {
+            LandscapeOperation::DrawMap { texmap, .. }
+            | LandscapeOperation::SyncRuntimeTexMap { texmap } => {
+                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                    return;
+                };
+                let _ = landscape.replace_runtime_texmap_state(texmap.clone());
+            }
+            LandscapeOperation::DrawDefMap {
+                texmap,
+                map_creator,
+                ..
+            } => {
+                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                    return;
+                };
+                let _ = landscape.replace_runtime_texmap_state(texmap.clone());
+                let _ = landscape.replace_runtime_map_creator_state(map_creator.0.clone());
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn with_scenario_values(
         mut self,
         values: Rc<ScenarioValueStore>,
@@ -12280,6 +12309,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("DigFree", dig_free);
     script.register_host_function("DigFreeRect", dig_free_rect);
     script.register_host_function("FreeRect", free_rect);
+    script.register_host_function("DrawDefMap", draw_def_map);
     script.register_host_function("DrawMap", draw_map);
     script.register_host_function("DrawMaterialQuad", draw_material_quad);
     script.register_host_function("ScriptGo", script_go);
@@ -14656,6 +14686,10 @@ where
 
 #[derive(Debug, Clone)]
 #[doc(hidden)]
+pub struct RetainedMapCreatorUpdate(pub(crate) crate::map_creator_s2::MapCreatorS2State);
+
+#[derive(Debug, Clone)]
+#[doc(hidden)]
 pub enum LandscapeOperation {
     DigCircle {
         center: Vector2,
@@ -14712,6 +14746,18 @@ pub enum LandscapeOperation {
         map_width: i32,
         map_height: i32,
         texmap: crate::landscape::RuntimeTexMapState,
+    },
+    /// FnDrawDefMap mutates the scenario's retained C4MapCreatorS2 before
+    /// mapping its named map to the landscape (C4Landscape.cpp:2672-2696).
+    /// Carry both the synchronously rendered bytes and evolved creator so
+    /// the authoritative fold performs neither parsing nor RNG draws.
+    DrawDefMap {
+        origin: Vector2,
+        bitmap: lc_resources::bitmap::IndexedBitmap,
+        map_width: i32,
+        map_height: i32,
+        texmap: crate::landscape::RuntimeTexMapState,
+        map_creator: RetainedMapCreatorUpdate,
     },
     /// DrawMap parsing can allocate a live TextureMap entry before
     /// Render(nullptr) finds no map. C++ retains that allocation despite the
@@ -24711,6 +24757,101 @@ fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
             map_width,
             map_height,
             texmap,
+        });
+        Ok(Value::Int(1))
+    })
+}
+
+/// FnDrawDefMap/C4Landscape::DrawDefMap (C4Script.cpp:4857-4861;
+/// C4Landscape.cpp:2672-2696): clip the GLOBAL destination, resize the named
+/// map in the retained scenario creator, re-evaluate that complete creator
+/// through the live synced RNG, and queue the rendered indexed bytes.
+fn draw_def_map(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "DrawDefMap", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "DrawDefMap", "y")?;
+    let width = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "DrawDefMap", "wdt")?;
+    let height = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "DrawDefMap", "hgt")?;
+    let Some(map_name) = parse_optional_string(args.get(4), "DrawDefMap", "map-definition")? else {
+        return Ok(Value::Int(0));
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Int(0));
+        };
+        let Some((landscape_width, landscape_height, map_zoom, mut map_creator)) =
+            context.world.landscape_ref().and_then(|landscape| {
+                let (landscape_width, landscape_height) = landscape.grid_dimensions()?;
+                let raster = landscape.raster_state()?;
+                Some((
+                    landscape_width,
+                    landscape_height,
+                    raster.map_zoom(),
+                    raster.map_creator()?.clone(),
+                ))
+            })
+        else {
+            return Ok(Value::Int(0));
+        };
+        if map_zoom <= 0 {
+            return Ok(Value::Int(0));
+        }
+
+        // C4Landscape::ClipRect runs before GetMap/SetSize. In particular,
+        // an empty clipped destination cannot re-evaluate the retained tree.
+        let left = i64::from(x).max(0);
+        let top = i64::from(y).max(0);
+        let right = (i64::from(x) + i64::from(width)).min(i64::from(landscape_width));
+        let bottom = (i64::from(y) + i64::from(height)).min(i64::from(landscape_height));
+        if right <= left || bottom <= top {
+            return Ok(Value::Int(0));
+        }
+        let clipped_x = left as i32;
+        let clipped_y = top as i32;
+        let clipped_width = (right - left) as i32;
+        let clipped_height = (bottom - top) as i32;
+        let map_width = (clipped_width - 1) / map_zoom + 1;
+        let map_height = (clipped_height - 1) / map_zoom + 1;
+
+        let Some(texmap) = context.runtime_texmap.take() else {
+            return Ok(Value::Int(0));
+        };
+        let mut classifier = crate::scenario::MapPixelClassifier::from_runtime_state(texmap);
+        let rendered = RANDOM_CONTEXT.with(|random_cell| {
+            let random_context = random_cell
+                .borrow()
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| RuntimeError::new("DrawDefMap: random context unavailable"))?;
+            let mut rng = random_context.rng.borrow_mut();
+            Ok(crate::map_creator_s2::render_named_s2_map(
+                &mut map_creator,
+                &map_name,
+                &mut classifier,
+                map_width,
+                map_height,
+                &mut rng,
+            ))
+        });
+        let texmap = classifier.into_runtime_state();
+        context.runtime_texmap = Some(texmap.clone());
+        let Some(bitmap) = rendered? else {
+            return Ok(Value::Int(0));
+        };
+
+        // C++ mutates pMapCreator synchronously. Update the callback's COW
+        // world now so a later DrawDefMap/DrawMap in this same VM call sees
+        // the resized and re-evaluated tree; the operation carries the same
+        // state into the authoritative engine fold.
+        context.preview_runtime_map_creator(map_creator.clone());
+        context.register_landscape_operation(LandscapeOperation::DrawDefMap {
+            origin: Vector2::new(clipped_x, clipped_y),
+            bitmap,
+            map_width,
+            map_height,
+            texmap,
+            map_creator: RetainedMapCreatorUpdate(map_creator),
         });
         Ok(Value::Int(1))
     })
@@ -39028,6 +39169,19 @@ impl EffectHostContext {
             .is_some_and(|texmap| texmap.get_index_mat_tex(material_texture, None) != 0)
     }
 
+    fn preview_runtime_map_creator(
+        &mut self,
+        creator: crate::map_creator_s2::MapCreatorS2State,
+    ) {
+        let Some(landscape) = self.world.landscape.as_mut() else {
+            return;
+        };
+        let Some(raster) = Rc::make_mut(landscape).raster_state_mut() else {
+            return;
+        };
+        raster.set_map_creator(Some(creator));
+    }
+
     fn get_world_object(&self, id: ObjectId) -> Option<HostWorldObject> {
         self.get_world_object_preserving_contents_link(id, None)
     }
@@ -43551,6 +43705,7 @@ mod tests {
         "DoMagicEnergy",
         "DoScore",
         "DoScoreboardShow",
+        "DrawDefMap",
         "DrawMap",
         "DrawMaterialQuad",
         "EffectCall",
@@ -48362,7 +48517,12 @@ public func RejectConstruction(x, y, builder)
         let mut setup_rng = LcgRng::new(1);
         let retained = crate::map_creator_s2::create_s2_map_with_state(
             "overlay Named { mat = Earth; tex = Rough; wdt = 50; seed = 7; }; \
-             map Original { seed = 5; Named; };",
+             map Original { seed = 5; Named; }; \
+             overlay Half { mat = Earth; tex = Rough; wdt = 50; }; \
+             map Requested { Half; }; \
+             map Decoy { seed = 41; \
+                 overlay { mat = Earth; tex = Rough; seed = 43; }; \
+             };",
             &mut classifier,
             crate::scenario::LegacyC4SVal::new(8, 0, 8, 8),
             crate::scenario::LegacyC4SVal::new(4, 0, 4, 4),
@@ -48650,6 +48810,241 @@ public func RejectConstruction(x, y, builder)
             );
             let final_rng = guard.finish();
             assert_eq!(result.expect("DrawMap false path succeeds"), Value::Int(0));
+            assert!(outcome.landscape.is_empty());
+            assert_eq!(final_rng, initial_rng);
+        }
+    }
+
+    #[test]
+    fn draw_def_map_clips_renders_the_named_map_and_consumes_full_tree_rng() {
+        // DrawDefMap mutates the retained creator rather than cloning a
+        // FakeLS creator. Requested is deliberately not the last map, and
+        // only its left-half template should reach the queued 2x2 bitmap.
+        // ReEvaluate visits three seedless overlays, for six exact draws.
+        let seed = 37;
+        let mut expected_rng = LcgRng::new(seed);
+        for _ in 0..3 {
+            let _ = expected_rng.random(32768);
+            let _ = expected_rng.random(65536);
+        }
+        let expected_random = expected_rng.random(1_000);
+        let guard = enter_random_context(LcgRng::new(seed));
+        let args = [
+            Value::Int(-2),
+            Value::Int(1),
+            Value::Int(7),
+            Value::Int(5),
+            Value::String("Requested".to_string()),
+        ];
+        let world = draw_map_world(8, 7, 3, true);
+        let initial_landscape = world.landscape_ref().expect("landscape exists").clone();
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            let drew = draw_def_map(&args)?;
+            let after = random(&[Value::Int(1_000)])?;
+            Ok::<_, RuntimeError>((drew, after))
+        });
+        let final_rng = guard.finish();
+
+        assert_eq!(
+            result.expect("DrawDefMap and Random succeed"),
+            (Value::Int(1), Value::Int(expected_random))
+        );
+        assert_eq!(final_rng, expected_rng);
+        assert_eq!(outcome.landscape.len(), 1);
+        let expected_creator = match &outcome.landscape[0] {
+            LandscapeOperation::DrawDefMap {
+                origin,
+                bitmap,
+                map_width,
+                map_height,
+                texmap,
+                map_creator,
+            } => {
+                assert_eq!(*origin, Vector2::new(0, 1));
+                assert_eq!((*map_width, *map_height), (2, 2));
+                assert_eq!((bitmap.width, bitmap.height), (2, 2));
+                assert_eq!(bitmap.indices, vec![1 | 0x80, 0, 1 | 0x80, 0]);
+                assert_eq!(texmap.default_material_entry("Earth"), Some(1));
+                map_creator.0.clone()
+            }
+            other => panic!("unexpected landscape operation: {other:?}"),
+        };
+
+        let mut engine = crate::Engine::new();
+        engine.set_landscape(initial_landscape);
+        engine.apply_landscape_operations(outcome.landscape.clone());
+        let landscape = engine.landscape().expect("folded landscape exists");
+        assert_eq!(landscape.grid_byte_at(0, 1), Some(1 | 0x80));
+        assert_eq!(
+            landscape
+                .raster_state()
+                .and_then(|state| state.map_creator()),
+            Some(&expected_creator),
+            "authoritative fold persists the mutated retained creator"
+        );
+    }
+
+    #[test]
+    fn draw_def_map_creator_mutation_is_live_to_later_draw_map() {
+        // pMapCreator is mutated before DrawDefMap returns. Resize the last
+        // scenario map to 1x1, then let DrawMap clone that live creator and
+        // render its last map from an empty runtime source. A stale creator
+        // snapshot would incorrectly produce Decoy's original 8x4 bitmap.
+        let guard = enter_random_context(LcgRng::new(41));
+        let def_args = [
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(1),
+            Value::String("Decoy".to_string()),
+        ];
+        let map_args = [
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(1),
+            Value::String(String::new()),
+        ];
+        let (result, outcome) =
+            with_effect_context(None, &[], draw_map_world(8, 7, 3, true), 1, || {
+                Ok::<_, RuntimeError>((draw_def_map(&def_args)?, draw_map(&map_args)?))
+            });
+        let final_rng = guard.finish();
+
+        assert_eq!(
+            result.expect("DrawDefMap then DrawMap succeed"),
+            (Value::Int(1), Value::Int(1))
+        );
+        assert_eq!(
+            final_rng.count, 8,
+            "six ReEvaluate seed draws plus two DrawMap FakeLS size draws"
+        );
+        assert_eq!(outcome.landscape.len(), 2);
+        match &outcome.landscape[1] {
+            LandscapeOperation::DrawMap { bitmap, .. } => {
+                assert_eq!((bitmap.width, bitmap.height), (1, 1));
+                assert_eq!(bitmap.indices, vec![1 | 0x80]);
+            }
+            other => panic!("unexpected landscape operation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_def_map_creator_mutation_threads_between_host_contexts() {
+        // Effect event batches invoke separate host contexts against a
+        // threaded HostWorldContext before their operations reach Engine.
+        // Replay the first callback's state-bearing operation and prove the
+        // second context clones Decoy at its resized 1x1 dimensions.
+        let guard = enter_random_context(LcgRng::new(47));
+        let mut world = draw_map_world(8, 7, 3, true);
+        let def_args = [
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(1),
+            Value::String("Decoy".to_string()),
+        ];
+        let (first_result, first_outcome) =
+            with_effect_context(None, &[], world.clone(), 1, || draw_def_map(&def_args));
+        assert_eq!(first_result.expect("DrawDefMap succeeds"), Value::Int(1));
+        for operation in &first_outcome.landscape {
+            world.preview_runtime_landscape_operation(operation);
+        }
+
+        let map_args = [
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(1),
+            Value::String(String::new()),
+        ];
+        let (second_result, second_outcome) =
+            with_effect_context(None, &[], world, 1, || draw_map(&map_args));
+        let final_rng = guard.finish();
+
+        assert_eq!(second_result.expect("DrawMap succeeds"), Value::Int(1));
+        assert_eq!(final_rng.count, 8);
+        match &second_outcome.landscape[0] {
+            LandscapeOperation::DrawMap { bitmap, .. } => {
+                assert_eq!((bitmap.width, bitmap.height), (1, 1));
+                assert_eq!(bitmap.indices, vec![1 | 0x80]);
+            }
+            other => panic!("unexpected landscape operation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_def_map_false_paths_leave_rng_creator_and_landscape_untouched() {
+        // GetMap runs after ClipRect but before SetSize/ReEvaluate. Missing
+        // or non-map names, a clipped-away rect, nil, and absent retained
+        // state therefore all return zero without queuing or drawing RNG.
+        for (retain_creator, args) in [
+            (
+                true,
+                vec![
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(1),
+                    Value::Int(1),
+                    Value::String("Missing".to_string()),
+                ],
+            ),
+            (
+                true,
+                vec![
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(1),
+                    Value::Int(1),
+                    Value::String("Half".to_string()),
+                ],
+            ),
+            (
+                true,
+                vec![
+                    Value::Int(8),
+                    Value::Int(0),
+                    Value::Int(1),
+                    Value::Int(1),
+                    Value::String("Requested".to_string()),
+                ],
+            ),
+            (
+                true,
+                vec![
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(1),
+                    Value::Int(1),
+                    Value::Nil,
+                ],
+            ),
+            (
+                false,
+                vec![
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(1),
+                    Value::Int(1),
+                    Value::String("Requested".to_string()),
+                ],
+            ),
+        ] {
+            let initial_rng = LcgRng::new(43);
+            let guard = enter_random_context(initial_rng.clone());
+            let (result, outcome) = with_effect_context(
+                None,
+                &[],
+                draw_map_world(8, 7, 3, retain_creator),
+                1,
+                || draw_def_map(&args),
+            );
+            let final_rng = guard.finish();
+
+            assert_eq!(
+                result.expect("DrawDefMap false path succeeds"),
+                Value::Int(0)
+            );
             assert!(outcome.landscape.is_empty());
             assert_eq!(final_rng, initial_rng);
         }

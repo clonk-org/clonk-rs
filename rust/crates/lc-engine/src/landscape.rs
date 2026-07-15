@@ -1644,6 +1644,33 @@ impl Landscape {
         self.raster_state.as_mut()
     }
 
+    pub(crate) fn replace_runtime_texmap_state(&mut self, texmap: RuntimeTexMapState) -> bool {
+        let Landscape {
+            pixels,
+            raster_state,
+            ..
+        } = self;
+        let Some(state) = raster_state.as_mut() else {
+            return false;
+        };
+        *state.texmap_mut() = texmap;
+        if let Some(pixels) = pixels {
+            pixels.sync_runtime_texmap(state.texmap());
+        }
+        true
+    }
+
+    pub(crate) fn replace_runtime_map_creator_state(
+        &mut self,
+        creator: crate::map_creator_s2::MapCreatorS2State,
+    ) -> bool {
+        let Some(state) = self.raster_state.as_mut() else {
+            return false;
+        };
+        state.set_map_creator(Some(creator));
+        true
+    }
+
     /// Rebuild the Rust column approximation from the authoritative Surface8
     /// plane. Scenario activation uses this once; runtime transactions use the
     /// affected columns only.
@@ -4186,19 +4213,19 @@ impl crate::Engine {
         let Some(landscape) = self.landscape.as_mut() else {
             return false;
         };
-        let Landscape {
-            pixels,
-            raster_state,
-            ..
-        } = landscape;
-        let Some(state) = raster_state.as_mut() else {
+        landscape.replace_runtime_texmap_state(texmap)
+    }
+
+    /// Persist DrawDefMap's in-place C4MapCreatorS2 mutation after the
+    /// callback-rendered bytes have been folded into the real landscape.
+    pub(crate) fn replace_runtime_map_creator(
+        &mut self,
+        creator: crate::map_creator_s2::MapCreatorS2State,
+    ) -> bool {
+        let Some(landscape) = self.landscape.as_mut() else {
             return false;
         };
-        *state.texmap_mut() = texmap;
-        if let Some(pixels) = pixels {
-            pixels.sync_runtime_texmap(state.texmap());
-        }
-        true
+        landscape.replace_runtime_map_creator_state(creator)
     }
 }
 
