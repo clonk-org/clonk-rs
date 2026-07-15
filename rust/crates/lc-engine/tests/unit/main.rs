@@ -36280,6 +36280,293 @@ func FxProbeTimer(pThis, iNumber) {
     }
 
     #[test]
+    fn effect_timer_walk_exposes_old_time_and_removes_later_effect_inline() {
+        // C4Effect::Execute advances one live list node at a time
+        // (C4Effect.cpp:319-363). While A's timer runs, the later B still
+        // has its old iTime. Removing B completes its Stop inline, so the
+        // traversal skips B's timer and reaches C only afterwards.
+        let script = r#"#strict 3
+        local iOrder, iSeenB;
+
+        func Install() {
+            iOrder = 0;
+            iSeenB = -1;
+            AddEffect("A", this(), 100, 1, this());
+            AddEffect("B", this(), 200, 1, this());
+            AddEffect("C", this(), 300, 1, this());
+        }
+
+        func FxATimer(object target, int number, int time) {
+            iOrder = iOrder * 10 + 1;
+            iSeenB = GetEffect("B", target, 0, 6);
+            RemoveEffect("B", target);
+            return 0;
+        }
+
+        func FxBTimer() { iOrder = iOrder * 10 + 9; }
+        func FxBStop() { iOrder = iOrder * 10 + 2; }
+        func FxCTimer() { iOrder = iOrder * 10 + 3; }
+        "#;
+
+        let mut definition =
+            Definition::from_script("OTW1", "Object timer walk", script)
+                .expect("script compiles");
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("OTW1"))
+            .expect("target spawns");
+        let idx = engine.find_object_index(id).expect("target exists");
+        engine
+            .call_object_function(idx, "Install", Vec::new())
+            .expect("effects install");
+
+        engine.tick().expect("timer frame succeeds");
+
+        let object = engine.object_snapshot(id).expect("target remains live");
+        assert_eq!(object.local_vars.get("iOrder"), Some(&Value::Int(123)));
+        assert_eq!(
+            object.local_vars.get("iSeenB"),
+            Some(&Value::Int(0)),
+            "A runs before C4Effect::Execute increments the later B"
+        );
+        assert!(
+            !object
+                .effects
+                .iter()
+                .any(|effect| effect.name == "B" && effect.priority != 0),
+            "B's inline removal prevents its already-eligible timer"
+        );
+        for name in ["A", "C"] {
+            assert_eq!(
+                object
+                    .effects
+                    .iter()
+                    .find(|effect| effect.name == name && effect.priority != 0)
+                    .map(|effect| effect.timer),
+                Some(1),
+                "the surviving effect advances exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn effect_timer_walk_executes_new_higher_effect_same_frame() {
+        // A new higher-priority node is inserted after the current cursor.
+        // C4Effect::Execute reaches it in the same live-list walk, advances
+        // iTime to one, and immediately fires its interval-one timer.
+        let script = r#"#strict 3
+        local iOrder, iNewTime;
+
+        func Install() {
+            iOrder = 0;
+            iNewTime = -1;
+            AddEffect("A", this(), 100, 1, this());
+        }
+
+        func FxATimer(object target) {
+            iOrder = iOrder * 10 + 1;
+            if (!GetEffect("New", target))
+                AddEffect("New", target, 200, 1, target);
+            return 0;
+        }
+
+        func FxNewTimer(object target, int number, int time) {
+            iOrder = iOrder * 10 + 2;
+            iNewTime = time;
+            return 0;
+        }
+        "#;
+
+        let mut definition =
+            Definition::from_script("OTW2", "Object timer insertion", script)
+                .expect("script compiles");
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("OTW2"))
+            .expect("target spawns");
+        let idx = engine.find_object_index(id).expect("target exists");
+        engine
+            .call_object_function(idx, "Install", Vec::new())
+            .expect("driver installs");
+
+        engine.tick().expect("timer frame succeeds");
+
+        let object = engine.object_snapshot(id).expect("target remains live");
+        assert_eq!(object.local_vars.get("iOrder"), Some(&Value::Int(12)));
+        assert_eq!(object.local_vars.get("iNewTime"), Some(&Value::Int(1)));
+        assert_eq!(
+            object
+                .effects
+                .iter()
+                .find(|effect| effect.name == "New" && effect.priority != 0)
+                .map(|effect| effect.timer),
+            Some(1),
+            "the newly inserted node advances in the frame that created it"
+        );
+    }
+
+    #[test]
+    fn effect_timer_walk_executes_replacement_after_current_unlinks() {
+        // The current callback may unlink its own node without callbacks and
+        // immediately add a higher-priority replacement. The Rust list can
+        // reuse the just-freed effect number, so the live traversal must not
+        // treat that number alone as an already-run cursor identity.
+        let script = r#"#strict 3
+        local iOrder, iNewTime;
+
+        func Install() {
+            iOrder = 0;
+            iNewTime = -1;
+            AddEffect("A", this(), 100, 1, this());
+        }
+
+        func FxATimer(object target, int number) {
+            iOrder = iOrder * 10 + 1;
+            RemoveEffect(nil, target, number, true);
+            AddEffect("New", target, 200, 1, target);
+            return 0;
+        }
+
+        func FxNewTimer(object target, int number, int time) {
+            iOrder = iOrder * 10 + 2;
+            iNewTime = time;
+            return 0;
+        }
+        "#;
+
+        let mut definition =
+            Definition::from_script("OTW4", "Object timer replacement", script)
+                .expect("script compiles");
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("OTW4"))
+            .expect("target spawns");
+        let idx = engine.find_object_index(id).expect("target exists");
+        engine
+            .call_object_function(idx, "Install", Vec::new())
+            .expect("driver installs");
+
+        engine.tick().expect("timer frame succeeds");
+
+        let object = engine.object_snapshot(id).expect("target remains live");
+        assert_eq!(object.local_vars.get("iOrder"), Some(&Value::Int(12)));
+        assert_eq!(object.local_vars.get("iNewTime"), Some(&Value::Int(1)));
+        assert_eq!(
+            object
+                .effects
+                .iter()
+                .find(|effect| effect.name == "New" && effect.priority != 0)
+                .map(|effect| effect.timer),
+            Some(1),
+            "the replacement is reached even when it reuses the removed cursor's number"
+        );
+    }
+
+    #[test]
+    fn effect_timer_kill_drops_removed_upper_readd_event() {
+        // A timer result of -1 performs Kill inline before traversal reaches
+        // Upper. Lower's Stop removes the temporarily inactive Upper; the
+        // stale TempReaddUpperEffects cursor must neither call Start(1) nor
+        // let Upper's formerly eligible timer run (C4Effect.cpp:342-405).
+        let script = r#"#strict 3
+        local iOrder, iStaleReadds, iUpperTimers;
+
+        func Install() {
+            iOrder = iStaleReadds = iUpperTimers = 0;
+            AddEffect("Lower", this(), 100, 1, this());
+            AddEffect("Upper", this(), 200, 1, this());
+        }
+
+        func FxLowerTimer() {
+            iOrder = iOrder * 10 + 1;
+            return -1;
+        }
+
+        func FxLowerStop(object target) {
+            iOrder = iOrder * 10 + 3;
+            RemoveEffect("Upper", target);
+            return 0;
+        }
+
+        func FxUpperTimer() {
+            iOrder = iOrder * 10 + 9;
+            ++iUpperTimers;
+            return 0;
+        }
+
+        func FxUpperStop(object target, int number, int reason, bool temp) {
+            if (reason == 1 && temp)
+                iOrder = iOrder * 10 + 2;
+            else
+                iOrder = iOrder * 10 + 4;
+            return 0;
+        }
+
+        func FxUpperStart(object target, int number, int temp) {
+            // Killing an inactive effect also has a Start(2) callback; that
+            // separate behavior is intentionally outside this regression.
+            if (temp == 1) {
+                iOrder = iOrder * 10 + 8;
+                ++iStaleReadds;
+            }
+            return 0;
+        }
+        "#;
+
+        let mut definition =
+            Definition::from_script("OTW3", "Object timer kill walk", script)
+                .expect("script compiles");
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("OTW3"))
+            .expect("target spawns");
+        let idx = engine.find_object_index(id).expect("target exists");
+        engine
+            .call_object_function(idx, "Install", Vec::new())
+            .expect("effects install");
+
+        engine.tick().expect("timer frame succeeds");
+
+        let object = engine.object_snapshot(id).expect("target remains live");
+        assert_eq!(object.local_vars.get("iOrder"), Some(&Value::Int(1234)));
+        assert_eq!(
+            object.local_vars.get("iUpperTimers"),
+            Some(&Value::Int(0))
+        );
+        assert_eq!(
+            object.local_vars.get("iStaleReadds"),
+            Some(&Value::Int(0))
+        );
+        assert!(
+            !object
+                .effects
+                .iter()
+                .any(|effect| effect.name == "Upper" && effect.priority != 0),
+            "Upper may remain linked dead until Execute revisits it, but it must not be active"
+        );
+    }
+
+    #[test]
     fn effect_death_stop_receives_reason_four_and_can_revive_target() {
         // AssignDeath clears effects with C4FxCall_RemoveDeath (4). Like
         // C4Effect::ClearAll, a Stop callback returning C4Fx_Stop_Deny (-1)
@@ -36465,7 +36752,10 @@ func FxProbeTimer(pThis, iNumber) {
         engine.tick().expect("scheduled callback succeeds");
 
         assert!(
-            engine.global_effects().is_empty(),
+            engine
+                .global_effects()
+                .iter()
+                .all(|effect| effect.priority == 0),
             "the successful one-shot callback removes its schedule effect"
         );
         let player = engine.player(0).expect("player remains registered");
@@ -36631,6 +36921,240 @@ func Probe(target) {
         assert_eq!(
             stop_calls, 1,
             "C4Effect::Kill fires the real Fx*Stop(nil, iNumber) once"
+        );
+    }
+
+    #[test]
+    fn global_effect_timer_walk_exposes_old_time_and_removes_later_effect_inline() {
+        // The global effect list uses the same one-node-at-a-time Execute
+        // walk as an object list. GA sees GB's old iTime, removes GB and
+        // completes its Stop before GC's later timer fires.
+        let script = r#"#strict 3
+        static iOrder, iSeenB;
+
+        func Install() {
+            iOrder = 0;
+            iSeenB = -1;
+            AddEffect("GA", nil, 100, 1, this());
+            AddEffect("GB", nil, 200, 1, this());
+            AddEffect("GC", nil, 300, 1, this());
+        }
+
+        global func FxGATimer(target, int number, int time) {
+            iOrder = iOrder * 10 + 1;
+            iSeenB = GetEffect("GB", nil, 0, 6);
+            RemoveEffect("GB", nil);
+            return 0;
+        }
+
+        global func FxGBTimer() { iOrder = iOrder * 10 + 9; }
+        global func FxGBStop() { iOrder = iOrder * 10 + 2; }
+        global func FxGCTimer() { iOrder = iOrder * 10 + 3; }
+        "#;
+
+        let mut definition =
+            Definition::from_script("GTW1", "Global timer walk", script)
+                .expect("script compiles");
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("GTW1"))
+            .expect("command target spawns");
+        let idx = engine.find_object_index(id).expect("command target exists");
+        engine
+            .call_object_function(idx, "Install", Vec::new())
+            .expect("effects install");
+
+        engine.tick().expect("timer frame succeeds");
+
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.script_globals.named.get("iOrder"),
+            Some(&Value::Int(123))
+        );
+        assert_eq!(
+            snapshot.script_globals.named.get("iSeenB"),
+            Some(&Value::Int(0)),
+            "GA runs before C4Effect::Execute increments the later GB"
+        );
+        assert!(
+            !engine
+                .global_effects()
+                .iter()
+                .any(|effect| effect.name == "GB" && effect.priority != 0),
+            "GB's inline removal prevents its already-eligible timer"
+        );
+        for name in ["GA", "GC"] {
+            assert_eq!(
+                engine
+                    .global_effects()
+                    .iter()
+                    .find(|effect| effect.name == name && effect.priority != 0)
+                    .map(|effect| effect.timer),
+                Some(1),
+                "the surviving global effect advances exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn global_effect_timer_walk_executes_new_higher_effect_same_frame() {
+        // A global node inserted above the current cursor is reached by the
+        // same Execute call and gets its first interval-one timer at iTime 1.
+        let script = r#"#strict 3
+        static iOrder, iNewTime;
+
+        func Install() {
+            iOrder = 0;
+            iNewTime = -1;
+            AddEffect("GA", nil, 100, 1, this());
+        }
+
+        global func FxGATimer(target) {
+            iOrder = iOrder * 10 + 1;
+            if (!GetEffect("GNew", nil))
+                AddEffect("GNew", nil, 200, 1, this());
+            return 0;
+        }
+
+        global func FxGNewTimer(target, int number, int time) {
+            iOrder = iOrder * 10 + 2;
+            iNewTime = time;
+            return 0;
+        }
+        "#;
+
+        let mut definition =
+            Definition::from_script("GTW2", "Global timer insertion", script)
+                .expect("script compiles");
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("GTW2"))
+            .expect("command target spawns");
+        let idx = engine.find_object_index(id).expect("command target exists");
+        engine
+            .call_object_function(idx, "Install", Vec::new())
+            .expect("driver installs");
+
+        engine.tick().expect("timer frame succeeds");
+
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.script_globals.named.get("iOrder"),
+            Some(&Value::Int(12))
+        );
+        assert_eq!(
+            snapshot.script_globals.named.get("iNewTime"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine
+                .global_effects()
+                .iter()
+                .find(|effect| effect.name == "GNew" && effect.priority != 0)
+                .map(|effect| effect.timer),
+            Some(1),
+            "the newly inserted global node advances in its creation frame"
+        );
+    }
+
+    #[test]
+    fn global_effect_timer_kill_drops_removed_upper_readd_event() {
+        // The global Execute walk also completes a timer-result Kill inline.
+        // GLower's Stop removes inactive GUpper, invalidating both its later
+        // timer turn and the pending Start(1) reactivation.
+        let script = r#"#strict 3
+        static iOrder, iStaleReadds, iUpperTimers;
+
+        func Install() {
+            iOrder = iStaleReadds = iUpperTimers = 0;
+            AddEffect("GLower", nil, 100, 1, this());
+            AddEffect("GUpper", nil, 200, 1, this());
+        }
+
+        global func FxGLowerTimer() {
+            iOrder = iOrder * 10 + 1;
+            return -1;
+        }
+
+        global func FxGLowerStop() {
+            iOrder = iOrder * 10 + 3;
+            RemoveEffect("GUpper", nil);
+            return 0;
+        }
+
+        global func FxGUpperTimer() {
+            iOrder = iOrder * 10 + 9;
+            ++iUpperTimers;
+            return 0;
+        }
+
+        global func FxGUpperStop(target, int number, int reason, bool temp) {
+            if (reason == 1 && temp)
+                iOrder = iOrder * 10 + 2;
+            else
+                iOrder = iOrder * 10 + 4;
+            return 0;
+        }
+
+        global func FxGUpperStart(target, int number, int temp) {
+            // Start(2) for an inactive-effect kill belongs to L026; this
+            // test only rejects the stale ordinary temp readd Start(1).
+            if (temp == 1) {
+                iOrder = iOrder * 10 + 8;
+                ++iStaleReadds;
+            }
+            return 0;
+        }
+        "#;
+
+        let mut definition =
+            Definition::from_script("GTW3", "Global timer kill walk", script)
+                .expect("script compiles");
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("GTW3"))
+            .expect("command target spawns");
+        let idx = engine.find_object_index(id).expect("command target exists");
+        engine
+            .call_object_function(idx, "Install", Vec::new())
+            .expect("effects install");
+
+        engine.tick().expect("timer frame succeeds");
+
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.script_globals.named.get("iOrder"),
+            Some(&Value::Int(1234))
+        );
+        assert_eq!(
+            snapshot.script_globals.named.get("iUpperTimers"),
+            Some(&Value::Int(0))
+        );
+        assert_eq!(
+            snapshot.script_globals.named.get("iStaleReadds"),
+            Some(&Value::Int(0))
+        );
+        assert!(
+            !engine
+                .global_effects()
+                .iter()
+                .any(|effect| effect.name == "GUpper" && effect.priority != 0),
+            "GUpper may remain linked dead until Execute revisits it, but it must not be active"
         );
     }
 

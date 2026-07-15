@@ -4947,6 +4947,16 @@ pub struct Object {
     #[doc(hidden)] pub own_shape_vertices: Option<Vec<ObjectVertex>>,
 }
 
+/// Stable position of C4Effect::Execute's live-list cursor. Effect numbers
+/// identify the current node even when callbacks insert into the prefix; the
+/// priority is only a fallback for legacy command paths that still unlink the
+/// current node immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EffectFrameCursor {
+    number: i32,
+    priority: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActionTransitionKind {
     Natural,
@@ -6298,17 +6308,11 @@ impl Object {
             .collect()
     }
 
-    fn tick_effects(&mut self) -> Vec<EffectEvent> {
-        // C4Effect::Execute unlinks priority-zero nodes silently when its
-        // traversal reaches them. They must never advance or emit Stop.
-        self.state.effects.retain(|effect| effect.priority != 0);
-        let mut events = Vec::new();
-        for effect in &mut self.state.effects {
-            if effect.advance_tick() {
-                events.push(EffectEvent::timer(effect.clone()));
-            }
-        }
-        events
+    fn advance_effect_frame_cursor(
+        &mut self,
+        cursor: Option<EffectFrameCursor>,
+    ) -> Option<(EffectFrameCursor, Option<EffectEvent>)> {
+        advance_effect_frame_cursor(&mut self.state.effects, cursor)
     }
 
     fn enqueue_commands<I>(&mut self, commands: I)
@@ -22927,7 +22931,6 @@ impl Engine {
             // Exit/DoCon; the end-of-exec update covers the net state).
             self.update_solid_mask(idx);
             self.update_sector_for_index(idx);
-            definition_id = self.objects[idx].definition_id.clone();
             // Script effect timers execute HERE in C++ — pEffects->Execute
             // follows ExecAction and ExecMovement inside C4Object::Execute
             // (C4Object.cpp:1069-1090): an action set by a timer callback
@@ -22935,108 +22938,98 @@ impl Engine {
             // callbacks read POST-movement state. Script effects (low
             // priority) run before the internal fire (priority 100 —
             // C4Effect execution is priority-ordered).
-            let timer_events = {
-                let object = &mut self.objects[idx];
-                object.tick_effects()
-            };
-
-            // The engine-internal fire timer (FnFxFireTimer,
-            // C4Effect.cpp:643-658 → C4Object::ExecFire) executes at its
-            // list position within the elapsed batch — unless a script
-            // overloads FxFireTimer (C++ resolves the callback through the
-            // script engine first; the engine function is registered
-            // beneath it, AddFunc C4Script.cpp:6995).
-            let mut segment: Vec<EffectEvent> = Vec::new();
-            for event in timer_events {
-                let is_fire_timer = event.effect.name == C4FX_FIRE
-                    && matches!(event.kind, EffectEventKind::Timer);
-                if !is_fire_timer {
-                    segment.push(event);
-                    continue;
-                }
-                if !segment.is_empty() {
-                    self.dispatch_object_effect_events(
-                        idx,
-                        &definition_id,
-                        std::mem::take(&mut segment),
-                    )?;
-                }
+            // C4Effect::Execute walks the LIVE list one node at a time. Do
+            // not pre-advance or snapshot the suffix: callbacks may kill a
+            // later node or insert a new upper node that must execute in
+            // this same frame (C4Effect.cpp:319-363).
+            let mut effect_cursor = None;
+            loop {
                 if self.objects[idx].destroyed
                     || !self.objects[idx].state.status.is_active()
                 {
                     break;
                 }
+                let Some((next_cursor, timer_event)) = self.objects[idx]
+                    .advance_effect_frame_cursor(effect_cursor)
+                else {
+                    break;
+                };
+                effect_cursor = Some(next_cursor);
+                let Some(event) = timer_event else {
+                    continue;
+                };
                 definition_id = self.objects[idx].definition_id.clone();
-                if self.effect_has_script_callback(&event.effect, &definition_id, "Timer") {
-                    segment.push(event);
+
+                // The engine-internal fire timer (FnFxFireTimer,
+                // C4Effect.cpp:643-658 → C4Object::ExecFire) executes at
+                // its live-list position unless a script overload shadows
+                // the engine function (C4Script.cpp:6995).
+                let native_fire = event.effect.name == C4FX_FIRE
+                    && !self.effect_has_script_callback(
+                        &event.effect,
+                        &definition_id,
+                        "Timer",
+                    );
+                if !native_fire {
+                    self.dispatch_object_effect_events(
+                        idx,
+                        &definition_id,
+                        vec![event],
+                    )?;
                     continue;
                 }
-                // An earlier callback may have killed this fire mid-batch —
-                // C4Effect::Execute skips dead entries (C4Effect.cpp:326-336).
-                let entry = self.objects[idx]
-                    .state
-                    .effects
-                    .iter()
-                    .find(|effect| effect.number == event.effect.number)
-                    .cloned();
-                if let Some(entry) = entry {
-                    if !entry.start_dispatched {
-                        // A check-chain survivor (AddEffect("Fire") with
-                        // higher-priority effects present) gets its engine
-                        // FnFxFireStart at the first execution — C++ ran it
-                        // inside the ctor after the Check pass
-                        // (C4Effect.cpp:118-133); the deferred protocol
-                        // lands here one frame later. The AddEffect rVals
-                        // still sit in vars [causedBy, blasted, incObj].
-                        let caused_by = match entry.vars().first() {
-                            Some(EffectVarValue::Int(value)) => *value,
-                            Some(EffectVarValue::Bool(flag)) => i32::from(*flag),
-                            _ => 0,
-                        };
-                        let blasted =
-                            matches!(entry.vars().get(1), Some(EffectVarValue::Bool(true)))
-                                || matches!(
-                                    entry.vars().get(1),
-                                    Some(EffectVarValue::Int(value)) if *value != 0
-                                );
-                        let incinerating = match entry.vars().get(2) {
-                            Some(EffectVarValue::Object(id)) => Some(ObjectId::new(*id)),
-                            _ => None,
-                        };
-                        if let Some(pending) = self.objects[idx]
-                            .state
-                            .effects
-                            .iter_mut()
-                            .find(|effect| effect.number == entry.number)
-                        {
-                            pending.start_dispatched = true;
-                        }
-                        let started = self.fire_effect_start_engine(
-                            idx,
-                            entry.number,
-                            caused_by,
-                            blasted,
-                            incinerating,
-                        )?;
-                        self.refresh_object_ocf(idx);
-                        definition_id = self.objects[idx].definition_id.clone();
-                        if !started {
-                            // the denied Start kills the entry without a
-                            // Stop call (C4Effect ctor, C4Effect.cpp:128-131)
-                            self.objects[idx].remove_effect_by_number(entry.number);
-                            continue;
-                        }
+
+                let entry = event.effect;
+                if !entry.start_dispatched {
+                    // A check-chain survivor gets its engine FnFxFireStart
+                    // at first execution. The AddEffect rVals still occupy
+                    // vars [causedBy, blasted, incObj].
+                    let caused_by = match entry.vars().first() {
+                        Some(EffectVarValue::Int(value)) => *value,
+                        Some(EffectVarValue::Bool(flag)) => i32::from(*flag),
+                        _ => 0,
+                    };
+                    let blasted = matches!(
+                        entry.vars().get(1),
+                        Some(EffectVarValue::Bool(true))
+                    ) || matches!(
+                        entry.vars().get(1),
+                        Some(EffectVarValue::Int(value)) if *value != 0
+                    );
+                    let incinerating = match entry.vars().get(2) {
+                        Some(EffectVarValue::Object(id)) => Some(ObjectId::new(*id)),
+                        _ => None,
+                    };
+                    if let Some(pending) = self.objects[idx]
+                        .state
+                        .effects
+                        .iter_mut()
+                        .find(|effect| effect.number == entry.number)
+                    {
+                        pending.start_dispatched = true;
                     }
-                    let stop_events = self.exec_object_fire(idx, frame, entry.number);
-                    segment.extend(stop_events);
-                    definition_id = self.objects[idx].definition_id.clone();
+                    let started = self.fire_effect_start_engine(
+                        idx,
+                        entry.number,
+                        caused_by,
+                        blasted,
+                        incinerating,
+                    )?;
+                    self.refresh_object_ocf(idx);
+                    if !started {
+                        // A denied Start dies without a Stop callback.
+                        self.objects[idx].remove_effect_by_number(entry.number);
+                        continue;
+                    }
                 }
-            }
-            if !segment.is_empty()
-                && !self.objects[idx].destroyed
-                && self.objects[idx].state.status.is_active()
-            {
-                self.dispatch_object_effect_events(idx, &definition_id, segment)?;
+                let stop_events = self.exec_object_fire(idx, frame, entry.number);
+                definition_id = self.objects[idx].definition_id.clone();
+                if !stop_events.is_empty()
+                    && !self.objects[idx].destroyed
+                    && self.objects[idx].state.status.is_active()
+                {
+                    self.dispatch_object_effect_events(idx, &definition_id, stop_events)?;
+                }
             }
             if self.objects[idx].destroyed
                 || !self.objects[idx].state.status.is_active()
@@ -26453,11 +26446,11 @@ impl Engine {
         let mut temp_wrapped_started: HashSet<i32> = HashSet::new();
         let mut temp_wrapped_stopped: HashSet<i32> = HashSet::new();
 
-        while let Some(event) = queue.pop_front() {
-            // The timer batch is collected before callbacks run. An earlier
-            // callback may have cleared this effect's command target and
-            // marked its still-linked node dead; C++'s list walk then skips
-            // that later node in the same Execute pass.
+        while let Some(mut event) = queue.pop_front() {
+            // A command generated by an earlier callback may have killed a
+            // queued callback target. Timer execution normally arrives one
+            // live node at a time, but this guard also protects callers that
+            // supply an explicit event batch.
             if matches!(event.kind, EffectEventKind::Timer)
                 && !object.state.effects.iter().any(|effect| {
                     effect.number == event.effect.number && effect.priority != 0
@@ -26626,6 +26619,45 @@ impl Engine {
                     effect.priority = 0;
                     state_snapshot.effects = object.state.effects.clone();
                 }
+            }
+
+            // TempRemoveUpperEffects flips each live upper node BEFORE its
+            // Stop callback; TempReadd walks the then-live suffix and flips
+            // only still-inactive nodes before Start. Resolving by number at
+            // dispatch time prevents a stale queued readd from resurrecting
+            // an effect killed inside its temp Stop.
+            match event.kind {
+                EffectEventKind::TempRemoved => {
+                    let Some(effect) = object
+                        .state
+                        .effects
+                        .iter_mut()
+                        .find(|effect| {
+                            effect.number == event.effect.number && effect.priority > 0
+                        })
+                    else {
+                        continue;
+                    };
+                    effect.priority = -effect.priority;
+                    event.effect = effect.clone();
+                    state_snapshot.effects = object.state.effects.clone();
+                }
+                EffectEventKind::TempReadded => {
+                    let Some(effect) = object
+                        .state
+                        .effects
+                        .iter_mut()
+                        .find(|effect| {
+                            effect.number == event.effect.number && effect.priority < 0
+                        })
+                    else {
+                        continue;
+                    };
+                    effect.priority = -effect.priority;
+                    event.effect = effect.clone();
+                    state_snapshot.effects = object.state.effects.clone();
+                }
+                _ => {}
             }
             let mut snapshot_for_call = state_snapshot.clone();
             if matches!(event.kind, EffectEventKind::Stopped(_))
@@ -26894,22 +26926,22 @@ impl Engine {
             };
             rng = new_rng;
             current_audio = audio_state;
-            if timer_kill {
-                // C4Effect::Execute kills THE elapsed effect (pEffect
-                // itself, C4Effect.cpp:342-357), not a same-name peer.
-                if let Some(removed) = object.remove_effect_by_number(event.effect.number) {
-                    queue.push_back(EffectEvent::stopped(removed, EffectStopReason::Removed));
-                }
-                state_snapshot.effects = object.state.effects.clone();
-            }
             if start_denied {
                 object.remove_effect_by_number(event.effect.number);
                 state_snapshot.effects = object.state.effects.clone();
             }
-            if stop_denied && !death_stop {
-                // Recover the refused effect at its priority position. C++
-                // restores the exact list node; the sorted reinsert may
-                // reorder equal-priority peers (documented divergence).
+            if stop_denied
+                && !death_stop
+                && !object
+                    .state
+                    .effects
+                    .iter()
+                    .any(|effect| effect.number == event.effect.number)
+            {
+                // Deferred command producers may have unlinked the victim
+                // before Stop. Reinsert it before folding the callback's
+                // EffectVar updates; timer Kill already has the exact dead
+                // node linked and therefore skips this compatibility path.
                 object.insert_effect(event.effect.clone());
                 state_snapshot.effects = object.state.effects.clone();
             }
@@ -27070,7 +27102,32 @@ impl Engine {
                 }
             }
 
-            if stop_denied && death_stop {
+            if stop_denied
+                && !death_stop
+                && !object.destroyed
+                && !matches!(object.state.status, ObjectStatus::Deleted)
+            {
+                // Kill restores iPriority on the same still-linked node
+                // after Stop returns. Restore after folding EffectVar
+                // updates so writes made while the node was dead survive.
+                if let Some(effect) = object
+                    .state
+                    .effects
+                    .iter_mut()
+                    .find(|effect| effect.number == event.effect.number)
+                {
+                    effect.priority = event.effect.priority;
+                } else {
+                    object.insert_effect(event.effect.clone());
+                }
+                state_snapshot = object.script_state_snapshot();
+            }
+
+            if stop_denied
+                && death_stop
+                && !object.destroyed
+                && !matches!(object.state.status, ObjectStatus::Deleted)
+            {
                 // ClearAll recovery restores only iPriority on the still
                 // linked node. Preserve EffectVar writes made inside Stop,
                 // and keep any callback-added effects at their newly
@@ -27112,6 +27169,32 @@ impl Engine {
             }
             if trigger_game_over {
                 game_over_requested = true;
+            }
+
+            if timer_kill
+                && !object.destroyed
+                && !matches!(object.state.status, ObjectStatus::Deleted)
+            {
+                // Execute calls Kill synchronously after the Timer callback
+                // has committed all of its mutations. Kill marks this exact
+                // node dead but leaves it linked; its Stop/temp bracket must
+                // finish before the live cursor advances to the next node.
+                if let Some(effect) = object
+                    .state
+                    .effects
+                    .iter_mut()
+                    .find(|effect| {
+                        effect.number == event.effect.number && effect.priority != 0
+                    })
+                {
+                    let stopped = effect.clone();
+                    effect.priority = 0;
+                    state_snapshot.effects = object.state.effects.clone();
+                    queue.push_front(EffectEvent::stopped(
+                        stopped,
+                        EffectStopReason::Removed,
+                    ));
+                }
             }
         }
 
@@ -40684,93 +40767,91 @@ impl Engine {
     /// `Fx*Timer(nil, iNumber, iTime)` on elapsed intervals. Callback
     /// outcomes fold exactly like the object timer batch.
     fn tick_global_effects(&mut self) -> Result<(), EngineError> {
-        // Dead nodes are unlinked by Execute without a Stop callback.
-        self.global_effects
-            .retain(|effect| effect.priority != 0);
-        let mut events = Vec::new();
-        for effect in &mut self.global_effects {
-            if effect.advance_tick() {
-                events.push(EffectEvent::timer(effect.clone()));
+        let mut cursor = None;
+        while let Some((next_cursor, timer_event)) =
+            advance_effect_frame_cursor(&mut self.global_effects, cursor)
+        {
+            cursor = Some(next_cursor);
+            let Some(event) = timer_event else {
+                continue;
+            };
+
+            let world = self.host_world_context();
+            let rng_state = self.rng.clone();
+            let mut global_effects = std::mem::take(&mut self.global_effects);
+            let dispatch_fallback = self
+                .definition_load_order
+                .first()
+                .and_then(|id| self.definitions.get(id));
+            let outcome = Self::run_effect_events_for_global(
+                dispatch_fallback,
+                &self.definitions,
+                self.game_over_triggered,
+                rng_state,
+                vec![event],
+                &mut global_effects,
+                &mut self.environment,
+                self.physics,
+                self.frame,
+                world,
+                self.audio_registry.clone(),
+            );
+            self.global_effects = global_effects;
+            let GlobalEffectRunOutcome {
+                particles,
+                physics_delta,
+                audio_events,
+                messages,
+                player_commands,
+                object_order_commands,
+                next_mission_commands,
+                landscape_ops,
+                spawns,
+                other_objects,
+                next_object_id,
+                game_over,
+                script_go,
+                script_counter,
+                audio_state,
+                rng,
+            } = outcome?;
+            self.rng = rng;
+            self.audio_registry = audio_state;
+            self.sync_next_object_id(next_object_id);
+            if !spawns.is_empty() {
+                self.process_spawn_queue(spawns)?;
             }
+            if !other_objects.is_empty() {
+                self.apply_nested_object_outcomes(other_objects)?;
+            }
+            if !landscape_ops.is_empty() {
+                self.apply_landscape_operations(landscape_ops);
+            }
+            if !player_commands.is_empty() {
+                self.apply_player_commands(player_commands)?;
+            }
+            self.pending_object_order_commands.extend(object_order_commands);
+            self.apply_next_mission_commands(next_mission_commands);
+            if !audio_events.is_empty() {
+                self.pending_audio.extend(audio_events);
+            }
+            for command in messages {
+                self.messages.apply_command(command);
+            }
+            if let Some(go) = script_go {
+                self.scenario_script_go = go;
+            }
+            if let Some(counter) = script_counter {
+                self.scenario_script_counter = counter;
+            }
+            if game_over {
+                self.request_game_over()?;
+            }
+            if !physics_delta.is_empty() {
+                self.apply_physics_delta(physics_delta);
+            }
+            self.apply_particle_commands(particles);
         }
-        if events.is_empty() {
-            return Ok(());
-        }
-        let world = self.host_world_context();
-        let rng_state = self.rng.clone();
-        let mut global_effects = std::mem::take(&mut self.global_effects);
-        let dispatch_fallback = self
-            .definition_load_order
-            .first()
-            .and_then(|id| self.definitions.get(id));
-        let outcome = Self::run_effect_events_for_global(
-            dispatch_fallback,
-            &self.definitions,
-            self.game_over_triggered,
-            rng_state,
-            events,
-            &mut global_effects,
-            &mut self.environment,
-            self.physics,
-            self.frame,
-            world,
-            self.audio_registry.clone(),
-        );
-        self.global_effects = global_effects;
-        let GlobalEffectRunOutcome {
-            particles,
-            physics_delta,
-            audio_events,
-            messages,
-            player_commands,
-            object_order_commands,
-            next_mission_commands,
-            landscape_ops,
-            spawns,
-            other_objects,
-            next_object_id,
-            game_over,
-            script_go,
-            script_counter,
-            audio_state,
-            rng,
-        } = outcome?;
-        self.rng = rng;
-        self.audio_registry = audio_state;
-        self.sync_next_object_id(next_object_id);
-        if !spawns.is_empty() {
-            self.process_spawn_queue(spawns)?;
-        }
-        if !other_objects.is_empty() {
-            self.apply_nested_object_outcomes(other_objects)?;
-        }
-        if !landscape_ops.is_empty() {
-            self.apply_landscape_operations(landscape_ops);
-        }
-        if !player_commands.is_empty() {
-            self.apply_player_commands(player_commands)?;
-        }
-        self.pending_object_order_commands.extend(object_order_commands);
-        self.apply_next_mission_commands(next_mission_commands);
-        if !audio_events.is_empty() {
-            self.pending_audio.extend(audio_events);
-        }
-        for command in messages {
-            self.messages.apply_command(command);
-        }
-        if let Some(go) = script_go {
-            self.scenario_script_go = go;
-        }
-        if let Some(counter) = script_counter {
-            self.scenario_script_counter = counter;
-        }
-        if game_over {
-            self.request_game_over()?;
-        }
-        if !physics_delta.is_empty() {
-            self.apply_physics_delta(physics_delta);
-        }
-        self.apply_particle_commands(particles);
         Ok(())
     }
 
@@ -40818,7 +40899,7 @@ impl Engine {
         // runner's temp_wrapped_stopped.
         let mut temp_wrapped_stopped: HashSet<i32> = HashSet::new();
 
-        while let Some(event) = queue.pop_front() {
+        while let Some(mut event) = queue.pop_front() {
             if matches!(event.kind, EffectEventKind::Timer)
                 && !global_effects.iter().any(|effect| {
                     effect.number == event.effect.number && effect.priority != 0
@@ -40853,6 +40934,27 @@ impl Engine {
                     }
                     continue;
                 }
+            }
+            match event.kind {
+                EffectEventKind::TempRemoved => {
+                    let Some(effect) = global_effects.iter_mut().find(|effect| {
+                        effect.number == event.effect.number && effect.priority > 0
+                    }) else {
+                        continue;
+                    };
+                    effect.priority = -effect.priority;
+                    event.effect = effect.clone();
+                }
+                EffectEventKind::TempReadded => {
+                    let Some(effect) = global_effects.iter_mut().find(|effect| {
+                        effect.number == event.effect.number && effect.priority < 0
+                    }) else {
+                        continue;
+                    };
+                    effect.priority = -effect.priority;
+                    event.effect = effect.clone();
+                }
+                _ => {}
             }
             let Some(dispatch_definition) = resolve_global_effect_dispatch_definition(
                 &event.effect,
@@ -40983,21 +41085,15 @@ impl Engine {
             };
             rng = new_rng;
             current_audio = audio_state;
-            if timer_kill {
-                // C4Effect::Execute kills THE elapsed effect (pEffect
-                // itself, C4Effect.cpp:342-357), not a same-name peer.
-                if let Some(removed) = remove_effect_from_stack(global_effects, event.effect.number)
-                {
-                    queue.push_back(EffectEvent::stopped(removed, EffectStopReason::Removed));
-                }
-            }
-            if stop_denied {
-                // Recover the refused effect at its priority position. C++
-                // restores the exact list node; the sorted reinsert may
-                // reorder equal-priority peers (documented divergence).
+            if stop_denied
+                && !global_effects
+                    .iter()
+                    .any(|effect| effect.number == event.effect.number)
+            {
+                // Preserve EffectVar writes from a Stop denial even for
+                // legacy deferred removals that unlinked before dispatch.
                 insert_effect_into_stack(global_effects, event.effect.clone());
             }
-
             let compat::EffectContextOutcome {
                 global: global_effect_commands,
                 environment: environment_update,
@@ -41052,6 +41148,16 @@ impl Engine {
             if !global_effect_commands.is_empty() {
                 apply_effect_commands_to_stack(global_effects, &global_effect_commands);
             }
+            if stop_denied {
+                if let Some(effect) = global_effects
+                    .iter_mut()
+                    .find(|effect| effect.number == event.effect.number)
+                {
+                    effect.priority = event.effect.priority;
+                } else {
+                    insert_effect_into_stack(global_effects, event.effect.clone());
+                }
+            }
             if !emitted_particles.is_empty() {
                 pending_particles.append(&mut emitted_particles);
             }
@@ -41069,6 +41175,21 @@ impl Engine {
             }
             if trigger_game_over {
                 game_over_requested = true;
+            }
+            if timer_kill {
+                if let Some(effect) = global_effects
+                    .iter_mut()
+                    .find(|effect| {
+                        effect.number == event.effect.number && effect.priority != 0
+                    })
+                {
+                    let stopped = effect.clone();
+                    effect.priority = 0;
+                    queue.push_front(EffectEvent::stopped(
+                        stopped,
+                        EffectStopReason::Removed,
+                    ));
+                }
             }
         }
 
@@ -42941,6 +43062,59 @@ fn effect_stop_reason_value(reason: EffectStopReason) -> Value {
     }
 }
 
+/// Advance one node of C4Effect::Execute's live list walk. Dead nodes are
+/// unlinked only when the cursor reaches them; a callback can therefore
+/// mutate the suffix before its nodes advance, and an effect inserted after
+/// the current node can still execute in this frame.
+fn advance_effect_frame_cursor(
+    effects: &mut Vec<EffectState>,
+    cursor: Option<EffectFrameCursor>,
+) -> Option<(EffectFrameCursor, Option<EffectEvent>)> {
+    let index = match cursor {
+        None => 0,
+        Some(cursor) => effects
+            .iter()
+            .position(|effect| {
+                effect.number == cursor.number
+                    && (effect.priority == 0
+                        || effect.priority.unsigned_abs() == cursor.priority)
+            })
+            .map(|index| index + 1)
+            .unwrap_or_else(|| {
+                // Most real removals leave the dead node linked. This
+                // structural fallback covers older command producers that
+                // still unlink immediately: higher priorities and older
+                // equal-priority peers form the suffix.
+                effects
+                    .iter()
+                    .position(|effect| {
+                        let priority = effect.priority.unsigned_abs();
+                        priority > cursor.priority
+                            || (priority == cursor.priority && effect.number < cursor.number)
+                    })
+                    .unwrap_or(effects.len())
+            }),
+    };
+
+    loop {
+        let effect = effects.get(index)?;
+        if effect.priority == 0 {
+            effects.remove(index);
+            continue;
+        }
+
+        let effect = &mut effects[index];
+        let cursor = EffectFrameCursor {
+            number: effect.number,
+            priority: effect.priority.unsigned_abs(),
+        };
+        let event = effect
+            .advance_tick()
+            .then(|| EffectEvent::timer(effect.clone()));
+        return Some((cursor, event));
+    }
+}
+
 /// Active effects AFTER `anchor` in the C++ effect list — the list orders
 /// ascending by |iPriority| with new-before-equal insertion
 /// (C4Effect.cpp:80-94), so an upper effect has a higher priority magnitude
@@ -42949,9 +43123,16 @@ fn effect_stop_reason_value(reason: EffectStopReason) -> Value {
 fn upper_effects_of(effects: &[EffectState], anchor: &EffectState) -> Vec<EffectState> {
     effects
         .iter()
-        .filter(|existing| existing.number != anchor.number && existing.priority != 1)
         .filter(|existing| {
-            let (upper, base) = (existing.priority.abs(), anchor.priority.abs());
+            existing.number != anchor.number
+                && existing.priority > 0
+                && existing.priority != 1
+        })
+        .filter(|existing| {
+            let (upper, base) = (
+                existing.priority.unsigned_abs(),
+                anchor.priority.unsigned_abs(),
+            );
             upper > base || (upper == base && existing.number < anchor.number)
         })
         .cloned()

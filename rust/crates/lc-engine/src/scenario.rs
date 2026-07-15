@@ -15516,24 +15516,29 @@ global func Step(state, frame, random)
 
         // FxShakeEffectTimer (Explode.c:188-199) fires every frame; its
         // strength formula iLevel/((3*iTime)/2+3)-iTime**2/400 reaches 0
-        // at iTime 29 for level 100 -> return(-1) kills the effect.
+        // at iTime 29 for level 100 -> return(-1) marks the effect dead.
+        // Execute does not unlink its current node until the next pass.
         let mut death_frame = None;
         for frame in 1..=40 {
             engine.tick().expect("tick runs");
-            if engine.global_effects().is_empty() {
+            let active = engine
+                .global_effects()
+                .iter()
+                .find(|effect| effect.priority != 0);
+            if active.is_none() {
                 death_frame = Some(frame);
                 break;
             }
             assert_eq!(
-                engine.global_effects()[0].timer,
-                frame,
+                active.map(|effect| effect.timer),
+                Some(frame),
                 "iTime advances every frame while the shake lives"
             );
         }
         assert_eq!(
             death_frame,
             Some(29),
-            "the timer's C4Fx_Execute_Kill return removes the global effect"
+            "the timer's C4Fx_Execute_Kill return deactivates the global effect"
         );
     }
 

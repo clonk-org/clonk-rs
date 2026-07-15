@@ -3095,10 +3095,15 @@ fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize() {
             .object_snapshot(id)
             .unwrap_or_else(|| panic!("FCWS segment {index} survives its first tick"));
         assert_eq!(segment.action.phase, expected_phases[index]);
-        assert_eq!(segment.effects.len(), 1);
-        assert_eq!(segment.effects[0].number, 2);
-        assert_eq!(segment.effects[0].name, "ForceFieldPSpell");
-        assert_eq!(segment.effects[0].timer, 1);
+        let active_effects = segment
+            .effects
+            .iter()
+            .filter(|effect| effect.priority != 0)
+            .collect::<Vec<_>>();
+        assert_eq!(active_effects.len(), 1);
+        assert_eq!(active_effects[0].number, 2);
+        assert_eq!(active_effects[0].name, "ForceFieldPSpell");
+        assert_eq!(active_effects[0].timer, 1);
         assert_eq!(
             engine.debug_solid_mask_override(id.as_u64()),
             Some(Some((expected_phases[index] * 8, 0, 8, 20)))
@@ -3477,7 +3482,7 @@ fn dragon_rock_real_schedule_enables_and_forces_player_fog_of_war() {
         engine
             .global_effects()
             .iter()
-            .all(|effect| effect.name != "IntSchedule"),
+            .all(|effect| effect.name != "IntSchedule" || effect.priority == 0),
         "successful eval reaches Helpers.c's one-shot kill return"
     );
     let player = engine.player(owner).expect("joined player remains live");
@@ -4311,7 +4316,7 @@ fn gold_rush_scorching_timer_returns_kill_before_playing_sound() {
             .expect("driver remains active")
             .effects
             .iter()
-            .all(|effect| effect.name != "IntScorching"),
+            .all(|effect| effect.name != "IntScorching" || effect.priority == 0),
         "return (FX_Execute_Kill, Sound(...)) returns the kill code after playing the sound"
     );
 }
