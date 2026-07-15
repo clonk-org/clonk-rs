@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use lc_engine::{
     CommandKind, ControlButton, ControlCommand, ControlEvent,
     JoinPlayerControlData, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
-    MessageBoardAnswerControlData, ScriptControlData, SyncCheckPacket,
+    MessageBoardAnswerControlData, PlayerSelectControlData, ScriptControlData, SyncCheckPacket,
     COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG,
     COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER,
     COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT, COM_MENU_SHOW_TEXT,
@@ -426,6 +426,18 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_player_selects(
+        &mut self,
+    ) -> Vec<(Tick, PlayerSelectControlData)> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitPlayerSelect { tick, selection } = command {
+                submitted.push((tick, selection));
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn take_submitted_scripts(&mut self) -> Vec<(Tick, ScriptControlData)> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -733,6 +745,7 @@ pub enum NetworkControl {
     VoteEnd(lc_engine::VoteControlData),
     PlayerControl(PlayerControlData),
     PlayerCommand(PlayerCommandControlData),
+    PlayerSelect(PlayerSelectControlData),
     Script(ScriptControlData),
     MessageBoardAnswer(MessageBoardAnswerControlData),
     Player { owner: i32, event: ControlEvent },
@@ -780,6 +793,10 @@ enum NetworkCommand {
     SubmitPlayerCommand {
         tick: Tick,
         command: PlayerCommandControlData,
+    },
+    SubmitPlayerSelect {
+        tick: Tick,
+        selection: PlayerSelectControlData,
     },
     SubmitScript {
         tick: Tick,
@@ -962,6 +979,18 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitPlayerCommand { tick, command })
             .map_err(|_| anyhow!("network worker is not accepting player commands"))
+    }
+
+    pub fn submit_player_select(
+        &self,
+        tick: Tick,
+        mut selection: PlayerSelectControlData,
+    ) -> Result<()> {
+        selection.by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the player-select wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitPlayerSelect { tick, selection })
+            .map_err(|_| anyhow!("network worker is not accepting player selections"))
     }
 
     pub fn submit_script_control(&self, tick: Tick, mut script: ScriptControlData) -> Result<()> {
@@ -1688,6 +1717,13 @@ async fn run_host_worker(
                             current_millis(),
                         );
                     }
+                    NetworkCommand::SubmitPlayerSelect { tick, selection } => {
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::PlayerSelect(selection),
+                            current_millis(),
+                        );
+                    }
                     NetworkCommand::SubmitScript { tick, script } => {
                         frame_builder.record_control(
                             tick,
@@ -2056,6 +2092,14 @@ async fn run_client_worker(
                         frame_builder.record_control(
                             tick,
                             lc_engine::ControlPacket::PlayerCommand(command),
+                            current_millis(),
+                        );
+                    }
+                    NetworkCommand::SubmitPlayerSelect { tick, selection } => {
+                        client_activation.refresh_frame(frame_tick_to_i32(tick));
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::PlayerSelect(selection),
                             current_millis(),
                         );
                     }
@@ -2452,6 +2496,7 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         // C++ packet layer counts them before InCom narrows Command to a byte.
         lc_engine::ControlPacket::PlayerControl(data) => Some(NetworkControl::PlayerControl(data)),
         lc_engine::ControlPacket::PlayerCommand(data) => Some(NetworkControl::PlayerCommand(data)),
+        lc_engine::ControlPacket::PlayerSelect(data) => Some(NetworkControl::PlayerSelect(data)),
         lc_engine::ControlPacket::Script(data) => Some(NetworkControl::Script(data)),
         lc_engine::ControlPacket::MessageBoardAnswer(data) => {
             Some(NetworkControl::MessageBoardAnswer(data))
@@ -4523,6 +4568,19 @@ mod tests {
     }
 
     #[test]
+    fn decoded_player_select_is_retained_for_scheduled_execution() {
+        let selection = PlayerSelectControlData {
+            player: 7,
+            objects: vec![12, -4, 91],
+            by_client: 4,
+        };
+        assert_eq!(
+            network_control_for_packet(lc_engine::ControlPacket::PlayerSelect(selection.clone())),
+            Some(NetworkControl::PlayerSelect(selection))
+        );
+    }
+
+    #[test]
     fn decoded_script_is_retained_for_scheduled_execution() {
         let script = ScriptControlData {
             target_object: lc_engine::SCRIPT_SCOPE_CONSOLE,
@@ -4638,6 +4696,34 @@ mod tests {
         assert_eq!(
             frame.controls,
             vec![lc_engine::ControlPacket::PlayerCommand(command)]
+        );
+    }
+
+    #[test]
+    fn player_select_frame_roundtrips_through_the_tick_accumulator() {
+        let selection = PlayerSelectControlData {
+            player: 3,
+            objects: vec![91, 42],
+            by_client: 4,
+        };
+        let mut accumulator = ControlFrameAccumulator::new(4);
+        accumulator.record_control(
+            12,
+            lc_engine::ControlPacket::PlayerSelect(selection.clone()),
+            100,
+        );
+        let frame = accumulator
+            .finalize_tick(12)
+            .expect("player selection produces a control frame");
+
+        let encoded = encode_control_packet(&frame).expect("encode accumulated frame");
+        assert_eq!(
+            decode_control_packet(&encoded).expect("decode accumulated frame"),
+            frame
+        );
+        assert_eq!(
+            frame.controls,
+            vec![lc_engine::ControlPacket::PlayerSelect(selection)]
         );
     }
 

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
+const MAX_PLAYER_SELECT_INI_OBJECTS: usize = 1_000_000;
+
 /// Unique identifier for a control packet inside the control log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControlPacketId(pub u8);
@@ -40,6 +42,9 @@ pub enum ControlPacket {
     /// Synchronized answer to a script-created message-board query
     /// (`CID_MessageBoardAnswer`, C4Control.cpp:1546-1594).
     MessageBoardAnswer(MessageBoardAnswerControlData),
+    /// Synchronized mouse/object selection (`CID_PlrSelect`,
+    /// C4Control.cpp:329-380).
+    PlayerSelect(PlayerSelectControlData),
     /// Player control command (`CID_PlrControl`).
     PlayerControl(PlayerControlData),
     /// Mouse/object command (`CID_PlrCommand`, C4Control.cpp:405-439).
@@ -240,6 +245,18 @@ impl Default for MessageBoardAnswerControlData {
             by_client: -1,
         }
     }
+}
+
+/// Body of `C4ControlPlayerSelect` (`CID_PlrSelect`).
+///
+/// Object numbers remain signed and ordered until execution: invalid entries
+/// are skipped by `SafeObjectPointer`, while valid entries contribute to the
+/// iterative control checksum (`src/C4Control.cpp:341-368`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerSelectControlData {
+    pub player: i32,
+    pub objects: Vec<i32>,
+    pub by_client: i32,
 }
 
 /// Body of a `PlayerControl` packet describing one direct input command.
@@ -874,6 +891,7 @@ impl RawPacket {
         const PID_NONE: u8 = 0xff;
         const CID_SCRIPT: u8 = 0x88;
         const CID_MESSAGE_BOARD_ANSWER: u8 = 0xd0;
+        const CID_PLR_SELECT: u8 = 0xA0;
         const CID_PLR_CONTROL: u8 = 0xA1;
         const CID_PLR_COMMAND: u8 = 0xA2;
 
@@ -931,6 +949,54 @@ impl RawPacket {
                     object,
                     answer,
                     player,
+                    by_client,
+                },
+            )));
+        }
+
+        if id == CID_PLR_SELECT {
+            // C4ControlPlayerSelect writes raw Player/ObjCnt/Objs fields,
+            // followed by the inherited packed ByClient. The INI writer may
+            // omit an all-zero object array through its naming default.
+            let player = parse_int_field_or(&self.fields, "Player", -1)?;
+            let object_count = parse_int_field_or(&self.fields, "ObjCnt", 0)?;
+            let declared = usize::try_from(object_count).map_err(|_| {
+                ControlParseError::InvalidPlayerSelectObjectCount {
+                    value: object_count,
+                }
+            })?;
+            if declared > MAX_PLAYER_SELECT_INI_OBJECTS {
+                return Err(ControlParseError::InvalidPlayerSelectObjectCount {
+                    value: object_count,
+                });
+            }
+            let objects = match self.fields.get("Objs") {
+                None => vec![0; declared],
+                Some(raw) if raw.trim().is_empty() && declared == 0 => Vec::new(),
+                Some(raw) => raw
+                    .split(',')
+                    .take(declared + 1)
+                    .map(|value| {
+                        value.trim().parse::<i32>().map_err(|_| {
+                            ControlParseError::InvalidIntegerField {
+                                field: "Objs".to_string(),
+                                value: value.trim().to_string(),
+                            }
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            };
+            if objects.len() != declared {
+                return Err(ControlParseError::PlayerSelectObjectCountMismatch {
+                    declared,
+                    actual: objects.len(),
+                });
+            }
+            let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
+            return Ok(Some(ControlPacket::PlayerSelect(
+                PlayerSelectControlData {
+                    player,
+                    objects,
                     by_client,
                 },
             )));
@@ -1101,6 +1167,12 @@ pub enum ControlParseError {
     InteriorNulString { field: String },
     #[error("script strictness {value} is outside the C++ range 0..=3")]
     InvalidScriptStrictness { value: i32 },
+    #[error("PlayerSelect object count {value} is outside the supported INI range")]
+    InvalidPlayerSelectObjectCount { value: i32 },
+    #[error(
+        "PlayerSelect declared {declared} objects but its INI array contained {actual} entries"
+    )]
+    PlayerSelectObjectCountMismatch { declared: usize, actual: usize },
     #[error("resource-backed JoinPlayer INI parsing is not implemented")]
     UnsupportedResourceJoin,
 }
@@ -1493,6 +1565,83 @@ mod tests {
                 by_client: -1,
             })]
         );
+    }
+
+    #[test]
+    fn parses_player_select_packet_array_and_omitted_defaults() {
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=160\n\
+    [Player Select]\n\
+      Player=7\n\
+      ObjCnt=3\n\
+      Objs=11,-2,0\n\
+      ByClient=4\n\
+  [IDPacket]\n\
+    ID=160\n\
+    [Player Select]\n\
+  [IDPacket]\n\
+    ID=160\n\
+    [Player Select]\n\
+      ObjCnt=3\n";
+
+        assert_eq!(
+            parse_control_ini(input).expect("parse player-select controls"),
+            vec![
+                ControlPacket::PlayerSelect(PlayerSelectControlData {
+                    player: 7,
+                    objects: vec![11, -2, 0],
+                    by_client: 4,
+                }),
+                ControlPacket::PlayerSelect(PlayerSelectControlData {
+                    player: -1,
+                    objects: Vec::new(),
+                    by_client: -1,
+                }),
+                ControlPacket::PlayerSelect(PlayerSelectControlData {
+                    player: -1,
+                    objects: vec![0, 0, 0],
+                    by_client: -1,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_player_select_ini_counts_that_would_exhaust_memory() {
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=160\n\
+    [Player Select]\n\
+      ObjCnt=2147483647\n";
+
+        assert!(matches!(
+            parse_control_ini(input),
+            Err(ControlParseError::InvalidPlayerSelectObjectCount {
+                value: i32::MAX
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_player_select_ini_arrays_longer_than_the_declared_count() {
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=160\n\
+    [Player Select]\n\
+      ObjCnt=1\n\
+      Objs=11,12,13\n";
+
+        assert!(matches!(
+            parse_control_ini(input),
+            Err(ControlParseError::PlayerSelectObjectCountMismatch {
+                declared: 1,
+                actual: 2,
+            })
+        ));
     }
 
     #[test]

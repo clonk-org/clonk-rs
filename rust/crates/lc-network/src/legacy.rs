@@ -5,9 +5,9 @@ use lc_engine::{
     ControlPacket as EngineControlPacket, ControlPacketId, ControlPlayerInfoEntry,
     InitScenarioPlayerControlData, JoinPlayerControlData, JoinPlayerSource, LegacyCString,
     MessageBoardAnswerControlData, NetworkResourceCore, PlayerCommandControlData,
-    PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest, ScriptControlData,
-    ScriptStrictness, SurrenderPlayerControlData, SyncCheckPacket, SynchronizeControlData,
-    VoteControlData,
+    PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest, PlayerSelectControlData,
+    ScriptControlData, ScriptStrictness, SurrenderPlayerControlData, SyncCheckPacket,
+    SynchronizeControlData, VoteControlData,
     CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
@@ -33,6 +33,7 @@ const CID_VOTE: u8 = 0x80 | 0x03;
 const CID_VOTE_END: u8 = 0x80 | 0x04;
 const CID_PLR_INFO: u8 = 0x80 | 0x10;
 const CID_JOIN_PLR: u8 = 0x80 | 0x11;
+const CID_PLR_SELECT: u8 = 0x80 | 0x20;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
 const CID_PLR_COMMAND: u8 = 0x80 | 0x22;
 const CID_INIT_SCENARIO_PLAYER: u8 = 0x80 | 0x52;
@@ -58,6 +59,8 @@ pub enum LegacyControlError {
     UnsupportedPacket(u8),
     #[error("script strictness {0} is outside the C++ range 0..=3")]
     InvalidScriptStrictness(u8),
+    #[error("PlayerSelect object count {0} is negative")]
+    PlayerSelectObjectCountOutOfRange(i32),
     #[error("resource SHA contains an invalid hexadecimal byte")]
     InvalidResourceSha,
     #[error("JoinData C4ID is not exactly four uppercase letters, digits or underscores")]
@@ -102,6 +105,8 @@ pub enum LegacyEncodeError {
     MissingPlayerInfoResource(i32),
     #[error("PlayerInfo count {0} is outside the C++ range")]
     PlayerInfoCountOutOfRange(usize),
+    #[error("PlayerSelect object count {0} exceeds C++ int32")]
+    PlayerSelectObjectCountTooLarge(usize),
     #[error("JoinData collection count {0} exceeds C++ int32")]
     JoinDataCollectionTooLarge(usize),
     #[error("JoinData client count {0} exceeds C++ uint32")]
@@ -629,6 +634,7 @@ fn decode_control(
         CID_VOTE_END => decode_vote_end(reader),
         CID_PLR_INFO => decode_player_info(reader),
         CID_JOIN_PLR => decode_join_player(reader),
+        CID_PLR_SELECT => decode_player_select(reader),
         CID_PLR_CONTROL => decode_player_control(reader),
         CID_PLR_COMMAND => decode_player_command(reader),
         CID_INIT_SCENARIO_PLAYER => decode_init_scenario_player(reader),
@@ -879,6 +885,28 @@ fn decode_player_control(
         player,
         command,
         data,
+        by_client,
+    }))
+}
+
+fn decode_player_select(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    let player = reader.read_raw_i32()?;
+    let object_count = reader.read_raw_i32()?;
+    if object_count < 0 {
+        return Err(LegacyControlError::PlayerSelectObjectCountOutOfRange(
+            object_count,
+        ));
+    }
+    let mut objects = Vec::new();
+    for _ in 0..object_count {
+        objects.push(reader.read_raw_i32()?);
+    }
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::PlayerSelect(PlayerSelectControlData {
+        player,
+        objects,
         by_client,
     }))
 }
@@ -1429,6 +1457,23 @@ fn encode_player_control(buffer: &mut Vec<u8>, data: &PlayerControlData) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_player_select(
+    buffer: &mut Vec<u8>,
+    data: &PlayerSelectControlData,
+) -> Result<(), LegacyEncodeError> {
+    let object_count = i32::try_from(data.objects.len()).map_err(|_| {
+        LegacyEncodeError::PlayerSelectObjectCountTooLarge(data.objects.len())
+    })?;
+    buffer.push(CID_PLR_SELECT);
+    append_raw_i32(buffer, data.player);
+    append_raw_i32(buffer, object_count);
+    for object in &data.objects {
+        append_raw_i32(buffer, *object);
+    }
+    append_int32(buffer, data.by_client);
+    Ok(())
+}
+
 fn encode_player_command(buffer: &mut Vec<u8>, data: &PlayerCommandControlData) {
     buffer.push(CID_PLR_COMMAND);
     append_int32(buffer, data.player);
@@ -1582,6 +1627,7 @@ fn encode_control(
         }
         EngineControlPacket::PlayerInfo(data) => encode_player_info(buffer, data),
         EngineControlPacket::JoinPlayer(data) => encode_join_player(buffer, data),
+        EngineControlPacket::PlayerSelect(data) => encode_player_select(buffer, data),
         EngineControlPacket::PlayerControl(data) => {
             encode_player_control(buffer, data);
             Ok(())
@@ -1798,6 +1844,45 @@ mod tests {
 
         assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected));
+    }
+
+    #[test]
+    fn player_select_entry_matches_cpp_raw_array_and_packed_author_layout() {
+        // C4ControlPlayerSelect writes raw native-endian Player/ObjCnt/Objs,
+        // then the inherited signed IntPack ByClient
+        // (src/C4Control.cpp:370-380,53-57).
+        let expected = EngineControlPacket::PlayerSelect(PlayerSelectControlData {
+            player: 7,
+            objects: vec![0x0102_0304, -2],
+            by_client: 3,
+        });
+        let encoded = [
+            0xa0, 0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x03, 0x02, 0x01,
+            0xfe, 0xff, 0xff, 0xff, 0x03,
+        ];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+
+        let empty = EngineControlPacket::PlayerSelect(PlayerSelectControlData {
+            player: -1,
+            objects: Vec::new(),
+            by_client: -1,
+        });
+        let empty_bytes = [0xa0, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0xff];
+        assert_eq!(decode_control_entry_payload(&empty_bytes), Ok(empty.clone()));
+        assert_eq!(encode_control_entry_payload(&empty), Ok(empty_bytes.to_vec()));
+    }
+
+    #[test]
+    fn player_select_rejects_a_negative_raw_object_count() {
+        let mut encoded = vec![CID_PLR_SELECT];
+        encoded.extend(7_i32.to_ne_bytes());
+        encoded.extend((-1_i32).to_ne_bytes());
+        assert_eq!(
+            decode_control_entry_payload(&encoded),
+            Err(LegacyControlError::PlayerSelectObjectCountOutOfRange(-1))
+        );
     }
 
     #[test]

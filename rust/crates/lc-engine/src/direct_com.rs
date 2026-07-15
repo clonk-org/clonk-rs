@@ -13,13 +13,14 @@ use crate::action::ActionProcedure;
 use crate::command::{CommandData, CommandId, CommandMode, CommandOperation, CommandRequest};
 use crate::compat;
 use crate::control::{
-    COM_CLEAR_PRESSED_COMS, COM_CONTENTS, COM_CURSOR_FIRST, COM_CURSOR_LAST, COM_CURSOR_LEFT,
-    COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_FIRST,
-    COM_MENU_LAST, COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER, COM_MENU_ENTER_ALL,
-    COM_MENU_LEFT, COM_MENU_NAVIGATION1, COM_MENU_NAVIGATION2, COM_MENU_RIGHT, COM_MENU_SELECT,
-    COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_NONE, COM_RELEASE_FIRST, COM_RELEASE_LAST,
-    COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
-    COM_WHEEL_DOWN, COM_WHEEL_UP, C4MN_ADJUST_POSITION,
+    PlayerSelectControlData, COM_CLEAR_PRESSED_COMS, COM_CONTENTS, COM_CURSOR_FIRST,
+    COM_CURSOR_LAST, COM_CURSOR_LEFT, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE,
+    COM_DOWN, COM_LEFT, COM_MENU_FIRST, COM_MENU_LAST, COM_MENU_CLOSE, COM_MENU_DOWN,
+    COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_NAVIGATION1,
+    COM_MENU_NAVIGATION2, COM_MENU_RIGHT, COM_MENU_SELECT, COM_MENU_SHOW_TEXT, COM_MENU_UP,
+    COM_NONE, COM_RELEASE_FIRST, COM_RELEASE_LAST, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE,
+    COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP, COM_WHEEL_DOWN, COM_WHEEL_UP,
+    C4MN_ADJUST_POSITION,
 };
 use crate::math::{self, itofix};
 use crate::player::CountedControlType;
@@ -1320,6 +1321,82 @@ impl Engine {
             self.count_player_control(owner, CountedControlType::DirectCom, id, 1);
         }
         self.player_in_com(owner, command as u8, data)
+    }
+
+    /// `C4ControlPlayerSelect::Execute` (C4Control.cpp:341-368): resolve the
+    /// ordered raw object numbers, run MouseSelection callbacks, count the
+    /// packet checksum, then replace the crew selection only when at least
+    /// one crew object survived or the packet explicitly carried no objects.
+    #[doc(hidden)]
+    pub fn execute_player_select(
+        &mut self,
+        data: &PlayerSelectControlData,
+    ) -> Result<bool, EngineError> {
+        let owner = data.player;
+        if !self.players.contains_key(&owner) {
+            return Ok(false);
+        }
+
+        let mut checksum = 0_i32;
+        let mut selected = Vec::new();
+        for number in &data.objects {
+            let Some(object_id) = u64::try_from(*number)
+                .ok()
+                .map(ObjectId::new)
+                .filter(|id| id.as_u64() != 0)
+            else {
+                continue;
+            };
+            let Some(index) = self.find_object_index(object_id).filter(|&index| {
+                !self.objects[index].destroyed
+                    && self.objects[index].state.status != crate::ObjectStatus::Deleted
+            }) else {
+                continue;
+            };
+
+            let live_number = i32::try_from(self.objects[index].id.as_u64()).unwrap_or(*number);
+            checksum = checksum.wrapping_add(
+                live_number.wrapping_mul(checksum.wrapping_add(4_787_821)),
+            );
+            if self.objects[index].state.category & CATEGORY_MOUSE_SELECT != 0 {
+                let _ = tolerate_script_error(self.call_object_function(
+                    index,
+                    "MouseSelection",
+                    vec![Value::Int(owner)],
+                ))?;
+            }
+
+            // The callback may remove the object or change the player's crew.
+            if self.find_object_index(object_id).is_some_and(|index| {
+                !self.objects[index].destroyed
+                    && self.objects[index].state.status != crate::ObjectStatus::Deleted
+            }) && self.player_crew_roster(owner).contains(&object_id)
+            {
+                selected.push(object_id);
+            }
+        }
+
+        self.count_player_control(owner, CountedControlType::Command, checksum, 1);
+
+        if !selected.is_empty() || data.objects.is_empty() {
+            self.player_unselect_crew(owner)?;
+            for id in selected {
+                let Some(index) = self.find_object_index(id).filter(|&index| {
+                    !self.objects[index].destroyed
+                        && self.objects[index].state.status != crate::ObjectStatus::Deleted
+                }) else {
+                    continue;
+                };
+                self.object_do_select(index, owner, false)?;
+            }
+            self.player_adjust_cursor_command(owner)?;
+            if let Some(player) = self.players.get_mut(&owner) {
+                player.control.cursor_selection = 0;
+                player.control.cursor_toggled = 0;
+                player.control.select_flash = 30;
+            }
+        }
+        Ok(true)
     }
 
     /// `C4ControlPlayerCommand::Execute` (C4Control.cpp:413-426): count the
@@ -3105,18 +3182,18 @@ impl Engine {
         Ok(())
     }
 
-    /// `C4MouseControl::SendPlayerSelectNext` followed by the one-object
-    /// `C4ControlPlayerSelect::Execute`: advance in crew-list order and
-    /// replace the selection immediately (C4MouseControl.cpp:1284-1300;
-    /// C4Control.cpp:341-369).
-    pub fn player_mouse_select_next(&mut self, owner: i32) -> Result<bool, EngineError> {
+    /// The object number queued by `C4MouseControl::SendPlayerSelectNext`:
+    /// advance in crew-list order, wrapping to the first eligible member
+    /// (C4MouseControl.cpp:1284-1300).
+    pub fn player_mouse_select_next_object(&self, owner: i32) -> Option<ObjectId> {
         if !self.players.contains_key(&owner) {
-            return Ok(false);
+            return None;
         }
         let roster = self.player_crew_roster(owner);
         let eligible = |engine: &Self, id: ObjectId| {
             engine.find_object_index(id).is_some_and(|index| {
-                engine.objects[index].state.status.is_active()
+                !engine.objects[index].destroyed
+                    && engine.objects[index].state.status != crate::ObjectStatus::Deleted
                     && !engine.objects[index].state.crew_disabled
             })
         };
@@ -3130,25 +3207,19 @@ impl Engine {
                     .find(|id| eligible(self, *id))
             })
             .or_else(|| roster.iter().copied().find(|id| eligible(self, *id)));
-        let Some(next) = next else {
-            return Ok(false);
-        };
+        next
+    }
 
-        self.player_unselect_crew(owner)?;
-        let Some(index) = self.find_object_index(next) else {
+    /// Select-next followed by the synchronized one-object packet execution.
+    pub fn player_mouse_select_next(&mut self, owner: i32) -> Result<bool, EngineError> {
+        let Some(next) = self.player_mouse_select_next_object(owner) else {
             return Ok(false);
         };
-        if !self.objects[index].state.status.is_active() {
-            return Ok(false);
-        }
-        self.object_do_select(index, owner, false)?;
-        self.player_adjust_cursor_command(owner)?;
-        if let Some(player) = self.players.get_mut(&owner) {
-            player.control.cursor_selection = 0;
-            player.control.cursor_toggled = 0;
-            player.control.select_flash = 30;
-        }
-        Ok(true)
+        self.execute_player_select(&PlayerSelectControlData {
+            player: owner,
+            objects: vec![next.as_u64() as i32],
+            by_client: -1,
+        })
     }
 
     /// Crew objects inside C4MouseControl's landscape drag frame, in the
@@ -3426,26 +3497,15 @@ impl Engine {
         if !self.players.contains_key(&owner) {
             return Ok(false);
         }
-        let requested = requested.into_iter().collect::<Vec<_>>();
-        let selected = self
-            .player_crew_roster(owner)
+        let objects = requested
             .into_iter()
-            .filter(|id| requested.contains(id))
-            .collect::<Vec<_>>();
-
-        self.player_unselect_crew(owner)?;
-        for id in selected {
-            if let Some(index) = self.find_object_index(id) {
-                self.object_do_select(index, owner, false)?;
-            }
-        }
-        self.player_adjust_cursor_command(owner)?;
-        if let Some(player) = self.players.get_mut(&owner) {
-            player.control.cursor_selection = 0;
-            player.control.cursor_toggled = 0;
-            player.control.select_flash = 30;
-        }
-        Ok(true)
+            .filter_map(|id| i32::try_from(id.as_u64()).ok())
+            .collect();
+        self.execute_player_select(&PlayerSelectControlData {
+            player: owner,
+            objects,
+            by_client: -1,
+        })
     }
 
     /// `C4Player::UnselectCrew` (C4Player.cpp:1295-1306).
@@ -15748,6 +15808,149 @@ protected func ControlContents(idTarget) { return(1); }
         assert_eq!(engine.selected_crew(1), vec![c]);
         assert_eq!(engine.crew_cursor(1), Some(c));
         assert_eq!(control_state(&engine, 1).select_flash, 30);
+    }
+
+    #[test]
+    fn player_select_calls_mouse_selection_and_keeps_crew_for_noncrew_packets() {
+        let mut engine = Engine::new();
+        let [a, b, _] = crew_trio(&mut engine);
+        engine.select_crew(1, [a, b]).expect("select old crew");
+        let before = engine.selected_crew(1);
+
+        let mut selectable = Definition::from_script(
+            "PICK",
+            "Selectable",
+            "#strict\nprotected func MouseSelection(player) { if (player == 1) SetCategory(17); return(1); }\n",
+        )
+        .expect("selectable script compiles");
+        selectable.set_category(CATEGORY_MOUSE_SELECT);
+        engine
+            .register_definition(selectable)
+            .expect("selectable registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("PICK"))
+            .expect("selectable spawns");
+
+        assert!(engine
+            .execute_player_select(&PlayerSelectControlData {
+                player: 1,
+                objects: vec![target.as_u64() as i32],
+                by_client: 4,
+            })
+            .expect("selection packet executes"));
+
+        assert_eq!(
+            engine.object_snapshot(target).expect("target survives").category,
+            17,
+            "MouseSelection receives the packet player before crew filtering"
+        );
+        assert_eq!(engine.selected_crew(1), before);
+        let player = engine.player(1).expect("player survives");
+        assert_eq!((player.control_count(), player.action_count()), (1, 1));
+    }
+
+    #[test]
+    fn player_select_rechecks_status_after_mouse_selection_callback() {
+        let mut engine = Engine::new();
+        let [old, _, _] = crew_trio(&mut engine);
+        engine.select_crew(1, [old]).expect("select old crew");
+        engine.set_crew_cursor(1, Some(old)).expect("keep old cursor");
+
+        let mut selectable = Definition::from_script(
+            "GONE",
+            "Removed selectable",
+            "#strict\nprotected func MouseSelection(player) { if (player == 1) RemoveObject(); return(1); }\n",
+        )
+        .expect("selectable script compiles");
+        selectable.set_category(CATEGORY_MOUSE_SELECT);
+        engine
+            .register_definition(selectable)
+            .expect("selectable registers");
+        let removed = engine
+            .spawn_object(
+                SpawnConfig::new("GONE")
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
+            .expect("selectable crew spawns");
+
+        engine
+            .execute_player_select(&PlayerSelectControlData {
+                player: 1,
+                objects: vec![removed.as_u64() as i32],
+                by_client: -1,
+            })
+            .expect("selection packet executes");
+
+        assert_eq!(
+            engine
+                .object_snapshot(removed)
+                .expect("removed object remains as the native-call tombstone")
+                .status,
+            crate::ObjectStatus::Deleted
+        );
+        assert_eq!(engine.selected_crew(1), vec![old]);
+        assert_eq!(engine.crew_cursor(1), Some(old));
+    }
+
+    #[test]
+    fn empty_player_select_runs_the_complete_deselection_path() {
+        let mut engine = Engine::new();
+        let crew = crew_trio(&mut engine);
+        engine.select_crew(1, crew).expect("select every crew member");
+
+        engine
+            .execute_player_select(&PlayerSelectControlData {
+                player: 1,
+                objects: Vec::new(),
+                by_client: -1,
+            })
+            .expect("empty selection packet executes");
+
+        let selected = engine.selected_crew(1);
+        assert_eq!(selected.len(), 1, "AdjustCursorCommand selects one fallback");
+        assert!(crew.contains(&selected[0]));
+        assert_eq!(control_state(&engine, 1).cursor_selection, 0);
+        assert_eq!(control_state(&engine, 1).cursor_toggled, 0);
+        assert_eq!(control_state(&engine, 1).select_flash, 30);
+    }
+
+    #[test]
+    fn player_select_count_uses_the_ordered_valid_object_checksum() {
+        let (mut engine, first, second) = engine_with_counted_crew();
+        let expected = [first, second].into_iter().fold(0_i32, |checksum, id| {
+            let number = id.as_u64() as i32;
+            checksum.wrapping_add(number.wrapping_mul(checksum.wrapping_add(4_787_821)))
+        });
+        engine.count_player_control(0, CountedControlType::Command, expected, 1);
+
+        engine
+            .execute_player_select(&PlayerSelectControlData {
+                player: 0,
+                objects: vec![
+                    first.as_u64() as i32,
+                    999_999,
+                    second.as_u64() as i32,
+                ],
+                by_client: 3,
+            })
+            .expect("ordered packet executes");
+        let player = engine.player(0).expect("player survives");
+        assert_eq!(
+            (player.control_count(), player.action_count()),
+            (2, 1),
+            "invalid numbers are skipped and the valid ordered fold matches C++"
+        );
+
+        engine
+            .execute_player_select(&PlayerSelectControlData {
+                player: 0,
+                objects: vec![first.as_u64() as i32],
+                by_client: 3,
+            })
+            .expect("different packet executes");
+        let player = engine.player(0).expect("player survives");
+        assert_eq!((player.control_count(), player.action_count()), (3, 2));
     }
 
     #[test]

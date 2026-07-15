@@ -433,6 +433,11 @@ impl RuntimeHandle {
                     self.apply_player_command(&data)
                         .map_err(|error| format!("{error} (player {})", data.player))?;
                 }
+                ControlPacket::PlayerSelect(data) => {
+                    self.engine
+                        .execute_player_select(&data)
+                        .map_err(|error| format!("{error} (player {})", data.player))?;
+                }
                 ControlPacket::Script(data) => {
                     self.engine
                         .execute_script_control(&data, ScriptControlPolicy::replay(false))
@@ -2101,6 +2106,7 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                     .map(|packet| match packet {
                         ControlPacket::PlayerControl(_) => "PlayerControl",
                         ControlPacket::PlayerCommand(_) => "PlayerCommand",
+                        ControlPacket::PlayerSelect(_) => "PlayerSelect",
                         ControlPacket::Script(_) => "Script",
                         ControlPacket::MessageBoardAnswer(_) => "MessageBoardAnswer",
                         ControlPacket::InitScenarioPlayer(_) => "InitScenarioPlayer",
@@ -3013,7 +3019,7 @@ mod tests {
     use crate::{
         control::{COM_MENU_RIGHT, COM_MENU_SELECT, COM_RELEASE_OFFSET, COM_RIGHT},
         ActionSpec, Definition, EnvironmentSettings, ObjectMenuItem, ObjectMenuState, ObjectUpdate,
-        PlayerConfig, RgbColor, SpawnConfig, Vector2,
+        PlayerConfig, PlayerSelectControlData, RgbColor, SpawnConfig, Vector2,
     };
     use serde_json::Value;
     use std::{ffi::CString, ptr};
@@ -4808,6 +4814,27 @@ global func Step(state, frame, random)
         assert_eq!(commands[0].tx, Some(12));
         assert_eq!(commands[0].ty, Some(-7));
         assert_eq!(commands[0].data, crate::command::CommandData::Integer(23));
+        let player = runtime.engine.player(0).expect("player exists");
+        assert_eq!((player.control_count(), player.action_count()), (1, 1));
+    }
+
+    #[test]
+    fn player_select_ffi_packet_reaches_the_synchronized_execution_seam() {
+        let (mut runtime, crew) = runtime_with_cursor_menu();
+        runtime.control_packets.insert(
+            1,
+            vec![ControlPacket::PlayerSelect(PlayerSelectControlData {
+                player: 0,
+                objects: vec![crew.as_u64() as i32],
+                by_client: 0,
+            })],
+        );
+
+        runtime
+            .apply_control_packets_for_frame(1)
+            .expect("player selection applies");
+
+        assert_eq!(runtime.engine.selected_crew(0), vec![crew]);
         let player = runtime.engine.player(0).expect("player exists");
         assert_eq!((player.control_count(), player.action_count()), (1, 1));
     }

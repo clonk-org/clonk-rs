@@ -82,8 +82,9 @@ use lc_engine::{
     EngineState, EnvironmentSettings, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet,
     MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MouseDragSource,
     MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData, PlayerConfig,
-    Recorder, Recording, RgbColor, Scenario, ScenarioError, ScoreboardPresentationRequest,
-    ScriptControlPolicy, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket,
+    PlayerSelectControlData, Recorder, Recording, RgbColor, Scenario, ScenarioError,
+    ScoreboardPresentationRequest, ScriptControlPolicy, SimulationSnapshot, SkyConfig, SpawnConfig,
+    SyncCheckPacket,
     TeamConfiguration, Vector2, FLAG_ALIGN_CENTER,
     FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK,
     FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
@@ -16545,6 +16546,26 @@ impl GameApp {
         self.execute_player_command_failsafe(command)
     }
 
+    fn submit_or_execute_player_select(
+        &mut self,
+        selection: PlayerSelectControlData,
+    ) -> Result<(), EngineError> {
+        if self.network.is_some() {
+            let tick = self.local_control_submission_tick();
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_player_select(tick, selection.clone()))
+            {
+                tracing::warn!(player = selection.player, %error, "failed to queue player selection");
+                self.status_text = "Failed to queue mouse selection".to_string();
+            }
+            return Ok(());
+        }
+
+        self.engine.execute_player_select(&selection).map(|_| ())
+    }
+
     fn execute_player_command_failsafe(
         &mut self,
         command: PlayerCommandControlData,
@@ -20103,6 +20124,36 @@ impl GameApp {
         }
     }
 
+    fn ingame_mouse_selectable_object(&self, owner: i32, object: ObjectId) -> bool {
+        self.snapshot.object(object).is_some_and(|snapshot| {
+            snapshot.category & lc_engine::CATEGORY_MOUSE_SELECT != 0
+                || snapshot.ocf & lc_engine::ocf::ALIVE != 0
+                    && self
+                        .snapshot
+                        .players
+                        .iter()
+                        .find(|player| player.id == owner)
+                        .is_some_and(|player| player.crew.contains(&object))
+        })
+    }
+
+    fn ingame_primary_mouse_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
+        let primary_ocf = lc_engine::ocf::GRAB
+            | lc_engine::ocf::CHOP
+            | lc_engine::ocf::CONTAINER
+            | lc_engine::ocf::CONSTRUCT
+            | lc_engine::ocf::LIVING
+            | lc_engine::ocf::CARRYABLE
+            | lc_engine::ocf::EXCLUSIVE;
+        self.graphics
+            .object_at_point_with_ocf(&self.snapshot, owner, point, primary_ocf)
+    }
+
+    fn ingame_mouse_select_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
+        self.ingame_primary_mouse_target(owner, point)
+            .filter(|object| self.ingame_mouse_selectable_object(owner, *object))
+    }
+
     fn update_ingame_drag_selection_kinds(&mut self) {
         let left_kind = self
             .mouse_state
@@ -20544,18 +20595,19 @@ impl GameApp {
                     match drag.motion.selection_kind {
                         IngameDragSelectionKind::Crew => {
                             self.ingame_dragged_objects.clear();
-                            if self.network.is_some() {
-                                self.status_text =
-                                    "Mouse selection commands are not networked yet".to_string();
-                                return Ok(());
-                            }
                             let selected = self.engine.mouse_drag_crew_in_rect(
                                 self.local_owner,
                                 first,
                                 second,
                             );
-                            self.engine
-                                .player_mouse_select_crew(self.local_owner, selected)?;
+                            self.submit_or_execute_player_select(PlayerSelectControlData {
+                                player: self.local_owner,
+                                objects: selected
+                                    .into_iter()
+                                    .map(|object| object.as_u64() as i32)
+                                    .collect(),
+                                by_client: -1,
+                            })?;
                             self.snapshot = self.engine.snapshot();
                             self.refresh_object_menu();
                             self.refresh_focus();
@@ -20613,10 +20665,22 @@ impl GameApp {
         if self.ingame_viewport_region(pointer.screen).is_some() {
             return Ok(());
         }
-        if let Some(target) =
+        let primary_target =
+            self.ingame_primary_mouse_target(self.local_owner, pointer.screen);
+        let context_target = primary_target.or_else(|| {
             self.graphics
                 .object_at_point(&self.snapshot, self.local_owner, pointer.screen)
-        {
+        });
+        if let Some(target) = context_target {
+            if let Some(select_target) = primary_target
+                .filter(|target| self.ingame_mouse_selectable_object(self.local_owner, *target))
+            {
+                self.submit_or_execute_player_select(PlayerSelectControlData {
+                    player: self.local_owner,
+                    objects: vec![select_target.as_u64() as i32],
+                    by_client: -1,
+                })?;
+            }
             self.show_startup_hint = false;
             let add_mode = 2 | if self.keyboard_modifiers.shift() { 4 } else { 0 };
             let (x, y) = self
@@ -20638,14 +20702,18 @@ impl GameApp {
                 by_client: -1,
             })?;
         } else {
-            // C4MouseControl::RightUpDragNone cycles crew on a free click.
-            // That is CID_PlrSelect, not CID_PlrCommand; keep it local-disabled
-            // until the separate selection packet is modeled.
-            if self.network.is_some() {
-                self.status_text = "Mouse selection commands are not networked yet".to_string();
-                return Ok(());
+            // C4MouseControl::RightUpDragNone cycles crew on a free click by
+            // queuing a one-object CID_PlrSelect packet.
+            if let Some(next) = self
+                .engine
+                .player_mouse_select_next_object(self.local_owner)
+            {
+                self.submit_or_execute_player_select(PlayerSelectControlData {
+                    player: self.local_owner,
+                    objects: vec![next.as_u64() as i32],
+                    by_client: -1,
+                })?;
             }
-            self.engine.player_mouse_select_next(self.local_owner)?;
             self.snapshot = self.engine.snapshot();
             self.refresh_focus();
         }
@@ -20895,25 +20963,8 @@ impl GameApp {
             return Ok(());
         };
         let down_target =
-            self.graphics
-                .object_at_point(&self.snapshot, self.local_owner, pointer.screen);
+            self.ingame_primary_mouse_target(pointer.owner, pointer.screen);
         self.mouse_state = Some(IngameMouseState::new(pointer, down_target.is_none()));
-
-        if self.local_controls.mouse_owner() != Some(pointer.owner) {
-            return Ok(());
-        }
-
-        if let Some(crew_id) =
-            self.graphics
-                .crew_at_point(&self.snapshot, pointer.owner, pointer.screen)
-        {
-            self.engine.select_crew(pointer.owner, [crew_id])?;
-            self.engine.set_crew_cursor(pointer.owner, Some(crew_id))?;
-            self.focus_id = Some(crew_id);
-            self.snapshot = self.engine.snapshot();
-            self.refresh_object_menu();
-            self.refresh_focus();
-        }
         Ok(())
     }
 
@@ -20925,6 +20976,27 @@ impl GameApp {
             return Ok(());
         }
         if state.moved {
+            if state.selection_frame
+                && state.selection_kind == IngameDragSelectionKind::Crew
+            {
+                let selected = self.engine.mouse_drag_crew_in_rect(
+                    state.start.owner,
+                    ingame_pointer_world_pixel(state.start),
+                    ingame_pointer_world_pixel(state.last),
+                );
+                self.submit_or_execute_player_select(PlayerSelectControlData {
+                    player: state.start.owner,
+                    objects: selected
+                        .into_iter()
+                        .map(|object| object.as_u64() as i32)
+                        .collect(),
+                    by_client: -1,
+                })?;
+                self.snapshot = self.engine.snapshot();
+                self.refresh_object_menu();
+                self.refresh_focus();
+                return Ok(());
+            }
             self.handle_mouse_drag(state)?;
         } else {
             self.handle_ingame_mouse_click(state.last)?;
@@ -20939,13 +21011,19 @@ impl GameApp {
         {
             return Ok(());
         }
-        // C4MC_Cursor_Select sends player selection rather than MoveTo. Rust
-        // applies that selection on LeftDown, so the matching LeftUp is done.
-        if self
-            .graphics
-            .crew_at_point(&self.snapshot, pointer.owner, pointer.screen)
-            .is_some()
+        // C4MC_Cursor_Select queues CID_PlrSelect on LeftUp for both crew and
+        // C4D_MouseSelect objects (C4MouseControl.cpp:1106-1129).
+        if let Some(target) =
+            self.ingame_mouse_select_target(pointer.owner, pointer.screen)
         {
+            self.submit_or_execute_player_select(PlayerSelectControlData {
+                player: pointer.owner,
+                objects: vec![target.as_u64() as i32],
+                by_client: -1,
+            })?;
+            self.snapshot = self.engine.snapshot();
+            self.refresh_object_menu();
+            self.refresh_focus();
             return Ok(());
         }
         self.show_startup_hint = false;
@@ -25207,6 +25285,9 @@ impl GameApp {
                 }
                 NetworkControl::PlayerCommand(data) => {
                     self.execute_player_command_failsafe(data)
+                }
+                NetworkControl::PlayerSelect(data) => {
+                    self.engine.execute_player_select(&data).map(|_| ())
                 }
                 NetworkControl::Script(data) => self
                     .engine
@@ -59406,6 +59487,105 @@ protected func InputCallback(string answer, int player)
             before,
             "the command executes only when the synchronized tick returns"
         );
+    }
+
+    #[test]
+    fn player_select_submission_queues_the_open_tick_without_local_execution() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let first = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        let definition = app
+            .engine
+            .object_snapshot(first)
+            .expect("cursor exists")
+            .definition_id;
+        let second = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new(definition)
+                    .with_owner(owner)
+                    .with_crew_member(true),
+            )
+            .expect("second crew spawns");
+        app.engine
+            .select_crew(owner, [first, second])
+            .expect("select both crew members");
+        app.engine
+            .set_crew_cursor(owner, Some(first))
+            .expect("retain first cursor");
+        let before = app.engine.selected_crew(owner);
+        let (manager, _event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+        let selection = PlayerSelectControlData {
+            player: owner,
+            objects: vec![second.as_u64() as i32],
+            by_client: -1,
+        };
+
+        app.submit_or_execute_player_select(selection.clone())
+            .expect("queue player selection");
+
+        assert_eq!(
+            commands.take_submitted_player_selects(),
+            vec![(
+                tick,
+                PlayerSelectControlData {
+                    by_client: 7,
+                    ..selection
+                }
+            )]
+        );
+        assert_eq!(
+            app.engine.selected_crew(owner),
+            before,
+            "selection executes only when the synchronized tick returns"
+        );
+    }
+
+    #[test]
+    fn synchronized_player_select_executes_at_the_ready_tick() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let first = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        let definition = app
+            .engine
+            .object_snapshot(first)
+            .expect("cursor exists")
+            .definition_id;
+        let second = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new(definition)
+                    .with_owner(owner)
+                    .with_crew_member(true),
+            )
+            .expect("second crew spawns");
+        app.engine
+            .select_crew(owner, [first, second])
+            .expect("select both crew members");
+        let (manager, event_tx, _commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: vec![NetworkControl::PlayerSelect(PlayerSelectControlData {
+                    player: owner,
+                    objects: vec![second.as_u64() as i32],
+                    by_client: 7,
+                })],
+            })
+            .expect("queue synchronized selection");
+
+        app.update().expect("execute ready selection");
+
+        assert_eq!(app.engine.selected_crew(owner), vec![second]);
+        assert_eq!(app.engine.crew_cursor(owner), Some(second));
+        let player = app.engine.player(owner).expect("player survives");
+        assert_eq!((player.control_count(), player.action_count()), (1, 1));
     }
 
     #[test]
