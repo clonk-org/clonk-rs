@@ -8704,6 +8704,133 @@ mod tests {
     }
 
     #[test]
+    fn nested_subcommand_failure_retries_middle_before_reaching_base() {
+        // C4Command::GetBaseCommand returns the next unfinished command,
+        // regardless of mode (C4Command.cpp:2498-2508).
+        let actor_id = ObjectId::new(1);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        actor.collectible = false;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: actor.position,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(CommandRequest::new(CommandId::Wait))
+            .expect("base command queued");
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(ObjectId::new(998)))
+                    .with_retries(1)
+                    .with_mode(CommandMode::Sub),
+            )
+            .expect("middle command queued");
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(ObjectId::new(999)))
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("leaf command queued");
+
+        let leaf_failure = stack.step(&ctx).expect("leaf should evaluate");
+        assert_eq!(leaf_failure.status, CommandStatus::Failed);
+        let after_leaf = stack.snapshot();
+        assert_eq!(after_leaf.commands.len(), 2);
+        assert_eq!(after_leaf.commands[0].mode, CommandMode::Sub);
+        assert_eq!(after_leaf.commands[0].failures, 1);
+        assert_eq!(after_leaf.commands[0].retries, 1);
+        assert_eq!(after_leaf.commands[1].failures, 0);
+
+        let middle_retry = stack.step(&ctx).expect("middle should consume its retry");
+        assert_eq!(middle_retry.status, CommandStatus::Running);
+        let during_retry = stack.snapshot();
+        assert_eq!(during_retry.commands.len(), 3);
+        assert!(matches!(during_retry.commands[0].state, CommandState::Retry(_)));
+        assert_eq!(during_retry.commands[1].failures, 0);
+        assert_eq!(during_retry.commands[1].retries, 0);
+        assert_eq!(during_retry.commands[2].failures, 0);
+
+        for _ in 0..10 {
+            stack.step(&ctx).expect("retry should evaluate");
+        }
+        let middle_failure = stack.step(&ctx).expect("middle should evaluate again");
+        assert_eq!(middle_failure.status, CommandStatus::Failed);
+        let after_middle = stack.snapshot();
+        assert_eq!(after_middle.commands.len(), 1);
+        assert_eq!(after_middle.commands[0].failures, 1);
+    }
+
+    #[test]
+    fn subcommand_failure_skips_finished_entry_and_targets_any_mode() {
+        // GetBaseCommand skips finished commands and returns the first live
+        // command below them without inspecting BaseMode (C4Command.cpp:2498-2508).
+        let actor_id = ObjectId::new(1);
+        let actor = snapshot_with_id(actor_id.as_u64());
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: actor.position,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::Wait).with_mode(CommandMode::SilentSub),
+            )
+            .expect("live tail queued");
+        stack
+            .push_front(CommandRequest::new(CommandId::Wait))
+            .expect("finished middle queued");
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(ObjectId::new(999)))
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("failing leaf queued");
+        stack.finish_entry_public(1, true);
+
+        let leaf_failure = stack.step(&ctx).expect("leaf should evaluate");
+        assert_eq!(leaf_failure.status, CommandStatus::Failed);
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 1);
+        assert_eq!(snapshot.commands[0].mode, CommandMode::SilentSub);
+        assert_eq!(snapshot.commands[0].failures, 1);
+    }
+
+    #[test]
     fn command_stack_put_transfers_item_into_container() {
         let actor_id = ObjectId::new(20);
         let item_id = ObjectId::new(21);
@@ -10856,7 +10983,8 @@ impl CommandStack {
                 if let Some(base) = self
                     .entries
                     .iter_mut()
-                    .find(|entry| matches!(entry.mode, CommandMode::Base | CommandMode::SilentBase))
+                    .skip(1)
+                    .find(|entry| entry.finished.is_none())
                 {
                     base.failures = base.failures.saturating_add(1);
                 }
