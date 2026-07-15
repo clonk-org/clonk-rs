@@ -227,6 +227,10 @@ pub struct CommandDefinitionSnapshot {
     /// throw-in path for this item definition.
     #[serde(default)]
     pub fragile: bool,
+    /// Raw DefCore `Projectile`; Attack selects the first contents item
+    /// whose definition carries any nonzero value.
+    #[serde(default)]
+    pub projectile: i32,
     #[serde(default)]
     pub can_chop: bool,
     #[serde(default)]
@@ -9192,7 +9196,7 @@ mod tests {
     }
 
     #[test]
-    fn attack_completes_when_target_not_crew() {
+    fn attack_completes_when_target_lacks_cached_crew_ocf() {
         let attacker_id = ObjectId::new(7);
         let target_id = ObjectId::new(8);
 
@@ -9200,7 +9204,8 @@ mod tests {
         attacker.command_direction = CommandDirection::Right;
 
         let mut target = snapshot_with_id(target_id.as_u64());
-        target.crew_member = false;
+        target.crew_member = true;
+        target.ocf &= !ocf::CREW_MEMBER;
 
         let mut objects = HashMap::new();
         objects.insert(attacker.id, attacker.clone());
@@ -9235,7 +9240,7 @@ mod tests {
     }
 
     #[test]
-    fn attack_requests_move_when_out_of_range() {
+    fn attack_moves_to_target_coordinates_without_range_or_cooldown() {
         let attacker_id = ObjectId::new(30);
         let target_id = ObjectId::new(40);
 
@@ -9244,7 +9249,8 @@ mod tests {
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.crew_member = true;
-        target.position = Vector2::new(200, -50);
+        target.ocf |= ocf::CREW_MEMBER;
+        target.position = Vector2::new(5, -5);
 
         let mut objects = HashMap::new();
         objects.insert(attacker.id, attacker.clone());
@@ -9279,7 +9285,9 @@ mod tests {
         match &result.operations[0] {
             CommandOperation::PushFront(request) => {
                 assert_eq!(request.id, CommandId::MoveTo);
-                assert_eq!(request.target, Some(target_id));
+                assert_eq!(request.target, None);
+                assert_eq!((request.tx, request.ty), (Some(5), Some(-5)));
+                assert_eq!(request.update_interval, 10);
             }
             other => panic!("expected move request, got {:?}", other),
         }
@@ -9288,6 +9296,119 @@ mod tests {
             pushed_request(&result.operations, CommandId::MoveTo),
             &ctx,
         );
+
+        let repeated = state.step(&ctx);
+        assert_eq!(
+            pushed_request(&repeated.operations, CommandId::MoveTo).tx,
+            Some(5),
+            "Attack re-evaluates every execution without an invented cooldown"
+        );
+    }
+
+    #[test]
+    fn attack_throws_the_first_projectile_before_following_containment() {
+        let attacker_id = ObjectId::new(50);
+        let target_id = ObjectId::new(51);
+        let ordinary_id = ObjectId::new(52);
+        let first_projectile_id = ObjectId::new(53);
+        let second_projectile_id = ObjectId::new(54);
+        let mut attacker = snapshot_with_id(attacker_id.as_u64());
+        attacker.container = Some(ObjectId::new(60));
+        attacker.contents = vec![ordinary_id, first_projectile_id, second_projectile_id];
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.ocf |= ocf::CREW_MEMBER;
+        target.container = Some(ObjectId::new(61));
+        target.position = Vector2::new(123, -45);
+        let mut ordinary = snapshot_with_id(ordinary_id.as_u64());
+        ordinary.definition_id = "WOOD".into();
+        let mut first_projectile = snapshot_with_id(first_projectile_id.as_u64());
+        first_projectile.definition_id = "ROCK".into();
+        let mut second_projectile = snapshot_with_id(second_projectile_id.as_u64());
+        second_projectile.definition_id = "FLNT".into();
+        let objects = HashMap::from([
+            (attacker_id, attacker.clone()),
+            (target_id, target),
+            (ordinary_id, ordinary),
+            (first_projectile_id, first_projectile),
+            (second_projectile_id, second_projectile),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::from([
+            ("WOOD".into(), CommandDefinitionSnapshot::default()),
+            (
+                "ROCK".into(),
+                CommandDefinitionSnapshot {
+                    projectile: -2,
+                    ..CommandDefinitionSnapshot::default()
+                },
+            ),
+            (
+                "FLNT".into(),
+                CommandDefinitionSnapshot {
+                    projectile: 1,
+                    ..CommandDefinitionSnapshot::default()
+                },
+            ),
+        ]);
+        let ctx = move_to_ctx_at_frame(&attacker, &objects, &players, &definitions, 0);
+        let mut state = AttackState::from_request(
+            &CommandRequest::new(CommandId::Attack).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+
+        let throw = pushed_request(&result.operations, CommandId::Throw);
+        assert_eq!(throw.target, Some(first_projectile_id));
+        assert_eq!((throw.tx, throw.ty), (Some(123), Some(-45)));
+        assert_eq!(throw.update_interval, 2);
+        assert_eq!(throw.mode, CommandMode::SilentSub);
+    }
+
+    #[test]
+    fn attack_aligns_containment_before_moving() {
+        let attacker_id = ObjectId::new(70);
+        let target_id = ObjectId::new(71);
+        let actor_container = ObjectId::new(72);
+        let target_container = ObjectId::new(73);
+        let mut attacker = snapshot_with_id(attacker_id.as_u64());
+        attacker.container = Some(actor_container);
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.ocf |= ocf::CREW_MEMBER;
+        target.container = Some(target_container);
+        let mut objects = HashMap::from([
+            (attacker_id, attacker.clone()),
+            (target_id, target.clone()),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let request = CommandRequest::new(CommandId::Attack).with_target(Some(target_id));
+
+        let ctx = move_to_ctx_at_frame(&attacker, &objects, &players, &definitions, 0);
+        let mut exiting = AttackState::from_request(&request).expect("state created");
+        let exit = pushed_request(&exiting.step(&ctx).operations, CommandId::Exit);
+        assert_eq!(exit.target, None);
+        assert_eq!(exit.update_interval, 10);
+        assert_eq!(exit.mode, CommandMode::SilentSub);
+
+        attacker.container = None;
+        objects.insert(attacker_id, attacker.clone());
+        let ctx = move_to_ctx_at_frame(&attacker, &objects, &players, &definitions, 1);
+        let mut entering = AttackState::from_request(&request).expect("state created");
+        let enter = pushed_request(&entering.step(&ctx).operations, CommandId::Enter);
+        assert_eq!(enter.target, Some(target_container));
+        assert_eq!(enter.update_interval, 10);
+        assert_eq!(enter.mode, CommandMode::SilentSub);
+
+        attacker.container = Some(target_container);
+        objects.insert(attacker_id, attacker.clone());
+        target.container = Some(target_container);
+        objects.insert(target_id, target);
+        let ctx = move_to_ctx_at_frame(&attacker, &objects, &players, &definitions, 2);
+        let mut moving = AttackState::from_request(&request).expect("state created");
+        let move_to = pushed_request(&moving.step(&ctx).operations, CommandId::MoveTo);
+        assert_eq!(move_to.target, None);
+        assert_eq!(move_to.update_interval, 10);
     }
 
     #[test]
@@ -21049,7 +21170,6 @@ impl ThrowState {
 struct AttackState {
     target: ObjectId,
     update_interval: u32,
-    last_move_order: Option<u64>,
 }
 
 impl AttackState {
@@ -21058,19 +21178,7 @@ impl AttackState {
         Ok(Self {
             target,
             update_interval: request.update_interval.max(1),
-            last_move_order: None,
         })
-    }
-
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 8;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
-        }
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -21079,29 +21187,42 @@ impl AttackState {
             None => return CommandStepResult::failed(None),
         };
 
-        if !target.is_active() {
+        if target.ocf & ocf::CREW_MEMBER == 0 {
             return CommandStepResult::completed(None);
         }
 
-        if !target.crew_member {
-            return CommandStepResult::completed(None);
+        if let Some(projectile) = ctx.object.contents.iter().copied().find(|id| {
+            ctx.resolve(*id)
+                .and_then(|object| ctx.definition(&object.definition_id))
+                .is_some_and(|definition| definition.projectile != 0)
+        }) {
+            let request = CommandRequest::new(CommandId::Throw)
+                .with_target(Some(projectile))
+                .with_tx(Some(target.position.x))
+                .with_ty(Some(target.position.y))
+                .with_update_interval(2);
+            return CommandStepResult::running(None)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
         }
 
-        const ATTACK_RANGE: i32 = 12;
-        let dx = target.position.x - ctx.position.x;
-        let dy = target.position.y - ctx.position.y;
-        if dx.abs() <= ATTACK_RANGE && dy.abs() <= ATTACK_RANGE {
-            return CommandStepResult::running(None);
+        if ctx.object.container != target.container {
+            let request = if ctx.object.container.is_some() {
+                CommandRequest::new(CommandId::Exit).with_update_interval(10)
+            } else {
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(target.container)
+                    .with_update_interval(10)
+            };
+            return CommandStepResult::running(None)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
         }
 
-        let mut result = CommandStepResult::running(None);
-        if self.should_issue_move(ctx.frame) {
-            let request = CommandRequest::new(CommandId::MoveTo)
-                .with_target(Some(self.target))
-                .with_update_interval(10);
-            result = result.with_operations(vec![CommandOperation::PushFront(request)]);
-        }
-        result
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_tx(Some(target.position.x))
+            .with_ty(Some(target.position.y))
+            .with_update_interval(10);
+        CommandStepResult::running(None)
+            .with_operations(vec![CommandOperation::PushFront(request)])
     }
 }
 

@@ -229,6 +229,8 @@ pub(crate) struct DefinitionFireMetadata {
     /// DefCore `Fragile`; Put does not throw these items into collection
     /// areas.
     pub fragile: bool,
+    /// Raw DefCore `Projectile`; nonzero contents are preferred by Attack.
+    pub projectile: i32,
     /// Positive Entrance rect enables OCF_Entrance at FullCon.
     pub entrance_rect: Option<DefinitionRect>,
     /// DefCore RotatedEntrance rotation cutoff.
@@ -39288,6 +39290,7 @@ impl EffectHostContext {
                             .filter(|limit| *limit > 0),
                         collection_rect: metadata.fire.collection_rect,
                         fragile: metadata.fire.fragile,
+                        projectile: metadata.fire.projectile,
                         can_chop: metadata.action_library.specs().iter().any(|(_, spec)| {
                             spec.procedure
                                 .as_deref()

@@ -8777,6 +8777,9 @@ pub struct Definition {
     /// DefCore `Fragile`; outdoor Put must not throw these objects into a
     /// target's collection area.
     fragile: bool,
+    /// Raw DefCore `Projectile`; any nonzero value lets Attack select the
+    /// object from the attacker's contents.
+    projectile: i32,
     collectible: bool,
     /// DefCore `NoGet` (src/C4Def.cpp:412): omit this definition from
     /// manual get/activate menus when set to any nonzero value.
@@ -9028,6 +9031,7 @@ impl Definition {
             collection_rect: None,
             collection_limit: None,
             fragile: false,
+            projectile: 0,
             collectible: false,
             no_get: false,
             grab_put_get: 0,
@@ -9385,6 +9389,7 @@ impl Definition {
         definition.set_collection_rect(resource.core.collection.map(DefinitionRect::from));
         definition.set_collection_limit(resource.core.collection_limit);
         definition.set_fragile(resource.core.fragile);
+        definition.set_projectile(resource.core.projectile);
         definition.set_fire_properties(
             resource.core.contact_incinerate,
             resource.core.no_burn_decay,
@@ -10487,6 +10492,14 @@ impl Definition {
 
     pub fn set_fragile(&mut self, fragile: bool) {
         self.fragile = fragile;
+    }
+
+    pub fn projectile(&self) -> i32 {
+        self.projectile
+    }
+
+    pub fn set_projectile(&mut self, projectile: i32) {
+        self.projectile = projectile;
     }
 
     pub fn is_collectible(&self) -> bool {
@@ -19583,6 +19596,7 @@ impl Engine {
                                 oversize: definition.oversize(),
                                 collection_rect: definition.collection_rect(),
                                 fragile: definition.fragile(),
+                                projectile: definition.projectile(),
                                 entrance_rect: definition.entrance_rect(),
                                 rotated_entrance: definition.rotated_entrance,
                                 attract_lightning: definition.attract_lightning,
@@ -23786,6 +23800,7 @@ impl Engine {
                         collection_limit: definition.collection_limit(),
                         collection_rect: definition.collection_rect(),
                         fragile: definition.fragile(),
+                        projectile: definition.projectile(),
                         can_chop: chop_action.is_some(),
                         chop_action,
                         constructable: definition.is_constructable(),
@@ -24102,6 +24117,7 @@ impl Engine {
                         collection_limit: definition.collection_limit(),
                         collection_rect: definition.collection_rect(),
                         fragile: definition.fragile(),
+                        projectile: definition.projectile(),
                         can_chop,
                         chop_action,
                         constructable: definition.is_constructable(),
@@ -38989,6 +39005,7 @@ impl Engine {
         definition.set_collection_rect(core.collection.map(DefinitionRect::from));
         definition.set_collection_limit(core.collection_limit);
         definition.set_fragile(core.fragile);
+        definition.set_projectile(core.projectile);
         definition.set_entrance_rect(core.entrance.map(DefinitionRect::from));
         definition.set_rotated_entrance(core.rotated_entrance);
         definition.set_fire_properties(

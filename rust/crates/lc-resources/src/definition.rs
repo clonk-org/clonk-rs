@@ -474,6 +474,9 @@ pub struct DefCore {
     /// `Fragile` (C4Def.cpp:393): any nonzero value prevents Put from
     /// choosing the outdoor throw-in path.
     pub fragile: bool,
+    /// `Projectile` (C4Def.cpp:395): nonzero definitions are selected by
+    /// C4Command::Attack from the attacker's contents.
+    pub projectile: i32,
     /// ContactIncinerate=N: 1-in-N chance of catching fire on contact with a
     /// burning object (CrossCheck pass 1, C4GameObjects.cpp:121-125); 0 = not
     /// inflammable.
@@ -855,6 +858,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut collection: Option<PictureRect> = None;
     let mut collection_limit: Option<u32> = None;
     let mut fragile = false;
+    let mut projectile: i32 = 0;
     let mut contact_incinerate: i32 = 0;
     let mut blast_incinerate: i32 = 0;
     let mut contain_blast: i32 = 0;
@@ -1083,6 +1087,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "fragile" => {
                 fragile = parse_i32(value).unwrap_or(0) != 0;
+            }
+            "projectile" => {
+                projectile = parse_i32(value).unwrap_or(0);
             }
             "contactincinerate" => {
                 contact_incinerate = parse_i32(value).unwrap_or(0).max(0);
@@ -1316,6 +1323,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         collection,
         collection_limit,
         fragile,
+        projectile,
         contact_incinerate,
         blast_incinerate,
         contain_blast,
@@ -3552,6 +3560,17 @@ Attach=1
         let defaulted = parse_def_core(b"[DefCore]\nid=SAFE\n")
             .expect("default DefCore parses");
         assert!(!defaulted.fragile);
+    }
+
+    #[test]
+    fn parse_def_core_projectile_preserves_signed_value_and_default() {
+        let parsed = parse_def_core(b"[DefCore]\nid=ROCK\nProjectile=-2\n")
+            .expect("Projectile DefCore parses");
+        assert_eq!(parsed.projectile, -2);
+
+        let defaulted =
+            parse_def_core(b"[DefCore]\nid=SAFE\n").expect("default DefCore parses");
+        assert_eq!(defaulted.projectile, 0);
     }
 
     #[test]
