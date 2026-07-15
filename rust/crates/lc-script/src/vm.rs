@@ -3120,27 +3120,19 @@ impl<'a> Vm<'a> {
                     right.type_name()
                 ))),
             },
-            Pow => {
-                let rhs = match right {
-                    Value::Int(i) => i,
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "cannot apply '**' to operands of type int and {}",
-                            other.type_name()
-                        )))
-                    }
-                };
-                if rhs < 0 {
-                    return Err(RuntimeError::new("negative exponent not supported"));
-                }
-                match left {
-                    Value::Int(lhs) => Ok(Value::Int(lhs.pow(rhs as u32))),
-                    other => Err(RuntimeError::new(format!(
-                        "cannot apply '**' to operands of type {} and int",
-                        other.type_name()
-                    ))),
-                }
-            }
+            Pow => match (left.as_c4_int(), right.as_c4_int()) {
+                // C4Math.cpp:48-65 returns 0 for negative exponents. For
+                // non-negative exponents, preserve C4ValueInt's 32-bit
+                // two's-complement overflow instead of panicking in debug
+                // builds. `as_c4_int` also mirrors `_getInt()` for nil/bool.
+                (Some(_), Some(rhs)) if rhs < 0 => Ok(Value::Int(0)),
+                (Some(lhs), Some(rhs)) => Ok(Value::Int(lhs.wrapping_pow(rhs as u32))),
+                _ => Err(RuntimeError::new(format!(
+                    "cannot apply '**' to operands of type {} and {}",
+                    left.type_name(),
+                    right.type_name()
+                ))),
+            },
             Equal => Ok(Value::Bool(
                 self.values_equal(&left, &right, strict, None, None),
             )),
@@ -3155,8 +3147,16 @@ impl<'a> Vm<'a> {
             BitAnd => self.eval_int_op(left, right, |a, b| a & b, "&"),
             BitOr => self.eval_int_op(left, right, |a, b| a | b, "|"),
             BitXor => self.eval_int_op(left, right, |a, b| a ^ b, "^"),
-            LeftShift => self.eval_int_op(left, right, |a, b| a << b, "<<"),
-            RightShift => self.eval_int_op(left, right, |a, b| a >> b, ">>"),
+            // C++ executes these with native 32-bit integer shifts. Its x86
+            // runtime masks the count to five bits, including negative counts
+            // read through `_getInt()`. Use wrapping shifts to make that
+            // behavior deterministic and avoid Rust debug-build panics.
+            LeftShift => {
+                self.eval_int_op(left, right, |a, b| a.wrapping_shl((b as u32) & 31), "<<")
+            }
+            RightShift => {
+                self.eval_int_op(left, right, |a, b| a.wrapping_shr((b as u32) & 31), ">>")
+            }
             // String comparison operators
             StringEqual => self.eval_string_cmp(left, right, strict, |a, b| a == b, "S="),
             StringNotEqual => self.eval_display_string_cmp(left, right, |a, b| a != b),

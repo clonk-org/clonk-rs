@@ -93,3 +93,30 @@ fn exponentiation_precedence_higher_than_multiply() {
 fn unary_precedence_is_higher_than_exponentiation() {
     assert_eq!(eval("-2**2"), Value::Int(4));
 }
+
+#[test]
+fn exponentiation_edge_semantics_match_cpp() {
+    assert_eq!(
+        eval("[2 ** -1, nil ** 2, 7 ** nil, 10 ** 10]"),
+        Value::Array(vec![
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(1_410_065_408),
+        ])
+    );
+}
+
+#[test]
+fn shift_counts_are_masked_like_cpp() {
+    assert_eq!(
+        eval("[1 << 32, 64 >> 32, 1 << -1, 64 >> -1, -8 >> 33]"),
+        Value::Array(vec![
+            Value::Int(1),
+            Value::Int(64),
+            Value::Int(i32::MIN),
+            Value::Int(0),
+            Value::Int(-4),
+        ])
+    );
+}
