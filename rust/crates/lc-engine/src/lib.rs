@@ -31811,6 +31811,7 @@ impl Engine {
         if self.objects[idx].state.on_fire {
             return Ok(false);
         }
+        let target_id = self.objects[idx].id;
         // In extinguishing material: no fire caused (C4Effect.cpp:574-583)
         let position = self.objects[idx].state.position;
         let in_extinguisher = self
@@ -31821,53 +31822,119 @@ impl Engine {
             .map(|material| material.extinguisher() > 0)
             .unwrap_or(false);
         let fire_caused = !in_extinguisher;
-        let (burn_turn_to, incomplete_activity, no_burn_decay) = self
+        let burn_turn_to = self
             .definitions
             .get(&self.objects[idx].definition_id)
-            .map(|definition| {
-                (
-                    definition.burn_turn_to().map(str::to_string),
-                    definition.incomplete_activity(),
-                    definition.no_burn_decay(),
-                )
-            })
-            .unwrap_or((None, false, false));
+            .and_then(|definition| definition.burn_turn_to().map(str::to_string));
         // BurnTurnTo: blasts changedef in water too (C4Effect.cpp:579-585)
         if let Some(target) = burn_turn_to.filter(|_| fire_caused || blasted) {
             self.change_object_def(idx, &target);
         }
-        // eject contents (C4Effect.cpp:586-594): into the burning object's
-        // container when contained, else exit at the object's position
-        if !incomplete_activity && !no_burn_decay {
-            let container = self.objects[idx].state.container;
-            let contents = std::mem::take(&mut self.objects[idx].state.contents);
+        // ChangeDef is live before both guarded blocks. Eject through real
+        // Enter/Exit so the controller assignment and callbacks occur in
+        // C++ order.
+        let eject_contents = self
+            .find_object_index(target_id)
+            .and_then(|index| self.definitions.get(&self.objects[index].definition_id))
+            .map(|definition| {
+                !definition.incomplete_activity() && !definition.no_burn_decay()
+            })
+            .unwrap_or(true);
+        if eject_contents {
+            let contents = self
+                .find_object_index(target_id)
+                .map(|index| self.objects[index].state.contents.clone())
+                .unwrap_or_default();
             for content_id in contents {
-                let update = match container {
-                    Some(parent) => ObjectUpdate::new().with_container(parent),
-                    None => ObjectUpdate::new()
-                        .clear_container()
-                        .with_position(position),
+                let Some(content_index) = self.find_object_index(content_id) else {
+                    continue;
                 };
-                self.apply_object_update(content_id, update)?;
+                if self.objects[content_index].destroyed
+                    || !self.objects[content_index].state.status.is_active()
+                    || self.objects[content_index].state.container != Some(target_id)
+                {
+                    continue;
+                }
+                self.objects[content_index].state.controller = caused_by;
+                let container = self
+                    .find_object_index(target_id)
+                    .and_then(|index| self.objects[index].state.container);
+                match container {
+                    Some(parent) => {
+                        let _ = self.try_object_enter(content_id, parent)?;
+                    }
+                    None => {
+                        let _ = self.exit_object_at_current_position(content_id)?;
+                    }
+                }
             }
         }
-        // (attached-object detach, C4Effect.cpp:595-600: needs the
-        // DFA_ATTACH action scan — open)
+
+        // Re-read the definition after ejection callbacks, then detach every
+        // live DFA_ATTACH action whose Target or Target2 is the burned object.
+        let detach_attached = self
+            .find_object_index(target_id)
+            .and_then(|index| self.definitions.get(&self.objects[index].definition_id))
+            .map(|definition| {
+                !definition.incomplete_activity() && !definition.no_burn_decay()
+            })
+            .unwrap_or(true);
+        if detach_attached {
+            let candidates = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+            for candidate in candidates {
+                let Some(candidate_index) = self.find_object_index(candidate) else {
+                    continue;
+                };
+                let object = &self.objects[candidate_index];
+                if object.destroyed
+                    || !object.state.status.is_active()
+                    || (object.state.action.target != Some(target_id)
+                        && object.state.action.target2 != Some(target_id))
+                {
+                    continue;
+                }
+                let definition_id = object.definition_id.clone();
+                let attached = self.definitions.get(&definition_id).is_some_and(|definition| {
+                    definition
+                        .action_library()
+                        .procedure_for_action(&object.state.action.name)
+                        == ActionProcedure::Attach
+                });
+                if attached {
+                    let _ = tolerate_script_error(self.action_with_calls(
+                        candidate_index,
+                        &definition_id,
+                        "Idle",
+                    ))?;
+                }
+            }
+        }
         if !fire_caused {
             // blasted but not incinerated: IncinerationEx (C4Effect.cpp:602-607)
             if blasted {
-                let _ =
-                    self.call_object_function(idx, "IncinerationEx", vec![Value::Int(caused_by)])?;
+                if let Some(index) = self.find_object_index(target_id) {
+                    let _ = self.call_object_function(
+                        index,
+                        "IncinerationEx",
+                        vec![Value::Int(caused_by)],
+                    )?;
+                }
             }
             return Ok(false);
         }
         // determine fire appearance (C4Effect.cpp:609-626): the ~FireMode
         // script answer wins; zero falls back to the category default; an
         // out-of-range answer degrades to Object mode.
+        let Some(idx) = self.find_object_index(target_id) else {
+            return Ok(false);
+        };
         let mode_answer = match self.call_object_function(idx, "FireMode", Vec::new())? {
             Value::Int(mode) => mode,
             Value::Bool(flag) => i32::from(flag),
             _ => 0,
+        };
+        let Some(idx) = self.find_object_index(target_id) else {
+            return Ok(false);
         };
         let fire_mode = if mode_answer == 0 {
             let category = self.objects[idx].state.category;
@@ -31930,6 +31997,26 @@ impl Engine {
             return Vec::new();
         }
         let mut stop_events = Vec::new();
+        // FnFxFireTimer reads Var(1), validates only the local copy and
+        // passes NO_OWNER into ExecFire when that player no longer exists.
+        // The stored effect value remains available to scripts unchanged.
+        let stored_caused_by = self.objects[idx]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.number == fire_number)
+            .and_then(|effect| effect.vars.get(1))
+            .map(|value| match value {
+                EffectVarValue::Int(value) => *value,
+                EffectVarValue::Bool(value) => i32::from(*value),
+                _ => 0,
+            })
+            .unwrap_or(self.objects[idx].state.fire_caused_by);
+        let caused_by = self
+            .players
+            .contains_key(&stored_caused_by)
+            .then_some(stored_caused_by)
+            .unwrap_or(OWNER_NONE);
         // Fire Phase (C4Object.cpp:769)
         {
             let object = &mut self.objects[idx];
@@ -31951,8 +32038,7 @@ impl Engine {
         }
         // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:780)
         if frame % 10 == 0 && !no_burn_damage {
-            let cause = self.objects[idx].state.fire_caused_by;
-            if let Err(error) = self.change_object_damage(idx, 2, C4FX_CALL_DMG_FIRE, cause) {
+            if let Err(error) = self.change_object_damage(idx, 2, C4FX_CALL_DMG_FIRE, caused_by) {
                 if let Some(error) = self.defer_runtime_flash_boundary(error) {
                     tracing::warn!(%error, "fire damage callback failed; continuing");
                 }
@@ -31964,7 +32050,7 @@ impl Engine {
                 idx,
                 -1,
                 C4FX_CALL_ENG_FIRE,
-                self.objects[idx].state.fire_caused_by,
+                caused_by,
             ) {
                 if let Some(error) = self.defer_runtime_flash_boundary(error) {
                     tracing::warn!(%error, "fire energy callback failed; continuing");
@@ -35353,6 +35439,73 @@ impl Engine {
         Ok(())
     }
 
+    /// Engine-owned `C4Object::Exit(x, y)` at the object's current integer
+    /// position. The containment change and motion reset are live before
+    /// Ejection and Departure, and both callbacks are fail-safe.
+    fn exit_object_at_current_position(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<bool, EngineError> {
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        let object = &self.objects[object_index];
+        if object.destroyed || !object.state.status.is_active() {
+            return Ok(false);
+        }
+        let Some(previous) = object.state.container else {
+            return Ok(false);
+        };
+        let position = object.state.position;
+
+        self.apply_container_change(object_id, Some(previous), None, false)?;
+        if let Some(object_index) = self.find_object_index(object_id) {
+            let object = &mut self.objects[object_index];
+            let previous_rect = object.current_shape_rect();
+            let previous_construction = object.state.construction;
+            object.set_position(position);
+            object.state.rotation = 0;
+            object.fixed_rotation = C4Fixed::ZERO;
+            object.fixed_velocity = FixedVec2::ZERO;
+            object.state.velocity = Vector2::ZERO;
+            object.rotation_velocity = C4Fixed::ZERO;
+            object.state.mobile = true;
+            object.state.in_liquid = false;
+            object.state.menu = None;
+            object.refresh_shape_after_state_change(
+                previous_construction,
+                previous_rect,
+                false,
+            );
+            self.update_solid_mask(object_index);
+            self.update_sector_for_index(object_index);
+            self.refresh_object_ocf(object_index);
+        }
+
+        if let Some(previous_index) = self.find_object_index(previous).filter(|&index| {
+            !self.objects[index].destroyed && self.objects[index].state.status.is_active()
+        }) {
+            let _ = tolerate_script_error(self.call_object_function(
+                previous_index,
+                "Ejection",
+                vec![object_reference_value(object_id)],
+            ))?;
+        }
+        if let Some(object_index) = self.find_object_index(object_id).filter(|&index| {
+            !self.objects[index].destroyed && self.objects[index].state.status.is_active()
+        }) {
+            let _ = tolerate_script_error(self.call_object_function(
+                object_index,
+                "Departure",
+                vec![object_reference_value(previous)],
+            ))?;
+        }
+
+        Ok(self
+            .find_object_index(object_id)
+            .is_some_and(|index| self.objects[index].state.container.is_none()))
+    }
+
     /// The callback tail shared by every engine-owned successful Enter.
     /// The new containment relation must already be live. Collection2 may
     /// move the entering object; Entrance then receives its current
@@ -35513,22 +35666,12 @@ impl Engine {
         // either callback may re-enter, in which case Exit reports false and
         // the outer Enter aborts (C4Object.cpp:1592-1594, 1560-1563).
         let previous = self.objects[object_index].state.container;
-        if let Some(previous_id) = previous {
-            self.apply_container_change(object_id, Some(previous_id), None, false)?;
-            if let Some(previous_index) = self.find_object_index(previous_id) {
-                let _ = tolerate_script_error(self.call_object_function(
-                    previous_index,
-                    "Ejection",
-                    vec![object_reference_value(object_id)],
-                ))?;
-            }
-            if let Some(object_index) = self.find_object_index(object_id) {
-                let _ = tolerate_script_error(self.call_object_function(
-                    object_index,
-                    "Departure",
-                    vec![object_reference_value(previous_id)],
-                ))?;
-            }
+        if previous.is_some() && !self.exit_object_at_current_position(object_id)? {
+            return Ok(if self.find_object_index(object_id).is_some() {
+                ObjectEnterOutcome::Failed
+            } else {
+                ObjectEnterOutcome::Removed
+            });
         }
 
         let Some(object_index) = self.find_object_index(object_id) else {

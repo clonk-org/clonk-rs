@@ -111,6 +111,8 @@ pub(crate) struct HostWorldObject {
     pub action_target2: Option<ObjectId>,
     pub action_procedure: Option<String>,
     pub owner: i32,
+    /// Same-call scope overlay for C4Object::Controller.
+    controller: Option<i32>,
     /// C4Object::Select at call entry, overlaid from active scopes.
     pub selected: bool,
     /// C4Object::CrewDisabled at call entry, overlaid from active scopes.
@@ -741,6 +743,7 @@ impl HostWorldObject {
             action_target2,
             action_procedure,
             owner,
+            controller: None,
             selected: false,
             crew_disabled: false,
             category,
@@ -915,10 +918,12 @@ impl HostWorldObject {
     /// fixture snapshots without one fall back to the owner (the Init
     /// default, C4Object.cpp:162).
     pub fn controller(&self) -> i32 {
-        self.state
-            .as_ref()
-            .map(|state| state.controller)
-            .unwrap_or(self.owner)
+        self.controller.unwrap_or_else(|| {
+            self.state
+                .as_ref()
+                .map(|state| state.controller)
+                .unwrap_or(self.owner)
+        })
     }
 
     pub fn category(&self) -> i32 {
@@ -16757,6 +16762,16 @@ fn reset_physical(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
+    do_energy_with_cause_override(args, None)
+}
+
+/// Internal engine callers already have the decoded player number and must
+/// be able to pass explicit NO_OWNER; the public script ABI reserves encoded
+/// zero for its caller-controller default.
+fn do_energy_with_cause_override(
+    args: &[Value],
+    caused_by_override: Option<i32>,
+) -> Result<Value, RuntimeError> {
     let change = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
         Value::Nil => 0,
@@ -16869,14 +16884,16 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
             .ok_or_else(|| RuntimeError::new("DoEnergy requires an active engine context"))?;
         // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
         // (C4Script.cpp:496-497) — resolved in the caller's scope.
-        let caused_by = if caused_by_plus_one != 0 {
-            caused_by_plus_one - 1
-        } else {
-            context
-                .object_context()
-                .map(|object| object.controller())
-                .unwrap_or(OWNER_NONE)
-        };
+        let caused_by = caused_by_override.unwrap_or_else(|| {
+            if caused_by_plus_one != 0 {
+                caused_by_plus_one - 1
+            } else {
+                context
+                    .object_context()
+                    .map(|object| object.controller())
+                    .unwrap_or(OWNER_NONE)
+            }
+        });
         // `if (!pObj) pObj = cthr->Obj` is only the local-call default
         // (C4Script.cpp:494) — a named target may be FOREIGN.
         let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
@@ -17222,6 +17239,15 @@ fn get_plr_jump_and_run_control(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
+    do_damage_with_cause_override(args, None)
+}
+
+/// Internal counterpart to `do_damage` that bypasses the script ABI's
+/// encoded-zero caller-controller default for explicit NO_OWNER.
+fn do_damage_with_cause_override(
+    args: &[Value],
+    caused_by_override: Option<i32>,
+) -> Result<Value, RuntimeError> {
     let change = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
         Value::Nil => 0,
@@ -17307,14 +17333,16 @@ fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
             .ok_or_else(|| RuntimeError::new("DoDamage requires an active engine context"))?;
         // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
         // (C4Script.cpp:511) — resolved in the caller's scope.
-        let caused_by = if caused_by_plus_one != 0 {
-            caused_by_plus_one - 1
-        } else {
-            context
-                .object_context()
-                .map(|object| object.controller())
-                .unwrap_or(OWNER_NONE)
-        };
+        let caused_by = caused_by_override.unwrap_or_else(|| {
+            if caused_by_plus_one != 0 {
+                caused_by_plus_one - 1
+            } else {
+                context
+                    .object_context()
+                    .map(|object| object.controller())
+                    .unwrap_or(OWNER_NONE)
+            }
+        });
         // `if (!pObj) pObj = cthr->Obj` is only the local-call default
         // (C4Script.cpp:510) — a named target may be FOREIGN.
         let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
@@ -17729,7 +17757,7 @@ fn fire_effect_start_core(
     enum FireStage {
         Deny,
         NoFire { blasted: bool },
-        Ignite { category: i32 },
+        Ignite,
     }
     let stage = HOST_CONTEXT.with(|cell| -> Result<FireStage, RuntimeError> {
         let mut borrow = cell.borrow_mut();
@@ -17763,10 +17791,6 @@ fn fire_effect_start_core(
         if !entry_exists {
             return Ok(FireStage::Deny);
         }
-        let category = context
-            .object_scope(target)
-            .map(|scope| scope.current_category)
-            .unwrap_or(0);
         // In extinguishing material: no fire caused, checked BEFORE the
         // FirePhase draw (C4Effect.cpp:574-583).
         let position = context
@@ -17786,34 +17810,11 @@ fn fire_effect_start_core(
             .map(|metadata| metadata.fire.clone())
             .unwrap_or_default();
         // BurnTurnTo: blasts changedef in water too (C4Effect.cpp:579-585).
-        if let Some(turn_to) = fire_meta.burn_turn_to.as_ref() {
-            if context.world.definition_metadata(turn_to).is_some() {
-                if let Some(scope) = context.object_scope_mut(target) {
-                    scope.pending_update.change_def = Some(turn_to.clone());
-                }
-            }
-        }
-        // Eject contents (C4Effect.cpp:586-594): into the burning object's
-        // container when contained, else exit at the object's position —
-        // raw container moves like the engine-side ejection (no Departure
-        // callbacks).
-        if !fire_meta.incomplete_activity && !fire_meta.no_burn_decay {
-            let parent = context
-                .object_scope(target)
-                .map(|scope| scope.container())
-                .unwrap_or(None);
-            let contents: Vec<ObjectId> = context
-                .get_world_object(target)
-                .map(|object| object.contents().to_vec())
-                .unwrap_or_default();
-            for content in contents {
-                if !context.ensure_object_scope(content) {
-                    continue;
-                }
-                if let Some(scope) = context.object_scope_mut(content) {
-                    scope.set_container(parent);
-                    if parent.is_none() {
-                        scope.set_position(position);
+        if fire_caused || blasted {
+            if let Some(turn_to) = fire_meta.burn_turn_to.as_ref() {
+                if context.world.definition_metadata(turn_to).is_some() {
+                    if let Some(scope) = context.object_scope_mut(target) {
+                        scope.pending_update.change_def = Some(turn_to.clone());
                     }
                 }
             }
@@ -17821,10 +17822,125 @@ fn fire_effect_start_core(
         if !fire_caused {
             return Ok(FireStage::NoFire { blasted });
         }
-        Ok(FireStage::Ignite { category })
+        Ok(FireStage::Ignite)
     })?;
-    let category = match stage {
-        FireStage::Deny => return Ok(-1),
+
+    if matches!(&stage, FireStage::Deny) {
+        return Ok(-1);
+    }
+
+    // ChangeDef above is immediately live in C++. Re-read the effective
+    // definition before each guarded block so BurnTurnTo and callbacks can
+    // change whether contents are ejected and attached objects detached.
+    let eject_contents = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        effective_definition_id(context, target)
+            .and_then(|id| context.world.definition_metadata(&id))
+            .map(|metadata| {
+                !metadata.fire.incomplete_activity && !metadata.fire.no_burn_decay
+            })
+            .unwrap_or(true)
+    });
+    if eject_contents {
+        // Snapshot the current contents order, then re-check every link after
+        // the preceding callbacks. Controller is assigned before the real
+        // Enter/Exit, so RejectEntrance/Ejection/Departure see iCausedBy.
+        let contents = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.get_world_object(target))
+                .map(|object| object.contents().to_vec())
+                .unwrap_or_default()
+        });
+        for content in contents {
+            let parent = HOST_CONTEXT.with(|cell| {
+                let mut borrow = cell.borrow_mut();
+                let context = borrow.as_mut()?;
+                let target_object = context.get_world_object(target)?;
+                let content_object = context.get_world_object(content)?;
+                if !target_object.is_present()
+                    || !content_object.is_present()
+                    || content_object.container() != Some(target)
+                    || !context.ensure_object_scope(content)
+                {
+                    return None;
+                }
+                context.object_scope_mut(content)?.set_controller(caused_by);
+                Some(target_object.container())
+            });
+            let Some(parent) = parent else {
+                continue;
+            };
+            match parent {
+                Some(container) => {
+                    let _ = enter_object_live(content, container)?;
+                }
+                None => {
+                    let _ = exit_object_at_current_position(content)?;
+                }
+            }
+        }
+    }
+
+    let detach_attached = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        effective_definition_id(context, target)
+            .and_then(|id| context.world.definition_metadata(&id))
+            .map(|metadata| {
+                !metadata.fire.incomplete_activity && !metadata.fire.no_burn_decay
+            })
+            .unwrap_or(true)
+    });
+    if detach_attached {
+        let candidates = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(EffectHostContext::master_object_ids)
+                .unwrap_or_default()
+        });
+        for candidate in candidates {
+            // Earlier SetAction callbacks may remove or retarget later
+            // candidates; test the live state immediately before detaching.
+            let attached = HOST_CONTEXT.with(|cell| {
+                let borrow = cell.borrow();
+                let Some(context) = borrow.as_ref() else {
+                    return false;
+                };
+                if let Some(scope) = context.object_scope(candidate) {
+                    return !scope.destroy
+                        && scope.status().is_active()
+                        && scope.effective_action_procedure() == ActionProcedure::Attach
+                        && (scope.effective_action_target(0) == Some(target)
+                            || scope.effective_action_target(1) == Some(target));
+                }
+                context.get_world_object(candidate).is_some_and(|object| {
+                    object.is_present()
+                        && object
+                            .procedure_name()
+                            .map(ActionProcedure::from_name)
+                            .unwrap_or_default()
+                            == ActionProcedure::Attach
+                        && (object.action_target(0) == Some(target)
+                            || object.action_target(1) == Some(target))
+                })
+            });
+            if attached {
+                let _ = object_set_action(&[
+                    object_reference_value(candidate),
+                    Value::String("Idle".to_string()),
+                ]);
+            }
+        }
+    }
+
+    match stage {
+        FireStage::Deny => unreachable!("denied fire start returned above"),
         FireStage::NoFire { blasted } => {
             // Blasted but not incinerated: IncinerationEx
             // (C4Effect.cpp:602-607) — fail-safe exec.
@@ -17842,8 +17958,26 @@ fn fire_effect_start_core(
             }
             return Ok(-1);
         }
-        FireStage::Ignite { category } => category,
-    };
+        FireStage::Ignite => {}
+    }
+    let category = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return 0;
+        };
+        let Some(scope) = context.object_scope(target) else {
+            return 0;
+        };
+        scope.pending_update.category.unwrap_or_else(|| {
+            scope
+                .pending_update
+                .change_def
+                .as_deref()
+                .and_then(|id| context.world.definition_metadata(id))
+                .map(|metadata| metadata.category)
+                .unwrap_or(scope.current_category)
+        })
+    });
     // determine fire appearance (C4Effect.cpp:609-626): the ~FireMode
     // script answer wins; zero falls back to the category default; an
     // out-of-range answer degrades to Object mode.
@@ -17988,6 +18122,7 @@ fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     });
     struct FireExecState {
         caused_by: i32,
+        attribution_caused_by: i32,
         phase: i32,
         no_burn_decay: bool,
         no_burn_damage: bool,
@@ -18018,6 +18153,24 @@ fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
             .fire
             .or(world_fire)
             .unwrap_or((OWNER_NONE, 0));
+        // FnFxFireTimer reads the cause from the effect variable every
+        // time, then validates that local value without rewriting Var(1).
+        let effect_caused_by = scope
+            .effects
+            .snapshot()
+            .iter()
+            .find(|effect| effect.number == fire_number)
+            .and_then(|effect| effect.vars.get(1))
+            .map(|value| match value {
+                EffectVarValue::Int(value) => *value,
+                EffectVarValue::Bool(value) => i32::from(*value),
+                _ => 0,
+            })
+            .unwrap_or(caused_by);
+        let attribution_caused_by = context
+            .player_state(effect_caused_by)
+            .map(|_| effect_caused_by)
+            .unwrap_or(OWNER_NONE);
         let fire_meta = effective_definition_id(context, target)
             .and_then(|id| context.world.definition_metadata(&id))
             .map(|metadata| metadata.fire.clone())
@@ -18025,6 +18178,7 @@ fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
         let scope = context.object_scope(target)?;
         Some(FireExecState {
             caused_by,
+            attribution_caused_by,
             phase,
             no_burn_decay: fire_meta.no_burn_decay,
             no_burn_damage: fire_meta.no_burn_damage,
@@ -18061,22 +18215,28 @@ fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_value = object_reference_value(target);
     // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:783)
     if frame % 10 == 0 && !state.no_burn_damage {
-        do_damage(&[
-            Value::Int(2),
-            target_value.clone(),
-            Value::Int(crate::C4FX_CALL_DMG_FIRE),
-            Value::Int(state.caused_by + 1),
-        ])?;
+        do_damage_with_cause_override(
+            &[
+                Value::Int(2),
+                target_value.clone(),
+                Value::Int(crate::C4FX_CALL_DMG_FIRE),
+                Value::Int(state.attribution_caused_by + 1),
+            ],
+            Some(state.attribution_caused_by),
+        )?;
     }
     // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:785)
     if frame % 5 == 0 {
-        do_energy(&[
-            Value::Int(-1),
-            target_value,
-            Value::Bool(false),
-            Value::Int(crate::C4FX_CALL_ENG_FIRE),
-            Value::Int(state.caused_by + 1),
-        ])?;
+        do_energy_with_cause_override(
+            &[
+                Value::Int(-1),
+                target_value,
+                Value::Bool(false),
+                Value::Int(crate::C4FX_CALL_ENG_FIRE),
+                Value::Int(state.attribution_caused_by + 1),
+            ],
+            Some(state.attribution_caused_by),
+        )?;
     }
     // Background effects: Tick5 over valid landscape material — extinguish
     // in extinguisher material, then the unconditional Random(3) inflame
@@ -33425,6 +33585,7 @@ impl EffectHostContext {
                 .unwrap_or(object.crew_disabled);
             object.direction = scope.current_direction.to_script_value();
             object.owner = scope.owner();
+            object.controller = Some(scope.controller());
             // Keep the whole-pixel mirror coherent for integer-velocity
             // consumers; `fixed_velocity` above retains exact sub-pixel dirs.
             if scope.pending_update.fixed_velocity.is_some()

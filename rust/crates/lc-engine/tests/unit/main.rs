@@ -1283,6 +1283,347 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
     }
 
     #[test]
+    fn fire_start_ejects_through_exit_and_detaches_attachers_on_both_paths(
+    ) -> Result<(), EngineError> {
+        // FnFxFireStart writes the causing player before the real Exit, so
+        // Departure observes the new controller. It then finds every
+        // DFA_ATTACH object whose primary target is the burning object and
+        // calls SetAction(ActIdle), including the normal AbortCall. Exercise
+        // both Rust entry points: direct engine ignition and script-host
+        // Incinerate/inherited native dispatch.
+        for via_script in [false, true] {
+            let path = if via_script { "compat" } else { "engine" };
+            let mut engine = Engine::with_seed(96);
+            engine.register_player(PlayerConfig::new(7, "Incinerator"))?;
+            engine.register_definition(Definition::from_script(
+                "ACTR",
+                "Actor",
+                "#strict\nfunc Ignite(pTarget) { return Incinerate(pTarget); }\n",
+            )?)?;
+
+            let mut burner_definition = Definition::from_script(
+                "BURN",
+                "Burner",
+                r#"#strict
+local ejection_count;
+func Ejection(pContent)
+{
+    ejection_count = ejection_count + 1;
+    return 1;
+}
+"#,
+            )?;
+            burner_definition.set_c4_callback_convention(true);
+            engine.register_definition(burner_definition)?;
+
+            let mut content_definition = Definition::from_script(
+                "ITEM",
+                "Item",
+                r#"#strict
+local departure_count, departure_controller, departure_container;
+func Departure(pOldContainer)
+{
+    departure_count = departure_count + 1;
+    departure_controller = GetController();
+    departure_container = pOldContainer;
+    return 1;
+}
+"#,
+            )?;
+            content_definition.set_c4_callback_convention(true);
+            engine.register_definition(content_definition)?;
+
+            let mut attached_definition = Definition::from_script(
+                "ATCH",
+                "Attached",
+                r#"#strict
+local abort_count, abort_saw_idle;
+func AttachAbort()
+{
+    abort_count = abort_count + 1;
+    abort_saw_idle = ActIdle();
+    return 1;
+}
+"#,
+            )?;
+            attached_definition.set_c4_callback_convention(true);
+            attached_definition.configure_actions(
+                Some("Idle".to_string()),
+                HashMap::from([
+                    ("Idle".to_string(), ActionSpec::default()),
+                    (
+                        "Attach".to_string(),
+                        ActionSpec::default()
+                            .with_procedure("ATTACH")
+                            .with_abort_call("AttachAbort"),
+                    ),
+                ]),
+            );
+            engine.register_definition(attached_definition)?;
+            engine.register_definition(simple_definition("ANCR"))?;
+
+            let actor = engine.spawn_object(
+                SpawnConfig::new("ACTR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_controller(7),
+            )?;
+            let burner = engine.spawn_object(
+                SpawnConfig::new("BURN").with_position(Vector2::new(30, 30)),
+            )?;
+            let content = engine.spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_container(burner)
+                    .with_controller(2)
+                    .with_rotation(73)
+                    .with_rotation_velocity(itofix(20))
+                    .with_in_liquid(true)
+                    .with_mobile(false),
+            )?;
+            let anchor = engine.spawn_object(SpawnConfig::new("ANCR"))?;
+
+            let mut attached_action = ActionState::new("Attach");
+            attached_action.target = Some(burner);
+            attached_action.phase = 6;
+            let attached = engine.spawn_object(
+                SpawnConfig::new("ATCH")
+                    .with_action(attached_action)
+                    .with_loaded(true),
+            )?;
+
+            let mut unrelated_action = ActionState::new("Attach");
+            unrelated_action.target = Some(anchor);
+            unrelated_action.phase = 4;
+            let unrelated = engine.spawn_object(
+                SpawnConfig::new("ATCH")
+                    .with_action(unrelated_action)
+                    .with_loaded(true),
+            )?;
+
+            if via_script {
+                let actor_idx = engine.find_object_index(actor).expect("actor exists");
+                assert_eq!(
+                    engine.call_object_function(
+                        actor_idx,
+                        "Ignite",
+                        vec![object_reference_value(burner)],
+                    )?,
+                    Value::Bool(true),
+                    "{path} ignition succeeds"
+                );
+            } else {
+                let burner_idx = engine.find_object_index(burner).expect("burner exists");
+                assert!(
+                    engine.incinerate_object(burner_idx, 7, false, None)?,
+                    "{path} ignition succeeds"
+                );
+            }
+
+            let burner_idx = engine.find_object_index(burner).expect("burner remains");
+            assert!(engine.objects[burner_idx].state.contents.is_empty());
+            assert_eq!(
+                engine.objects[burner_idx]
+                    .state
+                    .local_vars
+                    .get("ejection_count"),
+                Some(&Value::Int(1)),
+                "{path} uses the Ejection seam"
+            );
+
+            let content_idx = engine.find_object_index(content).expect("content remains");
+            let content_state = &engine.objects[content_idx].state;
+            assert_eq!(content_state.container, None, "{path} content exits");
+            assert_eq!(
+                content_state.controller, 7,
+                "{path} content receives the fire cause"
+            );
+            assert_eq!(
+                content_state.local_vars.get("departure_count"),
+                Some(&Value::Int(1)),
+                "{path} runs Departure"
+            );
+            assert_eq!(
+                content_state.local_vars.get("departure_controller"),
+                Some(&Value::Int(7)),
+                "{path} updates Controller before Exit callbacks"
+            );
+            assert_eq!(
+                content_state.local_vars.get("departure_container"),
+                Some(&object_reference_value(burner))
+            );
+            assert_eq!(content_state.rotation, 0, "{path} uses real Exit");
+            assert_eq!(
+                engine.objects[content_idx].rotation_velocity,
+                C4Fixed::ZERO,
+                "{path} Exit clears rotational velocity"
+            );
+            assert!(content_state.mobile, "{path} Exit mobilizes content");
+            assert!(!content_state.in_liquid, "{path} Exit clears InLiquid");
+
+            let attached_idx = engine.find_object_index(attached).expect("attacher remains");
+            let attached_state = &engine.objects[attached_idx].state;
+            assert_eq!(attached_state.action.name, "Idle", "{path} detaches DFA_ATTACH");
+            assert_eq!(
+                attached_state.action.target,
+                Some(burner),
+                "SetAction(ActIdle) preserves an unsupplied action target"
+            );
+            assert_eq!(
+                attached_state.local_vars.get("abort_count"),
+                Some(&Value::Int(1)),
+                "{path} dispatches Attach AbortCall"
+            );
+            assert_eq!(
+                attached_state.local_vars.get("abort_saw_idle"),
+                Some(&Value::Bool(true)),
+                "the idle action is live before AbortCall"
+            );
+
+            let unrelated_idx = engine
+                .find_object_index(unrelated)
+                .expect("unrelated attacher remains");
+            assert_eq!(engine.objects[unrelated_idx].state.action.name, "Attach");
+            assert_eq!(
+                engine.objects[unrelated_idx].state.action.target,
+                Some(anchor),
+                "{path} only detaches objects targeting the burner"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fire_start_rehomes_contents_through_enter_on_both_paths() -> Result<(), EngineError> {
+        // A contained burning object sends its contents through the complete
+        // Enter transfer: old-container Ejection, content Departure,
+        // destination Collection2, then content Entrance. The fire cause is
+        // installed before that transfer; ordinary nonliving Enter then
+        // adopts the destination container's controller.
+        for via_script in [false, true] {
+            let path = if via_script { "compat" } else { "engine" };
+            let mut engine = Engine::with_seed(97);
+            engine.register_player(PlayerConfig::new(5, "Parent owner"))?;
+            engine.register_player(PlayerConfig::new(7, "Incinerator"))?;
+            engine.register_definition(Definition::from_script(
+                "ACTR",
+                "Actor",
+                "#strict\nfunc Ignite(pTarget) { return Incinerate(pTarget); }\n",
+            )?)?;
+
+            let mut parent_definition = Definition::from_script(
+                "PRNT",
+                "Parent",
+                r#"#strict
+func Collection2(pContent) { pContent->Mark(3); return 1; }
+"#,
+            )?;
+            parent_definition.set_c4_callback_convention(true);
+            engine.register_definition(parent_definition)?;
+
+            let mut burner_definition = Definition::from_script(
+                "BURN",
+                "Burner",
+                r#"#strict
+func Ejection(pContent) { pContent->Mark(1); return 1; }
+"#,
+            )?;
+            burner_definition.set_c4_callback_convention(true);
+            engine.register_definition(burner_definition)?;
+
+            let mut content_definition = Definition::from_script(
+                "ITEM",
+                "Item",
+                r#"#strict
+local callback_order, departure_controller, departure_container, entrance_container;
+func Mark(iStep) { callback_order = callback_order * 10 + iStep; return 1; }
+func Departure(pOldContainer)
+{
+    Mark(2);
+    departure_controller = GetController();
+    departure_container = pOldContainer;
+    return 1;
+}
+func Entrance(pContainer)
+{
+    Mark(4);
+    entrance_container = pContainer;
+    return 1;
+}
+"#,
+            )?;
+            content_definition.set_c4_callback_convention(true);
+            engine.register_definition(content_definition)?;
+
+            let actor = engine.spawn_object(
+                SpawnConfig::new("ACTR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_controller(7),
+            )?;
+            let parent = engine.spawn_object(
+                SpawnConfig::new("PRNT")
+                    .with_position(Vector2::new(80, 40))
+                    .with_controller(5),
+            )?;
+            let burner = engine.spawn_object(
+                SpawnConfig::new("BURN")
+                    .with_position(Vector2::new(10, 10))
+                    .with_container(parent),
+            )?;
+            let content = engine.spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_container(burner)
+                    .with_controller(2),
+            )?;
+
+            if via_script {
+                let actor_idx = engine.find_object_index(actor).expect("actor exists");
+                assert_eq!(
+                    engine.call_object_function(
+                        actor_idx,
+                        "Ignite",
+                        vec![object_reference_value(burner)],
+                    )?,
+                    Value::Bool(true)
+                );
+            } else {
+                let burner_idx = engine.find_object_index(burner).expect("burner exists");
+                assert!(engine.incinerate_object(burner_idx, 7, false, None)?);
+            }
+
+            let content_idx = engine.find_object_index(content).expect("content remains");
+            let content_state = &engine.objects[content_idx].state;
+            assert_eq!(content_state.container, Some(parent), "{path} enters parent");
+            assert_eq!(
+                content_state.position,
+                Vector2::new(80, 40),
+                "{path} copies parent motion"
+            );
+            assert_eq!(
+                content_state.local_vars.get("callback_order"),
+                Some(&Value::Int(1234)),
+                "{path} runs Ejection -> Departure -> Collection2 -> Entrance"
+            );
+            assert_eq!(
+                content_state.local_vars.get("departure_controller"),
+                Some(&Value::Int(7)),
+                "the fire cause is assigned before Enter starts"
+            );
+            assert_eq!(
+                content_state.local_vars.get("departure_container"),
+                Some(&object_reference_value(burner))
+            );
+            assert_eq!(
+                content_state.local_vars.get("entrance_container"),
+                Some(&object_reference_value(parent))
+            );
+            assert_eq!(
+                content_state.controller, 5,
+                "nonliving Enter finally adopts the parent controller"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn incinerate_object_matches_cpp_start_semantics() -> Result<(), EngineError> {
         // C4Object::Incinerate (C4Object.cpp:1230-1241) + fxFireStart core
         // (C4Effect.cpp:560-641): already burning → false; dead livings don't
@@ -1727,6 +2068,127 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
                 .any(|effect| effect.name == "Fire"),
             "FX_OK keeps the effect alive"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn fire_timer_normalizes_invalid_attribution_on_native_and_inherited_paths(
+    ) -> Result<(), EngineError> {
+        // FnFxFireTimer validates the stored fire-cause player for every
+        // execution, passing NO_OWNER to both Tick10 DoDamage and Tick5
+        // DoEnergy when that player no longer exists. Give each burning
+        // object a different, valid controller so a NO_OWNER value encoded
+        // through the script DoDamage/DoEnergy seam cannot silently fall
+        // back to the caller's controller. Cover the native timer and a
+        // script FxFireTimer overload that chains through inherited().
+        let native_script = r#"#strict
+local damage_cause;
+func Damage(iChange, iCausedBy)
+{
+    damage_cause = iCausedBy;
+    return 1;
+}
+"#;
+        let inherited_script = r#"#strict
+local damage_cause;
+func Damage(iChange, iCausedBy)
+{
+    damage_cause = iCausedBy;
+    return 1;
+}
+func FxFireTimer(pObj, iNumber, iTime)
+{
+    return inherited(pObj, iNumber, iTime);
+}
+"#;
+
+        let mut native_definition =
+            Definition::from_script("NTMR", "Native timer", native_script)?;
+        native_definition.set_fire_properties(0, true, false);
+        let mut inherited_definition =
+            Definition::from_script("ITMR", "Inherited timer", inherited_script)?;
+        inherited_definition.set_fire_properties(0, true, false);
+
+        let mut engine = Engine::with_seed(44);
+        engine.register_player(PlayerConfig::new(5, "Object controller"))?;
+        engine.register_player(PlayerConfig::new(7, "Valid fire cause"))?;
+        engine.register_definition(native_definition)?;
+        engine.register_definition(inherited_definition)?;
+
+        let invalid_native = engine.spawn_object(
+            SpawnConfig::new("NTMR")
+                .with_category(CATEGORY_OBJECT)
+                .with_controller(5),
+        )?;
+        let invalid_inherited = engine.spawn_object(
+            SpawnConfig::new("ITMR")
+                .with_category(CATEGORY_OBJECT)
+                .with_controller(5),
+        )?;
+        let valid_native = engine.spawn_object(
+            SpawnConfig::new("NTMR")
+                .with_category(CATEGORY_OBJECT)
+                .with_controller(5),
+        )?;
+        let valid_inherited = engine.spawn_object(
+            SpawnConfig::new("ITMR")
+                .with_category(CATEGORY_OBJECT)
+                .with_controller(5),
+        )?;
+
+        for id in [invalid_native, invalid_inherited] {
+            let idx = engine.find_object_index(id).expect("invalid-cause object exists");
+            assert!(engine.incinerate_object(idx, 99, false, None)?);
+        }
+        for id in [valid_native, valid_inherited] {
+            let idx = engine.find_object_index(id).expect("valid-cause object exists");
+            assert!(engine.incinerate_object(idx, 7, false, None)?);
+        }
+
+        while engine.frame < 10 {
+            engine.tick()?;
+        }
+
+        for (id, path) in [
+            (invalid_native, "native"),
+            (invalid_inherited, "inherited"),
+        ] {
+            let idx = engine.find_object_index(id).expect("invalid-cause object remains");
+            assert_eq!(
+                engine.objects[idx].state.local_vars.get("damage_cause"),
+                Some(&Value::Int(OWNER_NONE)),
+                "{path} Tick10 damage receives NO_OWNER"
+            );
+            assert_eq!(
+                engine.objects[idx].last_energy_loss_cause,
+                OWNER_NONE,
+                "{path} Tick5 energy attribution receives NO_OWNER"
+            );
+            let fire = engine.objects[idx]
+                .state
+                .effects
+                .iter()
+                .find(|effect| effect.name == "Fire")
+                .expect("fire effect remains");
+            assert_eq!(
+                fire.vars()[1],
+                EffectVarValue::Int(99),
+                "validation is per timer call and does not rewrite the stored cause"
+            );
+        }
+
+        for (id, path) in [(valid_native, "native"), (valid_inherited, "inherited")] {
+            let idx = engine.find_object_index(id).expect("valid-cause object remains");
+            assert_eq!(
+                engine.objects[idx].state.local_vars.get("damage_cause"),
+                Some(&Value::Int(7)),
+                "{path} preserves a valid fire cause for damage"
+            );
+            assert_eq!(
+                engine.objects[idx].last_energy_loss_cause, 7,
+                "{path} preserves a valid fire cause for energy"
+            );
+        }
         Ok(())
     }
 
