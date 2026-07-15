@@ -4103,7 +4103,9 @@ mod tests {
         let mut target = snapshot_with_id(target_id.as_u64());
         target.position = Vector2::new(60, 0);
         target.shape = DefinitionRect::new(target.position.x - 10, target.position.y - 10, 20, 20);
-        target.ocf = ocf::GRAB | ocf::AVAILABLE;
+        // C++ passes OCF_All to At: any nonzero OCF qualifies; the target
+        // does not need OCF_Grab.
+        target.ocf = ocf::NORMAL;
 
         let mut objects = HashMap::new();
         objects.insert(actor.id, actor.clone());
@@ -4134,10 +4136,10 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
-        let update = result
-            .update
-            .expect("grab should stop actor before requesting movement");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert!(
+            result.update.is_none(),
+            "C4Command::Grab changes ComDir only after an accepted at-target attempt"
+        );
         assert!(result.events.is_empty());
         assert_eq!(result.operations.len(), 1);
         match &result.operations[0] {
@@ -4156,6 +4158,45 @@ mod tests {
             first_move,
             "Grab reissues MoveTo on its next execution"
         );
+    }
+
+    #[test]
+    fn grab_retained_status_zero_target_queues_move_without_stopping() {
+        let actor_id = ObjectId::new(201);
+        let target_id = ObjectId::new(301);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(10, 10);
+        actor.command_direction = CommandDirection::Left;
+        actor.action_procedure = ActionProcedure::Walk;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(10, 10);
+        target.shape = DefinitionRect::new(0, 0, 20, 20);
+        target.ocf = ocf::NORMAL;
+        target.status = crate::ObjectStatus::Deleted;
+        target.destroyed = true;
+
+        let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let mut state = GrabState::from_request(
+            &CommandRequest::new(CommandId::Grab).with_target(Some(target_id)),
+        )
+        .expect("Grab state");
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none());
+        assert!(result.events.is_empty());
+        assert!(matches!(
+            result.operations.as_slice(),
+            [CommandOperation::PushFront(request)]
+                if request.id == CommandId::MoveTo
+                    && request.tx == Some(10)
+                    && request.ty == Some(10)
+        ));
     }
 
     #[test]
@@ -4211,6 +4252,65 @@ mod tests {
         );
         assert_eq!(
             result.events,
+            vec![CommandEvent::AttemptGrab {
+                actor_id,
+                target_id,
+            }]
+        );
+    }
+
+    #[test]
+    fn grab_at_uses_ocf_all_and_requires_an_uncontained_target() {
+        let actor_id = ObjectId::new(312);
+        let target_id = ObjectId::new(322);
+        let container_id = ObjectId::new(323);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(10, 10);
+        actor.action_procedure = ActionProcedure::Walk;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(10, 10);
+        target.shape = DefinitionRect::new(0, 0, 20, 20);
+
+        let run = |target: CommandObjectSnapshot| {
+            let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
+            let players = HashMap::new();
+            let definitions = HashMap::new();
+            let ctx = move_to_ctx_at_frame(
+                objects.get(&actor_id).expect("actor present"),
+                &objects,
+                &players,
+                &definitions,
+                1,
+            );
+            GrabState::from_request(
+                &CommandRequest::new(CommandId::Grab).with_target(Some(target_id)),
+            )
+            .expect("Grab state")
+            .step(&ctx)
+        };
+
+        target.ocf = ocf::NONE;
+        let zero_ocf = run(target.clone());
+        assert!(zero_ocf.events.is_empty());
+        assert!(matches!(
+            zero_ocf.operations.as_slice(),
+            [CommandOperation::PushFront(request)] if request.id == CommandId::MoveTo
+        ));
+
+        target.ocf = ocf::NORMAL;
+        target.container = Some(container_id);
+        let contained = run(target.clone());
+        assert!(contained.events.is_empty());
+        assert!(matches!(
+            contained.operations.as_slice(),
+            [CommandOperation::PushFront(request)] if request.id == CommandId::MoveTo
+        ));
+
+        target.container = None;
+        let normal = run(target);
+        assert_eq!(
+            normal.events,
             vec![CommandEvent::AttemptGrab {
                 actor_id,
                 target_id,
@@ -4472,6 +4572,7 @@ mod tests {
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.action_procedure = ActionProcedure::Push;
         actor.action_target = Some(target_id);
+        actor.command_direction = CommandDirection::Right;
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.ocf = ocf::GRAB | ocf::AVAILABLE;
@@ -4518,6 +4619,7 @@ mod tests {
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.action_procedure = ActionProcedure::Push;
         actor.action_target = Some(other_id);
+        actor.command_direction = CommandDirection::Right;
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.position = Vector2::new(15, 0);
@@ -10983,9 +11085,10 @@ pub enum CommandEvent {
         object_id: ObjectId,
         tx: i32,
     },
-    /// Run C4Command::Grab's live at-target sequence. Scale/hangle let-go
-    /// and the target's RejectGrabbed callback must both finish before the
-    /// actor enters Push (C4Command.cpp:689-706).
+    /// Run C4Command::Grab's live sequence. Build/chop/dig stopping may
+    /// change the subsequent At result, while scale/hangle let-go and the
+    /// target's RejectGrabbed callback must finish before ObjectComGrab
+    /// (C4Command.cpp:667-716).
     AttemptGrab {
         actor_id: ObjectId,
         target_id: ObjectId,
@@ -11467,6 +11570,19 @@ impl CommandStack {
         self.entries.clear();
     }
 
+    /// A staged SetCommand that detaches an executing Grab must copy its
+    /// frozen target-pointer state back as a snapshot. Replaying only the
+    /// Clear operation later can invert its order with same-call removal.
+    pub(crate) fn has_pending_grab_attempt(&self) -> bool {
+        !self.detached_grab_attempts.is_empty()
+            || self.entries.iter().any(|entry| {
+                matches!(
+                    &entry.state,
+                    CommandState::Grab(state) if state.reject_pending
+                )
+            })
+    }
+
     /// `GrabLost` clears through the predecessor of the first PushTo that
     /// has one, keeping that PushTo and its tail (C4Object.cpp:4262-4273).
     pub(crate) fn clear_to_first_push_to(&mut self) {
@@ -11760,6 +11876,77 @@ impl CommandStack {
             }
         }
         Some(target_retained)
+    }
+
+    /// Tx/Ty belong to the exact Grab command that armed AttemptGrab. Read
+    /// them before live callbacks can replace or detach that command.
+    pub(crate) fn pending_grab_offsets(&self, target: ObjectId) -> Option<(i32, i32)> {
+        self.entries.iter().find_map(|entry| {
+            let CommandState::Grab(state) = &entry.state else {
+                return None;
+            };
+            (state.target == target && state.reject_pending)
+                .then_some((state.offset_x, state.offset_y))
+        })
+    }
+
+    /// ObjectComStop callbacks run before C4Command::Grab's null-target
+    /// check. If ClearPointers reached the executing command before a
+    /// callback detached it, finish that exact Grab with ordinary failure
+    /// semantics. A command detached first retains its raw C++ pointer even
+    /// when the target's Status subsequently becomes zero.
+    pub(crate) fn fail_pending_grab_if_target_cleared(&mut self, target: ObjectId) -> bool {
+        let Some(index) = self.entries.iter().position(|entry| {
+            matches!(
+                &entry.state,
+                CommandState::Grab(state)
+                    if state.target == target && state.reject_pending
+            )
+        }) else {
+            if let Some(index) = self
+                .detached_grab_attempts
+                .iter()
+                .rposition(|attempt| attempt.target == target)
+            {
+                if self.detached_grab_attempts[index].target_retained {
+                    return false;
+                }
+                self.detached_grab_attempts.remove(index);
+                return true;
+            }
+            return false;
+        };
+        let state_retained = matches!(
+            &self.entries[index].state,
+            CommandState::Grab(state) if !state.target_cleared
+        );
+        let request_retained = self.entries[index]
+            .request
+            .as_ref()
+            .map_or(true, |request| request.target == Some(target));
+        if state_retained && request_retained {
+            return false;
+        }
+
+        let mode = {
+            let command = &mut self.entries[index];
+            if let CommandState::Grab(state) = &mut command.state {
+                state.reject_pending = false;
+            }
+            command.finished = Some(CommandStatus::Failed);
+            command.mode
+        };
+        if matches!(mode, CommandMode::SilentSub | CommandMode::Sub) {
+            if let Some(base) = self
+                .entries
+                .iter_mut()
+                .skip(index + 1)
+                .find(|entry| entry.finished.is_none())
+            {
+                base.failures = base.failures.saturating_add(1);
+            }
+        }
+        true
     }
 
     /// Resolve only the Get command which emitted the live GetObject event.
@@ -13844,56 +14031,28 @@ impl GrabState {
         })
     }
 
-    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
-        if ctx.object.command_direction != CommandDirection::Stop {
-            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
-        } else {
-            None
-        }
-    }
-
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         let target = (!self.target_cleared).then_some(self.target);
         if ctx.object.action_procedure == ActionProcedure::Push
             && ctx.object.action_target == target
         {
-            return CommandStepResult::completed(self.update_to_stop(ctx));
+            return CommandStepResult::completed(None);
         }
 
-        if self.target_cleared {
-            return CommandStepResult::failed(Some(
-                ObjectUpdate::new().with_command_direction(CommandDirection::Stop),
-            ));
-        }
-
-        let target_snapshot = match ctx.resolve(self.target) {
-            Some(snapshot) => snapshot,
-            None => {
-                let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
-                return CommandStepResult::failed(Some(update));
-            }
-        };
-
-        // C4Command::Grab checks only the target pointer — no aliveness
-        // gate on the grabbed vehicle (C4Command.cpp:667-695).
-        if target_snapshot.destroyed || !target_snapshot.status.is_active() {
-            let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
-            return CommandStepResult::failed(Some(update));
-        }
-
-        let mut pending_update = self.update_to_stop(ctx);
-
+        // C++ stops BUILD/CHOP first and then DIG before consulting Target
+        // or adding UnGrab/MoveTo. The live event must therefore run even
+        // when a callback-cleared target is no longer resolvable here.
         if matches!(
             ctx.object.action_procedure,
-            ActionProcedure::Build
-                | ActionProcedure::Chop
-                | ActionProcedure::Dig
-                | ActionProcedure::Hang
-                | ActionProcedure::Scale
+            ActionProcedure::Build | ActionProcedure::Chop | ActionProcedure::Dig
         ) {
-            let idle_action = ActionUpdate::default().with_name("Idle").with_force(true);
-            let update = pending_update.take().unwrap_or_default();
-            pending_update = Some(update.with_action_update(idle_action));
+            self.reject_pending = true;
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::AttemptGrab {
+                    actor_id: ctx.object.id,
+                    target_id: self.target,
+                },
+            ]);
         }
 
         if ctx.object.action_procedure == ActionProcedure::Push
@@ -13902,10 +14061,19 @@ impl GrabState {
             let request = CommandRequest::new(CommandId::UnGrab)
                 .with_update_interval(50)
                 .with_mode(CommandMode::SilentSub);
-            let mut result = CommandStepResult::running(pending_update);
+            let mut result = CommandStepResult::running(None);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
         }
+
+        if self.target_cleared {
+            return CommandStepResult::failed(None);
+        }
+
+        let target_snapshot = match ctx.resolve(self.target) {
+            Some(snapshot) => snapshot,
+            None => return CommandStepResult::failed(None),
+        };
 
         let approach_position = Vector2::new(
             target_snapshot.position.x + self.offset_x,
@@ -13915,12 +14083,15 @@ impl GrabState {
         // "At target object: grab": point-in-shape like C4Command::Grab
         // (Target->At(cObj->x, cObj->y, ocf), C4Command.cpp:689-691).
         let can_grab_here = ctx.object.container.is_none()
+            && !target_snapshot.destroyed
+            && target_snapshot.status != crate::ObjectStatus::Deleted
+            && target_snapshot.container.is_none()
             && target_snapshot.at_point(ctx.position.x, ctx.position.y)
-            && (target_snapshot.ocf & ocf::GRAB) != 0;
+            && (target_snapshot.ocf & ocf::ALL) != 0;
 
         if can_grab_here {
             // Stop/Push must not be staged ahead of RejectGrabbed. The live
-            // event also performs Scale/Hangle's earlier let-go operation.
+            // event also performs ObjectComStop and Scale/Hangle's let-go.
             self.reject_pending = true;
             return CommandStepResult::running(None).with_events(vec![
                 CommandEvent::AttemptGrab {
@@ -13934,7 +14105,7 @@ impl GrabState {
             .with_tx(Some(approach_position.x))
             .with_ty(Some(approach_position.y))
             .with_update_interval(50);
-        let mut result = CommandStepResult::running(pending_update);
+        let mut result = CommandStepResult::running(None);
         result.operations.push(CommandOperation::PushFront(request));
         result
     }

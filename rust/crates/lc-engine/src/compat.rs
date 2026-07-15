@@ -25626,26 +25626,221 @@ fn preview_object_com_drop(actor: ObjectId, object: ObjectId) -> Result<bool, Ru
     Ok(true)
 }
 
+fn preview_object_com_stop_for_grab(actor: ObjectId) -> Result<(), RuntimeError> {
+    let _ = native_set_action_by_name(actor, "Idle")?;
+    HOST_CONTEXT.with(|cell| {
+        if let Some(scope) = cell
+            .borrow_mut()
+            .as_mut()
+            .and_then(|context| context.object_scope_mut(actor))
+        {
+            scope.set_command_direction(CommandDirection::Stop);
+        }
+    });
+    if native_set_action_by_name(actor, "Walk")? {
+        HOST_CONTEXT.with(|cell| {
+            if let Some(scope) = cell
+                .borrow_mut()
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(actor))
+            {
+                scope.set_fixed_velocity(FixedVec2::ZERO);
+            }
+        });
+    }
+    Ok(())
+}
+
+fn preview_object_com_grab(actor: ObjectId, target: ObjectId) -> Result<bool, RuntimeError> {
+    let walking = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_scope(actor))
+            .is_some_and(|scope| scope.effective_action_procedure() == ActionProcedure::Walk)
+    });
+    if !walking
+        || !native_set_action_by_name_with_target(actor, "Push", Some(target))?
+    {
+        return Ok(false);
+    }
+    if !preview_object_is_present(actor) {
+        return Ok(true);
+    }
+    let _ = call_object_own_fail_safe(
+        actor,
+        "Grab",
+        &[object_reference_value(target), Value::Bool(true)],
+    );
+    if !preview_object_is_present(actor) || !preview_object_is_present(target) {
+        return Ok(true);
+    }
+    let controller = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_scope(actor))
+            .map(ObjectScopeContext::controller)
+            .unwrap_or(OWNER_NONE)
+    });
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if let Some(context) = borrow.as_mut() {
+            if context.ensure_object_scope(target) {
+                if let Some(scope) = context.object_scope_mut(target) {
+                    scope.set_controller(controller);
+                }
+            }
+        }
+    });
+    let _ = call_object_own_fail_safe(
+        target,
+        "Grabbed",
+        &[object_reference_value(actor), Value::Bool(true)],
+    );
+    Ok(true)
+}
+
 /// Synchronous host preview for CommandEvent::AttemptGrab. The regular
 /// engine applies the same event before its command-finished tail; this
-/// form preserves that ordering inside script-level ExecuteCommand too.
+/// form preserves ObjectComStop, At, MoveTo and callback ordering inside
+/// script-level ExecuteCommand too.
 fn preview_grab_attempt(actor: ObjectId, target: ObjectId) -> Result<(), RuntimeError> {
-    let let_go_xdir = HOST_CONTEXT.with(|cell| {
+    let (initial_procedure, offsets) = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow.as_mut()?;
         if !context.ensure_object_scope(actor) {
             return None;
         }
         let object = context.object_scope(actor)?;
-        matches!(
+        Some((
             object.effective_action_procedure(),
-            ActionProcedure::Scale | ActionProcedure::Hang
-        )
-        .then_some(if object.direction() == Direction::Left {
-            1
-        } else {
-            -1
-        })
+            object
+                .live_commands
+                .pending_grab_offsets(target)
+                .unwrap_or((0, 0)),
+        ))
+    })
+    .unwrap_or((ActionProcedure::Undefined, (0, 0)));
+
+    let mut stopped_for_grab = false;
+    if matches!(
+        initial_procedure,
+        ActionProcedure::Build | ActionProcedure::Chop
+    ) {
+        stopped_for_grab = true;
+        preview_object_com_stop_for_grab(actor)?;
+    }
+    let procedure_after_build_or_chop = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_scope(actor))
+            .map(ObjectScopeContext::effective_action_procedure)
+            .unwrap_or(ActionProcedure::Undefined)
+    });
+    if procedure_after_build_or_chop == ActionProcedure::Dig {
+        stopped_for_grab = true;
+        preview_object_com_stop_for_grab(actor)?;
+    }
+
+    let snapshots = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let objects = context.command_runtime_data().0;
+        Some((objects.get(&actor)?.clone(), objects.get(&target).cloned()))
+    });
+    let Some((actor_snapshot, target_snapshot)) = snapshots else {
+        return Ok(());
+    };
+
+    if actor_snapshot.action_procedure == ActionProcedure::Push {
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            let Some(scope) = context.object_scope_mut(actor) else {
+                return;
+            };
+            let _ = scope.live_commands.resolve_grab_attempt(target, false);
+            let _ = scope.live_commands.push_front(
+                CommandRequest::new(CommandId::UnGrab)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::SilentSub),
+            );
+            scope.command_stack_replaced = true;
+            scope.command_count = scope.live_commands.len();
+        });
+        return Ok(());
+    }
+
+    if stopped_for_grab {
+        let failed = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return false;
+            };
+            let Some(scope) = context.object_scope_mut(actor) else {
+                return false;
+            };
+            let failed = scope
+                .live_commands
+                .fail_pending_grab_if_target_cleared(target);
+            if failed {
+                scope.command_stack_replaced = true;
+                scope.command_count = scope.live_commands.len();
+            }
+            failed
+        });
+        if failed {
+            return Ok(());
+        }
+    }
+
+    let Some(target_snapshot) = target_snapshot else {
+        return Ok(());
+    };
+
+    let target_at_actor = actor_snapshot.container.is_none()
+        && !target_snapshot.destroyed
+        && target_snapshot.status != ObjectStatus::Deleted
+        && target_snapshot.container.is_none()
+        && target_snapshot.ocf & ocf::ALL != 0
+        && target_snapshot.at_point(actor_snapshot.position.x, actor_snapshot.position.y);
+    if !target_at_actor {
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            let Some(scope) = context.object_scope_mut(actor) else {
+                return;
+            };
+            let retained = scope
+                .live_commands
+                .resolve_grab_attempt(target, false)
+                .unwrap_or(true);
+            if retained {
+                let _ = scope.live_commands.push_front(
+                    CommandRequest::new(CommandId::MoveTo)
+                        .with_tx(Some(target_snapshot.position.x.wrapping_add(offsets.0)))
+                        .with_ty(Some(target_snapshot.position.y.wrapping_add(offsets.1)))
+                        .with_update_interval(50)
+                        .with_mode(CommandMode::SilentSub),
+                );
+            }
+            scope.command_stack_replaced = true;
+            scope.command_count = scope.live_commands.len();
+        });
+        return Ok(());
+    }
+
+    let let_go_xdir = matches!(
+        actor_snapshot.action_procedure,
+        ActionProcedure::Scale | ActionProcedure::Hang
+    )
+    .then_some(if actor_snapshot.direction == Direction::Left {
+        1
+    } else {
+        -1
     });
     if let Some(xdir) = let_go_xdir {
         let _ = preview_object_action_jump(
@@ -25688,13 +25883,8 @@ fn preview_grab_attempt(actor: ObjectId, target: ObjectId) -> Result<(), Runtime
     if rejected {
         return Ok(());
     }
-    if target_retained && preview_object_is_present(target) {
-        let _ = set_action(&[
-            Value::String("Push".to_string()),
-            object_reference_value(target),
-            Value::Nil,
-            Value::Bool(true),
-        ])?;
+    if target_retained {
+        let _ = preview_object_com_grab(actor, target)?;
     }
     Ok(())
 }
@@ -35630,17 +35820,20 @@ impl EffectHostContext {
                 let vertices = scope
                     .map(ObjectScopeContext::vertices)
                     .unwrap_or(object.vertices.as_slice());
-                let local_shape = metadata
-                    .and_then(|metadata| metadata.shape)
+                let local_shape = live_object_bounds_shape(self, id)
                     .unwrap_or_else(|| DefinitionRect::new(-1, -1, 2, 2));
                 let shape_height = live_object_shape(self, id)
                     .map(|shape| shape.height)
                     .unwrap_or(local_shape.height);
+                let add_top = (18 - local_shape.height).max(0);
                 let shape = DefinitionRect::new(
                     position.x.saturating_add(local_shape.x),
-                    position.y.saturating_add(local_shape.y),
+                    position
+                        .y
+                        .saturating_add(local_shape.y)
+                        .saturating_sub(add_top),
                     local_shape.width,
-                    local_shape.height,
+                    local_shape.height.saturating_add(add_top),
                 );
                 let contact = vertices.iter().fold(0, |bits, vertex| {
                     bits
@@ -38404,9 +38597,13 @@ impl ObjectScopeContext {
     }
 
     fn clear_command_stack(&mut self) {
+        let preserve_grab_pointer_order = self.live_commands.has_pending_grab_attempt();
         self.live_commands.clear();
         self.command_operations.push(CommandOperation::Clear);
         self.command_count = 0;
+        if preserve_grab_pointer_order {
+            self.command_stack_replaced = true;
+        }
     }
 
     /// C4Object::SetCommand's NoCollectDelay entry decrement

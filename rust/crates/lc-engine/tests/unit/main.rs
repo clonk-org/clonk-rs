@@ -17808,6 +17808,1196 @@ protected func RejectGrabbed(clonk)
         );
     }
 
+    fn object_com_grab_test_engine() -> Engine {
+        let actor_script = r#"#strict
+local order, grab_target, grab_flag, target_controller_in_grab;
+local grabbed_target, grabbed_flag, grabbed_controller, deletion_mode;
+local stop_clear_target, finished;
+local push_start_comdir, push_start_action, push_start_target;
+local stop_to_dig, stop_walk_starts, stop_pointer_mode;
+local reject_action;
+local stop_order, stop_abort_action, stop_walk_start_action;
+
+public func ResetGrabCallbacks()
+{
+  order = 0;
+  grab_target = nil;
+  grab_flag = nil;
+  target_controller_in_grab = nil;
+  grabbed_target = nil;
+  grabbed_flag = nil;
+  grabbed_controller = nil;
+  deletion_mode = 0;
+  stop_clear_target = nil;
+  finished = nil;
+  push_start_comdir = nil;
+  push_start_action = nil;
+  push_start_target = nil;
+  stop_to_dig = nil;
+  stop_walk_starts = nil;
+  stop_pointer_mode = nil;
+  reject_action = nil;
+  stop_order = nil;
+  stop_abort_action = nil;
+  stop_walk_start_action = nil;
+  return true;
+}
+
+public func ArmGrabDeletion(mode)
+{
+  deletion_mode = mode;
+  return true;
+}
+
+public func ArmStopTargetClear(target)
+{
+  stop_clear_target = target;
+  return true;
+}
+
+public func ArmStopToDig()
+{
+  stop_to_dig = true;
+  stop_walk_starts = 0;
+  return true;
+}
+
+public func ArmStopPointerOrder(target, mode)
+{
+  stop_clear_target = target;
+  stop_pointer_mode = mode;
+  return true;
+}
+
+public func DeactivateTarget(target)
+{
+  return SetObjectStatus(2, target, false);
+}
+
+public func ReleaseAfterGrabbed()
+{
+  return deletion_mode == 4;
+}
+
+public func DetachBeforeRejectRemoval()
+{
+  return deletion_mode == 5;
+}
+
+public func NoteGrabReject(target)
+{
+  order = order * 10 + 1;
+  reject_action = GetAction();
+  return true;
+}
+
+protected func PushStart()
+{
+  order = order * 10 + 2;
+  push_start_comdir = GetComDir();
+  push_start_action = GetAction();
+  push_start_target = GetActionTarget();
+  return true;
+}
+
+protected func StopWalkStart()
+{
+  stop_order = stop_order * 10 + 2;
+  stop_walk_start_action = GetAction();
+  if (!stop_to_dig) return true;
+  stop_walk_starts++;
+  if (stop_walk_starts == 1) SetAction("Dig");
+  return true;
+}
+
+protected func StopAbort()
+{
+  stop_order = stop_order * 10 + 1;
+  stop_abort_action = GetAction();
+  if (stop_clear_target)
+  {
+    if (stop_pointer_mode == 1)
+    {
+      SetObjectStatus(2, stop_clear_target, true);
+      SetCommand(this(), "Wait", 0, 1);
+    }
+    else if (stop_pointer_mode == 2)
+    {
+      SetCommand(this(), "Wait", 0, 1);
+      RemoveObject(stop_clear_target);
+    }
+    else
+    {
+      SetObjectStatus(2, stop_clear_target, true);
+    }
+    stop_clear_target = nil;
+  }
+  return true;
+}
+
+protected func Grab(target, grab)
+{
+  if (!grab) return true;
+  order = order * 10 + 3;
+  grab_target = target;
+  grab_flag = grab;
+  target_controller_in_grab = GetController(target);
+  SetController(7);
+  if (deletion_mode == 1) RemoveObject(this());
+  if (deletion_mode == 2) RemoveObject(target);
+  if (deletion_mode == 3) SetCommand(this(), "Wait", 0, 1);
+  return false;
+}
+
+public func NoteGrabbed(target, grab, controller)
+{
+  order = order * 10 + 4;
+  grabbed_target = target;
+  grabbed_flag = grab;
+  grabbed_controller = controller;
+  return true;
+}
+
+public func RunGrabNow(target, mode)
+{
+  ResetGrabCallbacks();
+  deletion_mode = mode;
+  SetCommand(this(), "Grab", target);
+  ExecuteCommand();
+  return order;
+}
+
+
+public func RunStopClearGrabNow(target)
+{
+  ResetGrabCallbacks();
+  stop_clear_target = target;
+  SetCommand(this(), "Grab", target);
+  ExecuteCommand();
+  return finished;
+}
+
+public func RunStopPointerGrabNow(target, mode)
+{
+  ResetGrabCallbacks();
+  ArmStopPointerOrder(target, mode);
+  SetCommand(this(), "Grab", target);
+  ExecuteCommand();
+  return true;
+}
+
+public func RunStopToDigGrabNow(target)
+{
+  ResetGrabCallbacks();
+  ArmStopToDig();
+  SetCommand(this(), "Grab", target);
+  ExecuteCommand();
+  return order;
+}
+
+protected func ControlCommandFinished(command)
+{
+  finished = command;
+  return true;
+}
+"#;
+        let mut actor =
+            Definition::from_script("OGAC", "ObjectComGrab actor", actor_script)
+                .expect("actor compiles");
+        actor.set_c4_callback_convention(true);
+        actor.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        actor.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_start_call("StopWalkStart"),
+                ),
+                (
+                    "LockedWalk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_no_other_action(true),
+                ),
+                (
+                    "LockedBuild".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("BUILD")
+                        .with_no_other_action(true),
+                ),
+                (
+                    "Push".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("PUSH")
+                        .with_start_call("PushStart"),
+                ),
+                (
+                    "Build".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("BUILD")
+                        .with_abort_call("StopAbort"),
+                ),
+                (
+                    "Chop".to_string(),
+                    ActionSpec::default().with_procedure("CHOP"),
+                ),
+                (
+                    "Dig".to_string(),
+                    ActionSpec::default().with_procedure("DIG"),
+                ),
+                (
+                    "Flight".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+            ]),
+        );
+
+        let target_script = r#"#strict
+local reject_calls, grabbed_calls, grabbed_controller;
+
+protected func RejectGrabbed(clonk)
+{
+  reject_calls++;
+  clonk->NoteGrabReject(this());
+  if (clonk->DetachBeforeRejectRemoval())
+  {
+    SetCommand(clonk, "Wait", 0, 1);
+    RemoveObject(this());
+  }
+  return false;
+}
+
+protected func Grabbed(clonk, grab)
+{
+  grabbed_calls++;
+  grabbed_controller = GetController();
+  clonk->NoteGrabbed(this(), grab, grabbed_controller);
+  if (clonk->ReleaseAfterGrabbed()) clonk->SetAction("Walk");
+}
+"#;
+        let mut target =
+            Definition::from_script("OGTG", "ObjectComGrab target", target_script)
+                .expect("target compiles");
+        target.set_c4_callback_convention(true);
+        target.set_shape_rect(Some(DefinitionRect::new(-10, -12, 20, 24)));
+        target.set_rotateable(1);
+        // Deliberately no DefCore Grab bit: C4Command passes OCF_All to At.
+        target.set_grab(0);
+        let no_reject_script = r#"#strict
+local grabbed_calls, grabbed_controller;
+protected func Grabbed(clonk, grab)
+{
+  grabbed_calls++;
+  grabbed_controller = GetController();
+  clonk->NoteGrabbed(this(), grab, grabbed_controller);
+  if (clonk->ReleaseAfterGrabbed()) clonk->SetAction("Walk");
+}
+"#;
+        let mut no_reject =
+            Definition::from_script("OGNR", "Grabbed-only target", no_reject_script)
+                .expect("Grabbed-only target compiles");
+        no_reject.set_c4_callback_convention(true);
+        no_reject.set_shape_rect(Some(DefinitionRect::new(-10, -12, 20, 24)));
+        no_reject.set_grab(0);
+
+        let mut engine = Engine::with_seed(176);
+        engine.register_definition(actor).expect("actor registers");
+        engine.register_definition(target).expect("target registers");
+        engine
+            .register_definition(no_reject)
+            .expect("Grabbed-only target registers");
+        for player in [1, 2, 7] {
+            engine
+                .register_player(PlayerConfig::new(player, format!("Player {player}")))
+                .expect("player registers");
+        }
+        engine
+    }
+
+    fn spawn_object_com_grab_probe(
+        engine: &mut Engine,
+        action: &str,
+        x: i32,
+    ) -> (ObjectId, ObjectId) {
+        spawn_object_com_grab_probe_with_target(engine, action, x, "OGTG")
+    }
+
+    fn spawn_object_com_grab_probe_with_target(
+        engine: &mut Engine,
+        action: &str,
+        x: i32,
+        target_definition: &str,
+    ) -> (ObjectId, ObjectId) {
+        let position = Vector2::new(x, 100);
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("OGAC")
+                    .with_owner(1)
+                    .with_alive(true)
+                    .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                    .with_position(position)
+                    .with_action(ActionState::new(action))
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("actor spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new(target_definition)
+                    .with_owner(2)
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(position),
+            )
+            .expect("target spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_index, "ResetGrabCallbacks", Vec::new())
+            .expect("probe resets");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::Grab).with_target(Some(target)))
+            .expect("Grab queues");
+        (actor, target)
+    }
+
+    #[test]
+    fn object_com_grab_matches_cpp_callbacks_controller_walk_and_stop_gates() {
+        let mut engine = object_com_grab_test_engine();
+        let (walk_actor, walk_target) =
+            spawn_object_com_grab_probe(&mut engine, "Walk", 0);
+        let stopped = [
+            spawn_object_com_grab_probe(&mut engine, "Build", 100),
+            spawn_object_com_grab_probe(&mut engine, "Chop", 200),
+            spawn_object_com_grab_probe(&mut engine, "Dig", 300),
+        ];
+        let stopped_build_actor = stopped[0].0;
+        let (flight_actor, flight_target) =
+            spawn_object_com_grab_probe(&mut engine, "Flight", 400);
+        let (removed_actor, removed_actor_target) =
+            spawn_object_com_grab_probe(&mut engine, "Walk", 500);
+        let removed_actor_index = engine
+            .find_object_index(removed_actor)
+            .expect("removal actor exists");
+        engine
+            .call_object_function(
+                removed_actor_index,
+                "ArmGrabDeletion",
+                vec![Value::Int(1)],
+            )
+            .expect("self-removal arms");
+        let (target_remover, removed_target) =
+            spawn_object_com_grab_probe(&mut engine, "Walk", 600);
+        let target_remover_index = engine
+            .find_object_index(target_remover)
+            .expect("target remover exists");
+        engine
+            .call_object_function(
+                target_remover_index,
+                "ArmGrabDeletion",
+                vec![Value::Int(2)],
+            )
+            .expect("target-removal arms");
+        let (far_builder, far_target) =
+            spawn_object_com_grab_probe(&mut engine, "Build", 700);
+        let far_target_index = engine
+            .find_object_index(far_target)
+            .expect("far target exists");
+        engine.objects[far_target_index].set_position(Vector2::new(760, 100));
+        let (command_replacer, replacement_target) =
+            spawn_object_com_grab_probe(&mut engine, "Walk", 800);
+        let command_replacer_index = engine
+            .find_object_index(command_replacer)
+            .expect("command replacer exists");
+        engine
+            .call_object_function(
+                command_replacer_index,
+                "ArmGrabDeletion",
+                vec![Value::Int(3)],
+            )
+            .expect("command replacement arms");
+        let (cleared_builder, cleared_target) =
+            spawn_object_com_grab_probe(&mut engine, "Build", 900);
+        let cleared_builder_index = engine
+            .find_object_index(cleared_builder)
+            .expect("cleared builder exists");
+        engine
+            .call_object_function(
+                cleared_builder_index,
+                "ArmStopTargetClear",
+                vec![object_reference_value(cleared_target)],
+            )
+            .expect("stop target clear arms");
+        let (sequential_builder, sequential_target) =
+            spawn_object_com_grab_probe(&mut engine, "Build", 1_000);
+        let sequential_builder_index = engine
+            .find_object_index(sequential_builder)
+            .expect("sequential builder exists");
+        engine
+            .call_object_function(sequential_builder_index, "ArmStopToDig", Vec::new())
+            .expect("Build-to-Dig stop arms");
+        let (mutated_actor, mutated_target) =
+            spawn_object_com_grab_probe(&mut engine, "Walk", 1_100);
+        let mutated_actor_index = engine
+            .find_object_index(mutated_actor)
+            .expect("mutated actor exists");
+        engine
+            .call_object_function(
+                mutated_actor_index,
+                "ArmGrabDeletion",
+                vec![Value::Int(4)],
+            )
+            .expect("Grabbed mutation arms");
+        let (locked_actor, locked_target) =
+            spawn_object_com_grab_probe(&mut engine, "LockedWalk", 1_200);
+        let (locked_build_actor, locked_build_target) =
+            spawn_object_com_grab_probe(&mut engine, "LockedBuild", 1_250);
+        let (inactive_actor, inactive_target) =
+            spawn_object_com_grab_probe(&mut engine, "Walk", 1_300);
+        let inactive_actor_index = engine
+            .find_object_index(inactive_actor)
+            .expect("inactive-target actor exists");
+        engine
+            .call_object_function(
+                inactive_actor_index,
+                "DeactivateTarget",
+                vec![object_reference_value(inactive_target)],
+            )
+            .expect("target becomes inactive without pointer clearing");
+        let (clear_then_detach, clear_then_detach_target) =
+            spawn_object_com_grab_probe(&mut engine, "Build", 1_400);
+        let clear_then_detach_index = engine
+            .find_object_index(clear_then_detach)
+            .expect("clear-then-detach actor exists");
+        engine
+            .call_object_function(
+                clear_then_detach_index,
+                "ArmStopPointerOrder",
+                vec![object_reference_value(clear_then_detach_target), Value::Int(1)],
+            )
+            .expect("clear-then-detach arms");
+        let (detach_then_remove, detach_then_remove_target) =
+            spawn_object_com_grab_probe(&mut engine, "Build", 1_500);
+        let detach_then_remove_index = engine
+            .find_object_index(detach_then_remove)
+            .expect("detach-then-remove actor exists");
+        engine
+            .call_object_function(
+                detach_then_remove_index,
+                "ArmStopPointerOrder",
+                vec![object_reference_value(detach_then_remove_target), Value::Int(2)],
+            )
+            .expect("detach-then-remove arms");
+        let (reject_detacher, reject_removed_target) =
+            spawn_object_com_grab_probe(&mut engine, "Walk", 1_600);
+        let reject_detacher_index = engine
+            .find_object_index(reject_detacher)
+            .expect("Reject detacher exists");
+        engine
+            .call_object_function(
+                reject_detacher_index,
+                "ArmGrabDeletion",
+                vec![Value::Int(5)],
+            )
+            .expect("Reject detach-before-remove arms");
+
+        engine.tick().expect("Grab commands execute");
+
+        for (actor, target) in std::iter::once((walk_actor, walk_target)).chain(stopped) {
+            let actor = engine.object_snapshot(actor).expect("grabber remains");
+            assert_eq!(actor.action.name, "Push");
+            assert_eq!(actor.action.target, Some(target));
+            assert_eq!(actor.command_direction, CommandDirection::Stop);
+            assert_eq!(actor.local_vars.get("order"), Some(&Value::Int(1234)));
+            assert_eq!(
+                actor.local_vars.get("push_start_comdir"),
+                Some(&Value::Int(CommandDirection::Stop.to_script_value()))
+            );
+            assert_eq!(
+                actor.local_vars.get("push_start_action"),
+                Some(&Value::String("Push".to_string()))
+            );
+            assert_eq!(
+                actor.local_vars.get("push_start_target"),
+                Some(&object_reference_value(target))
+            );
+            assert_eq!(
+                actor.local_vars.get("grab_target"),
+                Some(&object_reference_value(target))
+            );
+            assert_eq!(actor.local_vars.get("grab_flag"), Some(&Value::Bool(true)));
+            assert_eq!(
+                actor.local_vars.get("target_controller_in_grab"),
+                Some(&Value::Int(2)),
+                "Grab runs before Controller propagation"
+            );
+            assert_eq!(
+                actor.local_vars.get("grabbed_controller"),
+                Some(&Value::Int(7)),
+                "Grabbed sees the actor's post-Grab Controller"
+            );
+            assert_eq!(
+                engine.object_snapshot(target).expect("target remains").controller,
+                7
+            );
+        }
+        let stopped_build = engine
+            .object_snapshot(stopped_build_actor)
+            .expect("stopped builder remains");
+        assert_eq!(stopped_build.local_vars.get("stop_order"), Some(&Value::Int(12)));
+        assert_eq!(
+            stopped_build.local_vars.get("stop_abort_action"),
+            Some(&Value::String("Idle".to_string()))
+        );
+        assert_eq!(
+            stopped_build.local_vars.get("stop_walk_start_action"),
+            Some(&Value::String("Walk".to_string()))
+        );
+
+        let flight = engine
+            .object_snapshot(flight_actor)
+            .expect("flight actor remains");
+        assert_eq!(flight.action.name, "Flight");
+        assert_eq!(flight.command_direction, CommandDirection::Stop);
+        assert_eq!(flight.local_vars.get("order"), Some(&Value::Int(1)));
+        assert_eq!(
+            engine
+                .object_snapshot(flight_target)
+                .expect("flight target remains")
+                .controller,
+            2,
+            "non-Walk ObjectComGrab cannot propagate Controller"
+        );
+
+        let removed_actor_target = engine
+            .object_snapshot(removed_actor_target)
+            .expect("self-removal target remains");
+        assert_eq!(removed_actor_target.controller, 2);
+        assert_eq!(
+            removed_actor_target.local_vars.get("grabbed_calls"),
+            Some(&Value::Nil),
+            "Grabbed is suppressed when Grab removes the actor"
+        );
+
+        let target_remover = engine
+            .object_snapshot(target_remover)
+            .expect("target remover remains");
+        assert_eq!(target_remover.local_vars.get("order"), Some(&Value::Int(123)));
+        assert!(
+            engine
+                .object_snapshot(removed_target)
+                .is_none_or(|target| target.status == ObjectStatus::Deleted),
+            "Grab may remove the target before the survival gate"
+        );
+
+        let far_builder = engine
+            .object_snapshot(far_builder)
+            .expect("far builder remains");
+        assert_eq!(
+            far_builder.action.name, "Walk",
+            "Build runs the full ObjectComStop before testing At"
+        );
+        assert_eq!(
+            far_builder.command_stack.command_names(),
+            vec!["MoveTo".to_string(), "Grab".to_string()],
+            "the live post-stop At result inserts MoveTo in the same command pass"
+        );
+
+        let command_replacer = engine
+            .object_snapshot(command_replacer)
+            .expect("command replacer remains");
+        assert_eq!(command_replacer.local_vars.get("order"), Some(&Value::Int(1234)));
+        assert_eq!(
+            command_replacer.command_stack.command_names(),
+            vec!["Wait".to_string()],
+            "Grab callback command replacement survives the remaining callbacks"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(replacement_target)
+                .expect("replacement target remains")
+                .controller,
+            7
+        );
+
+        let cleared_builder = engine
+            .object_snapshot(cleared_builder)
+            .expect("cleared builder remains");
+        assert_eq!(cleared_builder.action.name, "Walk");
+        assert_eq!(cleared_builder.local_vars.get("order"), Some(&Value::Nil));
+        assert_eq!(
+            cleared_builder.local_vars.get("finished"),
+            Some(&Value::String("Grab".to_string())),
+            "post-stop null Target fails in the same command execution"
+        );
+        assert!(cleared_builder.command_stack.is_empty());
+        let cleared_target = engine
+            .object_snapshot(cleared_target)
+            .expect("inactive target remains");
+        assert_eq!(cleared_target.status, ObjectStatus::Inactive);
+        assert_eq!(
+            cleared_target.local_vars.get("reject_calls"),
+            None,
+            "RejectGrabbed is after the post-stop null-target check"
+        );
+
+        let sequential_builder = engine
+            .object_snapshot(sequential_builder)
+            .expect("sequential builder remains");
+        assert_eq!(sequential_builder.action.name, "Push");
+        assert_eq!(sequential_builder.action.target, Some(sequential_target));
+        assert_eq!(
+            sequential_builder.local_vars.get("stop_walk_starts"),
+            Some(&Value::Int(2)),
+            "BUILD stop is followed by an independent DIG stop"
+        );
+        assert_eq!(sequential_builder.local_vars.get("order"), Some(&Value::Int(1234)));
+
+        let mutated_actor = engine
+            .object_snapshot(mutated_actor)
+            .expect("Grabbed-mutated actor remains");
+        assert_eq!(mutated_actor.action.name, "Walk");
+        assert_eq!(mutated_actor.local_vars.get("order"), Some(&Value::Int(1234)));
+        assert_eq!(
+            mutated_actor.command_stack.command_names(),
+            vec!["Grab".to_string()],
+            "Grabbed's action mutation survives and the unfinished Grab remains"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(mutated_target)
+                .expect("mutation target remains")
+                .controller,
+            7
+        );
+
+        let locked_actor = engine
+            .object_snapshot(locked_actor)
+            .expect("locked-Walk actor remains");
+        assert_eq!(locked_actor.action.name, "LockedWalk");
+        assert_eq!(locked_actor.command_direction, CommandDirection::Stop);
+        assert_eq!(locked_actor.local_vars.get("order"), Some(&Value::Int(1)));
+        assert_eq!(
+            engine
+                .object_snapshot(locked_target)
+                .expect("locked-Walk target remains")
+                .controller,
+            2,
+            "ObjectActionPush is non-forced and respects NoOtherAction"
+        );
+
+        let locked_build_actor = engine
+            .object_snapshot(locked_build_actor)
+            .expect("locked-Build actor remains");
+        assert_eq!(
+            locked_build_actor.local_vars.get("reject_action"),
+            Some(&Value::String("LockedBuild".to_string())),
+            "Grab's ObjectComStop cannot bypass NoOtherAction before RejectGrabbed"
+        );
+        assert_eq!(locked_build_actor.command_direction, CommandDirection::Stop);
+        assert_eq!(locked_build_actor.local_vars.get("order"), Some(&Value::Int(1)));
+        assert_eq!(
+            engine
+                .object_snapshot(locked_build_target)
+                .expect("locked-Build target remains")
+                .controller,
+            2,
+            "Grab's ObjectComStop is non-forced and cannot bypass NoOtherAction"
+        );
+
+        let inactive_actor = engine
+            .object_snapshot(inactive_actor)
+            .expect("inactive-target actor remains");
+        assert_eq!(inactive_actor.action.name, "Push");
+        assert_eq!(inactive_actor.action.target, Some(inactive_target));
+        assert_eq!(inactive_actor.local_vars.get("order"), Some(&Value::Int(1234)));
+        let inactive_target = engine
+            .object_snapshot(inactive_target)
+            .expect("inactive target remains addressable");
+        assert_eq!(inactive_target.status, ObjectStatus::Inactive);
+        assert_eq!(inactive_target.controller, 7);
+
+        let clear_then_detach = engine
+            .object_snapshot(clear_then_detach)
+            .expect("clear-then-detach actor remains");
+        assert_eq!(clear_then_detach.action.name, "Walk");
+        assert_eq!(
+            clear_then_detach.command_stack.command_names(),
+            vec!["Wait".to_string()],
+            "a pointer cleared before detachment remains null"
+        );
+        assert_eq!(clear_then_detach.local_vars.get("order"), Some(&Value::Nil));
+
+        let detach_then_remove = engine
+            .object_snapshot(detach_then_remove)
+            .expect("detach-then-remove actor remains");
+        assert_eq!(detach_then_remove.action.name, "Walk");
+        assert_eq!(
+            detach_then_remove.command_stack.command_names(),
+            vec!["MoveTo".to_string(), "Wait".to_string()],
+            "a pointer frozen by detachment still queues MoveTo after Status becomes zero"
+        );
+        assert!(
+            engine
+                .object_snapshot(detach_then_remove_target)
+                .is_none_or(|target| target.status == ObjectStatus::Deleted)
+        );
+
+        let reject_detacher = engine
+            .object_snapshot(reject_detacher)
+            .expect("Reject detacher remains");
+        assert_eq!(reject_detacher.action.name, "Walk");
+        assert_eq!(reject_detacher.action.target, Some(reject_removed_target));
+        assert_eq!(reject_detacher.local_vars.get("order"), Some(&Value::Int(123)));
+        assert_eq!(
+            reject_detacher.command_stack.command_names(),
+            vec!["Wait".to_string(), "Wait".to_string()],
+            "ObjectComGrab runs before same-frame PUSH notices the status-zero target and adds its delay"
+        );
+    }
+
+    #[test]
+    fn execute_command_runs_object_com_grab_callbacks_before_returning() {
+        let mut engine = object_com_grab_test_engine();
+        let (actor, target) = spawn_object_com_grab_probe(&mut engine, "Walk", 0);
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    actor_index,
+                    "RunGrabNow",
+                    vec![object_reference_value(target), Value::Int(0)],
+                )
+                .expect("RunGrabNow executes"),
+            Value::Int(1234)
+        );
+        let actor = engine.object_snapshot(actor).expect("actor remains");
+        assert_eq!(actor.action.name, "Push");
+        assert_eq!(actor.action.target, Some(target));
+        assert_eq!(actor.local_vars.get("grabbed_controller"), Some(&Value::Int(7)));
+        assert_eq!(
+            actor.local_vars.get("push_start_comdir"),
+            Some(&Value::Int(CommandDirection::Stop.to_script_value()))
+        );
+        assert_eq!(
+            actor.local_vars.get("push_start_action"),
+            Some(&Value::String("Push".to_string()))
+        );
+        assert_eq!(
+            actor.local_vars.get("push_start_target"),
+            Some(&object_reference_value(target))
+        );
+        assert_eq!(
+            engine.object_snapshot(target).expect("target remains").controller,
+            7
+        );
+
+        let (self_remover, self_remover_target) =
+            spawn_object_com_grab_probe(&mut engine, "Walk", 50);
+        let self_remover_index = engine
+            .find_object_index(self_remover)
+            .expect("self-removing actor exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    self_remover_index,
+                    "RunGrabNow",
+                    vec![object_reference_value(self_remover_target), Value::Int(1)],
+                )
+                .expect("self-removing Grab executes"),
+            Value::Int(123)
+        );
+        let self_remover_target = engine
+            .object_snapshot(self_remover_target)
+            .expect("self-removal target remains");
+        assert_eq!(self_remover_target.controller, 2);
+        assert_eq!(
+            self_remover_target.local_vars.get("grabbed_calls"),
+            Some(&Value::Nil),
+            "status-zero grabber suppresses Controller propagation and Grabbed"
+        );
+
+        let (remover, doomed) = spawn_object_com_grab_probe(&mut engine, "Walk", 100);
+        let remover_index = engine.find_object_index(remover).expect("remover exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    remover_index,
+                    "RunGrabNow",
+                    vec![object_reference_value(doomed), Value::Int(2)],
+                )
+                .expect("target-removing Grab executes"),
+            Value::Int(123)
+        );
+        let remover = engine.object_snapshot(remover).expect("remover remains");
+        assert_eq!(remover.local_vars.get("grabbed_target"), Some(&Value::Nil));
+
+        let (plain_actor, plain_target) =
+            spawn_object_com_grab_probe_with_target(&mut engine, "Walk", 200, "OGNR");
+        let plain_actor_index = engine
+            .find_object_index(plain_actor)
+            .expect("plain actor exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    plain_actor_index,
+                    "RunGrabNow",
+                    vec![object_reference_value(plain_target), Value::Int(0)],
+                )
+                .expect("missing RejectGrabbed is accepted"),
+            Value::Int(234)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(plain_target)
+                .expect("plain target remains")
+                .controller,
+            7,
+            "host preview creates a target scope before propagating Controller"
+        );
+
+        let (stop_actor, stop_target) =
+            spawn_object_com_grab_probe(&mut engine, "Build", 300);
+        let stop_actor_index = engine
+            .find_object_index(stop_actor)
+            .expect("stop actor exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    stop_actor_index,
+                    "RunStopClearGrabNow",
+                    vec![object_reference_value(stop_target)],
+                )
+                .expect("synchronous stop-clear executes"),
+            Value::String("Grab".to_string())
+        );
+        let stop_actor = engine.object_snapshot(stop_actor).expect("stop actor remains");
+        assert!(stop_actor.command_stack.is_empty());
+        assert_eq!(stop_actor.local_vars.get("order"), Some(&Value::Nil));
+        assert_eq!(stop_actor.local_vars.get("stop_order"), Some(&Value::Int(12)));
+        assert_eq!(
+            stop_actor.local_vars.get("stop_abort_action"),
+            Some(&Value::String("Idle".to_string()))
+        );
+        assert_eq!(
+            stop_actor.local_vars.get("stop_walk_start_action"),
+            Some(&Value::String("Walk".to_string()))
+        );
+        let stop_target = engine
+            .object_snapshot(stop_target)
+            .expect("inactive stop target remains");
+        assert_eq!(stop_target.status, ObjectStatus::Inactive);
+        assert_eq!(stop_target.local_vars.get("reject_calls"), None);
+
+        let (sequential_actor, sequential_target) =
+            spawn_object_com_grab_probe(&mut engine, "Build", 400);
+        let sequential_actor_index = engine
+            .find_object_index(sequential_actor)
+            .expect("sequential actor exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    sequential_actor_index,
+                    "RunStopToDigGrabNow",
+                    vec![object_reference_value(sequential_target)],
+                )
+                .expect("synchronous Build-to-Dig Grab executes"),
+            Value::Int(1234)
+        );
+        let sequential_actor = engine
+            .object_snapshot(sequential_actor)
+            .expect("sequential actor remains");
+        assert_eq!(sequential_actor.action.name, "Push");
+        assert_eq!(
+            sequential_actor.local_vars.get("stop_walk_starts"),
+            Some(&Value::Int(2))
+        );
+
+        let (mutated_actor, mutated_target) =
+            spawn_object_com_grab_probe(&mut engine, "Walk", 500);
+        let mutated_actor_index = engine
+            .find_object_index(mutated_actor)
+            .expect("mutated actor exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    mutated_actor_index,
+                    "RunGrabNow",
+                    vec![object_reference_value(mutated_target), Value::Int(4)],
+                )
+                .expect("Grabbed action mutation executes"),
+            Value::Int(1234)
+        );
+        let mutated_actor = engine
+            .object_snapshot(mutated_actor)
+            .expect("mutated actor remains");
+        assert_eq!(mutated_actor.action.name, "Walk");
+        assert_eq!(
+            mutated_actor.command_stack.command_names(),
+            vec!["Grab".to_string()]
+        );
+
+        let (locked_actor, locked_target) =
+            spawn_object_com_grab_probe(&mut engine, "LockedWalk", 600);
+        let locked_actor_index = engine
+            .find_object_index(locked_actor)
+            .expect("locked actor exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    locked_actor_index,
+                    "RunGrabNow",
+                    vec![object_reference_value(locked_target), Value::Int(0)],
+                )
+                .expect("locked-Walk Grab executes"),
+            Value::Int(1)
+        );
+        let locked_actor = engine
+            .object_snapshot(locked_actor)
+            .expect("locked actor remains");
+        assert_eq!(locked_actor.action.name, "LockedWalk");
+        assert_eq!(locked_actor.command_direction, CommandDirection::Stop);
+        assert_eq!(
+            engine
+                .object_snapshot(locked_target)
+                .expect("locked target remains")
+                .controller,
+            2
+        );
+
+        let (locked_build_actor, locked_build_target) =
+            spawn_object_com_grab_probe(&mut engine, "LockedBuild", 650);
+        let locked_build_actor_index = engine
+            .find_object_index(locked_build_actor)
+            .expect("locked-Build actor exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    locked_build_actor_index,
+                    "RunGrabNow",
+                    vec![object_reference_value(locked_build_target), Value::Int(0)],
+                )
+                .expect("locked-Build Grab executes"),
+            Value::Int(1)
+        );
+        let locked_build_actor = engine
+            .object_snapshot(locked_build_actor)
+            .expect("locked-Build actor remains");
+        assert_eq!(locked_build_actor.action.name, "LockedBuild");
+        assert_eq!(locked_build_actor.command_direction, CommandDirection::Stop);
+        assert_eq!(
+            engine
+                .object_snapshot(locked_build_target)
+                .expect("locked-Build target remains")
+                .controller,
+            2
+        );
+
+        let (inactive_actor, inactive_target) =
+            spawn_object_com_grab_probe(&mut engine, "Walk", 700);
+        let inactive_actor_index = engine
+            .find_object_index(inactive_actor)
+            .expect("inactive-target actor exists");
+        engine
+            .call_object_function(
+                inactive_actor_index,
+                "DeactivateTarget",
+                vec![object_reference_value(inactive_target)],
+            )
+            .expect("host target becomes inactive without pointer clearing");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    inactive_actor_index,
+                    "RunGrabNow",
+                    vec![object_reference_value(inactive_target), Value::Int(0)],
+                )
+                .expect("inactive-target Grab executes"),
+            Value::Int(1234)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(inactive_target)
+                .expect("inactive host target remains")
+                .controller,
+            7
+        );
+
+        let (clear_then_detach, clear_then_detach_target) =
+            spawn_object_com_grab_probe(&mut engine, "Build", 800);
+        let clear_then_detach_index = engine
+            .find_object_index(clear_then_detach)
+            .expect("host clear-then-detach actor exists");
+        engine
+            .call_object_function(
+                clear_then_detach_index,
+                "RunStopPointerGrabNow",
+                vec![object_reference_value(clear_then_detach_target), Value::Int(1)],
+            )
+            .expect("host clear-then-detach executes");
+        assert_eq!(
+            engine
+                .object_snapshot(clear_then_detach)
+                .expect("host clear-then-detach actor remains")
+                .command_stack
+                .command_names(),
+            vec!["Wait".to_string()]
+        );
+
+        let (detach_then_remove, detach_then_remove_target) =
+            spawn_object_com_grab_probe(&mut engine, "Build", 900);
+        let detach_then_remove_index = engine
+            .find_object_index(detach_then_remove)
+            .expect("host detach-then-remove actor exists");
+        engine
+            .call_object_function(
+                detach_then_remove_index,
+                "RunStopPointerGrabNow",
+                vec![object_reference_value(detach_then_remove_target), Value::Int(2)],
+            )
+            .expect("host detach-then-remove executes");
+        assert_eq!(
+            engine
+                .object_snapshot(detach_then_remove)
+                .expect("host detach-then-remove actor remains")
+                .command_stack
+                .command_names(),
+            vec!["MoveTo".to_string(), "Wait".to_string()]
+        );
+
+        let (reject_detacher, reject_removed_target) =
+            spawn_object_com_grab_probe(&mut engine, "Walk", 1_000);
+        let reject_detacher_index = engine
+            .find_object_index(reject_detacher)
+            .expect("host Reject detacher exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    reject_detacher_index,
+                    "RunGrabNow",
+                    vec![object_reference_value(reject_removed_target), Value::Int(5)],
+                )
+                .expect("host Reject detach-before-remove executes"),
+            Value::Int(123)
+        );
+        let reject_detacher = engine
+            .object_snapshot(reject_detacher)
+            .expect("host Reject detacher remains");
+        assert_eq!(reject_detacher.action.name, "Push");
+        assert_eq!(reject_detacher.action.target, Some(reject_removed_target));
+        assert_eq!(
+            reject_detacher.command_stack.command_names(),
+            vec!["Wait".to_string()]
+        );
+    }
+
+    #[test]
+    fn execute_command_grab_at_uses_live_construction_rotation_and_addtop_shape() {
+        let mut engine = object_com_grab_test_engine();
+        let spawn_actor = |engine: &mut Engine, position: Vector2| {
+            let actor = engine
+                .spawn_object(
+                    SpawnConfig::new("OGAC")
+                        .with_owner(1)
+                        .with_alive(true)
+                        .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                        .with_position(position)
+                        .with_action(ActionState::new("Walk")),
+                )
+                .expect("shape-probe actor spawns");
+            let actor_index = engine
+                .find_object_index(actor)
+                .expect("shape-probe actor exists");
+            engine.force_object_position(actor_index, position);
+            actor
+        };
+        let run_grab = |engine: &mut Engine, actor: ObjectId, target: ObjectId| {
+            let actor_index = engine.find_object_index(actor).expect("shape actor exists");
+            engine
+                .call_object_function(
+                    actor_index,
+                    "RunGrabNow",
+                    vec![object_reference_value(target), Value::Int(0)],
+                )
+                .expect("shape-probe Grab executes")
+        };
+
+        let short_target = engine
+            .spawn_object(
+                SpawnConfig::new("OGTG")
+                    .with_owner(2)
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(0, 100))
+                    .with_construction(FULL_CON / 2),
+            )
+            .expect("short target spawns");
+        let short_position = engine
+            .object_snapshot(short_target)
+            .expect("short target exists")
+            .position;
+        let addtop_actor = spawn_actor(
+            &mut engine,
+            Vector2::new(short_position.x, short_position.y - 10),
+        );
+        assert_eq!(
+            run_grab(&mut engine, addtop_actor, short_target),
+            Value::Int(1234),
+            "C4Object::addtop expands a short construction shape upward"
+        );
+
+        let outside_target = engine
+            .spawn_object(
+                SpawnConfig::new("OGTG")
+                    .with_owner(2)
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(100, 100))
+                    .with_construction(FULL_CON / 2),
+            )
+            .expect("outside target spawns");
+        let outside_position = engine
+            .object_snapshot(outside_target)
+            .expect("outside target exists")
+            .position;
+        let outside_actor = spawn_actor(
+            &mut engine,
+            Vector2::new(outside_position.x, outside_position.y + 8),
+        );
+        assert_eq!(run_grab(&mut engine, outside_actor, outside_target), Value::Nil);
+        let outside_actor = engine
+            .object_snapshot(outside_actor)
+            .expect("outside actor remains");
+        assert_eq!(outside_actor.action.name, "Walk");
+        assert_eq!(
+            outside_actor.command_stack.command_names(),
+            vec!["MoveTo".to_string(), "Grab".to_string()],
+            "the unscaled definition rect must not make At succeed"
+        );
+
+        let rotated_target = engine
+            .spawn_object(
+                SpawnConfig::new("OGTG")
+                    .with_owner(2)
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(200, 100))
+                    .with_rotation(90),
+            )
+            .expect("rotated target spawns");
+        let rotated_position = engine
+            .object_snapshot(rotated_target)
+            .expect("rotated target exists")
+            .position;
+        let rotated_actor = spawn_actor(
+            &mut engine,
+            Vector2::new(rotated_position.x - 15, rotated_position.y),
+        );
+        assert_eq!(
+            run_grab(&mut engine, rotated_actor, rotated_target),
+            Value::Int(1234),
+            "At uses the target's rotated live shape"
+        );
+    }
+
     #[test]
     fn tutorial_special2_executes_context_before_control_returns_like_cpp() {
         // FnExecuteCommand dispatches synchronously to C4Object::ExecuteCommand

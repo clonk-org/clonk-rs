@@ -30915,6 +30915,18 @@ impl Engine {
         self.action_with_optional_target_and_calls(idx, definition_id, name, Some(target), true)
     }
 
+    /// Ordinary target-bearing `SetActionByName`, used by ObjectActionPush
+    /// and the other C++ ObjectAction helpers that do not pass `fForce`.
+    pub(crate) fn action_with_target_and_calls(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        name: &str,
+        target: ObjectId,
+    ) -> Result<bool, EngineError> {
+        self.action_with_optional_target_and_calls(idx, definition_id, name, Some(target), false)
+    }
+
     fn action_with_optional_target_and_calls(
         &mut self,
         idx: usize,
@@ -30930,7 +30942,11 @@ impl Engine {
         else {
             return Ok(false);
         };
-        if !library.contains(name) {
+        // SetActionByName("Idle") selects the built-in slot before scanning
+        // ActMap (C4Object.cpp:4214-4215). ActionState's
+        // library-aware update already models that slot; do not reject it
+        // merely because a definition's map starts at Walk.
+        if name != "Idle" && !library.contains(name) {
             return Ok(false);
         }
         let previous = self.objects[idx].state.action.clone();
