@@ -8754,6 +8754,47 @@ mod tests {
             pushed_request(&result.operations, CommandId::MoveTo),
             &ctx,
         );
+
+        let ctx_next = CommandRuntimeContext {
+            frame: 1,
+            ..ctx
+        };
+        let next = state.step(&ctx_next);
+        assert_eq!(next.status, CommandStatus::Running);
+        assert!(next.events.is_empty());
+        assert_eq!(next.operations.len(), 1);
+        match &next.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.tx, Some(89));
+                assert_eq!(request.ty, Some(69));
+                assert_eq!(request.update_interval, 25);
+            }
+            other => panic!("unexpected operation: {other:?}"),
+        }
+        let serialized = serde_json::to_value(&state).expect("transfer state serializes");
+        assert!(
+            serialized.get("last_move_order").is_none(),
+            "Transfer carries no invented move cooldown state"
+        );
+
+        let mut blocked_landscape =
+            crate::Landscape::new(200, vec![0; 200]).expect("fully solid transfer perimeter");
+        blocked_landscape.set_world_height(200);
+        let blocked_ctx = CommandRuntimeContext {
+            landscape: Some(&blocked_landscape),
+            frame: 1,
+            ..ctx_next
+        };
+        let blocked = state.step(&blocked_ctx);
+        assert_eq!(
+            blocked.status,
+            CommandStatus::Failed,
+            "entry-point failure is immediate even after consecutive move orders"
+        );
+        assert!(blocked.update.is_none());
+        assert!(blocked.events.is_empty());
+        assert!(blocked.operations.is_empty());
     }
 
     #[test]
@@ -15625,7 +15666,6 @@ struct TransferState {
     target: ObjectId,
     tx: Option<i32>,
     ty: Option<i32>,
-    last_move_order: Option<u64>,
     last_script_call: Option<u64>,
 }
 
@@ -15636,7 +15676,6 @@ impl TransferState {
             target,
             tx: request.tx,
             ty: request.ty,
-            last_move_order: None,
             last_script_call: None,
         })
     }
@@ -15749,17 +15788,6 @@ impl TransferState {
         Some(Vector2::new(x, y))
     }
 
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
-        }
-    }
-
     fn should_call_script(&mut self, frame: u64) -> bool {
         if frame % 5 != 0 {
             return false;
@@ -15783,18 +15811,15 @@ impl TransferState {
         };
 
         if !self.within_zone(ctx, zone) {
-            if self.should_issue_move(ctx.frame) {
-                let Some(entry) = self.entry_point(ctx, zone, ctx.position) else {
-                    return CommandStepResult::failed(None);
-                };
-                let request = CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(entry.x))
-                    .with_ty(Some(entry.y))
-                    .with_update_interval(25);
-                return CommandStepResult::running(None)
-                    .with_operations(vec![CommandOperation::PushFront(request)]);
-            }
-            return CommandStepResult::running(None);
+            let Some(entry) = self.entry_point(ctx, zone, ctx.position) else {
+                return CommandStepResult::failed(None);
+            };
+            let request = CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(entry.x))
+                .with_ty(Some(entry.y))
+                .with_update_interval(25);
+            return CommandStepResult::running(None)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
         }
 
         if self.should_call_script(ctx.frame) {
