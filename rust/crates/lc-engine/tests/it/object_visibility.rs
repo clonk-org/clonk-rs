@@ -132,7 +132,7 @@ fn shipped_invisibility_recast_carries_remaining_time_into_reset_timer() {
         .expect("mage remains after recast")
         .effects
         .into_iter()
-        .filter(|effect| effect.name == "InvisPSpell")
+        .filter(|effect| effect.name == "InvisPSpell" && effect.priority != 0)
         .collect::<Vec<_>>();
     assert_eq!(effects.len(), 1, "FxInvisPSpellEffect merges the recast");
     assert_eq!(
@@ -148,4 +148,23 @@ fn shipped_invisibility_recast_carries_remaining_time_into_reset_timer() {
         effects[0].timer, 0,
         "ChangeEffect restarts the merged invisibility clock"
     );
+    assert!(engine
+        .object_snapshot(mage)
+        .expect("mage remains after recast")
+        .effects
+        .iter()
+        .any(|effect| effect.name == "InvisPSpell" && effect.priority == 0));
+    engine
+        .tick()
+        .expect("the mage's next Execute cleans the dead recast node");
+    let after = engine
+        .object_snapshot(mage)
+        .expect("mage remains after cleanup")
+        .effects
+        .into_iter()
+        .filter(|effect| effect.name == "InvisPSpell")
+        .collect::<Vec<_>>();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].number, before.number);
+    assert_eq!(after[0].timer, 1);
 }

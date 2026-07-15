@@ -63266,9 +63266,13 @@ protected func InputCallback(string answer, int player)
             tensioned
                 .effects
                 .iter()
-                .all(|effect| effect.name != "IntJnRAim"),
+                .all(|effect| effect.name != "IntJnRAim" || effect.priority == 0),
             "physical X release must cancel CATA's aim timer without losing phase six"
         );
+        assert!(tensioned
+            .effects
+            .iter()
+            .any(|effect| effect.name == "IntJnRAim" && effect.priority == 0));
 
         AppVirtualKeyboard::new(&mut app)
             .tap(VirtualKeyCode::A)
@@ -63293,6 +63297,13 @@ protected func InputCallback(string answer, int player)
                 })
             },
         );
+        assert!(app
+            .engine
+            .object_snapshot(valley_cata)
+            .expect("valley CATA survives the projectile flight")
+            .effects
+            .iter()
+            .all(|effect| effect.name != "IntJnRAim"));
         advance_app_until(
             &mut app,
             "Tutorial05 advances to the right-hill CLNK",
@@ -63548,9 +63559,13 @@ protected func InputCallback(string answer, int player)
             tensioned
                 .effects
                 .iter()
-                .all(|effect| effect.name != "IntJnRAim"),
+                .all(|effect| effect.name != "IntJnRAim" || effect.priority == 0),
             "physical X release must cancel the right-hill CATA aim timer"
         );
+        assert!(tensioned
+            .effects
+            .iter()
+            .any(|effect| effect.name == "IntJnRAim" && effect.priority == 0));
 
         AppVirtualKeyboard::new(&mut app)
             .tap(VirtualKeyCode::A)
@@ -63575,6 +63590,13 @@ protected func InputCallback(string answer, int player)
                 })
             },
         );
+        assert!(app
+            .engine
+            .object_snapshot(hill_cata)
+            .expect("right-hill CATA survives the projectile flight")
+            .effects
+            .iter()
+            .all(|effect| effect.name != "IntJnRAim"));
         let delivered = app
             .engine
             .object_snapshot(wood)

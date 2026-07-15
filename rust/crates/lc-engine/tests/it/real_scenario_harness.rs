@@ -1355,7 +1355,7 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         let active = mage
             .effects
             .iter()
-            .any(|effect| effect.name == "WarpUSpellData");
+            .any(|effect| effect.name == "WarpUSpellData" && effect.priority != 0);
         active && mage.vertices.is_empty()
     });
     assert!(
@@ -1368,7 +1368,7 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         .and_then(|mage| {
             mage.effects
                 .into_iter()
-                .find(|effect| effect.name == "WarpUSpellData")
+                .find(|effect| effect.name == "WarpUSpellData" && effect.priority != 0)
         })
         .expect("WarpUSpellData remains live at the observed zero-vertex point");
     assert_eq!(
@@ -1396,7 +1396,7 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         restored_warping_mage
             .effects
             .iter()
-            .any(|effect| effect.name == "WarpUSpellData"),
+            .any(|effect| effect.name == "WarpUSpellData" && effect.priority != 0),
         "the live WarpUSpellData effect survives EngineState restore"
     );
     assert!(
@@ -1433,9 +1433,22 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         warped_mage
             .effects
             .iter()
-            .all(|effect| effect.name != "WarpUSpellData"),
-        "the per-object warp bookkeeping effect is removed after transfer"
+            .all(|effect| effect.name != "WarpUSpellData" || effect.priority == 0),
+        "the per-object warp bookkeeping effect is dead after transfer"
     );
+    assert!(warped_mage
+        .effects
+        .iter()
+        .any(|effect| effect.name == "WarpUSpellData" && effect.priority == 0));
+    engine
+        .tick()
+        .expect("the mage's next effect Execute cleans WarpUSpellData");
+    assert!(engine
+        .object_snapshot(mage)
+        .expect("the warped mage remains live")
+        .effects
+        .iter()
+        .all(|effect| effect.name != "WarpUSpellData"));
 }
 
 #[test]
@@ -4286,9 +4299,13 @@ func RetargetFade() { return FadeOut(10, 5, this()); }
     let fades = object
         .effects
         .iter()
-        .filter(|effect| effect.name == "IntFade")
+        .filter(|effect| effect.name == "IntFade" && effect.priority != 0)
         .collect::<Vec<_>>();
     assert_eq!(fades.len(), 1, "the second FadeOut merges into the first");
+    assert!(object
+        .effects
+        .iter()
+        .any(|effect| effect.name == "IntFade" && effect.priority == 0));
     assert_eq!(fades[0].interval, 10, "ChangeEffect installs the new timer");
     assert_eq!(fades[0].timer, 0, "ChangeEffect resets effect time");
     assert_eq!(

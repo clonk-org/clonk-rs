@@ -174,30 +174,46 @@ fn jungle_poison_amulet_denies_the_shipped_poison_arrow_curse_inline() {
             .expect("the shipped poison-arrow hit callback completes");
     }
 
-    let protected = engine
+    let protected_snapshot = engine
         .object_snapshot(protected)
         .expect("the protected Jungle Clonk remains live");
     assert!(
-        protected.effects.iter().any(|effect| effect.name == "BanPoison"),
+        protected_snapshot
+            .effects
+            .iter()
+            .any(|effect| effect.name == "BanPoison"),
         "the AMPO protection must survive the rejected curse"
     );
 
-    let unprotected = engine
+    let unprotected_snapshot = engine
         .object_snapshot(unprotected)
         .expect("the control Jungle Clonk remains live");
     assert!(
-        unprotected
+        unprotected_snapshot
             .effects
             .iter()
-            .any(|effect| effect.name == "PoisonCurse"),
+            .any(|effect| effect.name == "PoisonCurse" && effect.priority != 0),
         "the fresh control arrow must prove the shipped poison path executed"
     );
 
     assert!(
-        protected
+        protected_snapshot
             .effects
             .iter()
-            .all(|effect| effect.name != "PoisonCurse"),
+            .all(|effect| effect.name != "PoisonCurse" || effect.priority == 0),
         "C++ denies PoisonCurse synchronously before it becomes live"
     );
+    assert!(protected_snapshot
+        .effects
+        .iter()
+        .any(|effect| effect.name == "PoisonCurse" && effect.priority == 0));
+    engine
+        .tick()
+        .expect("the protected Clonk's next Execute cleans the dead curse");
+    assert!(engine
+        .object_snapshot(protected)
+        .expect("the protected Jungle Clonk remains live")
+        .effects
+        .iter()
+        .all(|effect| effect.name != "PoisonCurse"));
 }

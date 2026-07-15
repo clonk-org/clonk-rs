@@ -233,7 +233,7 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
     let pressed_effect = pressed
         .effects
         .iter()
-        .find(|effect| effect.name == "IntJnRAim")
+        .find(|effect| effect.name == "IntJnRAim" && effect.priority != 0)
         .unwrap_or_else(|| {
             panic!(
                 "held Jump'n'Run Down must synchronously create IntJnRAim; \
@@ -274,7 +274,7 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
         let effect = cata
             .effects
             .iter()
-            .find(|effect| effect.name == "IntJnRAim")
+            .find(|effect| effect.name == "IntJnRAim" && effect.priority != 0)
             .unwrap_or_else(|| {
                 panic!(
                     "IntJnRAim disappeared while Down remained held at tick {elapsed}; \
@@ -321,9 +321,13 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
         released
             .effects
             .iter()
-            .all(|effect| effect.name != "IntJnRAim"),
+            .all(|effect| effect.name != "IntJnRAim" || effect.priority == 0),
         "released ControlUpdate/COMD_Stop must synchronously AimCancel; CATA={released:?}"
     );
+    assert!(released
+        .effects
+        .iter()
+        .any(|effect| effect.name == "IntJnRAim" && effect.priority == 0));
     assert_eq!(released.action.phase, 6, "release preserves full tension");
 
     player.tap(COM_THROW)?;
@@ -360,6 +364,13 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
                 .is_some_and(|object| object.container.is_none())
         },
     )?;
+    assert!(player
+        .engine()
+        .object_snapshot(valley_cata)
+        .expect("valley CATA survives projectile launch")
+        .effects
+        .iter()
+        .all(|effect| effect.name != "IntJnRAim"));
     let launched = player
         .engine()
         .object_snapshot(metal)

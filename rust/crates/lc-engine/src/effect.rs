@@ -229,11 +229,17 @@ pub enum EffectCommand {
     /// must never resurrect an effect the timer killed in the same
     /// frame (C4Effect vars live inside the effect; death is final).
     Update(EffectState),
+    /// Marks the selected live effect dead. C4Effect::Kill/SetDead leaves
+    /// the node linked at priority zero until the next Execute walk.
     Remove { name: String, no_callbacks: bool },
-    /// Identity-keyed removal for callers that address an effect by its C++
+    /// Identity-keyed death for callers that address an effect by its C++
     /// `iNumber`. Names are not unique, so folding this as `Remove { name }`
-    /// can delete the wrong same-name peer.
+    /// can target the wrong same-name peer.
     RemoveNumber { number: i32, no_callbacks: bool },
+    /// Immediate structural unlink for constructor exception unwind and
+    /// final object-list destruction. Ordinary effect removal must use one
+    /// of the dead-marking variants above.
+    UnlinkNumber { number: i32 },
     Clear,
 }
 
@@ -265,6 +271,10 @@ impl EffectCommand {
             number,
             no_callbacks,
         }
+    }
+
+    pub fn unlink_number(number: i32) -> Self {
+        Self::UnlinkNumber { number }
     }
 }
 

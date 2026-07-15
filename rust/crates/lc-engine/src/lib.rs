@@ -6386,7 +6386,7 @@ impl Object {
                     }
                 }
                 EffectCommand::Remove { name, no_callbacks } => {
-                    if let Some(removed) = self.remove_effect(name) {
+                    if let Some(removed) = self.mark_effect_dead(name) {
                         if !no_callbacks {
                             events.push(EffectEvent::stopped(removed, EffectStopReason::Removed));
                         }
@@ -6396,11 +6396,14 @@ impl Object {
                     number,
                     no_callbacks,
                 } => {
-                    if let Some(removed) = self.remove_effect_by_number(*number) {
+                    if let Some(removed) = self.mark_effect_dead_by_number(*number) {
                         if !no_callbacks {
                             events.push(EffectEvent::stopped(removed, EffectStopReason::Removed));
                         }
                     }
+                }
+                EffectCommand::UnlinkNumber { number } => {
+                    self.remove_effect_by_number(*number);
                 }
                 EffectCommand::Clear => {
                     events.extend(self.drain_effects_with_reason(EffectStopReason::Cleared));
@@ -6513,12 +6516,26 @@ impl Object {
         (inserted, None)
     }
 
-    fn remove_effect(&mut self, name: &str) -> Option<EffectState> {
-        self.state
+    fn mark_effect_dead(&mut self, name: &str) -> Option<EffectState> {
+        let effect = self
+            .state
             .effects
-            .iter()
-            .position(|existing| existing.name == name)
-            .map(|index| self.state.effects.remove(index))
+            .iter_mut()
+            .find(|effect| effect.name == name && effect.priority != 0)?;
+        let stopped = effect.clone();
+        effect.priority = 0;
+        Some(stopped)
+    }
+
+    fn mark_effect_dead_by_number(&mut self, number: i32) -> Option<EffectState> {
+        let effect = self
+            .state
+            .effects
+            .iter_mut()
+            .find(|effect| effect.number == number && effect.priority != 0)?;
+        let stopped = effect.clone();
+        effect.priority = 0;
+        Some(stopped)
     }
 
     /// Remove THE effect (by its C++ identity, iNumber — names may repeat).
@@ -47149,11 +47166,22 @@ fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[Eff
                 }
             }
             EffectCommand::Remove { name, .. } => {
-                if let Some(index) = target.iter().position(|existing| &existing.name == name) {
-                    target.remove(index);
+                if let Some(effect) = target
+                    .iter_mut()
+                    .find(|effect| &effect.name == name && effect.priority != 0)
+                {
+                    effect.priority = 0;
                 }
             }
             EffectCommand::RemoveNumber { number, .. } => {
+                if let Some(effect) = target
+                    .iter_mut()
+                    .find(|effect| effect.number == *number && effect.priority != 0)
+                {
+                    effect.priority = 0;
+                }
+            }
+            EffectCommand::UnlinkNumber { number } => {
                 remove_effect_from_stack(target, *number);
             }
             EffectCommand::Clear => target.clear(),

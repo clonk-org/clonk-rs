@@ -3395,13 +3395,20 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
         let hut_idx = engine.find_object_index(hut).expect("hut exists");
         assert!(!engine.objects[hut_idx].state.on_fire, "flag cleared");
         assert!(
-            !engine.objects[hut_idx]
+            engine.objects[hut_idx]
                 .state
                 .effects
                 .iter()
-                .any(|effect| effect.name == "Fire"),
-            "the fire effect was killed"
+                .any(|effect| effect.name == "Fire" && effect.priority == 0),
+            "the killed Fire node stays linked dead"
         );
+        engine.tick()?;
+        let hut_idx = engine.find_object_index(hut).expect("hut exists");
+        assert!(!engine.objects[hut_idx]
+            .state
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Fire"));
         Ok(())
     }
 
@@ -3435,6 +3442,13 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
         assert_eq!(result, Value::Bool(true));
         let hut_idx = engine.find_object_index(hut).expect("hut exists");
         assert!(!engine.objects[hut_idx].state.on_fire, "OnFire cleared");
+        assert!(engine.objects[hut_idx]
+            .state
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Fire" && effect.priority == 0));
+        engine.tick()?;
+        let hut_idx = engine.find_object_index(hut).expect("hut exists");
         assert!(!engine.objects[hut_idx]
             .state
             .effects
@@ -3797,13 +3811,36 @@ func Incineration(iCause) { return 1; }
                 (object.state.fire_phase, object.state.fire_caused_by),
                 fire_before[slot]
             );
-            assert_eq!(object.state.effects.len(), 1);
-            assert_eq!(object.state.effects[0].name, "Shield");
-            assert_eq!(object.state.effects[0].priority, 200);
+            let shield = object
+                .state
+                .effects
+                .iter()
+                .find(|effect| effect.name == "Shield" && effect.priority != 0)
+                .expect("the denying Shield remains active");
+            assert_eq!(shield.priority, 200);
             assert_eq!(
-                object.state.effects[0].number,
+                shield.number,
                 shield_numbers[&id],
                 "the denying effect is unchanged"
+            );
+            assert!(object
+                .state
+                .effects
+                .iter()
+                .any(|effect| effect.name == "Fire" && effect.priority == 0));
+        }
+
+        engine.tick()?;
+        for id in [direct, scripted] {
+            let idx = engine.find_object_index(id).expect("target survives");
+            assert_eq!(
+                engine.objects[idx]
+                    .state
+                    .effects
+                    .iter()
+                    .map(|effect| effect.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["Shield"]
             );
         }
 
@@ -4154,7 +4191,7 @@ func Incineration(iCause) { return 1; }
     }
 
     #[test]
-    fn incinerate_in_extinguisher_leaves_no_fire_effect_entry() -> Result<(), EngineError> {
+    fn incinerate_in_extinguisher_leaves_fire_dead_until_execute() -> Result<(), EngineError> {
         // fxFireStart deny (C4Effect.cpp:574-607 + ctor :128-133): in
         // extinguishing material the Start returns -1 and the freshly
         // created effect dies without a Stop call. The constructor still
@@ -4183,9 +4220,16 @@ func Incineration(iCause) { return 1; }
         assert!(engine.incinerate_object(idx, 1, false, None)?);
         assert!(!engine.objects[idx].state.on_fire);
         assert!(
-            engine.objects[idx].state.effects.is_empty(),
-            "denied fire start removes the effect entry"
+            engine.objects[idx]
+                .state
+                .effects
+                .iter()
+                .any(|effect| effect.name == "Fire" && effect.priority == 0),
+            "the Start-denied node stays linked dead"
         );
+        engine.tick()?;
+        let idx = engine.find_object_index(tree).expect("tree exists");
+        assert!(engine.objects[idx].state.effects.is_empty());
         Ok(())
     }
 
@@ -7259,6 +7303,100 @@ func FxShieldAdd(pTarget, iNumber, szNew, iInterval, iValue)
     }
 
     #[test]
+    fn removed_effects_stay_linked_dead_until_the_next_execute() {
+        let definition = Definition::from_script(
+            "CALL",
+            "Caller",
+            r#"#strict 2
+local silent_number;
+
+func RemoveAndReplace()
+{
+  var old_number = AddEffect("Old", this(), 100, 0, this());
+  EffectVar(0, this(), old_number) = 77;
+  var removed = RemoveEffect(0, this(), old_number);
+  var old_lookup = GetEffect(0, this(), old_number);
+  var old_var = EffectVar(0, this(), old_number);
+  var replacement = AddEffect("New", this(), 200, 0, this());
+  return [old_number, replacement, old_var, old_lookup, removed];
+}
+
+func RemoveWithoutCalls()
+{
+  silent_number = AddEffect("Silent", this(), 100, 0, this());
+  EffectVar(0, this(), silent_number) = 88;
+  var removed = RemoveEffect(0, this(), silent_number, true);
+  return [silent_number, removed, GetEffect(0, this(), silent_number), EffectVar(0, this(), silent_number)];
+}
+
+func ProbeSilent()
+{
+  return [GetEffect(0, this(), silent_number), EffectVar(0, this(), silent_number)];
+}
+"#,
+        )
+        .expect("caller compiles");
+
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("caller registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let index = engine.find_object_index(object).expect("caller index");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "RemoveAndReplace", vec![])
+                .expect("remove-and-replace call runs"),
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(77),
+                Value::Int(1),
+                Value::Bool(true),
+            ]),
+            "the dead number and vars remain visible and reserve the next number"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(index, "RemoveWithoutCalls", vec![])
+                .expect("no-callback removal runs"),
+            Value::Array(vec![
+                Value::Int(3),
+                Value::Bool(true),
+                Value::Int(3),
+                Value::Int(88),
+            ])
+        );
+        assert_eq!(
+            engine
+                .call_object_function(index, "ProbeSilent", vec![])
+                .expect("dead effect remains visible before Execute"),
+            Value::Array(vec![Value::Int(3), Value::Int(88)])
+        );
+
+        engine.tick().expect("next effect Execute cleans dead nodes");
+        assert_eq!(
+            engine
+                .call_object_function(index, "ProbeSilent", vec![])
+                .expect("post-Execute probe runs"),
+            Value::Array(vec![Value::Nil, Value::Nil])
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(object)
+                .expect("caller remains live")
+                .effects
+                .iter()
+                .map(|effect| (effect.name.clone(), effect.number))
+                .collect::<Vec<_>>(),
+            vec![("New".to_owned(), 2)]
+        );
+    }
+
+    #[test]
     fn check_effect_preserves_dead_head_zero_and_skips_removed_later_checker() {
         // C4Effect nodes are only unlinked by Execute. Within one VM call a
         // removed final node still means FnCheckEffect had a non-null head,
@@ -7309,9 +7447,17 @@ func FxVictimEffect(szNew) { if (szNew == "Probe") { SetR(9); return(-1); } retu
         assert_eq!(
             engine
                 .call_object_function(removed_index, "Walk", vec![])
-                .expect("later empty-list check runs"),
+                .expect("pre-Execute dead-list check runs"),
+            Value::Int(0),
+            "command folding keeps the dead list head linked"
+        );
+        engine.tick().expect("effect Execute cleans the dead head");
+        assert_eq!(
+            engine
+                .call_object_function(removed_index, "Walk", vec![])
+                .expect("post-Execute empty-list check runs"),
             Value::Nil,
-            "after command folding, a new call sees the truly null list head"
+            "the next Execute unlinks the dead final node"
         );
 
         let walked = engine
@@ -7396,10 +7542,29 @@ func FxShieldStop() { SetR(GetR() + 1); return(0); }
             snapshot
                 .effects
                 .iter()
+                .filter(|effect| effect.priority != 0)
                 .map(|effect| effect.number)
                 .collect::<Vec<_>>(),
             vec![first],
-            "last-annul winner {second} is removed by number; its same-name peer survives"
+            "last-annul winner {second} is dead; its same-name peer survives"
+        );
+        assert!(
+            snapshot
+                .effects
+                .iter()
+                .any(|effect| effect.number == second && effect.priority == 0),
+            "Kill leaves the annulled acceptor linked until Execute"
+        );
+        engine.tick().expect("effect Execute cleans the dead acceptor");
+        assert_eq!(
+            engine
+                .object_snapshot(object)
+                .expect("caller remains live")
+                .effects
+                .iter()
+                .map(|effect| effect.number)
+                .collect::<Vec<_>>(),
+            vec![first]
         );
     }
 
@@ -8533,11 +8698,23 @@ protected func OnOldAbort()
 
         let first_tick = engine.tick().expect("first tick succeeds");
         let object = first_tick.object(id).expect("object present");
-        assert_eq!(object.effects.len(), 1);
-        assert_eq!(object.effects[0].name, "Spark");
+        assert!(object
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Spark" && effect.priority != 0));
+        assert!(object
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Glow" && effect.priority == 0));
 
         let second_tick = engine.tick().expect("second tick succeeds");
         let object = second_tick.object(id).expect("object present");
+        assert_eq!(object.effects.len(), 1);
+        assert_eq!(object.effects[0].name, "Spark");
+        assert_eq!(object.effects[0].priority, 0);
+
+        let third_tick = engine.tick().expect("third tick succeeds");
+        let object = third_tick.object(id).expect("object present");
         assert!(object.effects.is_empty());
     }
 
@@ -31282,10 +31459,29 @@ public func ReadIDs(int first, int second)
 
         let snapshot = engine.tick().expect("second tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.effects.len(), 1);
-        assert_eq!(object.effects[0].name, "Boost");
-        assert_eq!(object.effects[0].priority, 50);
-        assert_eq!(object.effects[0].timer, 2);
+        let boost = object
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Boost")
+            .expect("Boost remains active");
+        assert_eq!(boost.priority, 50);
+        assert_eq!(boost.timer, 2);
+        assert!(object
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Heal" && effect.priority == 0));
+
+        let snapshot = engine.tick().expect("third tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(
+            object
+                .effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Boost"],
+            "the next Execute unlinks the dead Heal node"
+        );
     }
 
     // The AmmoHud pair: AHUD#1's Initialize counts its own def
@@ -33381,9 +33577,22 @@ func Trigger() {
             .find(|object| object.definition_id == "BNDT")
             .expect("bandit exists");
         assert!(
-            bandit.state.effects.iter().all(|e| e.name != "Life"),
-            "RemoveEffect right after CreateObject killed it - and \
-             materialization must NOT re-run Initialize (no second Life)"
+            bandit
+                .state
+                .effects
+                .iter()
+                .any(|effect| effect.name == "Life" && effect.priority == 0),
+            "RemoveEffect right after CreateObject leaves Life linked dead"
+        );
+        engine.tick().expect("next Execute cleans the dead Life node");
+        let bandit = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "BNDT")
+            .expect("bandit exists");
+        assert!(
+            bandit.state.effects.iter().all(|effect| effect.name != "Life"),
+            "materialization must not re-run Initialize after cleanup"
         );
     }
 
@@ -41082,6 +41291,13 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
         let third = engine.tick().expect("third tick succeeds");
         let object = third.object(id).expect("object present");
+        assert!(object
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Pulse" && effect.priority == 0));
+
+        let fourth = engine.tick().expect("fourth tick succeeds");
+        let object = fourth.object(id).expect("object present");
         assert!(object.effects.is_empty());
 
         let calls = call_log.lock().unwrap().clone();
@@ -44677,7 +44893,8 @@ func Probe(target) {
         // {C4VObj(pForObj), C4VInt(iNumber), C4VInt(0), rVal1..rVal4}) —
         // pForObj is nullptr (nil) for a GLOBAL effect (ctor list select
         // :74). A C4Fx_Start_Deny (-1) return marks the effect dead: it is
-        // deleted without a Stop callback (:128-131 + Execute :328-336).
+        // deleted by the next Execute without a Stop callback
+        // (:128-131 + Execute :328-336).
         let script = r#"
         global func Initialize(state, random) {
             AddEffect("Flash", nil, 200, 5, nil, nil, nil, 42);
@@ -44716,21 +44933,29 @@ func Probe(target) {
             .spawn_object(SpawnConfig::new("Actor"))
             .expect("spawn succeeds");
 
-        let names: Vec<&str> = engine
+        assert!(engine
             .global_effects()
             .iter()
-            .map(|effect| effect.name.as_str())
-            .collect();
+            .any(|effect| effect.name == "Vetoed" && effect.priority == 0));
+        let flash = engine
+            .global_effects()
+            .iter()
+            .find(|effect| effect.name == "Flash")
+            .expect("Flash remains active");
         assert_eq!(
-            names,
-            vec!["Flash"],
-            "the Start-denied effect was removed without a Stop callback"
-        );
-        assert_eq!(
-            engine.global_effects()[0].var(0),
+            flash.var(0),
             EffectVarValue::Int(43),
             "Fx*Start(nil, iNumber, 0, rVal1) ran synchronously inside \
              AddEffect and saw rVal1"
+        );
+        engine.tick().expect("global Execute cleans the dead node");
+        assert_eq!(
+            engine
+                .global_effects()
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Flash"]
         );
     }
 
@@ -45481,9 +45706,14 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         let names: Vec<&str> = object
             .effects
             .iter()
+            .filter(|effect| effect.priority != 0)
             .map(|effect| effect.name.as_str())
             .collect();
         assert_eq!(names, vec!["Upper"], "only Lower is killed");
+        assert!(object
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Lower" && effect.priority == 0));
 
         let calls: Vec<(String, Vec<Value>)> = call_log
             .lock()
@@ -45516,6 +45746,17 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             Some(&Value::Int(0)),
             "C4Effect::Kill omits the raw reason slot; strict-3 typed int \
              conversion exposes it as C4FxCall_Normal (0)"
+        );
+
+        let fourth = engine.tick().expect("next Execute succeeds");
+        let object = fourth.object(id).expect("object present");
+        assert_eq!(
+            object
+                .effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Upper"]
         );
     }
 
@@ -46072,6 +46313,13 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             .expect("spawn succeeds");
 
         let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert!(object
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Pulse" && effect.priority == 0));
+
+        let snapshot = engine.tick().expect("next Execute succeeds");
         let object = snapshot.object(id).expect("object present");
         assert!(object.effects.is_empty());
 

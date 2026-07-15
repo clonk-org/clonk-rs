@@ -8004,10 +8004,7 @@ fn clear_effects_for_assign_removal(target: ObjectId) -> Result<bool, RuntimeErr
             let Some(number) = scope.effects.effects.first().map(|effect| effect.number) else {
                 return false;
             };
-            scope
-                .effects
-                .remove_effect(None, number.max(0) as usize, true)
-                .is_some()
+            scope.effects.unlink_effect_by_number(number)
         });
         if !removed {
             break;
@@ -15052,8 +15049,8 @@ fn kill_effect_inline(
             })?;
         } else {
             with_context_mut(scope, |ctx| {
-                // Fx*Stop already ran above. Remove by effect number so a
-                // callback-added same-name peer cannot be deleted instead.
+                // Fx*Stop already ran above. Re-fold this exact dead node so
+                // callback EffectVar writes survive; Execute unlinks it.
                 ctx.remove_effect(None, stopped.number.max(0) as usize, true);
             })?;
         }
@@ -15260,8 +15257,8 @@ fn check_effect_with_policy(
             } else {
                 with_context_mut(scope, |ctx| {
                     // The Stop callback already ran synchronously above.
-                    // Fold only the identity-keyed deletion, never another
-                    // deferred Stop dispatch.
+                    // Persist the exact dead acceptor; the next Execute
+                    // unlinks it without another Stop dispatch.
                     ctx.remove_effect(None, acceptor.number as usize, true);
                 })?;
             }
@@ -20444,11 +20441,17 @@ fn extinguish_target(target: ObjectId) -> Result<bool, RuntimeError> {
         let mut killed = 0usize;
         loop {
             let name = scope.effects.effects.iter().find_map(|effect| {
-                (effect.name.contains("Fire") && !effect.name.starts_with("Int"))
+                (effect.priority != 0
+                    && effect.name.contains("Fire")
+                    && !effect.name.starts_with("Int"))
                     .then(|| effect.name.clone())
             });
             let Some(name) = name else { break };
-            if scope.effects.remove_effect(Some(&name), 0, false).is_none() {
+            if scope
+                .effects
+                .remove_live_effect(Some(&name), 0, false)
+                .is_none()
+            {
                 break;
             }
             if name == crate::C4FX_FIRE && engine_fire_stop {
@@ -39454,9 +39457,9 @@ impl EffectScopeContext {
         true
     }
 
-    /// Keeps the dead node in the live VM copy so later AddEffect calls in
-    /// the same script cannot reuse its number. The deferred command fold
-    /// removes it without a Stop callback.
+    /// Keeps the dead node linked so later AddEffect calls cannot reuse its
+    /// number before the list's next Execute cleanup. C++ leaves a
+    /// start-denied constructor node at priority zero too.
     fn discard_reserved_effect(&mut self, number: i32) -> bool {
         let Some(effect) = self
             .effects
@@ -39466,8 +39469,7 @@ impl EffectScopeContext {
             return false;
         };
         effect.priority = 0;
-        self.commands
-            .push(EffectCommand::remove_number(number, true));
+        self.commands.push(EffectCommand::update(effect.clone()));
         true
     }
 
@@ -39482,7 +39484,7 @@ impl EffectScopeContext {
         };
         self.effects.remove(position);
         self.commands
-            .push(EffectCommand::remove_number(number, true));
+            .push(EffectCommand::unlink_number(number));
         true
     }
 
@@ -39629,7 +39631,12 @@ impl EffectScopeContext {
     ) -> Option<EffectState> {
         let position = self.effect_position(name_filter, index, include_dead)?;
 
-        let effect = self.effects.remove(position);
+        // SetDead only clears iPriority. The node, its number, and its vars
+        // remain addressable through include-dead lookups until the next
+        // C4Effect::Execute walk unlinks it (C4Effect.cpp:326-336,389).
+        let effect = &mut self.effects[position];
+        effect.priority = 0;
+        let effect = effect.clone();
         let command = if name_filter.is_none() {
             EffectCommand::remove_number(effect.number, no_callbacks)
         } else if no_callbacks {
@@ -39639,6 +39646,19 @@ impl EffectScopeContext {
         };
         self.commands.push(command);
         Some(effect)
+    }
+
+    fn unlink_effect_by_number(&mut self, number: i32) -> bool {
+        let Some(position) = self
+            .effects
+            .iter()
+            .position(|effect| effect.number == number)
+        else {
+            return false;
+        };
+        self.effects.remove(position);
+        self.commands.push(EffectCommand::unlink_number(number));
+        true
     }
 
     /// `C4Effect::ClearPointers` (C4Effect.cpp): losing the live object

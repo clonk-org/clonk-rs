@@ -139,11 +139,16 @@ func FxStartDeniedStop() { ++iDeniedStops; }
         denied
             .effects
             .iter()
+            .filter(|effect| effect.priority != 0)
             .map(|effect| effect.name.as_str())
             .collect::<Vec<_>>(),
         vec!["Guard", "Upper"],
         "the denied pending effect never becomes live"
     );
+    assert!(denied
+        .effects
+        .iter()
+        .any(|effect| effect.name == "Denied" && effect.priority == 0));
     assert_eq!(denied.local_vars.get("iChecks"), Some(&Value::Int(1)));
     assert_eq!(denied.local_vars.get("iDenyExact"), Some(&Value::Int(1)));
 
@@ -230,8 +235,8 @@ func FxStartDeniedStop() { ++iDeniedStops; }
         start_denied
             .effects
             .iter()
-            .all(|effect| effect.name != "StartDenied"),
-        "C4Fx_Start_Deny leaves no validated effect"
+            .any(|effect| effect.name == "StartDenied" && effect.priority == 0),
+        "C4Fx_Start_Deny leaves the unvalidated node linked dead"
     );
     assert_eq!(
         start_denied.local_vars.get("iDeniedStops"),
