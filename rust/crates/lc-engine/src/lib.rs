@@ -354,6 +354,20 @@ pub const VIS_GOD: i32 = 32;
 pub const VIS_LAYER_TOGGLE: i32 = 64;
 pub const VIS_OVERLAY_ONLY: i32 = 128;
 
+/// `BoundBy(value, 0, maximum)` as used by `C4Object::DoEnergy`.
+///
+/// The C++ helper compares the lower bound first and does not normalize an
+/// inverted range, so keep the branches explicit instead of using `clamp`.
+pub(crate) fn bound_energy(value: i32, maximum: i32) -> i32 {
+    if value < 0 {
+        0
+    } else if value > maximum {
+        maximum
+    } else {
+        value
+    }
+}
+
 /// Active process-global `LoadResStr` entries used by
 /// C4Object::GetNeededMatStr. Headless engines default to the shipped US
 /// text; the app overwrites these from its frozen installed language table.
@@ -37105,9 +37119,9 @@ impl Engine {
     /// then clamp between zero and the physical Energy ceiling (scaled from
     /// the 0..C4MaxPhysical range to percent points), track the last
     /// energy-loss cause (C4Object.cpp:1353), and assign death when an alive
-    /// object's energy first reaches zero (C4Object.cpp:1363). Zero-physical
-    /// definitions keep the unclamped legacy ceiling so physical-less
-    /// fixtures behave as before.
+    /// object's energy first reaches zero (C4Object.cpp:1363). A definition
+    /// without Physical Energy has a zero ceiling and therefore clamps to
+    /// zero as well.
     /// Engine-side `C4Object::DoEnergy` with fExact=false — every engine
     /// caller passes percent (fire/hit/asphyxiation/corrosion,
     /// C4Object.cpp:782/904/928, C4GameObjects.cpp:174): the change scales
@@ -37163,11 +37177,8 @@ impl Engine {
         let was_zero = {
             let object = &mut self.objects[idx];
             let was_zero = object.state.energy == 0;
-            let mut energy = object.state.energy.saturating_add(change).max(0);
-            if max_energy > 0 {
-                energy = energy.min(max_energy);
-            }
-            object.state.energy = energy;
+            object.state.energy =
+                bound_energy(object.state.energy.saturating_add(change), max_energy);
             was_zero
         };
         if self.objects[idx].state.alive && self.objects[idx].state.energy == 0 && !was_zero {

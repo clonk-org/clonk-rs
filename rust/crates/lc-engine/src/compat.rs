@@ -41342,20 +41342,16 @@ impl ObjectScopeContext {
 
     /// `C4Object::DoEnergy` (C4Object.cpp:1345-1364): percent scale unless
     /// fExact (`iChange *= C4MaxPhysical/100`), clamped to
-    /// 0..GetPhysical()->Energy. Physical-less fixture defs (energy 0)
-    /// keep the raw value unclamped — real content always carries a
-    /// [Physical] Energy.
+    /// 0..GetPhysical()->Energy, including a zero ceiling when the
+    /// definition has no Physical Energy.
     fn adjust_energy(&mut self, delta: i32, exact: bool) -> i32 {
         let delta = if exact {
             delta
         } else {
             delta.saturating_mul(LEGACY_MAX_PHYSICAL / 100)
         };
-        let mut next = self.energy().saturating_add(delta).max(0);
         let max_energy = self.resolved_physical(false).energy;
-        if max_energy > 0 {
-            next = next.min(max_energy);
-        }
+        let next = crate::bound_energy(self.energy().saturating_add(delta), max_energy);
         self.set_energy(next);
         next
     }
@@ -42983,6 +42979,42 @@ mod tests {
         F: FnOnce() -> Result<T, RuntimeError>,
     {
         with_object_host_context_with_world(HostWorldContext::default(), func)
+    }
+
+    fn object_host_context_with_physical_energy(
+        energy: i32,
+        maximum: i32,
+    ) -> HostObjectContext<'static> {
+        HostObjectContext::new(
+            ObjectId::new(1),
+            None,
+            ObjectStatus::Normal,
+            energy,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        )
+        .with_physicals(
+            None,
+            None,
+            Vec::new(),
+            PhysicalInfo {
+                energy: maximum,
+                ..PhysicalInfo::default()
+            },
+        )
     }
 
     fn with_object_host_context_actions<F, T>(
@@ -58169,9 +58201,8 @@ public func Probe(object carrier)
     #[test]
     fn do_energy_applies_delta_and_clamps() {
         // The harness object carries 100 raw energy and NO physical:
-        // DoEnergy(-25) = -25% = -25000 raw (C4Object.cpp:1347), floored
-        // at 0; the upper clamp needs GetPhysical()->Energy (the
-        // physical-less fixture keeps raw growth unclamped, documented).
+        // DoEnergy(-25) = -25% = -25000 raw (C4Object.cpp:1347), and its
+        // missing Physical Energy gives both changes a zero upper bound.
         let (result, outcome) = with_object_host_context(|| do_energy(&[Value::Int(-25)]));
         let value = result.expect("DoEnergy returns bool");
         assert_eq!(value, Value::Bool(true));
@@ -58182,7 +58213,7 @@ public func Probe(object carrier)
         let value = result.expect("DoEnergy returns bool");
         assert_eq!(value, Value::Bool(true));
         let update = outcome.object_update.expect("energy update recorded");
-        assert_eq!(update.energy, Some(50_100));
+        assert_eq!(update.energy, Some(0));
     }
 
     #[test]
@@ -58225,7 +58256,16 @@ public func Probe(object carrier)
     #[test]
     fn do_energy_accepts_exact_flag() {
         let args = [Value::Int(0), Value::Nil, Value::Bool(true)];
-        let (result, outcome) = with_object_host_context(|| do_energy(&args));
+        let (result, outcome) = with_effect_context(
+            Some(object_host_context_with_physical_energy(
+                DEFAULT_MAX_ENERGY,
+                DEFAULT_MAX_ENERGY,
+            )),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || do_energy(&args),
+        );
         let value = result.expect("DoEnergy returns bool");
         assert_eq!(value, Value::Bool(true));
         assert!(outcome
@@ -64048,24 +64088,34 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             let expected = expected_energy_after_sequence(start_energy, &deltas);
 
             let sequence = deltas.clone();
-            let (result, outcome) = with_object_host_context(move || {
-                for delta in sequence.iter().copied() {
-                    let value = do_energy(&[Value::Int(delta)])?;
-                    match value {
-                        Value::Bool(true) => {}
-                        Value::Bool(false) => {
-                            return Err(RuntimeError::new("DoEnergy rejected update"));
-                        }
-                        other => {
-                            return Err(RuntimeError::new(format!(
-                                "DoEnergy returned unexpected value: {}",
-                                other.type_name()
-                            )));
+            let object = object_host_context_with_physical_energy(
+                start_energy,
+                DEFAULT_MAX_ENERGY,
+            );
+            let (result, outcome) = with_effect_context(
+                Some(object),
+                &[],
+                HostWorldContext::default(),
+                1,
+                move || {
+                    for delta in sequence.iter().copied() {
+                        let value = do_energy(&[Value::Int(delta)])?;
+                        match value {
+                            Value::Bool(true) => {}
+                            Value::Bool(false) => {
+                                return Err(RuntimeError::new("DoEnergy rejected update"));
+                            }
+                            other => {
+                                return Err(RuntimeError::new(format!(
+                                    "DoEnergy returned unexpected value: {}",
+                                    other.type_name()
+                                )));
+                            }
                         }
                     }
-                }
-                Ok(Value::Nil)
-            });
+                    Ok(Value::Nil)
+                },
+            );
 
             prop_assert!(result.is_ok());
 
@@ -64079,15 +64129,15 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     }
 
     // C4Object::DoEnergy model (C4Object.cpp:1345-1364): percent deltas
-    // scale by C4MaxPhysical/100; the harness object has no physical, so
-    // only the zero floor applies (real content always clamps to
-    // GetPhysical()->Energy).
+    // scale by C4MaxPhysical/100 and each change clamps to the fixture's
+    // explicit Physical Energy ceiling.
     fn expected_energy_after_sequence(start: i32, deltas: &[i32]) -> i32 {
         let mut energy = start;
         for &delta in deltas {
-            energy = energy
-                .saturating_add(delta.saturating_mul(LEGACY_MAX_PHYSICAL / 100))
-                .max(0);
+            energy = crate::bound_energy(
+                energy.saturating_add(delta.saturating_mul(LEGACY_MAX_PHYSICAL / 100)),
+                DEFAULT_MAX_ENERGY,
+            );
         }
         energy
     }

@@ -1177,6 +1177,10 @@ mod tests {
         let mut engine = Engine::with_seed(40);
         let mut victim_def = simple_definition("Clonk");
         victim_def.set_mass(100);
+        victim_def.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
         // Hit victims are livings: the Hit branch needs OCF_Alive, which
         // needs Category & C4D_Living (SetOCF, C4Object.cpp:600-605).
         victim_def.set_category(CATEGORY_LIVING);
@@ -1234,6 +1238,10 @@ mod tests {
         let mut victim_def = simple_definition("Clonk");
         victim_def.set_category(CATEGORY_LIVING);
         victim_def.set_mass(100);
+        victim_def.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
         engine.register_definition(victim_def)?;
         let mut rock_def = simple_definition("Rock");
         rock_def.set_category(CATEGORY_OBJECT);
@@ -1294,6 +1302,10 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
         victim_def.set_c4_callback_convention(true);
         victim_def.set_category(CATEGORY_LIVING);
         victim_def.set_mass(100);
+        victim_def.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
         victim_def.configure_actions(
             Some("Walk".to_string()),
             HashMap::from([
@@ -1368,6 +1380,10 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
         let mut victim_def = simple_definition("CLNK");
         victim_def.set_category(CATEGORY_LIVING);
         victim_def.set_mass(100);
+        victim_def.set_physical(PhysicalInfo {
+            energy: 1_000,
+            ..PhysicalInfo::default()
+        });
         engine.register_definition(victim_def)?;
         let mut rock_def = simple_definition("ROCK");
         rock_def.set_category(CATEGORY_OBJECT);
@@ -1423,6 +1439,10 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
             "#,
         )?;
         clonk_def.set_crew_member(true);
+        clonk_def.set_physical(PhysicalInfo {
+            energy: 5_000,
+            ..PhysicalInfo::default()
+        });
         let mut specs = HashMap::new();
         specs.insert("Idle".to_string(), ActionSpec::default());
         specs.insert("Dead".to_string(), ActionSpec::default());
@@ -3324,7 +3344,12 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
         let water = materials.id_of("Water").expect("water exists");
         let mut engine = Engine::with_seed(31);
         engine.set_materials(materials);
-        engine.register_definition(simple_definition("Hut"))?;
+        let mut hut_definition = simple_definition("Hut");
+        hut_definition.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
+        engine.register_definition(hut_definition)?;
         let hut =
             engine.spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(10, 10)))?;
         let idx = engine.find_object_index(hut).expect("hut exists");
@@ -3549,9 +3574,17 @@ func FxFireTimer(pObj, iNumber, iTime)
         let mut native_definition =
             Definition::from_script("NTMR", "Native timer", native_script)?;
         native_definition.set_fire_properties(0, true, false);
+        native_definition.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
         let mut inherited_definition =
             Definition::from_script("ITMR", "Inherited timer", inherited_script)?;
         inherited_definition.set_fire_properties(0, true, false);
+        inherited_definition.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
 
         let mut engine = Engine::with_seed(44);
         engine.register_player(PlayerConfig::new(5, "Object controller"))?;
@@ -4258,7 +4291,12 @@ func Incineration(iCause) { return 1; }
         let mut engine = Engine::with_seed(71);
         engine.set_materials(materials);
         engine.set_landscape(Landscape::flat_with_material(40, 30, Some(earth)));
-        engine.register_definition(simple_definition("Hut"))?;
+        let mut hut_definition = simple_definition("Hut");
+        hut_definition.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+        engine.register_definition(hut_definition)?;
         // in open air: the Tick5 background-material block never fires
         let hut = engine.spawn_object(
             SpawnConfig::new("Hut")
@@ -4792,6 +4830,10 @@ func CatchBlow(level, by)
         let mut victim = Definition::from_script("Victim", "Victim", victim_script)?;
         victim.set_category(CATEGORY_LIVING);
         victim.set_mass(100);
+        victim.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
         victim.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
         engine.register_definition(victim)?;
         let mut rock = simple_definition("Rock");
@@ -17098,11 +17140,15 @@ func Trigger() {
         global func RunEngineFn() { return Call("GetWind"); }
         "#;
 
+        let mut definition =
+            Definition::from_script("CLLR", "Caller", script).expect("script compiles");
+        definition.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
         let mut engine = Engine::with_seed(7);
         engine
-            .register_definition(
-                Definition::from_script("CLLR", "Caller", script).expect("script compiles"),
-            )
+            .register_definition(definition)
             .expect("definition registers");
         let id = engine
             .spawn_object(SpawnConfig::new("CLLR").with_energy(50))
@@ -23436,8 +23482,12 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
         }
         "#;
 
-        let definition =
+        let mut definition =
             Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(definition)
@@ -23487,15 +23537,16 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
             energy: 50_000,
             ..PhysicalInfo::default()
         });
-        let legacy_definition = Definition::from_script("Crate", "Crate", script).unwrap();
+        let zero_physical_definition =
+            Definition::from_script("Crate", "Crate", script).unwrap();
 
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(definition)
             .expect("definition registers");
         engine
-            .register_definition(legacy_definition)
-            .expect("legacy definition registers");
+            .register_definition(zero_physical_definition)
+            .expect("zero-physical definition registers");
 
         let clonk_id = engine
             .spawn_object(SpawnConfig::new("Clonk").with_energy(40_000))
@@ -23509,16 +23560,17 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
             "gain (+30% = +30000 raw) clamps to GetPhysical()->Energy"
         );
 
-        // Documented deviation: zero-physical fixture definitions keep the
-        // legacy unclamped ceiling instead of C++'s clamp-to-zero.
+        // C4PhysicalInfo::Default zeroes Energy. BoundBy applies that zero
+        // ceiling just like every positive one (C4Object.cpp:1388).
         let crate_id = engine
-            .spawn_object(SpawnConfig::new("Crate").with_energy(40))
+            .spawn_object(SpawnConfig::new("Crate"))
             .expect("crate spawns");
         let crate_idx = engine.find_object_index(crate_id).expect("crate exists");
+        assert_eq!(engine.objects[crate_idx].state.energy, 0);
         engine
             .change_object_energy(crate_idx, 30, C4FX_CALL_ENG_SCRIPT, -1)
             .expect("energy change succeeds");
-        assert_eq!(engine.objects[crate_idx].state.energy, 30_040);
+        assert_eq!(engine.objects[crate_idx].state.energy, 0);
     }
 
     #[test]
@@ -37105,6 +37157,10 @@ public func Death()
 "#;
         let mut live = Definition::from_script("HRSX", "Horse", live_script).expect("compiles");
         live.set_c4_callback_convention(true);
+        live.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
         live.configure_actions(
             None,
             HashMap::from([("Gallop".to_string(), ActionSpec::default().with_delay(1))]),
@@ -42473,8 +42529,13 @@ func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
                 Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
             )
             .expect("actor registers");
+        let mut victim_definition = simple_definition("VCTM");
+        victim_definition.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
         engine
-            .register_definition(simple_definition("VCTM"))
+            .register_definition(victim_definition)
             .expect("victim registers");
         let actor = engine
             .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
@@ -42513,8 +42574,13 @@ func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
                 Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
             )
             .expect("actor registers");
+        let mut victim_definition = simple_definition("VCTM");
+        victim_definition.set_physical(PhysicalInfo {
+            energy: 10_000,
+            ..PhysicalInfo::default()
+        });
         engine
-            .register_definition(simple_definition("VCTM"))
+            .register_definition(victim_definition)
             .expect("victim registers");
         let actor = engine
             .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
@@ -42556,8 +42622,13 @@ func Zap() { return BlastObject(12, FindObject(VCTM)); }
                 Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
             )
             .expect("actor registers");
+        let mut victim_definition = simple_definition("VCTM");
+        victim_definition.set_physical(PhysicalInfo {
+            energy: 10_000,
+            ..PhysicalInfo::default()
+        });
         engine
-            .register_definition(simple_definition("VCTM"))
+            .register_definition(victim_definition)
             .expect("victim registers");
         let actor = engine
             .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
@@ -42989,15 +43060,23 @@ func FxNullDamage(pTarget, iNumber, iChange, iCause, iCausePlr) { return(0); }
                 .expect("actor compiles"),
             )
             .expect("actor registers");
+        let mut warded_definition =
+            Definition::from_script("WARD", "Warded", warded_script).expect("warded compiles");
+        warded_definition.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
         engine
-            .register_definition(
-                Definition::from_script("WARD", "Warded", warded_script).expect("warded compiles"),
-            )
+            .register_definition(warded_definition)
             .expect("warded registers");
+        let mut nulled_definition =
+            Definition::from_script("NULD", "Nulled", nulled_script).expect("nulled compiles");
+        nulled_definition.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
         engine
-            .register_definition(
-                Definition::from_script("NULD", "Nulled", nulled_script).expect("nulled compiles"),
-            )
+            .register_definition(nulled_definition)
             .expect("nulled registers");
         let actor = engine
             .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
@@ -43083,8 +43162,13 @@ func ZapAs() { return DoEnergy(-10, FindObject(VCTM), 0, 0, 8); }
                 Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
             )
             .expect("actor registers");
+        let mut victim_definition = simple_definition("VCTM");
+        victim_definition.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
         engine
-            .register_definition(simple_definition("VCTM"))
+            .register_definition(victim_definition)
             .expect("victim registers");
         let actor = engine
             .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
@@ -43192,8 +43276,13 @@ func Hit() { return Punch(FindObject(VCTM), 5); }
                 Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
             )
             .expect("actor registers");
+        let mut victim_definition = simple_definition("VCTM");
+        victim_definition.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
         engine
-            .register_definition(simple_definition("VCTM"))
+            .register_definition(victim_definition)
             .expect("victim registers");
         let actor = engine
             .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
@@ -43232,8 +43321,13 @@ func Hit() { return Punch(FindObject(VCTM), 5); }
     #[test]
     fn update_last_energy_loss_cause_keeps_the_tracked_killer_like_cpp() {
         let mut engine = Engine::with_seed(19);
+        let mut victim_definition = simple_definition("VCTM");
+        victim_definition.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
         engine
-            .register_definition(simple_definition("VCTM"))
+            .register_definition(victim_definition)
             .expect("victim registers");
         let victim = engine
             .spawn_object(
@@ -45541,7 +45635,11 @@ func Probe(target) {
         }
         "#;
 
-        let host = Definition::from_script("HOST", "Host", host_script).unwrap();
+        let mut host = Definition::from_script("HOST", "Host", host_script).unwrap();
+        host.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
         let spell = Definition::from_script("SPEL", "Spell", spell_script).unwrap();
         let mut engine = Engine::with_seed(7);
         engine.register_definition(host).expect("host registers");
@@ -50480,6 +50578,10 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
             Definition::from_script("Mover", "Mover", script).expect("script compiles");
         mover_definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_RIGHT)]);
         mover_definition.set_contact_density(50);
+        mover_definition.set_physical(PhysicalInfo {
+            energy: 1_000_000,
+            ..PhysicalInfo::default()
+        });
 
         let mut engine = Engine::with_seed(63);
         engine.set_landscape(Landscape::flat(20, 20));
@@ -51565,7 +51667,12 @@ func FxChildWitnessStop(object target, int number, int reason) {
         // frame the now-deleted tombstone still receives fire Damage(+2)
         // and DoEnergy(-1) before the background tail (C4Object.cpp:776-806).
         let mut engine = Engine::with_seed(111);
-        engine.register_definition(simple_definition("BURN"))?;
+        let mut victim_definition = simple_definition("BURN");
+        victim_definition.set_physical(PhysicalInfo {
+            energy: 5_000,
+            ..PhysicalInfo::default()
+        });
+        engine.register_definition(victim_definition)?;
         let id = engine.spawn_object(
             SpawnConfig::new("BURN")
                 .with_construction(FULL_CON / 1000)
