@@ -4459,6 +4459,51 @@ mod tests {
     }
 
     #[test]
+    fn every_in_com_byte_survives_event_codec_and_network_dispatch() {
+        let controls = (1..=u8::MAX)
+            .map(|command| {
+                let event = lc_engine::interpret_player_control_command(i32::from(command))
+                    .unwrap_or_else(|| panic!("command {command} was dropped"));
+                let packet = control_packet_for_event(7, event, 3)
+                    .unwrap_or_else(|| panic!("command {command} was not encoded"));
+                assert_eq!(
+                    packet,
+                    lc_engine::ControlPacket::PlayerControl(PlayerControlData {
+                        player: 7,
+                        command: i32::from(command),
+                        data: 0,
+                        by_client: 3,
+                    }),
+                    "command {command}"
+                );
+                packet
+            })
+            .collect::<Vec<_>>();
+        let frame = LegacyControlFrame {
+            client_id: HOST_CLIENT_ID,
+            tick: 17,
+            timestamp_ms: 99,
+            controls,
+        };
+
+        let encoded = encode_control_packet(&frame).expect("encode every InCom byte");
+        let decoded = decode_control_packet(&encoded).expect("decode every InCom byte");
+        for (command, packet) in (1..=u8::MAX).zip(decoded.controls) {
+            let expected = PlayerControlData {
+                player: 7,
+                command: i32::from(command),
+                data: 0,
+                by_client: 3,
+            };
+            assert_eq!(
+                network_control_for_packet(packet),
+                Some(NetworkControl::PlayerControl(expected)),
+                "command {command}"
+            );
+        }
+    }
+
+    #[test]
     fn decoded_player_command_is_retained_for_scheduled_execution() {
         let command = PlayerCommandControlData {
             player: 7,

@@ -705,10 +705,19 @@ pub fn interpret_player_control_command(command: i32) -> Option<ControlEvent> {
     if command < 0 || command > u8::MAX as i32 {
         return None;
     }
-    let mut raw = command as u8;
+    if command == i32::from(COM_NONE) {
+        return None;
+    }
+    let original = command as u8;
+    let mut raw = original;
     if (COM_RELEASE_FIRST..=COM_RELEASE_LAST).contains(&raw) {
         let base = raw.saturating_sub(COM_RELEASE_OFFSET);
-        return interpret_base_command(base, CommandKind::Release);
+        return interpret_base_command(base, CommandKind::Release).or(Some(
+            ControlEvent::RawPlayerControl {
+                command: original,
+                data: 0,
+            },
+        ));
     }
     let mut kind = CommandKind::Press;
     if raw & COM_DOUBLE != 0 {
@@ -718,7 +727,19 @@ pub fn interpret_player_control_command(command: i32) -> Option<ControlEvent> {
         raw &= !COM_SINGLE;
         kind = CommandKind::Single;
     }
-    interpret_base_command(raw, kind)
+    let interpreted = interpret_base_command(raw, kind);
+    if matches!(raw, COM_LEFT | COM_RIGHT | COM_UP | COM_DOWN)
+        && matches!(kind, CommandKind::Single | CommandKind::Double)
+    {
+        return Some(ControlEvent::RawPlayerControl {
+            command: original,
+            data: 0,
+        });
+    }
+    interpreted.or(Some(ControlEvent::RawPlayerControl {
+        command: original,
+        data: 0,
+    }))
 }
 
 fn interpret_base_command(base: u8, kind: CommandKind) -> Option<ControlEvent> {
@@ -1742,11 +1763,92 @@ mod tests {
     }
 
     #[test]
-    fn ignores_unhandled_commands() {
+    fn preserves_untyped_and_lossy_commands_as_raw_bytes() {
+        for command in [
+            COM_CONTENTS,
+            COM_WHEEL_UP,
+            COM_WHEEL_DOWN,
+            COM_LEFT | COM_SINGLE,
+            COM_LEFT | COM_DOUBLE,
+        ] {
+            assert_eq!(
+                interpret_player_control_command(i32::from(command)),
+                Some(ControlEvent::RawPlayerControl { command, data: 0 })
+            );
+        }
+    }
+
+    #[test]
+    fn every_in_com_byte_round_trips_through_the_interpreter() {
+        fn button_code(button: ControlButton) -> u8 {
+            match button {
+                ControlButton::Left => COM_LEFT,
+                ControlButton::Right => COM_RIGHT,
+                ControlButton::Up => COM_UP,
+                ControlButton::Down => COM_DOWN,
+            }
+        }
+
+        fn command_code(command: ControlCommand) -> u8 {
+            match command {
+                ControlCommand::Throw => COM_THROW,
+                ControlCommand::Dig => COM_DIG,
+                ControlCommand::Special => COM_SPECIAL,
+                ControlCommand::Special2 => COM_SPECIAL2,
+                ControlCommand::CursorLeft => COM_CURSOR_LEFT,
+                ControlCommand::CursorRight => COM_CURSOR_RIGHT,
+                ControlCommand::CursorToggle => COM_CURSOR_TOGGLE,
+                ControlCommand::PlayerMenu => COM_PLAYER_MENU,
+                ControlCommand::MenuEnter => COM_MENU_ENTER,
+                ControlCommand::MenuEnterAll => COM_MENU_ENTER_ALL,
+                ControlCommand::MenuClose => COM_MENU_CLOSE,
+                ControlCommand::MenuShowText => COM_MENU_SHOW_TEXT,
+                ControlCommand::MenuLeft => COM_MENU_LEFT,
+                ControlCommand::MenuRight => COM_MENU_RIGHT,
+                ControlCommand::MenuUp => COM_MENU_UP,
+                ControlCommand::MenuDown => COM_MENU_DOWN,
+                ControlCommand::MenuSelect => COM_MENU_SELECT,
+            }
+        }
+
+        fn encoded(event: ControlEvent) -> u8 {
+            match event {
+                ControlEvent::Press(button) => button_code(button),
+                ControlEvent::Release(button) => button_code(button) + COM_RELEASE_OFFSET,
+                ControlEvent::Command { command, kind } => {
+                    let base = command_code(command);
+                    match kind {
+                        CommandKind::Press => base,
+                        CommandKind::Release => base + COM_RELEASE_OFFSET,
+                        CommandKind::Single => base | COM_SINGLE,
+                        CommandKind::Double => base | COM_DOUBLE,
+                    }
+                }
+                ControlEvent::RawPlayerControl { command, data } => {
+                    assert_eq!(data, 0);
+                    command
+                }
+                ControlEvent::ClearPressed => COM_CLEAR_PRESSED_COMS,
+            }
+        }
+
+        for command in 1..=u8::MAX {
+            let event = interpret_player_control_command(i32::from(command))
+                .unwrap_or_else(|| panic!("command {command} was dropped"));
+            assert_eq!(encoded(event), command, "command {command}");
+        }
+    }
+
+    #[test]
+    fn rejects_only_commands_outside_the_in_com_byte_domain() {
         assert!(interpret_player_control_command(999).is_none());
         assert!(interpret_player_control_command(-5).is_none());
-
-        // Unknown menu-like command remains ignored.
-        assert!(interpret_player_control_command(41).is_none());
+        assert_eq!(
+            interpret_player_control_command(41),
+            Some(ControlEvent::RawPlayerControl {
+                command: 41,
+                data: 0
+            })
+        );
     }
 }
