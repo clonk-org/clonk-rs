@@ -32643,6 +32643,90 @@ func FxProbeTimer(pThis, iNumber) {
     }
 
     #[test]
+    fn set_plr_view_range_matches_cpp_targets_clamp_and_persistence() -> Result<(), EngineError> {
+        // FnSetPlrViewRange defaults its object to the caller, clamps legacy
+        // positive ranges below 128 unless fExact is set, preserves negative
+        // values, and returns C4ValueInt success (C4Script.cpp:3681-3691).
+        // ObjectSnapshot::plr_view_range is the Rust engine's persisted FoW
+        // range projection; the broader visibility-map subsystem is separate.
+        let object_script = r#"#strict 2
+public func Probe(other) {
+  var clamped_ok = SetPlrViewRange(50);
+  var clamped = GetObjectVal("PlrViewRange", 0, this());
+  var exact_ok = SetPlrViewRange(50, other, true);
+  var exact = GetObjectVal("PlrViewRange", 0, other);
+  var negative_ok = SetPlrViewRange(-1);
+  var negative = GetObjectVal("PlrViewRange", 0, this());
+  return [clamped_ok, clamped, exact_ok, exact, negative_ok, negative];
+}
+"#;
+        let scenario_script = r#"#strict 2
+func Probe(target) {
+  var result = SetPlrViewRange(50);
+  if (result == 0 && GetType(result) == C4V_Int)
+    return SetPlrViewRange(66, target, true);
+  return SetPlrViewRange(77, target, true);
+}
+"#;
+
+        let mut engine = Engine::with_seed(23);
+        engine.register_definition(
+            Definition::from_script("VIEW", "View-range probe", object_script)
+                .expect("view-range probe compiles"),
+        )?;
+        let caller = engine.spawn_object(SpawnConfig::new("VIEW"))?;
+        let target = engine.spawn_object(SpawnConfig::new("VIEW"))?;
+
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        let result = engine.call_object_function(
+            caller_index,
+            "Probe",
+            vec![Value::Object(target.as_u64())],
+        )?;
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Int(128),
+                Value::Int(1),
+                Value::Int(50),
+                Value::Int(1),
+                Value::Int(-1),
+            ]),
+            "the host result and same-call PlrViewRange reflection match C++"
+        );
+
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.object(caller).map(|object| object.plr_view_range),
+            Some(-1)
+        );
+        assert_eq!(
+            snapshot.object(target).map(|object| object.plr_view_range),
+            Some(50)
+        );
+
+        engine.install_scenario_script_with_convention(
+            "Global view-range probe",
+            scenario_script,
+            true,
+        )?;
+        engine.call_scenario_script_function(
+            "Probe",
+            vec![Value::Object(target.as_u64())],
+        )?;
+        assert_eq!(
+            engine
+                .snapshot()
+                .object(target)
+                .map(|object| object.plr_view_range),
+            Some(66),
+            "a global call without an object returns integer 0 before the explicit-target write"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn global_effect_timer_kill_semantics_follow_cpp() {
         // C4Effect::Execute (C4Effect.cpp:342-357) with pObj=nullptr
         // (C4Game.cpp:831): an Fx*Timer returning C4Fx_Execute_Kill (-1,

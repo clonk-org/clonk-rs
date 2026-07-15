@@ -6332,20 +6332,20 @@ fn set_plr_view_range(args: &[Value]) -> Result<Value, RuntimeError> {
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
+            return Ok(Value::Int(0));
         };
         let target = target.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
-            return Ok(Value::Bool(false));
+            return Ok(Value::Int(0));
         };
         if !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
+            return Ok(Value::Int(0));
         }
         if let Some(scope) = context.object_scope_mut(target) {
             scope.set_plr_view_range(range);
-            Ok(Value::Bool(true))
+            Ok(Value::Int(1))
         } else {
-            Ok(Value::Bool(false))
+            Ok(Value::Int(0))
         }
     })
 }
