@@ -16400,6 +16400,20 @@ impl GameApp {
         Ok(())
     }
 
+    fn execute_player_control_failsafe(
+        &mut self,
+        owner: i32,
+        command: i32,
+        data: i32,
+    ) -> Result<(), EngineError> {
+        if let Err(err) = self.engine.execute_player_control(owner, command, data) {
+            let status = control_script_error_to_status(err)?;
+            tracing::error!(status, "control script error (non-fatal like C++)");
+            self.status_text = status;
+        }
+        Ok(())
+    }
+
     /// Menu commands on the key-input path share the control fail-safe:
     /// a script error inside a menu action logs, becomes a status line and
     /// counts as menu-consumed — C++ shows the error and keeps the session
@@ -24977,6 +24991,9 @@ impl GameApp {
                 NetworkControl::VoteEnd(result) => {
                     self.execute_league_vote_end(result);
                     Ok(())
+                }
+                NetworkControl::PlayerControl(data) => {
+                    self.execute_player_control_failsafe(data.player, data.command, data.data)
                 }
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
@@ -57235,6 +57252,31 @@ mod tests {
             app.status_text,
             "Network desync detected; disconnected from host"
         );
+    }
+
+    #[test]
+    fn synchronized_raw_player_control_counts_before_byte_narrowing() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+
+        app.apply_ready_controls(
+            12,
+            vec![NetworkControl::PlayerControl(
+                lc_engine::PlayerControlData {
+                    player: owner,
+                    // CountControl observes 273, while InCom receives its
+                    // narrowed byte (17, a release command).
+                    command: 273,
+                    data: 4,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("raw synchronized control executes");
+
+        let player = app.engine.player(owner).expect("local player remains");
+        assert_eq!((player.control_count(), player.action_count()), (1, 1));
+        assert_eq!(app.executing_ready_tick, None);
     }
 
     #[test]

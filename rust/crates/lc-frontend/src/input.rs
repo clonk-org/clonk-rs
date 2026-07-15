@@ -6,8 +6,9 @@ use lc_engine::{
     COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
 };
 
-/// Player input routing for the Rust frontend. All coms — object-directed
-/// AND cursor coms — run the engine's `C4Player::InCom` port
+/// Player input routing for the Rust frontend. All synchronized coms —
+/// object-directed AND cursor coms — run the engine's
+/// `C4ControlPlayerControl::Execute` + `C4Player::InCom` port
 /// (single/double synthesis, the cursor selection model and the full
 /// `C4Object::DirectCom` chain, C4Player.cpp:1490-1554 / 1235-1488 /
 /// C4Object.cpp:3327-3557). App-owned menus consume their commands before
@@ -31,24 +32,28 @@ impl InputDispatcher {
     ) -> Result<Option<CommandDirection>, EngineError> {
         match event {
             ControlEvent::Press(button) => {
-                engine.player_in_com(owner, button_com(button), 0)?;
+                engine.execute_player_control(owner, i32::from(button_com(button)), 0)?;
             }
             ControlEvent::Release(button) => {
-                engine.player_in_com(owner, button_com(button) + COM_RELEASE_OFFSET, 0)?;
+                engine.execute_player_control(
+                    owner,
+                    i32::from(button_com(button) + COM_RELEASE_OFFSET),
+                    0,
+                )?;
             }
             ControlEvent::ClearPressed => {
-                engine.player_in_com(owner, COM_CLEAR_PRESSED_COMS, 0)?;
+                engine.execute_player_control(owner, i32::from(COM_CLEAR_PRESSED_COMS), 0)?;
             }
             ControlEvent::Command { command, kind } => {
                 let handled = handle_command(engine, owner, command, kind)?;
                 if !handled {
                     if let Some(com) = command_com(command, kind) {
-                        engine.player_in_com(owner, com, 0)?;
+                        engine.execute_player_control(owner, i32::from(com), 0)?;
                     }
                 }
             }
             ControlEvent::RawPlayerControl { command, data } => {
-                engine.player_in_com(owner, command, data)?;
+                engine.execute_player_control(owner, i32::from(command), data)?;
             }
         }
         Ok(None)
@@ -127,15 +132,25 @@ fn handle_command(
                 _ => COM_CURSOR_TOGGLE,
             };
             match kind {
-                CommandKind::Press => engine.player_in_com(owner, base, 0)?,
-                CommandKind::Release => {
-                    engine.player_in_com(owner, base + COM_RELEASE_OFFSET, 0)?
+                CommandKind::Press => {
+                    engine.execute_player_control(owner, i32::from(base), 0)?
                 }
-                // App-side Single/Double synthesis would double-fire what
-                // InCom already synthesizes; pass the double through for
-                // callers that pre-detect it (network replay).
-                CommandKind::Double => engine.player_direct_com(owner, base | COM_DOUBLE, 0)?,
-                CommandKind::Single => {}
+                CommandKind::Release => {
+                    engine.execute_player_control(
+                        owner,
+                        i32::from(base + COM_RELEASE_OFFSET),
+                        0,
+                    )?
+                }
+                // Explicit pre-detected Single/Double events are already
+                // synchronized packet commands. Plain Press still lets
+                // InCom perform its own synthesis.
+                CommandKind::Double => {
+                    engine.execute_player_control(owner, i32::from(base | COM_DOUBLE), 0)?
+                }
+                CommandKind::Single => {
+                    engine.execute_player_control(owner, i32::from(base | COM_SINGLE), 0)?
+                }
             }
             return Ok(true);
         }
@@ -230,6 +245,12 @@ global func Step(state, frame, random) { return nil; }
             .command_direction;
         assert_eq!(crew, CommandDirection::Right);
         assert_eq!(engine.crew_cursor(1), Some(crew_id));
+        let player = engine.player(1).expect("player remains registered");
+        assert_eq!(
+            (player.control_count(), player.action_count()),
+            (1, 1),
+            "frontend input must pass through PlayerControl Execute"
+        );
         Ok(())
     }
 

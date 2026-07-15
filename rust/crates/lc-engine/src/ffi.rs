@@ -582,11 +582,11 @@ impl RuntimeHandle {
     }
 
     fn apply_player_control(&mut self, data: &PlayerControlData) -> Result<(), String> {
-        // C4ControlPlayerControl::Execute forwards the packet fields straight
-        // to C4Player::InCom (C4Control.cpp:386-395), including menu-only coms
-        // and iData. The int-to-byte cast matches C++'s parameter conversion.
+        // C4ControlPlayerControl::Execute counts non-release input first,
+        // then forwards the packet fields to C4Player::InCom
+        // (C4Control.cpp:386-395).
         self.engine
-            .player_in_com(data.player, data.command as u8, data.data)
+            .execute_player_control(data.player, data.command, data.data)
             .map_err(|error| error.to_string())
     }
 
@@ -1100,6 +1100,8 @@ unsafe fn make_snapshot(
             temporary_physical: None,
             physical_changes: Vec::new(),
             breath: 0,
+            // The current bridge ABI does not expose C4Object::PlrViewRange.
+            plr_view_range: 0,
             last_energy_loss_cause: crate::OWNER_NONE,
             fixed_position: optional_fixed_vec(
                 entry.fixed_position_x,
@@ -2078,6 +2080,8 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                         ControlPacket::ClientJoin(_) => "ClientJoin",
                         ControlPacket::ClientUpdate(_) => "ClientUpdate",
                         ControlPacket::ClientRemove(_) => "ClientRemove",
+                        ControlPacket::Vote(_) => "Vote",
+                        ControlPacket::VoteEnd(_) => "VoteEnd",
                         ControlPacket::Unknown { .. } => "Unknown",
                     })
                     .collect::<Vec<_>>(),
@@ -4712,6 +4716,28 @@ global func Step(state, frame, random)
             )
             .expect("install menu");
         (runtime, crew)
+    }
+
+    #[test]
+    fn player_control_count_ffi_packet_routes_through_count_control() {
+        let (mut runtime, _) = runtime_with_cursor_menu();
+        runtime.control_packets.insert(
+            1,
+            vec![ControlPacket::PlayerControl(PlayerControlData {
+                player: 0,
+                // Raw 273 is countable even though InCom narrows it to the
+                // release-range byte 17.
+                command: 273,
+                data: 4,
+                by_client: 0,
+            })],
+        );
+        runtime
+            .apply_control_packets_for_frame(1)
+            .expect("control applies");
+
+        let player = runtime.engine.player(0).expect("player exists");
+        assert_eq!((player.control_count(), player.action_count()), (1, 1));
     }
 
     #[test]

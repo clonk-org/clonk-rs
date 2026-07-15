@@ -18,6 +18,7 @@ use crate::control::{
     COM_WHEEL_DOWN, COM_WHEEL_UP, C4MN_ADJUST_POSITION,
 };
 use crate::math::{self, itofix};
+use crate::player::CountedControlType;
 use crate::{
     ocf, tolerate_script_error, C4Fixed, CommandDirection, Direction, Engine, EngineError,
     FixedVec2, Landscape, MouseDragSource, ObjectId, Value, Vector2, CATEGORY_MOUSE_SELECT,
@@ -254,6 +255,66 @@ fn mouse_has_throwing_position(
 }
 
 impl Engine {
+    /// `C4ControlPlayerControl::Execute` (C4Control.cpp:386-395): count the
+    /// original signed packet fields before the command is narrowed to the
+    /// byte consumed by `C4Player::InCom`.
+    #[doc(hidden)]
+    pub fn execute_player_control(
+        &mut self,
+        owner: i32,
+        command: i32,
+        data: i32,
+    ) -> Result<(), EngineError> {
+        if !self.players.contains_key(&owner) {
+            return Ok(());
+        }
+        if !(i32::from(COM_RELEASE_FIRST)..=i32::from(COM_RELEASE_LAST)).contains(&command) {
+            let id = command.wrapping_mul(10_000).wrapping_add(data);
+            self.count_player_control(owner, CountedControlType::DirectCom, id, 1);
+        }
+        self.player_in_com(owner, command as u8, data)
+    }
+
+    pub(crate) fn count_player_control(
+        &mut self,
+        owner: i32,
+        control_type: CountedControlType,
+        id: i32,
+        count: i32,
+    ) {
+        // CountControl observes the cursor before InCom may switch it.
+        let cursor = self.players.get(&owner).and_then(crate::Player::cursor);
+        let new_action = self
+            .players
+            .get_mut(&owner)
+            .is_some_and(|player| player.count_control(control_type, id, count));
+        if !new_action {
+            return;
+        }
+        let Some(cursor) = cursor.filter(|id| self.crew_object_infos.contains_key(id)) else {
+            return;
+        };
+        let Some(link) = self.crew_info_links.get(&cursor).copied() else {
+            return;
+        };
+        let control_count = self.crew_info_control_counts.entry(link).or_default();
+        *control_count = control_count.wrapping_add(1);
+        if *control_count % 5 == 0 {
+            self.adjust_object_info_experience(cursor, Some(link), 1);
+        }
+    }
+
+    #[doc(hidden)]
+    pub(crate) fn crew_info_control_count(&self, object: ObjectId) -> Option<i32> {
+        let link = self.crew_info_links.get(&object)?;
+        Some(
+            self.crew_info_control_counts
+                .get(link)
+                .copied()
+                .unwrap_or(0),
+        )
+    }
+
     /// `C4Player::InCom` (C4Player.cpp:1490-1554): pressed-com bookkeeping
     /// plus COM_Single/COM_Double synthesis around the LastCom buffer.
     pub fn player_in_com(&mut self, owner: i32, com: u8, data: i32) -> Result<(), EngineError> {
@@ -4706,10 +4767,10 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::{
-        ActionSpec, ActionState, Definition, MovementProfile, PhysicalInfo, PhysicsSettings,
-        PlayerConfig, SpawnConfig,
+        ActionSpec, ActionState, CrewInfoLink, CrewObjectInfo, Definition, MovementProfile,
+        PhysicalInfo, PhysicsSettings, PlayerConfig, SpawnConfig,
     };
-    use std::collections::HashMap;
+    use std::{collections::HashMap, rc::Rc};
 
     fn clonk_actions() -> HashMap<String, ActionSpec> {
         let mut actions = HashMap::new();
@@ -4759,6 +4820,205 @@ mod tests {
         engine.select_crew(owner, vec![crew]).expect("select");
         engine.set_crew_cursor(owner, Some(crew)).expect("cursor");
         crew
+    }
+
+    fn engine_with_counted_crew() -> (Engine, ObjectId, ObjectId) {
+        let mut engine = Engine::with_seed(0);
+        register_clonk(&mut engine, "Test", "");
+        engine
+            .register_player(PlayerConfig::new(0, "Test"))
+            .expect("player registers");
+        let spawn = |engine: &mut Engine| {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("Test")
+                        .with_owner(0)
+                        .with_crew_member(true)
+                        .with_action(ActionState::new("Walk")),
+                )
+                .expect("crew spawns")
+        };
+        let first = spawn(&mut engine);
+        let second = spawn(&mut engine);
+        engine.select_crew(0, [first, second]).expect("crew selected");
+        engine
+            .set_crew_cursor(0, Some(first))
+            .expect("first crew is cursor");
+
+        let roster_entry = |name: &str, experience: i32| crate::player_file::CrewInfo {
+            id: "Test".to_string(),
+            name: name.to_string(),
+            rank: 0,
+            experience,
+            death_count: 0,
+            total_playing_time: 0,
+            participation: 1,
+            in_action: true,
+            in_action_time: 0,
+            has_died: false,
+        };
+        engine.crew_rosters.insert(
+            0,
+            vec![roster_entry("First", 0), roster_entry("Second", 0)],
+        );
+        engine.crew_info_order.insert(0, vec![0, 1]);
+        for (object, roster_index, name, experience) in
+            [(first, 0, "First", 0), (second, 1, "Second", 0)]
+        {
+            Rc::make_mut(&mut engine.crew_object_infos).insert(
+                object,
+                CrewObjectInfo {
+                    definition_id: "Test".into(),
+                    name: name.to_string(),
+                    rank: 0,
+                    experience,
+                    death_count: 0,
+                },
+            );
+            Rc::make_mut(&mut engine.crew_info_links).insert(
+                object,
+                CrewInfoLink {
+                    player_id: 0,
+                    roster_index,
+                },
+            );
+            Rc::make_mut(&mut engine.crew_ranks).insert(object.as_u64(), 0);
+        }
+        (engine, first, second)
+    }
+
+    fn execute_player_controls(
+        engine: &mut Engine,
+        controls: impl IntoIterator<Item = (i32, i32)>,
+    ) {
+        for (command, data) in controls {
+            engine
+                .execute_player_control(0, command, data)
+                .expect("player control executes");
+        }
+    }
+
+    #[test]
+    fn player_control_count_replay_awards_the_pre_in_com_cursor() {
+        let (mut engine, first, second) = engine_with_counted_crew();
+        let mut controls = (0..4)
+            .map(|data| (i32::from(COM_THROW), data))
+            .collect::<Vec<_>>();
+        controls.push((i32::from(COM_CURSOR_RIGHT), 0));
+        execute_player_controls(&mut engine, controls);
+
+        let player = engine.player(0).expect("player exists");
+        assert_eq!((player.control_count(), player.action_count()), (5, 5));
+        assert_eq!(engine.crew_info_control_count(first), Some(5));
+        assert_eq!(engine.crew_info_control_count(second), Some(0));
+        assert_eq!(engine.crew_cursor(0), Some(second));
+
+        let first_info = engine.crew_object_info(first).expect("first crew has info");
+        assert_eq!((first_info.experience, first_info.rank), (1, 0));
+        assert_eq!(
+            (
+                engine.crew_rosters[&0][0].experience,
+                engine.crew_rosters[&0][0].rank,
+            ),
+            (1, 0),
+            "the persistent roster receives the same DoExperience result"
+        );
+        assert_eq!(engine.crew_object_info(second).unwrap().experience, 0);
+    }
+
+    #[test]
+    fn player_control_count_release_range_uses_the_raw_signed_command() {
+        let (mut engine, first, _) = engine_with_counted_crew();
+        execute_player_controls(&mut engine, (17..=30).map(|command| (command, command)));
+        let player = engine.player(0).expect("player exists");
+        assert_eq!((player.control_count(), player.action_count()), (0, 0));
+        assert_eq!(engine.crew_info_control_count(first), Some(0));
+        assert_eq!(engine.crew_object_info(first).unwrap().experience, 0);
+
+        execute_player_controls(
+            &mut engine,
+            [16, 31, 273, -1].into_iter().map(|command| (command, 0)),
+        );
+        let player = engine.player(0).expect("player exists");
+        assert_eq!((player.control_count(), player.action_count()), (4, 4));
+        assert_eq!(engine.crew_info_control_count(first), Some(4));
+    }
+
+    #[test]
+    fn player_control_count_deduplicates_the_computed_type_and_id_pair() {
+        let (mut engine, first, _) = engine_with_counted_crew();
+        execute_player_controls(
+            &mut engine,
+            [
+                (i32::from(COM_THROW), 7),
+                (21, 0),
+                (i32::from(COM_DOWN), 10_007),
+            ],
+        );
+
+        let player = engine.player(0).expect("player exists");
+        assert_eq!(
+            (player.control_count(), player.action_count()),
+            (2, 1),
+            "the release does not count or break the equal 50,007 checksum streak"
+        );
+        assert_eq!(engine.crew_info_control_count(first), Some(1));
+        assert_eq!(engine.crew_object_info(first).unwrap().experience, 0);
+    }
+
+    #[test]
+    fn player_control_count_deduplicates_by_control_type_and_id() {
+        let (mut engine, first, _) = engine_with_counted_crew();
+        engine.count_player_control(
+            0,
+            CountedControlType::DirectCom,
+            50_007,
+            1,
+        );
+        engine.count_player_control(0, CountedControlType::Command, 50_007, 1);
+        engine.count_player_control(0, CountedControlType::Command, 50_007, 1);
+
+        let player = engine.player(0).expect("player exists");
+        assert_eq!((player.control_count(), player.action_count()), (3, 2));
+        assert_eq!(engine.crew_info_control_count(first), Some(2));
+    }
+
+    #[test]
+    fn player_control_count_runs_at_the_packet_layer_not_inside_in_com() {
+        let (mut engine, first, _) = engine_with_counted_crew();
+        engine
+            .player_in_com(0, COM_THROW, 3)
+            .expect("direct InCom succeeds");
+        let player = engine.player(0).expect("player exists");
+        assert_eq!((player.control_count(), player.action_count()), (0, 0));
+        assert_eq!(engine.crew_info_control_count(first), Some(0));
+
+        execute_player_controls(&mut engine, [(i32::from(COM_THROW), 3)]);
+        let player = engine.player(0).expect("player exists");
+        assert_eq!((player.control_count(), player.action_count()), (1, 1));
+        assert_eq!(engine.crew_info_control_count(first), Some(1));
+    }
+
+    #[test]
+    fn player_control_count_resets_for_a_reused_player_number() {
+        let (mut engine, first, _) = engine_with_counted_crew();
+        execute_player_controls(&mut engine, [(i32::from(COM_THROW), 3)]);
+        assert_eq!(engine.crew_info_control_count(first), Some(1));
+
+        engine.remove_player(0).expect("old player leaves");
+        engine
+            .register_player(PlayerConfig::new(0, "Replacement"))
+            .expect("player number is reused");
+
+        let player = engine.player(0).expect("replacement exists");
+        assert_eq!((player.control_count(), player.action_count()), (0, 0));
+        assert!(
+            engine
+                .crew_info_control_counts
+                .keys()
+                .all(|link| link.player_id != 0),
+            "a new CrewInfoList cannot inherit runtime counters"
+        );
     }
 
     /// A collector clonk + a collectible item inside it, ready for the

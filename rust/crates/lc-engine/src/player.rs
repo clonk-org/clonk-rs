@@ -728,6 +728,12 @@ pub struct PlayerControlState {
     pub cursor_toggled: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CountedControlType {
+    Command,
+    DirectCom,
+}
+
 #[derive(Debug, Clone)]
 pub struct Player {
     id: i32,
@@ -808,6 +814,11 @@ pub struct Player {
     message_status: i32,
     message_buf: String,
     message_board_queries: Vec<MessageBoardQuery>,
+    /// Runtime-only C4Player control statistics. C++ resets these on player
+    /// initialization and omits them from C4Player::CompileFunc.
+    control_count: i32,
+    action_count: i32,
+    last_counted_control: Option<(CountedControlType, i32)>,
     /// Direct-com input state (C4Player.h:118-121).
     #[doc(hidden)] pub control: PlayerControlState,
     /// C4Player::ExtraData named slots (Fn[Set/Get]PlrExtraData).
@@ -882,6 +893,9 @@ impl Player {
             message_status: 0,
             message_buf: String::new(),
             message_board_queries: Vec::new(),
+            control_count: 0,
+            action_count: 0,
+            last_counted_control: None,
             control: PlayerControlState::default(),
             extra_data: Vec::new(),
         }
@@ -892,6 +906,32 @@ impl Player {
     /// `C4Player::ControlStyle` (C4Game.cpp:3578-3592).
     pub fn control_style(&self) -> bool {
         self.control.control_style
+    }
+
+    pub fn control_count(&self) -> i32 {
+        self.control_count
+    }
+
+    pub fn action_count(&self) -> i32 {
+        self.action_count
+    }
+
+    /// `C4Player::CountControl`'s player-statistics half. Returns whether
+    /// this `(type, id)` pair is a new action and should advance the cursor
+    /// crew's runtime C4ObjectInfo control count.
+    pub(crate) fn count_control(
+        &mut self,
+        control_type: CountedControlType,
+        id: i32,
+        count: i32,
+    ) -> bool {
+        self.control_count = self.control_count.wrapping_add(count);
+        if self.last_counted_control == Some((control_type, id)) {
+            return false;
+        }
+        self.last_counted_control = Some((control_type, id));
+        self.action_count = self.action_count.wrapping_add(count);
+        true
     }
 
     pub fn control_set(&self) -> i32 {
@@ -905,6 +945,9 @@ impl Player {
     pub(crate) fn set_runtime_control(&mut self, control_set: i32, mouse_control: i32) {
         self.control_set = control_set;
         self.mouse_control = mouse_control;
+        self.control_count = 0;
+        self.action_count = 0;
+        self.last_counted_control = None;
     }
 
     pub(crate) fn set_control_preferences(&mut self, pref_control: i32, pref_mouse: bool) {
@@ -1133,6 +1176,9 @@ impl Player {
             message_status: 0,
             message_buf: String::new(),
             message_board_queries: Vec::new(),
+            control_count: 0,
+            action_count: 0,
+            last_counted_control: None,
             control: PlayerControlState::default(),
             extra_data: Vec::new(),
         }
@@ -1318,6 +1364,9 @@ impl Player {
             message_status,
             message_buf: bounded_message_buf(message_buf),
             message_board_queries,
+            control_count: 0,
+            action_count: 0,
+            last_counted_control: None,
             control,
             extra_data,
         }

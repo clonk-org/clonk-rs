@@ -13017,6 +13017,9 @@ pub struct Engine {
     /// Owning C4Player::CrewInfoList for each live object-info pointer.
     /// This is independent of C4Object::Owner and crew-list membership.
     crew_info_links: Rc<HashMap<ObjectId, CrewInfoLink>>,
+    /// Runtime-only C4ObjectInfo::ControlCount, keyed by the stable roster
+    /// pointer identity so it follows an info reattached to another object.
+    crew_info_control_counts: HashMap<CrewInfoLink, i32>,
     team_home_base_rule: bool,
     needed_material_strings: Rc<NeededMaterialStrings>,
     construction_needs_material: bool,
@@ -14809,6 +14812,7 @@ impl Engine {
             crew_object_infos: Rc::new(HashMap::new()),
             crew_ranks: Rc::new(HashMap::new()),
             crew_info_links: Rc::new(HashMap::new()),
+            crew_info_control_counts: HashMap::new(),
             team_home_base_rule: false,
             needed_material_strings: Rc::new(NeededMaterialStrings::default()),
             construction_needs_material: false,
@@ -15469,6 +15473,10 @@ impl Engine {
         player.control.auto_context_menu = self
             .forced_auto_context_menu
             .unwrap_or(config.auto_context_menu);
+        // The new player's CrewInfoList owns fresh runtime-only control
+        // counters even when a departed player previously used this number.
+        self.crew_info_control_counts
+            .retain(|link, _| link.player_id != number);
         self.players.insert(number, player);
         self.recheck_runtime_team_memberships();
         if activates_auto_stop {
@@ -16643,6 +16651,10 @@ impl Engine {
         if self.players.contains_key(&id) {
             return Err(EngineError::PlayerAlreadyExists(id));
         }
+        // A new C4Player owns a fresh CrewInfoList runtime counter set even
+        // if this in-round player number was used by an earlier participant.
+        self.crew_info_control_counts
+            .retain(|link, _| link.player_id != id);
         let player_info_id = self.assign_player_info_id(config.player_info_id());
         let mut player = config.with_player_info_id(player_info_id).build();
         player.set_game_join_time(self.game_time);
@@ -25419,6 +25431,7 @@ impl Engine {
             .retain(|player_id, _| self.crew_rosters.contains_key(player_id));
         self.crew_object_infos = Rc::new(state.crew_object_infos.clone());
         self.crew_info_links = Rc::new(state.crew_info_links.clone());
+        self.crew_info_control_counts.clear();
         self.crew_ranks = Rc::new(
             state
                 .crew_object_infos
@@ -27140,6 +27153,51 @@ impl Engine {
         }
     }
 
+    fn adjust_object_info_experience(
+        &mut self,
+        object_id: ObjectId,
+        link: Option<CrewInfoLink>,
+        change: i32,
+    ) {
+        // The C4ObjectInfo belongs to the player's persistent CrewInfoList
+        // independently of the live object pointer. Apply there first so a
+        // later Retire/Grab in the same ordered stream retains the change.
+        let roster_values = link.and_then(|link| {
+            self.crew_rosters
+                .get_mut(&link.player_id)
+                .and_then(|roster| roster.get_mut(link.roster_index))
+                .map(|entry| {
+                    let mut info = CrewObjectInfo {
+                        definition_id: DefinitionId::from(entry.id.as_str()),
+                        name: entry.name.clone(),
+                        rank: entry.rank,
+                        experience: entry.experience,
+                        death_count: entry.death_count,
+                    };
+                    adjust_crew_experience(&mut info, change);
+                    entry.rank = info.rank;
+                    entry.experience = info.experience;
+                    (info.rank, info.experience)
+                })
+        });
+
+        let live_values = {
+            let infos = Rc::make_mut(&mut self.crew_object_infos);
+            infos.get_mut(&object_id).map(|info| {
+                if let Some((rank, experience)) = roster_values {
+                    info.rank = rank;
+                    info.experience = experience;
+                } else {
+                    adjust_crew_experience(info, change);
+                }
+                (info.rank, info.experience)
+            })
+        };
+        if let Some((rank, _)) = live_values.or(roster_values) {
+            Rc::make_mut(&mut self.crew_ranks).insert(object_id.as_u64(), rank);
+        }
+    }
+
     #[doc(hidden)]
     pub fn apply_player_commands(&mut self, commands: Vec<PlayerCommand>) -> Result<(), EngineError> {
         for command in commands {
@@ -27303,44 +27361,7 @@ impl Engine {
                     link,
                     change,
                 } => {
-                    // The C4ObjectInfo belongs to the player's persistent
-                    // CrewInfoList independently of the live object pointer.
-                    // Apply there first so a later Retire/Grab in this same
-                    // ordered command stream retains the changed values.
-                    let roster_values = link.and_then(|link| {
-                        self.crew_rosters
-                            .get_mut(&link.player_id)
-                            .and_then(|roster| roster.get_mut(link.roster_index))
-                            .map(|entry| {
-                                let mut info = CrewObjectInfo {
-                                    definition_id: DefinitionId::from(entry.id.as_str()),
-                                    name: entry.name.clone(),
-                                    rank: entry.rank,
-                                    experience: entry.experience,
-                                    death_count: entry.death_count,
-                                };
-                                adjust_crew_experience(&mut info, change);
-                                entry.rank = info.rank;
-                                entry.experience = info.experience;
-                                (info.rank, info.experience)
-                            })
-                    });
-
-                    let live_values = {
-                        let infos = Rc::make_mut(&mut self.crew_object_infos);
-                        infos.get_mut(&object_id).map(|info| {
-                            if let Some((rank, experience)) = roster_values {
-                                info.rank = rank;
-                                info.experience = experience;
-                            } else {
-                                adjust_crew_experience(info, change);
-                            }
-                            (info.rank, info.experience)
-                        })
-                    };
-                    if let Some((rank, _)) = live_values.or(roster_values) {
-                        Rc::make_mut(&mut self.crew_ranks).insert(object_id.as_u64(), rank);
-                    }
+                    self.adjust_object_info_experience(object_id, link, change);
                 }
                 PlayerCommand::AdjustHomeBaseMaterial {
                     player_id,

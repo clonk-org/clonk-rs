@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use lc_engine::{
-    interpret_player_control_command, CommandKind, ControlButton, ControlCommand, ControlEvent,
+    CommandKind, ControlButton, ControlCommand, ControlEvent,
     JoinPlayerControlData, PlayerControlData, PlayerInfoControlData, SyncCheckPacket,
     COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG,
     COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER,
@@ -696,6 +696,7 @@ pub enum NetworkControl {
     SurrenderPlayer(lc_engine::SurrenderPlayerControlData),
     Vote(lc_engine::VoteControlData),
     VoteEnd(lc_engine::VoteControlData),
+    PlayerControl(PlayerControlData),
     Player { owner: i32, event: ControlEvent },
     InitScenarioPlayer(lc_engine::InitScenarioPlayerControlData),
     Synchronize(lc_engine::SynchronizeControlData),
@@ -2320,11 +2321,9 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::ClientRemove(remove) => {
             Some(NetworkControl::ClientRemove(remove))
         }
-        lc_engine::ControlPacket::PlayerControl(data) => control_event_for_player_control(&data)
-            .map(|event| NetworkControl::Player {
-                owner: data.player,
-                event,
-            }),
+        // Keep the original signed fields through ordered execution. The
+        // C++ packet layer counts them before InCom narrows Command to a byte.
+        lc_engine::ControlPacket::PlayerControl(data) => Some(NetworkControl::PlayerControl(data)),
         lc_engine::ControlPacket::Synchronize(data) => Some(NetworkControl::Synchronize(data)),
         lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
         lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
@@ -2339,17 +2338,6 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::VoteEnd(result) => Some(NetworkControl::VoteEnd(result)),
         lc_engine::ControlPacket::Unknown { .. } => None,
     }
-}
-
-fn control_event_for_player_control(data: &PlayerControlData) -> Option<ControlEvent> {
-    if data.data != 0 {
-        let command = u8::try_from(data.command).ok()?;
-        return Some(ControlEvent::RawPlayerControl {
-            command,
-            data: data.data,
-        });
-    }
-    interpret_player_control_command(data.command)
 }
 
 fn control_packet_for_event(
@@ -3436,17 +3424,27 @@ mod tests {
             sync_clearance: true,
             by_client: 0,
         };
+        let right = PlayerControlData {
+            player: 4,
+            command: i32::from(COM_RIGHT),
+            data: 0,
+            by_client: 0,
+        };
+        let left = PlayerControlData {
+            player: 9,
+            command: i32::from(COM_LEFT),
+            data: 0,
+            by_client: 1,
+        };
         let frame = LegacyControlFrame {
             client_id: HOST_CLIENT_ID,
             tick: 17,
             timestamp_ms: 99,
             controls: vec![
-                control_packet_for_event(4, ControlEvent::Press(ControlButton::Right), 0)
-                    .expect("local control packet"),
+                lc_engine::ControlPacket::PlayerControl(right.clone()),
                 lc_engine::ControlPacket::Synchronize(synchronize.clone()),
                 lc_engine::ControlPacket::SyncCheck(check.clone()),
-                control_packet_for_event(9, ControlEvent::Press(ControlButton::Left), 1)
-                    .expect("remote control packet"),
+                lc_engine::ControlPacket::PlayerControl(left.clone()),
             ],
         };
         let (event_tx, event_rx) = mpsc::channel();
@@ -3459,16 +3457,10 @@ mod tests {
                 assert_eq!(
                     controls,
                     vec![
-                        NetworkControl::Player {
-                            owner: 4,
-                            event: ControlEvent::Press(ControlButton::Right),
-                        },
+                        NetworkControl::PlayerControl(right),
                         NetworkControl::Synchronize(synchronize),
                         NetworkControl::SyncCheck(check),
-                        NetworkControl::Player {
-                            owner: 9,
-                            event: ControlEvent::Press(ControlButton::Left),
-                        },
+                        NetworkControl::PlayerControl(left),
                     ],
                     "local, sync-check and remote controls stay in decoded order"
                 );
@@ -3524,15 +3516,19 @@ mod tests {
             by_client: 4,
             ..Default::default()
         };
-        let player = control_packet_for_event(7, ControlEvent::Press(ControlButton::Right), 4)
-            .expect("player control packet");
+        let player = PlayerControlData {
+            player: 7,
+            command: i32::from(COM_RIGHT),
+            data: 0,
+            by_client: 4,
+        };
         let frame = LegacyControlFrame {
             client_id: HOST_CLIENT_ID,
             tick: 23,
             timestamp_ms: 0,
             controls: vec![
                 lc_engine::ControlPacket::PlayerInfo(info.clone()),
-                player,
+                lc_engine::ControlPacket::PlayerControl(player.clone()),
                 lc_engine::ControlPacket::JoinPlayer(join.clone()),
             ],
         };
@@ -3549,10 +3545,7 @@ mod tests {
             controls,
             vec![
                 NetworkControl::PlayerInfo(info),
-                NetworkControl::Player {
-                    owner: 7,
-                    event: ControlEvent::Press(ControlButton::Right),
-                },
+                NetworkControl::PlayerControl(player),
                 NetworkControl::JoinPlayer(join),
             ]
         );
@@ -4227,12 +4220,21 @@ mod tests {
             lc_engine::ControlPacket::PlayerControl(expected.clone())
         );
         assert_eq!(
-            control_event_for_player_control(&expected),
-            Some(ControlEvent::RawPlayerControl {
-                command: COM_MENU_SELECT,
-                data,
-            }),
-            "remote peers must receive the same signed Data payload"
+            network_control_for_packet(lc_engine::ControlPacket::PlayerControl(expected.clone())),
+            Some(NetworkControl::PlayerControl(expected)),
+            "decoded execution must receive the same signed Data payload"
+        );
+
+        let raw = PlayerControlData {
+            player: 7,
+            command: 273,
+            data: 4,
+            by_client: 3,
+        };
+        assert_eq!(
+            network_control_for_packet(lc_engine::ControlPacket::PlayerControl(raw.clone())),
+            Some(NetworkControl::PlayerControl(raw)),
+            "decoded replay keeps the original signed command for CountControl"
         );
     }
 
