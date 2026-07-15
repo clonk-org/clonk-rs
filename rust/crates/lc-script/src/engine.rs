@@ -200,9 +200,9 @@ impl Script {
         &self.var_decls
     }
 
-    /// Errors quarantined during C4Aul-style declaration/function recovery.
-    /// The partial script is still executable; broken functions contain an
-    /// AB_ERR analogue and raise if execution reaches the bad suffix.
+    /// Warnings and errors retained during C4Aul-style parsing. Nonfatal
+    /// warnings leave their function executable; recovered errors add an
+    /// AB_ERR analogue that raises if execution reaches the bad suffix.
     pub fn parse_diagnostics(&self) -> &[ParseError] {
         &self.parse_diagnostics
     }

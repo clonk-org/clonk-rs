@@ -27,20 +27,20 @@ func Ok() { return 1; }
 }
 
 #[test]
-fn lexer_error_in_broken_function_does_not_swallow_the_next_function() {
+fn unknown_escape_warns_without_quarantining_the_function() {
     let script = Script::compile(
         r#"
 func Broken() { return "bad\q"; }
 func Ok() { return 1; }
 "#,
     )
-    .expect("the lexer error is quarantined to its function");
-    assert!(
-        script
-            .parse_diagnostics()
-            .iter()
-            .any(|error| error.message().contains("unknown escape sequence"))
+    .expect("an unknown escape warns without rejecting the script");
+    assert_eq!(
+        script.parse_diagnostics().len(),
+        1,
+        "one unknown escape produces one warning"
     );
+    assert_eq!(script.parse_diagnostics()[0].message(), "unknown escape: q");
 
     let mut engine = Engine::new();
     engine.add_script(script);
@@ -50,10 +50,12 @@ func Ok() { return 1; }
             .expect("the later function remains callable"),
         Value::Int(1)
     );
-    let error = engine
-        .call("Broken", &[])
-        .expect_err("the broken function retains the lexer error");
-    assert!(error.to_string().contains("parse error"));
+    assert_eq!(
+        engine
+            .call("Broken", &[])
+            .expect("the function with an unknown escape remains callable"),
+        Value::String(r"bad\q".into())
+    );
 }
 
 #[test]

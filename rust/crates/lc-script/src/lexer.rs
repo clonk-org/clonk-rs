@@ -1,6 +1,9 @@
 use crate::error::ParseError;
 use crate::token::{Keyword, Symbol, Token, TokenKind};
 
+// C4AUL_MAX_String (C4Aul.h): decoded string buffer bytes.
+const C4AUL_MAX_STRING: usize = 1024;
+
 pub struct Lexer<'a> {
     input: &'a str,
     chars: std::str::CharIndices<'a>,
@@ -8,6 +11,8 @@ pub struct Lexer<'a> {
     line: usize,
     column: usize,
     just_saw_cr: bool,
+    strict_level: u8,
+    diagnostics: Vec<ParseError>,
 }
 
 impl<'a> Lexer<'a> {
@@ -19,7 +24,17 @@ impl<'a> Lexer<'a> {
             line: 1,
             column: 1,
             just_saw_cr: false,
+            strict_level: 0,
+            diagnostics: Vec::new(),
         }
+    }
+
+    pub(crate) fn set_strict_level(&mut self, strict_level: u8) {
+        self.strict_level = strict_level;
+    }
+
+    pub(crate) fn take_diagnostics(&mut self) -> Vec<ParseError> {
+        std::mem::take(&mut self.diagnostics)
     }
 
     pub fn next_token(&mut self) -> Result<Token, ParseError> {
@@ -770,52 +785,80 @@ impl<'a> Lexer<'a> {
         column: usize,
     ) -> Result<Token, ParseError> {
         let mut value = String::new();
-        while let Some((_, ch, _, _)) = self.bump_char() {
+        let mut warned_too_long = false;
+        while let Some((_, ch, char_line, char_column)) = self.bump_char() {
             match ch {
                 '"' => {
                     return Ok(Token::new(TokenKind::String(value), line, column));
                 }
+                _ if value.len() >= C4AUL_MAX_STRING => {
+                    self.handle_string_overflow(&mut warned_too_long, char_line, char_column)?;
+                }
                 '\\' => {
-                    if let Some((_, escaped, _, _)) = self.bump_char() {
-                        match escaped {
-                            'n' => value.push('\n'),
-                            'r' => value.push('\r'),
-                            't' => value.push('\t'),
-                            '"' => value.push('"'),
-                            '\\' => value.push('\\'),
-                            other => {
-                                let error = ParseError::new(
-                                    format!("unknown escape sequence \\{other}"),
-                                    line,
-                                    column,
-                                );
-                                // Recovery must resume after this string's
-                                // closing quote. Returning immediately would
-                                // make that quote look like a new string and
-                                // could swallow every later declaration.
-                                self.skip_string_remainder();
-                                return Err(error);
-                            }
+                    match self.peek_char() {
+                        Some('"' | '\\') => {
+                            let (_, escaped, _, _) = self.bump_char().unwrap();
+                            value.push(escaped);
                         }
-                    } else {
-                        return Err(ParseError::new("unterminated string literal", line, column));
+                        Some(escaped) => {
+                            // C4Aul recognizes only quote and backslash. For
+                            // every other sequence it emits the backslash,
+                            // warns, and leaves the following character for
+                            // the ordinary next tokenizer iteration.
+                            value.push('\\');
+                            self.diagnostics.push(ParseError::new(
+                                format!("unknown escape: {escaped}"),
+                                char_line,
+                                char_column,
+                            ));
+                        }
+                        None => {
+                            return Err(ParseError::new(
+                                "unterminated string literal",
+                                line,
+                                column,
+                            ))
+                        }
                     }
                 }
-                other => value.push(other),
+                other if value.len() + other.len_utf8() <= C4AUL_MAX_STRING => {
+                    value.push(other);
+                }
+                _ => {
+                    // C++ counts raw bytes and can split a UTF-8 scalar at
+                    // the boundary. Rust strings cannot; retain whole scalars
+                    // while enforcing the same byte-length ceiling.
+                    self.handle_string_overflow(&mut warned_too_long, char_line, char_column)?;
+                }
             }
         }
         Err(ParseError::new("unterminated string literal", line, column))
     }
 
-    fn skip_string_remainder(&mut self) {
+    fn handle_string_overflow(
+        &mut self,
+        warned: &mut bool,
+        line: usize,
+        column: usize,
+    ) -> Result<(), ParseError> {
+        let error = ParseError::new("string too long", line, column);
+        if self.strict_level >= 3 {
+            // Once the C++ buffer is full, escape handling is bypassed: the
+            // first following quote closes the token even after a backslash.
+            self.skip_overlong_string_remainder();
+            return Err(error);
+        }
+        if !*warned {
+            self.diagnostics.push(error);
+            *warned = true;
+        }
+        Ok(())
+    }
+
+    fn skip_overlong_string_remainder(&mut self) {
         while let Some((_, ch, _, _)) = self.bump_char() {
-            match ch {
-                '"' => break,
-                '\\' => {
-                    // An escaped quote does not end the original string.
-                    self.bump_char();
-                }
-                _ => {}
+            if ch == '"' {
+                break;
             }
         }
     }

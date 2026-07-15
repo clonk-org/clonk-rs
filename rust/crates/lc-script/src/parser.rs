@@ -43,6 +43,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn with_strict_level(source: &'a str, strict_level: Option<u8>) -> Self {
         let mut parser = Self::new(source);
         parser.strict_level = strict_level.unwrap_or(0);
+        parser.lexer.set_strict_level(parser.strict_level);
         parser
     }
 
@@ -110,6 +111,8 @@ impl<'a> Parser<'a> {
                     "#strict" => {
                         // Default to level 1
                         let mut level = 1;
+                        self.strict_level = level;
+                        self.lexer.set_strict_level(level);
                         // Check if there's a number following
                         if let Ok(token) = self.peek() {
                             if let TokenKind::Number(n) = token.kind {
@@ -121,6 +124,7 @@ impl<'a> Parser<'a> {
                         }
                         strict_level = Some(level);
                         self.strict_level = level;
+                        self.lexer.set_strict_level(level);
                     }
                     _ => {
                         // Unknown directive, skip it
@@ -239,11 +243,13 @@ impl<'a> Parser<'a> {
                             // explicit level, so `#strict 4` retains level 1.
                             strict_level = Some(1);
                             self.strict_level = 1;
+                            self.lexer.set_strict_level(1);
                             if let Ok(token) = self.peek().cloned() {
                                 if let TokenKind::Number(level) = token.kind {
                                     if (1..=3).contains(&level) {
                                         strict_level = Some(level as u8);
                                         self.strict_level = level as u8;
+                                        self.lexer.set_strict_level(level as u8);
                                         self.next()?;
                                     } else {
                                         return Err(ParseError::new(
@@ -296,6 +302,8 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+
+        diagnostics.extend(self.lexer.take_diagnostics());
 
         (
             Script::with_directives(functions, var_decls, includes, appends, strict_level),
