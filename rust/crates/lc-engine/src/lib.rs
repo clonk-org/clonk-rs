@@ -31881,7 +31881,7 @@ impl Engine {
             txdir,
             math::val_by_physical(250, physical.push),
             false,
-        ) {
+        )? {
             self.reset_action_to_default(idx, definition_id, true);
             return Ok(false);
         }
@@ -32211,9 +32211,7 @@ impl Engine {
     /// `C4Object::Push` (C4Object.cpp:1758-1808): grab/containment checks,
     /// force scaled against the target mass, facing from the current motion,
     /// xdir worked toward the push speed (close-enough-set), straightening
-    /// for upright pushes. Still open: the pre-mobilization velocity zeroing
-    /// (no Mobile flag) and the Tick35 stuck check (contact + Stuck
-    /// callback + message).
+    /// for upright pushes, and the final Tick35 stuck probe.
     /// The LIVE object mass (C4Object::UpdateMass, C4Object.cpp:497-505):
     /// `max((Def->Mass + OwnMass) * Con / FullCon, 1)` plus the contents
     /// mass unless NoComponentMass (OwnMass is unmodeled — Objects.txt
@@ -32266,30 +32264,36 @@ impl Engine {
         txdir: C4Fixed,
         dforce: C4Fixed,
         straighten: bool,
-    ) -> bool {
+    ) -> Result<bool, EngineError> {
         {
             let target = &self.objects[target_idx];
             if target.destroyed
                 || !target.state.status.is_active()
                 || target.state.container.is_some()
             {
-                return false;
+                return Ok(false);
             }
         }
         if self.object_ocf_at_index(target_idx) & ocf::GRAB == 0 {
-            return false;
+            return Ok(false);
         }
         // dforce divides by the LIVE Mass incl. contents (C4Object::Push
         // C4Object.cpp:1770 uses this->Mass; UpdateMass :497-505).
         let live_mass = self.effective_object_mass(target_idx);
-        let (grab, mass) = self
+        let (grab, mass, no_horizontal_move) = self
             .definitions
             .get(&self.objects[target_idx].definition_id)
-            .map(|definition| (definition.grab(), live_mass))
-            .unwrap_or((0, 0));
+            .map(|definition| {
+                (
+                    definition.grab(),
+                    live_mass,
+                    definition.no_horizontal_move(),
+                )
+            })
+            .unwrap_or((0, 0, 0));
         // Grabbing okay, no pushing (C4Object.cpp:1763).
         if grab == 2 {
-            return true;
+            return Ok(true);
         }
         // General pushing force vs. object mass (C4Object.cpp:1770).
         let dforce = dforce * 100 / mass.max(1);
@@ -32353,7 +32357,67 @@ impl Engine {
             target.state.mobile = true;
         }
         target.refresh_velocity_from_fixed();
-        true
+
+        // Stuck check (C4Object.cpp:1801-1807): gate on the requested raw
+        // fixed speed, not on the velocity reached above. ContactCheck
+        // refreshes t_contact and runs directional Contact callbacks before
+        // the target message and fail-safe Stuck callback.
+        if self.frame % 35 == 0 && txdir.is_nonzero() && no_horizontal_move == 0 {
+            let target_id = self.objects[target_idx].id;
+            let definition_id = self.objects[target_idx].definition_id.clone();
+            let position = self.objects[target_idx].state.position;
+            let solid_mask_indices = self.active_solid_mask_indices();
+            let contacted = self
+                .object_contact_check_at(
+                    target_idx,
+                    &definition_id,
+                    position,
+                    &solid_mask_indices,
+                )?
+                .is_some_and(|contact| contact.is_contact());
+            if contacted {
+                if let Some(target_idx) = self.find_object_index(target_id).filter(|&index| {
+                    !self.objects[index].destroyed
+                        && self.objects[index].state.status != ObjectStatus::Deleted
+                }) {
+                    let object = &self.objects[target_idx];
+                    let name = object
+                        .state
+                        .custom_name
+                        .clone()
+                        .or_else(|| {
+                            self.crew_object_infos
+                                .get(&target_id)
+                                .map(|info| info.name.clone())
+                        })
+                        .or_else(|| {
+                            self.definitions
+                                .get(&object.definition_id)
+                                .map(|definition| definition.name().to_string())
+                        })
+                        .unwrap_or_else(|| object.definition_id.clone());
+                    self.messages.add_message(MessageSpec {
+                        kind: message::MessageKind::Target,
+                        text: format!("{name} is stuck!"),
+                        target: Some(target_id),
+                        player: None,
+                        offset: Vector2::ZERO,
+                        color: 0xffff_ffff,
+                        flags: 0,
+                        width: None,
+                        decoration: None,
+                        frame_decoration: None,
+                        portrait: None,
+                    });
+                    let _ = tolerate_script_error(self.call_object_function(
+                        target_idx,
+                        "Stuck",
+                        Vec::new(),
+                    ))?;
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// DFA_PUSH with a nonzero Walk physical (C4Object.cpp:5040-5097):
@@ -32386,7 +32450,7 @@ impl Engine {
             txdir,
             math::val_by_physical(250, physical.push),
             straighten,
-        ) {
+        )? {
             self.stop_action_delay_command(idx, definition_id)?;
             return Ok(false);
         }

@@ -19621,6 +19621,227 @@ protected func GrabLost()
         (engine, crate_id, ObjectId::new(0))
     }
 
+    fn stuck_push_fixture(
+        command_direction: CommandDirection,
+        horizontal_fix: i32,
+    ) -> (Engine, ObjectId, ObjectId) {
+        let mut pusher =
+            Definition::from_script("PSHR", "Pusher", "#strict").expect("pusher compiles");
+        pusher.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        pusher.set_physical(PhysicalInfo {
+            walk: 35_000,
+            push: 45_000,
+            ..PhysicalInfo::default()
+        });
+        pusher.configure_actions(
+            Some("Walk".to_owned()),
+            HashMap::from([
+                (
+                    "Walk".to_owned(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Push".to_owned(),
+                    ActionSpec::default()
+                        .with_procedure("PUSH")
+                        .with_delay(13)
+                        .with_length(20)
+                        .with_next("Push"),
+                ),
+            ]),
+        );
+
+        let vehicle_script = r#"#strict
+local stuck_calls;
+func Stuck()
+{
+    stuck_calls = stuck_calls + 1;
+    return 0;
+}
+"#;
+        let mut vehicle = Definition::from_script("VEHI", "Vehicle", vehicle_script)
+            .expect("vehicle compiles");
+        vehicle.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        vehicle.set_shape_vertices(vec![ObjectVertex::new(8, 0).with_cnat(CNAT_RIGHT)]);
+        vehicle.set_contact_density(50);
+        vehicle.set_grab(1);
+        vehicle.set_mass(200);
+        vehicle.set_no_horizontal_move(horizontal_fix);
+
+        let mut landscape = vehicle_grid_landscape(32, 32);
+        landscape.set_world_height(32);
+        // VEHI is centered at (8,10), so its CNAT_Right vertex probes here.
+        landscape.grid_write_byte(16, 10, 1);
+
+        let mut engine = Engine::with_seed(18);
+        engine.set_landscape(landscape);
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine.register_definition(pusher).expect("pusher registers");
+        engine
+            .register_definition(vehicle)
+            .expect("vehicle registers");
+
+        let vehicle_id = engine
+            .spawn_object(
+                SpawnConfig::new("VEHI")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(8, 10))
+                    .with_fixed_position(FixedVec2::from_ints(8, 10))
+                    .with_loaded(true),
+            )
+            .expect("vehicle spawns");
+        let mut push = ActionState::new("Push");
+        push.target = Some(vehicle_id);
+        let pusher_id = engine
+            .spawn_object(
+                SpawnConfig::new("PSHR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(8, 10))
+                    .with_fixed_position(FixedVec2::from_ints(8, 10))
+                    .with_action(push)
+                    .with_command_direction(command_direction)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("pusher spawns");
+
+        (engine, pusher_id, vehicle_id)
+    }
+
+    #[test]
+    fn push_tick35_refreshes_contact_and_reports_stuck() {
+        // C4Object::Push runs ContactCheck only on Tick35 while txdir is
+        // nonzero. ContactCheck replaces t_contact, then the stuck message
+        // and ~Stuck callback fire once (C4Object.cpp:1827-1832).
+        let (mut engine, pusher_id, vehicle_id) =
+            stuck_push_fixture(CommandDirection::Right, 0);
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
+        let vehicle_idx = engine
+            .find_object_index(vehicle_id)
+            .expect("vehicle exists");
+        engine.objects[vehicle_idx].frame_t_contact = CNAT_LEFT;
+
+        for frame in 1..=34 {
+            engine.frame = frame;
+            let _ = engine
+                .apply_physics_at_index(pusher_idx)
+                .expect("pre-Tick35 push succeeds");
+        }
+        assert_eq!(engine.objects[vehicle_idx].frame_t_contact, CNAT_LEFT);
+        assert_eq!(
+            engine.objects[vehicle_idx]
+                .state
+                .local_vars
+                .get("stuck_calls"),
+            None
+        );
+        assert!(engine.snapshot().hud.messages.is_empty());
+
+        engine.frame = 35;
+        let _ = engine
+            .apply_physics_at_index(pusher_idx)
+            .expect("Tick35 push succeeds");
+        assert_eq!(
+            engine.objects[vehicle_idx].frame_t_contact, CNAT_RIGHT,
+            "ContactCheck replaces the previous t_contact latch"
+        );
+        assert_eq!(
+            engine.objects[vehicle_idx]
+                .state
+                .local_vars
+                .get("stuck_calls"),
+            Some(&Value::Int(1))
+        );
+        let first_message = engine
+            .snapshot()
+            .hud
+            .messages
+            .into_iter()
+            .next()
+            .expect("Tick35 emits the stuck message");
+        assert_eq!(first_message.kind, MessageKind::Target);
+        assert_eq!(first_message.target, Some(vehicle_id));
+        assert_eq!(first_message.player, None);
+        assert_eq!(first_message.lines, vec!["Vehicle is stuck!"]);
+
+        for frame in 36..=69 {
+            engine.frame = frame;
+            let _ = engine
+                .apply_physics_at_index(pusher_idx)
+                .expect("between-boundary push succeeds");
+        }
+        assert_eq!(
+            engine.objects[vehicle_idx]
+                .state
+                .local_vars
+                .get("stuck_calls"),
+            Some(&Value::Int(1)),
+            "no second callback before the next Tick35"
+        );
+
+        engine.frame = 70;
+        let _ = engine
+            .apply_physics_at_index(pusher_idx)
+            .expect("second Tick35 push succeeds");
+        assert_eq!(
+            engine.objects[vehicle_idx]
+                .state
+                .local_vars
+                .get("stuck_calls"),
+            Some(&Value::Int(2)),
+            "a continuously stuck push calls Stuck once per 35 frames"
+        );
+        let messages = engine.snapshot().hud.messages;
+        assert_eq!(messages.len(), 1, "same-target messages replace each other");
+        assert_ne!(
+            messages[0].id, first_message.id,
+            "the Tick70 check emitted a fresh stuck message"
+        );
+    }
+
+    #[test]
+    fn push_tick35_stuck_check_honors_stop_and_horizontal_fix() {
+        // txdir==0 and Def->NoHorizontalMove both bypass ContactCheck,
+        // leaving t_contact untouched and producing neither notification.
+        for (label, command_direction, horizontal_fix) in [
+            ("stopped", CommandDirection::Stop, 0),
+            ("horizontal-fix", CommandDirection::Right, 1),
+        ] {
+            let (mut engine, pusher_id, vehicle_id) =
+                stuck_push_fixture(command_direction, horizontal_fix);
+            let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
+            let vehicle_idx = engine
+                .find_object_index(vehicle_id)
+                .expect("vehicle exists");
+            engine.objects[vehicle_idx].frame_t_contact = CNAT_LEFT;
+            engine.frame = 35;
+
+            let _ = engine
+                .apply_physics_at_index(pusher_idx)
+                .unwrap_or_else(|error| panic!("{label} push failed: {error}"));
+            assert_eq!(
+                engine.objects[vehicle_idx].frame_t_contact, CNAT_LEFT,
+                "{label}: skipped ContactCheck leaves t_contact untouched"
+            );
+            assert_eq!(
+                engine.objects[vehicle_idx]
+                    .state
+                    .local_vars
+                    .get("stuck_calls"),
+                None,
+                "{label}: Stuck is not called"
+            );
+            assert!(
+                engine.snapshot().hud.messages.is_empty(),
+                "{label}: no stuck message"
+            );
+        }
+    }
+
     #[test]
     fn push_procedure_uses_walk_and_push_physicals() {
         // DFA_PUSH (C4Object.cpp:5040-5097): the target is pushed via
