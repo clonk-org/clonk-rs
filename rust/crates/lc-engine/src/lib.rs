@@ -32230,6 +32230,18 @@ impl Engine {
         let Some(step_interval) = parameters.step_interval(command_direction) else {
             return Ok(true);
         };
+        // DoBridge overrides the action-data flag for vertical walls and
+        // diagonal roofs; only the wall-Up arm may move the Clonk
+        // (C4Object.cpp:4587-4592).
+        let move_clonk = parameters.move_clonk
+            && !(parameters.wall
+                && matches!(
+                    command_direction,
+                    CommandDirection::Left
+                        | CommandDirection::Right
+                        | CommandDirection::UpLeft
+                        | CommandDirection::UpRight
+                ));
 
         if step_interval == 0 || action_time % step_interval != 0 {
             return Ok(true);
@@ -32249,7 +32261,7 @@ impl Engine {
         let mut clonk_y = base_position.y;
         let mut target_x = base_position.x;
         let mut target_y = base_position.y + shape_height / 2;
-        let delta_time = if parameters.move_clonk {
+        let delta_time = if move_clonk {
             0
         } else {
             (action_time / step_interval) as i32
@@ -32269,7 +32281,7 @@ impl Engine {
                     target_y -= delta_time;
                 }
                 CommandDirection::Up => {
-                    let x0 = if parameters.move_clonk {
+                    let x0 = if move_clonk {
                         -3
                     } else {
                         (parameters.duration / step_interval) as i32 / -2
@@ -32300,22 +32312,22 @@ impl Engine {
                     clonk_x += 1;
                 }
                 CommandDirection::Up => {
-                    let stationary = i32::from(!parameters.move_clonk);
+                    let stationary = i32::from(!move_clonk);
                     target_x += (-shape_width / 2
                         + (shape_width - 1) * i32::from(facing == Direction::Right))
                         * stationary;
-                    target_y += -delta_time - i32::from(parameters.move_clonk);
+                    target_y += -delta_time - i32::from(move_clonk);
                     clonk_y -= 1;
                 }
                 CommandDirection::UpLeft => {
-                    target_x += -5 - delta_time + i32::from(parameters.move_clonk) * 3;
-                    target_y += 2 - delta_time - i32::from(parameters.move_clonk) * 3;
+                    target_x += -5 - delta_time + i32::from(move_clonk) * 3;
+                    target_y += 2 - delta_time - i32::from(move_clonk) * 3;
                     clonk_x -= 1;
                     clonk_y -= 1;
                 }
                 CommandDirection::UpRight => {
-                    target_x += 5 + delta_time - i32::from(parameters.move_clonk) * 2;
-                    target_y += 2 - delta_time - i32::from(parameters.move_clonk) * 3;
+                    target_x += 5 + delta_time - i32::from(move_clonk) * 2;
+                    target_y += 2 - delta_time - i32::from(move_clonk) * 3;
                     clonk_x += 1;
                     clonk_y -= 1;
                 }
@@ -32326,7 +32338,7 @@ impl Engine {
         // Shape.CheckContact(cx, cy-1) runs before drawing. A blocked moving
         // bridge rewrites the remaining bridge as stationary and immediately
         // retries at Action.Time 0 (C4Object.cpp:4631-4646).
-        if parameters.move_clonk
+        if move_clonk
             && self.object_shape_contacts_at(idx, Vector2::new(clonk_x, clonk_y - 1))
         {
             let mut remaining = parameters.duration.saturating_sub(action_time);
@@ -32350,7 +32362,7 @@ impl Engine {
             self.draw_material_rect(material, target_x - 2, target_y, 4, 3);
         }
 
-        if parameters.move_clonk {
+        if move_clonk {
             // C4Object::MovePosition removes/re-puts the solid mask with rider
             // backup, adds integer deltas to the true fixed coordinates, and
             // updates sectors (C4Movement.cpp:547-556).

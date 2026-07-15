@@ -10520,6 +10520,150 @@ func LiftTop()
         assert_eq!(object.velocity, Vector2::ZERO);
     }
 
+    fn wall_bridge_test_engine(blocker: Option<(usize, usize)>) -> (Engine, MaterialId) {
+        let mut definition =
+            Definition::from_script("Bridger", "Bridger", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        definition.set_shape_rect(Some(DefinitionRect::new(-5, -10, 10, 20)));
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+        definition.set_contact_density(50);
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Bridge".to_string(),
+                    ActionSpec::default().with_procedure("bridge"),
+                ),
+            ]),
+        );
+
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+            "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut bytes = vec![0; 160 * 160];
+        if let Some((x, y)) = blocker {
+            bytes[y * 160 + x] = 1;
+        }
+        let grid = landscape::PixelGrid::new(
+            160,
+            160,
+            bytes,
+            vec![0, 80],
+            vec![None, Some("Earth".into())],
+            vec![None; 2],
+        );
+        let mut landscape = Landscape::new(160, vec![160; 160]).expect("landscape constructs");
+        landscape.set_world_height(160);
+        landscape.set_pixel_grid(grid);
+
+        let mut engine = Engine::with_seed(31);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        (engine, earth)
+    }
+
+    #[test]
+    fn wall_left_bridge_forces_stationary_progression() {
+        // DoBridge locally clears fMoveClonk for wall-Left before calculating
+        // dt, checking contact, or calling MovePosition (C4Object.cpp:4587-4590,
+        // 4606,4629,4651). The stored action-data bit remains set.
+        let (mut engine, earth) = wall_bridge_test_engine(Some((100, 79)));
+        let encoded = encode_bridge_action_data(100, true, true, earth.index() as i32);
+        let mut action = ActionState::new("Bridge");
+        action.data = encoded;
+        action.time = 3;
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Bridger")
+                    .with_position(Vector2::new(100, 80))
+                    .with_fixed_position(FixedVec2::from_ints(100, 80))
+                    .with_command_direction(CommandDirection::Left)
+                    .with_action(action)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("spawn succeeds");
+
+        let index = engine.find_object_index(id).expect("object index remains");
+        engine
+            .apply_physics_at_index(index)
+            .expect("bridge procedure succeeds");
+
+        let object = engine.object_snapshot(id).expect("object remains");
+        assert_eq!(object.action.time, 4);
+        assert_eq!(object.action.data, encoded, "the override is local");
+        assert_eq!(object.position, Vector2::new(100, 80));
+        assert_eq!(
+            engine.objects[index].fixed_position,
+            FixedVec2::from_ints(100, 80)
+        );
+        let landscape = engine.landscape().expect("landscape remains");
+        for x in 93..97 {
+            assert_eq!(landscape.material_at(x, 89), Some(earth));
+            assert_eq!(landscape.material_at(x, 92), None);
+        }
+    }
+
+    #[test]
+    fn moving_wall_up_bridge_preserves_doubled_collision_retry() {
+        // Wall-Up is the sole wall arm that keeps fMoveClonk. A blocked first
+        // step converts the remaining 95 frames into a stationary 190-frame
+        // roof at Action.Time 95 and redraws immediately (C4Object.cpp:4631-4645).
+        let (mut engine, earth) = wall_bridge_test_engine(Some((101, 79)));
+        let mut action = ActionState::new("Bridge");
+        action.data = encode_bridge_action_data(100, true, true, earth.index() as i32);
+        action.time = 4;
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Bridger")
+                    .with_position(Vector2::new(100, 80))
+                    .with_fixed_position(FixedVec2::from_ints(100, 80))
+                    .with_direction(Direction::Right)
+                    .with_command_direction(CommandDirection::Up)
+                    .with_action(action)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("spawn succeeds");
+
+        let index = engine.find_object_index(id).expect("object index remains");
+        engine
+            .apply_physics_at_index(index)
+            .expect("bridge procedure succeeds");
+
+        let object = engine.object_snapshot(id).expect("object remains");
+        assert_eq!(object.action.time, 95);
+        assert_eq!(
+            object.action.data,
+            encode_bridge_action_data(190, false, true, earth.index() as i32)
+        );
+        assert_eq!(object.position, Vector2::new(100, 80));
+        assert_eq!(
+            engine.objects[index].fixed_position,
+            FixedVec2::from_ints(100, 80)
+        );
+        let landscape = engine.landscape().expect("landscape remains");
+        for y in 67..70 {
+            for x in 98..102 {
+                assert_eq!(landscape.material_at(x, y), Some(earth));
+            }
+        }
+    }
+
     #[test]
     fn moving_up_left_bridge_uses_action_time_and_draws_cpp_rectangles() {
         // DoBridge (C4Object.cpp:4581-4652): Action.Time has already been
