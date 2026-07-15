@@ -3821,6 +3821,154 @@ func FxFireTimer(pObj, iNumber, iTime)
     }
 
     #[test]
+    fn cross_check_collection_prefers_master_forward_living_collector() -> Result<(), EngineError> {
+        // CrossCheck's outer loop walks the C++ main list First->Next. Its
+        // category-descending order puts Living before StaticBack even though
+        // the StaticBack collector was spawned first (C4GameObjects.cpp:151;
+        // C4ObjectList.cpp:165-175).
+        let mut engine = Engine::new();
+        let mut collector = simple_definition("Collector");
+        collector.set_shape_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+        collector.set_collection_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+        engine.register_definition(collector)?;
+        let mut item = simple_definition("Item");
+        item.set_category(CATEGORY_OBJECT);
+        item.set_collectible(true);
+        engine.register_definition(item)?;
+
+        // Fresh shaped objects start at their Con=0 bottom. For this rect,
+        // y=60 grows to center y=50; keep the shapeless item at that center.
+        let collector_position = Vector2::new(50, 60);
+        let item_position = Vector2::new(50, 50);
+        let static_collector = engine.spawn_object(
+            SpawnConfig::new("Collector")
+                .with_category(CATEGORY_STATIC_BACK)
+                .with_position(collector_position),
+        )?;
+        let living_collector = engine.spawn_object(
+            SpawnConfig::new("Collector")
+                .with_category(CATEGORY_LIVING)
+                .with_alive(true)
+                .with_position(collector_position),
+        )?;
+        let item = engine.spawn_object(SpawnConfig::new("Item").with_position(item_position))?;
+
+        assert_eq!(
+            engine.debug_exec_order(),
+            vec![static_collector, living_collector, item]
+        );
+
+        for collector in [static_collector, living_collector] {
+            let index = engine
+                .find_object_index(collector)
+                .expect("collector exists");
+            assert_ne!(engine.object_ocf_at_index(index) & ocf::COLLECTION, 0);
+        }
+        let item_index = engine.find_object_index(item).expect("item exists");
+        assert_ne!(engine.object_ocf_at_index(item_index) & ocf::CARRYABLE, 0);
+
+        engine.cross_check(3)?;
+
+        assert_eq!(
+            engine.object_snapshot(item).expect("item exists").container,
+            Some(living_collector)
+        );
+        assert!(engine
+            .object_snapshot(static_collector)
+            .expect("StaticBack collector exists")
+            .contents
+            .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn cross_check_hits_newest_same_definition_victim_first() -> Result<(), EngineError> {
+        // stMain inserts a newer same-definition object before the existing
+        // cluster in forward order. B must therefore receive both hit
+        // callbacks before A (C4ObjectList.cpp:151-175;
+        // C4GameObjects.cpp:151,167-179).
+        let victim_script = r#"#strict 2
+local query_order, catch_order;
+func QueryCatchBlow(by)
+{
+    query_order = GetGravity();
+    SetGravity(query_order + 1);
+    return 0;
+}
+func CatchBlow(level, by)
+{
+    catch_order = GetGravity();
+    SetGravity(catch_order + 1);
+    return 1;
+}
+"#;
+        let mut engine = Engine::new();
+        let mut physics = engine.physics();
+        physics.gravity = 40;
+        engine.set_physics(physics);
+        let mut victim = Definition::from_script("Victim", "Victim", victim_script)?;
+        victim.set_category(CATEGORY_LIVING);
+        victim.set_mass(100);
+        victim.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        engine.register_definition(victim)?;
+        let mut rock = simple_definition("Rock");
+        rock.set_category(CATEGORY_OBJECT);
+        rock.set_mass(50);
+        engine.register_definition(rock)?;
+
+        // The shaped victims grow upward from y=55 to center y=50; the
+        // shapeless rock is placed directly at that center.
+        let victim_spawn_position = Vector2::new(50, 55);
+        let rock_position = Vector2::new(50, 50);
+        let victim_a = engine.spawn_object(
+            SpawnConfig::new("Victim")
+                .with_alive(true)
+                .with_energy(100_000)
+                .with_position(victim_spawn_position),
+        )?;
+        let victim_b = engine.spawn_object(
+            SpawnConfig::new("Victim")
+                .with_alive(true)
+                .with_energy(100_000)
+                .with_position(victim_spawn_position),
+        )?;
+        let rock = engine.spawn_object(
+            SpawnConfig::new("Rock")
+                .with_position(rock_position)
+                .with_velocity(Vector2::new(5, 0)),
+        )?;
+
+        assert_eq!(engine.debug_exec_order(), vec![victim_a, victim_b, rock]);
+        for victim in [victim_a, victim_b] {
+            let index = engine.find_object_index(victim).expect("victim exists");
+            assert_ne!(engine.object_ocf_at_index(index) & ocf::ALIVE, 0);
+        }
+        let rock_index = engine.find_object_index(rock).expect("rock exists");
+        assert_ne!(engine.object_ocf_at_index(rock_index) & ocf::HIT_SPEED2, 0);
+
+        engine.cross_check(1)?;
+
+        let callback_orders = |object_id| {
+            let index = engine.find_object_index(object_id).expect("victim exists");
+            let locals = &engine.objects[index].state.local_vars;
+            (
+                locals.get("query_order").cloned(),
+                locals.get("catch_order").cloned(),
+            )
+        };
+        assert_eq!(
+            callback_orders(victim_b),
+            (Some(Value::Int(40)), Some(Value::Int(41)))
+        );
+        assert_eq!(
+            callback_orders(victim_a),
+            (Some(Value::Int(42)), Some(Value::Int(43)))
+        );
+        assert_eq!(engine.physics().gravity, 44);
+        Ok(())
+    }
+
+    #[test]
     fn weather_disaster_rng_draw_order_matches_cpp() {
         // C4Weather::Execute disaster block (C4Weather.cpp:104-148): on every
         // Tick10 frame the gates Random(60) [meteorite], Random(35)
