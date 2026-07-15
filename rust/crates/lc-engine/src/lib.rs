@@ -177,7 +177,7 @@ use command::{
     definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandData,
     CommandDefinitionSnapshot, CommandEvent, CommandId, CommandObjectSnapshot, CommandOperation,
     CommandMode, CommandPlayerSnapshot, CommandRequest, CommandRuntimeContext, CommandStack,
-    CommandStepResult,
+    CommandStepResult, GetAttemptDisposition,
 };
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
@@ -670,12 +670,20 @@ pub const CATEGORY_LIVING: i32 = 1 << 3;
 pub const CATEGORY_OBJECT: i32 = 1 << 4;
 #[doc(hidden)]
 pub const CATEGORY_GOAL: i32 = 1 << 5;
+#[doc(hidden)]
+pub const CATEGORY_SELECT_KNOWLEDGE: i32 = 1 << 10;
 pub const CATEGORY_MAGIC: i32 = 1 << 17;
 pub const CATEGORY_PARALLAX: i32 = 1 << 21;
 pub const CATEGORY_MOUSE_SELECT: i32 = 1 << 22;
 /// Fallback assigned by `C4Def::Load` when DefCore `Version` is older than
 /// 4.0 or omitted (src/C4Def.cpp:573-581).
 pub const DEFAULT_DEFINITION_VERSION: [i32; 5] = [4, 9, 10, 7, 0];
+
+pub(crate) fn minimum_con_activation_denied(category: i32, construction: i32) -> bool {
+    category & (CATEGORY_VEHICLE | CATEGORY_OBJECT) != 0
+        && category & CATEGORY_SELECT_KNOWLEDGE != 0
+        && construction < FULL_CON
+}
 
 fn definition_version_at_least(version: [i32; 5], required: [i32; 4]) -> bool {
     (version[0], version[1], version[2], version[3])
@@ -12715,11 +12723,12 @@ enum ObjectEnterOutcome {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum GetEnterOutcome {
     Entered,
     Retry,
     Completed,
+    MinimumConstructionDenied(String),
     Failed,
 }
 
@@ -36812,7 +36821,7 @@ impl Engine {
     fn put_away_unused_object(
         &mut self,
         actor_id: ObjectId,
-        object_to_make_room_for: ObjectId,
+        object_to_make_room_for: Option<ObjectId>,
     ) -> Result<bool, EngineError> {
         let Some(actor_index) = self.find_object_index(actor_id) else {
             return Ok(false);
@@ -36826,7 +36835,9 @@ impl Engine {
             let selected = tolerate_script_error(self.call_object_function(
                 actor_index,
                 "GetObject2Drop",
-                vec![object_reference_value(object_to_make_room_for)],
+                vec![object_to_make_room_for
+                    .map(object_reference_value)
+                    .unwrap_or(Value::Nil)],
             ))?;
             selected
                 .map(|value| {
@@ -36905,6 +36916,74 @@ impl Engine {
         actor_id: ObjectId,
         object_id: ObjectId,
     ) -> Result<GetEnterOutcome, EngineError> {
+        let target_gate = self.find_object_index(object_id).map(|index| {
+            let target = &self.objects[index];
+            let name = target.state.custom_name.clone().unwrap_or_else(|| {
+                self.definitions
+                    .get(&target.definition_id)
+                    .map_or_else(|| target.definition_id.clone(), |definition| {
+                        definition.name().to_string()
+                    })
+            });
+            (
+                target.state.container,
+                minimum_con_activation_denied(
+                    target.state.category,
+                    target.state.construction,
+                ),
+                name,
+            )
+        });
+
+        if let Some((Some(container_id), minimum_con_denied, target_name)) = target_gate {
+            // C4Command::GetTryEnter runs CheckMinimumCon before any script
+            // callback or Enter attempt (C4Command.cpp:1092-1095,1295-1305).
+            if minimum_con_denied {
+                return Ok(GetEnterOutcome::MinimumConstructionDenied(format!(
+                    "{target_name} not completed.|Activation denied."
+                )));
+            }
+
+            // The target's current container may veto removing its contents.
+            // This precedes the collection-limit and RejectCollect paths
+            // (C4Command.cpp:1096-1098).
+            if let Some(container_index) = self.find_object_index(container_id) {
+                let rejected = tolerate_script_error(self.call_object_function(
+                    container_index,
+                    "RejectContents",
+                    Vec::new(),
+                ))?
+                .is_some_and(|value| compat::value_raw_truthy(&value));
+                if rejected {
+                    return Ok(GetEnterOutcome::Failed);
+                }
+            }
+        }
+
+        // A full collector makes room before Target->Enter, so the desired
+        // object's RejectEntrance/RejectCollect callbacks do not run on this
+        // evaluation (C4Command.cpp:1099-1106).
+        let collection_limit_reached = self.find_object_index(actor_id).is_some_and(|index| {
+            self.definitions
+                .get(&self.objects[index].definition_id)
+                .and_then(Definition::collection_limit)
+                .is_some_and(|limit| self.objects[index].state.contents.len() >= limit as usize)
+        });
+        if collection_limit_reached {
+            let current_target = self
+                .find_object_index(object_id)
+                .filter(|&index| {
+                    !self.objects[index].destroyed
+                        && self.objects[index].state.status.is_active()
+                })
+                .map(|_| object_id);
+            return if self.put_away_unused_object(actor_id, current_target)? {
+                Ok(GetEnterOutcome::Retry)
+            } else {
+                Ok(GetEnterOutcome::Failed)
+            };
+        }
+
         let was_contained = self
             .find_object_index(object_id)
             .is_some_and(|index| self.objects[index].state.container.is_some());
@@ -36925,7 +37004,7 @@ impl Engine {
                 Ok(GetEnterOutcome::Entered)
             }
             ObjectEnterOutcome::RejectedCollect => {
-                if self.put_away_unused_object(actor_id, object_id)? {
+                if self.put_away_unused_object(actor_id, Some(object_id))? {
                     Ok(GetEnterOutcome::Retry)
                 } else {
                     Ok(GetEnterOutcome::Failed)
@@ -37077,15 +37156,47 @@ impl Engine {
             CommandEvent::GetObject {
                 actor_id,
                 object_id,
-            } => match self.try_get_object_enter(actor_id, object_id)? {
-                GetEnterOutcome::Entered | GetEnterOutcome::Retry => {}
-                GetEnterOutcome::Completed => {
-                    self.complete_command(actor_id, CommandId::Get)?;
+            } => {
+                let (disposition, message) = match self
+                    .try_get_object_enter(actor_id, object_id)?
+                {
+                    GetEnterOutcome::Entered | GetEnterOutcome::Retry => {
+                        (GetAttemptDisposition::Continue, None)
+                    }
+                    GetEnterOutcome::Completed => (GetAttemptDisposition::Complete, None),
+                    GetEnterOutcome::MinimumConstructionDenied(message) => {
+                        (GetAttemptDisposition::Fail, Some(message))
+                    }
+                    GetEnterOutcome::Failed => (GetAttemptDisposition::Fail, None),
+                };
+                if let Some(actor_index) = self.find_object_index(actor_id) {
+                    let show_message = self.objects[actor_index].state.crew_member;
+                    let resolution = self.objects[actor_index]
+                        .commands
+                        .resolve_get_attempt(disposition);
+                    if show_message
+                        && resolution.is_some_and(|result| result.execute_failure_tail)
+                    {
+                        if let Some(message) = message {
+                            // SilentCommands is not represented yet; the
+                            // command mode/retry gates match C4Command::Fail.
+                            self.messages.add_message(MessageSpec {
+                                kind: message::MessageKind::Target,
+                                text: message,
+                                target: Some(actor_id),
+                                player: None,
+                                offset: Vector2::ZERO,
+                                color: 0xffff_ffff,
+                                flags: message::FLAG_MULTIPLE,
+                                width: None,
+                                decoration: None,
+                                frame_decoration: None,
+                                portrait: None,
+                            });
+                        }
+                    }
                 }
-                GetEnterOutcome::Failed => {
-                    self.fail_command(actor_id, CommandId::Get)?;
-                }
-            },
+            }
             CommandEvent::ThrowObject {
                 actor_id,
                 object_id,

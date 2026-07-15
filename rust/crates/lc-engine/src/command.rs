@@ -4,9 +4,9 @@ use crate::math::{self, FixedVec2};
 use crate::pathfinder::PathFinder;
 use crate::transfer::{TransferZone, TransferZoneTable};
 use crate::{
-    ocf, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, DefinitionRect, Direction,
-    ObjectId, ObjectStatus, ObjectUpdate, PlayerStatus, Vector2, CATEGORY_OBJECT,
-    CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, CATEGORY_VEHICLE, FULL_CON,
+    minimum_con_activation_denied, ocf, ActionProcedure, ActionUpdate, CommandDirection,
+    DefinitionId, DefinitionRect, Direction, ObjectId, ObjectStatus, ObjectUpdate, PlayerStatus,
+    Vector2, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, CATEGORY_VEHICLE, FULL_CON,
     LINE_CONNECT_POWER_INPUT, OWNER_NONE,
 };
 use lc_resources::PhysicalInfo;
@@ -26,7 +26,6 @@ const COMMAND_FLAG_MOVE_TO_NO_POS_ADJUST: i32 = 0b1;
 const COMMAND_FLAG_MOVE_TO_PUSH_TARGET: i32 = 0b10;
 const DIG_MOVE_TO_RANGE_DEFAULT: i32 = 5;
 const DIG_DIRECTION_RANGE: i32 = 1;
-const CATEGORY_SELECT_KNOWLEDGE: i32 = 1 << 10;
 const PUSH_TO_RANGE: i32 = 10;
 
 #[derive(Debug, Clone)]
@@ -10087,6 +10086,18 @@ pub struct CommandStack {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GetAttemptDisposition {
+    Continue,
+    Complete,
+    Fail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GetAttemptResolution {
+    pub execute_failure_tail: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DetachedGrabAttempt {
     target: ObjectId,
     target_retained: bool,
@@ -10448,6 +10459,58 @@ impl CommandStack {
             }
         }
         Some(target_retained)
+    }
+
+    /// Resolve only the Get command which emitted the live GetObject event.
+    /// Callback-side SetCommand may have removed it and installed another
+    /// Get, which must not inherit the old attempt's result.
+    pub(crate) fn resolve_get_attempt(
+        &mut self,
+        disposition: GetAttemptDisposition,
+    ) -> Option<GetAttemptResolution> {
+        let index = self.entries.iter().position(|entry| {
+            matches!(&entry.state, CommandState::Get(state) if state.enter_pending)
+        })?;
+        let mode = self.entries[index].mode;
+        let base_index = self
+            .entries
+            .iter()
+            .enumerate()
+            .skip(index + 1)
+            .find(|(_, entry)| entry.finished.is_none())
+            .map(|(index, _)| index);
+        let execute_failure_tail = match mode {
+            CommandMode::SilentSub => base_index.is_none(),
+            CommandMode::Sub => base_index
+                .and_then(|base| self.entries.get(base))
+                .is_none_or(|base| base.retries == 0),
+            CommandMode::Base => true,
+            CommandMode::SilentBase => false,
+        };
+
+        if let CommandState::Get(state) = &mut self.entries[index].state {
+            state.enter_pending = false;
+        }
+
+        match disposition {
+            GetAttemptDisposition::Continue => {}
+            GetAttemptDisposition::Complete => {
+                self.entries[index].finished = Some(CommandStatus::Completed);
+            }
+            GetAttemptDisposition::Fail => {
+                self.entries[index].finished = Some(CommandStatus::Failed);
+                if matches!(mode, CommandMode::SilentSub | CommandMode::Sub) {
+                    if let Some(base) = base_index.and_then(|index| self.entries.get_mut(index)) {
+                        base.failures = base.failures.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        Some(GetAttemptResolution {
+            execute_failure_tail: disposition == GetAttemptDisposition::Fail
+                && execute_failure_tail,
+        })
     }
 
     pub fn set_acquire_script_result(&mut self, result: AcquireScriptResult) -> bool {
@@ -12602,13 +12665,7 @@ impl ActivateState {
     }
 
     fn check_minimum_con(&self, target: &CommandObjectSnapshot) -> bool {
-        if (target.category & (CATEGORY_VEHICLE | CATEGORY_OBJECT)) == 0 {
-            return true;
-        }
-        if (target.category & CATEGORY_SELECT_KNOWLEDGE) == 0 {
-            return true;
-        }
-        target.construction >= FULL_CON
+        !minimum_con_activation_denied(target.category, target.construction)
     }
 
     fn release_target(
@@ -13450,6 +13507,8 @@ struct GetState {
     menu_identification: Option<i32>,
     remaining: i32,
     update_interval: u32,
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    enter_pending: bool,
 }
 
 impl GetState {
@@ -13477,6 +13536,7 @@ impl GetState {
             menu_identification,
             remaining,
             update_interval: request.update_interval.max(1),
+            enter_pending: false,
         })
     }
 
@@ -13546,6 +13606,7 @@ impl GetState {
         update: Option<ObjectUpdate>,
     ) -> CommandStepResult {
         let update = self.ensure_stop(ctx, update);
+        self.enter_pending = true;
         // Do not decrement `remaining` here. C++ only observes a successful
         // collection on the NEXT Get evaluation (Target->Contained == cObj,
         // C4Command.cpp:1154-1165). A RejectCollect/PutAway retry therefore
@@ -13686,7 +13747,15 @@ impl GetState {
             _ => return CommandStepResult::failed(update),
         };
 
-        if !target_snapshot.collectible || target_snapshot.construction < FULL_CON {
+        let reaches_get_try_enter_minimum_con_gate = target_snapshot.container.is_some()
+            && minimum_con_activation_denied(
+                target_snapshot.category,
+                target_snapshot.construction,
+            );
+        if !target_snapshot.collectible
+            || (target_snapshot.construction < FULL_CON
+                && !reaches_get_try_enter_minimum_con_gate)
+        {
             return CommandStepResult::failed(update);
         }
 

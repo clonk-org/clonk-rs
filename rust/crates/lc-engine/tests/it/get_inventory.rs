@@ -1,10 +1,36 @@
 use lc_engine::{
     Definition, DefinitionRect, Engine, ObjectMenuExtra, ObjectMenuItem, ObjectMenuState,
-    ObjectMenuSymbol, ObjectUpdate, SpawnConfig, Vector2,
+    ObjectId, ObjectMenuSymbol, ObjectUpdate, SpawnConfig, Vector2, CATEGORY_SELECT_KNOWLEDGE,
+    CATEGORY_VEHICLE, FULL_CON,
 };
+use lc_engine::command::{CommandId, CommandMode, CommandRequest};
 use lc_script::Value;
 
 use crate::support::real_scenario::{join_local_player, load_tutorial};
+
+fn arm_get(engine: &mut Engine, actor: ObjectId, target: ObjectId) {
+    let actor_index = engine.find_object_index(actor).expect("actor exists");
+    assert_eq!(
+        engine
+            .call_object_function(
+                actor_index,
+                "StartGet",
+                vec![Value::Object(target.as_u64())],
+            )
+            .expect("StartGet executes"),
+        Value::Bool(true)
+    );
+}
+
+fn local_int(engine: &Engine, object: ObjectId, name: &str) -> i32 {
+    match engine
+        .object_snapshot(object)
+        .and_then(|snapshot| snapshot.local_vars.get(name).cloned())
+    {
+        Some(Value::Int(value)) => value,
+        _ => 0,
+    }
+}
 
 #[test]
 fn tutorial04_enter_all_keeps_only_one_tflint_in_the_real_clonk() {
@@ -173,5 +199,563 @@ protected func RejectCollect(idObject, pObject) { return(1); }
             .container,
         Some(hut),
         "ordinary Enter must ignore HUT2::RejectCollect"
+    );
+}
+
+#[test]
+fn get_reject_contents_precedes_the_enter_attempt() {
+    let mut engine = Engine::new();
+    let mut actor = Definition::from_script(
+        "CLNK",
+        "Clonk",
+        r#"#strict
+local rejectCollectCount, getCount, dropSelectionCount, finishedCount;
+public func StartGet(pTarget) { return(SetCommand(this(), "Get", pTarget)); }
+protected func ControlCommandFinished(szCommand)
+{
+  finishedCount += 1;
+}
+protected func GetObject2Drop(pTarget)
+{
+  dropSelectionCount += 1;
+  return(Contents(0));
+}
+protected func RejectCollect(idObject, pObject)
+{
+  rejectCollectCount += 1;
+  return(0);
+}
+protected func Get(pObject)
+{
+  getCount += 1;
+  return(1);
+}
+"#,
+    )
+    .expect("actor definition compiles");
+    actor.set_c4_callback_convention(true);
+    actor.set_crew_member(true);
+    actor.set_collection_limit(Some(1));
+    let mut container = Definition::from_script(
+        "HUT2",
+        "Hut",
+        r#"#strict
+local rejectContentsCount;
+protected func RejectContents()
+{
+  rejectContentsCount += 1;
+  return(1);
+}
+"#,
+    )
+    .expect("container definition compiles");
+    container.set_c4_callback_convention(true);
+    let mut item = Definition::from_script(
+        "ITEM",
+        "Item",
+        r#"#strict
+local rejectEntranceCount;
+protected func RejectEntrance(pContainer)
+{
+  rejectEntranceCount += 1;
+  return(0);
+}
+"#,
+    )
+    .expect("item definition compiles");
+    item.set_c4_callback_convention(true);
+    item.set_collectible(true);
+    engine
+        .register_definition(actor)
+        .expect("actor definition registers");
+    engine
+        .register_definition(container)
+        .expect("container definition registers");
+    engine
+        .register_definition(item)
+        .expect("item definition registers");
+
+    let hut = engine
+        .spawn_object(SpawnConfig::new("HUT2"))
+        .expect("container spawns");
+    let clonk = engine
+        .spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_alive(true)
+                .with_crew_member(true)
+                .with_container(hut),
+        )
+        .expect("actor spawns");
+    let held = engine
+        .spawn_object(SpawnConfig::new("ITEM").with_container(clonk))
+        .expect("held item spawns");
+    let item = engine
+        .spawn_object(SpawnConfig::new("ITEM").with_container(hut))
+        .expect("item spawns");
+    arm_get(&mut engine, clonk, item);
+
+    engine.tick().expect("Get evaluates");
+
+    assert_eq!(local_int(&engine, hut, "rejectContentsCount"), 1);
+    assert_eq!(local_int(&engine, item, "rejectEntranceCount"), 0);
+    assert_eq!(local_int(&engine, clonk, "rejectCollectCount"), 0);
+    assert_eq!(local_int(&engine, clonk, "getCount"), 0);
+    assert_eq!(
+        local_int(&engine, clonk, "finishedCount"),
+        1,
+        "the failed Get remains visible to ControlCommandFinished"
+    );
+    assert_eq!(
+        local_int(&engine, clonk, "dropSelectionCount"),
+        0,
+        "RejectContents precedes the collection-limit PutAway gate"
+    );
+    assert_eq!(
+        engine.object_snapshot(held).expect("held item survives").container,
+        Some(clonk)
+    );
+    assert_eq!(
+        engine.object_snapshot(item).expect("item survives").container,
+        Some(hut)
+    );
+    assert!(
+        engine
+            .object_snapshot(clonk)
+            .expect("actor survives")
+            .command_stack
+            .command_names()
+            .is_empty(),
+        "RejectContents fails the Get command"
+    );
+}
+
+#[test]
+fn get_reject_contents_replacement_does_not_fail_the_new_get() {
+    let mut engine = Engine::new();
+    let mut actor = Definition::from_script(
+        "CLNK",
+        "Clonk",
+        r#"#strict
+public func StartGet(pTarget) { return(SetCommand(this(), "Get", pTarget)); }
+"#,
+    )
+    .expect("actor definition compiles");
+    actor.set_c4_callback_convention(true);
+    let mut container = Definition::from_script(
+        "HUT2",
+        "Hut",
+        r#"#strict
+local actor, replacement, rejectContentsCount;
+public func Configure(pActor, pReplacement)
+{
+  actor = pActor;
+  replacement = pReplacement;
+  return(1);
+}
+protected func RejectContents()
+{
+  rejectContentsCount += 1;
+  if (rejectContentsCount == 1)
+  {
+    SetCommand(actor, "Get", replacement);
+    return(1);
+  }
+  return(0);
+}
+"#,
+    )
+    .expect("container definition compiles");
+    container.set_c4_callback_convention(true);
+    let mut item = Definition::from_script("ITEM", "Item", "#strict\n")
+        .expect("item definition compiles");
+    item.set_collectible(true);
+    engine
+        .register_definition(actor)
+        .expect("actor definition registers");
+    engine
+        .register_definition(container)
+        .expect("container definition registers");
+    engine
+        .register_definition(item)
+        .expect("item definition registers");
+
+    let hut = engine
+        .spawn_object(SpawnConfig::new("HUT2"))
+        .expect("container spawns");
+    let clonk = engine
+        .spawn_object(SpawnConfig::new("CLNK").with_container(hut))
+        .expect("actor spawns");
+    let old_target = engine
+        .spawn_object(SpawnConfig::new("ITEM").with_container(hut))
+        .expect("old target spawns");
+    let replacement = engine
+        .spawn_object(SpawnConfig::new("ITEM").with_container(hut))
+        .expect("replacement target spawns");
+    let hut_index = engine.find_object_index(hut).expect("container exists");
+    assert_eq!(
+        engine
+            .call_object_function(
+                hut_index,
+                "Configure",
+                vec![
+                    Value::Object(clonk.as_u64()),
+                    Value::Object(replacement.as_u64()),
+                ],
+            )
+            .expect("container configures"),
+        Value::Int(1)
+    );
+    arm_get(&mut engine, clonk, old_target);
+
+    engine.tick().expect("old Get reaches RejectContents");
+
+    assert_eq!(
+        engine
+            .object_snapshot(clonk)
+            .expect("actor survives")
+            .command_stack
+            .command_names(),
+        vec!["Get"],
+        "the callback-installed Get must not receive the old attempt's failure"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(old_target)
+            .expect("old target survives")
+            .container,
+        Some(hut)
+    );
+
+    engine.tick().expect("replacement Get executes");
+    assert_eq!(
+        engine
+            .object_snapshot(replacement)
+            .expect("replacement survives")
+            .container,
+        Some(clonk),
+        "the replacement command remains live and collects its own target"
+    );
+}
+
+#[test]
+fn get_reject_contents_removal_passes_nil_to_put_away() {
+    let mut engine = Engine::new();
+    let mut actor = Definition::from_script(
+        "CLNK",
+        "Clonk",
+        r#"#strict
+local nilDropTargetCount, staleDropTargetCount;
+public func StartGet(pTarget) { return(SetCommand(this(), "Get", pTarget)); }
+protected func GetObject2Drop(pTarget)
+{
+  if (pTarget) staleDropTargetCount += 1;
+  else nilDropTargetCount += 1;
+  return(Contents(0));
+}
+"#,
+    )
+    .expect("actor definition compiles");
+    actor.set_c4_callback_convention(true);
+    actor.set_collection_limit(Some(1));
+    let mut container = Definition::from_script(
+        "HUT2",
+        "Hut",
+        r#"#strict
+local target, rejectContentsCount;
+public func Configure(pTarget)
+{
+  target = pTarget;
+  return(1);
+}
+protected func RejectContents()
+{
+  rejectContentsCount += 1;
+  RemoveObject(target);
+  return(0);
+}
+"#,
+    )
+    .expect("container definition compiles");
+    container.set_c4_callback_convention(true);
+    let mut item = Definition::from_script("ITEM", "Item", "#strict\n")
+        .expect("item definition compiles");
+    item.set_collectible(true);
+    engine
+        .register_definition(actor)
+        .expect("actor definition registers");
+    engine
+        .register_definition(container)
+        .expect("container definition registers");
+    engine
+        .register_definition(item)
+        .expect("item definition registers");
+
+    let hut = engine
+        .spawn_object(SpawnConfig::new("HUT2"))
+        .expect("container spawns");
+    let clonk = engine
+        .spawn_object(SpawnConfig::new("CLNK").with_container(hut))
+        .expect("actor spawns");
+    let held = engine
+        .spawn_object(SpawnConfig::new("ITEM").with_container(clonk))
+        .expect("held item spawns");
+    let target = engine
+        .spawn_object(SpawnConfig::new("ITEM").with_container(hut))
+        .expect("target spawns");
+    let hut_index = engine.find_object_index(hut).expect("container exists");
+    assert_eq!(
+        engine
+            .call_object_function(
+                hut_index,
+                "Configure",
+                vec![Value::Object(target.as_u64())],
+            )
+            .expect("container configures"),
+        Value::Int(1)
+    );
+    arm_get(&mut engine, clonk, target);
+
+    engine
+        .tick()
+        .expect("Get survives synchronous target removal");
+
+    assert_eq!(local_int(&engine, hut, "rejectContentsCount"), 1);
+    assert_eq!(local_int(&engine, clonk, "nilDropTargetCount"), 1);
+    assert_eq!(local_int(&engine, clonk, "staleDropTargetCount"), 0);
+    assert!(engine.object_snapshot(held).is_some(), "selected item survives");
+}
+
+#[test]
+fn get_collection_limit_puts_away_before_reject_collect() {
+    let mut engine = Engine::new();
+    let mut actor = Definition::from_script(
+        "CLNK",
+        "Clonk",
+        r#"#strict
+local dropSelectionCount, rejectCollectCount;
+public func StartGet(pTarget) { return(SetCommand(this(), "Get", pTarget)); }
+protected func GetObject2Drop(pTarget)
+{
+  dropSelectionCount += 1;
+  return(Contents(0));
+}
+protected func RejectCollect(idObject, pObject)
+{
+  rejectCollectCount += 1;
+  return(1);
+}
+"#,
+    )
+    .expect("actor definition compiles");
+    actor.set_c4_callback_convention(true);
+    actor.set_collection_limit(Some(1));
+    let mut held = Definition::from_script("HELD", "Held item", "#strict\n")
+        .expect("held definition compiles");
+    held.set_collectible(true);
+    let mut incoming = Definition::from_script(
+        "INCM",
+        "Incoming item",
+        r#"#strict
+local rejectEntranceCount;
+protected func RejectEntrance(pContainer)
+{
+  rejectEntranceCount += 1;
+  return(0);
+}
+"#,
+    )
+    .expect("incoming definition compiles");
+    incoming.set_c4_callback_convention(true);
+    incoming.set_collectible(true);
+    engine
+        .register_definition(actor)
+        .expect("actor definition registers");
+    engine
+        .register_definition(held)
+        .expect("held definition registers");
+    engine
+        .register_definition(incoming)
+        .expect("incoming definition registers");
+
+    let clonk = engine
+        .spawn_object(SpawnConfig::new("CLNK"))
+        .expect("actor spawns");
+    let held = engine
+        .spawn_object(SpawnConfig::new("HELD").with_container(clonk))
+        .expect("held item spawns");
+    let incoming = engine
+        .spawn_object(SpawnConfig::new("INCM"))
+        .expect("incoming item spawns");
+    arm_get(&mut engine, clonk, incoming);
+
+    engine.tick().expect("Get evaluates");
+
+    assert_eq!(local_int(&engine, clonk, "dropSelectionCount"), 1);
+    assert_eq!(local_int(&engine, clonk, "rejectCollectCount"), 0);
+    assert_eq!(local_int(&engine, incoming, "rejectEntranceCount"), 0);
+    assert!(engine.object_snapshot(held).is_some(), "selected item survives");
+    assert_eq!(
+        engine
+            .object_snapshot(incoming)
+            .expect("incoming item survives")
+            .container,
+        None,
+        "the desired item is not offered to RejectCollect on the full frame"
+    );
+    assert!(
+        engine
+            .object_snapshot(clonk)
+            .expect("actor survives")
+            .command_stack
+            .command_names()
+            .iter()
+            .any(|command| command == "Get"),
+        "successful PutAway leaves the Get command pending"
+    );
+}
+
+#[test]
+fn get_incomplete_select_knowledge_reports_no_con_activate() {
+    let mut engine = Engine::new();
+    let mut actor = Definition::from_script(
+        "CLNK",
+        "Clonk",
+        r#"#strict
+local rejectCollectCount;
+public func StartGet(pTarget) { return(SetCommand(this(), "Get", pTarget)); }
+protected func RejectCollect(idObject, pObject)
+{
+  rejectCollectCount += 1;
+  return(0);
+}
+"#,
+    )
+    .expect("actor definition compiles");
+    actor.set_c4_callback_convention(true);
+    actor.set_crew_member(true);
+    let mut container = Definition::from_script(
+        "HUT2",
+        "Hut",
+        r#"#strict
+local rejectContentsCount;
+protected func RejectContents()
+{
+  rejectContentsCount += 1;
+  return(0);
+}
+"#,
+    )
+    .expect("container definition compiles");
+    container.set_c4_callback_convention(true);
+    let mut cart = Definition::from_script(
+        "CART",
+        "Cart",
+        r#"#strict
+local rejectEntranceCount;
+protected func RejectEntrance(pContainer)
+{
+  rejectEntranceCount += 1;
+  return(0);
+}
+"#,
+    )
+    .expect("cart definition compiles");
+    cart.set_c4_callback_convention(true);
+    cart.set_collectible(true);
+    engine
+        .register_definition(actor)
+        .expect("actor definition registers");
+    engine
+        .register_definition(container)
+        .expect("container definition registers");
+    engine
+        .register_definition(cart)
+        .expect("cart definition registers");
+
+    let hut = engine
+        .spawn_object(SpawnConfig::new("HUT2"))
+        .expect("container spawns");
+    let clonk = engine
+        .spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_alive(true)
+                .with_crew_member(true)
+                .with_container(hut),
+        )
+        .expect("actor spawns");
+    let cart = engine
+        .spawn_object(
+            SpawnConfig::new("CART")
+                .with_category(CATEGORY_VEHICLE | CATEGORY_SELECT_KNOWLEDGE)
+                .with_construction(FULL_CON - 1)
+                .with_container(hut),
+        )
+        .expect("incomplete cart spawns");
+    arm_get(&mut engine, clonk, cart);
+
+    let frame = engine.tick().expect("Get evaluates");
+
+    assert_eq!(local_int(&engine, hut, "rejectContentsCount"), 0);
+    assert_eq!(local_int(&engine, cart, "rejectEntranceCount"), 0);
+    assert_eq!(local_int(&engine, clonk, "rejectCollectCount"), 0);
+    assert_eq!(
+        engine.object_snapshot(cart).expect("cart survives").container,
+        Some(hut)
+    );
+    let message = frame
+        .hud
+        .messages
+        .iter()
+        .find(|message| message.target == Some(clonk))
+        .expect("minimum-construction failure message");
+    assert_eq!(
+        message.lines,
+        vec!["Cart not completed.", "Activation denied."]
+    );
+    engine.tick().expect("failed Get clears");
+    assert!(
+        engine
+            .object_snapshot(clonk)
+            .expect("actor survives")
+            .command_stack
+            .command_names()
+            .is_empty()
+    );
+
+    let silent_clonk = engine
+        .spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_alive(true)
+                .with_crew_member(true)
+                .with_container(hut),
+        )
+        .expect("silent actor spawns");
+    let silent_cart = engine
+        .spawn_object(
+            SpawnConfig::new("CART")
+                .with_category(CATEGORY_VEHICLE | CATEGORY_SELECT_KNOWLEDGE)
+                .with_construction(FULL_CON - 1)
+                .with_container(hut),
+        )
+        .expect("silent incomplete cart spawns");
+    let silent_index = engine
+        .find_object_index(silent_clonk)
+        .expect("silent actor exists");
+    engine.objects[silent_index]
+        .commands
+        .push_front(
+            CommandRequest::new(CommandId::Get)
+                .with_target(Some(silent_cart))
+                .with_mode(CommandMode::SilentBase),
+        )
+        .expect("silent Get queues");
+    let silent_frame = engine.tick().expect("silent Get evaluates");
+    assert!(
+        silent_frame
+            .hud
+            .messages
+            .iter()
+            .all(|message| message.target != Some(silent_clonk)),
+        "SilentBase suppresses the no-construction failure message"
     );
 }
