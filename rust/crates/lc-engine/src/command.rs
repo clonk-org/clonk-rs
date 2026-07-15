@@ -2769,9 +2769,10 @@ mod tests {
 
     #[test]
     fn get_transfers_item_when_in_range() {
-        // C4Command::Get only requires a live target pointer with OCF_Carryable;
-        // nonliving items such as the Tutorial04 construction kit are valid
-        // Get targets (C4Command.cpp:1129-1152,1206-1216).
+        // C4Command::Get only requires a live target pointer with
+        // OCF_Carryable. That bit is independent of FullCon, so a nonliving,
+        // half-built construction kit remains a valid Get target
+        // (C4Object.cpp:558-560; C4Command.cpp:1129-1152,1206-1216).
         let actor_id = ObjectId::new(100);
         let target_id = ObjectId::new(200);
 
@@ -2782,9 +2783,9 @@ mod tests {
 
         let mut item = snapshot_with_id(target_id.as_u64());
         item.position = Vector2::new(8, 0);
-        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+        item.ocf = ocf::AVAILABLE | ocf::CARRYABLE;
         item.collectible = true;
-        item.construction = FULL_CON;
+        item.construction = FULL_CON / 2;
         item.alive = false;
 
         let mut objects = HashMap::new();
@@ -3009,6 +3010,59 @@ mod tests {
             CommandEvent::GetObject { actor_id: event_actor, object_id }
                 if *event_actor == actor_id && *object_id == item_id
         )));
+    }
+
+    #[test]
+    fn get_container_definition_uses_first_match_before_carryable_gate() {
+        let actor_id = ObjectId::new(101);
+        let container_id = ObjectId::new(201);
+        let first_id = ObjectId::new(301);
+        let later_id = ObjectId::new(302);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(container_id);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.contents = vec![first_id, later_id];
+
+        let mut first = snapshot_with_id(first_id.as_u64());
+        first.definition_id = "CNKT".into();
+        first.container = Some(container_id);
+        first.collectible = false;
+        first.construction = FULL_CON;
+        first.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+
+        let mut later = snapshot_with_id(later_id.as_u64());
+        later.definition_id = "CNKT".into();
+        later.container = Some(container_id);
+        later.collectible = true;
+        later.construction = FULL_CON;
+        later.ocf = ocf::AVAILABLE | ocf::FULL_CON | ocf::CARRYABLE;
+
+        let objects = HashMap::from([
+            (actor_id, actor),
+            (container_id, container),
+            (first_id, first),
+            (later_id, later),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 0);
+        let mut state = GetState::from_request(
+            &CommandRequest::new(CommandId::Get)
+                .with_target2(Some(container_id))
+                .with_data(CommandData::Text("CNKT".into())),
+        )
+        .expect("Get state");
+
+        let result = state.step(&ctx);
+
+        assert_eq!(state.target, Some(first_id));
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result.update.is_none());
+        assert!(result.operations.is_empty());
+        assert!(result.events.is_empty());
     }
 
     #[test]
@@ -19786,8 +19840,6 @@ impl GetState {
             if let Some(item_snapshot) = ctx.resolve(*item_id) {
                 if item_snapshot.is_status_active()
                     && item_snapshot.definition_id == definition_id
-                    && item_snapshot.collectible
-                    && item_snapshot.construction >= FULL_CON
                 {
                     self.target = Some(*item_id);
                     return self.target;
@@ -19997,15 +20049,7 @@ impl GetState {
             _ => return CommandStepResult::failed(None),
         };
 
-        let reaches_get_try_enter_minimum_con_gate = target_snapshot.container.is_some()
-            && minimum_con_activation_denied(
-                target_snapshot.category,
-                target_snapshot.construction,
-            );
-        if !target_snapshot.collectible
-            || (target_snapshot.construction < FULL_CON
-                && !reaches_get_try_enter_minimum_con_gate)
-        {
+        if !target_snapshot.collectible {
             return CommandStepResult::failed(None);
         }
 
