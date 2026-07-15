@@ -6037,7 +6037,7 @@ fn menu_components_from_custom(values: Vec<Value>) -> Vec<crate::ObjectMenuCompo
 /// (C4Def.cpp:1322-1355). The engine expects equal ids to be contiguous;
 /// a later non-contiguous run overwrites the earlier count while retaining
 /// the id's original list position through `SetIDCount(..., true)`.
-fn component_list_from_custom_array(values: &[Value]) -> Vec<(String, i32)> {
+pub(crate) fn component_list_from_custom_array(values: &[Value]) -> Vec<(String, i32)> {
     let mut components = Vec::<(String, i32)>::new();
     let mut last_id = String::new();
     let mut count = 0_i32;

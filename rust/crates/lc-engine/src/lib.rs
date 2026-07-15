@@ -32031,20 +32031,23 @@ impl Engine {
             return Ok(false);
         }
 
+        // DFA_BUILD chooses the external/internal level before entering
+        // Target::Build. GetCustomComponents may recontain the target, but
+        // that side effect only changes the next tick's level.
+        let level = if self.objects[target_idx].state.container.is_some() {
+            1
+        } else {
+            10
+        };
         let target_definition_id = self.objects[target_idx].definition_id.clone();
         let need_material = self.construction_needs_material
             || (self.objects[target_idx].state.category
                 & (CATEGORY_STRUCTURE | CATEGORY_STATIC_BACK))
                 == 0;
-        let required_components = self
-            .definitions
-            .get(&target_definition_id)
-            .map(|definition| definition.components().to_vec())
-            .unwrap_or_default();
-        let level = if self.objects[target_idx].state.container.is_some() {
-            1
+        let required_components = if need_material {
+            self.build_required_components(&target_definition_id, builder_id)?
         } else {
-            10
+            Vec::new()
         };
 
         let missing_component = if need_material {
@@ -32253,6 +32256,66 @@ impl Engine {
         }
 
         Ok(true)
+    }
+
+    /// `C4Def::GetComponents(..., pObjInstance=nullptr, pBuilder)` for
+    /// `C4Object::Build`. The definition callback has no object `this`, but
+    /// receives the builder and commits synchronous host side effects before
+    /// the material scan. Only an array overrides the DefCore component list.
+    fn build_required_components(
+        &mut self,
+        definition_id: &DefinitionId,
+        builder_id: ObjectId,
+    ) -> Result<Vec<DefinitionComponent>, EngineError> {
+        let Some((script, static_components, has_custom_components)) = self
+            .definitions
+            .get(definition_id)
+            .map(|definition| {
+                (
+                    definition.script_arc(),
+                    definition.components().to_vec(),
+                    definition.has_function("GetCustomComponents"),
+                )
+            })
+        else {
+            return Ok(Vec::new());
+        };
+        if !has_custom_components {
+            return Ok(static_components);
+        }
+
+        let world = self.host_world_context();
+        let (value, _args, batch, audio_state, rng, script_error) =
+            ScenarioScript::call_value_for_script(
+                definition_id,
+                &script,
+                Some(definition_id.clone()),
+                "GetCustomComponents",
+                &[object_reference_value(builder_id)],
+                world,
+                self.rng.clone(),
+                self.frame,
+                &self.global_effects.clone(),
+                self.physics,
+                self.environment,
+                self.audio_registry.clone(),
+                self.game_over_triggered,
+            );
+        self.rng = rng;
+        self.audio_registry = audio_state;
+        self.apply_scenario_batch(batch)?;
+        if let Some(error) = script_error {
+            tolerate_script_error::<()>(Err(error))?;
+            return Ok(static_components);
+        }
+
+        let Some(Value::Array(values)) = value else {
+            return Ok(static_components);
+        };
+        Ok(compat::component_list_from_custom_array(&values)
+            .into_iter()
+            .map(|(id, count)| DefinitionComponent { id, count })
+            .collect())
     }
 
     /// The ordinary (non-forced) ObjectComStop used by DFA_BUILD

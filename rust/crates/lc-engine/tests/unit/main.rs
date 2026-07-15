@@ -12975,10 +12975,100 @@ protected func Destruction()
     }
 
     #[test]
+    fn build_uses_definition_custom_components_with_builder_argument(
+    ) -> Result<(), EngineError> {
+        let builder_script = r#"#strict
+local component_queries;
+
+public func RecordComponentQuery()
+{
+    component_queries++;
+}
+"#;
+        let site_script = r#"#strict
+protected func GetCustomComponents(builder)
+{
+    builder->RecordComponentQuery();
+    return [METL];
+}
+"#;
+
+        let mut builder = Definition::from_script("BLDR", "Builder", builder_script)?;
+        builder.configure_actions(
+            Some("Walk".to_owned()),
+            HashMap::from([
+                (
+                    "Walk".to_owned(),
+                    ActionSpec::default().with_procedure("walk"),
+                ),
+                (
+                    "Build".to_owned(),
+                    ActionSpec::default().with_procedure("build"),
+                ),
+            ]),
+        );
+        builder.set_physical(PhysicalInfo {
+            can_construct: 1,
+            ..PhysicalInfo::default()
+        });
+
+        let mut site = Definition::from_script("SITE", "Site", site_script)?;
+        site.set_category(CATEGORY_STRUCTURE);
+        site.set_mass(100);
+        site.set_components(vec![DefinitionComponent {
+            id: "WOOD".to_owned(),
+            count: 1,
+        }]);
+
+        let mut engine = Engine::with_seed(57);
+        engine.register_definition(builder)?;
+        engine.register_definition(site)?;
+        engine.register_definition(Definition::from_script("WOOD", "Wood", "#strict")?)?;
+        engine.register_definition(Definition::from_script("METL", "Metal", "#strict")?)?;
+        engine.set_construction_needs_material(true);
+
+        let site_id = engine.spawn_object(
+            SpawnConfig::new("SITE")
+                .with_construction(1_000)
+                .with_ordered_components(vec![("WOOD".to_owned(), 0)]),
+        )?;
+        let mut action = ActionState::new("Build");
+        action.target = Some(site_id);
+        let builder_id = engine.spawn_object(SpawnConfig::new("BLDR").with_action(action))?;
+        let metal_id = engine.spawn_object(
+            SpawnConfig::new("METL")
+                .with_construction(FULL_CON)
+                .with_container(builder_id),
+        )?;
+
+        let snapshot = engine.tick()?;
+        assert!(snapshot.object(metal_id).is_none());
+        let site = snapshot.object(site_id).expect("site survives");
+        assert_eq!(site.construction, 2_500);
+        assert_eq!(site.components.get("METL"), Some(&1));
+        assert_eq!(site.components.get("WOOD"), Some(&0));
+        assert_eq!(
+            snapshot
+                .object(builder_id)
+                .and_then(|builder| builder.local_vars.get("component_queries")),
+            Some(&Value::Int(1)),
+            "Build calls the definition hook once with the live builder"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn build_uses_can_construct_turn_to_docon_components_and_repair(
     ) -> Result<(), EngineError> {
         fn builder_definition(id: &str, can_construct: i32) -> Result<Definition, EngineError> {
-            let mut definition = Definition::from_script(id, id, "#strict")?;
+            let mut definition = Definition::from_script(
+                id,
+                id,
+                r#"#strict
+local turn_damage;
+public func RecordTurnDamage(value) { turn_damage = value; }
+"#,
+            )?;
             definition.configure_actions(
                 Some("Walk".to_owned()),
                 HashMap::from([
@@ -13012,7 +13102,19 @@ protected func Destruction()
         engine.register_definition(builder_definition("FAST", 200)?)?;
         engine.register_definition(builder_definition("ZERO", 0)?)?;
         engine.register_definition(site)?;
-        engine.register_definition(Definition::from_script("DONE", "Done", "#strict")?)?;
+        let mut done = Definition::from_script(
+            "DONE",
+            "Done",
+            r#"#strict
+protected func RejectEntrance(container)
+{
+    container->RecordTurnDamage(GetDamage());
+    return false;
+}
+"#,
+        )?;
+        done.set_c4_callback_convention(true);
+        engine.register_definition(done)?;
         engine.register_definition(Definition::from_script("STON", "Stone", "#strict")?)?;
 
         let spawn_build =
@@ -13031,6 +13133,33 @@ protected func Destruction()
             };
         let (fast_builder, fast_site) = spawn_build(&mut engine, "FAST")?;
         let (zero_builder, zero_site) = spawn_build(&mut engine, "ZERO")?;
+
+        let full_site = engine.spawn_object(
+            SpawnConfig::new("SITE")
+                .with_construction(99_000)
+                .with_ordered_components(vec![("STON".to_owned(), 0)]),
+        )?;
+        let mut full_action = ActionState::new("Build");
+        full_action.target = Some(full_site);
+        engine.spawn_object(SpawnConfig::new("FAST").with_action(full_action))?;
+
+        // A contained construction silently exits and re-enters its builder
+        // during BuildTurnTo. The new definition's RejectEntrance observes
+        // Damage before Build's following repair assignment.
+        let mut internal_action = ActionState::new("Build");
+        let internal_builder =
+            engine.spawn_object(SpawnConfig::new("FAST").with_action(internal_action.clone()))?;
+        let internal_site = engine.spawn_object(
+            SpawnConfig::new("SITE")
+                .with_construction(1_000)
+                .with_container(internal_builder),
+        )?;
+        internal_action.target = Some(internal_site);
+        let internal_builder_idx = engine
+            .find_object_index(internal_builder)
+            .expect("internal builder exists");
+        engine.objects[internal_builder_idx].state.action = internal_action;
+        engine.apply_object_update(internal_site, ObjectUpdate::new().with_damage(77))?;
 
         let snapshot = engine.tick()?;
         let fast = snapshot.object(fast_site).expect("fast site survives");
@@ -13055,6 +13184,23 @@ protected func Destruction()
                 .object(zero_builder)
                 .and_then(|builder| builder.action_procedure.as_deref()),
             Some("walk")
+        );
+
+        let full = snapshot.object(full_site).expect("full site survives");
+        assert_eq!(full.construction, FULL_CON);
+        assert_eq!(full.components.get("STON"), Some(&100));
+
+        let internal = snapshot
+            .object(internal_site)
+            .expect("internal site survives");
+        assert_eq!(internal.definition_id, "DONE");
+        assert_eq!(internal.damage, 0);
+        assert_eq!(
+            snapshot
+                .object(internal_builder)
+                .and_then(|builder| builder.local_vars.get("turn_damage")),
+            Some(&Value::Int(77)),
+            "BuildTurnTo callbacks run before the successful-build repair write"
         );
         Ok(())
     }
