@@ -3326,7 +3326,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_queues_live_object_com_drop_without_stopping_plain_comdir() {
+    fn drop_omitted_and_zero_coordinates_queue_the_same_plain_object_com_drop() {
         let actor_id = ObjectId::new(630);
         let item_id = ObjectId::new(631);
 
@@ -3362,21 +3362,24 @@ mod tests {
             rng: None,
         };
 
-        let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
-        let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Running);
-        assert!(result.operations.is_empty());
-        assert_eq!(result.update, None, "plain Drop preserves Action.ComDir");
-        assert_eq!(result.events.len(), 1);
-        match &result.events[0] {
-            CommandEvent::ObjectComDrop {
-                actor_id: event_actor,
-                object_id,
-            } => {
-                assert_eq!(*event_actor, actor_id);
-                assert_eq!(*object_id, item_id);
-            }
-            other => panic!("unexpected event: {:?}", other),
+        for request in [
+            CommandRequest::new(CommandId::Drop),
+            CommandRequest::new(CommandId::Drop)
+                .with_tx(Some(0))
+                .with_ty(Some(0)),
+        ] {
+            let mut state = DropState::from_request(&request);
+            let result = state.step(&ctx);
+            assert_eq!(result.status, CommandStatus::Running);
+            assert!(result.operations.is_empty());
+            assert_eq!(result.update, None, "plain Drop preserves Action.ComDir");
+            assert_eq!(
+                result.events,
+                vec![CommandEvent::ObjectComDrop {
+                    actor_id,
+                    object_id: item_id,
+                }]
+            );
         }
     }
 
@@ -3588,13 +3591,15 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none());
+        assert!(result.events.is_empty());
         assert!(matches!(
             result.operations.as_slice(),
-            [CommandOperation::PushFront(CommandRequest {
-                id: CommandId::Get,
-                target: Some(target),
-                ..
-            })] if *target == item_id
+            [CommandOperation::PushFront(request)]
+                if request.id == CommandId::Get
+                    && request.target == Some(item_id)
+                    && request.update_interval == 40
+                    && request.mode == CommandMode::SilentSub
         ));
     }
 
