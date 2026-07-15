@@ -14190,17 +14190,21 @@ mod tests {
     }
 
     #[test]
-    fn chop_sets_action_on_a_nonliving_tree_at_point_like_cpp() {
+    fn chop_at_range_waits_for_walk_then_starts_nonforced_like_cpp() {
         // C4Command::Chop checks Target->At(cObj->x,cObj->y), plus the
-        // horizontal 4..9 range, before starting ObjectComChop. The real
-        // TRE2 shape reaches 28px vertically and trees are nonliving
-        // objects (C4Command.cpp:778-812).
+        // horizontal 4..9 range, before calling ObjectComChop. ObjectComChop
+        // only starts a non-forced Chop action while walking. The real TRE2
+        // shape reaches 28px vertically and trees are nonliving objects
+        // (C4Command.cpp:778-812; C4ObjectCom.cpp:162-165, 678-688).
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.position = Vector2::new(6, 14);
+        builder.action_name = "Swim".into();
+        builder.action_procedure = ActionProcedure::Swim;
         builder.command_direction = CommandDirection::Right;
+        builder.fixed_velocity = FixedVec2::from_ints(3, -2);
         let builder_definition = builder.definition_id.clone();
 
         let mut target = snapshot_with_id(target_id.as_u64());
@@ -14227,10 +14231,49 @@ mod tests {
             },
         );
 
+        let mut state = ChopState::from_request(
+            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        {
+            let builder_entry = objects.get(&builder_id).expect("builder present");
+            let ctx = CommandRuntimeContext {
+                landscape: None,
+                frame: 0,
+                position: builder_entry.position,
+                object: builder_entry,
+                objects: &objects,
+                players: &players,
+                definitions: &definitions,
+                structures_need_energy: false,
+                base_buy_enabled: true,
+                base_sell_enabled: true,
+                transfer_zones: &EMPTY_TRANSFER_ZONES,
+                rng: None,
+            };
+
+            let result = state.step(&ctx);
+            assert_eq!(result.status, CommandStatus::Running);
+            assert!(result.operations.is_empty());
+            assert!(result.events.is_empty());
+
+            let update = result.update.expect("expected stop update while swimming");
+            assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+            assert!(update.action.is_none());
+            assert!(update.velocity.is_none());
+            assert!(update.fixed_velocity.is_none());
+        }
+
+        let builder = objects.get_mut(&builder_id).expect("builder present");
+        builder.action_name = "Walk".into();
+        builder.action_procedure = ActionProcedure::Walk;
+        builder.command_direction = CommandDirection::Stop;
+
         let builder_entry = objects.get(&builder_id).expect("builder present");
         let ctx = CommandRuntimeContext {
             landscape: None,
-            frame: 0,
+            frame: 1,
             position: builder_entry.position,
             object: builder_entry,
             objects: &objects,
@@ -14238,27 +14281,26 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
-
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
             rng: None,
         };
 
-        let mut state = ChopState::from_request(
-            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
-        )
-        .expect("state created");
-
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.operations.is_empty());
+        assert!(result.events.is_empty());
 
-        let update = result.update.expect("expected update");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
-        assert_eq!(update.velocity, Some(Vector2::ZERO));
+        let update = result.update.expect("expected Chop update while walking");
+        assert!(update.command_direction.is_none());
+        assert!(update.velocity.is_none());
+        assert!(update.fixed_velocity.is_none());
         let action_update = update.action.expect("action update");
         assert_eq!(action_update.name, Some("Chop".into()));
         assert_eq!(action_update.target, Some(Some(target_id)));
-        assert!(action_update.force);
+        assert_eq!(action_update.phase, Some(0));
+        assert_eq!(action_update.ticks, Some(0));
+        assert!(!action_update.force);
     }
 
     #[test]
@@ -19050,6 +19092,11 @@ impl ChopState {
             && dx.abs() <= MAX_HORIZONTAL_RANGE;
 
         if at_target {
+            let update = self.update_to_stop(ctx);
+            if ctx.object.action_procedure != ActionProcedure::Walk {
+                return CommandStepResult::running(update);
+            }
+
             let action_name = self
                 .chop_action_name(ctx)
                 .unwrap_or_else(|| "Chop".to_string());
@@ -19058,11 +19105,10 @@ impl ChopState {
                 .with_target(Some(self.target))
                 .with_phase(0)
                 .with_ticks(0)
-                .with_force(true);
-            let update = ObjectUpdate::new()
-                .with_action_update(action_update)
-                .with_command_direction(CommandDirection::Stop)
-                .with_velocity(Vector2::ZERO);
+                .with_force(false);
+            let update = update
+                .unwrap_or_default()
+                .with_action_update(action_update);
             return CommandStepResult::running(Some(update));
         }
 
