@@ -99,6 +99,13 @@ impl PixelGridDirtyRect {
         }
     }
 
+    fn overlaps(self, other: Self) -> bool {
+        self.x < other.x.saturating_add(other.width)
+            && other.x < self.x.saturating_add(self.width)
+            && self.y < other.y.saturating_add(other.height)
+            && other.y < self.y.saturating_add(self.height)
+    }
+
     pub fn x(self) -> u32 {
         self.x
     }
@@ -113,6 +120,13 @@ impl PixelGridDirtyRect {
 
     pub fn height(self) -> u32 {
         self.height
+    }
+
+    fn contains(self, x: i32, y: i32) -> bool {
+        x >= self.x as i32
+            && y >= self.y as i32
+            && x < self.x.saturating_add(self.width) as i32
+            && y < self.y.saturating_add(self.height) as i32
     }
 }
 
@@ -168,6 +182,30 @@ mod hex_bytes {
     }
 }
 
+mod surface32_pixels_serde {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        pixels: &Arc<HashMap<usize, u32>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        pixels.as_ref().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Arc<HashMap<usize, u32>>, D::Error> {
+        HashMap::deserialize(deserializer).map(Arc::new)
+    }
+}
+
+fn surface32_pixels_are_empty(pixels: &Arc<HashMap<usize, u32>>) -> bool {
+    pixels.is_empty()
+}
+
 /// The per-pixel landscape plane (C4Landscape `Surface8`): each byte is a
 /// texmap index in the low 7 bits with the IFT bit 0x80
 /// (C4Landscape.h:29-32). Densities and materials resolve through the
@@ -183,6 +221,15 @@ pub struct PixelGrid {
     /// contexts and snapshots share this large plane until a terrain write.
     #[serde(with = "hex_bytes")]
     bytes: Arc<Vec<u8>>,
+    /// Sparse direct writes into C4Landscape's presentation-only Surface32.
+    /// C++ saves Surface32 as Landscape.png alongside Surface8, so preserve
+    /// these replacements across EngineState and snapshot serialization.
+    #[serde(
+        default,
+        with = "surface32_pixels_serde",
+        skip_serializing_if = "surface32_pixels_are_empty"
+    )]
+    surface32_pixels: Arc<HashMap<usize, u32>>,
     /// TEXTURE name per texmap index (presentation only: the frontend
     /// samples the texture png per pixel).
     #[serde(default)]
@@ -199,6 +246,18 @@ pub struct PixelGrid {
     /// performs a safe full rebuild.
     #[serde(default)]
     dirty_generations: VecDeque<PixelGridDirtyGeneration>,
+    /// Surface32 writes share the frontend cache but not Surface8's revision:
+    /// cosmetic writes must not look like material-plane mutations.
+    #[serde(skip)]
+    surface32_revision: u64,
+    #[serde(skip)]
+    surface32_render_token: u64,
+    #[serde(skip)]
+    surface32_dirty_generations: VecDeque<PixelGridDirtyGeneration>,
+    /// C4Landscape::SetPix queues relights until Draw::DoRelights. Direct
+    /// Surface32 writes inside one of these regions cannot survive that draw.
+    #[serde(skip)]
+    pending_surface32_relights: Vec<PixelGridDirtyRect>,
     /// Pix2Dens: density per texmap index (IFT stripped); index 0 and
     /// unmapped entries are sky (density 0).
     densities: Vec<i32>,
@@ -230,6 +289,7 @@ impl PixelGrid {
             width,
             height,
             bytes: Arc::new(bytes),
+            surface32_pixels: Arc::new(HashMap::new()),
             densities,
             material_names,
             materials,
@@ -238,6 +298,10 @@ impl PixelGrid {
             revision: 0,
             render_token,
             dirty_generations: VecDeque::new(),
+            surface32_revision: 0,
+            surface32_render_token: 0,
+            surface32_dirty_generations: VecDeque::new(),
+            pending_surface32_relights: Vec::new(),
         }
     }
 
@@ -280,7 +344,7 @@ impl PixelGrid {
 
     /// Raw plane write (C4SolidMask's _SBackPix): bumps the revision on change.
     pub fn write_byte(&mut self, x: i32, y: i32, byte: u8) {
-        self.set_byte(x, y, byte);
+        self.set_byte_impl(x, y, byte, false);
     }
 
     pub fn material_names(&self) -> &[Option<String>] {
@@ -303,23 +367,50 @@ impl PixelGrid {
         {
             return None;
         }
-        if (self.revision, self.render_token) == (previous.revision, previous.render_token) {
-            return (Arc::ptr_eq(&self.bytes, &previous.bytes)
-                || self.bytes.as_slice() == previous.bytes.as_slice())
-            .then(Vec::new);
+        let mut rects = Self::render_lineage_dirty_rects(
+            self.revision,
+            self.render_token,
+            &self.dirty_generations,
+            previous.revision,
+            previous.render_token,
+            Arc::ptr_eq(&self.bytes, &previous.bytes)
+                || self.bytes.as_slice() == previous.bytes.as_slice(),
+        )?;
+        rects.extend(Self::render_lineage_dirty_rects(
+            self.surface32_revision,
+            self.surface32_render_token,
+            &self.surface32_dirty_generations,
+            previous.surface32_revision,
+            previous.surface32_render_token,
+            Arc::ptr_eq(&self.surface32_pixels, &previous.surface32_pixels)
+                || self.surface32_pixels.as_ref() == previous.surface32_pixels.as_ref(),
+        )?);
+        Some(rects)
+    }
+
+    fn render_lineage_dirty_rects(
+        current_revision: u64,
+        current_token: u64,
+        generations: &VecDeque<PixelGridDirtyGeneration>,
+        previous_revision: u64,
+        previous_token: u64,
+        storage_equal: bool,
+    ) -> Option<Vec<PixelGridDirtyRect>> {
+        if (current_revision, current_token) == (previous_revision, previous_token) {
+            return storage_equal.then(Vec::new);
         }
 
-        let mut revision = previous.revision;
-        let mut token = previous.render_token;
+        let mut revision = previous_revision;
+        let mut token = previous_token;
         let mut rects = Vec::new();
-        for generation in &self.dirty_generations {
+        for generation in generations {
             if (generation.base_revision, generation.base_token) != (revision, token) {
                 continue;
             }
             rects.push(generation.rect);
             revision = generation.revision;
             token = generation.token;
-            if (revision, token) == (self.revision, self.render_token) {
+            if (revision, token) == (current_revision, current_token) {
                 return Some(rects);
             }
         }
@@ -328,6 +419,17 @@ impl PixelGrid {
 
     pub fn byte_at(&self, x: i32, y: i32) -> Option<u8> {
         self.slot(x, y).map(|slot| self.bytes[slot])
+    }
+
+    /// Raw C4 packed color written directly to the presentation-only
+    /// Surface32 at this coordinate, if one has not since been relit.
+    pub fn surface32_pixel_at(&self, x: i32, y: i32) -> Option<u32> {
+        let slot = self.slot(x, y)?;
+        self.surface32_pixels.get(&slot).copied()
+    }
+
+    pub fn has_surface32_pixels(&self) -> bool {
+        !self.surface32_pixels.is_empty()
     }
 
     fn density_of(&self, byte: u8) -> i32 {
@@ -426,29 +528,66 @@ impl PixelGrid {
         rect: PixelGridDirtyRect,
         storage_was_shared: bool,
     ) {
+        Self::record_lineage_change(
+            &mut self.dirty_generations,
+            self.revision,
+            self.render_token,
+            base_revision,
+            base_token,
+            rect,
+            storage_was_shared,
+        );
+    }
+
+    fn record_surface32_change(
+        &mut self,
+        base_revision: u64,
+        base_token: u64,
+        rect: PixelGridDirtyRect,
+        storage_was_shared: bool,
+    ) {
+        Self::record_lineage_change(
+            &mut self.surface32_dirty_generations,
+            self.surface32_revision,
+            self.surface32_render_token,
+            base_revision,
+            base_token,
+            rect,
+            storage_was_shared,
+        );
+    }
+
+    fn record_lineage_change(
+        generations: &mut VecDeque<PixelGridDirtyGeneration>,
+        revision: u64,
+        token: u64,
+        base_revision: u64,
+        base_token: u64,
+        rect: PixelGridDirtyRect,
+        storage_was_shared: bool,
+    ) {
         let can_extend = !storage_was_shared
-            && self.dirty_generations.back().is_some_and(|generation| {
+            && generations.back().is_some_and(|generation| {
                 (generation.revision, generation.token) == (base_revision, base_token)
             });
         if can_extend {
-            let generation = self
-                .dirty_generations
+            let generation = generations
                 .back_mut()
                 .expect("checked dirty generation exists");
-            generation.revision = self.revision;
-            generation.token = self.render_token;
+            generation.revision = revision;
+            generation.token = token;
             generation.rect = generation.rect.union(rect);
         } else {
-            self.dirty_generations.push_back(PixelGridDirtyGeneration {
+            generations.push_back(PixelGridDirtyGeneration {
                 base_revision,
-                revision: self.revision,
+                revision,
                 base_token,
-                token: self.render_token,
+                token,
                 rect,
             });
         }
-        while self.dirty_generations.len() > MAX_RENDER_DIRTY_GENERATIONS {
-            self.dirty_generations.pop_front();
+        while generations.len() > MAX_RENDER_DIRTY_GENERATIONS {
+            generations.pop_front();
         }
     }
 
@@ -464,6 +603,181 @@ impl PixelGrid {
         let token = render_token_bytes(token, x.to_le_bytes());
         let token = render_token_bytes(token, y.to_le_bytes());
         render_token_bytes(token, [old, new])
+    }
+
+    fn advance_surface32_render_token(
+        token: u64,
+        revision: u64,
+        x: i32,
+        y: i32,
+        old: Option<u32>,
+        new: Option<u32>,
+    ) -> u64 {
+        let token = render_token_bytes(token, [0x32]);
+        let token = render_token_bytes(token, revision.to_le_bytes());
+        let token = render_token_bytes(token, x.to_le_bytes());
+        let token = render_token_bytes(token, y.to_le_bytes());
+        let token = render_token_bytes(token, [u8::from(old.is_some())]);
+        let token = render_token_bytes(token, old.unwrap_or_default().to_le_bytes());
+        let token = render_token_bytes(token, [u8::from(new.is_some())]);
+        render_token_bytes(token, new.unwrap_or_default().to_le_bytes())
+    }
+
+    /// C4Surface::SetPixDw on the landscape's 32-bit presentation surface.
+    /// The packed high byte is legacy transparency (0 opaque, 255 clear).
+    pub fn set_surface32_pixel(&mut self, x: i32, y: i32, color: u32) -> bool {
+        let Some(slot) = self.slot(x, y) else {
+            return false;
+        };
+        if self
+            .pending_surface32_relights
+            .iter()
+            .any(|rect| rect.contains(x, y))
+        {
+            // C++ performs this write immediately, but Draw::DoRelights
+            // rebuilds the queued region before it can be presented.
+            return true;
+        }
+        // C4Surface::SetPixDw canonicalizes fully transparent pixels so stale
+        // RGB data cannot leak through later filtering.
+        let color = if color >> 24 == 0xff {
+            0xff00_0000
+        } else {
+            color
+        };
+        let old = self.surface32_pixels.get(&slot).copied();
+        if old == Some(color) {
+            return true;
+        }
+
+        let storage_was_shared = Arc::strong_count(&self.surface32_pixels) > 1;
+        let base_revision = self.surface32_revision;
+        let base_token = self.surface32_render_token;
+        Arc::make_mut(&mut self.surface32_pixels).insert(slot, color);
+        self.surface32_revision = self.surface32_revision.wrapping_add(1);
+        self.surface32_render_token = Self::advance_surface32_render_token(
+            base_token,
+            self.surface32_revision,
+            x,
+            y,
+            old,
+            Some(color),
+        );
+        self.record_surface32_change(
+            base_revision,
+            base_token,
+            PixelGridDirtyRect::single(x, y),
+            storage_was_shared,
+        );
+        true
+    }
+
+    /// A later material relight rebuilds Surface32 from Surface8 in this
+    /// expanded region, replacing any cosmetic SetLandscapePixel writes.
+    fn clear_surface32_rect(&mut self, x: i32, y: i32, width: i32, height: i32) {
+        let Some(bounds) = RasterChangeRect::new(x, y, width, height)
+            .clipped_to(self.width as i32, self.height as i32)
+        else {
+            return;
+        };
+        if self.surface32_pixels.is_empty() {
+            return;
+        }
+        let area = i64::from(bounds.width) * i64::from(bounds.height);
+        let mut removed = if area <= self.surface32_pixels.len() as i64 {
+            let mut removed = Vec::new();
+            for pixel_y in bounds.y..bounds.y + bounds.height {
+                for pixel_x in bounds.x..bounds.x + bounds.width {
+                    let slot = pixel_y as usize * self.width as usize + pixel_x as usize;
+                    if let Some(&color) = self.surface32_pixels.get(&slot) {
+                        removed.push((slot, pixel_x, pixel_y, color));
+                    }
+                }
+            }
+            removed
+        } else {
+            self.surface32_pixels
+                .iter()
+                .filter_map(|(&slot, &color)| {
+                    let pixel_x = (slot % self.width as usize) as i32;
+                    let pixel_y = (slot / self.width as usize) as i32;
+                    (pixel_x >= bounds.x
+                        && pixel_x < bounds.x + bounds.width
+                        && pixel_y >= bounds.y
+                        && pixel_y < bounds.y + bounds.height)
+                        .then_some((slot, pixel_x, pixel_y, color))
+                })
+                .collect::<Vec<_>>()
+        };
+        if removed.is_empty() {
+            return;
+        }
+        removed.sort_unstable_by_key(|&(slot, _, _, _)| slot);
+
+        let storage_was_shared = Arc::strong_count(&self.surface32_pixels) > 1;
+        let base_revision = self.surface32_revision;
+        let base_token = self.surface32_render_token;
+        let pixels = Arc::make_mut(&mut self.surface32_pixels);
+        for &(slot, _, _, _) in &removed {
+            pixels.remove(&slot);
+        }
+        self.surface32_revision = self.surface32_revision.wrapping_add(1);
+        let mut token = base_token;
+        for &(_, pixel_x, pixel_y, color) in &removed {
+            token = Self::advance_surface32_render_token(
+                token,
+                self.surface32_revision,
+                pixel_x,
+                pixel_y,
+                Some(color),
+                None,
+            );
+        }
+        self.surface32_render_token = token;
+        self.record_surface32_change(
+            base_revision,
+            base_token,
+            bounds.into(),
+            storage_was_shared,
+        );
+    }
+
+    fn schedule_surface32_relight_around(&mut self, x: i32, y: i32) {
+        // C4Landscape::Relight expands a changed Surface8 pixel by
+        // C4LS_MaxLightDistX/Y = 1/8 before rebuilding Surface32.
+        let x = x.saturating_sub(1);
+        let y = y.saturating_sub(8);
+        self.clear_surface32_rect(x, y, 3, 17);
+        let Some(rect) = RasterChangeRect::new(x, y, 3, 17)
+            .clipped_to(self.width as i32, self.height as i32)
+            .map(PixelGridDirtyRect::from)
+        else {
+            return;
+        };
+        if let Some(existing) = self
+            .pending_surface32_relights
+            .iter_mut()
+            .find(|existing| existing.overlaps(rect))
+        {
+            *existing = existing.union(rect);
+        } else if self.pending_surface32_relights.len() < MAX_RENDER_DIRTY_GENERATIONS {
+            self.pending_surface32_relights.push(rect);
+        } else if let Some(last) = self.pending_surface32_relights.last_mut() {
+            *last = last.union(rect);
+        }
+    }
+
+    fn relight_surface32_rect(&mut self, bounds: RasterChangeRect) {
+        self.clear_surface32_rect(
+            bounds.x.saturating_sub(1),
+            bounds.y.saturating_sub(8),
+            bounds.width.saturating_add(2),
+            bounds.height.saturating_add(16),
+        );
+    }
+
+    fn finish_pending_surface32_relights(&mut self) {
+        self.pending_surface32_relights.clear();
     }
 
     fn advance_rect_render_token(
@@ -493,6 +807,12 @@ impl PixelGrid {
         else {
             return;
         };
+        self.clear_surface32_rect(
+            (rect.x as i32).saturating_sub(1),
+            (rect.y as i32).saturating_sub(8),
+            (rect.width as i32).saturating_add(2),
+            (rect.height as i32).saturating_add(16),
+        );
         let storage_was_shared = Arc::strong_count(&self.bytes) > 1;
         let base_revision = self.revision;
         let base_token = self.render_token;
@@ -535,10 +855,17 @@ impl PixelGrid {
     }
 
     fn set_byte(&mut self, x: i32, y: i32, byte: u8) {
+        self.set_byte_impl(x, y, byte, true);
+    }
+
+    fn set_byte_impl(&mut self, x: i32, y: i32, byte: u8, schedule_relight: bool) {
         if let Some(slot) = self.slot(x, y) {
             let old = self.bytes[slot];
             if old == byte {
                 return;
+            }
+            if schedule_relight {
+                self.schedule_surface32_relight_around(x, y);
             }
             if self.material_counts.is_empty() && self.materials.iter().any(Option::is_some) {
                 self.rebuild_material_counts();
@@ -1368,6 +1695,9 @@ impl Landscape {
             let state = self.raster_state.as_mut()?;
             let result = change(pixels, state);
             pixels.sync_runtime_texmap(state.texmap());
+            // FinishChange relights synchronously, so a later direct
+            // Surface32 write in the same script call remains visible.
+            pixels.relight_surface32_rect(bounds);
             result
         };
         self.refresh_raster_columns(bounds.columns());
@@ -1489,7 +1819,7 @@ impl Landscape {
         let Some(current) = grid.byte_at(x, y) else {
             return false;
         };
-        grid.write_byte(x, y, byte | (current & 0x80));
+        grid.set_byte(x, y, byte | (current & 0x80));
         true
     }
 
@@ -1507,7 +1837,7 @@ impl Landscape {
         let Some(current) = grid.byte_at(x, y) else {
             return false;
         };
-        grid.write_byte(x, y, byte | (current & 0x80));
+        grid.set_byte(x, y, byte | (current & 0x80));
         true
     }
 
@@ -1523,9 +1853,38 @@ impl Landscape {
         self.pixels.as_ref().and_then(|grid| grid.byte_at(x, y))
     }
 
+    /// Raw packed C4 color explicitly written into the presentation-only
+    /// Surface32. Absence means the frontend composes this cell from Surface8.
+    pub fn surface32_pixel_at(&self, x: i32, y: i32) -> Option<u32> {
+        self.pixels
+            .as_ref()
+            .and_then(|grid| grid.surface32_pixel_at(x, y))
+    }
+
+    /// Direct Surface32 write used by SetLandscapePixel. Returns false for a
+    /// missing pixel surface or out-of-bounds coordinates; the script native
+    /// intentionally discards that result like C++.
+    pub fn set_surface32_pixel(&mut self, x: i32, y: i32, color: u32) -> bool {
+        self.pixels
+            .as_mut()
+            .is_some_and(|grid| grid.set_surface32_pixel(x, y, color))
+    }
+
+    pub(crate) fn finish_surface32_draw(&mut self) {
+        if let Some(grid) = self.pixels.as_mut() {
+            grid.finish_pending_surface32_relights();
+        }
+    }
+
     pub fn grid_write_byte(&mut self, x: i32, y: i32, byte: u8) {
         if let Some(grid) = self.pixels.as_mut() {
             grid.write_byte(x, y, byte);
+        }
+    }
+
+    pub(crate) fn grid_set_byte(&mut self, x: i32, y: i32, byte: u8) {
+        if let Some(grid) = self.pixels.as_mut() {
+            grid.set_byte(x, y, byte);
         }
     }
 
@@ -2090,7 +2449,7 @@ impl Landscape {
             let Some(old_byte) = self.grid_byte_at(x, converted_y) else {
                 break;
             };
-            self.grid_write_byte(
+            self.grid_set_byte(
                 x,
                 converted_y,
                 action.target_byte | (old_byte & 0x80),
@@ -4322,6 +4681,63 @@ mod tests {
             live.render_dirty_rects_since(&sibling).is_none(),
             "equal legacy/default tokens still compare content before reusing a cache"
         );
+    }
+
+    #[test]
+    fn surface32_writes_have_independent_lineage_and_relight_back_to_surface8() {
+        let mut grid = PixelGrid::new(4, 3, vec![0; 12], Vec::new(), Vec::new(), Vec::new());
+        let material_revision = grid.revision();
+        let before = grid.clone();
+
+        assert!(grid.set_surface32_pixel(2, 1, 0x0011_2233));
+        assert_eq!(grid.surface32_pixel_at(2, 1), Some(0x0011_2233));
+        assert_eq!(grid.bytes(), before.bytes());
+        assert_eq!(
+            grid.revision(),
+            material_revision,
+            "a cosmetic Surface32 write cannot mutate Surface8's revision"
+        );
+        assert_eq!(
+            grid.render_dirty_rects_since(&before),
+            Some(vec![PixelGridDirtyRect::single(2, 1)]),
+            "the frontend can patch only the changed Surface32 cache cell"
+        );
+
+        let opaque = grid.clone();
+        assert!(grid.set_surface32_pixel(3, 2, 0xffab_cdef));
+        assert_eq!(
+            grid.surface32_pixel_at(3, 2),
+            Some(0xff00_0000),
+            "C4Surface canonicalizes fully transparent writes to transparent black"
+        );
+        assert_eq!(
+            grid.render_dirty_rects_since(&opaque),
+            Some(vec![PixelGridDirtyRect::single(3, 2)])
+        );
+        let restored: PixelGrid = serde_json::from_str(
+            &serde_json::to_string(&grid).expect("Surface32 pixels serialize"),
+        )
+        .expect("Surface32 pixels restore");
+        assert_eq!(restored.surface32_pixel_at(2, 1), Some(0x0011_2233));
+        assert_eq!(restored.surface32_pixel_at(3, 2), Some(0xff00_0000));
+
+        // SetPix schedules a relight expanded by x=1/y=8. Changing this
+        // neighboring Surface8 byte therefore rebuilds both cosmetic cells
+        // from the material plane without changing their Surface8 bytes.
+        grid.set_byte(2, 0, 1);
+        assert_eq!(grid.surface32_pixel_at(2, 1), None);
+        assert_eq!(grid.surface32_pixel_at(3, 2), None);
+        assert_eq!(grid.byte_at(2, 1), Some(0));
+        assert_eq!(grid.byte_at(3, 2), Some(0));
+        assert!(grid.set_surface32_pixel(2, 1, 0x0044_5566));
+        assert_eq!(
+            grid.surface32_pixel_at(2, 1),
+            None,
+            "Draw::DoRelights overwrites even a direct write after SetPix"
+        );
+        grid.finish_pending_surface32_relights();
+        assert!(grid.set_surface32_pixel(2, 1, 0x0044_5566));
+        assert_eq!(grid.surface32_pixel_at(2, 1), Some(0x0044_5566));
     }
 
     #[test]

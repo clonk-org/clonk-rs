@@ -10333,6 +10333,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetSkyParallax", set_sky_parallax);
     script.register_host_function("SetSkyAdjust", set_sky_adjust);
     script.register_host_function("SetMatAdjust", set_mat_adjust);
+    script.register_host_function("SetLandscapePixel", set_landscape_pixel);
     script.register_host_function("GetSkyAdjust", get_sky_adjust);
     script.register_host_function("SetGamma", set_gamma);
     script.register_host_function("ResetGamma", reset_gamma);
@@ -12750,6 +12751,9 @@ pub enum LandscapeOperation {
     /// FnSetMatAdjust (C4Script.cpp:4626-4630) ->
     /// C4Landscape::SetModulation.
     MatAdjust { modulation: u32 },
+    /// FnSetLandscapePixel (C4Script.cpp:5082-5088): a direct packed-color
+    /// write into the presentation-only Surface32.
+    SetLandscapePixel { position: Vector2, color: u32 },
     /// FnSetSkyParallax (C4Script.cpp:4955-4970) — Sky is a C4Landscape
     /// member; the raw int args carry the SkyPar_KEEP magic through to
     /// `SkyState::apply_parallax`.
@@ -12840,7 +12844,7 @@ fn preview_construction_terrain(
                 continue;
             }
             while target_y >= bottom_y {
-                landscape.grid_write_byte(column, target_y, pixel);
+                landscape.grid_set_byte(column, target_y, pixel);
                 target_y -= 1;
             }
         }
@@ -21669,6 +21673,41 @@ fn set_mat_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
             Rc::make_mut(landscape).set_modulation(modulation);
         }
         context.register_landscape_operation(LandscapeOperation::MatAdjust { modulation });
+        Ok(Value::Nil)
+    })
+}
+
+/// FnSetLandscapePixel (C4Script.cpp:5082-5088): offset by the current
+/// script object and write only the packed-color Surface32 pixel. The native
+/// is void and ignores out-of-bounds or surface-lock failure.
+fn set_landscape_pixel(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetLandscapePixel",
+        "x",
+    )?;
+    let y = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetLandscapePixel",
+        "y",
+    )?;
+    let color = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetLandscapePixel",
+        "color",
+    )? as u32;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("SetLandscapePixel requires an active engine context")
+        })?;
+        let position = context.caller_scope().map_or(Vector2::new(x, y), |(_, base)| {
+            Vector2::new(base.x.saturating_add(x), base.y.saturating_add(y))
+        });
+        context.register_landscape_operation(LandscapeOperation::SetLandscapePixel {
+            position,
+            color,
+        });
         Ok(Value::Nil)
     })
 }
@@ -37102,6 +37141,7 @@ mod tests {
         "SetGravity",
         "SetHostility",
         "SetKiller",
+        "SetLandscapePixel",
         "SetLength",
         "SetMass",
         "SetMatAdjust",

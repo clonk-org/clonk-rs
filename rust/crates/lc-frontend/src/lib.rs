@@ -2747,6 +2747,7 @@ impl GraphicsSystem {
                 }
             };
             let bytes = grid.bytes();
+            let has_surface32_pixels = grid.has_surface32_pixels();
             let textures = grid.texture_names();
             let materials = grid.material_names();
             let material_textures = Arc::clone(&self.material_textures);
@@ -2809,6 +2810,18 @@ impl GraphicsSystem {
                         let out = (y * width as usize + x) * 4;
                         let output = &mut cache.pixels[out..out + 4];
                         output.fill(0);
+                        if has_surface32_pixels {
+                            if let Some(color) = grid.surface32_pixel_at(x as i32, y as i32) {
+                                let [red, green, blue, transparency] = split_c4_color(color);
+                                output.copy_from_slice(&[
+                                    red,
+                                    green,
+                                    blue,
+                                    255u8.saturating_sub(transparency),
+                                ]);
+                                continue;
+                            }
+                        }
                         let byte = bytes[y * width as usize + x];
                         // Pixel zero is sky. C4Landscape::GetClrByTex only
                         // applies material patterns when `pix` is nonzero
@@ -13884,6 +13897,86 @@ mod tests {
             graphics.surface().get_pixel(WIDTH - 1, HEIGHT - 1),
             Some(Color::opaque(254, 190, 126)),
             "the opaque specialization preserves the C++ material and gamma output"
+        );
+    }
+
+    #[test]
+    fn warm_landscape_cache_patches_one_direct_surface32_sky_pixel() {
+        const WIDTH: u32 = 8;
+        const CHANGE_X: i32 = 3;
+        const BACKGROUND: Color = Color::new(4, 8, 12, 255);
+        let mut bytes = vec![1; WIDTH as usize];
+        bytes[CHANGE_X as usize] = 0;
+        let mut landscape = Landscape::flat(WIDTH, 1);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            1,
+            bytes,
+            vec![0, 50],
+            vec![None, Some("Earth".to_string())],
+            vec![None, Some("Rough".to_string())],
+        ));
+        let mut graphics = GraphicsSystem::new(
+            WIDTH,
+            1,
+            1,
+            "direct Surface32 cache patch",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_material_textures(Arc::new(HashMap::from([(
+            "rough".to_string(),
+            ImageData::new(1, 1, vec![128, 96, 64, 255]),
+        )])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "earth".to_string(),
+            MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50),
+        )])));
+        graphics.surface_mut().fill(BACKGROUND);
+
+        reset_material_composition_calls();
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        assert_eq!(
+            material_composition_calls(),
+            WIDTH as usize - 1,
+            "the cold cache composes every non-sky material cell"
+        );
+        let unchanged_material = graphics
+            .surface()
+            .get_pixel(CHANGE_X as u32 - 1, 0)
+            .expect("neighboring material pixel");
+        assert_eq!(
+            graphics.surface().get_pixel(CHANGE_X as u32, 0),
+            Some(BACKGROUND),
+            "the untouched Surface8 sky cell leaves the backdrop visible"
+        );
+
+        assert!(landscape.set_surface32_pixel(CHANGE_X, 0, 0x0011_2233));
+        assert_eq!(
+            landscape.grid_byte_at(CHANGE_X, 0),
+            Some(0),
+            "the direct color write leaves Surface8 sky unchanged"
+        );
+        graphics.surface_mut().fill(BACKGROUND);
+        reset_material_composition_calls();
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+
+        assert_eq!(
+            material_composition_calls(),
+            0,
+            "a warm cache patches the direct color cell instead of rebuilding material pixels"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(CHANGE_X as u32, 0),
+            Some(Color::opaque(0x11, 0x22, 0x33)),
+            "packed C4 transparency zero renders as an opaque replacement sky pixel"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(CHANGE_X as u32 - 1, 0),
+            Some(unchanged_material),
+            "neighboring cached material output remains unchanged"
         );
     }
 

@@ -15492,7 +15492,7 @@ impl Engine {
                     continue;
                 }
                 while target_y >= y {
-                    landscape.grid_write_byte(column, target_y, pixel);
+                    landscape.grid_set_byte(column, target_y, pixel);
                     target_y -= 1;
                 }
             }
@@ -20761,6 +20761,12 @@ impl Engine {
 
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
         self.surface_pending_runtime_flash_boundary()?;
+        // The previous frame's C4Landscape::Draw ran DoRelights before its
+        // blit. Start the new simulation frame after that presentation
+        // boundary so fresh SetLandscapePixel writes may survive again.
+        if let Some(landscape) = &mut self.landscape {
+            landscape.finish_surface32_draw();
+        }
         self.exec_cursor = None;
         self.frame += 1;
         // C4Game::Ticks only arms the external one-second timer; it does not
@@ -35992,6 +35998,13 @@ impl Engine {
                     // (C4Script.cpp:4626-4630; C4Landscape.h:200-205).
                     if let Some(landscape) = &mut self.landscape {
                         landscape.set_modulation(modulation);
+                    }
+                }
+                LandscapeOperation::SetLandscapePixel { position, color } => {
+                    // FnSetLandscapePixel writes only the visible 32-bit
+                    // surface; Surface8/material queries stay untouched.
+                    if let Some(landscape) = &mut self.landscape {
+                        let _ = landscape.set_surface32_pixel(position.x, position.y, color);
                     }
                 }
                 LandscapeOperation::SkyParallax {
