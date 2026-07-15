@@ -524,7 +524,13 @@ pub enum PlayerCommand {
         definition_id: DefinitionId,
     },
     /// `FnSetWealth` (C4Script.cpp:2761-2766), already clamped.
-    SetWealth { player_id: i32, value: i32 },
+    SetWealth {
+        player_id: i32,
+        value: i32,
+        /// True for a C4Player::DoWealth path (buy/sell), which always arms
+        /// ViewWealth; false for FnSetWealth's direct assignment.
+        show_change: bool,
+    },
     /// `FnDoScore` -> `C4Player::DoPoints` (C4Script.cpp:2762-2766;
     /// C4Player.cpp:1824-1828). Keep this incremental so independently
     /// batched script outcomes compound in their original order.
@@ -2852,14 +2858,19 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
                     })
                     .unwrap_or(0),
             ),
+            "Control" => Value::Int(player.control_set),
+            "MouseControl" => Value::Int(player.mouse_control),
             "AutoContextMenu" => Value::Int(i32::from(player.control.auto_context_menu)),
             "AutoStopControl" => Value::Int(i32::from(player.control.control_style)),
             "Position" => Value::Int(player.position_index.unwrap_or(-1)),
             "ViewMode" => Value::Int(player.view_mode),
             "ViewX" => Value::Int(view_center.x),
             "ViewY" => Value::Int(view_center.y),
+            "ViewWealth" => Value::Int(player.view_wealth),
+            "ViewValue" => Value::Int(player.view_value),
             "FogOfWar" => Value::Bool(player.fog_of_war),
             "ForceFogOfWar" => Value::Bool(player.force_fog_of_war),
+            "ShowStartup" => Value::Bool(player.show_startup),
             "ShowControl" => Value::Int(player.show_control),
             "ShowControlPos" => Value::Int(player.show_control_position),
             "Wealth" => Value::Int(player.wealth),
@@ -2870,16 +2881,21 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "ObjectsOwned" => Value::Int(player.objects_owned as i32),
             "ProductionDelay" => Value::Int(player.production_delay as i32),
             "ProductionUnit" => Value::Int(player.production_unit as i32),
+            "SelectCount" => Value::Int(player.select_count),
             "SelectFlash" => Value::Int(player.control.select_flash),
             "CursorFlash" => Value::Int(player.control.cursor_flash),
             "Cursor" => Value::Int(object_number(player.cursor)),
             "ViewCursor" => Value::Int(object_number(player.view_cursor)),
+            "Captain" => Value::Int(object_number(player.captain)),
             "LastCom" => Value::Int(i32::from(player.control.last_com)),
             "LastComDel" => Value::Int(player.control.last_com_delay),
             "PressedComs" => Value::Int(player.control.pressed_coms),
             "LastComDownDouble" => Value::Int(player.control.last_com_down_double),
             "CursorSelection" => Value::Int(player.control.cursor_selection),
             "CursorToggled" => Value::Int(player.control.cursor_toggled),
+            "MessageStatus" => Value::Int(player.message_status),
+            "MessageBuf" => Value::String(player.message_buf.clone()),
+            "CrewCreated" => Value::Int(player.crew_created),
             _ => Value::Nil,
         })
     })
@@ -3300,6 +3316,7 @@ fn set_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
         context.record_player_command(PlayerCommand::SetWealth {
             player_id,
             value: clamped,
+            show_change: false,
         });
         Ok(Value::Bool(true))
     })
@@ -3770,6 +3787,7 @@ fn do_score(args: &[Value]) -> Result<Value, RuntimeError> {
         let points = (i64::from(player.points) + i64::from(change))
             .clamp(-100_000, 100_000) as i32;
         player.points = points;
+        player.view_value = 100;
         context.record_player_command(PlayerCommand::AdjustPoints {
             player_id,
             delta: change,
@@ -6856,11 +6874,13 @@ fn sell_object_to_home_live(target: ObjectId, player: i32) -> Result<bool, Runti
             };
             let updated = (i64::from(state.wealth) + i64::from(value)).clamp(0, 10_000) as i32;
             state.wealth = updated;
+            state.view_wealth = 100;
             updated
         };
         context.record_player_command(PlayerCommand::SetWealth {
             player_id: player,
             value: updated,
+            show_change: true,
         });
     });
 
@@ -8407,23 +8427,10 @@ fn get_select_count(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
-        let count = player
-            .crew
-            .iter()
-            .filter(|id| {
-                context
-                    .get_world_object(**id)
-                    .map(|object| object.selected && !object.crew_disabled)
-                    .unwrap_or_else(|| {
-                        context
-                            .world
-                            .crew_selection
-                            .get(&player_id)
-                            .is_some_and(|selection| selection.selected.contains(id))
-                    })
-            })
-            .count();
-        Ok(Value::Int(truncate_to_i32(count as u64)))
+        // This is C4Player::SelectCount, not a live recount. UpdateCounts
+        // refreshes it at the start of Player::Execute; selection changes
+        // made later in the same callback remain stale until that boundary.
+        Ok(Value::Int(player.select_count))
     })
 }
 
@@ -15721,6 +15728,9 @@ fn recruit_or_create_crew_info(
         rank: entry.rank,
         experience: entry.experience,
     };
+    if let Some(player) = context.player_state_mut(player) {
+        player.crew_created = player.crew_created.wrapping_add(1);
+    }
     Ok(Some((link, info, Some(entry))))
 }
 
@@ -41775,13 +41785,24 @@ public func RejectConstruction(x, y, builder)
         // exact serialized names and integer types (C4Player.cpp:1560-1605).
         let cursor = ObjectId::new(42);
         let view_cursor = ObjectId::new(43);
+        let captain = ObjectId::new(44);
         let mut player = PlayerState {
             id: 7,
             status: crate::PlayerStatus::Active,
             surrendered: true,
             cursor: Some(cursor),
             view_cursor: Some(view_cursor),
+            captain: Some(captain),
             color: Some(crate::RgbColor::new(0x12, 0x34, 0x56)),
+            control_set: 3,
+            mouse_control: 2,
+            view_wealth: 21,
+            view_value: 22,
+            show_startup: true,
+            select_count: 4,
+            message_status: 5,
+            message_buf: "legacy message".into(),
+            crew_created: 6,
             production_delay: 12,
             production_unit: 3,
             ..PlayerState::default()
@@ -41819,11 +41840,18 @@ public func RejectConstruction(x, y, builder)
                 read("ID")?,
                 read("Surrendered")?,
                 read("ColorDw")?,
+                read("Control")?,
+                read("MouseControl")?,
                 read("AutoStopControl")?,
+                read("ViewWealth")?,
+                read("ViewValue")?,
+                read("ShowStartup")?,
                 read("ProductionDelay")?,
                 read("ProductionUnit")?,
+                read("SelectCount")?,
                 read("Cursor")?,
                 read("ViewCursor")?,
+                read("Captain")?,
                 read("LastCom")?,
                 read("LastComDel")?,
                 read("PressedComs")?,
@@ -41832,6 +41860,9 @@ public func RejectConstruction(x, y, builder)
                 read("SelectFlash")?,
                 read("CursorSelection")?,
                 read("CursorToggled")?,
+                read("MessageStatus")?,
+                read("MessageBuf")?,
+                read("CrewCreated")?,
             ]))
         });
 
@@ -41843,11 +41874,18 @@ public func RejectConstruction(x, y, builder)
                 Value::Int(7),
                 Value::Int(1),
                 Value::Int(0x12_34_56),
+                Value::Int(3),
+                Value::Int(2),
                 Value::Int(1),
+                Value::Int(21),
+                Value::Int(22),
+                Value::Bool(true),
                 Value::Int(12),
                 Value::Int(3),
+                Value::Int(4),
                 Value::Int(42),
                 Value::Int(43),
+                Value::Int(44),
                 Value::Int(5),
                 Value::Int(7),
                 Value::Int(11),
@@ -41856,6 +41894,9 @@ public func RejectConstruction(x, y, builder)
                 Value::Int(15),
                 Value::Int(17),
                 Value::Int(19),
+                Value::Int(5),
+                Value::String("legacy message".into()),
+                Value::Int(6),
             ])
         );
     }
@@ -42199,6 +42240,15 @@ public func Probe()
             );
             // The same callback observes the clamped value.
             assert_eq!(get_wealth(&[Value::Int(12)])?, Value::Int(100_000));
+            assert_eq!(
+                get_player_val(&[
+                    Value::String("ViewWealth".into()),
+                    Value::Int(0),
+                    Value::Int(12),
+                ])?,
+                Value::Int(0),
+                "FnSetWealth is a direct write and does not arm ViewWealth"
+            );
             // Invalid player (C4Script.cpp:2763).
             assert_eq!(
                 set_wealth(&[Value::Int(5), Value::Int(10)])?,
@@ -42212,6 +42262,7 @@ public func Probe()
             [PlayerCommand::SetWealth {
                 player_id: 12,
                 value: 100_000,
+                show_change: false,
             }]
         ));
     }
@@ -42581,6 +42632,15 @@ func ProbeBadIndex(id) {
             assert_eq!(
                 do_score(&[Value::Int(4), Value::Int(5)])?,
                 Value::Int(1)
+            );
+            assert_eq!(
+                get_player_val(&[
+                    Value::String("ViewValue".into()),
+                    Value::Int(0),
+                    Value::Int(4),
+                ])?,
+                Value::Int(100),
+                "DoPoints arms ViewValue before the same script call continues"
             );
             assert_eq!(
                 do_score(&[Value::Int(4), Value::Int(5)])?,
@@ -43639,13 +43699,14 @@ func Missing() { return ComponentAll(nil, WOOD); }
     }
 
     #[test]
-    fn get_select_count_reports_selected_units() {
+    fn get_select_count_reads_the_cached_player_execute_count() {
         let cursor = ObjectId::new(930);
         let other = ObjectId::new(940);
         let mut player = PlayerState::default();
         player.id = 14;
         player.cursor = Some(cursor);
         player.crew = vec![cursor, other];
+        player.select_count = 2;
         let selection = CrewSelectionState {
             selected: vec![cursor, other],
             cursor: Some(cursor),

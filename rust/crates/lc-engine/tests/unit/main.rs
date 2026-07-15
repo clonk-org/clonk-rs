@@ -4279,6 +4279,20 @@ global func MenuCommand(state, kind, selection)
         let mut engine = Engine::new();
         engine.set_team_home_base_rule(true);
 
+        let mut crew = build_definition();
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("definition registers");
+        for owner in [1, 2] {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("Test")
+                        .with_owner(owner)
+                        .with_alive(true)
+                        .with_crew_member(true),
+                )
+                .expect("crew spawns");
+        }
+
         let mut production = HashMap::new();
         production.insert("Brick".to_string(), 10);
 
@@ -4307,9 +4321,77 @@ global func MenuCommand(state, kind, selection)
     }
 
     #[test]
+    fn team_home_base_leader_uses_team_player_info_order_not_runtime_number() {
+        // C4Team stores C4PlayerInfo IDs. GetFirstActivePlayerID walks that
+        // order and resolves each ID to a runtime player; C4Player::Number is
+        // a separate, reusable index (C4Teams.cpp:126-137;
+        // C4Player.cpp:1637-1664).
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(1, "Ordered", 0).with_player_ids(vec![20, 10]),
+        ]);
+        engine.set_team_home_base_rule(true);
+
+        let mut crew = build_definition();
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("definition registers");
+        for owner in [1, 5] {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("Test")
+                        .with_owner(owner)
+                        .with_alive(true)
+                        .with_crew_member(true),
+                )
+                .expect("crew spawns");
+        }
+        let production = HashMap::from([("Brick".to_string(), 10)]);
+        engine
+            .register_player(
+                PlayerConfig::new(1, "Lower runtime number")
+                    .with_player_info_id(10)
+                    .with_team(Some(1))
+                    .with_home_base_production(production.clone()),
+            )
+            .expect("first player registers");
+        engine
+            .register_player(
+                PlayerConfig::new(5, "Team-order leader")
+                    .with_player_info_id(20)
+                    .with_team(Some(1))
+                    .with_home_base_production(production),
+            )
+            .expect("second player registers");
+        engine.player_mut(1).expect("follower").set_production_delay(59);
+        engine.player_mut(5).expect("leader").set_production_delay(59);
+
+        engine.tick_player_systems().expect("Tick35 player pass");
+
+        let follower = engine.player(1).expect("follower remains");
+        let leader = engine.player(5).expect("leader remains");
+        assert_eq!((leader.production_delay(), follower.production_delay()), (0, 60));
+        assert_eq!(leader.home_base_material().get("Brick"), Some(&1));
+        assert_eq!(follower.home_base_material().get("Brick"), Some(&1));
+    }
+
+    #[test]
     fn home_base_production_respects_rule_toggle() {
         let mut engine = Engine::new();
         engine.set_team_home_base_rule(false);
+
+        let mut crew = build_definition();
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("definition registers");
+        for owner in [1, 2] {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("Test")
+                        .with_owner(owner)
+                        .with_alive(true)
+                        .with_crew_member(true),
+                )
+                .expect("crew spawns");
+        }
 
         let mut production = HashMap::new();
         production.insert("Brick".to_string(), 10);
@@ -10358,6 +10440,12 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         restored.register_definition(rule)?;
         restored.register_definition(crew)?;
         restored.restore_state(&state)?;
+        assert_eq!(
+            restored.player(1).and_then(Player::captain),
+            None,
+            "raw runtime compilation precedes C4Game::InitGameFinal"
+        );
+        restored.finalize_restored_players()?;
         assert_eq!(
             restored.player(1).and_then(Player::captain),
             Some(active_crew),
@@ -18784,6 +18872,8 @@ func CrewSelection(fUnselect, fCursor)
                 Value::Bool(true),
             ],
         )?;
+        engine.tick_player_systems()?;
+        assert_eq!(engine.player(1).expect("player").select_count(), 2);
         call(&mut engine, a, "ResetCallbacks", Vec::new())?;
         call(&mut engine, b, "ResetCallbacks", Vec::new())?;
 
@@ -18794,8 +18884,15 @@ func CrewSelection(fUnselect, fCursor)
                 "DisableAndCount",
                 vec![Value::Int(1), Value::Object(a.as_u64())],
             )?,
-            Value::Int(1),
-            "same-call GetSelectCount excludes the disabled cursor"
+            Value::Int(2),
+            "same-call GetSelectCount retains the cached pre-disable count"
+        );
+        assert_eq!(engine.player(1).expect("player").select_count(), 2);
+        engine.tick_player_systems()?;
+        assert_eq!(
+            engine.player(1).expect("player").select_count(),
+            1,
+            "the next Player::Execute refreshes the cache"
         );
         let a_index = engine.find_object_index(a).expect("A exists");
         let b_index = engine.find_object_index(b).expect("B exists");
@@ -18957,8 +19054,693 @@ func CrewSelection()
 
         let player = engine.player(1).expect("player present");
         assert_eq!(player.value(), 95);
-        assert_eq!(player.value_gain(), 0);
+        assert_eq!(
+            player.value_gain(),
+            60,
+            "the post-FinalInit ore is a real gain over the initial 35"
+        );
         assert_eq!(player.objects_owned(), 1);
+        Ok(())
+    }
+
+    fn lifecycle_join_config(
+        name: &str,
+        crew: Vec<player_file::CrewInfo>,
+    ) -> JoinPlayerConfig {
+        JoinPlayerConfig {
+            name: name.to_string(),
+            player_info_id: 1,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0xff0000,
+            pref_color: 0,
+            pref_position: 0,
+            crew,
+            control_style: false,
+            auto_context_menu: false,
+            startup_player_count: 1,
+        }
+    }
+
+    #[test]
+    fn player_lifecycle_runtime_control_is_visible_to_preinitialize_and_survives_join(
+    ) -> Result<(), EngineError> {
+        // C4Player::InitControl runs before PreInitializePlayer, so reflection
+        // in that callback already sees final Control/MouseControl
+        // (C4Player.cpp:323-347,1871-1918).
+        let script = r#"#strict 2
+static pre_control, pre_mouse;
+global func PreInitializePlayer(int player)
+{
+    pre_control = GetPlayerVal("Control", 0, player);
+    pre_mouse = GetPlayerVal("MouseControl", 0, player);
+    return 1;
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine.install_scenario_script_with_convention("Runtime control", script, true)?;
+
+        let runtime_control = PlayerRuntimeControl::new(6, 1);
+        let joined = engine
+            .join_player_with_runtime_control(
+                lifecycle_join_config("Controller", Vec::new()),
+                runtime_control,
+            )?
+            .number();
+
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.script_globals.named.get("pre_control"),
+            Some(&Value::Int(6))
+        );
+        assert_eq!(
+            snapshot.script_globals.named.get("pre_mouse"),
+            Some(&Value::Int(1))
+        );
+        let player = engine.player(joined).expect("joined player remains");
+        assert_eq!(player.control_set(), 6);
+        assert_eq!(player.mouse_control(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn player_lifecycle_restore_reapplies_autostop_to_inactive_crew() -> Result<(), EngineError> {
+        // ApplyForcedControl clears buffered input whenever ControlStyle
+        // changes and, when switching to AutoStop, clears ComDir on every
+        // inactive owned crew object (C4Player.cpp:2369-2391).
+        let mut engine = Engine::new();
+        let mut definition = simple_definition("REST");
+        definition.set_crew_member(true);
+        engine.register_definition(definition)?;
+        let crew = engine.spawn_object(
+            SpawnConfig::new("REST")
+                .with_owner(1)
+                .with_status(ObjectStatus::Inactive)
+                .with_command_direction(CommandDirection::Right),
+        )?;
+        engine.register_player(PlayerConfig::new(1, "Saved"))?;
+        {
+            let player = engine.player_mut(1)?;
+            player.control.last_com = COM_RIGHT;
+            player.control.pressed_coms = 0x3ff;
+        }
+
+        engine.reinitialize_player_after_restore(
+            1,
+            PlayerAtClient::HOST,
+            "Local",
+            "Current",
+            PlayerRuntimeControl::NONE,
+            false,
+            false,
+            true,
+            false,
+        )?;
+
+        let player = engine.player(1).expect("player remains");
+        assert!(player.control.control_style);
+        assert_eq!(player.control.last_com, 0);
+        assert_eq!(player.control.pressed_coms, 0);
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("inactive crew remains")
+                .command_direction,
+            CommandDirection::Stop
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn player_lifecycle_repeated_surrender_does_not_restart_retire_delay(
+    ) -> Result<(), EngineError> {
+        // C4Player::Surrender returns immediately when already surrendered,
+        // so a repeated request cannot restart the 60-frame RetireDelay
+        // (C4Player.cpp:971-979; C4Player.cpp:238-243).
+        let mut engine = Engine::new();
+        engine.register_player(PlayerConfig::new(1, "Surrendering"))?;
+        engine.set_player_surrendered(1, true)?;
+
+        for _ in 0..10 {
+            engine.tick_player_systems()?;
+        }
+        engine.set_player_surrendered(1, true)?;
+        for _ in 0..49 {
+            engine.tick_player_systems()?;
+        }
+
+        assert!(engine.player(1).is_some(), "player retires after frame 60");
+        engine.tick_player_systems()?;
+        assert!(
+            engine.player(1).is_none(),
+            "repeat surrender must not extend the original retire delay"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn player_lifecycle_fresh_autostop_clears_only_owned_inactive_crew_definitions(
+    ) -> Result<(), EngineError> {
+        // Fresh InitControl also transitions from the default FreeScroll
+        // style. Switching to AutoStop clears ComDir only for owned objects
+        // in the inactive list whose definitions are CrewMember
+        // (C4Player.cpp:2369-2391).
+        let mut join_engine = Engine::new();
+        let mut crew_definition = simple_definition("AUTO");
+        crew_definition.set_crew_member(true);
+        join_engine.register_definition(crew_definition)?;
+        join_engine.register_definition(simple_definition("ITEM"))?;
+
+        let owned_inactive_crew = join_engine.spawn_object(
+            SpawnConfig::new("AUTO")
+                .with_owner(0)
+                .with_status(ObjectStatus::Inactive)
+                .with_command_direction(CommandDirection::Right),
+        )?;
+        let owned_active_crew = join_engine.spawn_object(
+            SpawnConfig::new("AUTO")
+                .with_owner(0)
+                .with_command_direction(CommandDirection::Right),
+        )?;
+        let foreign_inactive_crew = join_engine.spawn_object(
+            SpawnConfig::new("AUTO")
+                .with_owner(9)
+                .with_status(ObjectStatus::Inactive)
+                .with_command_direction(CommandDirection::Right),
+        )?;
+        let owned_inactive_noncrew = join_engine.spawn_object(
+            SpawnConfig::new("ITEM")
+                .with_owner(0)
+                .with_status(ObjectStatus::Inactive)
+                .with_command_direction(CommandDirection::Right),
+        )?;
+
+        let mut join = lifecycle_join_config("Fresh AutoStop", Vec::new());
+        join.control_style = true;
+        let player = join_engine.join_player(join)?.number();
+        assert!(join_engine.player(player).unwrap().control.control_style);
+        assert_eq!(
+            join_engine
+                .object_snapshot(owned_inactive_crew)
+                .unwrap()
+                .command_direction,
+            CommandDirection::Stop
+        );
+        for object in [
+            owned_active_crew,
+            foreign_inactive_crew,
+            owned_inactive_noncrew,
+        ] {
+            assert_eq!(
+                join_engine
+                    .object_snapshot(object)
+                    .unwrap()
+                    .command_direction,
+                CommandDirection::Right
+            );
+        }
+
+        let mut register_engine = Engine::new();
+        let mut crew_definition = simple_definition("AUTO");
+        crew_definition.set_crew_member(true);
+        register_engine.register_definition(crew_definition)?;
+        let registered_inactive_crew = register_engine.spawn_object(
+            SpawnConfig::new("AUTO")
+                .with_owner(7)
+                .with_status(ObjectStatus::Inactive)
+                .with_command_direction(CommandDirection::Left),
+        )?;
+        register_engine.set_forced_control_style(Some(true));
+        register_engine.register_player(PlayerConfig::new(7, "Forced AutoStop"))?;
+        assert!(
+            register_engine
+                .player(7)
+                .unwrap()
+                .control
+                .control_style
+        );
+        assert_eq!(
+            register_engine
+                .object_snapshot(registered_inactive_crew)
+                .unwrap()
+                .command_direction,
+            CommandDirection::Stop
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn player_lifecycle_review_mouse_fog_initializes_between_player_callbacks(
+    ) -> Result<(), EngineError> {
+        // InitControl exposes MouseControl before PreInitializePlayer. The
+        // automatic, unforced mouse FoW begins later in ScenarioInit but still
+        // before InitializePlayer; an explicit SetFoW(false) in pre-init sets
+        // bForceFogOfWar and wins (C4Player.cpp:323-348,759-769,815-824).
+        let script = r#"#strict 2
+static pre_mouse, pre_fog, init_fog;
+static forced_pre_fog, forced_init_fog;
+global func PreInitializePlayer(int player)
+{
+    if (player == 0)
+    {
+        pre_mouse = GetPlayerVal("MouseControl", 0, player);
+        pre_fog = GetPlayerVal("FogOfWar", 0, player);
+    }
+    else
+    {
+        forced_pre_fog = GetPlayerVal("FogOfWar", 0, player);
+        SetFoW(false, player);
+    }
+    return 1;
+}
+global func InitializePlayer(int player)
+{
+    if (player == 0) init_fog = GetPlayerVal("FogOfWar", 0, player);
+    else forced_init_fog = GetPlayerVal("FogOfWar", 0, player);
+    return 1;
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine.install_scenario_script_with_convention("Mouse FoW order", script, true)?;
+
+        let automatic = engine
+            .join_player_with_runtime_control(
+                lifecycle_join_config("Automatic FoW", Vec::new()),
+                PlayerRuntimeControl::new(0, 1),
+            )?
+            .number();
+        let mut forced_config = lifecycle_join_config("Forced-off FoW", Vec::new());
+        forced_config.player_info_id = 2;
+        let forced = engine
+            .join_player_with_runtime_control(forced_config, PlayerRuntimeControl::new(1, 1))?
+            .number();
+
+        let globals = &engine.snapshot().script_globals.named;
+        assert_eq!(globals.get("pre_mouse"), Some(&Value::Int(1)));
+        assert_eq!(globals.get("pre_fog"), Some(&Value::Bool(false)));
+        assert_eq!(globals.get("init_fog"), Some(&Value::Bool(true)));
+        assert_eq!(globals.get("forced_pre_fog"), Some(&Value::Bool(false)));
+        assert_eq!(globals.get("forced_init_fog"), Some(&Value::Bool(false)));
+
+        let automatic = engine.player(automatic).expect("automatic player remains");
+        assert!(automatic.fog_of_war());
+        assert!(!automatic.force_fog_of_war());
+        let forced = engine.player(forced).expect("forced player remains");
+        assert!(!forced.fog_of_war());
+        assert!(forced.force_fog_of_war());
+        Ok(())
+    }
+
+    #[test]
+    fn player_lifecycle_review_final_init_preserves_or_derives_cursor_in_cpp_order(
+    ) -> Result<(), EngineError> {
+        // InitializePlayer runs before FinalInit. FinalInit preserves an
+        // explicit cursor; only a missing cursor triggers AdjustCursorCommand,
+        // which searches selected crew before all crew (C4Player.cpp:769-798,
+        // 1235-1258).
+        let join = |initialize_body: &str| -> Result<(Engine, i32, ObjectId, ObjectId), EngineError> {
+            let mut engine = Engine::with_seed(0);
+            for id in ["HIGH", "LOWR"] {
+                let mut definition = simple_definition(id);
+                definition.set_crew_member(true);
+                engine.register_definition(definition)?;
+            }
+            let mut start = PlayerStart::default();
+            start.ready_crew = vec![("HIGH".to_string(), 1), ("LOWR".to_string(), 1)];
+            engine.set_player_starts(vec![start]);
+            let script = format!(
+                "#strict 2\nglobal func InitializePlayer(int player)\n{{\n    {initialize_body}\n    return 1;\n}}\n"
+            );
+            engine.install_scenario_script_with_convention("Cursor order", &script, true)?;
+            let crew_info = |id: &str, name: &str, rank: i32| player_file::CrewInfo {
+                id: id.to_string(),
+                name: name.to_string(),
+                rank,
+                experience: 0,
+                total_playing_time: 0,
+                participation: 1,
+                in_action: false,
+                in_action_time: 0,
+                has_died: false,
+            };
+            let player = engine
+                .join_player(lifecycle_join_config(
+                    "Cursor order",
+                    vec![
+                        crew_info("HIGH", "High rank", 5),
+                        crew_info("LOWR", "Low rank", 1),
+                    ],
+                ))?
+                .number();
+            let crew = engine.player(player).expect("player remains").crew();
+            let low = crew
+                .iter()
+                .copied()
+                .find(|id| {
+                    engine
+                        .crew_object_info(*id)
+                        .is_some_and(|info| info.definition_id.as_str() == "LOWR")
+                })
+                .expect("low-rank crew exists");
+            let high = crew
+                .iter()
+                .copied()
+                .find(|id| {
+                    engine
+                        .crew_object_info(*id)
+                        .is_some_and(|info| info.definition_id.as_str() == "HIGH")
+                })
+                .expect("high-rank crew exists");
+            Ok((engine, player, low, high))
+        };
+
+        let (explicit, player, low, high) = join(
+            "SelectCrew(player, FindObject(HIGH), true, true); SelectCrew(player, FindObject(LOWR), true, true); SetCursor(player, FindObject(LOWR), true, true, true);",
+        )?;
+        assert_ne!(low, high);
+        assert_eq!(explicit.selected_crew(player).len(), 2);
+        assert_eq!(explicit.crew_cursor(player), Some(low));
+        assert_eq!(explicit.player(player).expect("player").cursor(), Some(low));
+
+        let (selected, player, low, high) = join(
+            "SelectCrew(player, FindObject(LOWR), true, true);",
+        )?;
+        assert_ne!(low, high);
+        assert_eq!(selected.selected_crew(player), vec![low]);
+        assert_eq!(selected.crew_cursor(player), Some(low));
+        assert_eq!(selected.player(player).expect("player").cursor(), Some(low));
+        Ok(())
+    }
+
+    #[test]
+    fn player_lifecycle_review_team_homebase_sync_follows_initialize_player(
+    ) -> Result<(), EngineError> {
+        // ScenarioInit installs the joining player's PlayerStart material,
+        // broadcasts InitializePlayer, and only then copies the team leader's
+        // homebase state (C4Player.cpp:702-711,769-775,349-350).
+        let script = r#"#strict 2
+static leader_brick, follower_ore, follower_brick;
+global func InitializePlayer(int player)
+{
+    if (player == 0) leader_brick = GetHomebaseMaterial(player, BRCK);
+    else
+    {
+        follower_ore = GetHomebaseMaterial(player, ORE1);
+        follower_brick = GetHomebaseMaterial(player, BRCK);
+    }
+    return 1;
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(simple_definition("BRCK"))?;
+        engine.register_definition(simple_definition("ORE1"))?;
+        engine.set_team_home_base_rule(true);
+        engine.set_teams(vec![TeamInfo::new(1, "Team", 0x00f4_0000)]);
+        let mut leader_start = PlayerStart::default();
+        leader_start.home_base_material = vec![("BRCK".to_string(), 7)];
+        let mut follower_start = PlayerStart::default();
+        follower_start.home_base_material = vec![("ORE1".to_string(), 3)];
+        engine.set_player_starts(vec![leader_start, follower_start]);
+        engine.install_scenario_script_with_convention("Team homebase order", script, true)?;
+
+        let mut leader_config = lifecycle_join_config("Leader", Vec::new());
+        leader_config.team = Some(1);
+        let leader = engine.join_player(leader_config)?.number();
+        let mut follower_config = lifecycle_join_config("Follower", Vec::new());
+        follower_config.player_info_id = 2;
+        follower_config.team = Some(1);
+        let follower = engine.join_player(follower_config)?.number();
+
+        let globals = &engine.snapshot().script_globals.named;
+        assert_eq!(globals.get("leader_brick"), Some(&Value::Int(7)));
+        assert_eq!(globals.get("follower_ore"), Some(&Value::Int(3)));
+        assert_eq!(globals.get("follower_brick"), Some(&Value::Int(0)));
+        let leader = engine.player(leader).expect("leader remains");
+        let follower = engine.player(follower).expect("follower remains");
+        assert_eq!(leader.home_base_material().get("BRCK"), Some(&7));
+        assert_eq!(follower.home_base_material().get("BRCK"), Some(&7));
+        assert!(!follower.home_base_material().contains_key("ORE1"));
+        Ok(())
+    }
+
+    #[test]
+    fn player_lifecycle_view_delays_arm_only_at_cpp_boundaries_and_decay_in_the_same_execute(
+    ) -> Result<(), EngineError> {
+        // C4Player::UpdateValue runs on Tick35, then ViewValue is decremented
+        // at the end of that same Execute (C4Player.cpp:228-241). DoPoints and
+        // DoWealth arm their counters immediately even for a zero delta
+        // (C4Player.cpp:905-914,1824-1828; C4Script.cpp:2762-2765).
+        let mut engine = Engine::new();
+        let mut valuable = simple_definition("VALU");
+        valuable.set_value(75);
+        engine.register_definition(valuable)?;
+        engine.install_scenario_script_with_convention(
+            "Score delay",
+            "#strict 2\nglobal func AwardScore(int player) { return DoScore(player, 0); }\n",
+            true,
+        )?;
+        engine.register_player(PlayerConfig::new(1, "Valuer"))?;
+        engine.spawn_object(SpawnConfig::new("VALU").with_owner(1))?;
+
+        for _ in 0..34 {
+            engine.tick()?;
+        }
+        assert_eq!(engine.snapshot().frame, 34);
+        assert_eq!(
+            engine.player(1).expect("player remains").view_value(),
+            0,
+            "asset changes do not refresh the cached value before Tick35"
+        );
+
+        engine.tick()?;
+        assert_eq!(engine.snapshot().frame, 35);
+        assert_eq!(
+            engine.player(1).expect("player remains").view_value(),
+            99,
+            "Tick35 arms to 100 before the same Execute decays to 99"
+        );
+
+        engine.call_scenario_script_function("AwardScore", vec![Value::Int(1)])?;
+        engine.adjust_player_wealth(1, 0)?;
+        let player = engine.player(1).expect("player remains");
+        assert_eq!(player.view_value(), 100);
+        assert_eq!(player.view_wealth(), 100);
+
+        engine.tick()?;
+        let player = engine.player(1).expect("player remains");
+        assert_eq!(player.view_value(), 99);
+        assert_eq!(player.view_wealth(), 99);
+        Ok(())
+    }
+
+    #[test]
+    fn player_lifecycle_execute_control_keeps_last_com_visible_during_single_callback(
+    ) -> Result<(), EngineError> {
+        // ExecuteControl dispatches the delayed COM_Single synchronously and
+        // only clears LastCom after the callback returns (C4Player.cpp:
+        // 1215-1229). Reflection in that callback still sees the plain com.
+        let mut engine = Engine::with_seed(0);
+        let mut crew_definition = Definition::from_script(
+            "LCOM",
+            "Last com crew",
+            r#"#strict 2
+func ControlUpSingle()
+{
+    SetPlrExtraData(GetOwner(), "seen_last_com", GetPlayerVal("LastCom", 0, GetOwner()));
+    return true;
+}
+"#,
+        )?;
+        crew_definition.set_crew_member(true);
+        engine.register_definition(crew_definition)?;
+        engine.register_player(PlayerConfig::new(1, "Buffered input"))?;
+        let crew = engine.spawn_object(
+            SpawnConfig::new("LCOM")
+                .with_owner(1)
+                .with_alive(true)
+                .with_crew_member(true),
+        )?;
+        engine.select_crew(1, [crew])?;
+        engine.set_crew_cursor(1, Some(crew))?;
+        {
+            let player = engine.player_mut(1)?;
+            player.control.last_com = COM_UP;
+            player.control.last_com_delay = 100;
+        }
+
+        engine.tick_player_systems()?;
+
+        let player = engine.player(1).expect("player remains");
+        assert_eq!(player.control.last_com, 0);
+        assert_eq!(player.control.last_com_delay, 0);
+        assert_eq!(
+            player
+                .to_state()
+                .extra_data
+                .iter()
+                .find(|(name, _)| name == "seen_last_com")
+                .map(|(_, value)| value),
+            Some(&Value::Int(i32::from(COM_UP)))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn player_lifecycle_select_count_is_a_saved_cache_refreshed_at_player_execute(
+    ) -> Result<(), EngineError> {
+        // UpdateCounts is the first Player::Execute step; selection changes do
+        // not rewrite SelectCount synchronously (C4Player.cpp:206-210,
+        // 1667-1677). CompileFunc saves the cached integer (:1594).
+        let mut engine = Engine::with_seed(0);
+        let mut crew_definition = simple_definition("SCNT");
+        crew_definition.set_crew_member(true);
+        engine.register_definition(crew_definition.clone())?;
+        engine.register_player(PlayerConfig::new(1, "Selector"))?;
+        let first = engine.spawn_object(
+            SpawnConfig::new("SCNT")
+                .with_owner(1)
+                .with_alive(true)
+                .with_crew_member(true),
+        )?;
+        let second = engine.spawn_object(
+            SpawnConfig::new("SCNT")
+                .with_owner(1)
+                .with_alive(true)
+                .with_crew_member(true),
+        )?;
+        engine.select_crew(1, [first, second])?;
+        assert_eq!(engine.player(1).expect("player").select_count(), 0);
+
+        engine.tick_player_systems()?;
+        assert_eq!(engine.player(1).expect("player").select_count(), 2);
+        engine.deselect_crew(1, [first]);
+        assert_eq!(
+            engine.player(1).expect("player").select_count(),
+            2,
+            "selection mutation leaves the cache stale until Player::Execute"
+        );
+
+        let saved = engine.capture_state();
+        let mut restored = Engine::with_seed(1);
+        restored.register_definition(crew_definition)?;
+        restored.restore_state(&saved)?;
+        assert_eq!(restored.selected_crew(1), vec![second]);
+        assert_eq!(
+            restored.player(1).expect("restored player").select_count(),
+            2,
+            "snapshot restore preserves the serialized cache"
+        );
+        restored.finalize_restored_players()?;
+        assert_eq!(restored.player(1).expect("player").select_count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn player_lifecycle_startup_hint_clears_through_object_com_and_object_command(
+    ) -> Result<(), EngineError> {
+        // ObjectCom and ObjectCommand clear ShowStartup after the eliminated
+        // guard (C4Player.cpp:1368-1404).
+        let mut engine = Engine::with_seed(0);
+        let mut crew_definition = simple_definition("HINT");
+        crew_definition.set_crew_member(true);
+        engine.register_definition(crew_definition)?;
+        engine.register_player(PlayerConfig::new(1, "Hints"))?;
+        let crew = engine.spawn_object(
+            SpawnConfig::new("HINT")
+                .with_owner(1)
+                .with_alive(true)
+                .with_crew_member(true),
+        )?;
+        engine.select_crew(1, [crew])?;
+        engine.set_crew_cursor(1, Some(crew))?;
+        assert!(engine.player(1).expect("player").show_startup());
+
+        engine.player_in_com(1, COM_UP, 0)?;
+        assert!(!engine.player(1).expect("player").show_startup());
+
+        engine.player_mut(1)?.set_show_startup(true);
+        engine.player_object_command(1, CommandId::Wait, None, 0, 0)?;
+        assert!(!engine.player(1).expect("player").show_startup());
+        Ok(())
+    }
+
+    #[test]
+    fn player_lifecycle_captain_assigns_in_final_init_round_trips_and_clears_with_object(
+    ) -> Result<(), EngineError> {
+        // FinalInit assigns the highest-rank active crew member only while a
+        // KILC exists; ClearPointers clears an exact Captain match
+        // (C4Player.cpp:57-82,793-802,1003-1019).
+        let mut engine = Engine::with_seed(0);
+        let mut kilc_definition = simple_definition("KILC");
+        kilc_definition.set_crew_member(true);
+        engine.register_definition(kilc_definition.clone())?;
+        let kilc = engine.spawn_object(
+            SpawnConfig::new("KILC")
+                .with_owner(0)
+                .with_alive(true)
+                .with_crew_member(true),
+        )?;
+        let joined = engine
+            .join_player(lifecycle_join_config("Captain", Vec::new()))?
+            .number();
+        assert_eq!(engine.player(joined).expect("player").captain(), Some(kilc));
+
+        let saved = engine.capture_state();
+        let mut restored = Engine::with_seed(1);
+        restored.register_definition(kilc_definition)?;
+        restored.restore_state(&saved)?;
+        assert_eq!(restored.player(joined).expect("player").captain(), Some(kilc));
+
+        restored.apply_object_update(
+            kilc,
+            ObjectUpdate::new().with_status(ObjectStatus::Deleted),
+        )?;
+        assert_eq!(restored.player(joined).expect("player").captain(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn player_lifecycle_crew_created_counts_new_info_but_not_loaded_info_reuse(
+    ) -> Result<(), EngineError> {
+        // C4ObjectInfoList::Load/Add do not increment iNumCreated; New does so
+        // once after Add succeeds (C4ObjectInfoList.cpp:56-90,144-184).
+        let setup = |engine: &mut Engine| -> Result<(), EngineError> {
+            let mut crew_definition = simple_definition("CRNW");
+            crew_definition.set_crew_member(true);
+            engine.register_definition(crew_definition)?;
+            let mut start = PlayerStart::default();
+            start.ready_crew = vec![("CRNW".to_string(), 1)];
+            engine.set_player_starts(vec![start]);
+            Ok(())
+        };
+
+        let mut created = Engine::with_seed(0);
+        setup(&mut created)?;
+        let created_player = created
+            .join_player(lifecycle_join_config("New info", Vec::new()))?
+            .number();
+        assert_eq!(created.player(created_player).expect("player").crew_created(), 1);
+        assert_eq!(created.capture_state().players[0].crew_created, 1);
+
+        let loaded_info = player_file::CrewInfo {
+            id: "CRNW".to_string(),
+            name: "Existing".to_string(),
+            rank: 0,
+            experience: 0,
+            total_playing_time: 0,
+            participation: 1,
+            in_action: false,
+            in_action_time: 0,
+            has_died: false,
+        };
+        let mut reused = Engine::with_seed(1);
+        setup(&mut reused)?;
+        let reused_player = reused
+            .join_player(lifecycle_join_config("Loaded info", vec![loaded_info]))?
+            .number();
+        assert_eq!(reused.player(reused_player).expect("player").crew_created(), 0);
+        assert_eq!(reused.capture_state().players[0].crew_created, 0);
         Ok(())
     }
 
@@ -38268,6 +39050,49 @@ func Probe() {
 
         let object = engine.object_snapshot(object).expect("StaticBack remains");
         assert_eq!((object.owner, object.controller), (OWNER_NONE, OWNER_NONE));
+        Ok(())
+    }
+
+    #[test]
+    fn skipped_restored_player_is_orphaned_without_removing_objects() -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        engine.register_definition(simple_definition("BACK"))?;
+        let normal = engine.spawn_object(
+            SpawnConfig::new("BACK")
+                .with_owner(1)
+                .with_controller(1)
+                .with_color(0xff12_3456),
+        )?;
+        let inactive = engine.spawn_object(
+            SpawnConfig::new("BACK")
+                .with_owner(1)
+                .with_controller(1)
+                .with_status(ObjectStatus::Inactive)
+                .with_color(0xff65_4321),
+        )?;
+        engine.register_player(PlayerConfig::new(1, "Skipped"))?;
+        engine.register_player(PlayerConfig::new(2, "Retained"))?;
+        for object in [normal, inactive] {
+            let index = engine.find_object_index(object).expect("object exists");
+            engine.objects[index].state.base = 1;
+        }
+
+        engine.retain_restored_players([2]);
+
+        assert!(engine.player(1).is_none());
+        assert!(engine.player(2).is_some());
+        for (object, status, color) in [
+            (normal, ObjectStatus::Normal, 0xff12_3456),
+            (inactive, ObjectStatus::Inactive, 0xff65_4321),
+        ] {
+            let object = engine.object_snapshot(object).expect("saved object remains");
+            assert_eq!(object.status, status);
+            assert_eq!(object.color, color);
+            assert_eq!(
+                (object.owner, object.base, object.controller),
+                (OWNER_NONE, OWNER_NONE, OWNER_NONE)
+            );
+        }
         Ok(())
     }
 

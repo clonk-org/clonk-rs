@@ -13647,8 +13647,23 @@ impl GameApp {
         if self.engine.player(self.local_owner).is_some() {
             return Ok(());
         }
+        let control = self.local_controls.initialize(LocalControlInit {
+            owner: self.local_owner,
+            preferred_set: 0,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: !self.mouse_control_allowed,
+        });
         let config = PlayerConfig::new(self.local_owner, self.player_name.clone());
-        self.engine.register_player(config)?;
+        if let Err(error) = self
+            .engine
+            .register_player_with_runtime_control(config, control.runtime_control())
+        {
+            self.local_controls.remove(self.local_owner);
+            return Err(error);
+        }
+        self.mouse_control = self.local_controls.mouse_owner().is_some();
         Ok(())
     }
 
@@ -13717,29 +13732,41 @@ impl GameApp {
                     0,
                 )
             });
-        let joined = self.engine.join_player(JoinPlayerConfig {
-            name,
-            player_info_id: 0,
-            score,
-            total_playing_time,
-            team: None,
-            color_dw,
-            pref_color,
-            pref_position,
-            crew,
-            startup_player_count: 1,
-            control_style,
-            auto_context_menu,
-        })?;
-        self.local_owner = joined.number();
-        self.local_controls.initialize(LocalControlInit {
-            owner: joined.number(),
+        let predicted_owner = self.engine.next_player_number();
+        let control = self.local_controls.initialize(LocalControlInit {
+            owner: predicted_owner,
             preferred_set: preferred_control,
             prefers_mouse,
             gamepads_enabled: true,
             replay: false,
             disable_mouse: !self.mouse_control_allowed,
         });
+        let joined = match self.engine.join_player_with_runtime_control(
+            JoinPlayerConfig {
+                name,
+                player_info_id: 0,
+                score,
+                total_playing_time,
+                team: None,
+                color_dw,
+                pref_color,
+                pref_position,
+                crew,
+                startup_player_count: 1,
+                control_style,
+                auto_context_menu,
+            },
+            control.runtime_control(),
+        ) {
+            Ok(joined) => joined,
+            Err(error) => {
+                self.local_controls.remove(predicted_owner);
+                return Err(error);
+            }
+        };
+        debug_assert_eq!(joined.number(), predicted_owner);
+        self.local_owner = joined.number();
+        self.mouse_control = self.local_controls.mouse_owner().is_some();
         if matches!(
             joined,
             lc_engine::JoinPlayerOutcome::AwaitingTeamSelection { .. }
@@ -16235,9 +16262,6 @@ impl GameApp {
         owner: i32,
         event: ControlEvent,
     ) -> Result<(), EngineError> {
-        // First local control com hides the startup hint
-        // (C4Player::DirectCom, src/C4Player.cpp:1376).
-        self.show_startup_hint = false;
         let mut event = event;
         let progressing_cursor_menu = self.object_menu.is_none()
             && !self.ingame_menu_belongs_to(owner)
@@ -17223,7 +17247,11 @@ impl GameApp {
             MenuAction::ToggleMouseControl => {
                 let selection = self.ingame_menu_selection(player);
                 if self.mouse_control_allowed {
-                    self.mouse_control = !self.mouse_control;
+                    if let Some(control) = self.local_controls.toggle_mouse(player) {
+                        self.engine
+                            .set_player_mouse_control(player, control.mouse)?;
+                        self.mouse_control = self.local_controls.mouse_owner().is_some();
+                    }
                 }
                 self.ingame_menu.replace(
                     player,
@@ -25379,12 +25407,12 @@ impl GameApp {
                 }
             }
         };
-        let local_control_preferences = locally_controlled.then(|| {
-            player_file
-                .as_ref()
-                .map(|file| (file.pref_control, file.pref_mouse))
-                .unwrap_or((0, false))
-        });
+        // C4Player derives these from its loaded player core on every client;
+        // fileless script players retain C4PlayerInfoCore's defaults.
+        let (preferred_set, prefers_mouse) = player_file
+            .as_ref()
+            .map(|file| (file.pref_control, file.pref_mouse))
+            .unwrap_or((0, true));
         let startup_player_count =
             i32::try_from(self.control_player_infos.player_count().max(1)).unwrap_or(i32::MAX);
         let config = match lc_engine::prepare_join_player_config(lc_engine::JoinPlayerPreparation {
@@ -25399,27 +25427,33 @@ impl GameApp {
                 return Ok(());
             }
         };
+        let predicted_owner = self.engine.next_player_number();
+        let control_init = LocalControlInit {
+            owner: predicted_owner,
+            preferred_set,
+            prefers_mouse,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: !self.mouse_control_allowed,
+        };
+        let control = if locally_controlled {
+            self.local_controls.initialize(control_init)
+        } else {
+            self.local_controls.resolve(control_init)
+        };
         match self
             .engine
-            .join_player_at_client_with_info_and_name(
+            .join_player_at_client_with_info_and_name_and_runtime_control(
                 config,
                 lc_engine::PlayerAtClient::new(join.at_client),
                 at_client_name,
                 &info,
-            )
-        {
+                control.runtime_control(),
+            ) {
             Ok(joined) if locally_controlled => {
+                debug_assert_eq!(joined.number(), predicted_owner);
                 self.control_player_infos.mark_joined(join.info_id);
-                if let Some((preferred_set, prefers_mouse)) = local_control_preferences {
-                    self.local_controls.initialize(LocalControlInit {
-                        owner: joined.number(),
-                        preferred_set,
-                        prefers_mouse,
-                        gamepads_enabled: true,
-                        replay: false,
-                        disable_mouse: !self.mouse_control_allowed,
-                    });
-                }
+                self.mouse_control = self.local_controls.mouse_owner().is_some();
                 let mut local_players = self.engine.snapshot().hud.local_players;
                 if !local_players.contains(&joined.number()) {
                     local_players.push(joined.number());
@@ -25440,9 +25474,15 @@ impl GameApp {
                 self.control_player_infos.mark_joined(join.info_id);
             }
             Err(error @ EngineError::RuntimeFlashProducerBoundary { .. }) => {
+                if locally_controlled {
+                    self.local_controls.remove(predicted_owner);
+                }
                 return Err(error);
             }
             Err(error) => {
+                if locally_controlled {
+                    self.local_controls.remove(predicted_owner);
+                }
                 tracing::warn!(info_id = join.info_id, %error, "player join failed");
             }
         }
@@ -27881,12 +27921,25 @@ impl GameApp {
             .graphics
             .active_gamma_ramp(&self.snapshot.environment.gamma);
         if let Some(_focus) = self.focus_snapshot.as_ref() {
-            let startup_hint_owner = self.show_startup_hint.then_some(self.local_owner);
+            let value_footer_player = self
+                .engine
+                .cursor_object_menu(self.local_owner)
+                .and_then(|(_, menu)| {
+                    (menu.extra == lc_engine::ObjectMenuExtra::Value)
+                        .then_some(menu.command_object)
+                        .flatten()
+                })
+                .and_then(|command_object| self.engine.object_controller(command_object))
+                .filter(|controller| self.engine.player(*controller).is_some());
+            if let Some(owner) = value_footer_player {
+                self.engine
+                    .arm_player_view_wealth(owner)
+                    .map_err(anyhow::Error::new)?;
+            }
             let mut players = collect_player_overlays(
                 &self.engine,
                 &self.snapshot,
                 self.focus_id,
-                startup_hint_owner,
                 &self.bindings,
             );
             populate_crew_inventories(&self.engine, &self.snapshot, &mut players);
@@ -29826,17 +29879,23 @@ impl GameApp {
                             continue;
                         }
                     };
-                    match self.engine.join_player_with_info(config, &info) {
+                    let predicted_owner = self.engine.next_player_number();
+                    let control = self.local_controls.initialize(LocalControlInit {
+                        owner: predicted_owner,
+                        preferred_set: player_file.pref_control,
+                        prefers_mouse: player_file.pref_mouse,
+                        gamepads_enabled: true,
+                        replay: false,
+                        disable_mouse: !self.mouse_control_allowed,
+                    });
+                    match self.engine.join_player_with_info_and_runtime_control(
+                        config,
+                        &info,
+                        control.runtime_control(),
+                    ) {
                         Ok(joined) => {
+                            debug_assert_eq!(joined.number(), predicted_owner);
                             self.control_player_infos.mark_joined(join.info_id);
-                            self.local_controls.initialize(LocalControlInit {
-                                owner: joined.number(),
-                                preferred_set: player_file.pref_control,
-                                prefers_mouse: player_file.pref_mouse,
-                                gamepads_enabled: true,
-                                replay: false,
-                                disable_mouse: !self.mouse_control_allowed,
-                            });
                             local_players.push(joined.number());
                             if matches!(
                                 joined,
@@ -29847,9 +29906,11 @@ impl GameApp {
                             joined_player_files.push(real_path);
                         }
                         Err(error @ EngineError::RuntimeFlashProducerBoundary { .. }) => {
+                            self.local_controls.remove(predicted_owner);
                             return Err(scenario_activation_engine_error(&scenario.title, error));
                         }
                         Err(error) => {
+                            self.local_controls.remove(predicted_owner);
                             tracing::warn!(
                                 info_id = join.info_id,
                                 %error,
@@ -29858,6 +29919,7 @@ impl GameApp {
                         }
                     }
                 }
+                self.mouse_control = self.local_controls.mouse_owner().is_some();
                 if let Some(first) = local_players.first().copied() {
                     self.local_owner = first;
                 }
@@ -30009,14 +30071,6 @@ impl GameApp {
         };
 
         self.ensure_local_player_registered()?;
-        self.local_controls.initialize(LocalControlInit {
-            owner: self.local_owner,
-            preferred_set: 0,
-            prefers_mouse: true,
-            gamepads_enabled: true,
-            replay: false,
-            disable_mouse: false,
-        });
 
         let spawn = SpawnConfig::new(spawn_definition)
             .with_owner(self.local_owner)
@@ -30153,6 +30207,61 @@ impl GameApp {
             .map_err(anyhow::Error::new)?;
         self.active_global_gui_overrides = loaded_overrides;
 
+        // C4Player runtime objects are recreated from their linked
+        // C4PlayerInfo entries. Keep process-local input assignments keyed by
+        // that stable identity rather than by the old round's player number.
+        let previous_local_owner = self.local_owner;
+        let previous_primary_info_id = self
+            .engine
+            .player(previous_local_owner)
+            .map(|player| player.player_info_id())
+            .filter(|info_id| *info_id > 0);
+        let previous_local_controls_by_owner = self
+            .local_controls
+            .assignments()
+            .map(|assignment| (assignment.owner, assignment))
+            .collect::<HashMap<_, _>>();
+        let previous_local_controls_by_info = self
+            .local_controls
+            .assignments()
+            .filter_map(|assignment| {
+                self.engine
+                    .player(assignment.owner)
+                    .map(|player| player.player_info_id())
+                    .filter(|info_id| *info_id > 0)
+                    .map(|info_id| (info_id, assignment))
+            })
+            .collect::<HashMap<_, _>>();
+        let previous_player_preferences_by_owner = self
+            .engine
+            .players()
+            .map(|player| {
+                let (pref_control, pref_mouse) = player.control_preferences();
+                let (pref_control_style, pref_auto_context_menu) =
+                    player.control_style_preferences();
+                (
+                    player.id(),
+                    (
+                        pref_control,
+                        pref_mouse,
+                        pref_control_style,
+                        pref_auto_context_menu,
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let previous_player_preferences_by_info = self
+            .engine
+            .players()
+            .filter(|player| player.player_info_id() > 0)
+            .map(|player| {
+                (
+                    player.player_info_id(),
+                    previous_player_preferences_by_owner[&player.id()],
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
         self.finish_recording();
         self.engine = Engine::new();
         self.engine.set_local_players([self.local_owner]);
@@ -30264,7 +30373,14 @@ impl GameApp {
 
         self.rebuild_definition_sprites();
 
+        let offline_player_infos = self
+            .network
+            .is_none()
+            .then(|| std::mem::take(&mut self.control_player_infos));
         self.configure_running_state(scenario_info.label.clone(), scenario_info.fallback_ground);
+        if let Some(player_infos) = offline_player_infos {
+            self.control_player_infos = player_infos;
+        }
         if let Some(enabled) = save.runtime_music_enabled {
             self.runtime_music_enabled = enabled;
         }
@@ -30279,6 +30395,244 @@ impl GameApp {
         self.engine
             .restore_state(&save.engine_state)
             .context("failed to restore saved engine state")?;
+        // Savegame runtime players live in C++'s RestorePlayerInfos until
+        // current takeover entries absorb their joined ID/flags/team via
+        // SetSavegameResume. Do this before RecreatePlayers filters for the
+        // JOINED bit: a nonempty current roster may consist entirely of
+        // unjoined takeover entries at this point.
+        for saved_player in &save.engine_state.players {
+            self.control_player_infos.resume_joined_savegame_player(
+                saved_player.player_info_id,
+                saved_player.team.unwrap_or(0),
+                saved_player.no_elimination_check,
+            );
+        }
+        let networked = self.network.is_some();
+        let authoritative_player_infos = self.control_player_infos.player_count() != 0;
+        let recreation_players = self
+            .control_player_infos
+            .recreation_players()
+            .into_iter()
+            .filter(|(client_id, _)| !networked || self.control_clients.contains(*client_id))
+            .collect::<Vec<_>>();
+        let recreation_info_ids = recreation_players
+            .iter()
+            .map(|(_, info_id)| *info_id)
+            .collect::<HashSet<_>>();
+        let retained_player_numbers = self
+            .engine
+            .players()
+            .filter_map(|player| {
+                (!authoritative_player_infos
+                    || recreation_info_ids.contains(&player.player_info_id()))
+                .then_some(player.id())
+            })
+            .collect::<Vec<_>>();
+        // RecreatePlayers skips unjoined/removed infos and whole missing
+        // network-client packets. It does not RemovePlayer their saved
+        // objects; the following ValidateOwners phase only orphans the three
+        // runtime player-number references.
+        self.engine
+            .retain_restored_players(retained_player_numbers);
+        // C++ compiles runtime data first, then C4Player::Init overwrites the
+        // current client/name and reruns InitControl for every recreated
+        // player. Control is always recalculated; MouseControl is only set
+        // true, so a compiled true value survives a failed current gate.
+        let mut restored_players = self
+            .engine
+            .players()
+            .map(|player| {
+                let (preferred_control_set, prefers_mouse) = player.control_preferences();
+                let (pref_control_style, pref_auto_context_menu) =
+                    player.control_style_preferences();
+                (
+                    player.id(),
+                    player.player_info_id(),
+                    player.is_script_player(),
+                    player.no_elimination_check(),
+                    player.at_client(),
+                    player.at_client_name().to_string(),
+                    player.name().to_string(),
+                    player.mouse_control(),
+                    preferred_control_set,
+                    prefers_mouse,
+                    pref_control_style,
+                    pref_auto_context_menu,
+                )
+            })
+            .collect::<Vec<_>>();
+        let recreation_order = recreation_players
+            .into_iter()
+            .enumerate()
+            .map(|(index, (_, info_id))| (info_id, index))
+            .collect::<HashMap<_, _>>();
+        restored_players.sort_by_key(|(number, player_info_id, ..)| {
+            (
+                recreation_order
+                    .get(player_info_id)
+                    .copied()
+                    .unwrap_or(usize::MAX),
+                *number,
+            )
+        });
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .unwrap_or(0);
+        let mut rebound_local_controls = LocalControlRegistry::default();
+        let mut local_players = Vec::new();
+        let mut restored_primary_owner = None;
+
+        for (
+            number,
+            player_info_id,
+            saved_script_player,
+            saved_no_elimination_check,
+            saved_at_client,
+            saved_at_client_name,
+            saved_player_name,
+            saved_mouse_control,
+            saved_preferred_control_set,
+            saved_prefers_mouse,
+            saved_pref_control_style,
+            saved_pref_auto_context_menu,
+        ) in restored_players
+        {
+            let linked_client_id = self
+                .control_player_infos
+                .client_id_for_info(player_info_id);
+            let current_info = self.control_player_infos.get(player_info_id);
+            let script_player = current_info
+                .map(|info| info.is_script_player())
+                .unwrap_or(saved_script_player);
+            let player_name = current_info
+                .and_then(|info| {
+                    [&info.league_account, &info.forced_name, &info.name]
+                        .into_iter()
+                        .find(|name| !name.is_empty())
+                })
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or(saved_player_name);
+            let no_elimination_check = current_info
+                .map(lc_engine::ControlPlayerInfoEntry::no_elimination_check)
+                .unwrap_or(saved_no_elimination_check);
+            let previous_control = previous_local_controls_by_info
+                .get(&player_info_id)
+                .copied()
+                .or_else(|| {
+                    (player_info_id == 0)
+                        .then(|| previous_local_controls_by_owner.get(&number).copied())
+                        .flatten()
+                });
+            let (
+                preferred_control_set,
+                prefers_mouse,
+                pref_control_style,
+                pref_auto_context_menu,
+            ) = current_info
+                .and_then(|_| {
+                    previous_player_preferences_by_info
+                        .get(&player_info_id)
+                        .copied()
+                        .or_else(|| {
+                            (player_info_id == 0)
+                                .then(|| {
+                                    previous_player_preferences_by_owner.get(&number).copied()
+                                })
+                                .flatten()
+                        })
+                })
+                .unwrap_or((
+                    saved_preferred_control_set,
+                    saved_prefers_mouse,
+                    saved_pref_control_style,
+                    saved_pref_auto_context_menu,
+                ));
+            let locally_controlled = !script_player
+                && match linked_client_id {
+                    Some(client_id) if networked => client_id == local_client_id,
+                    Some(client_id) => client_id == 0,
+                    _ => {
+                        previous_control.is_some()
+                            || (!networked
+                                && (saved_at_client == lc_engine::PlayerAtClient::HOST
+                                    || (player_info_id == 0
+                                        && number == previous_local_owner)))
+                    }
+                };
+
+            let at_client_id = linked_client_id.unwrap_or_else(|| {
+                if locally_controlled && !networked {
+                    0
+                } else {
+                    saved_at_client.get()
+                }
+            });
+            let at_client_name = self
+                .control_clients
+                .state(at_client_id)
+                .map(|client| {
+                    if !networked && client.name.is_empty() {
+                        "Local".to_string()
+                    } else {
+                        client.name.to_string_lossy().into_owned()
+                    }
+                })
+                .unwrap_or_else(|| {
+                    if locally_controlled && !networked {
+                        "Local".to_string()
+                    } else {
+                        saved_at_client_name
+                    }
+                });
+            let control_init = LocalControlInit {
+                owner: number,
+                preferred_set: preferred_control_set,
+                prefers_mouse,
+                gamepads_enabled: true,
+                replay: false,
+                disable_mouse: !self.mouse_control_allowed,
+            };
+            let control = if locally_controlled {
+                let control = rebound_local_controls
+                    .initialize_after_restore(control_init, saved_mouse_control != 0);
+                local_players.push(number);
+                if previous_primary_info_id == Some(player_info_id)
+                    || (previous_primary_info_id.is_none() && number == previous_local_owner)
+                {
+                    restored_primary_owner = Some(number);
+                }
+                control
+            } else {
+                rebound_local_controls.resolve(control_init)
+            };
+
+            self.engine
+                .reinitialize_player_after_restore(
+                    number,
+                    lc_engine::PlayerAtClient::new(at_client_id),
+                    at_client_name,
+                    player_name,
+                    control.runtime_control(),
+                    script_player,
+                    no_elimination_check,
+                    pref_control_style,
+                    pref_auto_context_menu,
+                )
+                .with_context(|| {
+                    format!("failed to reinitialize restored player {number}")
+                })?;
+        }
+        self.local_controls = rebound_local_controls;
+        if let Some(owner) = restored_primary_owner.or_else(|| local_players.first().copied()) {
+            self.local_owner = owner;
+        }
+        self.engine.set_local_players(local_players);
+        self.engine
+            .finalize_restored_players()
+            .context("failed to run restored player FinalInit")?;
+        self.mouse_control = self.local_controls.mouse_owner().is_some();
         if let Some(max_players) = self.engine.max_players() {
             self.network_max_players = usize::try_from(max_players).unwrap_or(0);
         }
@@ -31588,7 +31942,6 @@ fn collect_player_overlays(
     engine: &Engine,
     snapshot: &SimulationSnapshot,
     focus_id: Option<ObjectId>,
-    startup_hint_owner: Option<i32>,
     bindings: &KeyboardBindings,
 ) -> Vec<PlayerOverlay> {
     let detail_map: HashMap<_, _> = snapshot
@@ -31662,14 +32015,12 @@ fn collect_player_overlays(
                 inventory: Vec::new(),
             });
         }
-        // C4Player::SelectCount (src/C4Viewport.cpp:1320); the initial
-        // selection is the cursor crew.
-        let select_count = snapshot
-            .crew_selection
+        // DrawPlayerInfo reads the cached Player::SelectCount populated at
+        // the beginning of Player::Execute, not the live Select bits.
+        let select_count = detail_map
             .get(&player.owner)
-            .map(|selection| selection.selected.len() as i32)
-            .filter(|count| *count > 0)
-            .unwrap_or(i32::from(cursor.is_some()));
+            .map(|state| state.select_count)
+            .unwrap_or(0);
         let name = detail_map
             .get(&player.owner)
             .and_then(|state| {
@@ -31686,7 +32037,7 @@ fn collect_player_overlays(
             .unwrap_or(0);
         let score = detail_map
             .get(&player.owner)
-            .map(|state| state.points)
+            .map(|state| state.value_gain)
             .unwrap_or(0);
         let owner_color = detail_map
             .get(&player.owner)
@@ -31723,7 +32074,9 @@ fn collect_player_overlays(
             eliminated: player.eliminated,
             owner_color,
             select_count,
-            show_startup: startup_hint_owner == Some(player.owner),
+            show_startup: detail_map
+                .get(&player.owner)
+                .is_some_and(|state| state.show_startup),
             show_control,
             show_control_position,
             last_com,
@@ -36053,7 +36406,7 @@ mod tests {
 
     fn app_cursor_inventory_contains(app: &GameApp, clonk: ObjectId, definition: &str) -> bool {
         let mut overlays =
-            collect_player_overlays(&app.engine, &app.snapshot, Some(clonk), None, &app.bindings);
+            collect_player_overlays(&app.engine, &app.snapshot, Some(clonk), &app.bindings);
         populate_crew_inventories(&app.engine, &app.snapshot, &mut overlays);
         overlays
             .iter()
@@ -39803,6 +40156,11 @@ mod tests {
             .iter_mut()
             .find(|player| player.id == app.local_owner)
             .expect("sandbox local player");
+        // This probe isolates exact-viewport geometry. Runtime mouse setup
+        // correctly enables FoW, whose missing visibility bitmap is tested by
+        // the dedicated fail-closed cases below.
+        player.fog_of_war = false;
+        player.force_fog_of_war = true;
         player.viewports = vec![
             lc_engine::PlayerViewport::new(Vector2::new(100, 180)).with_focus(Some(target_id)),
             lc_engine::PlayerViewport::new(Vector2::new(1_000, 180)).with_focus(Some(target_id)),
@@ -39913,6 +40271,16 @@ mod tests {
     #[test]
     fn fractional_zoom_rounded_border_keeps_logical_edge_message_drawable() {
         let mut app = new_running_sandbox_app();
+        let player = app
+            .snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == app.local_owner)
+            .expect("sandbox local player");
+        // Model SetFoW(false) so this case exercises rounding independently
+        // of the visibility-bitmap boundary.
+        player.fog_of_war = false;
+        player.force_fog_of_war = true;
         let target = app.snapshot.objects.first_mut().expect("sandbox target");
         target.position = Vector2::new(100, 50);
         let target_id = target.id;
@@ -40242,6 +40610,8 @@ mod tests {
             wealth: 120,
             cursor: Some(focus),
             crew: vec![focus, teammate],
+            select_count: 1,
+            show_startup: true,
             show_control: 1 | 1 << 10,
             show_control_position: 3,
             control: lc_engine::PlayerControlState {
@@ -40253,7 +40623,7 @@ mod tests {
 
         let bindings = KeyboardBindings::load(None);
         let engine = Engine::new();
-        let overlay = collect_player_overlays(&engine, &snapshot, Some(focus), Some(1), &bindings);
+        let overlay = collect_player_overlays(&engine, &snapshot, Some(focus), &bindings);
         assert_eq!(overlay.len(), 1);
         let player = &overlay[0];
         assert_eq!(player.owner, 1);
@@ -40263,7 +40633,7 @@ mod tests {
         assert!(!player.eliminated);
         assert_eq!(player.crew.len(), 2);
         assert_eq!(player.owner_color, default_owner_color(1));
-        // SelectCount defaults to the cursor selection (C4Viewport.cpp:1320).
+        // HUD projection consumes C4Player's cached SelectCount.
         assert_eq!(player.select_count, 1);
         assert!(player.show_startup, "startup hint owner matches");
         assert_eq!(player.show_control, 1 | 1 << 10);
@@ -40339,7 +40709,7 @@ mod tests {
         assert_eq!(capacity, 250_000, "Tutorial09 installs AquaClonk capacity");
 
         let overlays =
-            collect_player_overlays(&app.engine, &app.snapshot, Some(clonk), None, &app.bindings);
+            collect_player_overlays(&app.engine, &app.snapshot, Some(clonk), &app.bindings);
         let crew = overlays
             .iter()
             .find(|player| player.owner == app.local_owner)
@@ -40550,7 +40920,7 @@ mod tests {
 
         let bindings = KeyboardBindings::load(None);
         let mut overlays =
-            collect_player_overlays(&engine, &snapshot, Some(crew_id), None, &bindings);
+            collect_player_overlays(&engine, &snapshot, Some(crew_id), &bindings);
         populate_crew_inventories(&engine, &snapshot, &mut overlays);
 
         let inventory = &overlays[0].crew[0].inventory;
@@ -52101,6 +52471,88 @@ mod tests {
             .expect("start sandbox scenario");
         wait_for_running(&mut app);
         app
+    }
+
+    #[test]
+    fn sandbox_mouse_toggle_updates_registry_and_reflected_player_state() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let player = app.engine.player(owner).expect("sandbox player");
+        assert_eq!((player.control_set(), player.mouse_control()), (0, 1));
+
+        app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleMouseControl)
+            .expect("disable mouse control");
+        let player = app.engine.player(owner).expect("sandbox player");
+        assert_eq!((player.control_set(), player.mouse_control()), (0, 0));
+        assert_eq!(app.local_controls.mouse_owner(), None);
+        assert!(!app.mouse_control);
+
+        app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleMouseControl)
+            .expect("enable mouse control");
+        let player = app.engine.player(owner).expect("sandbox player");
+        assert_eq!((player.control_set(), player.mouse_control()), (0, 1));
+        assert_eq!(app.local_controls.mouse_owner(), Some(owner));
+        assert!(app.mouse_control);
+    }
+
+    #[test]
+    fn restored_mouse_toggle_clears_global_owner_without_promoting_raw_flag() {
+        // A save may compile several nonzero per-player MouseControl fields.
+        // Numeric FinalInit order chooses the one process-global controller;
+        // toggling that player off clears Game.MouseControl and does not
+        // promote another player's surviving raw field (pristine 9ffa0a5d
+        // src/C4Player.cpp:778-786,2296-2315).
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = primary + 1;
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Secondary"))
+            .expect("register restored secondary player");
+        app.engine.set_local_players([primary, secondary]);
+        app.engine
+            .set_player_mouse_control(primary, true)
+            .expect("restore primary raw mouse flag");
+        app.engine
+            .set_player_mouse_control(secondary, true)
+            .expect("restore secondary raw mouse flag");
+
+        app.local_controls = LocalControlRegistry::default();
+        for (owner, preferred_set) in [(secondary, 1), (primary, 0)] {
+            app.local_controls.initialize_after_restore(
+                LocalControlInit {
+                    owner,
+                    preferred_set,
+                    prefers_mouse: false,
+                    gamepads_enabled: true,
+                    replay: false,
+                    disable_mouse: false,
+                },
+                true,
+            );
+        }
+        app.mouse_control = app.local_controls.mouse_owner().is_some();
+        assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
+
+        app.apply_ingame_menu_action_for_player(secondary, MenuAction::ToggleMouseControl)
+            .expect("disable restored active mouse owner");
+
+        assert_eq!(
+            app.engine
+                .player(primary)
+                .expect("primary player")
+                .mouse_control(),
+            1,
+            "the other raw per-player flag survives"
+        );
+        assert_eq!(
+            app.engine
+                .player(secondary)
+                .expect("secondary player")
+                .mouse_control(),
+            0
+        );
+        assert_eq!(app.local_controls.mouse_owner(), None);
+        assert!(!app.mouse_control);
     }
 
     #[test]
@@ -71042,6 +71494,299 @@ mod tests {
         assert!(!app.runtime_music_enabled);
         assert!(!app.audio.as_ref().expect("test audio").music_is_playing());
         assert!(app.runtime_flash_message.is_none());
+    }
+
+    #[test]
+    fn saved_game_control_values_are_overwritten_by_current_local_assignment() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let scenario = app
+            .active_scenario
+            .clone()
+            .unwrap_or_else(FrontendScenario::fallback);
+        let mut engine_state = app.engine.capture_state();
+        let saved_player = engine_state
+            .players
+            .iter_mut()
+            .find(|player| player.id == owner)
+            .expect("saved sandbox player");
+        saved_player.at_client = lc_engine::PlayerAtClient::new(77);
+        saved_player.at_client_name = Some("stale client".to_string());
+        saved_player.control_set = 7;
+        saved_player.mouse_control = 0;
+        saved_player.control.control_style = true;
+        saved_player.control.auto_context_menu = true;
+        saved_player.control.last_com = lc_engine::COM_RIGHT;
+        saved_player.control.last_com_down_double = 2;
+        saved_player.control.pressed_coms = 0x3ff;
+        saved_player.message_status = 2;
+        saved_player.view_wealth = 5;
+        saved_player.no_elimination_check = true;
+        let save = SavedGameFile {
+            version: SAVE_FILE_VERSION,
+            saved_at_seconds: 0,
+            scenario: SavedScenarioInfo::from_frontend(
+                &scenario,
+                &app.scenario_label,
+                app.fallback_ground,
+            ),
+            definition_load: app.active_definition_load.clone(),
+            focus_id: app.focus_id,
+            user_label: Some("local control restore".to_string()),
+            runtime_music_enabled: Some(app.runtime_music_enabled),
+            engine_state,
+        };
+
+        app.apply_loaded_game(save).expect("restore sandbox save");
+
+        let player = app.engine.player(owner).expect("restored sandbox player");
+        assert_eq!((player.control_set(), player.mouse_control()), (0, 1));
+        assert_eq!(player.at_client(), lc_engine::PlayerAtClient::HOST);
+        assert_eq!(player.at_client_name(), "Local");
+        assert!(!player.control.control_style);
+        assert!(!player.control.auto_context_menu);
+        assert_eq!(player.control.last_com, 0);
+        assert_eq!(player.control.last_com_down_double, 1);
+        assert_eq!(player.control.pressed_coms, 0);
+        assert_eq!(player.message_status(), 1);
+        assert_eq!(player.view_wealth(), 4);
+        assert!(player.no_elimination_check());
+        assert_eq!(app.local_controls.mouse_owner(), Some(owner));
+        assert!(app.mouse_control);
+    }
+
+    #[test]
+    fn saved_game_reapplies_current_player_info_identity_and_preferences() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let info_id = app
+            .engine
+            .player(owner)
+            .expect("sandbox player")
+            .player_info_id();
+        let text = |value: &str| {
+            lc_engine::LegacyCString::from_bytes(value.as_bytes().to_vec())
+                .expect("test string has no NUL")
+        };
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: info_id,
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                    name: text("Base name"),
+                    forced_name: text("Forced name"),
+                    league_account: text("League name"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let scenario = app
+            .active_scenario
+            .clone()
+            .unwrap_or_else(FrontendScenario::fallback);
+        let mut engine_state = app.engine.capture_state();
+        let saved_player = engine_state
+            .players
+            .iter_mut()
+            .find(|player| player.id == owner)
+            .expect("saved sandbox player");
+        saved_player.name = "Stale saved name".to_string();
+        saved_player.script_player = true;
+        saved_player.no_elimination_check = true;
+        saved_player.pref_control_style = true;
+        saved_player.pref_auto_context_menu = true;
+        let save = SavedGameFile {
+            version: SAVE_FILE_VERSION,
+            saved_at_seconds: 0,
+            scenario: SavedScenarioInfo::from_frontend(
+                &scenario,
+                &app.scenario_label,
+                app.fallback_ground,
+            ),
+            definition_load: app.active_definition_load.clone(),
+            focus_id: app.focus_id,
+            user_label: Some("current player info wins".to_string()),
+            runtime_music_enabled: Some(app.runtime_music_enabled),
+            engine_state,
+        };
+
+        app.apply_loaded_game(save).expect("restore sandbox save");
+
+        let player = app.engine.player(owner).expect("player is recreated");
+        assert_eq!(player.name(), "League name");
+        assert!(!player.is_script_player());
+        assert!(!player.no_elimination_check());
+        assert_eq!(player.control_style_preferences(), (false, false));
+    }
+
+    #[test]
+    fn saved_game_promotes_unjoined_takeover_info_before_recreation_filter() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let saved_info_id = app
+            .engine
+            .player(owner)
+            .expect("sandbox player")
+            .player_info_id();
+        assert!(saved_info_id > 0);
+        let text = |value: &str| {
+            lc_engine::LegacyCString::from_bytes(value.as_bytes().to_vec())
+                .expect("test string has no NUL")
+        };
+        app.control_player_infos = ControlPlayerInfoRegistry::default();
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: saved_info_id + 100,
+                    savegame_player: saved_info_id,
+                    name: text("Current takeover"),
+                    flags: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let scenario = app
+            .active_scenario
+            .clone()
+            .unwrap_or_else(FrontendScenario::fallback);
+        let mut engine_state = app.engine.capture_state();
+        let saved_player = engine_state
+            .players
+            .iter_mut()
+            .find(|player| player.id == owner)
+            .expect("saved player");
+        saved_player.name = "Saved identity".to_string();
+        saved_player.no_elimination_check = true;
+        let save = SavedGameFile {
+            version: SAVE_FILE_VERSION,
+            saved_at_seconds: 0,
+            scenario: SavedScenarioInfo::from_frontend(
+                &scenario,
+                &app.scenario_label,
+                app.fallback_ground,
+            ),
+            definition_load: app.active_definition_load.clone(),
+            focus_id: app.focus_id,
+            user_label: Some("unjoined takeover restore".to_string()),
+            runtime_music_enabled: Some(app.runtime_music_enabled),
+            engine_state,
+        };
+
+        app.apply_loaded_game(save).expect("restore sandbox save");
+
+        let player = app.engine.player(owner).expect("takeover recreates player");
+        assert_eq!(player.player_info_id(), saved_info_id);
+        assert_eq!(player.name(), "Current takeover");
+        assert!(player.no_elimination_check());
+        assert_eq!(app.control_player_infos.recreation_info_ids(), vec![saved_info_id]);
+    }
+
+    #[test]
+    fn saved_game_skips_removed_current_player_without_deleting_objects() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let info_id = app
+            .engine
+            .player(owner)
+            .expect("sandbox player")
+            .player_info_id();
+        let object = app
+            .engine
+            .snapshot()
+            .objects
+            .first()
+            .expect("sandbox object")
+            .id;
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: info_id,
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED
+                        | lc_engine::PLAYER_INFO_FLAG_REMOVED,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let scenario = app
+            .active_scenario
+            .clone()
+            .unwrap_or_else(FrontendScenario::fallback);
+        let save = SavedGameFile {
+            version: SAVE_FILE_VERSION,
+            saved_at_seconds: 0,
+            scenario: SavedScenarioInfo::from_frontend(
+                &scenario,
+                &app.scenario_label,
+                app.fallback_ground,
+            ),
+            definition_load: app.active_definition_load.clone(),
+            focus_id: app.focus_id,
+            user_label: Some("removed player skipped".to_string()),
+            runtime_music_enabled: Some(app.runtime_music_enabled),
+            engine_state: app.engine.capture_state(),
+        };
+
+        app.apply_loaded_game(save).expect("restore sandbox save");
+
+        assert!(app.engine.player(owner).is_none());
+        let object = app
+            .engine
+            .object_snapshot(object)
+            .expect("saved object is retained");
+        assert_eq!(object.owner, lc_engine::OWNER_NONE);
+    }
+
+    #[test]
+    fn saved_raw_mouse_control_survives_a_failed_restore_preference_gate() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let scenario = app
+            .active_scenario
+            .clone()
+            .unwrap_or_else(FrontendScenario::fallback);
+        app.local_controls
+            .toggle_mouse(owner)
+            .expect("disable current mouse owner");
+        app.engine
+            .set_player_mouse_control(owner, false)
+            .expect("disable live player mouse control");
+        let mut engine_state = app.engine.capture_state();
+        let saved_player = engine_state
+            .players
+            .iter_mut()
+            .find(|player| player.id == owner)
+            .expect("saved sandbox player");
+        saved_player.mouse_control = 2;
+        saved_player.pref_mouse = Some(false);
+        let save = SavedGameFile {
+            version: SAVE_FILE_VERSION,
+            saved_at_seconds: 0,
+            scenario: SavedScenarioInfo::from_frontend(
+                &scenario,
+                &app.scenario_label,
+                app.fallback_ground,
+            ),
+            definition_load: app.active_definition_load.clone(),
+            focus_id: app.focus_id,
+            user_label: Some("loaded mouse survives InitControl gate".to_string()),
+            runtime_music_enabled: Some(app.runtime_music_enabled),
+            engine_state,
+        };
+
+        app.apply_loaded_game(save).expect("restore sandbox save");
+
+        assert_eq!(
+            app.engine
+                .player(owner)
+                .expect("restored sandbox player")
+                .mouse_control(),
+            2
+        );
+        assert_eq!(app.local_controls.mouse_owner(), Some(owner));
+        assert!(app.mouse_control);
     }
 
     #[test]

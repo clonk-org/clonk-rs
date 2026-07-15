@@ -6667,6 +6667,13 @@ fn load_initial_network_teams<S: AsRef<str>>(
                 decode_legacy_script_text(team.name.as_bytes()),
                 team.color,
             )
+            .with_player_ids(
+                team.player_ids
+                    .iter()
+                    .copied()
+                    .filter(|player_id| *player_id > 0)
+                    .collect(),
+            )
             .with_player_start_index(team.player_start_index)
             .with_max_players(team.max_players)
             .with_icon_spec(decode_legacy_script_text(team.icon_spec.as_bytes()))
@@ -7001,7 +7008,16 @@ fn load_legacy_teams<S: AsRef<str>>(
         .teams
         .iter()
         .map(|team| {
-            let info = TeamInfo::new(team.id, &team.name, team.configured_color);
+            let info = TeamInfo::new(team.id, &team.name, team.configured_color)
+                .with_player_ids(
+                    team.players
+                        .iter()
+                        .copied()
+                        .filter(|player_id| *player_id > 0)
+                        .collect(),
+                )
+                .with_player_start_index(team.player_start_index)
+                .with_max_players(team.max_players);
             if let Some(icon) = team.icon_spec.as_deref() {
                 info.with_icon_spec(icon)
             } else {
@@ -16584,8 +16600,12 @@ public func ActualizePhase(pClonk)
         // (pristine 9ffa0a5d src/C4Control.cpp:1546-1578;
         // src/C4Control.h:589-594; src/C4Script.cpp:2849-2855).
         let mut engine = crate::Engine::new();
+        let info = crate::ControlPlayerInfoEntry {
+            flags: crate::PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
+            ..crate::ControlPlayerInfoEntry::default()
+        };
         let joined = engine
-            .join_player_at_client(
+            .join_player_at_client_with_info(
                 crate::JoinPlayerConfig {
                     name: "Remote".to_string(),
                     player_info_id: 42,
@@ -16601,6 +16621,7 @@ public func ActualizePhase(pClonk)
                     auto_context_menu: false,
                 },
                 crate::PlayerAtClient::new(3),
+                &info,
             )
             .expect("remote player joins");
         let player = joined.number();
@@ -16620,6 +16641,16 @@ public func ActualizePhase(pClonk)
             }
         ));
         assert!(engine.player(player).expect("player exists").surrendered());
+        for _ in 0..59 {
+            engine
+                .tick_player_systems()
+                .expect("surrender retirement advances");
+        }
+        assert!(engine.player(player).is_some());
+        engine
+            .tick_player_systems()
+            .expect("sixtieth execute retires surrendered player");
+        assert!(engine.player(player).is_none());
     }
 
     #[test]
@@ -16880,7 +16911,11 @@ public func ActualizePhase(pClonk)
         assert_eq!(joined, reference_joined);
         assert_eq!(generated.rng, reference.rng, "no lockstep RNG drift");
         let player = generated.player(number).expect("chooser remains joined");
-        assert_eq!(player.status(), crate::PlayerStatus::Active);
+        assert_eq!(
+            player.status(),
+            crate::PlayerStatus::Eliminated,
+            "an empty C++ scenario eliminates the crewless player during frame-zero FinalInit"
+        );
         assert_eq!(player.team(), Some(2));
         assert_eq!(player.color(), Some(crate::RgbColor::new(0x00, 0xc8, 0x00)));
     }

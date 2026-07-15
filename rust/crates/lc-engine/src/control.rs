@@ -357,6 +357,15 @@ impl ControlPlayerInfoEntry {
     pub fn no_scenario_init(&self) -> bool {
         self.flags & PLAYER_INFO_FLAG_NO_SCENARIO_INIT != 0
     }
+
+    pub fn no_elimination_check(&self) -> bool {
+        self.flags & PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK != 0
+    }
+
+    pub fn is_joined(&self) -> bool {
+        self.flags & PLAYER_INFO_FLAG_JOINED != 0
+            && self.flags & PLAYER_INFO_FLAG_REMOVED == 0
+    }
 }
 
 impl Default for ControlPlayerInfoEntry {
@@ -797,6 +806,11 @@ impl RawPacket {
                         {
                             entry.flags |= PLAYER_INFO_FLAG_NO_SCENARIO_INIT;
                         }
+                        if field(fields, "Flags")
+                            .is_some_and(|value| value.contains("NoEliminationCheck"))
+                        {
+                            entry.flags |= PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK;
+                        }
                         Ok(entry)
                     },
                 )
@@ -1157,6 +1171,7 @@ mod tests {
         assert_eq!(player.resource, None);
         assert!(!player.is_script_player());
         assert!(!player.no_scenario_init());
+        assert!(!player.no_elimination_check());
 
         let packet = PlayerInfoControlData::default();
         assert_eq!(packet.client_id, -1);
@@ -1295,7 +1310,7 @@ mod tests {
       Flags=Initial\n\
       [Player]\n\
         Name=\"Tyler\"\n\
-        Flags=\n\
+        Flags=NoScenarioInit|NoEliminationCheck\n\
         ID=1\n\
         Type=User\n\
         Color=15997440\n\
@@ -1318,6 +1333,8 @@ mod tests {
                 assert_eq!(info.players[0].color, 15997440);
                 assert_eq!(info.players[0].team, 0);
                 assert!(!info.players[0].is_script_player());
+                assert!(info.players[0].no_scenario_init());
+                assert!(info.players[0].no_elimination_check());
                 assert_eq!(info.players[1].id, 2);
                 assert_eq!(info.players[1].name.to_str(), Ok("Rival"));
                 assert_eq!(info.players[1].team, 7);

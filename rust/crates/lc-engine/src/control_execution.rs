@@ -2,7 +2,8 @@ use crate::{
     player_file::PlayerFile, InitialNetworkTeam, InitialNetworkTeamDistribution,
     InitialNetworkTeamMetadata, JoinPlayerConfig, JoinPlayerControlData, JoinPlayerSource,
     LegacyCString, NetworkResourceCore, PlayerInfoUpdateRequest, ScenarioError,
-    PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_USER,
+    PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
+    PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_USER,
 };
 use crate::{
     ControlPlayerInfoEntry, PlayerInfoControlData, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
@@ -809,6 +810,76 @@ impl ControlPlayerInfoRegistry {
             .find(|player| player.id == info_id)
     }
 
+    pub fn client_id_for_info(&self, info_id: i32) -> Option<i32> {
+        self.clients.iter().find_map(|client| {
+            client
+                .players
+                .iter()
+                .any(|player| player.id == info_id)
+                .then_some(client.client_id)
+        })
+    }
+
+    /// C4PlayerInfoList::RecreatePlayers walks client packets and each
+    /// packet's player list in storage order. InitControl collision handling
+    /// therefore observes this order before restored runtime player numbers
+    /// re-sort C4PlayerList.
+    pub fn recreation_players(&self) -> Vec<(i32, i32)> {
+        self.clients
+            .iter()
+            .flat_map(|client| {
+                client
+                    .players
+                    .iter()
+                    .filter(|player| player.is_joined())
+                    .map(|player| (client.client_id, player.id))
+            })
+            .collect()
+    }
+
+    pub fn recreation_info_ids(&self) -> Vec<i32> {
+        self.recreation_players()
+            .into_iter()
+            .map(|(_, info_id)| info_id)
+            .collect()
+    }
+
+    /// Applies the `C4PlayerInfo::SetSavegameResume` fields that are
+    /// authoritative for a still-live saved runtime player. The current
+    /// entry keeps its player-file/name/type identity, while the associated
+    /// savegame ID, joined state, team and no-elimination flag are restored
+    /// before `RecreatePlayers` filters the registry.
+    pub fn resume_joined_savegame_player(
+        &mut self,
+        savegame_info_id: i32,
+        team: i32,
+        no_elimination_check: bool,
+    ) -> bool {
+        if savegame_info_id <= 0 {
+            return false;
+        }
+        let Some(player) = self
+            .clients
+            .iter_mut()
+            .flat_map(|client| &mut client.players)
+            .find(|player| player.savegame_player == savegame_info_id)
+        else {
+            return false;
+        };
+
+        player.id = savegame_info_id;
+        player.flags &= !(PLAYER_INFO_FLAG_JOINED
+            | PLAYER_INFO_FLAG_REMOVED
+            | PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK);
+        player.flags |= PLAYER_INFO_FLAG_JOINED;
+        if no_elimination_check {
+            player.flags |= PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK;
+        }
+        player.team = team;
+        self.last_player_id = self.last_player_id.max(savegame_info_id);
+        true
+    }
+
     fn first_unissued_team_player(&self, team: &InitialNetworkTeam) -> Option<i32> {
         team.player_ids.iter().copied().find(|id| {
             !self.issued_join_ids.contains(id)
@@ -1422,6 +1493,43 @@ mod tests {
         assert_eq!(registry.get(7).map(|entry| entry.id), Some(7));
         assert_eq!(registry.get(8).map(|entry| entry.id), Some(8));
         assert_eq!(registry.player_count(), 2);
+    }
+
+    #[test]
+    fn recreation_order_contains_only_currently_joined_players() {
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![
+                ControlPlayerInfoEntry {
+                    id: 7,
+                    flags: PLAYER_INFO_FLAG_JOINED,
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    id: 8,
+                    flags: PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_REMOVED,
+                    ..Default::default()
+                },
+                player(9),
+            ],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 4,
+            players: vec![ControlPlayerInfoEntry {
+                id: 10,
+                flags: PLAYER_INFO_FLAG_JOINED,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        assert_eq!(registry.recreation_players(), vec![(3, 7), (4, 10)]);
+        assert_eq!(registry.recreation_info_ids(), vec![7, 10]);
+        assert_eq!(registry.get(8).map(|info| info.flags), Some(
+            PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_REMOVED
+        ));
     }
 
     #[test]
@@ -2285,6 +2393,31 @@ mod tests {
                 startup_player_count: 2,
             }
         );
+    }
+
+    #[test]
+    fn savegame_resume_promotes_associated_unjoined_info_before_recreation() {
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 0,
+            players: vec![ControlPlayerInfoEntry {
+                id: 91,
+                savegame_player: 7,
+                flags: PLAYER_INFO_FLAG_REMOVED | PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
+                team: 3,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        assert!(registry.resume_joined_savegame_player(7, 5, false));
+
+        let resumed = registry.get(7).expect("associated info takes saved ID");
+        assert_eq!(resumed.team, 5);
+        assert_eq!(resumed.flags & PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_JOINED);
+        assert_eq!(resumed.flags & PLAYER_INFO_FLAG_REMOVED, 0);
+        assert_eq!(resumed.flags & PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK, 0);
+        assert_eq!(registry.recreation_players(), vec![(0, 7)]);
     }
 
     #[test]

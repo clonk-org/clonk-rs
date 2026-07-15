@@ -1,4 +1,4 @@
-use lc_engine::ControlEvent;
+use lc_engine::{ControlEvent, PlayerRuntimeControl};
 use winit::event::ElementState;
 
 const CONTROL_SET_NONE: i32 = -1;
@@ -21,12 +21,34 @@ pub(crate) struct LocalControlInit {
 pub(crate) struct LocalControlAssignment {
     pub(crate) owner: i32,
     pub(crate) set: i32,
+    /// Whether the current InitControl preference gate actively enabled the
+    /// mouse. `mouse` may additionally be true because a loaded raw nonzero
+    /// MouseControl survives a failed gate.
+    mouse_gate_passed: bool,
     pub(crate) mouse: bool,
+    preferred_set: i32,
+    prefers_mouse: bool,
+}
+
+impl LocalControlAssignment {
+    pub(crate) const fn runtime_control(self) -> PlayerRuntimeControl {
+        PlayerRuntimeControl::with_preferences(
+            self.set,
+            self.mouse_gate_passed as i32,
+            self.preferred_set,
+            self.prefers_mouse,
+        )
+    }
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct LocalControlRegistry {
     assignments: Vec<LocalControlAssignment>,
+    /// Process-global `C4MouseControl::Player`. This is intentionally
+    /// separate from the per-player raw `MouseControl` flags: restored data
+    /// may leave several local players flagged while `FinalInit` repeatedly
+    /// reinitializes the one process-global mouse controller.
+    active_mouse_owner: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,25 +61,34 @@ pub(crate) enum KeyboardRoutingOutcome {
 }
 
 impl LocalControlRegistry {
-    pub(crate) fn initialize(&mut self, init: LocalControlInit) -> LocalControlAssignment {
-        let assignment = LocalControlAssignment {
-            owner: init.owner,
-            set: CONTROL_SET_NONE,
-            mouse: false,
-        };
-        self.assignments.push(assignment);
-        let index = self.assignments.len() - 1;
+    /// Resolves `C4Player::InitControl` without retaining the player as a
+    /// local input target. Every client runs InitControl for remote players,
+    /// too, but only locally controlled players participate in this app's
+    /// keyboard and mouse routing registry.
+    pub(crate) fn resolve(&self, init: LocalControlInit) -> LocalControlAssignment {
+        self.resolve_with_local_self(init, false)
+    }
 
+    fn resolve_with_local_self(
+        &self,
+        init: LocalControlInit,
+        local_self_is_listed: bool,
+    ) -> LocalControlAssignment {
         let mut preferred_set = init.preferred_set;
         if !init.gamepads_enabled && (GAMEPAD_SET_FIRST..=GAMEPAD_SET_LAST).contains(&preferred_set)
         {
             preferred_set = KEYBOARD_SET_FIRST;
         }
-        let set = if self
-            .assignments
-            .iter()
-            .any(|assignment| assignment.set == preferred_set)
-        {
+        // C4PlayerList inserts a local provisional player before InitControl;
+        // its default Control=-1 makes a local None preference collide with
+        // itself. A remote player's LocalControl is false, so its own -1 does
+        // not participate in ControlTaken.
+        let preferred_taken = local_self_is_listed && preferred_set == CONTROL_SET_NONE
+            || self
+                .assignments
+                .iter()
+                .any(|assignment| assignment.set == preferred_set);
+        let set = if preferred_taken {
             (KEYBOARD_SET_FIRST..=KEYBOARD_SET_LAST)
                 .find(|set| {
                     !self
@@ -69,13 +100,89 @@ impl LocalControlRegistry {
         } else {
             preferred_set
         };
-        self.assignments[index].set = set;
-        self.assignments[index].mouse = init.prefers_mouse
+        let mouse_gate_passed = init.prefers_mouse
             && !init.replay
             && !init.disable_mouse
             && (KEYBOARD_SET_FIRST..=GAMEPAD_SET_LAST).contains(&set)
             && !self.assignments.iter().any(|assignment| assignment.mouse);
-        self.assignments[index]
+        LocalControlAssignment {
+            owner: init.owner,
+            set,
+            mouse_gate_passed,
+            mouse: mouse_gate_passed,
+            preferred_set: init.preferred_set,
+            prefers_mouse: init.prefers_mouse,
+        }
+    }
+
+    pub(crate) fn initialize(&mut self, init: LocalControlInit) -> LocalControlAssignment {
+        let assignment = self.resolve_with_local_self(init, true);
+        self.assignments.push(assignment);
+        // A live join runs FinalInit immediately after InitControl. If the
+        // preference gate set MouseControl, FinalInit initializes the global
+        // C4MouseControl for this player.
+        if assignment.mouse {
+            self.active_mouse_owner = Some(assignment.owner);
+        }
+        assignment
+    }
+
+    pub(crate) fn initialize_after_restore(
+        &mut self,
+        init: LocalControlInit,
+        loaded_mouse: bool,
+    ) -> LocalControlAssignment {
+        let mut assignment = self.resolve_with_local_self(init, true);
+        // InitControl never clears MouseControl. A true value compiled from
+        // runtime data survives even when the current preference gate fails.
+        assignment.mouse |= loaded_mouse;
+        self.assignments.push(assignment);
+        if assignment.mouse {
+            // RecreatePlayers may initialize controls in player-info order,
+            // but InitGameFinal walks the number-sorted runtime player list.
+            // Every flagged local player calls C4MouseControl::Init, so the
+            // highest-numbered one is the final process-global owner.
+            self.active_mouse_owner = Some(
+                self.active_mouse_owner
+                    .map_or(assignment.owner, |owner| owner.max(assignment.owner)),
+            );
+        }
+        assignment
+    }
+
+    pub(crate) fn assignment(&self, owner: i32) -> Option<LocalControlAssignment> {
+        self.assignments
+            .iter()
+            .find(|assignment| assignment.owner == owner)
+            .copied()
+    }
+
+    pub(crate) fn assignments(&self) -> impl Iterator<Item = LocalControlAssignment> + '_ {
+        self.assignments.iter().copied()
+    }
+
+    /// `C4Player::ToggleMouseControl`: disable a player whose raw flag is set,
+    /// or enable a player only while no local raw flag is set. Disabling also
+    /// clears the separate process-global controller.
+    pub(crate) fn toggle_mouse(&mut self, owner: i32) -> Option<LocalControlAssignment> {
+        let index = self
+            .assignments
+            .iter()
+            .position(|assignment| assignment.owner == owner)?;
+        if self.assignments[index].mouse {
+            self.assignments[index].mouse = false;
+            self.assignments[index].mouse_gate_passed = false;
+            // C4Player::ToggleMouseControl unconditionally clears and
+            // defaults Game.MouseControl when this player's raw flag is set.
+            // It does not promote another restored player whose raw flag is
+            // still nonzero.
+            self.active_mouse_owner = None;
+        } else if !self.assignments.iter().any(|assignment| assignment.mouse) {
+            self.assignments[index].mouse = true;
+            self.assignments[index].mouse_gate_passed = true;
+            self.active_mouse_owner = Some(owner);
+        }
+        Some(self.assignments[index])
     }
 
     pub(crate) fn owner_for_set(&self, set: i32) -> Option<i32> {
@@ -140,10 +247,7 @@ impl LocalControlRegistry {
     }
 
     pub(crate) fn mouse_owner(&self) -> Option<i32> {
-        self.assignments
-            .iter()
-            .find(|assignment| assignment.mouse)
-            .map(|assignment| assignment.owner)
+        self.active_mouse_owner
     }
 
     pub(crate) fn owners(&self) -> impl Iterator<Item = i32> + '_ {
@@ -157,7 +261,11 @@ impl LocalControlRegistry {
             .assignments
             .iter()
             .position(|assignment| assignment.owner == owner)?;
-        Some(self.assignments.remove(index))
+        let assignment = self.assignments.remove(index);
+        if self.active_mouse_owner == Some(owner) {
+            self.active_mouse_owner = None;
+        }
+        Some(assignment)
     }
 }
 
@@ -475,4 +583,131 @@ mod tests {
         let replacement = initialize(&mut controls, 62);
         assert_eq!((replacement.set, replacement.mouse), (0, true));
     }
+
+    #[test]
+    fn resolving_remote_control_does_not_register_an_input_target() {
+        let mut controls = LocalControlRegistry::default();
+        controls.initialize(LocalControlInit {
+            owner: 70,
+            preferred_set: 0,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+
+        let remote = controls.resolve(LocalControlInit {
+            owner: 71,
+            preferred_set: 0,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+
+        assert_eq!((remote.set, remote.mouse), (1, false));
+        assert_eq!(controls.assignment(71), None);
+        assert_eq!(controls.owner_for_set(1), None);
+        assert_eq!(controls.owners().collect::<Vec<_>>(), vec![70]);
+
+        let remote_none = controls.resolve(LocalControlInit {
+            owner: 72,
+            preferred_set: CONTROL_SET_NONE,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        assert_eq!(remote_none.set, CONTROL_SET_NONE);
+    }
+
+    #[test]
+    fn mouse_toggle_mutates_only_a_registered_available_owner() {
+        let mut controls = LocalControlRegistry::default();
+        let initialize = |controls: &mut LocalControlRegistry, owner, prefers_mouse| {
+            controls.initialize(LocalControlInit {
+                owner,
+                preferred_set: owner - 80,
+                prefers_mouse,
+                gamepads_enabled: true,
+                replay: false,
+                disable_mouse: false,
+            })
+        };
+        initialize(&mut controls, 80, true);
+        initialize(&mut controls, 81, false);
+
+        assert_eq!(
+            controls.toggle_mouse(81).map(|value| value.mouse),
+            Some(false)
+        );
+        assert_eq!(
+            controls.toggle_mouse(80).map(|value| value.mouse),
+            Some(false)
+        );
+        assert_eq!(
+            controls.toggle_mouse(81).map(|value| value.mouse),
+            Some(true)
+        );
+        assert_eq!(controls.toggle_mouse(999), None);
+        assert_eq!(controls.mouse_owner(), Some(81));
+    }
+
+    #[test]
+    fn restored_raw_mouse_ownership_follows_numeric_final_init_order() {
+        let mut controls = LocalControlRegistry::default();
+        for owner in [9, 3] {
+            controls.initialize_after_restore(
+                LocalControlInit {
+                    owner,
+                    preferred_set: owner,
+                    prefers_mouse: false,
+                    gamepads_enabled: true,
+                    replay: false,
+                    disable_mouse: false,
+                },
+                true,
+            );
+        }
+
+        // RecreatePlayers may visit player infos in a different order, but
+        // InitGameFinal calls MouseControl.Init through FinalInit in restored
+        // player-number order. The last nonzero player therefore owns it.
+        assert_eq!(controls.mouse_owner(), Some(9));
+    }
+
+    #[test]
+    fn disabling_restored_mouse_owner_does_not_promote_another_raw_flag() {
+        // Compiled runtime data can contain several nonzero MouseControl
+        // fields. FinalInit leaves the highest-numbered player in the one
+        // process-global C4MouseControl, but ToggleMouseControl clears that
+        // global controller rather than rerunning FinalInit or selecting a
+        // surviving raw flag (pristine 9ffa0a5d src/C4Player.cpp:778-786,
+        // 2296-2315; src/C4PlayerList.cpp:556-562).
+        let mut controls = LocalControlRegistry::default();
+        for owner in [9, 3] {
+            controls.initialize_after_restore(
+                LocalControlInit {
+                    owner,
+                    preferred_set: owner,
+                    prefers_mouse: false,
+                    gamepads_enabled: true,
+                    replay: false,
+                    disable_mouse: false,
+                },
+                true,
+            );
+        }
+        assert_eq!(controls.mouse_owner(), Some(9));
+
+        assert_eq!(controls.toggle_mouse(9).map(|value| value.mouse), Some(false));
+        assert_eq!(controls.assignment(3).map(|value| value.mouse), Some(true));
+        assert_eq!(controls.mouse_owner(), None);
+
+        // The surviving raw flag still makes MouseControlTaken true, so the
+        // now-unflagged former owner cannot reacquire the global controller.
+        assert_eq!(controls.toggle_mouse(9).map(|value| value.mouse), Some(false));
+        assert_eq!(controls.mouse_owner(), None);
+    }
+
 }

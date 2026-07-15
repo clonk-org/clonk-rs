@@ -7,6 +7,7 @@ const MAX_SET_WEALTH: i32 = 100_000;
 const MAX_WEALTH_ADJUSTMENT: i32 = 10_000;
 const MAX_SCORE: i32 = 100_000;
 const MIN_SCORE: i32 = -100_000;
+const PLAYER_VIEW_DELAY: i32 = 100;
 
 pub const PLAYER_VIEW_MODE_CURSOR: i32 = 0;
 pub const PLAYER_VIEW_MODE_TARGET: i32 = 1;
@@ -83,6 +84,18 @@ fn bounded_at_client_name(mut name: String) -> String {
     name
 }
 
+fn bounded_message_buf(mut message: String) -> String {
+    const C4_MESSAGE_BUFFER_LENGTH: usize = 256;
+    if message.len() > C4_MESSAGE_BUFFER_LENGTH {
+        let mut end = C4_MESSAGE_BUFFER_LENGTH;
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
+    }
+    message
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlayerViewport {
     #[serde(default)]
@@ -133,6 +146,14 @@ pub struct PlayerState {
     /// client name rather than being conflated with that default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_client_name: Option<String>,
+    /// Stable C4PlayerInfo type used to recompute LocalControl on restore.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub script_player: bool,
+    /// Saved `C4PlayerInfo::PIF_NoEliminationCheck` projection. The C++
+    /// runtime field itself is Local-NoSave, but exact saves retain the
+    /// authoritative player-info bit and reapply it during recreation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_elimination_check: bool,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -203,8 +224,15 @@ pub struct PlayerState {
     /// `ViewX/ViewY` center (C4Viewport.cpp:1183-1214).
     #[serde(default, skip_serializing_if = "is_zero_vector")]
     pub view_offset: Vector2,
+    /// Frames the wealth/value HUD change indicators remain visible.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub view_wealth: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub view_value: i32,
     #[serde(default)]
     pub crew: Vec<ObjectId>,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub crew_created: i32,
     #[serde(default)]
     pub home_base_material: HashMap<DefinitionId, u32>,
     #[serde(default)]
@@ -223,6 +251,24 @@ pub struct PlayerState {
     /// represents the live C++ sentinel -1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_index: Option<i32>,
+    /// Effective runtime control set. Missing runtime-save data compiles to
+    /// C++'s serialized default `0`; a fresh live Player starts at `-1`.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub control_set: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub mouse_control: i32,
+    /// Player-core preferences used when InitControl recomputes the effective
+    /// process-local assignment after a savegame recreation.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub pref_control: i32,
+    /// `None` is the C4PlayerInfoCore default (`PrefMouse=1`) for legacy Rust
+    /// saves that predate this retained player-core value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pref_mouse: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pref_control_style: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pref_auto_context_menu: bool,
     /// Saved `C4Player::fFogOfWar` setting (C4Player.cpp:1580).
     #[serde(default)]
     pub fog_of_war: bool,
@@ -230,6 +276,16 @@ pub struct PlayerState {
     /// control (C4Player::bForceFogOfWar, C4Player.cpp:1581).
     #[serde(default)]
     pub force_fog_of_war: bool,
+    /// Startup overlay flag. Fresh players start true; absent save data uses
+    /// the serialized C++ default false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_startup: bool,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub select_count: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub message_status: i32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub message_buf: String,
     /// C4Player::ShowControlPos: tutorial-selected placement for the command
     /// hint strip (FnSetPlrShowControlPos, C4Script.cpp:2561-2566).
     #[serde(default)]
@@ -361,6 +417,10 @@ pub struct Player {
     player_info_id: i32,
     at_client: PlayerAtClient,
     at_client_name: String,
+    script_player: bool,
+    /// `C4Player::NoEliminationCheck`: local/no-save and restored from the
+    /// current `C4PlayerInfo`, never from serialized player runtime data.
+    no_elimination_check: bool,
     name: String,
     status: PlayerStatus,
     team: Option<i32>,
@@ -393,7 +453,10 @@ pub struct Player {
     view_target: Option<ObjectId>,
     viewports: Vec<PlayerViewport>,
     view_offset: Vector2,
+    view_wealth: i32,
+    view_value: i32,
     crew: Vec<ObjectId>,
+    crew_created: i32,
     home_base_material: HashMap<DefinitionId, u32>,
     home_base_production: HashMap<DefinitionId, u32>,
     production_delay: u32,
@@ -411,6 +474,17 @@ pub struct Player {
     /// The startup position slot taken at ScenarioInit
     /// (C4Player.cpp:717-732; C4PlayerList::PositionTaken). -1 when unset.
     position_index: i32,
+    /// Runtime input assignment (`C4Player::Control`/`MouseControl`).
+    control_set: i32,
+    mouse_control: i32,
+    pref_control: i32,
+    pref_mouse: bool,
+    pref_control_style: bool,
+    pref_auto_context_menu: bool,
+    show_startup: bool,
+    select_count: i32,
+    message_status: i32,
+    message_buf: String,
     /// Direct-com input state (C4Player.h:118-121).
     #[doc(hidden)] pub control: PlayerControlState,
     /// C4Player::ExtraData named slots (Fn[Set/Get]PlrExtraData).
@@ -424,6 +498,8 @@ impl Player {
             player_info_id: 0,
             at_client: PlayerAtClient::UNKNOWN,
             at_client_name: "Local".to_string(),
+            script_player: false,
+            no_elimination_check: false,
             name: name.into(),
             status: PlayerStatus::Active,
             team: None,
@@ -451,7 +527,10 @@ impl Player {
             view_target: None,
             viewports: Vec::new(),
             view_offset: Vector2::ZERO,
+            view_wealth: 0,
+            view_value: 0,
             crew: Vec::new(),
+            crew_created: 0,
             home_base_material: HashMap::new(),
             home_base_production: HashMap::new(),
             production_delay: 0,
@@ -464,6 +543,16 @@ impl Player {
             hostility: HashSet::new(),
             color_index: -1,
             position_index: -1,
+            control_set: -1,
+            mouse_control: 0,
+            pref_control: 0,
+            pref_mouse: true,
+            pref_control_style: false,
+            pref_auto_context_menu: false,
+            show_startup: true,
+            select_count: 0,
+            message_status: 0,
+            message_buf: String::new(),
             control: PlayerControlState::default(),
             extra_data: Vec::new(),
         }
@@ -474,6 +563,116 @@ impl Player {
     /// `C4Player::ControlStyle` (C4Game.cpp:3578-3592).
     pub fn control_style(&self) -> bool {
         self.control.control_style
+    }
+
+    pub fn control_set(&self) -> i32 {
+        self.control_set
+    }
+
+    pub fn mouse_control(&self) -> i32 {
+        self.mouse_control
+    }
+
+    pub(crate) fn set_runtime_control(&mut self, control_set: i32, mouse_control: i32) {
+        self.control_set = control_set;
+        self.mouse_control = mouse_control;
+    }
+
+    pub(crate) fn set_control_preferences(&mut self, pref_control: i32, pref_mouse: bool) {
+        self.pref_control = pref_control;
+        self.pref_mouse = pref_mouse;
+    }
+
+    pub fn control_preferences(&self) -> (i32, bool) {
+        (self.pref_control, self.pref_mouse)
+    }
+
+    pub(crate) fn set_control_style_preferences(
+        &mut self,
+        pref_control_style: bool,
+        pref_auto_context_menu: bool,
+    ) {
+        self.pref_control_style = pref_control_style;
+        self.pref_auto_context_menu = pref_auto_context_menu;
+    }
+
+    pub fn control_style_preferences(&self) -> (bool, bool) {
+        (self.pref_control_style, self.pref_auto_context_menu)
+    }
+
+    pub fn show_startup(&self) -> bool {
+        self.show_startup
+    }
+
+    pub fn set_show_startup(&mut self, show: bool) {
+        self.show_startup = show;
+    }
+
+    pub(crate) fn hide_startup(&mut self) {
+        self.show_startup = false;
+    }
+
+    pub fn select_count(&self) -> i32 {
+        self.select_count
+    }
+
+    pub(crate) fn set_select_count(&mut self, select_count: i32) {
+        self.select_count = select_count;
+    }
+
+    pub fn message_status(&self) -> i32 {
+        self.message_status
+    }
+
+    pub fn set_message_status(&mut self, status: i32) {
+        self.message_status = status;
+    }
+
+    pub fn message_buf(&self) -> &str {
+        &self.message_buf
+    }
+
+    pub fn set_message_buf(&mut self, message: impl Into<String>) {
+        self.message_buf = bounded_message_buf(message.into());
+    }
+
+    pub fn view_wealth(&self) -> i32 {
+        self.view_wealth
+    }
+
+    pub fn set_view_wealth(&mut self, delay: i32) {
+        self.view_wealth = delay;
+    }
+
+    pub(crate) fn arm_view_wealth(&mut self) {
+        self.view_wealth = PLAYER_VIEW_DELAY;
+    }
+
+    pub fn view_value(&self) -> i32 {
+        self.view_value
+    }
+
+    pub fn set_view_value(&mut self, delay: i32) {
+        self.view_value = delay;
+    }
+
+    pub(crate) fn arm_view_value(&mut self) {
+        self.view_value = PLAYER_VIEW_DELAY;
+    }
+
+    pub(crate) fn advance_runtime_delays(&mut self) {
+        if self.status == PlayerStatus::Inactive {
+            return;
+        }
+        if self.message_status > 0 {
+            self.message_status -= 1;
+        }
+        if self.view_wealth > 0 {
+            self.view_wealth -= 1;
+        }
+        if self.view_value > 0 {
+            self.view_value -= 1;
+        }
     }
 
     pub fn from_config(config: PlayerConfig) -> Self {
@@ -509,6 +708,8 @@ impl Player {
             player_info_id,
             at_client: PlayerAtClient::UNKNOWN,
             at_client_name: "Local".to_string(),
+            script_player: false,
+            no_elimination_check: false,
             name,
             status,
             team,
@@ -536,7 +737,10 @@ impl Player {
             view_target: None,
             viewports,
             view_offset: Vector2::ZERO,
+            view_wealth: 0,
+            view_value: 0,
             crew: Vec::new(),
+            crew_created: 0,
             home_base_material,
             home_base_production,
             production_delay,
@@ -549,6 +753,16 @@ impl Player {
             hostility: HashSet::new(),
             color_index: -1,
             position_index: -1,
+            control_set: -1,
+            mouse_control: 0,
+            pref_control: 0,
+            pref_mouse: true,
+            pref_control_style: false,
+            pref_auto_context_menu: false,
+            show_startup: true,
+            select_count: 0,
+            message_status: 0,
+            message_buf: String::new(),
             control: PlayerControlState::default(),
             extra_data: Vec::new(),
         }
@@ -560,6 +774,8 @@ impl Player {
             player_info_id,
             at_client,
             at_client_name,
+            script_player,
+            no_elimination_check,
             name,
             status,
             team,
@@ -585,7 +801,10 @@ impl Player {
             view_target: _,
             viewports,
             view_offset,
+            view_wealth,
+            view_value,
             crew,
+            crew_created,
             home_base_material,
             home_base_production,
             production_delay,
@@ -593,8 +812,18 @@ impl Player {
             color,
             color_index,
             position_index,
+            control_set,
+            mouse_control,
+            pref_control,
+            pref_mouse,
+            pref_control_style,
+            pref_auto_context_menu,
             fog_of_war,
             force_fog_of_war,
+            show_startup,
+            select_count,
+            message_status,
+            message_buf,
             show_control_position,
             show_control,
             hostility,
@@ -608,6 +837,8 @@ impl Player {
             at_client_name: bounded_at_client_name(
                 at_client_name.unwrap_or_else(|| "Local".to_string()),
             ),
+            script_player,
+            no_elimination_check,
             name,
             status,
             team,
@@ -635,7 +866,10 @@ impl Player {
             view_target: None,
             viewports,
             view_offset,
+            view_wealth,
+            view_value,
             crew,
+            crew_created,
             home_base_material,
             home_base_production,
             production_delay,
@@ -648,6 +882,16 @@ impl Player {
             hostility: hostility.into_iter().collect(),
             color_index: color_index.unwrap_or(-1),
             position_index: position_index.unwrap_or(-1),
+            control_set,
+            mouse_control,
+            pref_control,
+            pref_mouse: pref_mouse.unwrap_or(true),
+            pref_control_style,
+            pref_auto_context_menu,
+            show_startup,
+            select_count,
+            message_status,
+            message_buf: bounded_message_buf(message_buf),
             control,
             extra_data,
         }
@@ -661,6 +905,8 @@ impl Player {
             player_info_id: self.player_info_id,
             at_client: self.at_client,
             at_client_name: (self.at_client_name != "Local").then(|| self.at_client_name.clone()),
+            script_player: self.script_player,
+            no_elimination_check: self.no_elimination_check,
             name: self.name.clone(),
             status: self.status,
             team: self.team,
@@ -686,7 +932,10 @@ impl Player {
             view_target: self.view_target,
             viewports: self.viewports.clone(),
             view_offset: self.view_offset,
+            view_wealth: self.view_wealth,
+            view_value: self.view_value,
             crew: self.crew.clone(),
+            crew_created: self.crew_created,
             home_base_material: self.home_base_material.clone(),
             home_base_production: self.home_base_production.clone(),
             production_delay: self.production_delay,
@@ -694,8 +943,18 @@ impl Player {
             color: self.color,
             color_index: (self.color_index != -1).then_some(self.color_index),
             position_index: (self.position_index != -1).then_some(self.position_index),
+            control_set: self.control_set,
+            mouse_control: self.mouse_control,
+            pref_control: self.pref_control,
+            pref_mouse: (!self.pref_mouse).then_some(false),
+            pref_control_style: self.pref_control_style,
+            pref_auto_context_menu: self.pref_auto_context_menu,
             fog_of_war: self.fog_of_war,
             force_fog_of_war: self.force_fog_of_war,
+            show_startup: self.show_startup,
+            select_count: self.select_count,
+            message_status: self.message_status,
+            message_buf: self.message_buf.clone(),
             show_control_position: self.show_control_position,
             show_control: self.show_control,
             hostility: {
@@ -750,6 +1009,22 @@ impl Player {
         &self.name
     }
 
+    pub fn is_script_player(&self) -> bool {
+        self.script_player
+    }
+
+    pub(crate) fn set_script_player(&mut self, script_player: bool) {
+        self.script_player = script_player;
+    }
+
+    pub fn no_elimination_check(&self) -> bool {
+        self.no_elimination_check
+    }
+
+    pub(crate) fn set_no_elimination_check(&mut self, no_elimination_check: bool) {
+        self.no_elimination_check = no_elimination_check;
+    }
+
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
     }
@@ -783,7 +1058,10 @@ impl Player {
         if self.retire_delay > 0 {
             self.retire_delay -= 1;
         }
-        self.status == PlayerStatus::Eliminated && self.retire_delay == 0
+        matches!(
+            self.status,
+            PlayerStatus::Eliminated | PlayerStatus::Surrendered
+        ) && self.retire_delay == 0
     }
 
     pub fn team(&self) -> Option<i32> {
@@ -815,6 +1093,29 @@ impl Player {
     pub fn set_fog_of_war(&mut self, enabled: bool) {
         self.fog_of_war = enabled;
         self.force_fog_of_war = true;
+    }
+
+    pub(crate) fn initialize_mouse_fog_of_war(&mut self) {
+        if self.mouse_control != 0 && !self.force_fog_of_war && !self.fog_of_war {
+            self.fog_of_war = true;
+        }
+    }
+
+    pub(crate) fn apply_mouse_control_toggle(&mut self, enabled: bool) {
+        self.mouse_control = i32::from(enabled);
+        if enabled {
+            if !self.force_fog_of_war && !self.fog_of_war {
+                self.fog_of_war = true;
+            }
+        } else {
+            if self.view_mode == PLAYER_VIEW_MODE_SCROLLING {
+                self.view_mode = PLAYER_VIEW_MODE_CURSOR;
+                self.view_target = None;
+            }
+            if !self.force_fog_of_war {
+                self.fog_of_war = false;
+            }
+        }
     }
 
     pub fn surrendered(&self) -> bool {
@@ -853,11 +1154,18 @@ impl Player {
     }
 
     pub fn set_surrendered(&mut self, surrendered: bool) {
+        // C4Player::Surrender is idempotent: a repeated surrender must not
+        // restart an already-running RetireDelay (C4Player.cpp:971-979).
+        if surrendered && self.surrendered {
+            return;
+        }
         self.surrendered = surrendered;
         if surrendered {
             self.status = PlayerStatus::Surrendered;
+            self.retire_delay = 60;
         } else if self.status == PlayerStatus::Surrendered {
             self.status = PlayerStatus::Active;
+            self.retire_delay = 0;
         }
     }
 
@@ -873,6 +1181,7 @@ impl Player {
         let updated = (self.wealth as i64 + i64::from(delta))
             .clamp(0, i64::from(MAX_WEALTH_ADJUSTMENT)) as i32;
         self.wealth = updated;
+        self.arm_view_wealth();
         self.wealth
     }
 
@@ -907,6 +1216,7 @@ impl Player {
         let updated = (self.points as i64 + i64::from(delta))
             .clamp(i64::from(MIN_SCORE), i64::from(MAX_SCORE)) as i32;
         self.points = updated;
+        self.arm_view_value();
         self.points
     }
 
@@ -922,25 +1232,29 @@ impl Player {
         self.initial_value
     }
 
+    pub(crate) fn initial_value_is_set(&self) -> bool {
+        self.initial_value_set
+    }
+
     pub fn objects_owned(&self) -> u32 {
         self.objects_owned
     }
 
     pub fn update_asset_value(&mut self, value: i32, objects_owned: u32) {
+        let old_value_gain = self.value_gain;
+        let old_objects_owned = self.objects_owned;
         self.value = value;
         self.objects_owned = objects_owned;
-        if !self.initial_value_set {
-            self.initial_value = value;
-            self.initial_value_set = true;
-        }
         let gain = i64::from(self.value) - i64::from(self.initial_value);
         self.value_gain = gain.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        if self.value_gain != old_value_gain || self.objects_owned != old_objects_owned {
+            self.arm_view_value();
+        }
     }
 
     pub fn reset_initial_value(&mut self) {
         self.initial_value = self.value;
         self.initial_value_set = true;
-        self.value_gain = 0;
     }
 
     pub fn knowledge(&self) -> impl Iterator<Item = &DefinitionId> {
@@ -1120,6 +1434,19 @@ impl Player {
         &self.crew
     }
 
+    pub fn crew_created(&self) -> i32 {
+        self.crew_created
+    }
+
+    pub fn set_crew_created(&mut self, crew_created: i32) {
+        self.crew_created = crew_created;
+    }
+
+    pub(crate) fn increment_crew_created(&mut self) -> i32 {
+        self.crew_created = self.crew_created.wrapping_add(1);
+        self.crew_created
+    }
+
     pub fn color_index(&self) -> i32 {
         self.color_index
     }
@@ -1227,11 +1554,18 @@ impl Player {
     }
 
     pub fn advance_home_base_production(&mut self) -> bool {
-        if self.home_base_production.is_empty() {
-            return false;
-        }
+        self.advance_home_base_production_as_leader(true)
+    }
+
+    pub(crate) fn advance_home_base_production_as_leader(&mut self, is_team_leader: bool) -> bool {
         self.production_delay = self.production_delay.saturating_add(1);
         if self.production_delay < 60 {
+            return false;
+        }
+        // Team-homebase followers return after incrementing and retain their
+        // >=60 delay; only the team's first still-present runtime player
+        // produces/resets (C4Team::GetFirstActivePlayerID).
+        if !is_team_leader {
             return false;
         }
         self.production_delay = 0;
@@ -1642,5 +1976,110 @@ mod tests {
 
         let restored = Player::from_state(state);
         assert_eq!(restored.game_join_time(), 0);
+    }
+
+    #[test]
+    fn runtime_scalar_defaults_and_state_round_trip_match_cpp_lifecycle() {
+        let legacy: PlayerState = serde_json::from_str(r#"{"id":2}"#)
+            .unwrap_or_else(|error| panic!("legacy player state decodes: {error}"));
+        assert_eq!(legacy.control_set, 0);
+        assert_eq!(legacy.mouse_control, 0);
+        assert!(!legacy.show_startup);
+        assert_eq!(legacy.captain, None);
+        assert_eq!(legacy.message_buf, "");
+
+        let restored_legacy = Player::from_state(legacy);
+        assert_eq!(restored_legacy.control_set(), 0);
+        assert!(!restored_legacy.show_startup());
+
+        let fresh = Player::new(3, "Fresh");
+        assert_eq!(fresh.control_set(), -1);
+        assert!(fresh.show_startup());
+
+        let state = PlayerState {
+            id: 4,
+            captain: Some(ObjectId::new(9)),
+            view_wealth: 3,
+            view_value: 4,
+            crew_created: 5,
+            control_set: 2,
+            mouse_control: 1,
+            pref_control: 6,
+            pref_mouse: Some(false),
+            pref_control_style: true,
+            pref_auto_context_menu: true,
+            show_startup: true,
+            select_count: 6,
+            message_status: 7,
+            message_buf: "hello".to_string(),
+            ..PlayerState::default()
+        };
+        assert_eq!(Player::from_state(state.clone()).to_state(), state);
+    }
+
+    #[test]
+    fn runtime_scalar_setters_bound_messages_and_clear_captain() {
+        let captain = ObjectId::new(9);
+        let mut player = Player::new(1, "Player");
+        player.set_runtime_control(3, 1);
+        player.set_select_count(4);
+        player.set_captain(Some(captain));
+        player.set_crew_created(8);
+        assert_eq!(player.increment_crew_created(), 9);
+        player.set_message_buf(format!("{}é", "x".repeat(255)));
+
+        assert_eq!(player.control_set(), 3);
+        assert_eq!(player.mouse_control(), 1);
+        assert_eq!(player.select_count(), 4);
+        assert_eq!(player.captain(), Some(captain));
+        assert_eq!(player.crew_created(), 9);
+        assert_eq!(player.message_buf().as_bytes().len(), 255);
+
+        player.clear_object_pointers(captain);
+        assert_eq!(player.captain(), None);
+    }
+
+    #[test]
+    fn wealth_value_and_message_delays_follow_active_player_frames() {
+        let mut player = Player::new(1, "Player");
+        player.adjust_wealth(0);
+        player.adjust_points(0);
+        player.set_message_status(2);
+        assert_eq!(player.view_wealth(), PLAYER_VIEW_DELAY);
+        assert_eq!(player.view_value(), PLAYER_VIEW_DELAY);
+
+        player.advance_runtime_delays();
+        assert_eq!(player.message_status(), 1);
+        assert_eq!(player.view_wealth(), PLAYER_VIEW_DELAY - 1);
+        assert_eq!(player.view_value(), PLAYER_VIEW_DELAY - 1);
+
+        player.set_status(PlayerStatus::Inactive);
+        player.advance_runtime_delays();
+        assert_eq!(player.message_status(), 1);
+        assert_eq!(player.view_wealth(), PLAYER_VIEW_DELAY - 1);
+        assert_eq!(player.view_value(), PLAYER_VIEW_DELAY - 1);
+    }
+
+    #[test]
+    fn asset_updates_compare_cached_gain_and_count_without_resetting_baseline() {
+        let mut player = Player::new(1, "Player");
+        player.update_asset_value(50, 0);
+        assert_eq!(player.initial_value(), 0);
+        assert!(!player.to_state().initial_value_set);
+        assert_eq!(player.value_gain(), 50);
+        assert_eq!(player.view_value(), PLAYER_VIEW_DELAY);
+
+        player.reset_initial_value();
+        assert_eq!(
+            player.value_gain(),
+            50,
+            "InitialValue assignment does not rewrite the cached ValueGain"
+        );
+        player.set_view_value(0);
+        player.update_asset_value(50, 0);
+        assert_eq!(player.view_value(), PLAYER_VIEW_DELAY);
+
+        player.update_asset_value(50, 1);
+        assert_eq!(player.view_value(), PLAYER_VIEW_DELAY);
     }
 }

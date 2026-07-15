@@ -351,135 +351,175 @@ impl Engine {
     /// LastComDownDouble countdown. Runs once per frame per player after
     /// object execution (C4Game.cpp:822 Players.Execute order).
     pub(crate) fn execute_player_controls(&mut self) -> Result<(), EngineError> {
-        let mut pending_singles: Vec<(i32, u8)> = Vec::new();
         let mut owners: Vec<i32> = self.players.keys().copied().collect();
         owners.sort_unstable();
         for owner in owners {
-            let Some(player) = self.players.get_mut(&owner) else {
+            if self
+                .players
+                .get(&owner)
+                .is_none_or(|player| player.status() == crate::PlayerStatus::Inactive)
+            {
                 continue;
-            };
-            // CursorFlash/SelectFlash decrement (C4Player.cpp:242-243).
-            if player.control.cursor_flash > 0 {
-                player.control.cursor_flash -= 1;
             }
-            if player.control.select_flash > 0 {
-                player.control.select_flash -= 1;
+            self.execute_player_control_and_menu(owner)?;
+            let _ = self.finish_player_execute_delays(owner);
+        }
+        Ok(())
+    }
+
+    /// The Tick1 control/menu/AutoContext portion of one C4Player::Execute.
+    /// Callers perform UpdateCounts/UpdateView first and Tick35/delays after.
+    pub(super) fn execute_player_control_and_menu(
+        &mut self,
+        owner: i32,
+    ) -> Result<(), EngineError> {
+        let timed_out_last_com = {
+            let Some(player) = self.players.get_mut(&owner) else {
+                return Ok(());
+            };
+            if player.status() == crate::PlayerStatus::Inactive {
+                return Ok(());
             }
             // LastCom timeout (C4Player.cpp:1215-1229).
             if player.control.last_com != COM_NONE {
                 player.control.last_com_delay += 1;
                 if player.control.last_com_delay > C4_DOUBLE_CLICK {
-                    let last_com = player.control.last_com;
-                    player.control.last_com = COM_NONE;
-                    player.control.last_com_delay = 0;
-                    if last_com & COM_SINGLE == 0 {
-                        pending_singles.push((owner, last_com | COM_SINGLE));
-                    }
+                    Some(player.control.last_com)
+                } else {
+                    None
                 }
+            } else {
+                None
             }
+        };
+        if let Some(last_com) = timed_out_last_com {
+            // C++ keeps LastCom visible during the synchronous COM_Single
+            // callback and clears it only after DirectCom returns.
+            if last_com & COM_SINGLE == 0 {
+                self.player_direct_com(owner, last_com | COM_SINGLE, 0)?;
+            }
+            if let Some(player) = self.players.get_mut(&owner) {
+                player.control.last_com = COM_NONE;
+                player.control.last_com_delay = 0;
+            }
+        }
+        if let Some(player) = self.players.get_mut(&owner) {
             // LastComDownDouble (C4Player.cpp:1231-1232).
             if player.control.last_com_down_double > 0 {
                 player.control.last_com_down_double -= 1;
             }
         }
-        for (owner, com) in pending_singles {
-            self.player_direct_com(owner, com, 0)?;
-        }
-        self.refill_player_object_menus()?;
-        self.open_player_auto_context_menus()?;
+        self.refill_player_object_menu(owner)?;
+        self.open_player_auto_context_menu(owner)?;
         Ok(())
+    }
+
+    /// Final delay tail of one C4Player::Execute. The return value mirrors the
+    /// list-level retirement check, which runs only after every player has
+    /// completed its Execute pass.
+    pub(super) fn finish_player_execute_delays(&mut self, owner: i32) -> bool {
+        let Some(player) = self.players.get_mut(&owner) else {
+            return false;
+        };
+        if player.status() == crate::PlayerStatus::Inactive {
+            return false;
+        }
+        player.advance_runtime_delays();
+        let ready_to_retire = player.advance_retire_delay();
+        if player.control.cursor_flash > 0 {
+            player.control.cursor_flash -= 1;
+        }
+        if player.control.select_flash > 0 {
+            player.control.select_flash -= 1;
+        }
+        ready_to_retire
     }
 
     /// Player-menu execution notices refill-target content-count changes
     /// after objects have run and performs the shared 35-tick refill
     /// (C4Player.cpp:206-212; C4ObjectMenu.cpp:448-459). Rebuild internal
     /// Activate/Get/Contents menus before the AutoContextMenu tail.
-    fn refill_player_object_menus(&mut self) -> Result<(), EngineError> {
-        let periodic_refill = self.frame % 35 == 0;
-        let mut pending = self
+    fn refill_player_object_menu(&mut self, owner: i32) -> Result<(), EngineError> {
+        if self
             .players
-            .keys()
-            .filter_map(|owner| self.crew_cursor(*owner))
-            .filter_map(|crew_id| {
-                let crew_index = self.find_object_index(crew_id)?;
-                let menu = self.objects[crew_index].state.menu.as_ref()?;
-                let identification = match menu.identification {
-                    Value::Int(6) => 6,
-                    Value::Int(13) => 13,
-                    Value::Int(18) => 18,
-                    _ => return None,
-                };
-                Some((
-                    crew_id,
-                    menu.refill_object?,
-                    identification,
-                    menu.refill_object_contents_count,
-                ))
-            })
-            .collect::<Vec<_>>();
-        pending.sort_unstable_by_key(|(crew_id, _, _, _)| crew_id.as_u64());
-        for (crew_id, container_id, identification, previous_count) in pending {
-            let Some(crew_index) = self.find_object_index(crew_id) else {
-                continue;
-            };
-            let Some(container_index) = self.find_object_index(container_id) else {
-                if periodic_refill {
-                    let _ = self.close_object_menu(crew_id, false)?;
-                }
-                continue;
-            };
-            let current_count =
-                self.live_contents_count(&self.objects[container_index].state.contents);
-            if !periodic_refill && current_count == previous_count {
-                continue;
+            .get(&owner)
+            .is_none_or(|player| player.status() == crate::PlayerStatus::Inactive)
+        {
+            return Ok(());
+        }
+        let periodic_refill = self.frame % 35 == 0;
+        let Some(crew_id) = self.crew_cursor(owner) else {
+            return Ok(());
+        };
+        let Some(crew_index) = self.find_object_index(crew_id) else {
+            return Ok(());
+        };
+        let Some(menu) = self.objects[crew_index].state.menu.as_ref() else {
+            return Ok(());
+        };
+        let identification = match menu.identification {
+            Value::Int(6) => 6,
+            Value::Int(13) => 13,
+            Value::Int(18) => 18,
+            _ => return Ok(()),
+        };
+        let Some(container_id) = menu.refill_object else {
+            return Ok(());
+        };
+        let previous_count = menu.refill_object_contents_count;
+        let Some(container_index) = self.find_object_index(container_id) else {
+            if periodic_refill {
+                let _ = self.close_object_menu(crew_id, false)?;
             }
-            match identification {
-                6 => self.open_activate_menu(crew_index, container_index)?,
-                13 | 18 => {
-                    self.open_container_contents_menu(crew_index, container_index, identification)?;
-                }
-                _ => unreachable!("filtered internal object-menu id"),
+            return Ok(());
+        };
+        let current_count = self.live_contents_count(&self.objects[container_index].state.contents);
+        if !periodic_refill && current_count == previous_count {
+            return Ok(());
+        }
+        match identification {
+            6 => self.open_activate_menu(crew_index, container_index)?,
+            13 | 18 => {
+                self.open_container_contents_menu(crew_index, container_index, identification)?;
             }
+            _ => unreachable!("filtered internal object-menu id"),
         }
         Ok(())
     }
 
-    /// C4Player::Execute's cursor AutoContextMenu tail
-    /// (C4Player.cpp:206-212; C4Object.cpp:2044-2062).
-    fn open_player_auto_context_menus(&mut self) -> Result<(), EngineError> {
-        let mut owners = self
+    pub(super) fn open_player_auto_context_menu(
+        &mut self,
+        owner: i32,
+    ) -> Result<(), EngineError> {
+        let Some(crew_index) = self
+            .crew_cursor(owner)
+            .and_then(|crew| self.find_object_index(crew))
+        else {
+            return Ok(());
+        };
+        if !self
             .players
-            .iter()
-            .filter_map(|(&owner, player)| player.control.auto_context_menu.then_some(owner))
-            .collect::<Vec<_>>();
-        owners.sort_unstable();
-        for owner in owners {
-            let Some(crew_index) = self
-                .crew_cursor(owner)
-                .and_then(|crew| self.find_object_index(crew))
-            else {
-                continue;
-            };
-            if !self.objects[crew_index].commands.is_empty()
-                || self.objects[crew_index].state.menu.is_some()
-                || !self.objects[crew_index].state.crew_member
-            {
-                continue;
-            }
-            let Some(base_index) = self.objects[crew_index]
-                .state
-                .container
-                .and_then(|base| self.find_object_index(base))
-            else {
-                continue;
-            };
-            let auto_context = self
-                .definitions
-                .get(&self.objects[base_index].definition_id)
-                .is_some_and(|definition| definition.auto_context_menu());
-            if auto_context {
-                self.open_context_menu(crew_index, base_index, true)?;
-            }
+            .get(&owner)
+            .is_some_and(|player| player.control.auto_context_menu)
+            || !self.objects[crew_index].commands.is_empty()
+            || self.objects[crew_index].state.menu.is_some()
+            || !self.objects[crew_index].state.crew_member
+        {
+            return Ok(());
+        }
+        let Some(base_index) = self.objects[crew_index]
+            .state
+            .container
+            .and_then(|base| self.find_object_index(base))
+        else {
+            return Ok(());
+        };
+        let auto_context = self
+            .definitions
+            .get(&self.objects[base_index].definition_id)
+            .is_some_and(|definition| definition.auto_context_menu());
+        if auto_context {
+            self.open_context_menu(crew_index, base_index, true)?;
         }
         Ok(())
     }
@@ -951,6 +991,13 @@ impl Engine {
         // Eliminated (:1369).
         if self.is_owner_eliminated(owner) {
             return Ok(());
+        }
+        // ObjectCom hides the startup control hint before selection commits
+        // or any cursor callback can reflect the player (C4Player.cpp:
+        // 1368-1379). Cursor-cycle DirectCom paths above deliberately bypass
+        // this write.
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.hide_startup();
         }
         // If regular com, update cursor & selection status (:1378-1379).
         let is_release = (COM_RELEASE_FIRST..=COM_RELEASE_LAST).contains(&com);
@@ -4223,7 +4270,6 @@ impl Engine {
             if !active {
                 continue;
             }
-            self.player_update_selection_toggle_status(owner)?;
             self.player_crew_object_command(
                 owner,
                 command,
@@ -4276,7 +4322,6 @@ impl Engine {
             if !active {
                 continue;
             }
-            self.player_update_selection_toggle_status(owner)?;
             self.player_crew_object_command(
                 owner,
                 CommandId::Put,
@@ -4336,7 +4381,6 @@ impl Engine {
             if !active_vehicle {
                 continue;
             }
-            self.player_update_selection_toggle_status(owner)?;
             self.player_crew_object_command(
                 owner,
                 CommandId::PushTo,
@@ -4365,7 +4409,6 @@ impl Engine {
         if !self.players.contains_key(&owner) {
             return Ok(false);
         }
-        self.player_update_selection_toggle_status(owner)?;
         self.player_crew_object_command(
             owner,
             CommandId::Context,
@@ -4392,6 +4435,15 @@ impl Engine {
         mode: PlayerObjectCommandMode,
         ranged: bool,
     ) -> Result<bool, EngineError> {
+        if self.is_owner_eliminated(owner) {
+            return Ok(false);
+        }
+        // C4Player::ObjectCommand clears ShowStartup before it commits the
+        // selection toggle or dispatches commands to crew.
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.hide_startup();
+        }
+        self.player_update_selection_toggle_status(owner)?;
         let cursor = self.crew_cursor(owner);
         let cursor_position = cursor
             .and_then(|id| self.find_object_index(id))
