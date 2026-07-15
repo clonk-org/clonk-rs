@@ -52489,6 +52489,179 @@ protected func Grabbed(object actor, bool grab)
     }
 
     #[test]
+    fn object_com_ungrab_soft_closes_menu_before_release_callbacks() {
+        let actor_script = r#"#strict
+local deny, query_calls, grab_calls, menu_during_grab;
+public func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
+public func SetDeny(value) { deny = value; return(1); }
+public func ReadMenu() { return GetMenu(); }
+protected func MenuQueryCancel()
+{
+  query_calls++;
+  return deny;
+}
+protected func Grab(object target, bool grab)
+{
+  grab_calls++;
+  menu_during_grab = GetMenu();
+  return(1);
+}
+"#;
+        let target_script = r#"#strict
+local grabbed_calls, menu_during_grabbed;
+protected func Grabbed(object actor, bool grab)
+{
+  grabbed_calls++;
+  menu_during_grabbed = actor->ReadMenu();
+  return(1);
+}
+"#;
+        let mut actor = Definition::from_script("UGMA", "Menu pusher", actor_script)
+            .expect("actor compiles");
+        actor.set_c4_callback_convention(true);
+        actor.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Push".to_string(),
+                    ActionSpec::default().with_procedure("PUSH"),
+                ),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+            ]),
+        );
+        let mut target = Definition::from_script("UGMT", "Menu push target", target_script)
+            .expect("target compiles");
+        target.set_c4_callback_convention(true);
+
+        let mut engine = Engine::new();
+        engine.register_definition(actor).expect("actor registers");
+        engine.register_definition(target).expect("target registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("UGMT"))
+            .expect("target spawns");
+        let mut push = ActionState::new("Push");
+        push.target = Some(target);
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("UGMA")
+                    .with_action(push)
+                    .with_velocity(Vector2::new(4, -2)),
+            )
+            .expect("actor spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        engine.objects[actor_index].state.command_direction = CommandDirection::Left;
+
+        let call_actor = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let actor_index = engine.find_object_index(actor).expect("actor remains");
+            engine
+                .call_object_function(actor_index, name, args)
+                .expect("actor call succeeds")
+        };
+        assert_eq!(
+            call_actor(&mut engine, "OpenMenu", Vec::new()),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call_actor(&mut engine, "SetDeny", vec![Value::Int(1)]),
+            Value::Int(1)
+        );
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        assert!(!engine
+            .object_com_ungrab(actor_index)
+            .expect("denied ungrab returns"));
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        assert_eq!(engine.objects[actor_index].state.action.name, "Walk");
+        assert_eq!(engine.objects[actor_index].fixed_velocity, FixedVec2::ZERO);
+        assert_eq!(
+            engine.objects[actor_index].state.command_direction,
+            CommandDirection::Stop
+        );
+        assert!(engine.objects[actor_index].state.menu.is_some());
+        assert_eq!(
+            engine.objects[actor_index]
+                .state
+                .local_vars
+                .get("query_calls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine.objects[actor_index]
+                .state
+                .local_vars
+                .get("grab_calls"),
+            Some(&Value::Nil),
+            "a denied close stops before Grab(false)"
+        );
+        let target_index = engine.find_object_index(target).expect("target remains");
+        assert_eq!(
+            engine.objects[target_index]
+                .state
+                .local_vars
+                .get("grabbed_calls"),
+            None,
+            "a denied close stops before Grabbed(false)"
+        );
+
+        assert_eq!(
+            call_actor(&mut engine, "SetDeny", vec![Value::Int(0)]),
+            Value::Int(1)
+        );
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let mut push = ActionState::new("Push");
+        push.target = Some(target);
+        engine.objects[actor_index].state.action = push;
+        assert!(engine
+            .object_com_ungrab(actor_index)
+            .expect("allowed ungrab succeeds"));
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        assert_eq!(engine.objects[actor_index].state.action.name, "Walk");
+        assert!(engine.objects[actor_index].state.menu.is_none());
+        assert_eq!(
+            engine.objects[actor_index]
+                .state
+                .local_vars
+                .get("query_calls"),
+            Some(&Value::Int(2))
+        );
+        assert_eq!(
+            engine.objects[actor_index]
+                .state
+                .local_vars
+                .get("grab_calls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine.objects[actor_index]
+                .state
+                .local_vars
+                .get("menu_during_grab"),
+            Some(&Value::Int(0)),
+            "Grab(false) observes the menu already closed"
+        );
+        let target_index = engine.find_object_index(target).expect("target remains");
+        assert_eq!(
+            engine.objects[target_index]
+                .state
+                .local_vars
+                .get("grabbed_calls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine.objects[target_index]
+                .state
+                .local_vars
+                .get("menu_during_grabbed"),
+            Some(&Value::Int(0)),
+            "Grabbed(false) observes the menu already closed"
+        );
+    }
+
+    #[test]
     fn object_com_ungrab_uses_raw_status_gates_after_grab_callback() {
         let actor_script = r#"#strict
 local grab_calls, remove_self;
