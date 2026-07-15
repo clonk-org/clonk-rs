@@ -3647,13 +3647,22 @@ func FxFireTimer(pObj, iNumber, iTime)
         tree_def.set_fire_properties(1, false, false); // Random(1) == 0 always
         tree_def.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 16)));
         engine.register_definition(tree_def)?;
+        engine.register_definition(simple_definition("FireLayer"))?;
+        let source_layer = engine.spawn_object(SpawnConfig::new("FireLayer"))?;
+        let other_layer = engine.spawn_object(SpawnConfig::new("FireLayer"))?;
 
-        let torch =
-            engine.spawn_object(SpawnConfig::new("Torch").with_position(Vector2::new(40, 20)))?;
+        let torch = engine.spawn_object(
+            SpawnConfig::new("Torch")
+                .with_position(Vector2::new(40, 20))
+                .with_layer(source_layer),
+        )?;
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 28 - (16 - 8)
         // keeps the tree center at (41,20), on top of the shapeless torch.
-        let tree =
-            engine.spawn_object(SpawnConfig::new("Tree").with_position(Vector2::new(41, 28)))?;
+        let tree = engine.spawn_object(
+            SpawnConfig::new("Tree")
+                .with_position(Vector2::new(41, 28))
+                .with_layer(other_layer),
+        )?;
         let torch_idx = engine.find_object_index(torch).expect("torch exists");
         assert!(engine.incinerate_object(torch_idx, 7, false, None)?);
 
@@ -3664,8 +3673,18 @@ func FxFireTimer(pObj, iNumber, iTime)
         assert!(!engine.objects[tree_idx].state.on_fire);
         assert_eq!(engine.rng, mirror);
 
-        // Tick35: Random(ContactIncinerate=1) == 0 → incinerate, which draws
-        // the new fire's FirePhase. The fire cause carries over (GetFireCausePlr).
+        // A different pLayer is rejected by AtObject before the contact
+        // chance, so even a Tick35 pass consumes no draw.
+        let mirror = engine.rng.clone();
+        engine.cross_check(35)?;
+        let tree_idx = engine.find_object_index(tree).expect("tree exists");
+        assert!(!engine.objects[tree_idx].state.on_fire);
+        assert_eq!(engine.rng, mirror, "cross-layer contact draws nothing");
+
+        engine.apply_object_update(tree, ObjectUpdate::new().with_layer(source_layer))?;
+        // Same layer on Tick35: Random(ContactIncinerate=1) == 0 →
+        // incinerate, which draws the new fire's FirePhase. The fire cause
+        // carries over (GetFireCausePlr).
         let mut mirror = engine.rng.clone();
         mirror.random(1);
         mirror.random(15);
@@ -3704,23 +3723,28 @@ func FxFireTimer(pObj, iNumber, iTime)
         let mut engine = Engine::with_seed(50);
         engine.register_definition(fighter_def("KnightA", PLAIN)?)?;
         engine.register_definition(fighter_def("KnightB", PLAIN)?)?;
+        engine.register_definition(simple_definition("FightLayer"))?;
         engine.register_player(PlayerConfig::new(1, "P1"))?;
         engine.register_player(PlayerConfig::new(2, "P2"))?;
         engine.set_hostility(1, 2, true)?;
+        let layer_a = engine.spawn_object(SpawnConfig::new("FightLayer"))?;
+        let layer_b = engine.spawn_object(SpawnConfig::new("FightLayer"))?;
 
         let knight_a = engine.spawn_object(
             SpawnConfig::new("KnightA")
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_alive(true)
-                .with_position(Vector2::new(50, 50)),
+                .with_position(Vector2::new(50, 50))
+                .with_layer(layer_a),
         )?;
         let knight_b = engine.spawn_object(
             SpawnConfig::new("KnightB")
                 .with_owner(2)
                 .with_crew_member(true)
                 .with_alive(true)
-                .with_position(Vector2::new(52, 50)),
+                .with_position(Vector2::new(52, 50))
+                .with_layer(layer_b),
         )?;
 
         // Frame 4 is not a Tick5 frame: nothing happens.
@@ -3728,6 +3752,13 @@ func FxFireTimer(pObj, iNumber, iTime)
         let idx_a = engine.find_object_index(knight_a).expect("knight A");
         assert_ne!(engine.objects[idx_a].state.action.name, "Fight");
 
+        engine.cross_check(5)?;
+        let idx_a = engine.find_object_index(knight_a).expect("knight A");
+        let idx_b = engine.find_object_index(knight_b).expect("knight B");
+        assert_ne!(engine.objects[idx_a].state.action.name, "Fight");
+        assert_ne!(engine.objects[idx_b].state.action.name, "Fight");
+
+        engine.apply_object_update(knight_b, ObjectUpdate::new().with_layer(layer_a))?;
         engine.cross_check(5)?;
         let idx_a = engine.find_object_index(knight_a).expect("knight A");
         let idx_b = engine.find_object_index(knight_b).expect("knight B");
@@ -40771,6 +40802,79 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         assert!(engine
             .at_object(Vector2::new(20, 20), ocf::GRAB, None)
             .is_none());
+    }
+
+    #[test]
+    fn at_object_exclude_skips_wrong_layer_exclusive_before_same_layer_match() {
+        let mut blocker = simple_definition("LayerBlocker");
+        blocker.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        blocker.set_ocf_base(ocf::EXCLUSIVE);
+        let mut target = simple_definition("LayerTarget");
+        target.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        target.set_ocf_base(ocf::GRAB);
+        let mut exclude = simple_definition("LayerExclude");
+        exclude.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        exclude.set_ocf_base(ocf::GRAB);
+
+        let mut engine = Engine::with_seed(35);
+        engine.set_landscape(Landscape::flat(120, 120));
+        engine
+            .register_definition(simple_definition("LayerKey"))
+            .expect("layer definition registers");
+        engine
+            .register_definition(blocker)
+            .expect("blocker definition registers");
+        engine
+            .register_definition(target)
+            .expect("target definition registers");
+        engine
+            .register_definition(exclude)
+            .expect("exclude definition registers");
+        let foreign_layer = engine
+            .spawn_object(SpawnConfig::new("LayerKey"))
+            .expect("foreign layer spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("LayerTarget").with_position(Vector2::new(20, 25)),
+            )
+            .expect("target spawns");
+        let blocker = engine
+            .spawn_object(
+                SpawnConfig::new("LayerBlocker")
+                    .with_position(Vector2::new(20, 25))
+                    .with_layer(foreign_layer),
+            )
+            .expect("foreign blocker spawns");
+        let exclude = engine
+            .spawn_object(
+                SpawnConfig::new("LayerExclude").with_position(Vector2::new(20, 25)),
+            )
+            .expect("exclude object spawns");
+
+        let relevant_order = engine
+            .sectors
+            .as_ref()
+            .expect("sectors initialized")
+            .shape_ids(SectorKey::Inside { x: 0, y: 0 })
+            .iter()
+            .copied()
+            .filter(|id| [exclude, blocker, target].contains(id))
+            .collect::<Vec<_>>();
+        assert_eq!(relevant_order, vec![exclude, blocker, target]);
+        assert_eq!(
+            engine
+                .at_object(Vector2::new(20, 20), ocf::GRAB, None)
+                .map(|(_, id, _)| id),
+            Some(exclude),
+            "without an exclude object no identity or layer filter applies"
+        );
+        assert_eq!(
+            engine
+                .at_object(Vector2::new(20, 20), ocf::GRAB, Some(exclude))
+                .map(|(_, id, _)| id),
+            Some(target),
+            "exclude layer filtering runs before Exclusive blocking"
+        );
     }
 
     #[test]

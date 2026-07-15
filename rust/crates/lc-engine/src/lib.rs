@@ -17882,6 +17882,12 @@ impl Engine {
             // not its center-point Objects list (C4GameObjects.cpp:87-90).
             .map(|sectors| sectors.shape_ids_at(point.x, point.y).to_vec())
             .unwrap_or_else(|| self.objects.iter().map(|object| object.id).collect());
+        // Preserve the outer Option: Some(None) is a valid layerless exclude
+        // and only matches candidates whose pLayer is likewise null.
+        let exclude_layer = exclude.and_then(|id| {
+            self.find_object_index(id)
+                .map(|index| self.objects[index].state.layer)
+        });
         for candidate_id in candidate_ids {
             if exclude == Some(candidate_id) {
                 continue;
@@ -17890,6 +17896,9 @@ impl Engine {
                 continue;
             };
             let candidate = &self.objects[candidate_idx];
+            if exclude_layer.is_some_and(|layer| candidate.state.layer != layer) {
+                continue;
+            }
             if candidate.destroyed
                 || !candidate.state.status.is_active()
                 || candidate.state.container.is_some()
