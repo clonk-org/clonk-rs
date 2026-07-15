@@ -7195,6 +7195,232 @@ fn sell_object_to_home_live(target: ObjectId, player: i32) -> Result<bool, Runti
     Ok(true)
 }
 
+fn report_buy_error(
+    player: i32,
+    message: String,
+    target: Option<ObjectId>,
+) -> Result<(), RuntimeError> {
+    let _ = player_message(&[Value::Int(player), Value::String(message)])?;
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context
+                .audio_mut()
+                .play_sound("Error", target, 100, false, false, None);
+        }
+    });
+    Ok(())
+}
+
+/// FnBuy (C4Script.cpp:3732-3751) plus C4Player::Buy
+/// (C4Player.cpp:826-864): synchronously consume the paying player's base
+/// stock and wealth, create the item for another player, call Purchase, then
+/// enter an explicit target or force-position at the calling object.
+fn buy(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 5 {
+        return Err(RuntimeError::new(
+            "Buy expects at most 5 arguments: definition, for_player, pay_player, target, show_errors",
+        ));
+    }
+    let Some(definition) = parse_definition_argument(args.first(), "Buy")? else {
+        return Ok(Value::Nil);
+    };
+    let for_player = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "Buy",
+        "for_player",
+    )?;
+    let pay_player = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "Buy",
+        "pay_player",
+    )?;
+    let to_base = parse_object_reference_argument(
+        args.get(3).unwrap_or(&Value::Nil),
+        "Buy",
+        "target",
+    )?;
+    let show_errors = value_to_bool(
+        args.get(4).unwrap_or(&Value::Nil),
+        "Buy",
+        "show_errors",
+    )?;
+    let caller = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.script_object_context)
+    });
+    let creator = to_base.or(caller);
+    let definition_id = DefinitionId::from(definition.as_str());
+
+    let initial = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return None;
+        };
+        // ValidPlr accepts eliminated players; C4Player::Buy reports that
+        // state separately below.
+        context.player_state(for_player)?;
+        let payer = context.player_state(pay_player)?;
+        let eliminated = matches!(
+            payer.status,
+            crate::PlayerStatus::Eliminated | crate::PlayerStatus::Surrendered
+        ) || payer.surrendered;
+        let available = payer
+            .exact_home_base_material_entries()
+            .into_iter()
+            .find_map(|(id, count)| (id == definition_id).then_some(count))
+            .unwrap_or(0);
+        let crew_member = context
+            .definition_metadata(&definition)
+            .map(|metadata| metadata.crew_member);
+        Some((eliminated, payer.name.clone(), available, crew_member))
+    });
+    let Some((eliminated, payer_name, available, crew_member)) = initial else {
+        return Ok(Value::Nil);
+    };
+    if eliminated {
+        if show_errors {
+            report_buy_error(
+                pay_player,
+                format!("Player {payer_name}|eliminated."),
+                creator,
+            )?;
+        }
+        return Ok(Value::Nil);
+    }
+    // C4Player::Buy checks stock before resolving the definition. Neither an
+    // unavailable item nor an unknown definition produces an error message.
+    if available <= 0 {
+        return Ok(Value::Nil);
+    }
+    let Some(crew_member) = crew_member else {
+        return Ok(Value::Nil);
+    };
+
+    let Some(price) = calculated_definition_value(&definition, creator, pay_player)? else {
+        return Ok(Value::Nil);
+    };
+
+    // CalcDefValue/CalcBuyValue callbacks above can mutate both wealth and
+    // stock. C++ compares/decrements the live values after those callbacks,
+    // while retaining only the initial availability decision.
+    let charged = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        let Some(current_wealth) = context.player_state(pay_player).map(|payer| payer.wealth)
+        else {
+            return false;
+        };
+        if price > current_wealth {
+            return false;
+        }
+
+        let (team, updated_material, updated_wealth) = {
+            let Some(payer) = context.player_state_mut(pay_player) else {
+                return false;
+            };
+            payer.adjust_home_base_material_entry(definition_id.clone(), -1);
+            let updated_wealth = (i64::from(payer.wealth) - i64::from(price))
+                .clamp(0, 10_000) as i32;
+            payer.wealth = updated_wealth;
+            payer.view_wealth = 100;
+            (
+                payer.team,
+                payer.exact_home_base_material_entries(),
+                updated_wealth,
+            )
+        };
+
+        if context.team_home_base_rule() {
+            if let Some(team) = team {
+                let teammates: Vec<i32> = context
+                    .player_ids()
+                    .iter()
+                    .copied()
+                    .filter(|other| {
+                        *other != pay_player
+                            && context.player_state(*other).and_then(|player| player.team)
+                                == Some(team)
+                    })
+                    .collect();
+                for teammate in teammates {
+                    if let Some(player) = context.player_state_mut(teammate) {
+                        player.set_home_base_material_entries(updated_material.clone());
+                    }
+                }
+            }
+        }
+        context.record_player_command(PlayerCommand::AdjustHomeBaseMaterial {
+            player_id: pay_player,
+            definition_id: definition_id.clone(),
+            delta: -1,
+        });
+        context.record_player_command(PlayerCommand::SetWealth {
+            player_id: pay_player,
+            value: updated_wealth,
+            show_change: true,
+        });
+        true
+    });
+    if !charged {
+        if show_errors {
+            report_buy_error(pay_player, "Not enough money!".to_string(), creator)?;
+        }
+        return Ok(Value::Nil);
+    }
+
+    let Some(created) = create_native_object(NativeObjectCreation {
+        definition: definition.clone(),
+        creator,
+        owner: for_player,
+        position: Vector2::new(50, 50),
+        rotation: 0,
+        velocity: FixedVec2::ZERO,
+        rotation_velocity: C4Fixed::ZERO,
+    })? else {
+        return Ok(Value::Nil);
+    };
+
+    if crew_member {
+        let _ = make_crew_member_live(created, for_player)?;
+    }
+    if !object_is_present(created) {
+        return Ok(Value::Nil);
+    }
+    call_object_own_fail_safe(
+        created,
+        "Purchase",
+        &[
+            Value::Int(pay_player),
+            creator.map(object_reference_value).unwrap_or(Value::Nil),
+        ],
+    );
+    if !object_is_present(created) {
+        return Ok(Value::Nil);
+    }
+
+    if let Some(to_base) = to_base {
+        let _ = enter_object_live(created, to_base)?;
+    } else if let Some(caller) = caller {
+        let caller_position = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.get_world_object(caller))
+                .map(|object| object.position())
+        });
+        if let Some(position) = caller_position {
+            let _ = set_position(&[
+                Value::Int(position.x),
+                Value::Int(position.y),
+                object_reference_value(created),
+            ])?;
+        }
+    }
+    Ok(object_reference_value(created))
+}
+
 /// FnSell (C4Script.cpp:3753-3760): a nil object means the executing
 /// script object; a valid player then runs the complete Sell2Home path.
 fn sell(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -8138,7 +8364,7 @@ fn calculated_definition_value(
         Value::Int(player),
     ];
     let mut value = match script.and_then(|script| {
-        call_scoped_script_function(script, "CalcDefValue", &callback_args)
+        call_scoped_definition_function(script, definition, "CalcDefValue", &callback_args)
     }) {
         Some(result) => result?.as_c4_int().unwrap_or(0),
         None => metadata.value,
@@ -10458,6 +10684,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetDefinition", get_definition);
     script.register_host_function("Value", definition_value);
     script.register_host_function("GetValue", get_value);
+    script.register_host_function("Buy", buy);
     script.register_host_function("Sell", sell);
     script.register_host_function("GetDefCoreVal", get_def_core_val);
     script.register_host_function("Enter", enter);
@@ -15988,30 +16215,9 @@ fn recruit_or_create_crew_info(
     Ok(Some((link, info, Some(entry))))
 }
 
-fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
-    let target = parse_object_reference_argument(
-        args.first().unwrap_or(&Value::Nil),
-        "MakeCrewMember",
-        "obj",
-    )?;
-    let player = parse_optional_i32(args.get(1), "MakeCrewMember", "player")?.unwrap_or(0);
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
-    });
-    if let Some(target) = target {
-        if Some(target) != active {
-            return match call_world_object_function(
-                target,
-                "MakeCrewMember",
-                &[Value::Nil, Value::Int(player)],
-            ) {
-                Some(result) => result,
-                None => Ok(Value::Bool(false)),
-            };
-        }
-    }
+/// Direct C4Player::MakeCrewMember mutation. Native callers such as Buy must
+/// not dispatch a definition function named MakeCrewMember on the target.
+fn make_crew_member_live(target: ObjectId, player: i32) -> Result<bool, RuntimeError> {
     let joined = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
@@ -16020,14 +16226,11 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         if context.player_state(player).is_none() {
             return Ok(false); // ValidPlr (C4Script.cpp:2166)
         }
-        let Some(id) = context.object_context().map(|object| object.id()) else {
-            return Ok(false);
-        };
-        if !context.object_status_present(id) {
+        if !context.object_status_present(target) || !context.ensure_object_scope(target) {
             return Ok(false); // !pObj->Status (C4Player.cpp:1169)
         }
         let crew_def = context
-            .object_effective_definition_id(id)
+            .object_effective_definition_id(target)
             .and_then(|definition| context.world.definition_metadata(&definition))
             .map(|metadata| metadata.crew_member)
             .unwrap_or(false);
@@ -16041,21 +16244,18 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         // ClonkNames (or the game standard names) — a synced ledger draw
         // that must fire INSIDE this call.
         let already_has_info = context
-            .object_context()
+            .object_scope(target)
             .is_some_and(|object| object.info_rank().is_some());
         let assignment = if already_has_info {
             None
         } else {
-            let Some(definition_id) = context
-                .object_context()
-                .and_then(|object| object.definition_id.clone())
-            else {
+            let Some(definition_id) = context.object_effective_definition_id(target) else {
                 return Ok(false);
             };
-            recruit_or_create_crew_info(context, player, &definition_id)?
+            recruit_or_create_crew_info(context, player, definition_id.as_str())?
         };
         {
-            let Some(object) = context.object_context_mut() else {
+            let Some(object) = context.object_scope_mut(target) else {
                 return Ok(false);
             };
             object.set_crew_member(true);
@@ -16076,7 +16276,7 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         }
         if let Some((link, info, created_entry)) = assignment {
             context.record_player_command(PlayerCommand::LinkCrewInfo {
-                object_id: id,
+                object_id: target,
                 link: Some(link),
                 info,
                 created_entry,
@@ -16091,7 +16291,7 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         // category/id branch: prefer the first equal category+id link, then
         // the first link whose relative category is <= the new one
         // (C4ObjectList.cpp:110-195).
-        if !context.insert_player_crew(player, id) {
+        if !context.insert_player_crew(player, target) {
             return Ok(false);
         }
         context.record_crew_rosters();
@@ -16102,11 +16302,27 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         // (C4Script.h:107 `#define PSF_OnJoinCrew "~Recruitment"`), fired
         // inside MakeCrewMember (C4Player.cpp:1206-1209). C4Object::Call's
         // default fPassError=false makes it fail-safe.
-        if let Some(active) = active {
-            call_recruitment_callback(active, player);
-        }
+        call_recruitment_callback(target, player);
     }
-    Ok(Value::Bool(joined))
+    Ok(joined)
+}
+
+fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
+    let explicit = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "MakeCrewMember",
+        "obj",
+    )?;
+    let player = parse_optional_i32(args.get(1), "MakeCrewMember", "player")?.unwrap_or(0);
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    let Some(target) = explicit.or(active) else {
+        return Ok(Value::Bool(false));
+    };
+    Ok(Value::Bool(make_crew_member_live(target, player)?))
 }
 
 /// FnSetMass (C4Script.cpp:3620-3626): OwnMass = value - Def->Mass, then
@@ -37272,6 +37488,7 @@ mod tests {
         "BlastObject",
         "BoundBy",
         "Bubble",
+        "Buy",
         "C4Id",
         "Call",
         "CallMessageBoard",
@@ -53407,6 +53624,325 @@ protected func Entrance() { entrance_ocf = GetOCF(); }
                 .get(&DefinitionId::from("GOLD")),
             Some(&1)
         );
+    }
+
+    fn buy_host_fixture() -> (crate::Engine, ObjectId, ObjectId) {
+        let caller_script = r#"#strict
+public func BuyAt(int for_player, int pay_player, object target, bool show_errors)
+{
+    return Buy(ITEM, for_player, pay_player, target, show_errors);
+}
+public func BuyHere(int for_player, int pay_player, bool show_errors)
+{
+    return Buy(ITEM, for_player, pay_player, nil, show_errors);
+}
+public func BuyCrew(int for_player, int pay_player, object target)
+{
+    return Buy(CREW, for_player, pay_player, target, false);
+}
+"#;
+        let item_script = r#"#strict
+local purchase_player, purchase_base;
+public func CalcDefValue(object base, int player)
+{
+    if (GetID() == ITEM) return 25;
+    return 99;
+}
+public func Purchase(int player, object base)
+{
+    purchase_player = player;
+    purchase_base = base;
+}
+"#;
+
+        let mut engine = crate::Engine::with_seed(32);
+        engine
+            .register_player(crate::PlayerConfig::new(1, "Recipient").with_wealth(7))
+            .expect("recipient registers");
+        engine
+            .register_player(
+                crate::PlayerConfig::new(2, "Payer")
+                    .with_wealth(100)
+                    .with_home_base_material(HashMap::from([
+                        (DefinitionId::from("ITEM"), 2),
+                        (DefinitionId::from("CREW"), 1),
+                    ])),
+            )
+            .expect("payer registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("BASE", "Base", "#strict")
+                    .expect("base compiles"),
+            )
+            .expect("base registers");
+        let mut item = crate::Definition::from_script("ITEM", "Item", item_script)
+            .expect("item compiles");
+        item.set_value(99);
+        engine.register_definition(item).expect("item registers");
+        let mut crew = crate::Definition::from_script(
+            "CREW",
+            "Crew",
+            r#"#strict
+local order;
+public func MakeCrewMember() { order = 9; return false; }
+public func Recruitment(int player) { order = order * 10 + player; }
+public func Purchase(int player, object base) { order = order * 10 + player; }
+"#,
+        )
+        .expect("crew compiles");
+        crew.set_value(10);
+        crew.set_category(crate::CATEGORY_LIVING);
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+
+        let caller = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_owner(1)
+                    .with_controller(1)
+                    .with_position(Vector2::new(123, 234)),
+            )
+            .expect("caller spawns");
+        let base = engine
+            .spawn_object(
+                SpawnConfig::new("BASE")
+                    .with_owner(2)
+                    .with_controller(2)
+                    .with_position(Vector2::new(70, 80)),
+            )
+            .expect("base spawns");
+        (engine, caller, base)
+    }
+
+    #[test]
+    fn buy_host_charges_payer_and_places_the_created_object() {
+        let (mut engine, caller, base) = buy_host_fixture();
+        let caller_index = engine.find_object_index(caller).expect("caller index");
+
+        let bought = engine
+            .call_object_function(
+                caller_index,
+                "BuyAt",
+                vec![
+                    Value::Int(1),
+                    Value::Int(2),
+                    object_reference_value(base),
+                    Value::Bool(false),
+                ],
+            )
+            .expect("Buy with an explicit target runs");
+        let bought = object_id_from_value(&bought).expect("Buy returns the item");
+        let snapshot = engine.object_snapshot(bought).expect("bought item exists");
+        assert_eq!(snapshot.owner, 1);
+        assert_eq!(snapshot.controller, 2, "Enter copies base controller");
+        assert_eq!(snapshot.container, Some(base));
+        assert_eq!(snapshot.position, Vector2::new(70, 80));
+        assert_eq!(
+            snapshot.local_vars.get("purchase_player"),
+            Some(&Value::Int(2))
+        );
+        assert_eq!(
+            snapshot.local_vars.get("purchase_base"),
+            Some(&object_reference_value(base))
+        );
+        assert_eq!(engine.player(1).expect("recipient remains").wealth(), 7);
+        assert_eq!(engine.player(2).expect("payer remains").wealth(), 75);
+        assert_eq!(
+            engine
+                .player(2)
+                .expect("payer remains")
+                .home_base_material()
+                .get(&DefinitionId::from("ITEM")),
+            Some(&1)
+        );
+
+        let bought = engine
+            .call_object_function(
+                caller_index,
+                "BuyHere",
+                vec![Value::Int(1), Value::Int(2), Value::Bool(false)],
+            )
+            .expect("Buy without a target runs");
+        let bought = object_id_from_value(&bought).expect("Buy returns the second item");
+        let snapshot = engine
+            .object_snapshot(bought)
+            .expect("second bought item exists");
+        assert_eq!(snapshot.owner, 1);
+        assert_eq!(snapshot.controller, 1);
+        assert_eq!(snapshot.container, None);
+        assert_eq!(snapshot.position, Vector2::new(123, 234));
+        assert_eq!(
+            snapshot.local_vars.get("purchase_base"),
+            Some(&object_reference_value(caller))
+        );
+        assert_eq!(engine.player(2).expect("payer remains").wealth(), 50);
+        assert_eq!(
+            engine
+                .player(2)
+                .expect("payer remains")
+                .home_base_material()
+                .get(&DefinitionId::from("ITEM")),
+            Some(&0),
+            "DecreaseIDCount(false) retains the zero stock slot"
+        );
+    }
+
+    #[test]
+    fn buy_host_uses_native_crew_enrollment_before_purchase() {
+        let (mut engine, caller, base) = buy_host_fixture();
+        let caller_index = engine.find_object_index(caller).expect("caller index");
+        let bought = engine
+            .call_object_function(
+                caller_index,
+                "BuyCrew",
+                vec![Value::Int(1), Value::Int(2), object_reference_value(base)],
+            )
+            .expect("crew Buy runs");
+        let bought = object_id_from_value(&bought).expect("crew Buy returns the object");
+        let snapshot = engine.object_snapshot(bought).expect("bought crew exists");
+        assert!(snapshot.crew_member);
+        assert_eq!(snapshot.owner, 1);
+        assert_eq!(snapshot.controller, 1);
+        assert_eq!(snapshot.container, Some(base));
+        assert_eq!(
+            snapshot.local_vars.get("order"),
+            Some(&Value::Int(12)),
+            "native Recruitment runs before Purchase and bypasses the same-name script override"
+        );
+        assert!(engine
+            .player(1)
+            .expect("recipient remains")
+            .crew()
+            .contains(&bought));
+        assert_eq!(engine.player(2).expect("payer remains").wealth(), 90);
+        assert_eq!(
+            engine
+                .player(2)
+                .expect("payer remains")
+                .home_base_material()
+                .get(&DefinitionId::from("CREW")),
+            Some(&0)
+        );
+    }
+
+    #[test]
+    fn buy_host_rejects_invalid_players_and_honors_silent_errors() {
+        let (mut engine, caller, base) = buy_host_fixture();
+        let caller_index = engine.find_object_index(caller).expect("caller index");
+        let initial_objects = engine.snapshot().objects.len();
+
+        for (for_player, pay_player) in [(99, 2), (1, 99)] {
+            let rejected = engine
+                .call_object_function(
+                    caller_index,
+                    "BuyAt",
+                    vec![
+                        Value::Int(for_player),
+                        Value::Int(pay_player),
+                        object_reference_value(base),
+                        Value::Bool(true),
+                    ],
+                )
+                .expect("invalid-player Buy returns normally");
+            assert_eq!(rejected, Value::Nil);
+        }
+        assert_eq!(engine.snapshot().objects.len(), initial_objects);
+        assert_eq!(engine.player(2).expect("payer remains").wealth(), 100);
+        assert_eq!(
+            engine
+                .player(2)
+                .expect("payer remains")
+                .home_base_material()
+                .get(&DefinitionId::from("ITEM")),
+            Some(&2)
+        );
+        assert!(engine.snapshot().hud.messages.is_empty());
+        assert!(engine.pending_audio.is_empty());
+
+        engine
+            .set_player_home_base_material(2, HashMap::new())
+            .expect("empty stock installs");
+        let unavailable = engine
+            .call_object_function(
+                caller_index,
+                "BuyAt",
+                vec![
+                    Value::Int(1),
+                    Value::Int(2),
+                    object_reference_value(base),
+                    Value::Bool(false),
+                ],
+            )
+            .expect("silent unavailable-item Buy returns normally");
+        assert_eq!(unavailable, Value::Nil);
+        assert_eq!(engine.snapshot().objects.len(), initial_objects);
+        assert!(engine.snapshot().hud.messages.is_empty());
+        assert!(engine.pending_audio.is_empty());
+        engine
+            .set_player_home_base_material(
+                2,
+                HashMap::from([(DefinitionId::from("ITEM"), 2)]),
+            )
+            .expect("stock restores");
+
+        engine
+            .set_player_wealth(2, 24)
+            .expect("insufficient wealth installs");
+        let rejected = engine
+            .call_object_function(
+                caller_index,
+                "BuyAt",
+                vec![
+                    Value::Int(1),
+                    Value::Int(2),
+                    object_reference_value(base),
+                    Value::Bool(false),
+                ],
+            )
+            .expect("silent insufficient-wealth Buy returns normally");
+        assert_eq!(rejected, Value::Nil);
+        assert_eq!(engine.snapshot().objects.len(), initial_objects);
+        assert_eq!(engine.player(2).expect("payer remains").wealth(), 24);
+        assert_eq!(
+            engine
+                .player(2)
+                .expect("payer remains")
+                .home_base_material()
+                .get(&DefinitionId::from("ITEM")),
+            Some(&2)
+        );
+        assert!(engine.snapshot().hud.messages.is_empty());
+        assert!(engine.pending_audio.is_empty());
+
+        let rejected = engine
+            .call_object_function(
+                caller_index,
+                "BuyAt",
+                vec![
+                    Value::Int(1),
+                    Value::Int(2),
+                    object_reference_value(base),
+                    Value::Bool(true),
+                ],
+            )
+            .expect("visible insufficient-wealth Buy returns normally");
+        assert_eq!(rejected, Value::Nil);
+        let messages = engine.snapshot().hud.messages;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MessageKind::GlobalPlayer);
+        assert_eq!(messages[0].player, Some(2));
+        assert_eq!(messages[0].lines, vec!["Not enough money!"]);
+        assert!(matches!(
+            engine.pending_audio.as_slice(),
+            [AudioCommand::PlaySound { name, target, .. }]
+                if name == "Error" && *target == Some(base)
+        ));
     }
 
     #[test]
