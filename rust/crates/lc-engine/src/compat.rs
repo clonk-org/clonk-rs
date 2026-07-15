@@ -430,6 +430,21 @@ const PHYS_STACK_TEMPORARY: i32 = 3;
 #[derive(Debug, Clone)]
 #[doc(hidden)]
 pub enum PlayerCommand {
+    /// `FnSetName`'s definition branch writes the mutable `C4Def::Name`.
+    /// This is engine-global; the player-command outcome is the existing
+    /// ordered synchronous script-to-engine transport.
+    SetDefinitionName {
+        definition_id: DefinitionId,
+        name: String,
+    },
+    /// Persist one `C4ObjectInfo::Name` write. `link` identifies the owning
+    /// roster entry when the live info came from a player's CrewInfoList;
+    /// link-less fixture/import infos still update the live object payload.
+    SetCrewInfoName {
+        object_id: ObjectId,
+        link: Option<CrewInfoLink>,
+        name: String,
+    },
     /// Engine-global `C4Game::LoadScenarioSection` request. This uses the
     /// player-command outcome channel only as the existing synchronous
     /// script-to-engine transport; it is not scoped to any player.
@@ -2209,7 +2224,7 @@ impl WorldAccessor for EffectHostContext {
     }
 
     fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata> {
-        HostWorldContext::definition_metadata(&self.world, id).cloned()
+        EffectHostContext::definition_metadata(self, id).cloned()
     }
 
     fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
@@ -17165,18 +17180,43 @@ fn get_desc(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnSetName ordinary-object branch (C4Script.cpp:1008-1061): a nil or
-/// empty string clears CustomName, and a missing object defaults to the
-/// calling object. Definition and crew-info renaming require mutable
-/// definition/object-info models and deliberately remain unsupported here.
+const C4_MAX_NAME_BYTES: usize = 30;
+
+/// `C4ObjectInfoList::MakeValidName` (C4ObjectInfoList.cpp:93-101): keep the
+/// requested name as the fixed base, replace its tail with 2, 3, ... and
+/// choose the first case-insensitively unused candidate. Legacy strings are
+/// byte buffers; Rust keeps the retained prefix on a UTF-8 boundary.
+fn make_valid_crew_name(requested: &str, existing: &[String]) -> String {
+    let requested_len = requested.len();
+    let mut candidate = requested.to_owned();
+    let mut suffix = 2u64;
+    while existing
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(&candidate))
+    {
+        let suffix_text = suffix.to_string();
+        let mut keep = requested_len.min(C4_MAX_NAME_BYTES.saturating_sub(suffix_text.len()));
+        while !requested.is_char_boundary(keep) {
+            keep -= 1;
+        }
+        candidate.clear();
+        candidate.push_str(&requested[..keep]);
+        candidate.push_str(&suffix_text);
+        suffix += 1;
+    }
+    candidate
+}
+
+/// FnSetName (C4Script.cpp:1008-1061): rename a definition, persist a crew
+/// info name with owner-list duplicate handling, or set an object's transient
+/// CustomName. A missing object defaults to the calling object.
 fn set_name(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 5 {
         return Err(RuntimeError::new(
             "SetName expects at most 5 arguments: name, object, definition, set-in-info, make-valid",
         ));
     }
-    let custom_name =
-        parse_optional_string(args.first(), "SetName", "name")?.filter(|name| !name.is_empty());
+    let requested_name = parse_optional_string(args.first(), "SetName", "name")?;
     let target_id = args
         .get(1)
         .map(|value| parse_object_reference_argument(value, "SetName", "target"))
@@ -17189,7 +17229,7 @@ fn set_name(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|value| value_to_bool(value, "SetName", "set-in-info"))
         .transpose()?
         .unwrap_or(false);
-    let _make_valid = args
+    let make_valid = args
         .get(4)
         .map(|value| value_to_bool(value, "SetName", "make-valid"))
         .transpose()?
@@ -17200,13 +17240,107 @@ fn set_name(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_mut() else {
             return Ok(Value::Bool(false));
         };
-        if definition.is_some() || set_in_info {
+        if set_in_info && definition.is_some() {
             return Ok(Value::Bool(false));
+        }
+        if let Some(definition) = definition {
+            return Ok(Value::Bool(context.set_definition_name(
+                definition,
+                requested_name.unwrap_or_default(),
+            )));
         }
         let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
         else {
             return Ok(Value::Bool(false));
         };
+
+        if set_in_info {
+            if !context.ensure_object_scope(target) {
+                return Ok(Value::Bool(false));
+            }
+            let Some((owner, link, old_name)) = context.object_scope(target).and_then(|scope| {
+                Some((
+                    scope.owner(),
+                    scope.info_link(),
+                    scope.info_core()?.name.clone(),
+                ))
+            }) else {
+                return Ok(Value::Bool(false));
+            };
+            let Some(requested_name) = requested_name else {
+                return Ok(Value::Bool(false));
+            };
+            if requested_name.is_empty() || requested_name.len() > C4_MAX_NAME_BYTES {
+                return Ok(Value::Bool(false));
+            }
+            if requested_name == old_name {
+                return Ok(Value::Bool(true));
+            }
+
+            let owner_names = if context.player_state(owner).is_some() {
+                context
+                    .world
+                    .crew_info_state
+                    .borrow()
+                    .roster_names
+                    .get(&owner)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let duplicate = owner_names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&requested_name));
+            if duplicate && !make_valid {
+                return Ok(Value::Bool(false));
+            }
+            let final_name = if duplicate {
+                make_valid_crew_name(&requested_name, &owner_names)
+            } else {
+                requested_name
+            };
+
+            let Some(scope) = context.object_scope_mut(target) else {
+                return Ok(Value::Bool(false));
+            };
+            let Some(mut info) = scope.info_core().cloned() else {
+                return Ok(Value::Bool(false));
+            };
+            info.name = final_name.clone();
+            scope.set_info_core(Some(info));
+            // pObj->SetName() with no argument adopts Info->Name by clearing
+            // any transient CustomName override.
+            scope.pending_update.custom_name = Some(None);
+            if let Some(link) = link {
+                let mut state = context.world.crew_info_state.borrow_mut();
+                if let Some(entry) = state.entries.get_mut(&link) {
+                    entry.name = final_name.clone();
+                }
+                if let Some(name) = state
+                    .roster_names
+                    .get_mut(&link.player_id)
+                    .and_then(|names| names.get_mut(link.roster_index))
+                {
+                    *name = final_name.clone();
+                }
+                for entries in state.idle.values_mut() {
+                    for (candidate, entry) in entries {
+                        if *candidate == link {
+                            entry.name = final_name.clone();
+                        }
+                    }
+                }
+            }
+            context.record_player_command(PlayerCommand::SetCrewInfoName {
+                object_id: target,
+                link,
+                name: final_name,
+            });
+            return Ok(Value::Bool(true));
+        }
+
+        let custom_name = requested_name.filter(|name| !name.is_empty());
         Ok(Value::Bool(
             context.set_object_custom_name(target, custom_name),
         ))
@@ -33826,6 +33960,10 @@ struct EffectHostContext {
     /// (C4Object.cpp:287-306).
     unlinked_content_links: HashSet<(ObjectId, ObjectId)>,
     world: HostWorldContext,
+    /// Mutable C4Def metadata preview for this synchronous VM session.
+    /// Definition writes are folded into Engine after the callback returns,
+    /// but later host calls must already observe them.
+    definition_metadata_overrides: HashMap<DefinitionId, DefinitionMetadata>,
     player_overrides: HashMap<i32, PlayerState>,
     /// Live C4TeamList projection for this synchronous VM session. Runtime
     /// TEAMID_New generation must be visible to GetTeam* immediately and to
@@ -34052,6 +34190,7 @@ impl EffectHostContext {
             script_object_context,
             global,
             world,
+            definition_metadata_overrides: HashMap::new(),
             player_overrides: HashMap::new(),
             teams,
             player_commands: Vec::new(),
@@ -35705,7 +35844,24 @@ impl EffectHostContext {
     }
 
     fn definition_metadata(&self, id: &str) -> Option<&DefinitionMetadata> {
-        self.world.definition_metadata(id)
+        self.definition_metadata_overrides
+            .get(id)
+            .or_else(|| self.world.definition_metadata(id))
+    }
+
+    /// Stage one mutable `C4Def::Name` write and expose it to the remainder
+    /// of this VM session before Engine folds the ordered command.
+    fn set_definition_name(&mut self, id: DefinitionId, name: String) -> bool {
+        let Some(mut metadata) = self.definition_metadata(id.as_str()).cloned() else {
+            return false;
+        };
+        metadata.name = name.clone();
+        self.definition_metadata_overrides.insert(id.clone(), metadata);
+        self.record_player_command(PlayerCommand::SetDefinitionName {
+            definition_id: id,
+            name,
+        });
+        true
     }
 
     fn landscape_ref(&self) -> Option<&Landscape> {
@@ -40000,6 +40156,219 @@ func Trigger(object pOther)
                 .as_deref(),
             Some("Arrow")
         );
+    }
+
+    #[test]
+    fn set_name_info_form_updates_live_and_persistent_names_with_cpp_duplicates() {
+        // FnSetName(..., true) writes the linked C4ObjectInfo, rejects empty
+        // and overlong names, checks the CURRENT owner's whole info list
+        // case-insensitively, and clears CustomName after success
+        // (C4Script.cpp:1024-1056; C4ObjectInfoList.cpp:93-110).
+        let script = r#"#strict 2
+func SetAlias(object target) { return SetName("Alias", target); }
+func RenameInfo(object target, string name, bool make_valid)
+{
+    return [SetName(name, target, 0, true, make_valid),
+            GetName(target),
+            GetObjectInfoCoreVal("Name", "ObjectInfo", target)];
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        let mut definition = crate::Definition::from_script("CREW", "Crew", script)
+            .expect("crew-name fixture compiles");
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("crew-name fixture registers");
+
+        let mut start = crate::scenario::PlayerStart::default();
+        start.ready_crew = vec![("CREW".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        let info = |name: &str, experience: i32| crate::player_file::CrewInfo {
+            id: "CREW".to_string(),
+            name: name.to_string(),
+            rank: 0,
+            experience,
+            total_playing_time: 0,
+            participation: 1,
+            in_action: false,
+            in_action_time: 0,
+            has_died: false,
+        };
+        engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Name owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![info("Target", 30), info("Ada", 20), info("Ada2", 10)],
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("name owner joins");
+
+        let target = engine.player(0).expect("player exists").crew()[0];
+        let target_index = engine
+            .find_object_index(target)
+            .expect("ready crew object exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    target_index,
+                    "SetAlias",
+                    vec![Value::Object(target.as_u64())],
+                )
+                .expect("ordinary alias succeeds"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(target)
+                .expect("target remains")
+                .custom_name
+                .as_deref(),
+            Some("Alias")
+        );
+
+        let rename = |engine: &mut crate::Engine, name: &str, make_valid: bool| {
+            engine
+                .call_object_function(
+                    target_index,
+                    "RenameInfo",
+                    vec![
+                        Value::Object(target.as_u64()),
+                        Value::String(name.to_string()),
+                        Value::Bool(make_valid),
+                    ],
+                )
+                .expect("info rename probe runs")
+        };
+        assert_eq!(
+            rename(&mut engine, "Nova", false),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::String("Nova".into()),
+                Value::String("Nova".into()),
+            ])
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(target)
+                .expect("target remains")
+                .custom_name,
+            None
+        );
+
+        for invalid in ["", "1234567890123456789012345678901"] {
+            assert_eq!(
+                rename(&mut engine, invalid, true),
+                Value::Array(vec![
+                    Value::Bool(false),
+                    Value::String("Nova".into()),
+                    Value::String("Nova".into()),
+                ])
+            );
+        }
+        assert_eq!(
+            rename(&mut engine, "ada", false),
+            Value::Array(vec![
+                Value::Bool(false),
+                Value::String("Nova".into()),
+                Value::String("Nova".into()),
+            ])
+        );
+        assert_eq!(
+            rename(&mut engine, "ada", true),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::String("ada3".into()),
+                Value::String("ada3".into()),
+            ])
+        );
+
+        assert_eq!(
+            engine
+                .crew_object_info(target)
+                .expect("target retains live info")
+                .name,
+            "ada3"
+        );
+        let state = engine.capture_state();
+        let link = state.crew_info_links[&target];
+        assert_eq!(
+            state.crew_info_rosters[&link.player_id][link.roster_index].name,
+            "ada3"
+        );
+    }
+
+    #[test]
+    fn set_name_definition_form_is_live_persistent_and_exclusive_with_info_form() {
+        // The id branch mutates C4Def::Name immediately. Combining it with
+        // fSetInInfo is rejected before either target is changed
+        // (C4Script.cpp:1012-1022).
+        let script = r#"#strict 2
+func RenameDefinition(string name, bool set_in_info, object target)
+{
+    return [SetName(name, 0, CREW, set_in_info),
+            GetName(0, CREW), GetName(target)];
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(
+                crate::Definition::from_script("CREW", "Crew", script)
+                    .expect("definition-name fixture compiles"),
+            )
+            .expect("definition-name fixture registers");
+        let target = engine
+            .spawn_object(crate::SpawnConfig::new("CREW"))
+            .expect("info-less target spawns");
+        let target_index = engine.find_object_index(target).expect("target exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    target_index,
+                    "RenameDefinition",
+                    vec![
+                        Value::String("Renamed".into()),
+                        Value::Bool(false),
+                        Value::Object(target.as_u64()),
+                    ],
+                )
+                .expect("definition rename runs"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::String("Renamed".into()),
+                Value::String("Renamed".into()),
+            ])
+        );
+        assert_eq!(engine.definition_name("CREW"), Some("Renamed"));
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    target_index,
+                    "RenameDefinition",
+                    vec![
+                        Value::String("Blocked".into()),
+                        Value::Bool(true),
+                        Value::Object(target.as_u64()),
+                    ],
+                )
+                .expect("exclusive-form probe runs"),
+            Value::Array(vec![
+                Value::Bool(false),
+                Value::String("Renamed".into()),
+                Value::String("Renamed".into()),
+            ])
+        );
+        assert_eq!(engine.definition_name("CREW"), Some("Renamed"));
     }
 
     #[test]

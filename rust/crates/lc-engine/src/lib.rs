@@ -8450,6 +8450,10 @@ impl Definition {
         &self.name
     }
 
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
     pub fn version(&self) -> [i32; 5] {
         self.version
     }
@@ -26638,6 +26642,35 @@ impl Engine {
     pub fn apply_player_commands(&mut self, commands: Vec<PlayerCommand>) -> Result<(), EngineError> {
         for command in commands {
             match command {
+                PlayerCommand::SetDefinitionName {
+                    definition_id,
+                    name,
+                } => {
+                    if let Some(definition) = self.definitions.get_mut(&definition_id) {
+                        definition.set_name(name);
+                        self.definition_metadata_cache.borrow_mut().take();
+                    }
+                }
+                PlayerCommand::SetCrewInfoName {
+                    object_id,
+                    link,
+                    name,
+                } => {
+                    if let Some(link) = link {
+                        if let Some(entry) = self
+                            .crew_rosters
+                            .get_mut(&link.player_id)
+                            .and_then(|roster| roster.get_mut(link.roster_index))
+                        {
+                            entry.name = name.clone();
+                        }
+                    }
+                    if let Some(info) =
+                        Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id)
+                    {
+                        info.name = name;
+                    }
+                }
                 PlayerCommand::LoadScenarioSection {
                     name,
                     flags,
