@@ -15003,9 +15003,34 @@ impl Engine {
             }
         }
         self.sync_player_cursor(number);
+        self.assign_player_captain_on_final_init(number);
         self.refresh_elimination_state();
         self.check_game_over()?;
         Ok(())
+    }
+
+    /// `C4Player::FinalInit` assigns Captain once, after ready crew and the
+    /// InitializePlayer callback, but only while a live KILC rule exists
+    /// (C4Player.cpp:778-803). Later selection/rank changes never re-elect.
+    fn assign_player_captain_on_final_init(&mut self, number: i32) {
+        let Some(player) = self.players.get(&number) else {
+            return;
+        };
+        if player.status() == PlayerStatus::Inactive || player.captain().is_some() {
+            return;
+        }
+        let kill_the_captain_active = self.objects.iter().any(|object| {
+            !object.destroyed
+                && object.state.status.is_active()
+                && object.definition_id.as_str() == "KILC"
+        });
+        if !kill_the_captain_active {
+            return;
+        }
+        let captain = self.player_hi_rank_active_crew(number, false);
+        if let Some(player) = self.players.get_mut(&number) {
+            player.set_captain(captain);
+        }
     }
 
     /// `C4Player::ScenarioInit` (C4Player.cpp:670-777). The RNG draw order
@@ -15971,6 +15996,7 @@ impl Engine {
 
         tolerate_script_error(self.broadcast_scenario_function("InitializePlayer", init_args))?;
 
+        self.assign_player_captain_on_final_init(id);
         self.refresh_elimination_state();
         self.check_game_over()?;
         Ok(())
@@ -24451,6 +24477,7 @@ impl Engine {
                 // focus remains the presentation projection only.
                 denumerate_object_reference(&mut state.cursor, &object_numbers);
                 denumerate_object_reference(&mut state.view_cursor, &object_numbers);
+                denumerate_object_reference(&mut state.captain, &object_numbers);
                 for viewport in &mut state.viewports {
                     denumerate_object_reference(&mut viewport.focus, &object_numbers);
                 }
@@ -24515,6 +24542,10 @@ impl Engine {
         self.prune_roles();
         self.prune_selection();
         self.sync_all_player_cursors();
+        let player_ids = self.players.keys().copied().collect::<Vec<_>>();
+        for player_id in player_ids {
+            self.assign_player_captain_on_final_init(player_id);
+        }
         self.refresh_elimination_state();
         self.check_game_over()?;
 

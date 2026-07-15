@@ -10273,6 +10273,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             id: 1,
             cursor: Some(target),
             view_cursor: Some(target),
+            captain: Some(target),
             viewports: vec![
                 PlayerViewport::new(Vector2::new(12, 34)).with_focus(Some(target)),
             ],
@@ -10304,9 +10305,207 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .find(|player| player.id == 1)
             .expect("player restores");
         assert_eq!(player.cursor, None);
+        assert_eq!(player.captain, None);
         assert!(player.crew.is_empty());
         assert_eq!(player.viewports[0].focus, None);
         assert_eq!(player.viewports[0].center, Vector2::new(12, 34));
+    }
+
+    #[test]
+    fn player_restore_final_init_reseeds_only_active_missing_captains() -> Result<(), EngineError> {
+        let rule = Definition::from_script("KILC", "Kill the Captain", "#strict 2")?;
+        let mut crew = Definition::from_script("CREW", "Crew", "#strict 2")?;
+        crew.set_crew_member(true);
+
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(rule.clone())?;
+        engine.register_definition(crew.clone())?;
+        engine.spawn_object(SpawnConfig::new("KILC"))?;
+        let active_crew = engine.spawn_object(
+            SpawnConfig::new("CREW")
+                .with_owner(1)
+                .with_crew_member(true),
+        )?;
+        engine.spawn_object(
+            SpawnConfig::new("CREW")
+                .with_owner(2)
+                .with_crew_member(true),
+        )?;
+        engine.register_player(PlayerConfig::new(1, "Active"))?;
+        engine.register_player(
+            PlayerConfig::new(2, "Inactive").with_status(PlayerStatus::Inactive),
+        )?;
+
+        let mut state = engine.capture_state();
+        let active = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == 1)
+            .expect("active player saves");
+        assert_eq!(active.captain, Some(active_crew));
+        active.captain = None;
+        assert_eq!(
+            state
+                .players
+                .iter()
+                .find(|player| player.id == 2)
+                .expect("inactive player saves")
+                .captain,
+            None
+        );
+
+        let mut restored = Engine::with_seed(0);
+        restored.register_definition(rule)?;
+        restored.register_definition(crew)?;
+        restored.restore_state(&state)?;
+        assert_eq!(
+            restored.player(1).and_then(Player::captain),
+            Some(active_crew),
+            "loaded FinalInit re-elects a missing captain while KILC is live"
+        );
+        assert_eq!(
+            restored.player(2).and_then(Player::captain),
+            None,
+            "C4Player::FinalInit skips inactive players"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn get_captain_tracks_the_shipped_kill_the_captain_rule_identity() -> Result<(), EngineError> {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let group = lc_resources::Group::open(
+            repository.join("content/Objects.c4d/Rules.c4d/KillTheCaptain.c4d"),
+        )
+        .expect("shipped KillTheCaptain definition opens");
+        let resource = ResourceDefinitionData::load(&group)
+            .expect("shipped KillTheCaptain definition loads");
+
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(Definition::from_resource(&resource)?)?;
+        let mut crew = Definition::from_script("CREW", "Crew", "#strict 2")?;
+        crew.set_crew_member(true);
+        engine.register_definition(crew)?;
+        engine.register_definition(Definition::from_script(
+            "PROB",
+            "Captain probe",
+            r#"#strict 2
+public func Read(int player)
+{
+    return [GetCaptain(player), GetHiRank(player),
+            GetCaptain(-1), GetCaptain(99)];
+}
+public func RemoveCaptain(int player)
+{
+    RemoveObject(GetCaptain(player));
+    return [GetCaptain(player), GetHiRank(player)];
+}
+"#,
+        )?)?;
+        let rule = engine.spawn_object(SpawnConfig::new("KILC"))?;
+        let probe = engine.spawn_object(SpawnConfig::new("PROB"))?;
+
+        engine.set_teams(vec![TeamInfo::new(1, "Team", 0x00f4_0000)]);
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("CREW".to_string(), 2)];
+        engine.set_player_starts(vec![start]);
+        engine.join_player(JoinPlayerConfig {
+            name: "Captain owner".to_string(),
+            player_info_id: 1,
+            score: 0,
+            total_playing_time: 0,
+            team: Some(1),
+            color_dw: 0x00f4_0000,
+            pref_color: 0,
+            pref_position: 0,
+            crew: vec![
+                player_file::CrewInfo {
+                    id: "CREW".to_string(),
+                    name: "Runner-up".to_string(),
+                    rank: 1,
+                    experience: 1_000,
+                    total_playing_time: 0,
+                    participation: 1,
+                    in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                },
+                player_file::CrewInfo {
+                    id: "CREW".to_string(),
+                    name: "Captain".to_string(),
+                    rank: 5,
+                    experience: 5_000,
+                    total_playing_time: 0,
+                    participation: 1,
+                    in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                },
+            ],
+            control_style: false,
+            auto_context_menu: false,
+            startup_player_count: 1,
+        })?;
+
+        let roster = engine.player(0).expect("player joins").crew().to_vec();
+        let captain = roster
+            .iter()
+            .copied()
+            .find(|id| engine.crew_object_info(*id).is_some_and(|info| info.rank == 5))
+            .expect("highest-ranked crew exists");
+        let runner_up = roster
+            .iter()
+            .copied()
+            .find(|id| *id != captain)
+            .expect("runner-up crew exists");
+        let probe_index = engine.find_object_index(probe).expect("probe exists");
+        let rule_index = engine.find_object_index(rule).expect("rule exists");
+
+        assert_eq!(
+            engine.call_object_function(probe_index, "Read", vec![Value::Int(0)])?,
+            Value::Array(vec![
+                object_reference_value(captain),
+                object_reference_value(captain),
+                Value::Nil,
+                Value::Nil,
+            ])
+        );
+        engine.clear_crew_selection(0);
+        engine.select_crew(0, [runner_up])?;
+        assert_eq!(
+            engine.call_object_function(probe_index, "Read", vec![Value::Int(0)])?,
+            Value::Array(vec![
+                object_reference_value(captain),
+                object_reference_value(captain),
+                Value::Nil,
+                Value::Nil,
+            ]),
+            "selection changes do not replace the stored captain"
+        );
+        engine.call_object_function(rule_index, "Execute", Vec::new())?;
+        assert_eq!(
+            engine.player(0).expect("player remains registered").status(),
+            PlayerStatus::Active,
+            "the shipped check keeps a player whose captain is present"
+        );
+        assert_eq!(
+            engine.call_object_function(
+                probe_index,
+                "RemoveCaptain",
+                vec![Value::Int(0)],
+            )?,
+            Value::Array(vec![Value::Nil, object_reference_value(runner_up)]),
+            "ClearPointers nulls Captain without electing the surviving crew"
+        );
+
+        engine.call_object_function(rule_index, "Execute", Vec::new())?;
+        assert_eq!(
+            engine.player(0).expect("player remains registered").status(),
+            PlayerStatus::Eliminated,
+            "the shipped rule completes its captain check without a runtime abort"
+        );
+        assert!(engine.find_object_index(rule).is_some(), "rule remains live");
+        Ok(())
     }
 
     #[test]

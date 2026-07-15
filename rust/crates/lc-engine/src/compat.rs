@@ -8311,6 +8311,31 @@ fn get_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetCaptain (C4Script.cpp:2939-2943): return the stored player Captain
+/// pointer verbatim. FinalInit owns its one-time assignment; this query does
+/// not recompute it from the cursor or current highest-ranked crew member.
+fn get_captain(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetCaptain expects at most 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetCaptain", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        Ok(player
+            .captain
+            .map(object_reference_value)
+            .unwrap_or(Value::Nil))
+    })
+}
+
 /// FnSetViewCursor (C4Script.cpp:2954-2963): assign the camera-follow
 /// pointer. Unlike SetCursor, C++ validates neither object Status nor crew
 /// membership and performs no selection callbacks.
@@ -10221,6 +10246,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetCrewStatus", set_crew_status);
     script.register_host_function("UnselectCrew", unselect_crew_host);
     script.register_host_function("GetViewCursor", get_view_cursor);
+    script.register_host_function("GetCaptain", get_captain);
     script.register_host_function("SetViewCursor", set_view_cursor);
     script.register_host_function("GetSelectCount", get_select_count);
     script.register_host_function("SetPlrKnowledge", set_plr_knowledge);
@@ -36783,6 +36809,7 @@ mod tests {
         "GetAlive",
         "GetBase",
         "GetBreath",
+        "GetCaptain",
         "GetCategory",
         "GetChar",
         "GetClimate",

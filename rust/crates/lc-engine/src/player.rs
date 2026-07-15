@@ -186,6 +186,11 @@ pub struct PlayerState {
     /// pointer. This is distinct from a temporary C4PVM_Target ViewTarget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_cursor: Option<ObjectId>,
+    /// Saved `C4Player::Captain`. This is assigned once during FinalInit
+    /// when the KillTheCaptain rule is present; it is not derived from the
+    /// current cursor or highest-ranked crew on each query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captain: Option<ObjectId>,
     /// C4Player::ViewTarget is explicitly NO-SAVE. It remains in live
     /// snapshots so presentation can resolve the target-mode center, but never
     /// enters serialized engine state.
@@ -271,6 +276,9 @@ impl PlayerState {
 
     pub(crate) fn clear_object_pointers(&mut self, object: ObjectId) {
         self.crew.retain(|member| *member != object);
+        if self.captain == Some(object) {
+            self.captain = None;
+        }
         if self.cursor == Some(object) {
             self.cursor = None;
         }
@@ -381,6 +389,7 @@ pub struct Player {
     cursor: Option<ObjectId>,
     view_mode: i32,
     view_cursor: Option<ObjectId>,
+    captain: Option<ObjectId>,
     view_target: Option<ObjectId>,
     viewports: Vec<PlayerViewport>,
     view_offset: Vector2,
@@ -438,6 +447,7 @@ impl Player {
             cursor: None,
             view_mode: PLAYER_VIEW_MODE_CURSOR,
             view_cursor: None,
+            captain: None,
             view_target: None,
             viewports: Vec::new(),
             view_offset: Vector2::ZERO,
@@ -522,6 +532,7 @@ impl Player {
             cursor,
             view_mode: PLAYER_VIEW_MODE_CURSOR,
             view_cursor: None,
+            captain: None,
             view_target: None,
             viewports,
             view_offset: Vector2::ZERO,
@@ -570,6 +581,7 @@ impl Player {
             cursor,
             view_mode,
             view_cursor,
+            captain,
             view_target: _,
             viewports,
             view_offset,
@@ -619,6 +631,7 @@ impl Player {
             cursor,
             view_mode,
             view_cursor,
+            captain,
             view_target: None,
             viewports,
             view_offset,
@@ -669,6 +682,7 @@ impl Player {
             cursor: self.cursor,
             view_mode: self.view_mode,
             view_cursor: self.view_cursor,
+            captain: self.captain,
             view_target: self.view_target,
             viewports: self.viewports.clone(),
             view_offset: self.view_offset,
@@ -998,6 +1012,14 @@ impl Player {
         self.sync_viewport_focus();
     }
 
+    pub fn captain(&self) -> Option<ObjectId> {
+        self.captain
+    }
+
+    pub(crate) fn set_captain(&mut self, captain: Option<ObjectId>) {
+        self.captain = captain;
+    }
+
     pub fn view_cursor(&self) -> Option<ObjectId> {
         self.view_cursor
     }
@@ -1031,6 +1053,9 @@ impl Player {
 
     pub(crate) fn clear_object_pointers(&mut self, object: ObjectId) {
         self.crew.retain(|member| *member != object);
+        if self.captain == Some(object) {
+            self.captain = None;
+        }
         if self.cursor == Some(object) {
             self.cursor = None;
         }
@@ -1517,6 +1542,7 @@ mod tests {
             score: 250,
             total_playing_time: 1_234,
             view_cursor: Some(ObjectId::new(7)),
+            captain: Some(ObjectId::new(8)),
             ..PlayerState::default()
         };
         assert_eq!(Player::from_state(evaluated.clone()).to_state(), evaluated);
@@ -1538,6 +1564,7 @@ mod tests {
             "total_playing_time",
             "view_mode",
             "view_cursor",
+            "captain",
             "view_target",
         ] {
             assert!(value.get(field).is_none(), "unexpected default field {field}");

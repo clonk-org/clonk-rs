@@ -1086,7 +1086,11 @@ impl Engine {
     /// strictly highest-ranked eligible member wins. Equal ranks retain the
     /// FIRST eligible roster entry because the C++ loop only replaces its
     /// candidate for `iRank > iHighestRank`.
-    fn player_hi_rank_active_crew(&self, owner: i32, select_only: bool) -> Option<ObjectId> {
+    pub(super) fn player_hi_rank_active_crew(
+        &self,
+        owner: i32,
+        select_only: bool,
+    ) -> Option<ObjectId> {
         let selected = self.selected_crew(owner);
         let mut highest: Option<(ObjectId, i32)> = None;
         for id in self.player_crew_roster(owner) {
