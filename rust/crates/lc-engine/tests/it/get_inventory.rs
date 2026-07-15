@@ -76,6 +76,7 @@ fn tutorial04_enter_all_keeps_only_one_tflint_in_the_real_clonk() {
         permanent: true,
         extra: ObjectMenuExtra::None,
         extra_data: 0,
+        internal_refill_token: 0,
         selection: 0,
         user_menu: false,
         command_object: Some(clonk),

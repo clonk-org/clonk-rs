@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::rc::Rc;
 
@@ -269,6 +269,9 @@ pub(crate) struct DefinitionMetadata {
     pub action_graphics: HashMap<String, crate::DefinitionActionGraphics>,
     #[allow(dead_code)]
     pub value: i32,
+    /// DefCore AllowPictureStack APS_* exception bits, used by the live
+    /// internal object-menu row grouping path.
+    pub allow_picture_stack: i32,
     #[allow(dead_code)]
     pub mass: i32,
     /// DefCore NoComponentMass suppresses the contents contribution to the
@@ -5697,6 +5700,7 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         permanent,
         extra: crate::ObjectMenuExtra::from_legacy(extra),
         extra_data,
+        internal_refill_token: 0,
         selection: -1,
         user_menu: true,
         command_object,
@@ -6404,7 +6408,9 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     };
     // First selectable item takes the selection, WITHOUT callbacks
     // (C4Menu::AddItem -> SetSelection(ItemCount-1, false, false)).
-    if menu.selection == -1 && selectable {
+    if menu.internal_refill_token == 0 && menu.selection == -1
+        && selectable
+    {
         menu.selection = menu.items.len() as i32;
     }
     menu.items.push(crate::ObjectMenuItem {
@@ -7732,7 +7738,25 @@ fn exit_object_at_position_with_calls(
 
 fn exit_object_at_position_with_motion_and_calls(
     target: ObjectId,
+    position: Vector2,
+    velocity: FixedVec2,
+    rotation_velocity: C4Fixed,
+    f_calls: bool,
+) -> Result<bool, RuntimeError> {
+    exit_object_at_position_with_full_motion_and_calls(
+        target,
+        position,
+        0,
+        velocity,
+        rotation_velocity,
+        f_calls,
+    )
+}
+
+fn exit_object_at_position_with_full_motion_and_calls(
+    target: ObjectId,
     mut position: Vector2,
+    rotation: i32,
     velocity: FixedVec2,
     rotation_velocity: C4Fixed,
     f_calls: bool,
@@ -7745,14 +7769,17 @@ fn exit_object_at_position_with_motion_and_calls(
         if !context.ensure_object_scope(target) {
             return None;
         }
+        let previous = context.object_scope(target)?.container()?;
+        context.track_contents_link_removal(previous, target);
         let scope = context.object_scope_mut(target)?;
-        let previous = scope.container()?;
         // Raw unlink first. Contained is null for BoundsCheck, but C++ does
         // not close the menu or refresh this object's OCF until afterward.
+        scope.removed_contents_links.insert(previous);
         scope.current_container = None;
         scope.pending_update.container = Some(None);
         scope.pending_update.construction_preserves_fixed_position = false;
         scope.exit_bounds_in_progress = true;
+        context.relink_content_after_exit(previous, target);
         refresh_container_collection_ocf(context, previous);
         Some(previous)
     });
@@ -7780,9 +7807,9 @@ fn exit_object_at_position_with_motion_and_calls(
         scope.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
         scope.pending_update.position = Some(position);
         scope.pending_update.construction_preserves_fixed_position = false;
-        scope.current_rotation = 0;
-        scope.current_fixed_rotation = C4Fixed::ZERO;
-        scope.pending_update.rotation = Some(0);
+        scope.current_rotation = rotation;
+        scope.current_fixed_rotation = itofix(rotation);
+        scope.pending_update.rotation = Some(rotation);
         scope.set_fixed_velocity(velocity);
         scope.set_rotation_velocity(rotation_velocity);
         scope.set_mobile(true);
@@ -7854,6 +7881,25 @@ fn enter_object_live_with_calls(
     container: ObjectId,
     f_calls: bool,
 ) -> Result<bool, RuntimeError> {
+    enter_object_live_internal(target, container, f_calls, false)
+}
+
+/// ObjectComPut's Enter form supplies a non-null RejectCollect result
+/// pointer. It shares the ordinary callback/copy-motion tail but inserts the
+/// target query after cycle detection and before Exit (C4Object.cpp:1566-1636).
+fn enter_object_live_with_reject_collect(
+    target: ObjectId,
+    container: ObjectId,
+) -> Result<bool, RuntimeError> {
+    enter_object_live_internal(target, container, true, true)
+}
+
+fn enter_object_live_internal(
+    target: ObjectId,
+    container: ObjectId,
+    f_calls: bool,
+    reject_collect: bool,
+) -> Result<bool, RuntimeError> {
     if target == container || !object_is_present(target) || !object_is_present(container) {
         return Ok(false);
     }
@@ -7886,6 +7932,29 @@ fn enter_object_live_with_calls(
     });
     if would_cycle {
         return Ok(false);
+    }
+
+    if reject_collect {
+        let definition_id = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.object_effective_definition_id(target))
+        });
+        let Some(definition_id) = definition_id else {
+            return Ok(false);
+        };
+        if call_object_own_fail_safe(
+            container,
+            "RejectCollect",
+            &[
+                Value::C4Id(definition_id.to_string()),
+                object_reference_value(target),
+            ],
+        )
+        .as_bool()
+        {
+            return Ok(false);
+        }
     }
 
     let contained = HOST_CONTEXT.with(|cell| {
@@ -8228,9 +8297,7 @@ fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, Ru
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else { return };
         let removed_from = context.object_scope(target).and_then(ObjectScopeContext::container);
-        if let Some(scope) = context.object_scope_mut(target) {
-            scope.set_container(None);
-        }
+        context.set_object_container_tracked(target, None);
         if let Some(container) = removed_from {
             // AssignRemoval removes the child's link, then UpdateMass and
             // SetOCF on the surviving parent (C4Object.cpp:297-305).
@@ -8951,10 +9018,9 @@ fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
         if !context.ensure_object_scope(item) {
             return None;
         }
-        let scope = context.object_scope_mut(item)?;
-        let previous = scope.container();
+        let previous = context.object_scope(item)?.container();
         if previous.is_some() {
-            scope.set_container(None);
+            context.set_object_container_tracked(item, None);
         }
         Some(previous)
     });
@@ -9292,10 +9358,9 @@ fn grab_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             if !context.ensure_object_scope(child) {
                 return None;
             }
-            let scope = context.object_scope_mut(child)?;
-            let previous = scope.container();
+            let previous = context.object_scope(child)?.container();
             if previous.is_some() {
-                scope.set_container(None);
+                context.set_object_container_tracked(child, None);
             }
             Some(previous)
         });
@@ -9456,13 +9521,13 @@ fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
         if !context.ensure_object_scope(target) {
             return None;
         }
+        let Some(previous_container) = context.object_scope(target).and_then(ObjectScopeContext::container) else {
+            return None; // not contained (C4Object.cpp:1539)
+        };
+        context.set_object_container_tracked(target, None);
         let Some(scope) = context.object_scope_mut(target) else {
             return None;
         };
-        let Some(previous_container) = scope.container() else {
-            return None; // not contained (C4Object.cpp:1539)
-        };
-        scope.set_container(None);
         scope.set_position(Vector2::new(abs_x, abs_y.saturating_add(shape_y)));
         // Raw r write — C4Object::Exit assigns without SetRotation's
         // normalization (C4Object.cpp:1552).
@@ -26534,19 +26599,31 @@ fn preview_object_com_ungrab(
     // callbacks. Preserve the pre-Drop FightReady capability underneath a
     // callback-installed ObjectDisabled Push action so changing to Walk can
     // expose it again; NoCollectDelay still keeps Collection disabled.
-    HOST_CONTEXT.with(|cell| {
+    let cached_ocf_before = HOST_CONTEXT.with(|cell| {
+        let mut cached_before = None;
         if let Some(scope) = cell
             .borrow_mut()
             .as_mut()
             .and_then(|context| context.object_scope_mut(actor))
         {
+            cached_before = scope.cached_ocf;
             if restore_fight_ready && scope.ocf() & ocf::ALIVE != 0 {
                 let cached = scope.cached_ocf.unwrap_or_else(|| scope.ocf());
                 scope.cached_ocf = Some(cached | ocf::FIGHT_READY);
             }
         }
+        cached_before
     });
     if !native_set_action_by_name(actor, "Walk")? {
+        HOST_CONTEXT.with(|cell| {
+            if let Some(scope) = cell
+                .borrow_mut()
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(actor))
+            {
+                scope.cached_ocf = cached_ocf_before;
+            }
+        });
         return Ok(false);
     }
     HOST_CONTEXT.with(|cell| {
@@ -26558,14 +26635,83 @@ fn preview_object_com_ungrab(
             scope.set_fixed_velocity(FixedVec2::ZERO);
         }
     });
+    if !close_object_menu(actor, false) {
+        return Ok(false);
+    }
     let target_value = target.map(object_reference_value).unwrap_or(Value::Nil);
     let _ = call_object_own_fail_safe(actor, "Grab", &[target_value, Value::Bool(false)]);
-    if let Some(target) = target.filter(|target| object_is_present(*target)) {
-        let _ = call_object_own_fail_safe(
-            target,
-            "Grabbed",
-            &[object_reference_value(actor), Value::Bool(false)],
+    if object_has_status(actor) {
+        if let Some(target) = target.filter(|target| object_has_status(*target)) {
+            let _ = call_object_own_fail_safe(
+                target,
+                "Grabbed",
+                &[object_reference_value(actor), Value::Bool(false)],
+            );
+        }
+    }
+    Ok(true)
+}
+
+/// Synchronous ObjectActionThrow twin for script ExecuteCommand. Force and
+/// facing are frozen before SetAction callbacks; position/shape and the Exit
+/// callbacks are observed afterward (C4ObjectCom.cpp:120-137).
+fn preview_object_action_throw(
+    actor: ObjectId,
+    object: ObjectId,
+) -> Result<bool, RuntimeError> {
+    let prepared = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        if !context.ensure_object_scope(actor) || !context.ensure_object_scope(object) {
+            return None;
+        }
+        let actor_state = context.get_world_object(actor)?;
+        if !actor_state.is_present() {
+            return None;
+        }
+        let actor_scope = context.object_scope(actor)?;
+        let throw_force = crate::math::val_by_physical(
+            400,
+            actor_scope.resolved_physical(false).throw,
         );
+        let direction = if actor_scope.current_direction == Direction::Left {
+            -1
+        } else {
+            1
+        };
+        Some((throw_force, direction))
+    });
+    let Some((throw_force, direction)) = prepared else {
+        return Ok(false);
+    };
+    if !native_set_action_by_name(actor, "Throw")? {
+        return Ok(false);
+    }
+
+    // ObjectActionThrow consumes the synced rotation only after SetAction
+    // succeeds, even if callbacks removed the carried object before Exit.
+    let rotation = draw_context_random(360)?;
+    let exit = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let actor_position = context.object_scope(actor)?.effective_position();
+        let shape_top = live_object_bounds_shape(context, actor)
+            .map(|shape| shape.y)
+            .unwrap_or(0);
+        Some(Vector2::new(
+            actor_position.x,
+            actor_position.y.wrapping_add(shape_top).wrapping_sub(1),
+        ))
+    });
+    if let Some(position) = exit {
+        let _ = exit_object_at_position_with_full_motion_and_calls(
+            object,
+            position,
+            rotation,
+            FixedVec2::new(throw_force * direction, -throw_force),
+            throw_force * direction,
+            true,
+        )?;
     }
     Ok(true)
 }
@@ -26688,6 +26834,384 @@ fn preview_object_com_drop(actor: ObjectId, object: ObjectId) -> Result<bool, Ru
     Ok(true)
 }
 
+enum PreviewObjectComPutGate {
+    Reject,
+    Drop,
+    Put,
+}
+
+/// Synchronous ObjectComPut twin for script ExecuteCommand. The Enter
+/// callbacks and Put/Collection tail must be visible before the next script
+/// instruction, and its result must not resolve an unrelated outer Put.
+fn preview_object_com_put(
+    actor: ObjectId,
+    target: ObjectId,
+    object: ObjectId,
+) -> Result<bool, RuntimeError> {
+    let gate = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return PreviewObjectComPutGate::Reject;
+        };
+        let Some(actor_state) = context.get_world_object(actor) else {
+            return PreviewObjectComPutGate::Reject;
+        };
+        let Some(target_state) = context.get_world_object(target) else {
+            return PreviewObjectComPutGate::Reject;
+        };
+        if !actor_state.is_present()
+            || !target_state.is_present()
+            || !actor_state.contents().contains(&object)
+        {
+            return PreviewObjectComPutGate::Reject;
+        }
+        let target_metadata = context
+            .object_effective_definition_id(target)
+            .and_then(|id| context.definition_metadata(&id));
+        let actor_container = actor_state.container();
+        let grab_put = target_metadata
+            .is_some_and(|metadata| metadata.grab_put_get & crate::GRAB_PUT_GET_PUT != 0);
+        if actor_container != Some(target) && !grab_put {
+            let down_double = context
+                .player_state(actor_state.owner)
+                .is_some_and(|player| player.control.last_com_down_double != 0);
+            return if down_double {
+                PreviewObjectComPutGate::Drop
+            } else {
+                PreviewObjectComPutGate::Reject
+            };
+        }
+        let target_ocf = context
+            .object_scope(target)
+            .map(ObjectScopeContext::ocf)
+            .unwrap_or_else(|| target_state.ocf());
+        if target_ocf & ocf::FULL_CON == 0 {
+            return PreviewObjectComPutGate::Reject;
+        }
+        let collection_limit = target_metadata.map_or(0, |metadata| metadata.collection_limit);
+        if collection_limit > 0
+            && target_state.contents().len() >= collection_limit as usize
+        {
+            return PreviewObjectComPutGate::Reject;
+        }
+        PreviewObjectComPutGate::Put
+    });
+
+    match gate {
+        PreviewObjectComPutGate::Reject => Ok(false),
+        PreviewObjectComPutGate::Drop => preview_object_com_drop(actor, object),
+        PreviewObjectComPutGate::Put => {
+            if !enter_object_live_with_reject_collect(object, target)? {
+                return Ok(false);
+            }
+            let _ = call_object_own_fail_safe(actor, "Put", &[]);
+            let _ = call_object_own_fail_safe(
+                target,
+                "Collection",
+                &[object_reference_value(object), Value::Bool(true)],
+            );
+            Ok(true)
+        }
+    }
+}
+
+struct PreviewInternalObjectMenuSource;
+
+impl crate::direct_com::InternalObjectMenuSource for PreviewInternalObjectMenuSource {
+    type Error = RuntimeError;
+
+    fn current_menu(&self, object: ObjectId) -> Option<crate::ObjectMenuState> {
+        HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.object_menu(object))
+        })
+    }
+
+    fn object(
+        &self,
+        object: ObjectId,
+    ) -> Option<crate::direct_com::InternalObjectMenuObject> {
+        HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            let object_state = context.get_world_object(object)?;
+            let definition_id = object_state.definition_id().to_string();
+            let name = context
+                .object_custom_name(object)
+                .or_else(|| {
+                    context
+                        .object_scope(object)
+                        .and_then(ObjectScopeContext::info_core)
+                        .map(|info| info.name.clone())
+                })
+                .or_else(|| {
+                    context
+                        .world
+                        .crew_infos
+                        .get(&object)
+                        .map(|info| info.name.clone())
+                })
+                .or_else(|| {
+                    context
+                        .definition_metadata(&definition_id)
+                        .map(|definition| definition.name.clone())
+                })
+                .unwrap_or_else(|| definition_id.clone());
+            let contents_link_generation = context
+                .object_scope(object)
+                .map(|scope| scope.current_contents_link_generation)
+                .or_else(|| {
+                    object_state
+                        .full_state()
+                        .map(|state| state.contents_link_generation)
+                })
+                .unwrap_or(0);
+            Some(crate::direct_com::InternalObjectMenuObject {
+                id: object,
+                contents_link_generation,
+                definition_id,
+                name,
+                category: object_state.category(),
+                ocf: object_state.ocf(),
+                contents: object_state.contents().to_vec(),
+                active: object_state.status() != ObjectStatus::Deleted,
+            })
+        })
+    }
+
+    fn definition(
+        &self,
+        definition: &str,
+    ) -> Option<crate::direct_com::InternalObjectMenuDefinition> {
+        HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            let metadata = context.definition_metadata(definition)?;
+            Some(crate::direct_com::InternalObjectMenuDefinition {
+                name: metadata.name.clone(),
+                description: context
+                    .world
+                    .definition_description(definition)
+                    .unwrap_or_default()
+                    .to_string(),
+                no_get: metadata.fire.no_get,
+                collection_limit: u32::try_from(metadata.collection_limit)
+                    .ok()
+                    .unwrap_or(0),
+            })
+        })
+    }
+
+    fn can_concat_picture_with(&self, object: ObjectId, other: ObjectId) -> bool {
+        HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|context| {
+                    context.internal_menu_can_concat_picture_with(object, other)
+                })
+        })
+    }
+
+    fn activate_value(
+        &mut self,
+        command_object: ObjectId,
+        object: ObjectId,
+        container: ObjectId,
+        menu_before_value: &crate::ObjectMenuState,
+    ) -> Result<i32, Self::Error> {
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                context.set_object_menu(command_object, Some(menu_before_value.clone()));
+            }
+        });
+        let value = get_value(&[
+            object_reference_value(object),
+            Value::Int(0),
+            object_reference_value(container),
+            Value::Int(OWNER_NONE),
+        ]);
+        match value {
+            Ok(value) => Ok(value.as_c4_int().unwrap_or(0)),
+            Err(error) => {
+                tracing::error!(%error, "script error in Activate-menu GetValue; continuing");
+                Ok(0)
+            }
+        }
+    }
+
+    fn reject_collection(
+        &mut self,
+        command_object: ObjectId,
+        object: ObjectId,
+        menu_before_call: &crate::ObjectMenuState,
+    ) -> Result<bool, Self::Error> {
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                context.set_object_menu(command_object, Some(menu_before_call.clone()));
+            }
+        });
+        let definition_id = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.get_world_object(object))
+                .map(|object| object.definition_id().to_string())
+        });
+        let Some(definition_id) = definition_id else {
+            return Ok(false);
+        };
+        Ok(call_object_own_fail_safe(
+            command_object,
+            "RejectCollect",
+            &[Value::C4Id(definition_id), object_reference_value(object)],
+        )
+        .as_bool())
+    }
+}
+
+/// Run the callbackful half of an internal Activate/Get menu in the live VM
+/// scope, including SetRefillObject's immediate full refill. No HOST_CONTEXT
+/// borrow is held while the Activate builder calls GetValue/CalcValue.
+fn preview_prepare_put_take_menu(request: MenuRequest) -> bool {
+    let prepared = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let target = match &request.kind {
+            MenuRequestKind::Activate => context
+                .get_world_object(request.crew_id)
+                .and_then(|object| object.container()),
+            MenuRequestKind::Get { container } => Some(*container),
+            _ => None,
+        }?;
+        let reused_menu_identity = context
+            .object_menu(request.crew_id)
+            .map(|menu| menu.internal_refill_token)
+            .filter(|identity| *identity != 0);
+        Some((
+            target,
+            if matches!(&request.kind, MenuRequestKind::Activate) {
+                6
+            } else {
+                13
+            },
+            reused_menu_identity,
+        ))
+    });
+    let Some((target, identification, reused_menu_identity)) = prepared else {
+        return false;
+    };
+    let _ = close_object_menu(request.crew_id, true);
+    if call_object_own_fail_safe(target, "RejectContents", &[]).as_bool() {
+        return false;
+    }
+    let menu = match identification {
+        6 => crate::direct_com::build_activate_menu_state(
+            &mut PreviewInternalObjectMenuSource,
+            request.crew_id,
+            target,
+            false,
+            reused_menu_identity,
+        ),
+        13 => crate::direct_com::build_container_contents_menu_state(
+            &mut PreviewInternalObjectMenuSource,
+            request.crew_id,
+            target,
+            13,
+            false,
+            reused_menu_identity,
+        ),
+        _ => unreachable!("PutTake only opens Activate/Get menus"),
+    };
+    let Ok(Some(menu)) = menu else {
+        return false;
+    };
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        context.set_object_menu(request.crew_id, Some(menu))
+    })
+}
+
+enum PreviewObjectComPutTakeOutcome {
+    Finished,
+    NeedsGet(ObjectId),
+}
+
+/// Synchronous script-host half of ObjectComPutTake. Item transfers run
+/// entirely in the live VM scope. Internal menu construction continues
+/// through the established menu-request fold, while command completion is
+/// still resolved before ExecuteCommand returns.
+fn preview_object_com_put_take(
+    actor: ObjectId,
+    target: ObjectId,
+    requested_item: Option<ObjectId>,
+) -> Result<PreviewObjectComPutTakeOutcome, RuntimeError> {
+    let prepared = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let actor_state = context.get_world_object(actor)?;
+        let target_state = context.get_world_object(target)?;
+        if !actor_state.is_present() || !target_state.is_present() {
+            return None;
+        }
+        let (item, needs_get) = match requested_item {
+            Some(item) if actor_state.contents().contains(&item) => (Some(item), None),
+            Some(item)
+                if context
+                    .get_world_object(item)
+                    .is_some_and(|object| object.is_present()) =>
+            {
+                (None, Some(item))
+            }
+            Some(_) | None => (actor_state.contents().first().copied(), None),
+        };
+        let grab_get = context
+            .object_effective_definition_id(target)
+            .and_then(|id| context.definition_metadata(&id))
+            .is_some_and(|metadata| metadata.grab_put_get & crate::GRAB_PUT_GET_GET != 0);
+        Some((
+            item,
+            actor_state.container(),
+            actor_state.controller(),
+            actor_state.owner,
+            grab_get,
+            needs_get,
+        ))
+    });
+    let Some((item, container, controller, owner, grab_get, needs_get)) = prepared else {
+        return Ok(PreviewObjectComPutTakeOutcome::Finished);
+    };
+    if let Some(item) = needs_get {
+        return Ok(PreviewObjectComPutTakeOutcome::NeedsGet(item));
+    };
+    if let Some(item) = item {
+        let _ = preview_object_com_put(actor, target, item)?;
+        return Ok(PreviewObjectComPutTakeOutcome::Finished);
+    }
+
+    let request = if container == Some(target) {
+        Some(MenuRequest {
+            crew_id: actor,
+            owner: controller,
+            kind: MenuRequestKind::Activate,
+        })
+    } else if grab_get {
+        Some(MenuRequest {
+            crew_id: actor,
+            owner,
+            kind: MenuRequestKind::Get { container: target },
+        })
+    } else {
+        None
+    };
+    if let Some(request) = request {
+        let _ = preview_prepare_put_take_menu(request);
+    }
+    Ok(PreviewObjectComPutTakeOutcome::Finished)
+}
+
 fn preview_object_com_stop(actor: ObjectId) -> Result<(), RuntimeError> {
     let _ = native_set_action_by_name(actor, "Idle")?;
     HOST_CONTEXT.with(|cell| {
@@ -26743,20 +27267,21 @@ fn preview_move_to_stop(actor: ObjectId) -> Result<(), RuntimeError> {
             base_sell_enabled: context.world.base_sell_enabled,
             transfer_zones: &transfers,
         };
-        let Some(scope) = context.object_scope_mut(actor) else {
-            return Vec::new();
-        };
-        let Some(mut result) = scope
-            .live_commands
-            .execute_pending_move_to_stop(&runtime)
+        let Some(mut result) = context
+            .object_scope_mut(actor)
+            .and_then(|scope| scope.live_commands.execute_pending_move_to_stop(&runtime))
         else {
             return Vec::new();
         };
-        scope.command_stack_replaced = true;
-        if let Some(update) = result.update.take() {
-            scope.stage_command_update(update);
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_stack_replaced = true;
         }
-        scope.command_count = scope.live_commands.len();
+        if let Some(update) = result.update.take() {
+            context.stage_object_command_update(actor, update);
+        }
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_count = scope.live_commands.len();
+        }
         result.events
     });
 
@@ -26881,6 +27406,300 @@ fn preview_build_stop(actor: ObjectId) -> Result<(), RuntimeError> {
                     }
                 });
             }
+        }
+    }
+    Ok(())
+}
+
+fn preview_resolve_put_take_attempt(
+    actor_id: ObjectId,
+    target_id: ObjectId,
+    requested_item: Option<ObjectId>,
+    command: CommandId,
+    command_instance_id: u64,
+) -> Result<(), RuntimeError> {
+    let outcome = preview_object_com_put_take(actor_id, target_id, requested_item)?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        let Some(scope) = context.object_scope_mut(actor_id) else {
+            return;
+        };
+        match outcome {
+            PreviewObjectComPutTakeOutcome::Finished => match command {
+                CommandId::Throw => {
+                    scope
+                        .live_commands
+                        .finish_pending_throw(command_instance_id);
+                }
+                CommandId::Drop => {
+                    scope
+                        .live_commands
+                        .finish_pending_drop(command_instance_id);
+                }
+                _ => debug_assert!(false, "ObjectComPutTake must come from Throw/Drop"),
+            },
+            PreviewObjectComPutTakeOutcome::NeedsGet(item) => {
+                if scope
+                    .live_commands
+                    .clear_pending_put_take(command, command_instance_id)
+                {
+                    let _ = scope.live_commands.push_front(
+                        CommandRequest::new(CommandId::Get)
+                            .with_target(Some(item))
+                            .with_update_interval(40)
+                            .with_mode(CommandMode::SilentSub),
+                    );
+                }
+            }
+        }
+        scope.command_stack_replaced = true;
+        scope.command_count = scope.live_commands.len();
+    });
+    Ok(())
+}
+
+fn preview_resolve_throw_attempt(
+    actor_id: ObjectId,
+    object_id: ObjectId,
+    complete_on_success: bool,
+    command_instance_id: u64,
+) -> Result<(), RuntimeError> {
+    let success = preview_object_action_throw(actor_id, object_id)?;
+    if success || !complete_on_success {
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(scope) = borrow
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(actor_id))
+            else {
+                return;
+            };
+            scope
+                .live_commands
+                .finish_command_instance(CommandId::Throw, command_instance_id);
+            scope.command_stack_replaced = true;
+            scope.command_count = scope.live_commands.len();
+        });
+    }
+    Ok(())
+}
+
+fn preview_resume_throw_after_prelude(
+    actor: ObjectId,
+    command_instance_id: u64,
+) -> Vec<CommandEvent> {
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Vec::new();
+        };
+        let (objects, players, definitions, transfers) = context.command_runtime_data();
+        let Some(object_snapshot) = objects.get(&actor) else {
+            return Vec::new();
+        };
+        let landscape = context.world.landscape.clone();
+        let runtime = CommandRuntimeContext {
+            rng: None,
+            frame: context.world.frame,
+            position: object_snapshot.position,
+            landscape: landscape.as_deref(),
+            object: object_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: context.world.structures_need_energy,
+            base_buy_enabled: context.world.base_buy_enabled,
+            base_sell_enabled: context.world.base_sell_enabled,
+            transfer_zones: &transfers,
+        };
+        let gravity = PHYSICS_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|context| fixed100(context.gravity()) / 5)
+                .unwrap_or_else(|| PhysicsSettings::default().gravity_as_c4fixed())
+        });
+        let Some(mut result) = context.object_scope_mut(actor).and_then(|scope| {
+            scope.live_commands.execute_pending_throw_prelude(
+                &runtime,
+                gravity,
+                command_instance_id,
+            )
+        })
+        else {
+            return Vec::new();
+        };
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_stack_replaced = true;
+        }
+        if let Some(update) = result.update.take() {
+            context.stage_object_command_update(actor, update);
+        }
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_count = scope.live_commands.len();
+        }
+        result.events
+    })
+}
+
+fn preview_resume_drop_after_prelude(
+    actor: ObjectId,
+    command_instance_id: u64,
+) -> Vec<CommandEvent> {
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Vec::new();
+        };
+        let (objects, players, definitions, transfers) = context.command_runtime_data();
+        let Some(object_snapshot) = objects.get(&actor) else {
+            return Vec::new();
+        };
+        let landscape = context.world.landscape.clone();
+        let runtime = CommandRuntimeContext {
+            rng: None,
+            frame: context.world.frame,
+            position: object_snapshot.position,
+            landscape: landscape.as_deref(),
+            object: object_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: context.world.structures_need_energy,
+            base_buy_enabled: context.world.base_buy_enabled,
+            base_sell_enabled: context.world.base_sell_enabled,
+            transfer_zones: &transfers,
+        };
+        let Some(mut result) = context.object_scope_mut(actor).and_then(|scope| {
+            scope
+                .live_commands
+                .execute_pending_drop_prelude(&runtime, command_instance_id)
+        })
+        else {
+            return Vec::new();
+        };
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_stack_replaced = true;
+        }
+        if let Some(update) = result.update.take() {
+            context.stage_object_command_update(actor, update);
+        }
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_count = scope.live_commands.len();
+        }
+        result.events
+    })
+}
+
+fn preview_command_prelude(initial: CommandEvent) -> Result<(), RuntimeError> {
+    let actor = match &initial {
+        CommandEvent::ObjectComStopThrow { object_id, .. }
+        | CommandEvent::ObjectComSetDirThrow { object_id, .. }
+        | CommandEvent::ObjectComStopDrop { object_id, .. } => *object_id,
+        _ => return Ok(()),
+    };
+    let mut events = VecDeque::from([initial]);
+    while let Some(event) = events.pop_front() {
+        let resumed = match event {
+            CommandEvent::ObjectComStopThrow {
+                object_id,
+                command_instance_id,
+            } => {
+                preview_object_com_stop(object_id)?;
+                preview_resume_throw_after_prelude(object_id, command_instance_id)
+            }
+            CommandEvent::ObjectComSetDirThrow {
+                object_id,
+                direction,
+                command_instance_id,
+            } => {
+                native_set_dir(object_id, direction)?;
+                preview_resume_throw_after_prelude(object_id, command_instance_id)
+            }
+            CommandEvent::ObjectComStopDrop {
+                object_id,
+                command_instance_id,
+            } => {
+                preview_object_com_stop(object_id)?;
+                preview_resume_drop_after_prelude(object_id, command_instance_id)
+            }
+            CommandEvent::ObjectComPutTake {
+                actor_id,
+                target_id,
+                requested_item,
+                command,
+                command_instance_id,
+            } => {
+                preview_resolve_put_take_attempt(
+                    actor_id,
+                    target_id,
+                    requested_item,
+                    command,
+                    command_instance_id,
+                )?;
+                Vec::new()
+            }
+            CommandEvent::ObjectComDrop {
+                actor_id,
+                object_id,
+                command_instance_id,
+            } => {
+                let _ = preview_object_com_drop(actor_id, object_id)?;
+                HOST_CONTEXT.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    let Some(scope) = borrow
+                        .as_mut()
+                        .and_then(|context| context.object_scope_mut(actor_id))
+                    else {
+                        return;
+                    };
+                    scope
+                        .live_commands
+                        .finish_pending_drop(command_instance_id);
+                    scope.command_stack_replaced = true;
+                    scope.command_count = scope.live_commands.len();
+                });
+                Vec::new()
+            }
+            CommandEvent::ThrowObject {
+                actor_id,
+                object_id,
+                complete_command_on_success,
+                command_instance_id,
+            } => {
+                preview_resolve_throw_attempt(
+                    actor_id,
+                    object_id,
+                    complete_command_on_success,
+                    command_instance_id,
+                )?;
+                Vec::new()
+            }
+            CommandEvent::FailureFeedback { actor_id, feedback } => {
+                preview_command_failure_feedback(actor_id, feedback)?;
+                Vec::new()
+            }
+            other => {
+                HOST_CONTEXT.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    let Some(context) = borrow.as_mut() else {
+                        return;
+                    };
+                    context.pending_command_events.push(other.clone());
+                    if let Some(scope) = context.object_scope_mut(actor) {
+                        scope.queued_commands.push(
+                            QueuedCommand::immediate(ObjectUpdate::default())
+                                .with_events(vec![other]),
+                        );
+                    }
+                });
+                Vec::new()
+            }
+        };
+        for event in resumed.into_iter().rev() {
+            events.push_front(event);
         }
     }
     Ok(())
@@ -27525,6 +28344,10 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
         sell_attempts,
         grab_attempts,
         drop_attempts,
+        ungrab_attempts,
+        put_take_attempts,
+        throw_attempts,
+        throw_preludes,
         entrance_attempts,
         failure_feedback,
         move_to_stops,
@@ -27538,6 +28361,10 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
         || !sell_attempts.is_empty()
         || !grab_attempts.is_empty()
         || !drop_attempts.is_empty()
+        || !ungrab_attempts.is_empty()
+        || !put_take_attempts.is_empty()
+        || !throw_attempts.is_empty()
+        || !throw_preludes.is_empty()
         || !entrance_attempts.is_empty()
         || !failure_feedback.is_empty()
         || !move_to_stops.is_empty()
@@ -27582,14 +28409,56 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
             preview_command_failure_feedback(actor_id, feedback)?;
         }
     }
-    for (actor_id, object_id) in drop_attempts {
+    for (actor_id, object_id, command_instance_id) in drop_attempts {
         let _ = preview_object_com_drop(actor_id, object_id)?;
         HOST_CONTEXT.with(|cell| {
             cell.borrow_mut()
                 .as_mut()
                 .and_then(|context| context.object_scope_mut(actor_id))
-            .map(|scope| scope.live_commands.finish_pending_drop())
+            .map(|scope| {
+                scope
+                    .live_commands
+                    .finish_pending_drop(command_instance_id)
+            })
         });
+    }
+    for (actor_id, command_instance_id) in ungrab_attempts {
+        let _ = preview_object_com_ungrab(actor_id, false)?;
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(scope) = borrow
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(actor_id))
+            else {
+                return;
+            };
+            scope.set_command_direction(CommandDirection::Stop);
+            scope
+                .live_commands
+                .finish_command_instance(CommandId::UnGrab, command_instance_id);
+            scope.command_stack_replaced = true;
+            scope.command_count = scope.live_commands.len();
+        });
+    }
+    for (actor_id, target_id, requested_item, command, command_instance_id) in put_take_attempts {
+        preview_resolve_put_take_attempt(
+            actor_id,
+            target_id,
+            requested_item,
+            command,
+            command_instance_id,
+        )?;
+    }
+    for (actor_id, object_id, complete_on_success, command_instance_id) in throw_attempts {
+        preview_resolve_throw_attempt(
+            actor_id,
+            object_id,
+            complete_on_success,
+            command_instance_id,
+        )?;
+    }
+    for event in throw_preludes {
+        preview_command_prelude(event)?;
     }
     for (object_id, caller, on_result) in entrance_attempts {
         let detached_feedback = matches!(
@@ -29255,6 +30124,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
+                allow_picture_stack: 0,
                 mass: 0,
                 no_component_mass: false,
                 constructable: false,
@@ -29671,9 +30541,10 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                 crew_member: false,
                 silent_commands: false,
                 vehicle_control: 0,
-                action_library: ActionLibrary::default(),
+                    action_library: ActionLibrary::default(),
                     action_graphics: HashMap::new(),
                     value: 0,
+                    allow_picture_stack: 0,
                     mass: 0,
                     no_component_mass: false,
                     constructable: false,
@@ -30752,6 +31623,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
+                allow_picture_stack: 0,
                 mass: 0,
                 no_component_mass: false,
                 constructable: true,
@@ -37396,6 +38268,8 @@ impl EffectHostContext {
                     scope.current_mobile = state.mobile;
                     scope.current_t_attach = state.t_attach;
                     scope.current_contact_density = state.contact_density;
+                    scope.current_contents_link_generation =
+                        state.contents_link_generation;
                     scope.current_plr_view_range = state.plr_view_range;
                     scope.walk_rotation.t_attach = state.t_attach;
                 }
@@ -37924,6 +38798,18 @@ impl EffectHostContext {
     }
 
     fn get_world_object(&self, id: ObjectId) -> Option<HostWorldObject> {
+        self.get_world_object_preserving_contents_link(id, None)
+    }
+
+    /// Overlay one live object while optionally retaining one raw contents
+    /// link whose child has already reached Status=0. AssignRemoval marks the
+    /// child dead before `pCont->Contents.Remove(this)`, but registered C++
+    /// iterators still observe that link at the later Remove call.
+    fn get_world_object_preserving_contents_link(
+        &self,
+        id: ObjectId,
+        preserved_child: Option<ObjectId>,
+    ) -> Option<HostWorldObject> {
         let mut object = if let Some(object) = self.pending_objects.get(&id) {
             object.clone()
         } else {
@@ -38026,9 +38912,10 @@ impl EffectHostContext {
                     && self
                         .object_scope(*child_id)
                         .map(|scope| {
-                            !scope.destroy
-                                && scope.status.is_active()
-                                && scope.current_container == Some(id)
+                            scope.current_container == Some(id)
+                                && (preserved_child == Some(*child_id)
+                                    || (!scope.destroy
+                                        && scope.status() != ObjectStatus::Deleted))
                         })
                         .unwrap_or(true)
             });
@@ -38042,14 +38929,18 @@ impl EffectHostContext {
             .filter(|scope| {
                 scope.current_container == Some(id)
                     && !scope.destroy
-                    && scope.status.is_active()
+                    && scope.status() != ObjectStatus::Deleted
                     && !self.unlinked_content_links.contains(&(id, scope.id))
                     && !object.contents.contains(&scope.id)
             })
             .map(|scope| scope.id)
             .collect();
         for child in entered {
-            let position = self.contents_insert_position(&object.contents, child);
+            let position = self.contents_insert_position(
+                &object.contents,
+                child,
+                preserved_child,
+            );
             object.contents.insert(position, child);
         }
         if let Some(new_front) = self
@@ -38339,7 +39230,11 @@ impl EffectHostContext {
         Vec<(ObjectId, ObjectId, DefinitionId, i32, i32, i32)>,
         Vec<(ObjectId, ObjectId, DefinitionId, Option<ObjectId>, i32)>,
         Vec<(ObjectId, ObjectId)>,
-        Vec<(ObjectId, ObjectId)>,
+        Vec<(ObjectId, ObjectId, u64)>,
+        Vec<(ObjectId, u64)>,
+        Vec<(ObjectId, ObjectId, Option<ObjectId>, CommandId, u64)>,
+        Vec<(ObjectId, ObjectId, bool, u64)>,
+        Vec<CommandEvent>,
         Vec<(ObjectId, ObjectId, Option<CallResultAction>)>,
         Vec<(ObjectId, CommandFailureFeedback)>,
         Vec<ObjectId>,
@@ -38370,7 +39265,7 @@ impl EffectHostContext {
                 .unwrap_or_else(|| PhysicsSettings::default().gravity_as_c4fixed())
         });
 
-        let (mut events, finished) = {
+        let (mut events, finished, update) = {
             let scope = self.object_scope_mut(target)?;
             let result = scope
                 .live_commands
@@ -38379,21 +39274,27 @@ impl EffectHostContext {
                 scope.command_stack_replaced = true;
             }
             let mut events = Vec::new();
+            let mut update = None;
             if let Some(mut result) = result {
-                if let Some(update) = result.update.take() {
-                    scope.stage_command_update(update);
-                }
+                update = result.update.take();
                 events = result.events;
             }
             scope.command_count = scope.live_commands.len();
-            (events, scope.live_commands.finished_front_view())
+            (events, scope.live_commands.finished_front_view(), update)
         };
+        if let Some(update) = update {
+            self.stage_object_command_update(target, update);
+        }
 
         let mut deferred_events = Vec::new();
         let mut buy_attempts = Vec::new();
         let mut sell_attempts = Vec::new();
         let mut grab_attempts = Vec::new();
         let mut drop_attempts = Vec::new();
+        let mut ungrab_attempts = Vec::new();
+        let mut put_take_attempts = Vec::new();
+        let mut throw_attempts = Vec::new();
+        let mut throw_preludes = Vec::new();
         let mut entrance_attempts = Vec::new();
         let mut failure_feedback = Vec::new();
         let mut move_to_stops = Vec::new();
@@ -38451,7 +39352,41 @@ impl EffectHostContext {
                 CommandEvent::ObjectComDrop {
                     actor_id,
                     object_id,
-                } => drop_attempts.push((actor_id, object_id)),
+                    command_instance_id,
+                } => drop_attempts.push((actor_id, object_id, command_instance_id)),
+                CommandEvent::ObjectComUnGrabCommand {
+                    actor_id,
+                    command_instance_id,
+                } => ungrab_attempts.push((actor_id, command_instance_id)),
+                CommandEvent::ObjectComPutTake {
+                    actor_id,
+                    target_id,
+                    requested_item,
+                    command,
+                    command_instance_id,
+                } => put_take_attempts.push((
+                    actor_id,
+                    target_id,
+                    requested_item,
+                    command,
+                    command_instance_id,
+                )),
+                CommandEvent::ThrowObject {
+                    actor_id,
+                    object_id,
+                    complete_command_on_success,
+                    command_instance_id,
+                } => throw_attempts.push((
+                    actor_id,
+                    object_id,
+                    complete_command_on_success,
+                    command_instance_id,
+                )),
+                event @ (CommandEvent::ObjectComStopThrow { .. }
+                | CommandEvent::ObjectComSetDirThrow { .. }
+                | CommandEvent::ObjectComStopDrop { .. }) => {
+                    throw_preludes.push(event);
+                }
                 CommandEvent::ActivateEntrance {
                     object_id,
                     caller,
@@ -38488,6 +39423,10 @@ impl EffectHostContext {
             sell_attempts,
             grab_attempts,
             drop_attempts,
+            ungrab_attempts,
+            put_take_attempts,
+            throw_attempts,
+            throw_preludes,
             entrance_attempts,
             failure_feedback,
             move_to_stops,
@@ -38560,13 +39499,93 @@ impl EffectHostContext {
             .unwrap_or(false)
     }
 
+    fn contents_link_generation(&self, id: ObjectId) -> u64 {
+        self.object_scope(id)
+            .map(|scope| scope.current_contents_link_generation)
+            .or_else(|| {
+                self.get_world_object(id)
+                    .and_then(|object| object.full_state().cloned())
+                    .map(|state| state.contents_link_generation)
+            })
+            .unwrap_or(0)
+    }
+
+    fn track_contents_link_removal(&self, container: ObjectId, child: ObjectId) {
+        let Some(contents) = self
+            .get_world_object_preserving_contents_link(container, Some(child))
+            .map(|object| object.contents().to_vec())
+        else {
+            return;
+        };
+        let Some(position) = contents.iter().position(|candidate| *candidate == child) else {
+            return;
+        };
+        let successor = contents
+            .get(position + 1)
+            .copied()
+            .map(|successor| (successor, self.contents_link_generation(successor)));
+        crate::direct_com::track_internal_object_menu_link_removal(
+            container,
+            child,
+            self.contents_link_generation(child),
+            successor,
+        );
+    }
+
+    fn set_object_container_tracked(
+        &mut self,
+        child: ObjectId,
+        container: Option<ObjectId>,
+    ) -> bool {
+        let previous = match self.object_scope(child) {
+            Some(scope) => scope.container(),
+            None => self
+                .get_world_object(child)
+                .and_then(|object| object.container()),
+        };
+        if previous != container {
+            if let Some(previous) = previous {
+                self.track_contents_link_removal(previous, child);
+            }
+        }
+        let Some(scope) = self.object_scope_mut(child) else {
+            return false;
+        };
+        scope.set_container(container);
+        true
+    }
+
+    fn stage_object_command_update(&mut self, object: ObjectId, update: ObjectUpdate) {
+        if let Some(container) = update.container {
+            let previous = match self.object_scope(object) {
+                Some(scope) => scope.container(),
+                None => self
+                    .get_world_object(object)
+                    .and_then(|state| state.container()),
+            };
+            if previous != container {
+                if let Some(previous) = previous {
+                    self.track_contents_link_removal(previous, object);
+                }
+            }
+        }
+        if let Some(scope) = self.object_scope_mut(object) {
+            scope.stage_command_update(update);
+        }
+    }
+
     /// C4ObjectList::Add stContents sort-in (C4ObjectList.cpp:104-152):
     /// cluster with the first same-(SortLimit-category, id) entry, else
     /// before the first entry of lower-or-equal sort category; lines (and
     /// StaticBack children, which skip the cluster pass) fall through to
     /// the relative-category walk, lines append at the end. The
     /// engine-side twin is `Engine::contents_insert_position`.
-    fn contents_insert_position(&self, contents: &[ObjectId], child: ObjectId) -> usize {
+    fn contents_insert_position(
+        &self,
+        contents: &[ObjectId],
+        child: ObjectId,
+        preserved_child: Option<ObjectId>,
+    ) -> usize {
         let Some((category, definition_id)) = self.contents_sort_key(child) else {
             return contents.len();
         };
@@ -38583,7 +39602,8 @@ impl EffectHostContext {
         let mut found_cluster = false;
         if category & crate::CATEGORY_STATIC_BACK == 0 {
             for (position, &other) in contents.iter().enumerate() {
-                if !self.contents_object_is_present(other)
+                if (preserved_child != Some(other)
+                    && !self.contents_object_is_present(other))
                     || self.contents_object_unsorted(other)
                 {
                     continue;
@@ -38603,7 +39623,8 @@ impl EffectHostContext {
         if !found_cluster {
             predecessor = None;
             for (position, &other) in contents.iter().enumerate() {
-                if !self.contents_object_is_present(other)
+                if (preserved_child != Some(other)
+                    && !self.contents_object_is_present(other))
                     || self.contents_object_unsorted(other)
                 {
                     continue;
@@ -38720,6 +39741,7 @@ impl EffectHostContext {
     }
 
     fn unlink_content_for_removal(&mut self, parent: ObjectId, child: ObjectId) {
+        self.track_contents_link_removal(parent, child);
         self.unlinked_content_links.insert((parent, child));
     }
 
@@ -38945,6 +39967,7 @@ impl EffectHostContext {
         scope.current_mobile = state.mobile;
         scope.current_t_attach = state.t_attach;
         scope.current_contact_density = state.contact_density;
+        scope.current_contents_link_generation = state.contents_link_generation;
         scope.unsorted = object.unsorted;
         scope.staged_own_vertices = object.own_vertices;
         scope.walk_rotation.t_attach = state.t_attach;
@@ -39516,7 +40539,129 @@ impl EffectHostContext {
                         .or_else(|| self.world.crew_rank(target.as_u64()))
                 })
                 .flatten(),
-        })
+            })
+    }
+
+    /// Live C4Object::CanConcatPictureWith for internal menu refill rows.
+    /// The pending scope overlays make nested ExecuteCommand see the same
+    /// picture grouping as the ordinary Engine builder.
+    fn internal_menu_can_concat_picture_with(
+        &self,
+        object: ObjectId,
+        other: ObjectId,
+    ) -> bool {
+        let Some(object_picture) = self.object_menu_picture_snapshot(object, false, 0) else {
+            return false;
+        };
+        let Some(other_picture) = self.object_menu_picture_snapshot(other, false, 0) else {
+            return false;
+        };
+        if object_picture.definition_id != other_picture.definition_id {
+            return false;
+        }
+        let definition_id = object_picture.definition_id.as_str();
+        let Some(definition) = self.definition_metadata(definition_id) else {
+            return false;
+        };
+        let allowed = definition.allow_picture_stack;
+        if allowed & crate::APS_COLOR == 0 {
+            if self.world.definition_color_by_owner(definition_id)
+                && object_picture.color != other_picture.color
+            {
+                return false;
+            }
+            if object_picture.color_modulation != other_picture.color_modulation
+                || object_picture.blit_mode != other_picture.blit_mode
+            {
+                return false;
+            }
+        }
+        if allowed & crate::APS_GRAPHICS == 0 {
+            fn graphics_key(
+                picture: &crate::ObjectMenuPictureSnapshot,
+            ) -> (&str, Option<&str>) {
+                picture
+                    .base_graphics
+                    .as_ref()
+                    .map(|graphics| {
+                        (
+                            graphics.definition.as_str(),
+                            graphics.graphics_name.as_deref(),
+                        )
+                    })
+                    .unwrap_or((picture.definition_id.as_str(), None))
+            }
+            if graphics_key(&object_picture) != graphics_key(&other_picture)
+                || object_picture.picture_rect != other_picture.picture_rect
+            {
+                return false;
+            }
+        }
+        if allowed & crate::APS_NAME == 0 {
+            let object_name = self
+                .object_custom_name(object)
+                .or_else(|| {
+                    self.object_scope(object)
+                        .and_then(ObjectScopeContext::info_core)
+                        .map(|info| info.name.clone())
+                })
+                .or_else(|| self.world.crew_infos.get(&object).map(|info| info.name.clone()))
+                .unwrap_or_else(|| definition.name.clone());
+            let other_name = self
+                .object_custom_name(other)
+                .or_else(|| {
+                    self.object_scope(other)
+                        .and_then(ObjectScopeContext::info_core)
+                        .map(|info| info.name.clone())
+                })
+                .or_else(|| self.world.crew_infos.get(&other).map(|info| info.name.clone()))
+                .unwrap_or_else(|| definition.name.clone());
+            if object_name != other_name {
+                return false;
+            }
+        }
+        if allowed & crate::APS_OVERLAY == 0 {
+            let overlays_equal = |left: &ObjectGraphicsOverlay, right: &ObjectGraphicsOverlay| {
+                left.mode == right.mode
+                    && left.definition == right.definition
+                    && left.graphics_name == right.graphics_name
+                    && left.action == right.action
+                    && left.blit_mode == right.blit_mode
+                    && left.color_modulation == right.color_modulation
+                    && left.transform == right.transform
+                    && left.overlay_object == right.overlay_object
+            };
+            for overlay in object_picture
+                .graphics_overlays
+                .iter()
+                .filter(|overlay| overlay.mode == GraphicsOverlayMode::Picture)
+            {
+                let Some(other_overlay) = other_picture
+                    .graphics_overlays
+                    .iter()
+                    .find(|candidate| candidate.id == overlay.id)
+                else {
+                    return false;
+                };
+                if !overlays_equal(other_overlay, overlay) {
+                    return false;
+                }
+            }
+            for overlay in other_picture
+                .graphics_overlays
+                .iter()
+                .filter(|overlay| overlay.mode == GraphicsOverlayMode::Picture)
+            {
+                if !object_picture
+                    .graphics_overlays
+                    .iter()
+                    .any(|candidate| candidate.id == overlay.id)
+                {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Whether a nested call removed the object — the C++ Status re-check
@@ -40448,6 +41593,11 @@ struct ObjectScopeContext {
     /// changes every subsequent C4ObjectList::Add position in this call.
     unsorted: bool,
     current_container: Option<ObjectId>,
+    /// Parents whose concrete contents link was removed in this VM call.
+    /// Re-entering one of them must allocate a fresh link even if the final
+    /// `Contained` value equals the frame-start value.
+    removed_contents_links: HashSet<ObjectId>,
+    current_contents_link_generation: u64,
     /// Between Exit's raw contents unlink and its post-BoundsCheck tail,
     /// `Contained` is already null but the object's cached OCF and menu are
     /// deliberately still stale (C4Object.cpp:1549-1557).
@@ -40601,6 +41751,8 @@ impl ObjectScopeContext {
             id,
             unsorted: false,
             current_container: container,
+            removed_contents_links: HashSet::new(),
+            current_contents_link_generation: 0,
             exit_bounds_in_progress: false,
             status,
             effects: EffectScopeContext::new(effects),
@@ -41422,8 +42574,23 @@ impl ObjectScopeContext {
     }
 
     fn set_container(&mut self, container: Option<ObjectId>) {
-        if self.container() == container {
+        let previous = self.container();
+        if previous == container {
             return;
+        }
+        if let Some(previous) = previous {
+            self.removed_contents_links.insert(previous);
+        }
+        if let Some(container) = container {
+            self.current_contents_link_generation = self
+                .current_contents_link_generation
+                .checked_add(1)
+                .unwrap_or(1);
+            if self.removed_contents_links.contains(&container) {
+                // Reuse the established engine fold for a remove/re-add
+                // whose final Contained value otherwise collapses to a no-op.
+                self.pending_update.change_def_reinsert = true;
+            }
         }
         self.exit_bounds_in_progress = false;
         self.current_container = container;
@@ -49373,6 +50540,7 @@ func ProbeBadIndex(id) {
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
+                allow_picture_stack: 0,
                 mass: 0,
                 no_component_mass: false,
                 constructable: false,
@@ -49433,6 +50601,7 @@ func ProbeBadIndex(id) {
                 action_library: ActionLibrary::default(),
                     action_graphics: HashMap::new(),
                     value: 0,
+                    allow_picture_stack: 0,
                     mass: 0,
                     no_component_mass: false,
                     constructable: false,
@@ -49471,6 +50640,7 @@ func ProbeBadIndex(id) {
                 action_library: ActionLibrary::default(),
                     action_graphics: HashMap::new(),
                     value: 0,
+                    allow_picture_stack: 0,
                     mass: 0,
                     no_component_mass: false,
                     constructable: false,
@@ -49533,6 +50703,7 @@ func ProbeBadIndex(id) {
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
+                allow_picture_stack: 0,
                 mass: 0,
                 no_component_mass: false,
                 constructable: false,
@@ -49607,6 +50778,7 @@ func ProbeBadIndex(id) {
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
+                allow_picture_stack: 0,
                 mass: 0,
                 no_component_mass: false,
                 constructable: false,
@@ -49691,6 +50863,7 @@ func ProbeBadIndex(id) {
                 action_library: ActionLibrary::default(),
             action_graphics: HashMap::new(),
             value: 0,
+            allow_picture_stack: 0,
             mass: 0,
             no_component_mass: false,
             constructable: false,
@@ -50814,6 +51987,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
+                allow_picture_stack: 0,
                 mass: 0,
                 no_component_mass: false,
                 constructable: false,
@@ -50965,6 +52139,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
+                allow_picture_stack: 0,
                 mass: 0,
                 no_component_mass: false,
                 constructable: false,
@@ -51040,6 +52215,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
+                allow_picture_stack: 0,
                 mass: 0,
                 no_component_mass: false,
                 constructable: false,
@@ -60974,6 +62150,7 @@ public func SeedFull()
                 action_library: ActionLibrary::default(),
                 action_graphics: HashMap::new(),
                 value: 0,
+                allow_picture_stack: 0,
                 mass: 100,
                 no_component_mass: false,
                 constructable: true,
@@ -61194,6 +62371,7 @@ protected func Construction()
                 action_library: ActionLibrary::default(),
             action_graphics: HashMap::new(),
             value: 0,
+            allow_picture_stack: 0,
             mass: 100,
             no_component_mass: false,
             constructable: true,

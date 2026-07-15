@@ -5,6 +5,10 @@
 //! (C4ObjectCom.cpp). Coms are the raw C4Constants.h bytes (COM_Left=1 …)
 //! with the COM_Single/COM_Double/release modifiers.
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::action::ActionProcedure;
 use crate::command::{CommandData, CommandId, CommandMode, CommandOperation, CommandRequest};
 use crate::compat;
@@ -45,6 +49,1114 @@ const C4P_COMMAND_SET: i32 = 1;
 const C4P_COMMAND_ADD: i32 = 2;
 const C4P_COMMAND_APPEND: i32 = 4;
 const C4P_COMMAND_RANGE: i32 = 8;
+
+/// The live object data consumed by C4ObjectMenu's Activate/Get refill.
+/// Both the ordinary engine path and the reentrant script-host preview feed
+/// this same builder so nested ExecuteCommand observes the complete menu,
+/// including rows and selection, before it returns.
+#[derive(Clone)]
+pub(crate) struct InternalObjectMenuObject {
+    pub id: ObjectId,
+    /// Runtime identity of this object's current `C4ObjectList` contents
+    /// link. `Exit` followed by `Enter` creates a new link even when the
+    /// object and final list slot are unchanged.
+    pub contents_link_generation: u64,
+    pub definition_id: String,
+    /// Effective C4Object::GetName (CustomName -> crew info -> definition).
+    pub name: String,
+    pub category: i32,
+    pub ocf: u32,
+    pub contents: Vec<ObjectId>,
+    pub active: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct InternalObjectMenuDefinition {
+    pub name: String,
+    pub description: String,
+    pub no_get: bool,
+    pub collection_limit: u32,
+}
+
+pub(crate) trait InternalObjectMenuSource {
+    type Error;
+
+    fn current_menu(&self, object: ObjectId) -> Option<crate::ObjectMenuState>;
+    fn object(&self, object: ObjectId) -> Option<InternalObjectMenuObject>;
+    fn definition(&self, definition: &str) -> Option<InternalObjectMenuDefinition>;
+    fn can_concat_picture_with(&self, object: ObjectId, other: ObjectId) -> bool;
+    fn activate_value(
+        &mut self,
+        command_object: ObjectId,
+        object: ObjectId,
+        container: ObjectId,
+        menu_before_value: &crate::ObjectMenuState,
+    ) -> Result<i32, Self::Error>;
+    fn reject_collection(
+        &mut self,
+        command_object: ObjectId,
+        object: ObjectId,
+        menu_before_call: &crate::ObjectMenuState,
+    ) -> Result<bool, Self::Error>;
+}
+
+struct InternalObjectMenuPictureGroup {
+    representative: ObjectId,
+    count: i32,
+}
+
+fn internal_object_menu_picture_groups<S: InternalObjectMenuSource>(
+    source: &S,
+    contents: &[ObjectId],
+    category_mask: i32,
+) -> Vec<InternalObjectMenuPictureGroup> {
+    let links = internal_object_menu_links(source, contents);
+    let mut p_curr = InternalObjectMenuSafeCursor::before_start(None);
+    let mut p_curr_id = if links.is_empty() {
+        InternalObjectMenuSafeCursor::end(None)
+    } else {
+        InternalObjectMenuSafeCursor::at(&links, 0, None)
+    };
+    let mut groups = Vec::new();
+    while let Some((seed, count)) = internal_object_menu_iterator_next(
+        source,
+        &links,
+        &mut p_curr,
+        &mut p_curr_id,
+        category_mask,
+    ) {
+        let Some(seed_object) = source.object(seed) else {
+            continue;
+        };
+        let representative = if seed_object.ocf & crate::ocf::FULL_CON == 0 {
+            contents
+                .iter()
+                .filter_map(|candidate| source.object(*candidate))
+                .find(|candidate| {
+                    candidate.active
+                        && candidate.definition_id == seed_object.definition_id
+                        && candidate.ocf & crate::ocf::FULL_CON != 0
+                })
+                // Contents.Find returns once. Only that first full-con
+                // candidate is tested for picture concatenation.
+                .filter(|candidate| source.can_concat_picture_with(candidate.id, seed))
+                .map(|candidate| candidate.id)
+                .unwrap_or(seed)
+        } else {
+            seed
+        };
+        groups.push(InternalObjectMenuPictureGroup {
+            representative,
+            count,
+        });
+    }
+    groups
+}
+
+fn internal_live_contents_definition_count<S: InternalObjectMenuSource>(
+    source: &S,
+    contents: &[ObjectId],
+    definition_id: &str,
+) -> i32 {
+    let count = contents
+        .iter()
+        .filter_map(|candidate| source.object(*candidate))
+        .filter(|candidate| candidate.active && candidate.definition_id == definition_id)
+        .count();
+    i32::try_from(count).unwrap_or(i32::MAX)
+}
+
+fn internal_live_contents_count<S: InternalObjectMenuSource>(
+    source: &S,
+    contents: &[ObjectId],
+) -> i32 {
+    let count = contents
+        .iter()
+        .filter_map(|candidate| source.object(*candidate))
+        .filter(|candidate| candidate.active)
+        .count();
+    i32::try_from(count).unwrap_or(i32::MAX)
+}
+
+fn internal_refilled_object_menu_selection(
+    items: &[crate::ObjectMenuItem],
+    previous_selection: Option<i32>,
+    selected_definition: Option<&str>,
+) -> i32 {
+    if items.is_empty() {
+        return -1;
+    }
+    let mut desired = previous_selection.unwrap_or(-1);
+    if let (Some(previous), Some(selected)) = (previous_selection, selected_definition) {
+        if usize::try_from(previous)
+            .ok()
+            .and_then(|selection| items.get(selection))
+            .is_some_and(|item| item.item_id == selected)
+        {
+            desired = previous;
+        } else if let Some(selection) = items
+            .iter()
+            .position(|item| item.item_id == selected)
+            .and_then(|selection| i32::try_from(selection).ok())
+        {
+            desired = selection;
+        }
+    } else if let Some(selection) = selected_definition
+        .and_then(|selected| items.iter().position(|item| item.item_id == selected))
+        .and_then(|selection| i32::try_from(selection).ok())
+    {
+        desired = selection;
+    }
+    if usize::try_from(desired)
+        .ok()
+        .and_then(|selection| items.get(selection))
+        .is_some_and(|item| item.selectable)
+    {
+        return desired;
+    }
+
+    let mut below = desired.saturating_sub(1).min(
+        i32::try_from(items.len().saturating_sub(1)).unwrap_or(i32::MAX),
+    );
+    while below >= 0 {
+        if items
+            .get(usize::try_from(below).unwrap_or(usize::MAX))
+            .is_some_and(|item| item.selectable)
+        {
+            return below;
+        }
+        below -= 1;
+    }
+    let mut above = desired.saturating_add(1).max(0);
+    while let Some(item) = usize::try_from(above)
+        .ok()
+        .and_then(|selection| items.get(selection))
+    {
+        if item.selectable {
+            return above;
+        }
+        above = above.saturating_add(1);
+    }
+    -1
+}
+
+fn internal_object_menu_selected_definition(
+    menu: &crate::ObjectMenuState,
+) -> Option<String> {
+    usize::try_from(menu.selection)
+        .ok()
+        .and_then(|selection| menu.items.get(selection))
+        // C4ObjectMenu::checkIDSelection explicitly skips C4ID_None.
+        .filter(|item| item.item_id != "NONE")
+        .map(|item| item.item_id.clone())
+}
+
+fn activate_menu_state(
+    crew_id: ObjectId,
+    container_id: ObjectId,
+    container_definition_id: &str,
+    container_name: &str,
+    refill_object_contents_count: i32,
+    items: Vec<crate::ObjectMenuItem>,
+    selection: i32,
+) -> crate::ObjectMenuState {
+    crate::ObjectMenuState {
+        caption: format!("{} is empty.", container_name),
+        symbol_id: container_definition_id.to_string(),
+        title_symbol: crate::ObjectMenuSymbol::default(),
+        identification: Value::Int(6),
+        style: 0,
+        equal_item_height: false,
+        permanent: true,
+        extra: crate::ObjectMenuExtra::default(),
+        extra_data: 0,
+        internal_refill_token: 0,
+        selection,
+        user_menu: false,
+        command_object: Some(crew_id),
+        scenario_callbacks: false,
+        refill_object: Some(container_id),
+        refill_object_contents_count,
+        items,
+        columns: 5,
+        lines: 0,
+        text_progressing: false,
+        decoration: None,
+    }
+}
+
+static NEXT_INTERNAL_OBJECT_MENU_REFILL_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+fn next_internal_object_menu_refill_token() -> u64 {
+    loop {
+        let token = NEXT_INTERNAL_OBJECT_MENU_REFILL_TOKEN.fetch_add(1, Ordering::Relaxed);
+        if token != 0 {
+            return token;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct InternalObjectMenuLink {
+    object: ObjectId,
+    generation: u64,
+}
+
+struct InternalObjectMenuMutationTracker {
+    token: u64,
+    menu_object: ObjectId,
+    menu_identity: u64,
+    container: ObjectId,
+    removed_successors: HashMap<InternalObjectMenuLink, Option<InternalObjectMenuLink>>,
+}
+
+thread_local! {
+    static INTERNAL_OBJECT_MENU_MUTATION_TRACKERS: RefCell<Vec<InternalObjectMenuMutationTracker>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+struct InternalObjectMenuMutationGuard {
+    token: u64,
+}
+
+impl InternalObjectMenuMutationGuard {
+    fn begin(
+        token: u64,
+        menu_object: ObjectId,
+        menu_identity: u64,
+        container: ObjectId,
+    ) -> Self {
+        INTERNAL_OBJECT_MENU_MUTATION_TRACKERS.with(|trackers| {
+            trackers.borrow_mut().push(InternalObjectMenuMutationTracker {
+                token,
+                menu_object,
+                menu_identity,
+                container,
+                removed_successors: HashMap::new(),
+            });
+        });
+        Self { token }
+    }
+}
+
+fn internal_object_menu_has_enclosing_refill(
+    token: u64,
+    menu_object: ObjectId,
+    menu_identity: u64,
+) -> bool {
+    INTERNAL_OBJECT_MENU_MUTATION_TRACKERS.with(|trackers| {
+        trackers.borrow().iter().any(|tracker| {
+            tracker.token != token
+                && tracker.menu_object == menu_object
+                && tracker.menu_identity == menu_identity
+        })
+    })
+}
+
+impl Drop for InternalObjectMenuMutationGuard {
+    fn drop(&mut self) {
+        INTERNAL_OBJECT_MENU_MUTATION_TRACKERS.with(|trackers| {
+            let mut trackers = trackers.borrow_mut();
+            if let Some(index) = trackers
+                .iter()
+                .rposition(|tracker| tracker.token == self.token)
+            {
+                trackers.remove(index);
+            }
+        });
+    }
+}
+
+pub(crate) fn track_internal_object_menu_link_removal(
+    container: ObjectId,
+    object: ObjectId,
+    generation: u64,
+    successor: Option<(ObjectId, u64)>,
+) {
+    let link = InternalObjectMenuLink { object, generation };
+    let successor = successor.map(|(object, generation)| InternalObjectMenuLink {
+        object,
+        generation,
+    });
+    INTERNAL_OBJECT_MENU_MUTATION_TRACKERS.with(|trackers| {
+        for tracker in trackers
+            .borrow_mut()
+            .iter_mut()
+            .filter(|tracker| tracker.container == container)
+        {
+            tracker.removed_successors.entry(link).or_insert(successor);
+        }
+    });
+}
+
+fn internal_object_menu_removed_successor(
+    token: u64,
+    link: InternalObjectMenuLink,
+) -> Option<Option<InternalObjectMenuLink>> {
+    INTERNAL_OBJECT_MENU_MUTATION_TRACKERS.with(|trackers| {
+        trackers
+            .borrow()
+            .iter()
+            .find(|tracker| tracker.token == token)
+            .and_then(|tracker| tracker.removed_successors.get(&link).copied())
+    })
+}
+
+impl InternalObjectMenuLink {
+    fn from_object(object: &InternalObjectMenuObject) -> Self {
+        Self {
+            object: object.id,
+            generation: object.contents_link_generation,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum InternalObjectMenuIteratorPosition {
+    BeforeStart,
+    Link(InternalObjectMenuLink),
+    End,
+}
+
+/// Removal-safe `C4ObjectList::iterator` cursor. When the pointed link is
+/// removed, C++ advances the registered iterator to that link's successor;
+/// `C4ObjectListIterator::GetNext` then increments once more. Capturing the
+/// successor link identities (rather than object ids) also prevents a later
+/// re-entry of the same object from retargeting the iterator.
+#[derive(Clone, Debug)]
+struct InternalObjectMenuSafeCursor {
+    position: InternalObjectMenuIteratorPosition,
+    successors: Vec<InternalObjectMenuLink>,
+    tracker_token: Option<u64>,
+}
+
+impl InternalObjectMenuSafeCursor {
+    fn before_start(tracker_token: Option<u64>) -> Self {
+        Self {
+            position: InternalObjectMenuIteratorPosition::BeforeStart,
+            successors: Vec::new(),
+            tracker_token,
+        }
+    }
+
+    fn at(
+        links: &[InternalObjectMenuLink],
+        index: usize,
+        tracker_token: Option<u64>,
+    ) -> Self {
+        Self {
+            position: InternalObjectMenuIteratorPosition::Link(links[index]),
+            successors: links[index + 1..].to_vec(),
+            tracker_token,
+        }
+    }
+
+    fn end(tracker_token: Option<u64>) -> Self {
+        Self {
+            position: InternalObjectMenuIteratorPosition::End,
+            successors: Vec::new(),
+            tracker_token,
+        }
+    }
+
+    /// Resolve removals which occurred since the prior `GetNext`. A newly
+    /// inserted link with the same object id has a different generation and
+    /// therefore cannot alias the removed link.
+    fn resolve(&mut self, links: &[InternalObjectMenuLink]) -> Option<usize> {
+        match self.position {
+            InternalObjectMenuIteratorPosition::BeforeStart
+            | InternalObjectMenuIteratorPosition::End => None,
+            InternalObjectMenuIteratorPosition::Link(link) => {
+                let tracker_token = self.tracker_token;
+                let mut cursor = link;
+                let mut visited = HashSet::new();
+                let mut index = links.iter().position(|candidate| *candidate == cursor);
+                while index.is_none() && visited.insert(cursor) {
+                    let Some(token) = tracker_token else {
+                        break;
+                    };
+                    let Some(successor) = internal_object_menu_removed_successor(token, cursor)
+                    else {
+                        break;
+                    };
+                    let Some(successor) = successor else {
+                        *self = Self::end(tracker_token);
+                        return None;
+                    };
+                    cursor = successor;
+                    index = links.iter().position(|candidate| *candidate == cursor);
+                }
+                let index = index.or_else(|| {
+                    self.successors.iter().find_map(|successor| {
+                        links.iter().position(|candidate| candidate == successor)
+                    })
+                });
+                match index {
+                    Some(index) => {
+                        *self = Self::at(links, index, tracker_token);
+                        Some(index)
+                    }
+                    None => {
+                        *self = Self::end(tracker_token);
+                        None
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn internal_object_menu_links<S: InternalObjectMenuSource>(
+    source: &S,
+    contents: &[ObjectId],
+) -> Vec<InternalObjectMenuLink> {
+    contents
+        .iter()
+        .filter_map(|object| source.object(*object))
+        .map(|object| InternalObjectMenuLink::from_object(&object))
+        .collect()
+}
+
+/// One exact `C4ObjectListIterator::GetNext` step over a freshly read live
+/// contents list (C4ObjectList.cpp:849-903). `p_curr` and `p_curr_id` are
+/// separate registered iterators: removing a returned group head advances
+/// both to its old successor, while duplicate suppression starts at the
+/// independently advanced `p_curr_id`.
+fn internal_object_menu_iterator_next<S: InternalObjectMenuSource>(
+    source: &S,
+    links: &[InternalObjectMenuLink],
+    p_curr: &mut InternalObjectMenuSafeCursor,
+    p_curr_id: &mut InternalObjectMenuSafeCursor,
+    category_mask: i32,
+) -> Option<(ObjectId, i32)> {
+    let mut head_index = p_curr_id.resolve(links)?;
+    let mut current_index = match p_curr.position {
+        InternalObjectMenuIteratorPosition::BeforeStart => {
+            *p_curr = p_curr_id.clone();
+            head_index
+        }
+        InternalObjectMenuIteratorPosition::Link(_) => p_curr.resolve(links)?.checked_add(1)?,
+        InternalObjectMenuIteratorPosition::End => return None,
+    };
+
+    let eligible = |index: usize| {
+        source.object(links[index].object).is_some_and(|object| {
+            object.active && object.category & category_mask != 0
+        })
+    };
+    while current_index < links.len() && !eligible(current_index) {
+        current_index += 1;
+    }
+    if current_index == links.len() {
+        *p_curr = InternalObjectMenuSafeCursor::end(p_curr.tracker_token);
+        return None;
+    }
+
+    let current = source.object(links[current_index].object)?;
+    let head = source.object(links[head_index].object)?;
+    if current.definition_id != head.definition_id {
+        *p_curr_id = InternalObjectMenuSafeCursor::at(
+            links,
+            current_index,
+            p_curr_id.tracker_token,
+        );
+        head_index = current_index;
+    } else {
+        // Preserve the literal C++ for-loop cursor behavior. After a match,
+        // pCheck is assigned pCurrID and the loop increment advances it once,
+        // so the newly selected candidate resumes checking at head+1.
+        let mut check_index = head_index;
+        while check_index < current_index {
+            let current = source.object(links[current_index].object)?;
+            if eligible(check_index)
+                && source.can_concat_picture_with(links[check_index].object, current.id)
+            {
+                current_index += 1;
+                while current_index < links.len() && !eligible(current_index) {
+                    current_index += 1;
+                }
+                if current_index == links.len() {
+                    *p_curr = InternalObjectMenuSafeCursor::end(p_curr.tracker_token);
+                    return None;
+                }
+                let next = source.object(links[current_index].object)?;
+                if next.definition_id != head.definition_id {
+                    *p_curr_id = InternalObjectMenuSafeCursor::at(
+                        links,
+                        current_index,
+                        p_curr_id.tracker_token,
+                    );
+                    head_index = current_index;
+                    break;
+                }
+                check_index = head_index;
+            }
+            check_index += 1;
+        }
+    }
+
+    let current = source.object(links[current_index].object)?;
+    let mut count = 1i32;
+    for candidate in links.iter().skip(current_index + 1) {
+        let Some(candidate_object) = source.object(candidate.object) else {
+            continue;
+        };
+        if candidate_object.definition_id != current.definition_id {
+            break;
+        }
+        if candidate_object.active
+            && candidate_object.category & category_mask != 0
+            && source.can_concat_picture_with(candidate.object, current.id)
+        {
+            count = count.saturating_add(1);
+        }
+    }
+
+    *p_curr = InternalObjectMenuSafeCursor::at(
+        links,
+        current_index,
+        p_curr.tracker_token,
+    );
+    // Refresh the registered head iterator's successor chain at the instant
+    // GetNext returns, before CalcValue may mutate the contents list.
+    *p_curr_id = InternalObjectMenuSafeCursor::at(
+        links,
+        head_index,
+        p_curr_id.tracker_token,
+    );
+    Some((current.id, count))
+}
+
+pub(crate) fn build_activate_menu_state<S: InternalObjectMenuSource>(
+    source: &mut S,
+    crew_id: ObjectId,
+    container_id: ObjectId,
+    continue_existing: bool,
+    reused_menu_identity: Option<u64>,
+) -> Result<Option<crate::ObjectMenuState>, S::Error> {
+    const CATEGORY_TRADE_LIVING: i32 = 1 << 16;
+    let continuing_menu = continue_existing
+        .then(|| source.current_menu(crew_id))
+        .flatten()
+        .filter(|menu| {
+            menu.identification == Value::Int(6)
+                && menu.refill_object == Some(container_id)
+        });
+    let (previous_selection, selected_definition) = continuing_menu
+        .as_ref()
+        .map(|menu| {
+            let selected_definition = internal_object_menu_selected_definition(menu);
+            (Some(menu.selection), selected_definition)
+        })
+        .unwrap_or((None, None));
+    let Some(container) = source.object(container_id) else {
+        return Ok(None);
+    };
+    let Some(_container_definition) = source.definition(&container.definition_id) else {
+        return Ok(None);
+    };
+    let container_name = container.name.clone();
+    let contents = container.contents.clone();
+    let refill_object_contents_count = if continuing_menu.is_some() {
+        internal_live_contents_count(source, &contents)
+    } else {
+        0
+    };
+    let activate_category = crate::CATEGORY_STATIC_BACK
+        | crate::CATEGORY_STRUCTURE
+        | crate::CATEGORY_VEHICLE
+        | crate::CATEGORY_OBJECT
+        | CATEGORY_TRADE_LIVING;
+    let mut menu = match continuing_menu {
+        Some(mut menu) => {
+            // C4ObjectMenu::DoRefillInternal only ClearItems(false)s an
+            // existing Activate menu. Script-mutated size, decoration,
+            // text/layout state, caption and symbols all survive.
+            menu.items.clear();
+            menu.refill_object_contents_count = refill_object_contents_count;
+            menu
+        }
+        None => activate_menu_state(
+            crew_id,
+            container_id,
+            &container.definition_id,
+            &container_name,
+            refill_object_contents_count,
+            Vec::new(),
+            previous_selection.unwrap_or(-1),
+        ),
+    };
+    let menu_identity = source
+        .current_menu(crew_id)
+        .map(|menu| menu.internal_refill_token)
+        .filter(|identity| *identity != 0)
+        .or(reused_menu_identity)
+        .unwrap_or_else(next_internal_object_menu_refill_token);
+    let refill_token = next_internal_object_menu_refill_token();
+    menu.internal_refill_token = menu_identity;
+
+    let _mutation_tracker = InternalObjectMenuMutationGuard::begin(
+        refill_token,
+        crew_id,
+        menu_identity,
+        container_id,
+    );
+    let initial_links = internal_object_menu_links(source, &contents);
+    let mut p_curr = InternalObjectMenuSafeCursor::before_start(Some(refill_token));
+    let mut p_curr_id = if initial_links.is_empty() {
+        InternalObjectMenuSafeCursor::end(Some(refill_token))
+    } else {
+        InternalObjectMenuSafeCursor::at(&initial_links, 0, Some(refill_token))
+    };
+    loop {
+        let Some(live_container) = source.object(container_id) else {
+            break;
+        };
+        let live_contents = live_container.contents;
+        let live_links = internal_object_menu_links(source, &live_contents);
+        let Some((seed, count)) = internal_object_menu_iterator_next(
+            source,
+            &live_links,
+            &mut p_curr,
+            &mut p_curr_id,
+            activate_category,
+        ) else {
+            break;
+        };
+        let Some(seed_object) = source.object(seed) else {
+            continue;
+        };
+        let item_id = if seed_object.ocf & crate::ocf::FULL_CON == 0 {
+            live_contents
+                .iter()
+                .copied()
+                .filter_map(|candidate| source.object(candidate))
+                .find(|object| {
+                    object.active
+                        && object.definition_id == seed_object.definition_id
+                        && object.ocf & crate::ocf::FULL_CON != 0
+                })
+                // Contents.Find returns once. Only that first full-con
+                // candidate is tested for picture concatenation.
+                .filter(|candidate| {
+                    source.can_concat_picture_with(candidate.id, seed)
+                })
+                .map(|candidate| candidate.id)
+                .unwrap_or(seed)
+        } else {
+            seed
+        };
+        let Some(item) = source.object(item_id) else {
+            continue;
+        };
+        let Some(definition) = source.definition(&item.definition_id) else {
+            continue;
+        };
+        if definition.no_get {
+            continue;
+        }
+        let item_name = item.name.clone();
+        let all_count = internal_live_contents_definition_count(
+            source,
+            &live_contents,
+            &item.definition_id,
+        );
+        let command = format!(
+            "SetCommand(this,\"Activate\",Object({}))&&ExecuteCommand()",
+            item_id.as_u64()
+        );
+        let command2 = format!(
+            "SetCommand(this,\"Activate\", ,{},0,Object({}),{})&&ExecuteCommand()",
+            all_count,
+            container_id.as_u64(),
+            item.definition_id
+        );
+        // C4ObjectMenu is already installed and frozen before GetValue.
+        // Rows added by prior iterations and callback-side menu mutations
+        // are therefore live at this exact call site.
+        let value = source.activate_value(
+            crew_id,
+            item_id,
+            container_id,
+            &menu,
+        )?;
+        menu = match source.current_menu(crew_id) {
+            Some(live) if live.internal_refill_token == menu_identity => live,
+            // A callback explicitly reopened/replaced the menu. Preserve
+            // that live result instead of resurrecting the refill object.
+            Some(replacement) => return Ok(Some(replacement)),
+            None => return Ok(None),
+        };
+        let text_display_progress = if menu.text_progressing { 0 } else { -1 };
+        menu.items.push(crate::ObjectMenuItem {
+            caption: format!("Activate {}", item_name),
+            info_caption: crate::normalize_menu_info_caption(definition.description),
+            command,
+            command2,
+            count,
+            item_id: item.definition_id,
+            symbol: crate::ObjectMenuSymbol::default(),
+            image: crate::ObjectMenuImage::default(),
+            presentation_definition_id: None,
+            picture_snapshot: None,
+            picture_object: Some(item_id),
+            components: Vec::new(),
+            selectable: true,
+            value: Some(value),
+            text_display_progress,
+        });
+    }
+
+    menu.selection = internal_refilled_object_menu_selection(
+        &menu.items,
+        Some(menu.selection),
+        selected_definition.as_deref(),
+    );
+    if !internal_object_menu_has_enclosing_refill(
+        refill_token,
+        crew_id,
+        menu_identity,
+    ) {
+        menu.internal_refill_token = 0;
+    }
+    Ok(Some(menu))
+}
+
+pub(crate) fn build_container_contents_menu_state<S: InternalObjectMenuSource>(
+    source: &mut S,
+    crew_id: ObjectId,
+    container_id: ObjectId,
+    identification: i32,
+    continue_existing: bool,
+    reused_menu_identity: Option<u64>,
+) -> Result<Option<crate::ObjectMenuState>, S::Error> {
+    const CATEGORY_TRADE_LIVING: i32 = 1 << 16;
+    let continuing_menu = continue_existing
+        .then(|| source.current_menu(crew_id))
+        .flatten()
+        .filter(|menu| {
+            menu.identification == Value::Int(identification)
+                && menu.refill_object == Some(container_id)
+        });
+    let (previous_selection, selected_definition) = continuing_menu
+        .as_ref()
+        .map(|menu| {
+            let selected_definition = internal_object_menu_selected_definition(menu);
+            (Some(menu.selection), selected_definition)
+        })
+        .unwrap_or((None, None));
+    let Some(container) = source.object(container_id) else {
+        return Ok(None);
+    };
+    let Some(_container_definition) = source.definition(&container.definition_id) else {
+        return Ok(None);
+    };
+    let contents = container.contents.clone();
+    let refill_object_contents_count = if continuing_menu.is_some() {
+        internal_live_contents_count(source, &contents)
+    } else {
+        0
+    };
+    let get_category = crate::CATEGORY_STATIC_BACK
+        | crate::CATEGORY_STRUCTURE
+        | crate::CATEGORY_VEHICLE
+        | crate::CATEGORY_OBJECT
+        | CATEGORY_TRADE_LIVING;
+    let mut menu = match continuing_menu {
+        Some(mut menu) => {
+            menu.items.clear();
+            menu.refill_object_contents_count = refill_object_contents_count;
+            menu
+        }
+        None => crate::ObjectMenuState {
+            caption: format!("{} is empty.", container.name),
+            symbol_id: container.definition_id,
+            title_symbol: crate::ObjectMenuSymbol::default(),
+            identification: Value::Int(identification),
+            style: 0,
+            equal_item_height: false,
+            permanent: true,
+            extra: crate::ObjectMenuExtra::default(),
+            extra_data: 0,
+            internal_refill_token: 0,
+            selection: previous_selection.unwrap_or(-1),
+            user_menu: false,
+            command_object: Some(crew_id),
+            scenario_callbacks: false,
+            refill_object: Some(container_id),
+            refill_object_contents_count,
+            items: Vec::new(),
+            columns: 5,
+            lines: 0,
+            text_progressing: false,
+            decoration: None,
+        },
+    };
+    let menu_identity = source
+        .current_menu(crew_id)
+        .map(|menu| menu.internal_refill_token)
+        .filter(|identity| *identity != 0)
+        .or(reused_menu_identity)
+        .unwrap_or_else(next_internal_object_menu_refill_token);
+    let refill_token = next_internal_object_menu_refill_token();
+    menu.internal_refill_token = menu_identity;
+    let _mutation_tracker = InternalObjectMenuMutationGuard::begin(
+        refill_token,
+        crew_id,
+        menu_identity,
+        container_id,
+    );
+    let initial_links = internal_object_menu_links(source, &contents);
+    let mut p_curr = InternalObjectMenuSafeCursor::before_start(Some(refill_token));
+    let mut p_curr_id = if initial_links.is_empty() {
+        InternalObjectMenuSafeCursor::end(Some(refill_token))
+    } else {
+        InternalObjectMenuSafeCursor::at(&initial_links, 0, Some(refill_token))
+    };
+    // C4ObjectMenu reuses this loop-local string and only overwrites it for
+    // multi-count rows. Preserve the legacy stale secondary command on a
+    // later singleton row (C4ObjectMenu.cpp:314-318).
+    let mut command2 = String::new();
+    loop {
+        let Some(live_container) = source.object(container_id) else {
+            break;
+        };
+        let live_contents = live_container.contents;
+        let live_links = internal_object_menu_links(source, &live_contents);
+        let Some((seed, count)) = internal_object_menu_iterator_next(
+            source,
+            &live_links,
+            &mut p_curr,
+            &mut p_curr_id,
+            get_category,
+        ) else {
+            break;
+        };
+        let Some(seed_object) = source.object(seed) else {
+            continue;
+        };
+        let item_id = if seed_object.ocf & crate::ocf::FULL_CON == 0 {
+            live_contents
+                .iter()
+                .copied()
+                .filter_map(|candidate| source.object(candidate))
+                .find(|object| {
+                    object.active
+                        && object.definition_id == seed_object.definition_id
+                        && object.ocf & crate::ocf::FULL_CON != 0
+                })
+                .filter(|candidate| source.can_concat_picture_with(candidate.id, seed))
+                .map(|candidate| candidate.id)
+                .unwrap_or(seed)
+        } else {
+            seed
+        };
+        let Some(item) = source.object(item_id) else {
+            continue;
+        };
+        let item_definition_id = item.definition_id.clone();
+        let pre_callback_item_name = item.name.clone();
+        let Some(definition) = source.definition(&item_definition_id) else {
+            continue;
+        };
+        if definition.no_get {
+            continue;
+        }
+        let mut get = item.ocf & crate::ocf::CARRYABLE != 0;
+        if identification == 18 {
+            let at_collection_limit = source.object(crew_id).is_some_and(|crew| {
+                source
+                    .definition(&crew.definition_id)
+                    .is_some_and(|definition| {
+                        definition.collection_limit > 0
+                            && internal_live_contents_count(source, &crew.contents)
+                                >= i32::try_from(definition.collection_limit)
+                                    .unwrap_or(i32::MAX)
+                    })
+            });
+            let rejected = source.reject_collection(crew_id, item_id, &menu)?;
+            menu = match source.current_menu(crew_id) {
+                Some(live) if live.internal_refill_token == menu_identity => live,
+                Some(replacement) => return Ok(Some(replacement)),
+                None => return Ok(None),
+            };
+            if at_collection_limit || rejected {
+                get = false;
+            }
+        }
+        if source
+            .object(container_id)
+            .is_some_and(|container| container.ocf & crate::ocf::ENTRANCE == 0)
+        {
+            get = true;
+        }
+        let all_count = source
+            .object(container_id)
+            .map(|container| {
+                internal_live_contents_definition_count(
+                    source,
+                    &container.contents,
+                    &item_definition_id,
+                )
+            })
+            .unwrap_or(0);
+        let command_name = if get { "Get" } else { "Activate" };
+        let item_name = source
+            .object(item_id)
+            .map(|item| item.name)
+            .unwrap_or(pre_callback_item_name);
+        let command = format!(
+            "SetCommand(this, \"{}\", Object({})) && ExecuteCommand()",
+            command_name,
+            item_id.as_u64()
+        );
+        if all_count > 1 {
+            command2 = format!(
+                "SetCommand(this, \"{}\", , {},0, Object({}), {}) && ExecuteCommand()",
+                command_name,
+                all_count,
+                container_id.as_u64(),
+                item_definition_id
+            );
+        }
+        let text_display_progress = if menu.text_progressing { 0 } else { -1 };
+        menu.items.push(crate::ObjectMenuItem {
+            caption: format!("{} {}", command_name, item_name),
+            info_caption: crate::normalize_menu_info_caption(definition.description),
+            command,
+            command2: command2.clone(),
+            count,
+            item_id: item_definition_id,
+            symbol: crate::ObjectMenuSymbol::default(),
+            image: crate::ObjectMenuImage::default(),
+            presentation_definition_id: None,
+            picture_snapshot: None,
+            picture_object: Some(item_id),
+            components: Vec::new(),
+            selectable: true,
+            value: None,
+            text_display_progress,
+        });
+    }
+    menu.selection = internal_refilled_object_menu_selection(
+        &menu.items,
+        Some(menu.selection),
+        selected_definition.as_deref(),
+    );
+    if !internal_object_menu_has_enclosing_refill(
+        refill_token,
+        crew_id,
+        menu_identity,
+    ) {
+        menu.internal_refill_token = 0;
+    }
+    Ok(Some(menu))
+}
+
+struct EngineInternalObjectMenuSource<'a>(&'a mut Engine);
+
+impl InternalObjectMenuSource for EngineInternalObjectMenuSource<'_> {
+    type Error = EngineError;
+
+    fn current_menu(&self, object: ObjectId) -> Option<crate::ObjectMenuState> {
+        self.0
+            .find_object_index(object)
+            .and_then(|index| self.0.objects[index].state.menu.clone())
+    }
+
+    fn object(&self, object: ObjectId) -> Option<InternalObjectMenuObject> {
+        let index = self.0.find_object_index(object)?;
+        let object = &self.0.objects[index];
+        Some(InternalObjectMenuObject {
+            id: object.id,
+            contents_link_generation: object.state.contents_link_generation,
+            definition_id: object.definition_id.clone(),
+            name: object
+                .state
+                .custom_name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    self.0
+                        .crew_object_infos
+                        .get(&object.id)
+                        .map(|info| info.name.clone())
+                })
+                .or_else(|| {
+                    self.0
+                        .definitions
+                        .get(&object.definition_id)
+                        .map(|definition| definition.name().to_string())
+                })
+                .unwrap_or_else(|| object.definition_id.clone()),
+            category: object.state.category,
+            ocf: object.state.ocf,
+            contents: object.state.contents.clone(),
+            active: !object.destroyed
+                && object.state.status != crate::ObjectStatus::Deleted,
+        })
+    }
+
+    fn definition(&self, definition: &str) -> Option<InternalObjectMenuDefinition> {
+        self.0
+            .definitions
+            .get(definition)
+            .map(|definition| InternalObjectMenuDefinition {
+                name: definition.name().to_string(),
+                description: definition.description().unwrap_or_default().to_string(),
+                no_get: definition.no_get(),
+                collection_limit: definition.collection_limit().unwrap_or(0),
+            })
+    }
+
+    fn can_concat_picture_with(&self, object: ObjectId, other: ObjectId) -> bool {
+        let Some(object) = self.0.object_snapshot(object) else {
+            return false;
+        };
+        let Some(other) = self.0.object_snapshot(other) else {
+            return false;
+        };
+        self.0.can_concat_picture_with(&object, &other)
+    }
+
+    fn activate_value(
+        &mut self,
+        command_object: ObjectId,
+        object: ObjectId,
+        container: ObjectId,
+        menu_before_value: &crate::ObjectMenuState,
+    ) -> Result<i32, Self::Error> {
+        let Some(command_index) = self.0.find_object_index(command_object) else {
+            return Ok(0);
+        };
+        self.0.objects[command_index].state.menu = Some(menu_before_value.clone());
+        self.0
+            .object_value_in_container_for_menu(command_index, object, container)
+    }
+
+    fn reject_collection(
+        &mut self,
+        command_object: ObjectId,
+        object: ObjectId,
+        menu_before_call: &crate::ObjectMenuState,
+    ) -> Result<bool, Self::Error> {
+        let Some(command_index) = self.0.find_object_index(command_object) else {
+            return Ok(false);
+        };
+        self.0.objects[command_index].state.menu = Some(menu_before_call.clone());
+        let Some(object_index) = self.0.find_object_index(object) else {
+            return Ok(false);
+        };
+        let definition_id = self.0.objects[object_index].definition_id.clone();
+        let result = tolerate_script_error(self.0.call_object_function(
+            command_index,
+            "RejectCollect",
+            vec![Value::C4Id(definition_id), compat::object_reference_value(object)],
+        ))?;
+        Ok(result.is_some_and(|value| compat::value_raw_truthy(&value)))
+    }
+}
 
 /// Backing selected by the one `C4Object::GetPhysical()` call at
 /// ObjectComDigDouble entry. C++ retains this pointer across Activate:
@@ -1265,6 +2377,7 @@ impl Engine {
             permanent,
             extra: crate::ObjectMenuExtra::default(),
             extra_data: 0,
+            internal_refill_token: 0,
             selection: -1,
             user_menu: false,
             command_object: Some(crew_id),
@@ -1502,6 +2615,7 @@ impl Engine {
             permanent: true,
             extra: crate::ObjectMenuExtra::default(),
             extra_data: 0,
+            internal_refill_token: 0,
             selection: -1,
             user_menu: false,
             command_object: Some(crew_id),
@@ -3444,6 +4558,7 @@ impl Engine {
             permanent: true,
             extra: crate::ObjectMenuExtra::Value,
             extra_data: 0,
+            internal_refill_token: 0,
             selection,
             user_menu: false,
             command_object: Some(crew_id),
@@ -3464,91 +4579,18 @@ impl Engine {
     /// retain list order, and only `CanConcatPictureWith`-equal objects share
     /// a row (C4ObjectList.cpp:849-903).
     fn object_menu_picture_groups(
-        &self,
+        &mut self,
         contents: &[ObjectId],
         category_mask: i32,
     ) -> Vec<(ObjectId, i32)> {
-        let eligible = contents
-            .iter()
-            .filter_map(|object_id| {
-                let index = self.find_object_index(*object_id)?;
-                let object = &self.objects[index];
-                (!object.destroyed
-                    && object.state.status.is_active()
-                    && object.state.category & category_mask != 0)
-                    .then_some(*object_id)
-                    .and_then(|object_id| {
-                        self.object_snapshot(object_id)
-                            .map(|snapshot| (object_id, snapshot))
-                    })
-            })
-            .collect::<Vec<_>>();
-        let mut groups = Vec::new();
-        let mut chunk_start = 0usize;
-        while chunk_start < eligible.len() {
-            let chunk_definition = eligible[chunk_start].1.definition_id.as_str();
-            let chunk_end = eligible[chunk_start..]
-                .iter()
-                .position(|(_, object)| object.definition_id != chunk_definition)
-                .map(|offset| chunk_start + offset)
-                .unwrap_or(eligible.len());
-
-            for current in chunk_start..chunk_end {
-                // GetNext's duplicate scan is deliberately directional:
-                // each prior object asks whether it concatenates `current`.
-                if (chunk_start..current).any(|prior| {
-                    self.can_concat_picture_with(&eligible[prior].1, &eligible[current].1)
-                }) {
-                    continue;
-                }
-                // Its piCount scan uses the reverse direction: each later
-                // object asks whether it concatenates the representative.
-                let count = 1usize
-                    + (current + 1..chunk_end)
-                        .filter(|later| {
-                            self.can_concat_picture_with(
-                                &eligible[*later].1,
-                                &eligible[current].1,
-                            )
-                        })
-                        .count();
-                // C4ObjectMenu prefers the first live fully-constructed
-                // same-ID object when the iterator's representative is
-                // incomplete and the two pictures concatenate. This changes
-                // the picture/primary command target, not piCount
-                // (C4ObjectMenu.cpp:182-199,252-271,292-321;
-                // C4ObjectList.cpp:271-281).
-                let representative = if eligible[current].1.ocf & crate::ocf::FULL_CON == 0 {
-                    contents
-                        .iter()
-                        .filter_map(|candidate| {
-                            let index = self.find_object_index(*candidate)?;
-                            let object = &self.objects[index];
-                            (!object.destroyed
-                                && object.state.status.is_active()
-                                && object.definition_id == chunk_definition
-                                && object.state.ocf & crate::ocf::FULL_CON != 0)
-                                .then(|| self.object_snapshot(*candidate))
-                                .flatten()
-                                .filter(|snapshot| {
-                                    self.can_concat_picture_with(snapshot, &eligible[current].1)
-                                })
-                                .map(|_| *candidate)
-                        })
-                        .next()
-                        .unwrap_or(eligible[current].0)
-                } else {
-                    eligible[current].0
-                };
-                groups.push((
-                    representative,
-                    i32::try_from(count).unwrap_or(i32::MAX),
-                ));
-            }
-            chunk_start = chunk_end;
-        }
-
-        groups
+        internal_object_menu_picture_groups(
+            &EngineInternalObjectMenuSource(self),
+            contents,
+            category_mask,
+        )
+        .into_iter()
+        .map(|group| (group.representative, group.count))
+        .collect()
     }
 
     /// `C4ObjectList::ObjectCount(id)` counts every live same-ID content,
@@ -3741,6 +4783,7 @@ impl Engine {
             permanent: true,
             extra: crate::ObjectMenuExtra::Value,
             extra_data: 0,
+            internal_refill_token: 0,
             selection,
             user_menu: false,
             command_object: Some(crew_id),
@@ -3763,116 +4806,33 @@ impl Engine {
         crew_index: usize,
         container_index: usize,
     ) -> Result<(), EngineError> {
-        const CATEGORY_TRADE_LIVING: i32 = 1 << 16;
+        self.set_activate_menu(crew_index, container_index, true, None)
+    }
+
+    pub(crate) fn initialize_activate_menu(
+        &mut self,
+        crew_index: usize,
+        container_index: usize,
+    ) -> Result<(), EngineError> {
+        self.set_activate_menu(crew_index, container_index, false, None)
+    }
+
+    pub(crate) fn set_activate_menu(
+        &mut self,
+        crew_index: usize,
+        container_index: usize,
+        continue_existing: bool,
+        reused_menu_identity: Option<u64>,
+    ) -> Result<(), EngineError> {
         let crew_id = self.objects[crew_index].id;
         let container_id = self.objects[container_index].id;
-        let (previous_selection, selected_definition, continuing_refill) = self.objects[crew_index]
-            .state
-            .menu
-            .as_ref()
-            .filter(|menu| {
-                menu.identification == Value::Int(6) && menu.refill_object == Some(container_id)
-            })
-            .map(|menu| {
-                let selected_definition = usize::try_from(menu.selection)
-                    .ok()
-                    .and_then(|selection| menu.items.get(selection))
-                    .map(|item| item.item_id.clone());
-                (Some(menu.selection), selected_definition, true)
-            })
-            .unwrap_or((None, None, false));
-        let container_definition = self.objects[container_index].definition_id.clone();
-        let container_name = self.objects[container_index]
-            .state
-            .custom_name
-            .as_deref()
-            .filter(|name| !name.is_empty())
-            .map(str::to_string)
-            .or_else(|| {
-                self.definitions
-                    .get(&container_definition)
-                    .map(|definition| definition.name().to_string())
-            })
-            .unwrap_or_else(|| container_definition.clone());
-        let contents = self.objects[container_index].state.contents.clone();
-        let refill_object_contents_count = if continuing_refill {
-            self.live_contents_count(&contents)
-        } else {
-            0
-        };
-        let activate_category = crate::CATEGORY_STATIC_BACK
-            | crate::CATEGORY_STRUCTURE
-            | crate::CATEGORY_VEHICLE
-            | crate::CATEGORY_OBJECT
-            | CATEGORY_TRADE_LIVING;
-        let mut items = Vec::new();
-
-        for (item_id, count) in self.object_menu_picture_groups(&contents, activate_category) {
-            let Some(item_index) = self.find_object_index(item_id) else {
-                continue;
-            };
-            let definition_id = self.objects[item_index].definition_id.clone();
-            let (no_get, definition_name, info_caption) = self
-                .definitions
-                .get(&definition_id)
-                .map(|definition| {
-                    (
-                        definition.no_get(),
-                        definition.name().to_string(),
-                        definition
-                            .description()
-                            .map(crate::normalize_menu_info_caption)
-                            .unwrap_or_default(),
-                    )
-                })
-                .unwrap_or((false, definition_id.clone(), String::new()));
-            if no_get {
-                continue;
-            }
-            let item_name = self.objects[item_index]
-                .state
-                .custom_name
-                .as_deref()
-                .filter(|name| !name.is_empty())
-                .unwrap_or(&definition_name)
-                .to_string();
-            let all_count = self.live_contents_definition_count(&contents, &definition_id);
-            let command = format!(
-                "SetCommand(this,\"Activate\",Object({}))&&ExecuteCommand()",
-                item_id.as_u64()
-            );
-            let command2 = format!(
-                "SetCommand(this,\"Activate\", ,{},0,Object({}),{})&&ExecuteCommand()",
-                all_count,
-                container_id.as_u64(),
-                definition_id
-            );
-            let value =
-                self.object_value_in_container_for_menu(crew_index, item_id, container_id)?;
-            items.push(crate::ObjectMenuItem {
-                caption: format!("Activate {}", item_name),
-                info_caption,
-                command,
-                command2,
-                count,
-                item_id: definition_id,
-                symbol: crate::ObjectMenuSymbol::default(),
-                image: crate::ObjectMenuImage::default(),
-                presentation_definition_id: None,
-                picture_snapshot: None,
-                picture_object: Some(item_id),
-                components: Vec::new(),
-                selectable: true,
-                value: Some(value),
-                text_display_progress: -1,
-            });
-        }
-
-        let selection = Self::refilled_object_menu_selection(
-            &items,
-            previous_selection,
-            selected_definition.as_deref(),
-        );
+        let menu = build_activate_menu_state(
+            &mut EngineInternalObjectMenuSource(self),
+            crew_id,
+            container_id,
+            continue_existing,
+            reused_menu_identity,
+        )?;
         let _ = self.close_object_menu(crew_id, true)?;
         let Some(crew_index) = self.find_object_index(crew_id) else {
             return Ok(());
@@ -3880,28 +4840,7 @@ impl Engine {
         if self.find_object_index(container_id).is_none() {
             return Ok(());
         }
-        self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
-            caption: format!("{} is empty.", container_name),
-            symbol_id: container_definition,
-            title_symbol: crate::ObjectMenuSymbol::default(),
-            identification: Value::Int(6),
-            style: 0,
-            equal_item_height: false,
-            permanent: true,
-            extra: crate::ObjectMenuExtra::default(),
-            extra_data: 0,
-            selection,
-            user_menu: false,
-            command_object: Some(crew_id),
-            scenario_callbacks: false,
-            refill_object: Some(container_id),
-            refill_object_contents_count,
-            items,
-            columns: 5,
-            lines: 0,
-            text_progressing: false,
-            decoration: None,
-        });
+        self.objects[crew_index].state.menu = menu;
         Ok(())
     }
 
@@ -3913,195 +4852,53 @@ impl Engine {
         container_index: usize,
         identification: i32,
     ) -> Result<(), EngineError> {
-        const CATEGORY_TRADE_LIVING: i32 = 1 << 16;
+        self.set_container_contents_menu(
+            crew_index,
+            container_index,
+            identification,
+            true,
+            None,
+        )
+    }
+
+    pub(crate) fn initialize_container_contents_menu(
+        &mut self,
+        crew_index: usize,
+        container_index: usize,
+        identification: i32,
+    ) -> Result<(), EngineError> {
+        self.set_container_contents_menu(
+            crew_index,
+            container_index,
+            identification,
+            false,
+            None,
+        )
+    }
+
+    pub(crate) fn set_container_contents_menu(
+        &mut self,
+        crew_index: usize,
+        container_index: usize,
+        identification: i32,
+        continue_existing: bool,
+        reused_menu_identity: Option<u64>,
+    ) -> Result<(), EngineError> {
         let crew_id = self.objects[crew_index].id;
         let container_id = self.objects[container_index].id;
-        let (previous_selection, selected_definition, continuing_refill) = self.objects[crew_index]
-            .state
-            .menu
-            .as_ref()
-            .filter(|menu| {
-                menu.identification == Value::Int(identification)
-                    && menu.refill_object == Some(container_id)
-            })
-            .map(|menu| {
-                let selected_definition = usize::try_from(menu.selection)
-                    .ok()
-                    .and_then(|selection| menu.items.get(selection))
-                    .map(|item| item.item_id.clone());
-                (Some(menu.selection), selected_definition, true)
-            })
-            .unwrap_or((None, None, false));
-        let container_definition = self.objects[container_index].definition_id.clone();
-        let contents = self.objects[container_index].state.contents.clone();
-        let refill_object_contents_count = if continuing_refill {
-            self.live_contents_count(&contents)
-        } else {
-            0
-        };
-        let mut items = Vec::new();
-        let get_category = crate::CATEGORY_STATIC_BACK
-            | crate::CATEGORY_STRUCTURE
-            | crate::CATEGORY_VEHICLE
-            | crate::CATEGORY_OBJECT
-            | CATEGORY_TRADE_LIVING;
-
-        for (item_id, count) in self.object_menu_picture_groups(&contents, get_category) {
-            let Some(item_index) = self.find_object_index(item_id) else {
-                continue;
-            };
-            let item = &self.objects[item_index];
-            if item.destroyed || !item.state.status.is_active() {
-                continue;
-            }
-            let definition_id = item.definition_id.clone();
-            let carryable = item.state.ocf & ocf::CARRYABLE != 0;
-            if self
-                .definitions
-                .get(&definition_id)
-                .is_some_and(|definition| definition.no_get())
-            {
-                continue;
-            }
-            let mut get = carryable;
-            if identification == 18 {
-                // C4MN_Contents evaluates both downgrades independently on
-                // every refill row; a missing target Entrance overrides them
-                // back to Get only after the callback (C4ObjectMenu.cpp:
-                // 300-308).
-                let collection_limit_reached =
-                    self.find_object_index(crew_id).is_some_and(|crew_index| {
-                        self.definitions
-                            .get(&self.objects[crew_index].definition_id)
-                            .and_then(crate::Definition::collection_limit)
-                            .is_some_and(|limit| {
-                                let contents_count = self.objects[crew_index]
-                                    .state
-                                    .contents
-                                    .iter()
-                                    .filter_map(|object_id| self.find_object_index(*object_id))
-                                    .filter(|&index| {
-                                        self.objects[index].state.status
-                                            != crate::ObjectStatus::Deleted
-                                    })
-                                    .count();
-                                u64::try_from(contents_count).unwrap_or(u64::MAX)
-                                    >= u64::from(limit)
-                            })
-                    });
-                if collection_limit_reached {
-                    get = false;
-                }
-                let reject_collection = if let Some(crew_index) = self.find_object_index(crew_id) {
-                    tolerate_script_error(self.call_object_function(
-                        crew_index,
-                        "RejectCollect",
-                        vec![
-                            Value::C4Id(definition_id.clone()),
-                            compat::object_reference_value(item_id),
-                        ],
-                    ))?
-                    .is_some_and(|value| compat::value_raw_truthy(&value))
-                } else {
-                    false
-                };
-                if reject_collection {
-                    get = false;
-                }
-            }
-            let has_entrance = self.find_object_index(container_id).is_some_and(|index| {
-                self.objects[index].state.ocf & ocf::ENTRANCE != 0
-            });
-            if !has_entrance {
-                get = true;
-            }
-            let all_count = self
-                .find_object_index(container_id)
-                .map(|index| {
-                    self.live_contents_definition_count(
-                        &self.objects[index].state.contents,
-                        &definition_id,
-                    )
-                })
-                .unwrap_or(0);
-            let command_name = if get { "Get" } else { "Activate" };
-            let item_name = self.line_construction_object_name(item_id);
-            let item_definition = self.definitions.get(&definition_id);
-            let info_caption = item_definition
-                .and_then(|definition| definition.description())
-                .map(crate::normalize_menu_info_caption)
-                .unwrap_or_default();
-            let command = format!(
-                "SetCommand(this, \"{}\", Object({})) && ExecuteCommand()",
-                command_name,
-                item_id.as_u64()
-            );
-            let command2 = (all_count > 1)
-                .then(|| {
-                    format!(
-                        "SetCommand(this, \"{}\", , {},0, Object({}), {}) && ExecuteCommand()",
-                        command_name,
-                        all_count,
-                        container_id.as_u64(),
-                        definition_id
-                    )
-                })
-                .unwrap_or_default();
-            items.push(crate::ObjectMenuItem {
-                caption: format!("{} {}", command_name, item_name),
-                info_caption,
-                command,
-                command2,
-                count,
-                item_id: definition_id,
-                symbol: crate::ObjectMenuSymbol::default(),
-                image: crate::ObjectMenuImage::default(),
-                presentation_definition_id: None,
-                picture_snapshot: None,
-                picture_object: Some(item_id),
-                components: Vec::new(),
-                selectable: true,
-                value: None,
-                text_display_progress: -1,
-            });
-        }
-
-        let selection = Self::refilled_object_menu_selection(
-            &items,
-            previous_selection,
-            selected_definition.as_deref(),
-        );
-        let container_name = self
-            .definitions
-            .get(&container_definition)
-            .map(|definition| definition.name().to_string())
-            .unwrap_or_else(|| container_definition.clone());
+        let menu = build_container_contents_menu_state(
+            &mut EngineInternalObjectMenuSource(self),
+            crew_id,
+            container_id,
+            identification,
+            continue_existing,
+            reused_menu_identity,
+        )?;
         let _ = self.close_object_menu(crew_id, true)?;
         let Some(crew_index) = self.find_object_index(crew_id) else {
             return Ok(());
         };
-        self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
-            caption: format!("{} is empty.", container_name),
-            symbol_id: container_definition,
-            title_symbol: crate::ObjectMenuSymbol::default(),
-            identification: Value::Int(identification),
-            style: 0,
-            equal_item_height: false,
-            permanent: true,
-            extra: crate::ObjectMenuExtra::default(),
-            extra_data: 0,
-            selection,
-            user_menu: false,
-            command_object: Some(crew_id),
-            scenario_callbacks: false,
-            refill_object: Some(container_id),
-            refill_object_contents_count,
-            items,
-            columns: 5,
-            lines: 0,
-            text_progressing: false,
-            decoration: None,
-        });
+        self.objects[crew_index].state.menu = menu;
         Ok(())
     }
 
@@ -5534,7 +6331,7 @@ impl Engine {
     fn exit_object_for_drop(
         &mut self,
         object_id: ObjectId,
-        mut target: Vector2,
+        target: Vector2,
         velocity: FixedVec2,
     ) -> Result<bool, EngineError> {
         let Some(object_index) = self.find_object_index(object_id) else {
@@ -5543,66 +6340,14 @@ impl Engine {
         let Some(previous) = self.objects[object_index].state.container else {
             return Ok(false);
         };
-
-        if let Some(previous_index) = self.find_object_index(previous) {
-            self.objects[previous_index]
-                .state
-                .contents
-                .retain(|&child| child != object_id);
-            self.refresh_object_ocf(previous_index);
-        }
-        if let Some(object_index) = self.find_object_index(object_id) {
-            self.objects[object_index].state.container = None;
-        }
-
-        self.bounds_check_for_change_def_exit(object_id, &mut target)?;
-        let Some(object_index) = self.find_object_index(object_id) else {
-            return Ok(false);
-        };
-        {
-            let object = &mut self.objects[object_index];
-            let previous_rect = object.current_shape_rect();
-            let previous_construction = object.state.construction;
-            object.set_position(target);
-            object.state.rotation = 0;
-            object.fixed_rotation = C4Fixed::ZERO;
-            object.fixed_velocity = velocity;
-            object.state.velocity = object.velocity_pixels();
-            object.rotation_velocity = C4Fixed::ZERO;
-            object.state.mobile = true;
-            object.state.in_liquid = false;
-            object.state.menu = None;
-            if object.shape_template.line == 0 {
-                object.state.shape_override = None;
-            }
-            object.refresh_shape_after_state_change(previous_construction, previous_rect, false);
-        }
-        self.update_solid_mask(object_index);
-        self.update_sector_for_index(object_index);
-        self.refresh_object_ocf(object_index);
-
-        if let Some(previous_index) = self.find_object_index(previous).filter(|&index| {
-            self.objects[index].state.status != crate::ObjectStatus::Deleted
-        }) {
-            let _ = tolerate_script_error(self.call_object_function(
-                previous_index,
-                "Ejection",
-                vec![compat::object_reference_value(object_id)],
-            ))?;
-        }
-        if let Some(object_index) = self.find_object_index(object_id).filter(|&index| {
-            self.objects[index].state.status != crate::ObjectStatus::Deleted
-        }) {
-            let _ = tolerate_script_error(self.call_object_function(
-                object_index,
-                "Departure",
-                vec![compat::object_reference_value(previous)],
-            ))?;
-        }
-
-        Ok(self
-            .find_object_index(object_id)
-            .is_some_and(|index| self.objects[index].state.container.is_none()))
+        self.exit_object_at_position_with_full_motion(
+            object_id,
+            previous,
+            target,
+            0,
+            velocity,
+            C4Fixed::ZERO,
+        )
     }
 
     /// `ObjectComUnGrab` (C4ObjectCom.cpp:261-278): stand up and release the
@@ -5611,19 +6356,34 @@ impl Engine {
         if self.object_procedure(index) != ActionProcedure::Push {
             return Ok(false);
         }
+        let object_id = self.objects[index].id;
         let target = self.objects[index].state.action.target;
-        let definition_id = self.objects[index].definition_id.clone();
-        if !self.object_action_stand(index, &definition_id)? {
+        if !self.object_action_stand_live(object_id)? {
             return Ok(false);
         }
-        let target_ref = target
-            .map(compat::object_reference_value)
-            .unwrap_or(Value::Nil);
-        self.contained_call(index, "Grab", &[target_ref, Value::Bool(false)])?;
-        if let Some(target_index) = target.and_then(|id| self.find_object_index(id)) {
-            let self_ref = compat::object_reference_value(self.objects[index].id);
-            if self.objects[target_index].state.status.is_active() {
-                self.contained_call(target_index, "Grabbed", &[self_ref, Value::Bool(false)])?;
+        if !self.close_object_menu(object_id, false)? {
+            return Ok(false);
+        }
+        if let Some(index) = self.find_object_index(object_id).filter(|&index| {
+            self.objects[index].state.status != crate::ObjectStatus::Deleted
+        }) {
+            let target_ref = target
+                .map(compat::object_reference_value)
+                .unwrap_or(Value::Nil);
+            self.contained_call(index, "Grab", &[target_ref, Value::Bool(false)])?;
+            let actor_has_status = self.find_object_index(object_id).is_some_and(|index| {
+                self.objects[index].state.status != crate::ObjectStatus::Deleted
+            });
+            if actor_has_status {
+                if let Some(target_index) = target
+                    .and_then(|id| self.find_object_index(id))
+                    .filter(|&index| {
+                        self.objects[index].state.status != crate::ObjectStatus::Deleted
+                    })
+                {
+                    let self_ref = compat::object_reference_value(object_id);
+                    self.contained_call(target_index, "Grabbed", &[self_ref, Value::Bool(false)])?;
+                }
             }
         }
         Ok(true)
@@ -9048,6 +9808,865 @@ protected func ContainedThrow(object clonk)
     }
 
     #[test]
+    fn internal_menus_test_only_the_first_full_con_picture_candidate() {
+        // C4ObjectMenu's "easy way" calls Contents.Find once and tests only
+        // that first FULL_CON object's picture. It must not search through a
+        // non-concatenating full object for a later concatenating one
+        // (C4ObjectMenu.cpp:183-189,252-259,292-299).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        let mut container =
+            Definition::from_script("CONT", "Container", "#strict 2\n")
+                .expect("container compiles");
+        container.set_category(crate::CATEGORY_STRUCTURE);
+        engine
+            .register_definition(container)
+            .expect("container registers");
+        let mut item = Definition::from_script("ITEM", "Item", "#strict 2\n")
+            .expect("item compiles");
+        item.set_category(crate::CATEGORY_OBJECT);
+        engine.register_definition(item).expect("item registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player registers");
+
+        let crew = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("crew spawns");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        // Same-ID contents insert at their cluster head. Spawn in reverse so
+        // the final list is incomplete-red, blue, blue, full-red. Besides
+        // the first-full candidate rule, this pins C++'s literal pCheck
+        // reset/increment behavior on alternating picture groups.
+        let later_full_red = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+            .expect("later red item spawns");
+        let second_full_blue = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+            .expect("second blue item spawns");
+        let first_full_blue = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+            .expect("first full item spawns");
+        for blue in [first_full_blue, second_full_blue] {
+            engine
+                .apply_object_update(
+                    blue,
+                    crate::ObjectUpdate {
+                    picture_rect: Some(crate::DefinitionRect::new(0, 76, 64, 64)),
+                    ..crate::ObjectUpdate::default()
+                    },
+                )
+                .expect("blue picture installs");
+        }
+        let incomplete_red = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_construction(crate::FULL_CON / 2)
+                    .with_container(container),
+            )
+            .expect("incomplete item spawns");
+        assert_eq!(
+            engine.object_snapshot(container).expect("container exists").contents,
+            [
+                incomplete_red,
+                first_full_blue,
+                second_full_blue,
+                later_full_red,
+            ]
+        );
+        assert!(!engine.can_concat_picture_with(
+            &engine.object_snapshot(incomplete_red).expect("incomplete exists"),
+            &engine.object_snapshot(first_full_blue).expect("blue exists"),
+        ));
+        assert!(engine.can_concat_picture_with(
+            &engine.object_snapshot(incomplete_red).expect("incomplete exists"),
+            &engine.object_snapshot(later_full_red).expect("red exists"),
+        ));
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container exists");
+        engine
+            .open_container_contents_menu(crew_index, container_index, 18)
+            .expect("contents menu opens");
+        let contents_menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("contents menu remains");
+        assert_eq!(
+            contents_menu
+                .items
+                .iter()
+                .map(|item| item.picture_object)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(incomplete_red),
+                Some(first_full_blue),
+                Some(later_full_red),
+            ]
+        );
+
+        engine
+            .open_activate_menu(crew_index, container_index)
+            .expect("activate menu opens");
+        let activate_menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("activate menu remains");
+        assert_eq!(
+            activate_menu
+                .items
+                .iter()
+                .map(|item| item.picture_object)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(incomplete_red),
+                Some(first_full_blue),
+                Some(later_full_red),
+            ]
+        );
+
+        engine.objects[container_index].state.base = 1;
+        engine
+            .open_base_sell_menu(crew_index, container_index)
+            .expect("sell menu opens");
+        let sell_menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("sell menu remains");
+        assert_eq!(
+            sell_menu
+                .items
+                .iter()
+                .map(|item| item.picture_object)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(incomplete_red),
+                Some(first_full_blue),
+                Some(later_full_red),
+            ]
+        );
+    }
+
+    #[test]
+    fn contents_menu_includes_inactive_links_and_runs_collection_gates() {
+        let mut engine = Engine::new();
+        let crew_script = r#"#strict 2
+local reject_calls;
+protected func RejectCollect(item_id, object item)
+{
+  reject_calls++;
+  return 1;
+}
+"#;
+        let mut crew_definition = Definition::from_script("CLNK", "Clonk", crew_script)
+            .expect("crew compiles");
+        crew_definition.set_collection_limit(Some(1));
+        engine
+            .register_definition(crew_definition)
+            .expect("crew registers");
+        let mut container = Definition::from_script("CONT", "Container", "#strict 2\n")
+            .expect("container compiles");
+        container.set_category(crate::CATEGORY_STRUCTURE);
+        container.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        engine
+            .register_definition(container)
+            .expect("container registers");
+        for id in ["ITEM", "FILL"] {
+            let mut definition = Definition::from_script(id, id, "#strict 2\n")
+                .expect("item compiles");
+            definition.set_category(crate::CATEGORY_OBJECT);
+            definition.set_collectible(true);
+            engine
+                .register_definition(definition)
+                .expect("item registers");
+        }
+        let crew = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("crew spawns");
+        engine
+            .spawn_object(SpawnConfig::new("FILL").with_container(crew))
+            .expect("inventory filler spawns");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container exists");
+        engine.objects[container_index].state.entrance_status = true;
+        engine.refresh_object_ocf(container_index);
+        let item = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_status(crate::ObjectStatus::Inactive)
+                    .with_container(container),
+            )
+            .expect("inactive item spawns contained");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+
+        engine
+            .open_container_contents_menu(crew_index, container_index, 18)
+            .expect("Contents menu opens");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew remains")
+            .expect("Contents menu remains");
+        assert_eq!(menu.items.len(), 1, "Status=Inactive remains in Contents");
+        assert_eq!(menu.items[0].picture_object, Some(item));
+        assert!(menu.items[0].command.contains("\"Activate\""));
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .local_vars
+                .get("reject_calls"),
+            Some(&Value::Int(1))
+        );
+
+        engine
+            .initialize_container_contents_menu(crew_index, container_index, 13)
+            .expect("Get menu opens");
+        let get_menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew remains")
+            .expect("Get menu remains");
+        assert_eq!(get_menu.items.len(), 1);
+        assert!(get_menu.items[0].command.contains("\"Get\""));
+        assert_eq!(
+            engine.objects[crew_index]
+                .state
+                .local_vars
+                .get("reject_calls"),
+            Some(&Value::Int(1)),
+            "C4MN_Get does not ask RejectCollect"
+        );
+    }
+
+    #[test]
+    fn contents_menu_preserves_stale_command2_and_cpp_selection_adjustment() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        let mut container =
+            Definition::from_script("CONT", "Container", "#strict 2\n")
+                .expect("container compiles");
+        container.set_category(crate::CATEGORY_STRUCTURE);
+        engine
+            .register_definition(container)
+            .expect("container registers");
+        for (id, name) in [("MULT", "Multiple"), ("SING", "Single")] {
+            let mut definition = Definition::from_script(id, name, "#strict 2\n")
+                .expect("item compiles");
+            definition.set_category(crate::CATEGORY_OBJECT);
+            definition.set_collectible(true);
+            engine
+                .register_definition(definition)
+                .expect("item registers");
+        }
+        let crew = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("crew spawns");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        engine
+            .spawn_object(SpawnConfig::new("SING").with_container(container))
+            .expect("singleton spawns");
+        engine
+            .spawn_object(SpawnConfig::new("MULT").with_container(container))
+            .expect("first grouped item spawns");
+        engine
+            .spawn_object(SpawnConfig::new("MULT").with_container(container))
+            .expect("second grouped item spawns");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container exists");
+        engine
+            .initialize_container_contents_menu(crew_index, container_index, 13)
+            .expect("Get menu opens");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("Get menu remains");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| (item.item_id.as_str(), item.count))
+                .collect::<Vec<_>>(),
+            [("MULT", 2), ("SING", 1)]
+        );
+        assert!(!menu.items[0].command2.is_empty());
+        assert_eq!(
+            menu.items[1].command2, menu.items[0].command2,
+            "C4ObjectMenu reuses the prior multi-count command2 for a later singleton row"
+        );
+
+        let mut none_selection = menu.clone();
+        none_selection.selection = 1;
+        none_selection.items[1].item_id = "NONE".to_string();
+        assert_eq!(
+            internal_object_menu_selected_definition(&none_selection),
+            None,
+            "C4ID_None bypasses checkIDSelection"
+        );
+        let mut rows = menu.items.clone();
+        rows[1].selectable = false;
+        assert_eq!(
+            internal_refilled_object_menu_selection(&rows, Some(1), None),
+            0,
+            "AdjustSelection searches downward first"
+        );
+        rows[0].selectable = false;
+        rows[1].selectable = true;
+        assert_eq!(
+            internal_refilled_object_menu_selection(&rows, Some(0), None),
+            1,
+            "AdjustSelection searches upward after exhausting lower slots"
+        );
+    }
+
+    #[test]
+    fn activate_refill_tracks_link_incarnation_and_both_cpp_iterators() {
+        // First row A (red) exits and re-enters at the same final list slot
+        // from CalcValue. C++'s pCurr and pCurrID stay on old successor B
+        // (blue), so GetNext increments to C (red), whose picture is compared
+        // against B and emitted. An ObjectId cursor would alias A's new link
+        // and incorrectly emit B instead (C4ObjectList.cpp:249-253,849-903).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        let mut container =
+            Definition::from_script("CONT", "Container", "#strict 2\n")
+                .expect("container compiles");
+        container.set_category(crate::CATEGORY_STRUCTURE);
+        engine
+            .register_definition(container)
+            .expect("container registers");
+        let script = r#"#strict 2
+local relink;
+protected func CalcValue(object pInBase)
+{
+  if (relink)
+  {
+    relink = 0;
+    Exit();
+    Enter(pInBase);
+  }
+  return 9;
+}
+"#;
+        let mut item = Definition::from_script("ITEM", "Item", script)
+            .expect("item compiles");
+        item.set_category(crate::CATEGORY_OBJECT);
+        engine.register_definition(item).expect("item registers");
+        let crew = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("crew spawns");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        let c_red = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+            .expect("C spawns");
+        let b_blue = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+            .expect("B spawns");
+        engine
+            .apply_object_update(
+                b_blue,
+                crate::ObjectUpdate {
+                    picture_rect: Some(crate::DefinitionRect::new(0, 76, 64, 64)),
+                    ..crate::ObjectUpdate::default()
+                },
+            )
+            .expect("B picture changes");
+        let a_red = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+            .expect("A spawns");
+        let a_index = engine.find_object_index(a_red).expect("A exists");
+        engine.objects[a_index]
+            .state
+            .local_vars
+            .insert("relink".to_string(), Value::Int(1));
+        let generation_before = engine.objects[a_index].state.contents_link_generation;
+        assert_eq!(
+            engine.object_snapshot(container).expect("container exists").contents,
+            [a_red, b_blue, c_red]
+        );
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container exists");
+        engine
+            .open_activate_menu(crew_index, container_index)
+            .expect("activate menu opens");
+
+        let a_index = engine.find_object_index(a_red).expect("A remains");
+        assert_ne!(
+            engine.objects[a_index].state.contents_link_generation,
+            generation_before,
+            "Exit+Enter allocates a distinct C4ObjectList link"
+        );
+        assert_eq!(
+            engine.object_snapshot(container).expect("container remains").contents,
+            [a_red, b_blue, c_red],
+            "the final id vector can be identical despite new link identity"
+        );
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("activate menu remains");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.picture_object)
+                .collect::<Vec<_>>(),
+            vec![Some(a_red), Some(c_red)]
+        );
+    }
+
+    #[test]
+    fn activate_refill_applies_each_registered_iterator_removal_immediately() {
+        // Initial A,B,C. A::CalcValue removes A (registered iterators move
+        // to B), inserts N before C, then removes B (iterators move to N).
+        // The next GetNext increments N -> C, so C is the next row. A final
+        // snapshot alone cannot reconstruct that temporal chain.
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        let mut container =
+            Definition::from_script("CONT", "Container", "#strict 2\n")
+                .expect("container compiles");
+        container.set_category(crate::CATEGORY_STRUCTURE);
+        engine
+            .register_definition(container)
+            .expect("container registers");
+        let mut a_definition = Definition::from_script(
+            "ITMA",
+            "A",
+            r#"#strict 2
+local inserted, victim, mutate;
+protected func CalcValue(object pInBase)
+{
+  if (mutate)
+  {
+    mutate = 0;
+    Exit();
+    inserted->Enter(pInBase);
+    victim->Exit();
+  }
+  return 1;
+}
+"#,
+        )
+        .expect("A compiles");
+        a_definition.set_category(crate::CATEGORY_OBJECT);
+        engine
+            .register_definition(a_definition)
+            .expect("A registers");
+        for (id, name) in [("ITMB", "B"), ("ITMC", "C")]
+        {
+            let mut definition = Definition::from_script(id, name, "#strict 2\n")
+                .expect("item compiles");
+            definition.set_category(crate::CATEGORY_OBJECT);
+            engine
+                .register_definition(definition)
+                .expect("item registers");
+        }
+
+        let crew = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("crew spawns");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        let c = engine
+            .spawn_object(SpawnConfig::new("ITMC").with_container(container))
+            .expect("C spawns");
+        let b = engine
+            .spawn_object(SpawnConfig::new("ITMB").with_container(container))
+            .expect("B spawns");
+        let a = engine
+            .spawn_object(SpawnConfig::new("ITMA").with_container(container))
+            .expect("A spawns");
+        let inserted = engine
+            .spawn_object(SpawnConfig::new("ITMC"))
+            .expect("N spawns outside");
+        engine
+            .apply_object_update(
+                inserted,
+                crate::ObjectUpdate {
+                    picture_rect: Some(crate::DefinitionRect::new(0, 76, 64, 64)),
+                    ..crate::ObjectUpdate::default()
+                },
+            )
+            .expect("N gets a distinct picture");
+        assert_eq!(
+            engine.object_snapshot(container).expect("container exists").contents,
+            [a, b, c]
+        );
+        let a_index = engine.find_object_index(a).expect("A exists");
+        engine.objects[a_index].state.local_vars.extend([
+            ("inserted".to_string(), compat::object_reference_value(inserted)),
+            ("victim".to_string(), compat::object_reference_value(b)),
+            ("mutate".to_string(), Value::Int(1)),
+        ]);
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container exists");
+        engine
+            .open_activate_menu(crew_index, container_index)
+            .expect("activate menu opens");
+
+        assert_eq!(
+            engine.object_snapshot(container).expect("container remains").contents,
+            [inserted, c]
+        );
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("activate menu remains");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.picture_object)
+                .collect::<Vec<_>>(),
+            [Some(a), Some(c)]
+        );
+    }
+
+    #[test]
+    fn activate_refill_tracks_assign_removal_at_the_parent_unlink() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        let mut container =
+            Definition::from_script("CONT", "Container", "#strict 2\n")
+                .expect("container compiles");
+        container.set_category(crate::CATEGORY_STRUCTURE);
+        engine
+            .register_definition(container)
+            .expect("container registers");
+        let mut a_definition = Definition::from_script(
+            "ITMA",
+            "A",
+            r#"#strict 2
+local inserted, victim, mutate;
+protected func CalcValue(object pInBase)
+{
+  if (mutate)
+  {
+    mutate = 0;
+    var new_item = inserted, old_successor = victim;
+    RemoveObject();
+    new_item->Enter(pInBase);
+    RemoveObject(old_successor);
+  }
+  return 1;
+}
+"#,
+        )
+        .expect("A compiles");
+        a_definition.set_category(crate::CATEGORY_OBJECT);
+        engine
+            .register_definition(a_definition)
+            .expect("A registers");
+        for (id, name) in [("ITMB", "B"), ("ITMC", "C")] {
+            let mut definition = Definition::from_script(id, name, "#strict 2\n")
+                .expect("item compiles");
+            definition.set_category(crate::CATEGORY_OBJECT);
+            engine
+                .register_definition(definition)
+                .expect("item registers");
+        }
+
+        let crew = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("crew spawns");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        let c = engine
+            .spawn_object(SpawnConfig::new("ITMC").with_container(container))
+            .expect("C spawns");
+        let b = engine
+            .spawn_object(SpawnConfig::new("ITMB").with_container(container))
+            .expect("B spawns");
+        let a = engine
+            .spawn_object(SpawnConfig::new("ITMA").with_container(container))
+            .expect("A spawns");
+        let inserted = engine
+            .spawn_object(SpawnConfig::new("ITMC"))
+            .expect("N spawns outside");
+        engine
+            .apply_object_update(
+                inserted,
+                crate::ObjectUpdate {
+                    picture_rect: Some(crate::DefinitionRect::new(0, 76, 64, 64)),
+                    ..crate::ObjectUpdate::default()
+                },
+            )
+            .expect("N gets a distinct picture");
+        let a_index = engine.find_object_index(a).expect("A exists");
+        engine.objects[a_index].state.local_vars.extend([
+            ("inserted".to_string(), compat::object_reference_value(inserted)),
+            ("victim".to_string(), compat::object_reference_value(b)),
+            ("mutate".to_string(), Value::Int(1)),
+        ]);
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container exists");
+        engine
+            .open_activate_menu(crew_index, container_index)
+            .expect("activate menu opens");
+
+        assert_eq!(
+            engine.object_snapshot(container).expect("container remains").contents,
+            [inserted, c]
+        );
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("activate menu remains");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.picture_object)
+                .collect::<Vec<_>>(),
+            [Some(a), Some(c)]
+        );
+    }
+
+    #[test]
+    fn continuing_activate_refill_preserves_non_item_menu_state() {
+        // DoRefillInternal(C4MN_Activate) calls ClearItems(false), not Init:
+        // script-mutated layout and the original caption/symbol survive the
+        // periodic refill (C4ObjectMenu.cpp:170-203; C4Menu.cpp:975-988).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        let mut container =
+            Definition::from_script("CONT", "Container", "#strict 2\n")
+                .expect("container compiles");
+        container.set_category(crate::CATEGORY_STRUCTURE);
+        engine
+            .register_definition(container)
+            .expect("container registers");
+        let mut item = Definition::from_script("ITEM", "Item", "#strict 2\n")
+            .expect("item compiles");
+        item.set_category(crate::CATEGORY_OBJECT);
+        engine.register_definition(item).expect("item registers");
+        let crew = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("crew spawns");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+            .expect("item spawns");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container exists");
+        engine
+            .open_activate_menu(crew_index, container_index)
+            .expect("initial menu opens");
+        {
+            let menu = engine.objects[crew_index]
+                .state
+                .menu
+                .as_mut()
+                .expect("menu exists");
+            menu.caption = "Callback caption".to_string();
+            menu.symbol_id = "ITEM".to_string();
+            menu.style = 2;
+            menu.columns = 3;
+            menu.lines = 4;
+            menu.text_progressing = true;
+        }
+
+        engine
+            .open_activate_menu(crew_index, container_index)
+            .expect("continuing refill runs");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("menu remains");
+        assert_eq!(menu.caption, "Callback caption");
+        assert_eq!(menu.symbol_id, "ITEM");
+        assert_eq!((menu.style, menu.columns, menu.lines), (2, 3, 4));
+        assert!(menu.text_progressing);
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(menu.items[0].text_display_progress, 0);
+
+        engine
+            .initialize_activate_menu(crew_index, container_index)
+            .expect("fresh internal init runs");
+        let fresh = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("fresh menu remains");
+        assert_eq!(fresh.caption, "Container is empty.");
+        assert_eq!(fresh.symbol_id, "CONT");
+        assert_eq!((fresh.style, fresh.columns, fresh.lines), (0, 5, 0));
+        assert!(!fresh.text_progressing);
+        assert_eq!(fresh.items.len(), 1);
+        assert_eq!(fresh.items[0].text_display_progress, -1);
+    }
+
+    #[test]
+    fn activate_refill_does_not_alias_script_extra_data_with_runtime_freeze_state() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        let mut container =
+            Definition::from_script("CONT", "Container", "#strict 2\n")
+                .expect("container compiles");
+        container.set_category(crate::CATEGORY_STRUCTURE);
+        engine
+            .register_definition(container)
+            .expect("container registers");
+        let script = r#"#strict 2
+local menu_owner, replace_menu;
+protected func CalcValue(object pInBase)
+{
+  if (replace_menu)
+  {
+    replace_menu = 0;
+    var marker = -2147483647;
+    marker--;
+    CreateMenu(ITEM, menu_owner, menu_owner, 0, "Replacement", marker, 0, 0, 77);
+    AddMenuItem("Only row", "DoNothing", ITEM, menu_owner);
+  }
+  return 1;
+}
+"#;
+        let mut item = Definition::from_script("ITEM", "Item", script)
+            .expect("item compiles");
+        item.set_category(crate::CATEGORY_OBJECT);
+        engine.register_definition(item).expect("item registers");
+        let crew = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("crew spawns");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        let item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+            .expect("item spawns");
+        let item_index = engine.find_object_index(item).expect("item exists");
+        engine.objects[item_index].state.local_vars.extend([
+            ("menu_owner".to_string(), compat::object_reference_value(crew)),
+            ("replace_menu".to_string(), Value::Int(1)),
+        ]);
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container exists");
+
+        engine
+            .open_activate_menu(crew_index, container_index)
+            .expect("refill callback runs");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew remains")
+            .expect("replacement menu remains");
+        assert_eq!(menu.identification, Value::Int(77));
+        assert_eq!(menu.extra_data, i32::MIN);
+        assert_eq!(menu.internal_refill_token, 0);
+        assert_eq!(menu.refill_object, None);
+        assert_eq!(menu.selection, 0);
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(menu.items[0].caption, "Only row");
+    }
+
+    #[test]
+    fn activate_refill_continues_into_a_nested_internal_reinitialization() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        let mut container =
+            Definition::from_script("CONT", "Container", "#strict 2\n")
+                .expect("container compiles");
+        container.set_category(crate::CATEGORY_STRUCTURE);
+        engine
+            .register_definition(container)
+            .expect("container registers");
+        let mut first = Definition::from_script(
+            "ITMA",
+            "A",
+            r#"#strict 2
+static reopened;
+local menu_owner;
+protected func CalcValue(object pInBase)
+{
+  if (!reopened)
+  {
+    reopened = 1;
+    SetCommand(menu_owner, "Take");
+    ExecuteCommand(menu_owner);
+  }
+  return 1;
+}
+"#,
+        )
+        .expect("A compiles");
+        first.set_category(crate::CATEGORY_OBJECT);
+        engine.register_definition(first).expect("A registers");
+        let mut second = Definition::from_script("ITMB", "B", "#strict 2\n")
+            .expect("B compiles");
+        second.set_category(crate::CATEGORY_OBJECT);
+        engine.register_definition(second).expect("B registers");
+
+        let crew = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("crew spawns");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        engine
+            .spawn_object(SpawnConfig::new("ITMB").with_container(container))
+            .expect("B spawns");
+        let first = engine
+            .spawn_object(SpawnConfig::new("ITMA").with_container(container))
+            .expect("A spawns");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(container))
+            .expect("crew enters container");
+        let first_index = engine.find_object_index(first).expect("A exists");
+        engine.objects[first_index].state.local_vars.insert(
+            "menu_owner".to_string(),
+            compat::object_reference_value(crew),
+        );
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container exists");
+        engine
+            .open_activate_menu(crew_index, container_index)
+            .expect("outer refill runs");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew remains")
+            .expect("internal menu remains");
+        assert_eq!(menu.identification, Value::Int(6));
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.item_id.as_str())
+                .collect::<Vec<_>>(),
+            ["ITMA", "ITMB", "CLNK", "ITMA", "ITMB", "CLNK"],
+            "the nested Init rows survive and the suspended outer refill appends its current and remaining rows"
+        );
+        assert_eq!(menu.internal_refill_token, 0);
+    }
+
+    #[test]
     fn activate_target_reject_contents_force_closes_the_prior_menu() {
         let mut engine = Engine::new();
         register_clonk(&mut engine, "CLNK", "#strict\n");
@@ -9172,7 +10791,11 @@ protected func ContainedThrow(object clonk)
         // Clonk to ObjectComPutTake, which puts its first content into the
         // containing object (C4Command.cpp:966-970; C4ObjectCom.cpp:700-712).
         let mut engine = Engine::new();
-        register_clonk(&mut engine, "CLNK", "#strict\n");
+        register_clonk(
+            &mut engine,
+            "CLNK",
+            "#strict\nlocal put_called; protected func Put() { put_called = 1; return(1); }\n",
+        );
         engine
             .register_definition(
                 Definition::from_script("HUT1", "Hut", "#strict\n").expect("hut compiles"),
@@ -9204,6 +10827,15 @@ protected func ContainedThrow(object clonk)
             flag.container,
             Some(hut),
             "the carried flag is put into the hut before control returns"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew snapshot")
+                .local_vars
+                .get("put_called"),
+            Some(&Value::Int(1)),
+            "ObjectComPut callbacks complete before contained control returns"
         );
         assert!(
             engine

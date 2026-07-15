@@ -4068,6 +4068,7 @@ mod tests {
                 vec![CommandEvent::ObjectComDrop {
                     actor_id,
                     object_id: item_id,
+                    command_instance_id: 0,
                 }]
             );
         }
@@ -4079,6 +4080,7 @@ mod tests {
         stack
             .push_front(CommandRequest::new(CommandId::Drop))
             .expect("Drop queues");
+        let drop_instance_id = stack.entries.front().expect("Drop remains").instance_id;
         let Some(ActiveCommand {
             state: CommandState::Drop(state),
             ..
@@ -4094,9 +4096,12 @@ mod tests {
         stack
             .push_front(CommandRequest::new(CommandId::Wait))
             .expect("callback command queues");
-        assert!(stack.finish_pending_drop());
+        assert!(stack.finish_pending_drop(drop_instance_id));
         assert_eq!(stack.finished_front_view(), None);
-        assert!(!stack.finish_pending_drop(), "pending marker is one-shot");
+        assert!(
+            !stack.finish_pending_drop(drop_instance_id),
+            "pending marker is one-shot"
+        );
 
         stack.pop_front();
         assert_eq!(
@@ -4106,6 +4111,442 @@ mod tests {
                 .name,
             "Drop"
         );
+    }
+
+    #[test]
+    fn pending_put_take_resolution_matches_the_exact_command_instance() {
+        let mut throws = CommandStack::new();
+        throws
+            .push_front(CommandRequest::new(CommandId::Throw))
+            .expect("outer Throw queues");
+        let outer_throw = throws.entries.front().expect("outer Throw remains").instance_id;
+        let CommandState::Throw(state) = &mut throws.entries.front_mut().unwrap().state else {
+            panic!("outer command should be Throw");
+        };
+        state.put_take_pending = true;
+        throws
+            .push_front(CommandRequest::new(CommandId::Throw))
+            .expect("inner Throw queues");
+        let inner_throw = throws.entries.front().expect("inner Throw remains").instance_id;
+        let CommandState::Throw(state) = &mut throws.entries.front_mut().unwrap().state else {
+            panic!("inner command should be Throw");
+        };
+        state.put_take_pending = true;
+        assert_ne!(outer_throw, inner_throw);
+
+        // FinishCommand/SetCommand may remove the nested command while its
+        // native helper is still returning. Its result must not consume the
+        // same-kind outer marker that is now first in the list.
+        throws.clear_front();
+        assert!(!throws.finish_pending_throw(inner_throw));
+        assert!(!throws.clear_pending_put_take(CommandId::Throw, inner_throw));
+        assert!(matches!(
+            &throws.entries.front().unwrap().state,
+            CommandState::Throw(state) if state.put_take_pending
+        ));
+        assert!(throws.finish_pending_throw(outer_throw));
+
+        let mut drops = CommandStack::new();
+        drops
+            .push_front(CommandRequest::new(CommandId::Drop))
+            .expect("outer Drop queues");
+        let outer_drop = drops.entries.front().expect("outer Drop remains").instance_id;
+        let CommandState::Drop(state) = &mut drops.entries.front_mut().unwrap().state else {
+            panic!("outer command should be Drop");
+        };
+        state.completion_pending = true;
+        drops
+            .push_front(CommandRequest::new(CommandId::Drop))
+            .expect("inner Drop queues");
+        let inner_drop = drops.entries.front().expect("inner Drop remains").instance_id;
+        let CommandState::Drop(state) = &mut drops.entries.front_mut().unwrap().state else {
+            panic!("inner command should be Drop");
+        };
+        state.completion_pending = true;
+        drops.clear_front();
+        assert!(!drops.finish_pending_drop(inner_drop));
+        assert!(matches!(
+            &drops.entries.front().unwrap().state,
+            CommandState::Drop(state) if state.completion_pending
+        ));
+        assert!(drops.finish_pending_drop(outer_drop));
+    }
+
+    #[test]
+    fn command_instance_ids_survive_live_restore_but_persisted_stacks_get_fresh_ids() {
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::Throw))
+            .expect("Throw queues");
+        let instance_id = stack.entries.front().expect("Throw remains").instance_id;
+        let CommandState::Throw(state) = &mut stack.entries.front_mut().unwrap().state else {
+            panic!("command should be Throw");
+        };
+        state.put_take_pending = true;
+        let snapshot = stack.snapshot();
+
+        let mut live_restore = CommandStack::new();
+        live_restore.restore_from_snapshot(&snapshot);
+        assert_eq!(
+            live_restore.entries.front().unwrap().instance_id,
+            instance_id,
+            "callback Restore retains the in-flight native-command identity"
+        );
+        assert!(live_restore.finish_pending_throw(instance_id));
+
+        let encoded = serde_json::to_value(&snapshot).expect("snapshot serializes");
+        assert!(
+            encoded.get("next_instance_id").is_none(),
+            "the runtime allocator is not savegame state"
+        );
+        assert!(
+            encoded["commands"][0].get("instance_id").is_none(),
+            "native command identity is not serialized"
+        );
+        let decoded: CommandStackSnapshot =
+            serde_json::from_value(encoded.clone()).expect("snapshot deserializes");
+        let mut restored = CommandStack::new();
+        restored
+            .push_front(CommandRequest::new(CommandId::Wait))
+            .expect("allocator advances");
+        restored.clear();
+        restored.restore_from_snapshot(&decoded);
+        let persisted_id = restored.entries.front().unwrap().instance_id;
+        assert_ne!(persisted_id, 0);
+        assert_ne!(persisted_id, instance_id);
+        assert!(restored.finish_pending_throw(persisted_id));
+        restored
+            .push_front(CommandRequest::new(CommandId::Wait))
+            .expect("new command queues");
+        assert_ne!(restored.entries.front().unwrap().instance_id, persisted_id);
+
+        let legacy: CommandStackSnapshot =
+            serde_json::from_value(encoded).expect("legacy snapshot deserializes");
+        let mut restored_legacy = CommandStack::new();
+        restored_legacy.restore_from_snapshot(&legacy);
+        let migrated_id = restored_legacy.entries.front().unwrap().instance_id;
+        assert_ne!(migrated_id, 0);
+        assert!(
+            restored_legacy.finish_pending_throw(0),
+            "a serialized legacy event with token zero uses the compatibility fallback"
+        );
+        restored_legacy
+            .push_front(CommandRequest::new(CommandId::Wait))
+            .expect("post-migration command queues");
+        assert_ne!(restored_legacy.entries.front().unwrap().instance_id, migrated_id);
+    }
+
+    #[test]
+    fn detached_throw_prelude_retains_its_failure_feedback_context() {
+        let actor_id = ObjectId::new(619);
+        let mut digging = snapshot_with_id(actor_id.as_u64());
+        digging.action_procedure = ActionProcedure::Dig;
+        let digging_objects = HashMap::from([(actor_id, digging.clone())]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let digging_ctx = move_to_ctx_at_frame(
+            digging_objects.get(&actor_id).expect("actor present"),
+            &digging_objects,
+            &players,
+            &definitions,
+            1,
+        );
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Throw)
+                    .with_tx(Some(100))
+                    .with_ty(Some(20))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("Throw queues");
+        let command_instance_id = stack.entries.front().unwrap().instance_id;
+        let initial = stack.execute_front(&digging_ctx).expect("Throw starts");
+        assert!(matches!(
+            initial.events.as_slice(),
+            [CommandEvent::ObjectComStopThrow { .. }]
+        ));
+
+        stack.clear();
+        let mut walking = digging;
+        walking.action_procedure = ActionProcedure::Walk;
+        let walking_objects = HashMap::from([(actor_id, walking)]);
+        let walking_ctx = move_to_ctx_at_frame(
+            walking_objects.get(&actor_id).expect("actor present"),
+            &walking_objects,
+            &players,
+            &definitions,
+            1,
+        );
+        let resumed = stack
+            .execute_pending_throw_prelude(
+                &walking_ctx,
+                crate::PhysicsSettings::default().gravity_as_c4fixed(),
+                command_instance_id,
+            )
+            .expect("detached Throw resumes");
+        assert_eq!(resumed.status, CommandStatus::Failed);
+        assert!(matches!(
+            resumed.events.as_slice(),
+            [CommandEvent::FailureFeedback { feedback, .. }]
+                if feedback.command.name == "Throw"
+        ));
+    }
+
+    #[test]
+    fn detached_throw_failure_updates_its_detached_outer_base() {
+        let actor_id = ObjectId::new(622);
+        let mut walking = snapshot_with_id(actor_id.as_u64());
+        walking.action_procedure = ActionProcedure::Walk;
+        let objects = HashMap::from([(actor_id, walking)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(
+            objects.get(&actor_id).expect("actor present"),
+            &objects,
+            &players,
+            &definitions,
+            1,
+        );
+        let mut stack = CommandStack::new();
+        let request = || {
+            CommandRequest::new(CommandId::Throw)
+                .with_tx(Some(100))
+                .with_ty(Some(20))
+        };
+        stack
+            .push_front(request().with_mode(CommandMode::Base))
+            .expect("outer Throw queues");
+        let outer_instance_id = stack.entries.front().unwrap().instance_id;
+        let CommandState::Throw(outer) = &mut stack.entries.front_mut().unwrap().state else {
+            panic!("outer command should be Throw");
+        };
+        outer
+            .continuations
+            .push(ThrowContinuation::AfterObjectComStop);
+        stack
+            .push_front(request().with_mode(CommandMode::SilentSub))
+            .expect("inner Throw queues");
+        let inner_instance_id = stack.entries.front().unwrap().instance_id;
+        let CommandState::Throw(inner) = &mut stack.entries.front_mut().unwrap().state else {
+            panic!("inner command should be Throw");
+        };
+        inner
+            .continuations
+            .push(ThrowContinuation::AfterObjectComStop);
+
+        stack.clear();
+        let resumed = stack
+            .execute_pending_throw_prelude(
+                &ctx,
+                crate::PhysicsSettings::default().gravity_as_c4fixed(),
+                inner_instance_id,
+            )
+            .expect("detached inner Throw resumes");
+        assert_eq!(resumed.status, CommandStatus::Failed);
+        assert!(
+            resumed
+                .events
+                .iter()
+                .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })),
+            "SilentSub failure with a retained base suppresses direct feedback"
+        );
+        let outer = stack
+            .detached_throw_preludes
+            .iter()
+            .find(|candidate| candidate.entry.instance_id == outer_instance_id)
+            .expect("outer iExec Throw remains retained");
+        assert_eq!(outer.entry.failures, 1);
+    }
+
+    #[test]
+    fn detached_throw_failure_uses_nonprelude_and_next_unfinished_bases() {
+        let actor_id = ObjectId::new(623);
+        let mut walking = snapshot_with_id(actor_id.as_u64());
+        walking.action_procedure = ActionProcedure::Walk;
+        let objects = HashMap::from([(actor_id, walking)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(
+            objects.get(&actor_id).expect("actor present"),
+            &objects,
+            &players,
+            &definitions,
+            1,
+        );
+        let inner_request = || {
+            CommandRequest::new(CommandId::Throw)
+                .with_tx(Some(100))
+                .with_ty(Some(20))
+                .with_mode(CommandMode::SilentSub)
+        };
+
+        let mut cleared = CommandStack::new();
+        cleared
+            .push_front(CommandRequest::new(CommandId::Drop))
+            .expect("outer Drop queues");
+        let CommandState::Drop(outer) = &mut cleared.entries.front_mut().unwrap().state else {
+            panic!("outer command should be Drop");
+        };
+        outer.completion_pending = true;
+        cleared
+            .push_front(inner_request())
+            .expect("inner Throw queues");
+        let inner_id = cleared.entries.front().unwrap().instance_id;
+        let CommandState::Throw(inner) = &mut cleared.entries.front_mut().unwrap().state else {
+            panic!("inner command should be Throw");
+        };
+        inner
+            .continuations
+            .push(ThrowContinuation::AfterObjectComStop);
+        cleared.clear();
+        let result = cleared
+            .execute_pending_throw_prelude(
+                &ctx,
+                crate::PhysicsSettings::default().gravity_as_c4fixed(),
+                inner_id,
+            )
+            .expect("inner Throw resumes");
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result
+            .events
+            .iter()
+            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
+
+        let mut skipped = CommandStack::new();
+        skipped
+            .push_front(CommandRequest::new(CommandId::Wait))
+            .expect("base2 queues");
+        let base2_id = skipped.entries.front().unwrap().instance_id;
+        skipped
+            .push_front(CommandRequest::new(CommandId::Wait))
+            .expect("base1 queues");
+        let base1_id = skipped.entries.front().unwrap().instance_id;
+        skipped
+            .push_front(inner_request())
+            .expect("inner Throw queues");
+        let inner_id = skipped.entries.front().unwrap().instance_id;
+        let CommandState::Throw(inner) = &mut skipped.entries.front_mut().unwrap().state else {
+            panic!("inner command should be Throw");
+        };
+        inner
+            .continuations
+            .push(ThrowContinuation::AfterObjectComStop);
+        skipped.clear_front();
+        skipped.finish_entry_public(0, true);
+        let result = skipped
+            .execute_pending_throw_prelude(
+                &ctx,
+                crate::PhysicsSettings::default().gravity_as_c4fixed(),
+                inner_id,
+            )
+            .expect("detached inner Throw resumes");
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result
+            .events
+            .iter()
+            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
+        let base1 = skipped
+            .entries
+            .iter()
+            .find(|entry| entry.instance_id == base1_id)
+            .expect("base1 remains linked");
+        let base2 = skipped
+            .entries
+            .iter()
+            .find(|entry| entry.instance_id == base2_id)
+            .expect("base2 remains linked");
+        assert_eq!(base1.failures, 0);
+        assert_eq!(base2.failures, 1);
+    }
+
+    #[test]
+    fn detached_base_modes_do_not_increment_an_unrelated_base() {
+        for (mode, expects_feedback) in [
+            (CommandMode::Base, true),
+            (CommandMode::SilentBase, false),
+        ] {
+            let mut stack = CommandStack::new();
+            stack
+                .push_front(CommandRequest::new(CommandId::Wait))
+                .expect("base queues");
+            let base_chain = stack
+                .entries
+                .iter()
+                .map(DetachedCommandBase::from)
+                .collect::<Vec<_>>();
+            let failed = ActiveCommand::from_request(
+                CommandRequest::new(CommandId::Throw).with_mode(mode),
+            )
+            .expect("failed command constructs");
+            assert_eq!(
+                stack
+                    .record_detached_failure(&failed, &base_chain)
+                    .is_some(),
+                expects_feedback
+            );
+            assert_eq!(stack.entries.front().unwrap().failures, 0);
+        }
+    }
+
+    #[test]
+    fn detached_drop_keeps_raw_removed_target_and_queues_get() {
+        let actor_id = ObjectId::new(620);
+        let item_id = ObjectId::new(621);
+        let mut digging = snapshot_with_id(actor_id.as_u64());
+        digging.action_procedure = ActionProcedure::Dig;
+        digging.contents = vec![item_id];
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+        let initial_objects = HashMap::from([
+            (actor_id, digging.clone()),
+            (item_id, item.clone()),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let initial_ctx = move_to_ctx_at_frame(
+            initial_objects.get(&actor_id).expect("actor present"),
+            &initial_objects,
+            &players,
+            &definitions,
+            1,
+        );
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Drop).with_target(Some(item_id)),
+            )
+            .expect("Drop queues");
+        let command_instance_id = stack.entries.front().unwrap().instance_id;
+        let initial = stack.execute_front(&initial_ctx).expect("Drop starts");
+        assert!(matches!(
+            initial.events.as_slice(),
+            [CommandEvent::ObjectComStopDrop { .. }]
+        ));
+
+        stack.clear();
+        assert!(
+            !stack.clear_object_reference(item_id),
+            "ClearPointers does not walk the unlinked iExec command"
+        );
+        let mut walking = digging;
+        walking.action_procedure = ActionProcedure::Walk;
+        walking.contents.clear();
+        item.destroyed = true;
+        let resumed_objects = HashMap::from([(actor_id, walking), (item_id, item)]);
+        let resumed_ctx = move_to_ctx_at_frame(
+            resumed_objects.get(&actor_id).expect("actor present"),
+            &resumed_objects,
+            &players,
+            &definitions,
+            1,
+        );
+        let resumed = stack
+            .execute_pending_drop_prelude(&resumed_ctx, command_instance_id)
+            .expect("detached Drop resumes");
+        assert_eq!(resumed.status, CommandStatus::Running);
+        assert_eq!(stack.command_names(), ["Get"]);
+        assert_eq!(stack.command_views()[0].target, Some(item_id));
     }
 
     #[test]
@@ -4148,6 +4589,7 @@ mod tests {
             vec![CommandEvent::ObjectComDrop {
                 actor_id,
                 object_id: item_id,
+                command_instance_id: 0,
             }]
         );
     }
@@ -4217,6 +4659,7 @@ mod tests {
             vec![CommandEvent::ObjectComDrop {
                 actor_id,
                 object_id: item_id,
+                command_instance_id: 0,
             }]
         );
     }
@@ -4357,7 +4800,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_delegates_put_when_actor_contained() {
+    fn drop_runs_inline_put_take_when_actor_contained() {
         let actor_id = ObjectId::new(650);
         let item_id = ObjectId::new(651);
         let container_id = ObjectId::new(652);
@@ -4398,26 +4841,32 @@ mod tests {
 
         // Explicit 0/0 is C++'s untargeted sentinel and must still reach the
         // later contained Put branch.
-        let mut state = DropState::from_request(
-            &CommandRequest::new(CommandId::Drop)
-                .with_tx(Some(0))
-                .with_ty(Some(0)),
-        );
-        let result = state.step(&ctx);
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Drop)
+                    .with_tx(Some(0))
+                    .with_ty(Some(0)),
+            )
+            .expect("Drop queues");
+        let command_instance_id = stack.entries.front().expect("Drop remains").instance_id;
+        let result = stack.execute_front(&ctx).expect("Drop executes");
         assert_eq!(result.status, CommandStatus::Running);
-        assert_eq!(result.operations.len(), 1);
-        match &result.operations[0] {
-            CommandOperation::PushFront(request) => {
-                assert_eq!(request.id, CommandId::Put);
-                assert_eq!(request.target, Some(container_id));
-                assert_eq!(request.target2, Some(item_id));
-            }
-            other => panic!("expected delegated put request, got {:?}", other),
-        }
+        assert!(result.operations.is_empty());
+        assert_eq!(
+            result.events,
+            vec![CommandEvent::ObjectComPutTake {
+                actor_id,
+                target_id: container_id,
+                requested_item: None,
+                command: CommandId::Drop,
+                command_instance_id,
+            }]
+        );
     }
 
     #[test]
-    fn drop_delegates_put_when_pushing_target() {
+    fn drop_runs_inline_put_take_when_pushing_target() {
         let actor_id = ObjectId::new(660);
         let item_id = ObjectId::new(661);
         let pushed_id = ObjectId::new(662);
@@ -4460,34 +4909,17 @@ mod tests {
         let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
-        assert_eq!(result.operations.len(), 1);
-        match &result.operations[0] {
-            CommandOperation::PushFront(request) => {
-                assert_eq!(request.id, CommandId::Put);
-                assert_eq!(request.target, Some(pushed_id));
-                assert_eq!(request.target2, Some(item_id));
-            }
-            other => panic!("expected delegated put request, got {:?}", other),
-        }
-
-        // C4Command::Drop calls ObjectComPutTake while pushing and then
-        // immediately Finish(true); once the delegated Put has moved the item
-        // into that target, Drop must not enqueue Get and pull it back out
-        // (C4Command.cpp:998-1049, especially :1043-1048).
-        objects
-            .get_mut(&actor_id)
-            .expect("actor present")
-            .contents
-            .clear();
-        objects
-            .get_mut(&item_id)
-            .expect("item present")
-            .container = Some(pushed_id);
-        let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 1);
-        let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
         assert!(result.operations.is_empty());
+        assert_eq!(
+            result.events,
+            vec![CommandEvent::ObjectComPutTake {
+                actor_id,
+                target_id: pushed_id,
+                requested_item: None,
+                command: CommandId::Drop,
+                command_instance_id: 0,
+            }]
+        );
     }
 
     fn step_dig_once(
@@ -6958,7 +7390,7 @@ mod tests {
     }
 
     #[test]
-    fn ungrab_stands_in_walk_and_completes() {
+    fn ungrab_defers_callbackful_object_com_ungrab_to_the_live_engine() {
         let actor_id = ObjectId::new(370);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
@@ -6989,20 +7421,19 @@ mod tests {
         let mut state = UnGrabState::from_request(&CommandRequest::new(CommandId::UnGrab));
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
-        let update = result.update.expect("ungrab should update actor");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
-        let action = update.action.expect("ungrab should reset action");
-        assert_eq!(action.name.as_deref(), Some("Walk"));
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none());
         assert_eq!(
-            action.target, None,
-            "ObjectActionStand retains the former action target"
+            result.events,
+            [CommandEvent::ObjectComUnGrabCommand {
+                actor_id,
+                command_instance_id: 0,
+            }]
         );
-        assert_eq!(update.velocity, Some(Vector2::ZERO));
     }
 
     #[test]
-    fn ungrab_completes_without_update_when_not_pushing() {
+    fn ungrab_still_runs_live_helper_and_trailing_stop_when_not_pushing() {
         let actor_id = ObjectId::new(380);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
@@ -7033,9 +7464,16 @@ mod tests {
         let mut state = UnGrabState::from_request(&CommandRequest::new(CommandId::UnGrab));
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.status, CommandStatus::Running);
         assert!(result.update.is_none());
         assert!(result.operations.is_empty());
+        assert_eq!(
+            result.events,
+            [CommandEvent::ObjectComUnGrabCommand {
+                actor_id,
+                command_instance_id: 0,
+            }]
+        );
     }
 
     #[test]
@@ -7607,15 +8045,31 @@ mod tests {
         let result = state.step_with_gravity(&ctx, gravity);
         assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty());
-        let update = result.update.expect("throw should update actor");
+        assert_eq!(result.update, None, "SetDir must run before ComDir=Stop");
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(
+            result.events[0],
+            CommandEvent::ObjectComSetDirThrow {
+                object_id: actor_id,
+                direction: Direction::Right,
+                command_instance_id: 0,
+            },
+            "targeted Throw exposes SetDir's callback boundary"
+        );
+
+        let result = state.resume_after_prelude(&ctx, gravity);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.operations.is_empty());
+        let update = result.update.expect("post-SetDir Throw stops command motion");
         assert_eq!(update.command_direction, Some(CommandDirection::Stop));
         assert!(update.action.is_none(), "the engine event gates SetAction");
-        assert_eq!(update.direction, Some(Direction::Right));
+        assert_eq!(update.direction, None);
         assert_eq!(result.events.len(), 1);
         let CommandEvent::ThrowObject {
             actor_id: event_actor,
             object_id,
             complete_command_on_success,
+            command_instance_id,
         } = &result.events[0]
         else {
             panic!("targeted Throw must emit its atomic throw event even while contained")
@@ -7623,11 +8077,12 @@ mod tests {
         assert_eq!(*event_actor, actor_id);
         assert_eq!(*object_id, target_id);
         assert!(*complete_command_on_success);
+        assert_eq!(*command_instance_id, 0);
         assert_eq!(*rng.borrow(), expected_rng, "the event owns the RNG draw");
     }
 
     #[test]
-    fn untargeted_throw_puts_into_pushed_target_without_ungrabbing() {
+    fn untargeted_throw_runs_inline_put_take_without_ungrabbing() {
         // C4Command::Throw only ungrabs for a targeted-coordinate throw.
         // With no coordinates, DFA_PUSH instead calls ObjectComPutTake on
         // Action.Target and immediately finishes (C4Command.cpp:910-984,
@@ -7681,14 +8136,18 @@ mod tests {
         .expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty());
-        assert_eq!(result.events.len(), 1);
-        let CommandEvent::ApplyObjectUpdate { object_id, update } = &result.events[0] else {
-            panic!("pushed-target Throw must transfer one item")
-        };
-        assert_eq!(*object_id, item_id);
-        assert_eq!(update.container, Some(Some(push_target_id)));
+        assert_eq!(
+            result.events,
+            vec![CommandEvent::ObjectComPutTake {
+                actor_id,
+                target_id: push_target_id,
+                requested_item: Some(item_id),
+                command: CommandId::Throw,
+                command_instance_id: 0,
+            }]
+        );
     }
 
     #[test]
@@ -13415,13 +13874,32 @@ pub enum CommandEvent {
         /// is released after a successful helper call.
         ungrab_on_success: bool,
     },
+    /// Throw/Drop call ObjectComPutTake inline and unconditionally finish
+    /// only after its callbackful put or menu attempt returns. Keep this
+    /// separate from ObjectComPut so a nested PutTake cannot consume an
+    /// outer Put command's pending result (C4ObjectCom.cpp:700-721;
+    /// C4Command.cpp:966-979,1036-1049).
+    ObjectComPutTake {
+        actor_id: ObjectId,
+        target_id: ObjectId,
+        requested_item: Option<ObjectId>,
+        command: CommandId,
+        /// Identity of the native C4Command instance whose helper is in
+        /// flight. Zero is reserved for deserialized legacy events.
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
     /// ObjectComThrow -> ObjectActionThrow is one ordered operation: the
     /// action transition must succeed before Random(360) and C4Object::Exit
     /// run (C4ObjectCom.cpp:120-137).
     ThrowObject {
         actor_id: ObjectId,
         object_id: ObjectId,
+        /// Targeted throws finish only on helper success; ordinary outside
+        /// throws finish after the helper regardless of its boolean.
         complete_command_on_success: bool,
+        #[serde(skip)]
+        command_instance_id: u64,
     },
     /// Run ObjectComDrop as one live ordered operation. Exit callbacks must
     /// observe the final fixed motion before the dropper's NoCollectDelay
@@ -13429,6 +13907,17 @@ pub enum CommandEvent {
     ObjectComDrop {
         actor_id: ObjectId,
         object_id: ObjectId,
+        /// Identity of the native C4Command instance whose helper is in
+        /// flight. Zero is reserved for deserialized legacy events.
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
+    /// C4CMD_UnGrab executes the callbackful ObjectComUnGrab, then writes
+    /// ComDir Stop and finishes unconditionally (C4Command.cpp:903-908).
+    ObjectComUnGrabCommand {
+        actor_id: ObjectId,
+        #[serde(skip)]
+        command_instance_id: u64,
     },
     /// Execute C4Command::Jump against the live object. ObjectComJump may run
     /// the object's OnActionJump hook synchronously, so it cannot be reduced
@@ -13456,6 +13945,32 @@ pub enum CommandEvent {
         object_id: ObjectId,
         target_id: ObjectId,
         stop_first: bool,
+    },
+    /// C4Command::Throw runs ordinary ObjectComStop synchronously when the
+    /// actor starts in DFA_DIG, then continues the same native command with
+    /// callback-mutated object/command state (C4Command.cpp:910-914).
+    ObjectComStopThrow {
+        object_id: ObjectId,
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
+    /// C4Command::Drop has the same callbackful ObjectComStop prelude when
+    /// it starts in DFA_DIG, then continues the same native command against
+    /// callback-mutated state (C4Command.cpp:988-989).
+    ObjectComStopDrop {
+        object_id: ObjectId,
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
+    /// A targeted Throw at its launch position calls C4Object::SetDir before
+    /// writing ComDir=Stop and invoking ObjectComThrow. SetDir may run the
+    /// current action's TurnAction callbacks, so the remaining Throw body
+    /// must resume against live state (C4Command.cpp:948-955).
+    ObjectComSetDirThrow {
+        object_id: ObjectId,
+        direction: Direction,
+        #[serde(skip)]
+        command_instance_id: u64,
     },
     /// Run C4Command::Grab's live sequence. Build/chop/dig stopping may
     /// change the subsequent At result, while scale/hangle let-go and the
@@ -13736,8 +14251,12 @@ pub enum CommandError {
     Unsupported,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandSnapshot {
+    /// Runtime identity of the C4Command node. Native pointer identity is
+    /// not savegame state; persisted restores assign a fresh nonzero id.
+    #[serde(skip)]
+    instance_id: u64,
     state: CommandState,
     mode: CommandMode,
     retries: i32,
@@ -13757,9 +14276,22 @@ pub struct CommandSnapshot {
     finished: Option<CommandStatus>,
 }
 
+impl PartialEq for CommandSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.state == other.state
+            && self.mode == other.mode
+            && self.retries == other.retries
+            && self.failures == other.failures
+            && self.update_interval == other.update_interval
+            && self.request == other.request
+            && self.finished == other.finished
+    }
+}
+
 impl CommandSnapshot {
     fn new(entry: &ActiveCommand) -> Self {
         Self {
+            instance_id: entry.instance_id,
             state: entry.state.clone(),
             mode: entry.mode,
             retries: entry.retries,
@@ -13816,11 +14348,22 @@ impl CommandView {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CommandStackSnapshot {
     commands: Vec<CommandSnapshot>,
+    /// Runtime-only monotonic allocator state. Never rewound by an in-memory
+    /// callback Restore; persisted restores safely restart with fresh ids.
+    #[serde(skip)]
+    next_instance_id: u64,
     #[serde(skip)]
     detached_grab_attempts: Vec<DetachedGrabAttempt>,
+}
+
+impl PartialEq for CommandStackSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.commands == other.commands
+            && self.detached_grab_attempts == other.detached_grab_attempts
+    }
 }
 
 impl CommandStackSnapshot {
@@ -13868,6 +14411,8 @@ impl CommandStackSnapshot {
 #[derive(Debug, Clone)]
 pub struct CommandStack {
     entries: VecDeque<ActiveCommand>,
+    /// Nonzero identity allocator for native-command lifetime matching.
+    next_instance_id: u64,
     detached_grab_attempts: Vec<DetachedGrabAttempt>,
     /// A callback may ClearCommands/SetCommand while ObjectComStop is
     /// running. Native keeps the executing C4Command alive through its
@@ -13877,6 +14422,15 @@ pub struct CommandStack {
     /// Build has the same callback-detachment hazard while its Dig stop is
     /// in flight; retain that exact executing state through the continuation.
     detached_build_stops: VecDeque<BuildState>,
+    /// Throw has two callback boundaries inside one C4Command::Execute:
+    /// ObjectComStop for a digging actor and SetDir's TurnAction at a
+    /// targeted launch point. A callback may unlink the command while its
+    /// native body is still executing, so retain that body until the
+    /// matching continuation event returns.
+    detached_throw_preludes: VecDeque<DetachedThrowPrelude>,
+    /// Drop has the same retained ObjectComStop boundary when it starts in
+    /// DFA_DIG. Keep a detached body alive if callbacks replace the stack.
+    detached_drop_preludes: VecDeque<DetachedDropPrelude>,
     /// Live Grab callbacks resolve inside engine/compat event handling, so
     /// their failure feedback cannot travel on the original CommandEvent.
     /// Keep it transient and let that synchronous caller drain it before
@@ -13917,6 +14471,35 @@ struct DetachedGrabAttempt {
     target_retained: bool,
 }
 
+#[derive(Debug, Clone)]
+struct DetachedThrowPrelude {
+    entry: ActiveCommand,
+    base_chain: Vec<DetachedCommandBase>,
+}
+
+#[derive(Debug, Clone)]
+struct DetachedDropPrelude {
+    entry: ActiveCommand,
+    base_chain: Vec<DetachedCommandBase>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DetachedCommandBase {
+    instance_id: u64,
+    retries: i32,
+    finished: Option<CommandStatus>,
+}
+
+impl From<&ActiveCommand> for DetachedCommandBase {
+    fn from(entry: &ActiveCommand) -> Self {
+        Self {
+            instance_id: entry.instance_id,
+            retries: entry.retries,
+            finished: entry.finished,
+        }
+    }
+}
+
 impl Default for CommandStack {
     fn default() -> Self {
         Self::new()
@@ -13930,9 +14513,12 @@ impl CommandStack {
     pub fn new() -> Self {
         Self {
             entries: VecDeque::new(),
+            next_instance_id: 1,
             detached_grab_attempts: Vec::new(),
             detached_move_to_stops: VecDeque::new(),
             detached_build_stops: VecDeque::new(),
+            detached_throw_preludes: VecDeque::new(),
+            detached_drop_preludes: VecDeque::new(),
             pending_failure_feedback: VecDeque::new(),
         }
     }
@@ -13976,11 +14562,45 @@ impl CommandStack {
         }
     }
 
+    fn remember_detached_throw_prelude(&mut self, entry: &ActiveCommand) {
+        if let CommandState::Throw(state) = &entry.state {
+            if !state.continuations.is_empty() {
+                self.detached_throw_preludes
+                    .push_back(DetachedThrowPrelude {
+                        entry: entry.clone(),
+                        base_chain: self
+                            .entries
+                            .iter()
+                            .map(DetachedCommandBase::from)
+                            .collect(),
+                    });
+            }
+        }
+    }
+
+    fn remember_detached_drop_prelude(&mut self, entry: &ActiveCommand) {
+        if let CommandState::Drop(state) = &entry.state {
+            if !state.continuations.is_empty() {
+                self.detached_drop_preludes
+                    .push_back(DetachedDropPrelude {
+                        entry: entry.clone(),
+                        base_chain: self
+                            .entries
+                            .iter()
+                            .map(DetachedCommandBase::from)
+                            .collect(),
+                    });
+            }
+        }
+    }
+
     fn pop_front(&mut self) -> Option<ActiveCommand> {
         let entry = self.entries.pop_front()?;
         self.remember_detached_grab(&entry);
         self.remember_detached_move_to_stop(&entry);
         self.remember_detached_build_stop(&entry);
+        self.remember_detached_throw_prelude(&entry);
+        self.remember_detached_drop_prelude(&entry);
         Some(entry)
     }
 
@@ -14070,6 +14690,46 @@ impl CommandStack {
             })
             .collect::<Vec<_>>();
         self.detached_build_stops.extend(build_stops);
+        let throw_preludes = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match &entry.state {
+                CommandState::Throw(state) if !state.continuations.is_empty() => {
+                    Some(DetachedThrowPrelude {
+                        entry: entry.clone(),
+                        base_chain: self
+                            .entries
+                            .iter()
+                            .skip(index + 1)
+                            .map(DetachedCommandBase::from)
+                            .collect(),
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.detached_throw_preludes.extend(throw_preludes);
+        let drop_preludes = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match &entry.state {
+                CommandState::Drop(state) if !state.continuations.is_empty() => {
+                    Some(DetachedDropPrelude {
+                        entry: entry.clone(),
+                        base_chain: self
+                            .entries
+                            .iter()
+                            .skip(index + 1)
+                            .map(DetachedCommandBase::from)
+                            .collect(),
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.detached_drop_preludes.extend(drop_preludes);
         self.entries.clear();
     }
 
@@ -14106,6 +14766,7 @@ impl CommandStack {
     pub fn snapshot(&self) -> CommandStackSnapshot {
         CommandStackSnapshot {
             commands: self.entries.iter().map(CommandSnapshot::new).collect(),
+            next_instance_id: self.next_instance_id,
             detached_grab_attempts: self.detached_grab_attempts.clone(),
         }
     }
@@ -14151,13 +14812,103 @@ impl CommandStack {
                 .collect::<Vec<_>>();
             self.detached_build_stops.extend(build_stops);
         }
-        self.entries = snapshot
+        let retained_throw_ids = snapshot
+            .commands
+            .iter()
+            .filter_map(|command| match &command.state {
+                CommandState::Throw(state) if !state.continuations.is_empty() => {
+                    Some(command.instance_id)
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let detached_throw_preludes = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match &entry.state {
+                CommandState::Throw(state)
+                    if !state.continuations.is_empty()
+                        && !retained_throw_ids.contains(&entry.instance_id) =>
+                {
+                    Some(DetachedThrowPrelude {
+                        entry: entry.clone(),
+                        base_chain: self
+                            .entries
+                            .iter()
+                            .skip(index + 1)
+                            .map(DetachedCommandBase::from)
+                            .collect(),
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.detached_throw_preludes
+            .extend(detached_throw_preludes);
+        let retained_drop_ids = snapshot
+            .commands
+            .iter()
+            .filter_map(|command| match &command.state {
+                CommandState::Drop(state) if !state.continuations.is_empty() => {
+                    Some(command.instance_id)
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let detached_drop_preludes = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match &entry.state {
+                CommandState::Drop(state)
+                    if !state.continuations.is_empty()
+                        && !retained_drop_ids.contains(&entry.instance_id) =>
+                {
+                    Some(DetachedDropPrelude {
+                        entry: entry.clone(),
+                        base_chain: self
+                            .entries
+                            .iter()
+                            .skip(index + 1)
+                            .map(DetachedCommandBase::from)
+                            .collect(),
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.detached_drop_preludes.extend(detached_drop_preludes);
+        let highest_restored_id = snapshot
+            .commands
+            .iter()
+            .map(|command| command.instance_id)
+            .max()
+            .unwrap_or(0);
+        self.next_instance_id = self
+            .next_instance_id
+            .max(snapshot.next_instance_id)
+            .max(highest_restored_id.saturating_add(1))
+            .max(1);
+        let mut entries: VecDeque<_> = snapshot
             .commands
             .iter()
             .cloned()
             .map(ActiveCommand::from_snapshot)
             .collect();
+        for entry in &mut entries {
+            if entry.instance_id == 0 {
+                entry.instance_id = self.allocate_command_instance_id();
+            }
+        }
+        self.entries = entries;
         self.detached_grab_attempts = snapshot.detached_grab_attempts.clone();
+    }
+
+    fn allocate_command_instance_id(&mut self) -> u64 {
+        let id = self.next_instance_id.max(1);
+        self.next_instance_id = id.checked_add(1).unwrap_or(1);
+        id
     }
 
     /// C4Command::DenumeratePointers resolves the saved Target/Target2
@@ -14184,6 +14935,9 @@ impl CommandStack {
             }
             changed |= entry.state.clear_object_reference(removed);
         }
+        // An iExec command detached by ClearCommands is no longer in
+        // C4Object::Command, so the later ClearPointers walk does not reach
+        // it (C4Object.cpp:2194-2205). Preserve those raw native pointers.
         changed
     }
 
@@ -14335,7 +15089,189 @@ impl CommandStack {
                 }
             }
         }
+        self.apply_result_operations(&mut result);
+        Some(result)
+    }
 
+    /// Resume the exact Throw body suspended across ObjectComStop or
+    /// SetDir. This is still the same native Execute call, so neither the
+    /// command interval nor retry bookkeeping advances a second time.
+    pub(crate) fn execute_pending_throw_prelude(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        command_instance_id: u64,
+    ) -> Option<CommandStepResult> {
+        let index = self.entries.iter().position(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(
+                    &entry.state,
+                    CommandState::Throw(state) if !state.continuations.is_empty()
+                )
+        });
+
+        let mut detached_failure = None;
+        let mut result = if let Some(index) = index {
+            let entry = self.entries.get_mut(index)?;
+            let CommandState::Throw(state) = &mut entry.state else {
+                return None;
+            };
+            let result = state.resume_after_prelude(ctx, gravity);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                entry.finished = Some(result.status);
+            }
+            result
+        } else {
+            let detached_index = self.detached_throw_preludes.iter().position(|entry| {
+                (command_instance_id == 0 || entry.entry.instance_id == command_instance_id)
+                    && matches!(
+                        &entry.entry.state,
+                        CommandState::Throw(state) if !state.continuations.is_empty()
+                    )
+            })?;
+            let mut detached = self.detached_throw_preludes.remove(detached_index)?;
+            let CommandState::Throw(state) = &mut detached.entry.state else {
+                return None;
+            };
+            let result = state.resume_after_prelude(ctx, gravity);
+            if !state.continuations.is_empty() {
+                self.detached_throw_preludes.push_back(detached);
+            } else if result.status == CommandStatus::Failed {
+                detached_failure = Some((detached.entry, detached.base_chain));
+            }
+            result
+        };
+
+        if result.status == CommandStatus::Failed {
+            if let Some(index) = index {
+                if let Some(feedback) = self.record_failure_at(index) {
+                    result.events.push(CommandEvent::FailureFeedback {
+                        actor_id: ctx.object.id,
+                        feedback,
+                    });
+                }
+            } else if let Some((entry, base_chain)) = detached_failure.as_ref() {
+                if let Some(feedback) = self.record_detached_failure(entry, base_chain) {
+                    result.events.push(CommandEvent::FailureFeedback {
+                        actor_id: ctx.object.id,
+                        feedback,
+                    });
+                }
+            }
+        }
+        for event in &mut result.events {
+            match event {
+                CommandEvent::ObjectComPutTake {
+                    command_instance_id: event_instance_id,
+                    ..
+                }
+                | CommandEvent::ThrowObject {
+                    command_instance_id: event_instance_id,
+                    ..
+                }
+                | CommandEvent::ObjectComStopThrow {
+                    command_instance_id: event_instance_id,
+                    ..
+                }
+                | CommandEvent::ObjectComSetDirThrow {
+                    command_instance_id: event_instance_id,
+                    ..
+                } if *event_instance_id == 0 => {
+                    *event_instance_id = command_instance_id;
+                }
+                _ => {}
+            }
+        }
+        self.apply_result_operations(&mut result);
+        Some(result)
+    }
+
+    /// Resume the exact Drop body suspended across its initial
+    /// ObjectComStop. This is still the same native Execute call, so the
+    /// command interval and retry bookkeeping must not advance again.
+    pub(crate) fn execute_pending_drop_prelude(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        command_instance_id: u64,
+    ) -> Option<CommandStepResult> {
+        let index = self.entries.iter().position(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(
+                    &entry.state,
+                    CommandState::Drop(state) if !state.continuations.is_empty()
+                )
+        });
+
+        let mut detached_failure = None;
+        let mut result = if let Some(index) = index {
+            let entry = self.entries.get_mut(index)?;
+            let CommandState::Drop(state) = &mut entry.state else {
+                return None;
+            };
+            let result = state.resume_after_prelude(ctx);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                entry.finished = Some(result.status);
+            }
+            result
+        } else {
+            let detached_index = self.detached_drop_preludes.iter().position(|entry| {
+                (command_instance_id == 0 || entry.entry.instance_id == command_instance_id)
+                    && matches!(
+                        &entry.entry.state,
+                        CommandState::Drop(state) if !state.continuations.is_empty()
+                    )
+            })?;
+            let mut detached = self.detached_drop_preludes.remove(detached_index)?;
+            let CommandState::Drop(state) = &mut detached.entry.state else {
+                return None;
+            };
+            let result = state.resume_after_prelude(ctx);
+            if !state.continuations.is_empty() {
+                self.detached_drop_preludes.push_back(detached);
+            } else if result.status == CommandStatus::Failed {
+                detached_failure = Some((detached.entry, detached.base_chain));
+            }
+            result
+        };
+
+        if result.status == CommandStatus::Failed {
+            if let Some(index) = index {
+                if let Some(feedback) = self.record_failure_at(index) {
+                    result.events.push(CommandEvent::FailureFeedback {
+                        actor_id: ctx.object.id,
+                        feedback,
+                    });
+                }
+            } else if let Some((entry, base_chain)) = detached_failure.as_ref() {
+                if let Some(feedback) = self.record_detached_failure(entry, base_chain) {
+                    result.events.push(CommandEvent::FailureFeedback {
+                        actor_id: ctx.object.id,
+                        feedback,
+                    });
+                }
+            }
+        }
+        for event in &mut result.events {
+            match event {
+                CommandEvent::ObjectComPutTake {
+                    command_instance_id: event_instance_id,
+                    ..
+                }
+                | CommandEvent::ObjectComDrop {
+                    command_instance_id: event_instance_id,
+                    ..
+                } if *event_instance_id == 0 => {
+                    *event_instance_id = command_instance_id;
+                }
+                _ => {}
+            }
+        }
         self.apply_result_operations(&mut result);
         Some(result)
     }
@@ -14396,7 +15332,8 @@ impl CommandStack {
         if self.entries.len() >= MAX_COMMAND_STACK {
             return Err(CommandError::StackFull);
         }
-        let command = ActiveCommand::from_request(request)?;
+        let mut command = ActiveCommand::from_request(request)?;
+        command.instance_id = self.allocate_command_instance_id();
         self.entries.push_front(command);
         Ok(())
     }
@@ -14405,7 +15342,8 @@ impl CommandStack {
         if self.entries.len() >= MAX_COMMAND_STACK {
             return Err(CommandError::StackFull);
         }
-        let command = ActiveCommand::from_request(request)?;
+        let mut command = ActiveCommand::from_request(request)?;
+        command.instance_id = self.allocate_command_instance_id();
         self.entries.push_back(command);
         Ok(())
     }
@@ -14433,11 +15371,31 @@ impl CommandStack {
         false
     }
 
+    /// Finish the exact native C4Command whose callbackful helper returned.
+    /// A zero token is the compatibility fallback for persisted legacy
+    /// events, which had no runtime pointer identity.
+    pub(crate) fn finish_command_instance(
+        &mut self,
+        id: CommandId,
+        command_instance_id: u64,
+    ) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|entry| {
+            entry.id() == Some(id)
+                && (command_instance_id == 0 || entry.instance_id == command_instance_id)
+        }) else {
+            return false;
+        };
+        entry.finished = Some(CommandStatus::Completed);
+        true
+    }
+
     /// Finish the exact Drop whose live ObjectComDrop helper just returned.
     /// AddCommand may have pushed entries above it; SetCommand may have
     /// removed it entirely.
-    pub fn finish_pending_drop(&mut self) -> bool {
+    pub fn finish_pending_drop(&mut self, command_instance_id: u64) -> bool {
         let Some(entry) = self.entries.iter_mut().find(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                &&
             matches!(
                 &entry.state,
                 CommandState::Drop(state) if state.completion_pending
@@ -14450,6 +15408,66 @@ impl CommandStack {
         };
         state.completion_pending = false;
         entry.finished = Some(CommandStatus::Completed);
+        true
+    }
+
+    /// Finish the exact Throw whose live ObjectComPutTake helper returned.
+    /// Callback-side AddCommand may have pushed another entry above it, and
+    /// SetCommand may have removed it entirely.
+    pub(crate) fn finish_pending_throw(&mut self, command_instance_id: u64) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                &&
+            matches!(
+                &entry.state,
+                CommandState::Throw(state) if state.put_take_pending
+            )
+        }) else {
+            return false;
+        };
+        let CommandState::Throw(state) = &mut entry.state else {
+            unreachable!("the pending-throw predicate only matches Throw commands");
+        };
+        state.put_take_pending = false;
+        entry.finished = Some(CommandStatus::Completed);
+        true
+    }
+
+    /// A live requested item moved out of the actor after the command
+    /// snapshot was built. Clear the in-flight PutTake marker so a Get child
+    /// can run and the same original command can retry afterward.
+    pub(crate) fn clear_pending_put_take(
+        &mut self,
+        command: CommandId,
+        command_instance_id: u64,
+    ) -> bool {
+        let entry = match command {
+            CommandId::Throw => self.entries.iter_mut().find(|entry| {
+                (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                    &&
+                matches!(
+                    &entry.state,
+                    CommandState::Throw(state) if state.put_take_pending
+                )
+            }),
+            CommandId::Drop => self.entries.iter_mut().find(|entry| {
+                (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                    &&
+                matches!(
+                    &entry.state,
+                    CommandState::Drop(state) if state.completion_pending
+                )
+            }),
+            _ => None,
+        };
+        let Some(entry) = entry else {
+            return false;
+        };
+        match &mut entry.state {
+            CommandState::Throw(state) => state.put_take_pending = false,
+            CommandState::Drop(state) => state.completion_pending = false,
+            _ => unreachable!("pending PutTake predicate matched another command"),
+        }
         true
     }
 
@@ -14958,6 +15976,90 @@ impl CommandStack {
                 ),
                 reason: None,
             }
+        })
+    }
+
+    /// Fail tail for an iExec command unlinked by ClearCommand(s). Preserve
+    /// the original ordered `Next` chain: callback-installed replacements
+    /// are not bases, and a newly finished original base must be skipped.
+    fn increment_detached_base_failure(
+        &mut self,
+        base_chain: &[DetachedCommandBase],
+    ) -> Option<bool> {
+        for candidate in base_chain {
+            if let Some(index) = self
+                .entries
+                .iter()
+                .position(|entry| entry.instance_id == candidate.instance_id)
+            {
+                let base = &mut self.entries[index];
+                if base.finished.is_some() {
+                    continue;
+                }
+                base.failures = base.failures.saturating_add(1);
+                return Some(base.retries == 0);
+            }
+            if let Some(index) = self
+                .detached_throw_preludes
+                .iter()
+                .position(|entry| entry.entry.instance_id == candidate.instance_id)
+            {
+                let base = &mut self.detached_throw_preludes[index].entry;
+                if base.finished.is_some() {
+                    continue;
+                }
+                base.failures = base.failures.saturating_add(1);
+                return Some(base.retries == 0);
+            }
+            if let Some(index) = self
+                .detached_drop_preludes
+                .iter()
+                .position(|entry| entry.entry.instance_id == candidate.instance_id)
+            {
+                let base = &mut self.detached_drop_preludes[index].entry;
+                if base.finished.is_some() {
+                    continue;
+                }
+                base.failures = base.failures.saturating_add(1);
+                return Some(base.retries == 0);
+            }
+            if candidate.finished.is_none() {
+                // The base was another executing command cleared from the
+                // object list. Native iExec retains it even when this Rust
+                // continuation has no full detached state for that command.
+                return Some(candidate.retries == 0);
+            }
+        }
+        None
+    }
+
+    fn record_detached_failure(
+        &mut self,
+        entry: &ActiveCommand,
+        base_chain: &[DetachedCommandBase],
+    ) -> Option<CommandFailureFeedback> {
+        let execute_feedback = match entry.mode {
+            CommandMode::SilentSub => {
+                self.increment_detached_base_failure(base_chain).is_none()
+            }
+            CommandMode::Sub => self
+                .increment_detached_base_failure(base_chain)
+                .unwrap_or(true),
+            CommandMode::Base => true,
+            CommandMode::SilentBase => false,
+        };
+        execute_feedback.then(|| CommandFailureFeedback {
+            command: CommandView::from_entry(
+                entry
+                    .state
+                    .id()
+                    .map(CommandId::to_name)
+                    .unwrap_or("None")
+                    .to_string(),
+                entry.request.as_ref(),
+                &entry.state,
+            ),
+            reason: None,
         })
     }
 }
@@ -17615,41 +18717,26 @@ impl PushToState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct UnGrabState {
     update_interval: u32,
+    #[serde(default)]
+    completion_pending: bool,
 }
 
 impl UnGrabState {
     fn from_request(request: &CommandRequest) -> Self {
         Self {
             update_interval: request.update_interval.max(1),
+            completion_pending: false,
         }
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let mut needs_update = false;
-        let mut update = ObjectUpdate::new();
-
-        if ctx.object.command_direction != CommandDirection::Stop {
-            update = update.with_command_direction(CommandDirection::Stop);
-            needs_update = true;
-        }
-
-        if ctx.object.action_procedure == ActionProcedure::Push {
-            // ObjectComUnGrab calls ObjectActionStand: ComDir Stop, Walk,
-            // and zero xdir/ydir. SetActionByName receives no target, so
-            // the previous target is retained (C4ObjectCom.cpp:41-46,
-            // 261-278; C4Object.cpp:4142-4143).
-            let action_update = ActionUpdate::default().with_name("Walk").with_force(true);
-            update = update
-                .with_action_update(action_update)
-                .with_velocity(Vector2::ZERO);
-            needs_update = true;
-        }
-
-        if needs_update {
-            CommandStepResult::completed(Some(update))
-        } else {
-            CommandStepResult::completed(None)
-        }
+        self.completion_pending = true;
+        CommandStepResult::running(None).with_events(vec![
+            CommandEvent::ObjectComUnGrabCommand {
+                actor_id: ctx.object.id,
+                command_instance_id: 0,
+            },
+        ])
     }
 }
 
@@ -18023,15 +19110,26 @@ impl PutState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct DropState {
     requested_item: Option<ObjectId>,
-    definition_id: Option<DefinitionId>,
     target_position: Option<Vector2>,
     update_interval: u32,
+    /// Legacy save fields from the former delegated-Put approximation.
+    /// ObjectComPutTake is now executed inline, but retaining these fields
+    /// keeps old command snapshots readable without a migration.
+    #[serde(default)]
     delegated_put: bool,
+    #[serde(default)]
     delegated_container: Option<ObjectId>,
     /// ObjectComDrop is running between the helper call and Finish(true).
     /// This identifies the exact command if callbacks push new entries.
     #[serde(default)]
     completion_pending: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    continuations: Vec<DropContinuation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum DropContinuation {
+    AfterObjectComStop,
 }
 
 impl DropState {
@@ -18041,12 +19139,12 @@ impl DropState {
         let target_position = (tx != 0 || ty != 0).then_some(Vector2::new(tx, ty));
         Self {
             requested_item: request.target,
-            definition_id: command_data_to_definition_id(&request.data),
             target_position,
             update_interval: request.update_interval.max(1),
             delegated_put: false,
             delegated_container: None,
             completion_pending: false,
+            continuations: Vec::new(),
         }
     }
 
@@ -18061,20 +19159,8 @@ impl DropState {
             self.requested_item = None;
         }
 
-        if let Some(definition_id) = &self.definition_id {
-            for object_id in &ctx.object.contents {
-                if let Some(snapshot) = ctx.resolve(*object_id) {
-                    if &snapshot.definition_id == definition_id {
-                        self.requested_item = Some(*object_id);
-                        return Some((*object_id, snapshot));
-                    }
-                }
-            }
-        }
-
         if let Some(object_id) = ctx.object.contents.first().copied() {
             if let Some(snapshot) = ctx.resolve(object_id) {
-                self.requested_item = Some(object_id);
                 return Some((object_id, snapshot));
             }
         }
@@ -18082,67 +19168,64 @@ impl DropState {
         None
     }
 
-    fn delegate_put(
-        &mut self,
-        item_id: ObjectId,
-        container_id: ObjectId,
-        update: Option<ObjectUpdate>,
-    ) -> CommandStepResult {
-        if self.delegated_put && self.delegated_container == Some(container_id) {
-            return CommandStepResult::running(update);
-        }
-        self.delegated_put = true;
-        self.delegated_container = Some(container_id);
-
-        let mut request = CommandRequest::new(CommandId::Put)
-            .with_target(Some(container_id))
-            .with_target2(Some(item_id))
-            .with_mode(CommandMode::SilentSub)
-            .with_update_interval(15);
-
-        if let Some(position) = self.target_position {
-            request = request.with_tx(Some(position.x)).with_ty(Some(position.y));
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if ctx.object.action_procedure == ActionProcedure::Dig {
+            self.continuations
+                .push(DropContinuation::AfterObjectComStop);
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::ObjectComStopDrop {
+                    object_id: ctx.object.id,
+                    command_instance_id: 0,
+                },
+            ]);
         }
 
-        let mut result = CommandStepResult::running(update);
-        result.operations.push(CommandOperation::PushFront(request));
-        result
+        self.step_after_object_com_stop(ctx)
     }
 
-    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        // Plain outside Drop preserves Action.ComDir. Only the targeted
-        // at-position branch stops it before ObjectComDrop
-        // (C4Command.cpp:998-1049). Keep the old Dig stop approximation
-        // until the dedicated ObjectComStop parity slice owns that action.
-        let mut update = (ctx.object.action_procedure == ActionProcedure::Dig
-            && ctx.object.command_direction != CommandDirection::Stop)
-            .then(|| ObjectUpdate::new().with_command_direction(CommandDirection::Stop));
-
-        let (item_id, item_snapshot) = match self.resolve_item(ctx) {
-            Some(value) => value,
-            None => return CommandStepResult::completed(update),
-        };
-
-        if item_snapshot.destroyed {
-            return CommandStepResult::failed(update);
+    fn resume_after_prelude(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
+        match self.continuations.pop() {
+            Some(DropContinuation::AfterObjectComStop) => {
+                self.step_after_object_com_stop(ctx)
+            }
+            None => CommandStepResult::running(None),
         }
+    }
 
-        // C4Command::Drop's contained/pushing branches call
-        // ObjectComPutTake and finish immediately. Once our delegated Put has
-        // transferred the item to that same container, do not try to Get it
-        // back into the actor (C4Command.cpp:1036-1049).
-        if self.delegated_put && item_snapshot.container == self.delegated_container {
+    fn step_after_object_com_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
+        // Plain outside Drop preserves Action.ComDir. Only ObjectComStop's
+        // ObjectActionStand and the targeted at-position branch stop it
+        // (C4Command.cpp:988-1049).
+        let mut update = None;
+
+        let item = self.resolve_item(ctx);
+        // Older snapshots may already have a delegated Put child in front
+        // of this Drop. Once that child moved the item to its recorded
+        // target, preserve the old one-shot completion instead of fetching
+        // the item back and attempting a second inline PutTake.
+        if self.delegated_put
+            && self.delegated_container.is_some()
+            && item.is_some_and(|(_, item)| item.container == self.delegated_container)
+        {
             return CommandStepResult::completed(update);
         }
 
-        if item_snapshot.container != Some(ctx.object.id) {
-            let mut result = CommandStepResult::running(update.clone());
-            let request = CommandRequest::new(CommandId::Get)
-                .with_target(Some(item_id))
-                .with_update_interval(40)
-                .with_mode(CommandMode::SilentSub);
-            result.operations.push(CommandOperation::PushFront(request));
-            return result;
+        if let Some((item_id, _item_snapshot)) = item {
+            if !ctx.object.contents.contains(&item_id) {
+                let mut result = CommandStepResult::running(update.clone());
+                let request = CommandRequest::new(CommandId::Get)
+                    .with_target(Some(item_id))
+                    .with_update_interval(40)
+                    .with_mode(CommandMode::SilentSub);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
         }
 
         if let Some(position) = self.target_position {
@@ -18181,18 +19264,36 @@ impl DropState {
             if ctx.object.command_direction != CommandDirection::Stop {
                 update = Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop));
             }
-        } else {
-            if let Some(container_id) = ctx.object.container {
-                return self.delegate_put(item_id, container_id, update);
-            }
-
-            if ctx.object.action_procedure == ActionProcedure::Push {
-                if let Some(container_id) = ctx.object.action_target {
-                    return self.delegate_put(item_id, container_id, update);
-                }
+        } else if let Some(container_id) = ctx.object.container {
+            self.completion_pending = true;
+            return CommandStepResult::running(update).with_events(vec![
+                CommandEvent::ObjectComPutTake {
+                    actor_id: ctx.object.id,
+                    target_id: container_id,
+                    requested_item: self.requested_item,
+                    command: CommandId::Drop,
+                    command_instance_id: 0,
+                },
+            ]);
+        } else if ctx.object.action_procedure == ActionProcedure::Push {
+            let Some(container_id) = ctx.object.action_target else {
                 return CommandStepResult::completed(update);
-            }
+            };
+            self.completion_pending = true;
+            return CommandStepResult::running(update).with_events(vec![
+                CommandEvent::ObjectComPutTake {
+                    actor_id: ctx.object.id,
+                    target_id: container_id,
+                    requested_item: self.requested_item,
+                    command: CommandId::Drop,
+                    command_instance_id: 0,
+                },
+            ]);
         }
+
+        let Some((item_id, _)) = item else {
+            return CommandStepResult::completed(update);
+        };
 
         // C++ calls Finish(true) only after ObjectComDrop (including all
         // Exit/UnGrab callbacks) returns. The live event marks this Drop
@@ -18201,6 +19302,7 @@ impl DropState {
         CommandStepResult::running(update).with_events(vec![CommandEvent::ObjectComDrop {
             actor_id: ctx.object.id,
             object_id: item_id,
+            command_instance_id: 0,
         }])
     }
 }
@@ -18765,6 +19867,16 @@ struct ThrowState {
     tx: Option<i32>,
     ty: Option<i32>,
     update_interval: u32,
+    #[serde(default)]
+    put_take_pending: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    continuations: Vec<ThrowContinuation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum ThrowContinuation {
+    AfterObjectComStop,
+    AfterSetDir,
 }
 
 impl ThrowState {
@@ -18774,15 +19886,9 @@ impl ThrowState {
             tx: request.tx,
             ty: request.ty,
             update_interval: request.update_interval.max(1),
+            put_take_pending: false,
+            continuations: Vec::new(),
         })
-    }
-
-    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
-        if ctx.object.command_direction != CommandDirection::Stop {
-            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
-        } else {
-            None
-        }
     }
 
     fn throw_position(&self) -> Option<Vector2> {
@@ -18802,19 +19908,28 @@ impl ThrowState {
         ctx: &CommandRuntimeContext<'_>,
         gravity: crate::C4Fixed,
     ) -> CommandStepResult {
-        let mut pending_update = None;
-
         if ctx.object.action_procedure == ActionProcedure::Dig {
-            // C4Command::Throw first ObjectComStop's a digging Clonk back to
-            // Walk (C4Command.cpp:912-913; C4ObjectCom.cpp:239-244).
-            let walk_action = ActionUpdate::default().with_name("Walk").with_force(false);
-            let update = self.update_to_stop(ctx).unwrap_or_default();
-            pending_update = Some(
-                update
-                    .with_velocity(Vector2::ZERO)
-                    .with_action_update(walk_action),
-            );
+            // ObjectComStop is two callbackful SetAction operations (Idle,
+            // then Walk), not a reducible Walk update. Resume this same
+            // Throw only after both calls have returned.
+            self.continuations
+                .push(ThrowContinuation::AfterObjectComStop);
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::ObjectComStopThrow {
+                    object_id: ctx.object.id,
+                    command_instance_id: 0,
+                },
+            ]);
         }
+
+        self.step_after_object_com_stop(ctx, gravity)
+    }
+
+    fn step_after_object_com_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+    ) -> CommandStepResult {
 
         if let Some(target_id) = self.target {
             if !ctx.object.contents.contains(&target_id) {
@@ -18822,7 +19937,7 @@ impl ThrowState {
                     .with_target(Some(target_id))
                     .with_update_interval(40)
                     .with_mode(CommandMode::SilentSub);
-                let mut result = CommandStepResult::running(pending_update);
+                let mut result = CommandStepResult::running(None);
                 result
                     .operations
                     .push(CommandOperation::PushFront(get_request));
@@ -18835,7 +19950,7 @@ impl ThrowState {
             let request = CommandRequest::new(CommandId::UnGrab)
                 .with_update_interval(50)
                 .with_mode(CommandMode::SilentSub);
-            let mut result = CommandStepResult::running(pending_update);
+            let mut result = CommandStepResult::running(None);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
         }
@@ -18860,7 +19975,7 @@ impl ThrowState {
                     })
             });
             let Some(throwing_position) = throwing_position else {
-                return CommandStepResult::failed(pending_update);
+                return CommandStepResult::failed(None);
             };
 
             const THROW_HORIZONTAL_RANGE_DEFAULT: i32 = 5;
@@ -18878,30 +19993,40 @@ impl ThrowState {
                     .with_ty(Some(throwing_position.y))
                     .with_update_interval(20)
                     .with_mode(CommandMode::SilentSub);
-                let mut result = CommandStepResult::running(pending_update);
+                let mut result = CommandStepResult::running(None);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
+
+            let direction = if target_position.x > ctx.position.x {
+                Direction::Right
+            } else {
+                Direction::Left
+            };
+            self.continuations.push(ThrowContinuation::AfterSetDir);
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::ObjectComSetDirThrow {
+                    object_id: ctx.object.id,
+                    direction,
+                    command_instance_id: 0,
+                },
+            ]);
         }
 
-        // An untargeted Throw while contained is a put/take operation, not
-        // the outside Throw action (C4Command.cpp:966-970). ObjectComPutTake
-        // chooses the requested item or the actor's first content and enters
-        // it into the containing object (C4ObjectCom.cpp:700-712).
+        // An untargeted Throw while contained is an inline put/take operation,
+        // not the outside Throw action (C4Command.cpp:966-970).
         if target_position.is_none() {
             if let Some(container_id) = ctx.object.container {
-                let item_id = self
-                    .target
-                    .filter(|target| ctx.object.contents.contains(target))
-                    .or_else(|| ctx.object.contents.first().copied());
-                let events = item_id
-                    .map(|object_id| CommandEvent::ApplyObjectUpdate {
-                        object_id,
-                        update: ObjectUpdate::new().with_container(container_id),
-                    })
-                    .into_iter()
-                    .collect();
-                return CommandStepResult::completed(pending_update).with_events(events);
+                self.put_take_pending = true;
+                return CommandStepResult::running(None).with_events(vec![
+                    CommandEvent::ObjectComPutTake {
+                        actor_id: ctx.object.id,
+                        target_id: container_id,
+                        requested_item: self.target,
+                        command: CommandId::Throw,
+                        command_instance_id: 0,
+                    },
+                ]);
             }
         }
 
@@ -18909,71 +20034,77 @@ impl ThrowState {
         // contained branch above: ObjectComPutTake uses Action.Target and the
         // command finishes without ungrabbing (C4Command.cpp:973-979).
         if target_position.is_none() && ctx.object.action_procedure == ActionProcedure::Push {
-            let item_id = self
-                .target
-                .filter(|target| ctx.object.contents.contains(target))
-                .or_else(|| ctx.object.contents.first().copied());
-            let events = ctx
-                .object
-                .action_target
-                .zip(item_id)
-                .map(|(container_id, object_id)| CommandEvent::ApplyObjectUpdate {
-                    object_id,
-                    update: ObjectUpdate::new().with_container(container_id),
-                })
-                .into_iter()
-                .collect();
-            return CommandStepResult::completed(pending_update).with_events(events);
+            let Some(container_id) = ctx.object.action_target else {
+                return CommandStepResult::completed(None);
+            };
+            self.put_take_pending = true;
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::ObjectComPutTake {
+                    actor_id: ctx.object.id,
+                    target_id: container_id,
+                    requested_item: self.target,
+                    command: CommandId::Throw,
+                    command_instance_id: 0,
+                },
+            ]);
         }
 
-        let mut update = pending_update.unwrap_or_default();
+        self.step_object_com_throw(ctx, false)
+    }
 
-        if let Some(position) = target_position {
-            update.command_direction = Some(CommandDirection::Stop);
-            if position.x > ctx.position.x {
-                update.direction = Some(Direction::Right);
-            } else {
-                update.direction = Some(Direction::Left);
+    fn resume_after_prelude(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+    ) -> CommandStepResult {
+        match self.continuations.pop() {
+            Some(ThrowContinuation::AfterObjectComStop) => {
+                self.step_after_object_com_stop(ctx, gravity)
             }
+            Some(ThrowContinuation::AfterSetDir) => self.step_object_com_throw(ctx, true),
+            None => CommandStepResult::running(None),
         }
+    }
+
+    fn step_object_com_throw(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        targeted: bool,
+    ) -> CommandStepResult {
+        let update = targeted.then(|| {
+            ObjectUpdate::new().with_command_direction(CommandDirection::Stop)
+        });
 
         // ObjectActionThrow changes the Clonk action, then immediately exits
         // the selected (or first) content. Keep that ordered operation in the
         // engine: SetAction may reject the transition, and only a successful
         // transition consumes Random(360) (C4ObjectCom.cpp:120-137).
-        let item_id = self
-            .target
-            .filter(|target| ctx.object.contents.contains(target))
-            .or_else(|| ctx.object.contents.first().copied());
-        let targeted = target_position.is_some();
+        // Target was verified before a possible SetDir callback. Keep that
+        // explicit pointer even if the callback moved it out of Contents;
+        // ClearPointers may instead have nulled it, in which case native
+        // ObjectComThrow falls back to the current first content.
+        let item_id = self.target.or_else(|| ctx.object.contents.first().copied());
         let Some(object_id) = item_id else {
             return if targeted {
-                CommandStepResult::running(Some(update))
+                CommandStepResult::running(update)
             } else {
-                CommandStepResult::completed(Some(update))
+                CommandStepResult::completed(None)
             };
         };
-        if !matches!(
-            ctx.object.action_procedure,
-            ActionProcedure::Walk | ActionProcedure::Dig
-        ) {
+        if ctx.object.action_procedure != ActionProcedure::Walk {
             return if targeted {
-                CommandStepResult::running(Some(update))
+                CommandStepResult::running(update)
             } else {
-                CommandStepResult::completed(Some(update))
+                CommandStepResult::completed(None)
             };
         }
         let event = CommandEvent::ThrowObject {
             actor_id: ctx.object.id,
             object_id,
             complete_command_on_success: targeted,
+            command_instance_id: 0,
         };
-        let update = (!update.is_empty()).then_some(update);
-        if targeted {
-            CommandStepResult::running(update).with_events(vec![event])
-        } else {
-            CommandStepResult::completed(update).with_events(vec![event])
-        }
+        CommandStepResult::running(update).with_events(vec![event])
     }
 }
 
@@ -20304,6 +21435,8 @@ fn clear_matching_object_reference(reference: &mut Option<ObjectId>, removed: Ob
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ActiveCommand {
+    #[serde(skip)]
+    instance_id: u64,
     state: CommandState,
     mode: CommandMode,
     retries: i32,
@@ -20368,6 +21501,7 @@ impl ActiveCommand {
         };
 
         Ok(Self {
+            instance_id: 0,
             state,
             mode: request.mode,
             retries: request.retries.max(0),
@@ -20380,6 +21514,7 @@ impl ActiveCommand {
 
     fn from_snapshot(snapshot: CommandSnapshot) -> Self {
         let CommandSnapshot {
+            instance_id,
             state,
             mode,
             retries,
@@ -20401,6 +21536,7 @@ impl ActiveCommand {
             }
         });
         Self {
+            instance_id,
             state,
             mode,
             retries,
@@ -20445,7 +21581,7 @@ impl ActiveCommand {
             }
         }
 
-        match &mut self.state {
+        let mut result = match &mut self.state {
             CommandState::Follow(state) => state.step(ctx),
             CommandState::MoveTo(state) => {
                 let mut result = state.step_with_waypoint(ctx, next_is_move_to);
@@ -20491,6 +21627,44 @@ impl ActiveCommand {
             CommandState::Home(state) => state.step(ctx),
             CommandState::Energy(state) => state.step(ctx),
             CommandState::Unsupported => CommandStepResult::failed(None),
+        };
+        for event in &mut result.events {
+            match event {
+                CommandEvent::ObjectComPutTake {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::ObjectComDrop {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::ThrowObject {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::ObjectComUnGrabCommand {
+                    command_instance_id,
+                    ..
+                } if *command_instance_id == 0 => {
+                    *command_instance_id = self.instance_id;
+                }
+                CommandEvent::ObjectComStopDrop {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::ObjectComStopThrow {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::ObjectComSetDirThrow {
+                    command_instance_id,
+                    ..
+                } if *command_instance_id == 0 => {
+                    *command_instance_id = self.instance_id;
+                }
+                _ => {}
+            }
         }
+        result
     }
 }

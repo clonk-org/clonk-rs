@@ -61692,6 +61692,7 @@ protected func Entrance(pTarget)
                     permanent: true,
                     extra: ObjectMenuExtra::default(),
                     extra_data: 0,
+                    internal_refill_token: 0,
                     selection: -1,
                     user_menu: false,
                     command_object: Some(occupant),
@@ -62410,6 +62411,155 @@ protected func Entrance(pTarget)
         assert_eq!(
             locals.get("entrance_target"),
             Some(&object_reference_value(collector_id))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_collection_keeps_item_motion_through_callbacks_then_copies_collector(
+    ) -> Result<(), EngineError> {
+        // C4Object::Collect is the only Enter caller with fCopyMotion=false.
+        // Collection2, Entrance, Collection and Hit therefore observe the
+        // carryable's incoming motion. ObjectComCancelAttach precedes
+        // Collection, and only the final Collect tail copies the collector's
+        // current fixed motion (C4Object.cpp:5698-5713).
+        let collector_script = r#"#strict
+protected func RejectCollect(idItem, pItem)
+{
+  pItem->Mark(2);
+  return(0);
+}
+
+protected func Collection2(pItem)
+{
+  pItem->Mark(3);
+  return(1);
+}
+
+protected func Collection(pItem)
+{
+  pItem->RecordCollectionState();
+  return(1);
+}
+"#;
+        let item_script = r#"#strict
+local callback_order;
+local entrance_x, entrance_xdir;
+local collection_x, collection_xdir;
+local hit_x, hit_xdir;
+
+public func Mark(iStep)
+{
+  callback_order = callback_order * 10 + iStep;
+  return(1);
+}
+
+protected func RejectEntrance(pContainer)
+{
+  Mark(1);
+  return(0);
+}
+
+protected func Entrance(pContainer)
+{
+  Mark(4);
+  entrance_x = GetX();
+  entrance_xdir = GetXDir();
+  return(1);
+}
+
+public func RecordCollectionState()
+{
+  if (GetAction() eq "Idle") Mark(5); else Mark(9);
+  collection_x = GetX();
+  collection_xdir = GetXDir();
+  return(1);
+}
+
+protected func Hit()
+{
+  Mark(6);
+  hit_x = GetX();
+  hit_xdir = GetXDir();
+  return(1);
+}
+"#;
+        let mut collector =
+            Definition::from_script("ACOL", "Automatic collector", collector_script)?;
+        collector.set_c4_callback_convention(true);
+        collector.set_shape_rect(Some(DefinitionRect::new(-12, -9, 24, 18)));
+        collector.set_collection_rect(Some(DefinitionRect::new(-12, -9, 24, 18)));
+        let mut item = Definition::from_script("AITE", "Automatic item", item_script)?;
+        item.set_c4_callback_convention(true);
+        item.set_collectible(true);
+        item.configure_actions(
+            None,
+            HashMap::from([(
+                "Attached".to_string(),
+                ActionSpec::default().with_procedure("ATTACH"),
+            )]),
+        );
+
+        let mut engine = Engine::new();
+        engine.register_definition(collector)?;
+        engine.register_definition(item)?;
+        let collector_id = engine.spawn_object(
+            SpawnConfig::new("ACOL")
+                .with_alive(true)
+                .with_position(Vector2::new(100, 100)),
+        )?;
+        let item_id = engine.spawn_object(
+            SpawnConfig::new("AITE")
+                .with_action(ActionState::new("Attached"))
+                .with_position(Vector2::new(104, 95)),
+        )?;
+
+        let collector_idx = engine
+            .find_object_index(collector_id)
+            .expect("collector exists");
+        engine.objects[collector_idx].fixed_velocity = FixedVec2::new(
+            C4Fixed::from_raw(212_992), // 3.25
+            C4Fixed::from_raw(-98_304), // -1.5
+        );
+        let collector_position = engine.objects[collector_idx].state.position;
+        let collector_velocity = engine.objects[collector_idx].fixed_velocity;
+        let item_idx = engine.find_object_index(item_id).expect("item exists");
+        engine.objects[item_idx].fixed_velocity.x = C4Fixed::from_raw(114_688); // 1.75
+        engine.refresh_object_ocf(item_idx);
+        let incoming_position = engine.objects[item_idx].state.position;
+
+        engine.cross_check(3)?;
+
+        let item_idx = engine.find_object_index(item_id).expect("item remains");
+        let item = &engine.objects[item_idx];
+        assert_eq!(item.state.container, Some(collector_id));
+        assert_eq!(item.state.action.name, "Idle");
+        assert_eq!(
+            item.state.local_vars.get("callback_order"),
+            Some(&Value::Int(123_456)),
+            "RejectEntrance -> RejectCollect -> Collection2 -> Entrance -> \
+             CancelAttach -> Collection -> Hit"
+        );
+        for field in ["entrance_x", "collection_x", "hit_x"] {
+            assert_eq!(
+                item.state.local_vars.get(field),
+                Some(&Value::Int(incoming_position.x)),
+                "{field} observes the pre-CopyMotion item position"
+            );
+        }
+        for field in ["entrance_xdir", "collection_xdir", "hit_xdir"] {
+            assert_eq!(
+                item.state.local_vars.get(field),
+                Some(&Value::Int(18)),
+                "{field} observes the incoming 1.75 fixed xdir"
+            );
+        }
+        assert_eq!(item.state.position, collector_position);
+        assert_eq!(item.fixed_velocity, collector_velocity);
+        assert_eq!(
+            item.fixed_position,
+            FixedVec2::from_ints(collector_position.x, collector_position.y),
+            "the post-Hit CopyMotion snaps fixed position to collector integers"
         );
         Ok(())
     }

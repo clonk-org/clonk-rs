@@ -3201,6 +3201,13 @@ pub struct ObjectMenuState {
     /// `C4Menu::ExtraData`, used by the magic-value footer variants.
     #[serde(default, skip_serializing_if = "i32_is_zero")]
     pub extra_data: i32,
+    /// Runtime identity of the internal C4ObjectMenu allocation while a
+    /// refill is in progress. Nested Activate/Get initialization reuses it;
+    /// script CreateMenu replacement does not. C++ keeps the equivalent in
+    /// the menu/window objects, not script-visible ExtraData.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub internal_refill_token: u64,
     /// C4Menu::Selection (-1 = none, C4Menu.cpp:284).
     pub selection: i32,
     /// C4ObjectMenu::UserMenu — script menus always pass fUserMenu=true
@@ -3428,6 +3435,11 @@ pub struct ObjectState {
     pub blit_mode: u32,
     #[serde(default)]
     pub contents: Vec<ObjectId>,
+    /// Runtime identity of this object's current link in its container's
+    /// `C4ObjectList`. Every successful Enter allocates a fresh link, even
+    /// when an Exit+Enter callback restores the same final container/slot.
+    #[serde(skip)]
+    pub(crate) contents_link_generation: u64,
     #[serde(default)]
     pub components: HashMap<DefinitionId, i32>,
     /// C4Object::Component is a C4IDList: indexed access follows insertion
@@ -3671,6 +3683,7 @@ pub(crate) fn preview_spawn_state(
         visibility: 0,
         blit_mode: 0,
         contents: Vec::new(),
+        contents_link_generation: 0,
         components: HashMap::new(),
         component_order: Vec::new(),
         status: ObjectStatus::Normal,
@@ -4140,6 +4153,8 @@ impl ObjectDelta {
             self.change_def_reinsert = update.change_def_reinsert;
             self.change_def_contents_sort = update.change_def_contents_sort.clone();
             self.change_def_reset_action_time = update.change_def_reset_action_time;
+        } else if update.change_def_reinsert {
+            self.change_def_reinsert = true;
         }
         let writes_construction = update.construction.is_some();
         let construction_via_docon = update.construction_via_docon;
@@ -4468,10 +4483,10 @@ pub struct ObjectUpdate {
     /// C4Object.cpp:1180-1231).
     #[serde(default)]
     pub change_def: Option<String>,
-    /// A contained ChangeDef disturbed this object's contents link. The
+    /// A callback removed and re-added this object's contents link. The
     /// final container may equal the pre-call value, so an ordinary Option
-    /// delta would otherwise collapse the mandatory remove/re-add (and its
-    /// C++ Unsorted tail placement) into a no-op.
+    /// delta would otherwise collapse the mandatory remove/re-add into a
+    /// no-op. ChangeDef additionally carries its special sort metadata.
     #[serde(default, skip_serializing_if = "is_false")]
     #[doc(hidden)]
     pub change_def_reinsert: bool,
@@ -13659,6 +13674,21 @@ enum GetEnterOutcome {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjectComPutTakeOutcome {
+    Finished,
+    NeedsGet(ObjectId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImmediateCommandResume {
+    Front,
+    MoveToAfterStop,
+    BuildAfterStop,
+    ThrowPrelude(u64),
+    DropPrelude(u64),
+}
+
 /// Network control timing copied from a C++ `C4PacketJoinData` before
 /// synchronized gameplay starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19487,6 +19517,7 @@ impl Engine {
                             action_library: definition.action_library().clone(),
                             action_graphics: definition.action_graphics().clone(),
                             value: definition.value(),
+                            allow_picture_stack: definition.allow_picture_stack(),
                             mass: definition.mass(),
                             no_component_mass: definition.no_component_mass(),
                             constructable: definition.is_constructable(),
@@ -23629,7 +23660,7 @@ impl Engine {
     /// Throw). It shares the retained-front callback/clear tail with the
     /// ordinary object tick.
     fn execute_object_command_now(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
-        self.execute_object_command_now_inner(object_id, None)
+        self.execute_object_command_now_inner(object_id, ImmediateCommandResume::Front)
     }
 
     /// Resume the post-ObjectComStop half of the retained MoveTo without a
@@ -23637,19 +23668,47 @@ impl Engine {
     /// C4Command::Execute invocation; only the live callback boundary made
     /// the engine rebuild its command snapshot.
     fn resume_move_to_after_stop(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
-        self.execute_object_command_now_inner(object_id, Some(CommandId::MoveTo))
+        self.execute_object_command_now_inner(
+            object_id,
+            ImmediateCommandResume::MoveToAfterStop,
+        )
     }
 
     /// Resume Build after its Dig arm's live ObjectComStop without consuming
     /// another command interval or frame.
     fn resume_build_after_stop(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
-        self.execute_object_command_now_inner(object_id, Some(CommandId::Build))
+        self.execute_object_command_now_inner(
+            object_id,
+            ImmediateCommandResume::BuildAfterStop,
+        )
+    }
+
+    fn resume_throw_after_prelude(
+        &mut self,
+        object_id: ObjectId,
+        command_instance_id: u64,
+    ) -> Result<(), EngineError> {
+        self.execute_object_command_now_inner(
+            object_id,
+            ImmediateCommandResume::ThrowPrelude(command_instance_id),
+        )
+    }
+
+    fn resume_drop_after_prelude(
+        &mut self,
+        object_id: ObjectId,
+        command_instance_id: u64,
+    ) -> Result<(), EngineError> {
+        self.execute_object_command_now_inner(
+            object_id,
+            ImmediateCommandResume::DropPrelude(command_instance_id),
+        )
     }
 
     fn execute_object_command_now_inner(
         &mut self,
         object_id: ObjectId,
-        resume_after_stop: Option<CommandId>,
+        resume: ImmediateCommandResume,
     ) -> Result<(), EngineError> {
         let command_snapshots = self
             .objects
@@ -23737,17 +23796,27 @@ impl Engine {
             base_sell_enabled: self.base_sell_enabled,
             transfer_zones: &transfer_zones,
         };
-        let result = match resume_after_stop {
-            Some(CommandId::MoveTo) => self.objects[index]
-                .commands
-                .execute_pending_move_to_stop(&command_context),
-            Some(CommandId::Build) => self.objects[index]
-                .commands
-                .execute_pending_build_stop(&command_context),
-            _ => {
-                let command_gravity = self.physics.gravity_as_c4fixed();
+        let command_gravity = self.physics.gravity_as_c4fixed();
+        let result = match resume {
+            ImmediateCommandResume::Front => {
                 self.objects[index].step_command_stack(command_context, command_gravity)
             }
+            ImmediateCommandResume::MoveToAfterStop => self.objects[index]
+                .commands
+                .execute_pending_move_to_stop(&command_context),
+            ImmediateCommandResume::BuildAfterStop => self.objects[index]
+                .commands
+                .execute_pending_build_stop(&command_context),
+            ImmediateCommandResume::ThrowPrelude(command_instance_id) => self.objects[index]
+                .commands
+                .execute_pending_throw_prelude(
+                    &command_context,
+                    command_gravity,
+                    command_instance_id,
+                ),
+            ImmediateCommandResume::DropPrelude(command_instance_id) => self.objects[index]
+                .commands
+                .execute_pending_drop_prelude(&command_context, command_instance_id),
         };
         self.rng = command_rng.into_inner();
 
@@ -27672,6 +27741,7 @@ impl Engine {
                     },
                     picture_rect: snapshot.picture_rect,
                     contents: Vec::new(),
+                    contents_link_generation: 0,
                     components: snapshot.components.clone(),
                     component_order: normalized_component_order(
                         &snapshot.components,
@@ -35993,89 +36063,11 @@ impl Engine {
                             candidate_position
                         ));
                     }
-                    // C4Object::Collect routes through Enter
-                    // (C4Object.cpp:5698 -> :1552), whose veto chain runs
-                    // BEFORE any state change: RejectEntrance on the
-                    // collected object, arg = the container (:1564).
-                    let reject_entrance = self.call_object_function(
-                        candidate_idx,
-                        "RejectEntrance",
-                        vec![object_reference_value(obj1_id)],
-                    )?;
-                    // The callback may tamper with either object
-                    // (C4GameObjects.cpp:191-193 rechecks obj1 after
-                    // Collect returns — veto or not).
-                    if self.find_object_index(candidate_id).is_none() {
-                        continue;
-                    }
-                    let Some(obj1_idx) = self.find_object_index(obj1_id) else {
-                        continue 'outer;
-                    };
-                    {
-                        let obj1 = &self.objects[obj1_idx];
-                        if obj1.destroyed
-                            || !obj1.state.status.is_active()
-                            || obj1.state.container.is_some()
-                            || self.object_ocf_at_index(obj1_idx) & focf == 0
-                        {
-                            continue 'outer;
-                        }
-                    }
-                    if reject_entrance.as_bool() {
-                        continue;
-                    }
-                    // Second gate: RejectCollect on the COLLECTOR with
-                    // (idObject, pObject) — C4Object.cpp:1569-1577;
-                    // PSF_RejectCollection = "~RejectCollect"
-                    // (C4Script.h:82).
-                    let candidate_def_id = self.objects[candidate_idx].definition_id.clone();
-                    let reject_collect = self.call_object_function(
-                        obj1_idx,
-                        "RejectCollect",
-                        vec![
-                            Value::C4Id(candidate_def_id.as_str().to_string()),
-                            object_reference_value(candidate_id),
-                        ],
-                    )?;
-                    if self.find_object_index(candidate_id).is_none() {
-                        continue;
-                    }
-                    let Some(obj1_idx) = self.find_object_index(obj1_id) else {
-                        continue 'outer;
-                    };
-                    {
-                        let obj1 = &self.objects[obj1_idx];
-                        if obj1.destroyed
-                            || !obj1.state.status.is_active()
-                            || obj1.state.container.is_some()
-                            || self.object_ocf_at_index(obj1_idx) & focf == 0
-                        {
-                            continue 'outer;
-                        }
-                    }
-                    let _ = obj1_idx;
-                    if reject_collect.as_bool() {
-                        continue;
-                    }
-                    let update = ObjectUpdate::new().with_container(obj1_id);
-                    match self.apply_object_update(candidate_id, update) {
-                        Ok(_) => {}
-                        Err(EngineError::UnknownObject(_)) => continue,
-                        Err(err) => return Err(err),
-                    }
-                    self.run_object_enter_callbacks(candidate_id, obj1_id)?;
-                    // C4Object::Collect enters with fCopyMotion=false
-                    // (C4Object.cpp:5698): the pinned stand-in re-applies
-                    // the explicit position and zero velocity AFTER the
-                    // enter's default motion copy.
-                    let update = ObjectUpdate::new()
-                        .with_position(obj1_position)
-                        .with_velocity(Vector2::ZERO);
-                    match self.apply_object_update(candidate_id, update) {
-                        Ok(_) => {}
-                        Err(EngineError::UnknownObject(_)) => continue,
-                        Err(err) => return Err(err),
-                    }
+                    // C4Object::Collect runs the full Enter-and-tail path:
+                    // both vetoes, fCopyMotion=false callbacks, attach
+                    // cancellation, Collection/Hit and the final conditional
+                    // CopyMotion (C4Object.cpp:5693-5715).
+                    let _ = self.try_object_collect(candidate_id, obj1_id)?;
                     // obj1 might have been tampered with
                     let Some(idx) = self.find_object_index(obj1_id) else {
                         continue 'outer;
@@ -38165,6 +38157,7 @@ impl Engine {
                 .and_then(|index| self.objects[index].state.contents.first().copied());
             let Some(child) = child else { break };
             if let Some(index) = self.find_object_index(object_id) {
+                self.track_contents_link_removal(object_id, child);
                 self.objects[index]
                     .state
                     .contents
@@ -38180,6 +38173,7 @@ impl Engine {
             .and_then(|index| self.objects[index].state.container);
         if let Some(container) = container {
             if let Some(container_index) = self.find_object_index(container) {
+                self.track_contents_link_removal(container, object_id);
                 self.objects[container_index]
                     .state
                     .contents
@@ -39193,6 +39187,11 @@ impl Engine {
     /// The force-close/RejectContents lifecycle shared by the internal
     /// Activate/Get/Contents menus (C4Object.cpp:1884-1959).
     fn apply_container_menu_request(&mut self, request: MenuRequest) -> Result<(), EngineError> {
+        let reused_menu_identity = self
+            .find_object_index(request.crew_id)
+            .and_then(|index| self.objects[index].state.menu.as_ref())
+            .map(|menu| menu.internal_refill_token)
+            .filter(|identity| *identity != 0);
         let _ = self.close_object_menu(request.crew_id, true)?;
         let (container, identification) = match &request.kind {
             MenuRequestKind::Activate => (
@@ -39236,9 +39235,20 @@ impl Engine {
             return Ok(());
         };
         match identification {
-            6 => self.open_activate_menu(crew_index, container_index)?,
+            6 => self.set_activate_menu(
+                crew_index,
+                container_index,
+                false,
+                reused_menu_identity,
+            )?,
             13 | 18 => {
-                self.open_container_contents_menu(crew_index, container_index, identification)?;
+                self.set_container_contents_menu(
+                    crew_index,
+                    container_index,
+                    identification,
+                    false,
+                    reused_menu_identity,
+                )?;
             }
             _ => unreachable!("known internal object-menu id"),
         }
@@ -41314,6 +41324,42 @@ impl Engine {
         predecessor.map_or(0, |position| position + 1)
     }
 
+    fn track_contents_link_removal(&self, container_id: ObjectId, object_id: ObjectId) {
+        let Some(container_index) = self.find_object_index(container_id) else {
+            return;
+        };
+        let Some(position) = self.objects[container_index]
+            .state
+            .contents
+            .iter()
+            .position(|&child| child == object_id)
+        else {
+            return;
+        };
+        let generation = self
+            .find_object_index(object_id)
+            .map(|index| self.objects[index].state.contents_link_generation)
+            .unwrap_or(0);
+        let successor = self.objects[container_index]
+            .state
+            .contents
+            .get(position + 1)
+            .and_then(|&successor| {
+                self.find_object_index(successor).map(|index| {
+                    (
+                        successor,
+                        self.objects[index].state.contents_link_generation,
+                    )
+                })
+            });
+        crate::direct_com::track_internal_object_menu_link_removal(
+            container_id,
+            object_id,
+            generation,
+            successor,
+        );
+    }
+
     /// `loaded`: a compiled load rebuilds contents verbatim — C4ObjectList::
     /// DenumerateRead appends in saved order (Add stNone, C4ObjectList.cpp:
     /// 457-464) — while runtime entries sort in (Add stContents,
@@ -41325,12 +41371,56 @@ impl Engine {
         new: Option<ObjectId>,
         loaded: bool,
     ) -> Result<(), EngineError> {
+        self.apply_container_change_with_motion(object_id, previous, new, loaded, true)
+    }
+
+    /// Runtime `Enter` normally copies the new container's motion. Collect
+    /// is the one C++ caller that passes `fCopyMotion=false`, keeping the
+    /// entering object's exact position and fixed velocity through callbacks
+    /// before its own post-Hit CopyMotion (C4Object.cpp:1598-1606,5698-5713).
+    fn apply_container_change_with_motion(
+        &mut self,
+        object_id: ObjectId,
+        previous: Option<ObjectId>,
+        new: Option<ObjectId>,
+        loaded: bool,
+        copy_motion: bool,
+    ) -> Result<(), EngineError> {
         if previous == new {
             return Ok(());
         }
 
         if let Some(prev_id) = previous {
             if let Some(prev_index) = self.find_object_index(prev_id) {
+                if let Some(position) = self.objects[prev_index]
+                    .state
+                    .contents
+                    .iter()
+                    .position(|&child| child == object_id)
+                {
+                    let generation = self
+                        .find_object_index(object_id)
+                        .map(|index| self.objects[index].state.contents_link_generation)
+                        .unwrap_or(0);
+                    let successor = self.objects[prev_index]
+                        .state
+                        .contents
+                        .get(position + 1)
+                        .and_then(|&successor| {
+                            self.find_object_index(successor).map(|index| {
+                                (
+                                    successor,
+                                    self.objects[index].state.contents_link_generation,
+                                )
+                            })
+                        });
+                    crate::direct_com::track_internal_object_menu_link_removal(
+                        prev_id,
+                        object_id,
+                        generation,
+                        successor,
+                    );
+                }
                 let contents = &mut self.objects[prev_index].state.contents;
                 contents.retain(|&child| child != object_id);
                 // Exit refreshes the old container's OCF (Collection limit,
@@ -41384,6 +41474,10 @@ impl Engine {
                         .state
                         .contents
                         .insert(position, object_id);
+                    let generation = &mut self.objects[object_index]
+                        .state
+                        .contents_link_generation;
+                    *generation = generation.checked_add(1).unwrap_or(1);
                 }
 
                 self.objects[object_index].state.container = Some(container_id);
@@ -41403,32 +41497,34 @@ impl Engine {
                     // then fCopyMotion (default true, C4Object.h:313)
                     // copies the NEW container's motion IMMEDIATELY
                     // (:1598-1606; CopyMotion, C4Movement.cpp:523-534).
-                    // The COLLECT path (fCopyMotion=false, C4Object.cpp:
-                    // 5698) re-applies its explicit position/velocity
-                    // AFTER this change.
+                    // The COLLECT path passes fCopyMotion=false and keeps
+                    // its incoming position/velocity through this Enter
+                    // (C4Object.cpp:5698).
                     // Enter installs Contained first, then removes the old
                     // solid mask before CopyMotion. Containment prevents
                     // UpdateSolidMask from putting it back at either site.
-                    self.remove_solid_mask(object_index);
+                    if copy_motion {
+                        self.remove_solid_mask(object_index);
+                    }
                     if previous.is_some() {
                         let entering = &mut self.objects[object_index].state;
                         entering.mobile = true;
                         entering.in_liquid = false;
                     }
-                    let (container_position, container_velocity) = {
-                        let container = &self.objects[container_index];
-                        (container.state.position, container.fixed_velocity)
-                    };
-                    let object = &mut self.objects[object_index];
-                    object.state.position = container_position;
-                    object.fixed_position =
-                        FixedVec2::from_ints(container_position.x, container_position.y);
-                    object.fixed_velocity = container_velocity;
-                    object.state.velocity = object.velocity_pixels();
-                    self.update_sector_for_index(object_index);
+                    if copy_motion {
+                        let (container_position, container_velocity) = {
+                            let container = &self.objects[container_index];
+                            (container.state.position, container.fixed_velocity)
+                        };
+                        let object = &mut self.objects[object_index];
+                        object.state.position = container_position;
+                        object.fixed_position =
+                            FixedVec2::from_ints(container_position.x, container_position.y);
+                        object.fixed_velocity = container_velocity;
+                        object.state.velocity = object.velocity_pixels();
+                        self.update_sector_for_index(object_index);
+                    }
                 }
-                // Enter refreshes the new container too (C4Object.cpp:1518).
-                self.refresh_object_ocf(container_index);
             }
             None => {
                 self.objects[object_index].state.container = None;
@@ -41443,15 +41539,28 @@ impl Engine {
         }
         // The moved object's own SetOCF (C4Object.cpp:1531,1570).
         self.refresh_object_ocf(object_index);
+        // Enter always follows SetOCF with UpdateFace(true). With ordinary
+        // fCopyMotion=true the mask was already removed before CopyMotion;
+        // Collect's false form reaches the same removal only here, preserving
+        // the C++ OCF-before-UpdateFace order (C4Object.cpp:1608-1621).
+        if new.is_some() && !loaded && !copy_motion {
+            self.remove_solid_mask(object_index);
+            self.update_sector_for_index(object_index);
+        }
+        // C++ updates the entering object's OCF/face before it updates the
+        // new container's mass and OCF (C4Object.cpp:1617-1624).
+        if let Some(container_index) = new.and_then(|id| self.find_object_index(id)) {
+            self.refresh_object_ocf(container_index);
+        }
 
         Ok(())
     }
 
-    /// Fold the contents-link remove/add that cannot be represented by a
-    /// final container delta when ChangeDef exits and successfully re-enters
-    /// the same parent. Motion and object fields already contain the host's
-    /// final, correctly ordered writes; this method changes only list/mass-
-    /// derived state.
+    /// Fold a contents-link remove/add that cannot be represented by a final
+    /// container delta when a callback exits and successfully re-enters the
+    /// same parent. ChangeDef may supply an old-definition sort override;
+    /// ordinary Enter uses the object's current key. Motion and object fields
+    /// already contain the host's final, correctly ordered writes.
     fn reinsert_change_def_contents_link(
         &mut self,
         object_id: ObjectId,
@@ -41471,6 +41580,34 @@ impl Engine {
         let Some(container_index) = self.find_object_index(container_id) else {
             return Ok(());
         };
+        if let Some(position) = self.objects[container_index]
+            .state
+            .contents
+            .iter()
+            .position(|&child| child == object_id)
+        {
+            let generation = self.objects[object_index]
+                .state
+                .contents_link_generation;
+            let successor = self.objects[container_index]
+                .state
+                .contents
+                .get(position + 1)
+                .and_then(|&successor| {
+                    self.find_object_index(successor).map(|index| {
+                        (
+                            successor,
+                            self.objects[index].state.contents_link_generation,
+                        )
+                    })
+                });
+            crate::direct_com::track_internal_object_menu_link_removal(
+                container_id,
+                object_id,
+                generation,
+                successor,
+            );
+        }
         self.objects[container_index]
             .state
             .contents
@@ -41490,6 +41627,10 @@ impl Engine {
             .state
             .contents
             .insert(position, object_id);
+        let generation = &mut self.objects[object_index]
+            .state
+            .contents_link_generation;
+        *generation = generation.checked_add(1).unwrap_or(1);
         self.refresh_object_ocf(container_index);
         self.refresh_object_ocf(object_index);
         Ok(())
@@ -41555,6 +41696,28 @@ impl Engine {
         position: Vector2,
         rotation: i32,
     ) -> Result<bool, EngineError> {
+        self.exit_object_at_position_with_full_motion(
+            object_id,
+            previous,
+            position,
+            rotation,
+            FixedVec2::ZERO,
+            C4Fixed::ZERO,
+        )
+    }
+
+    /// Engine-owned `C4Object::Exit` with the caller-supplied full fixed
+    /// motion. BoundsCheck still observes the object's pre-Exit motion; the
+    /// requested motion is installed only after every bound/contact callback.
+    fn exit_object_at_position_with_full_motion(
+        &mut self,
+        object_id: ObjectId,
+        previous: ObjectId,
+        position: Vector2,
+        rotation: i32,
+        velocity: FixedVec2,
+        rotation_velocity: C4Fixed,
+    ) -> Result<bool, EngineError> {
         let Some(object_index) = self.find_object_index(object_id) else {
             return Ok(false);
         };
@@ -41570,6 +41733,7 @@ impl Engine {
         // motion and liquid/mobile flags remain callback-visible until the
         // requested target has been clamped (C4Object.cpp:1519-1531).
         if let Some(previous_index) = self.find_object_index(previous) {
+            self.track_contents_link_removal(previous, object_id);
             self.objects[previous_index]
                 .state
                 .contents
@@ -41589,9 +41753,9 @@ impl Engine {
             object.set_position(position);
             object.state.rotation = rotation;
             object.fixed_rotation = itofix(rotation);
-            object.fixed_velocity = FixedVec2::ZERO;
-            object.state.velocity = Vector2::ZERO;
-            object.rotation_velocity = C4Fixed::ZERO;
+            object.fixed_velocity = velocity;
+            object.state.velocity = object.velocity_pixels();
+            object.rotation_velocity = rotation_velocity;
             object.state.mobile = true;
             object.state.in_liquid = false;
             object.state.menu = None;
@@ -41851,6 +42015,7 @@ impl Engine {
         // and InLiquid are intentionally stale during BoundsCheck Contact*
         // callbacks; Exit writes them only after BoundsCheck returns.
         if let Some(previous_index) = self.find_object_index(previous) {
+            self.track_contents_link_removal(previous, object_id);
             self.objects[previous_index]
                 .state
                 .contents
@@ -41978,6 +42143,23 @@ impl Engine {
         query_reject_collect: bool,
         f_calls: bool,
     ) -> Result<ObjectEnterOutcome, EngineError> {
+        self.try_object_enter_with_options(
+            object_id,
+            target_id,
+            query_reject_collect,
+            f_calls,
+            true,
+        )
+    }
+
+    fn try_object_enter_with_options(
+        &mut self,
+        object_id: ObjectId,
+        target_id: ObjectId,
+        query_reject_collect: bool,
+        f_calls: bool,
+        copy_motion: bool,
+    ) -> Result<ObjectEnterOutcome, EngineError> {
         if object_id == target_id {
             return Ok(ObjectEnterOutcome::Failed);
         }
@@ -42083,7 +42265,13 @@ impl Engine {
         // Forced CloseMenu runs after the final status gate and before the
         // new contents link (C4Object.cpp:1596).
         self.objects[object_index].state.menu = None;
-        self.apply_container_change(object_id, None, Some(target_id), false)?;
+        self.apply_container_change_with_motion(
+            object_id,
+            None,
+            Some(target_id),
+            false,
+            copy_motion,
+        )?;
         if f_calls {
             self.run_object_enter_callbacks(object_id, target_id)?;
         }
@@ -42115,6 +42303,87 @@ impl Engine {
         Ok(ObjectEnterOutcome::Entered)
     }
 
+    /// `C4Object::Collect`: Enter with both vetoes and without its ordinary
+    /// motion copy, then cancel ATTACH, notify the collector, dispatch live
+    /// Hit thresholds in order, and only finally copy the current collector
+    /// motion if callbacks left the item inside it (C4Object.cpp:5693-5715).
+    fn try_object_collect(
+        &mut self,
+        object_id: ObjectId,
+        collector_id: ObjectId,
+    ) -> Result<bool, EngineError> {
+        if self.try_object_enter_with_options(
+            object_id,
+            collector_id,
+            true,
+            true,
+            false,
+        )? != ObjectEnterOutcome::Entered
+        {
+            return Ok(false);
+        }
+
+        let attached = self.find_object_index(object_id).is_some_and(|index| {
+            let object = &self.objects[index];
+            self.definitions
+                .get(&object.definition_id)
+                .is_some_and(|definition| {
+                    definition
+                        .action_library()
+                        .procedure_for_action(&object.state.action.name)
+                        == ActionProcedure::Attach
+                })
+        });
+        if attached {
+            if let Some(index) = self.find_object_index(object_id) {
+                let definition_id = self.objects[index].definition_id.clone();
+                let _ = tolerate_script_error(self.action_with_calls(
+                    index,
+                    &definition_id,
+                    "Idle",
+                ))?;
+            }
+        }
+
+        if let Some(index) = self.find_object_index(collector_id).filter(|&index| {
+            !self.objects[index].destroyed && self.objects[index].state.status.is_active()
+        }) {
+            let _ = tolerate_script_error(self.call_object_function(
+                index,
+                "Collection",
+                vec![object_reference_value(object_id)],
+            ))?;
+        }
+
+        for (flag, callback) in [
+            (ocf::HIT_SPEED1, "Hit"),
+            (ocf::HIT_SPEED2, "Hit2"),
+            (ocf::HIT_SPEED3, "Hit3"),
+        ] {
+            let Some(index) = self.find_object_index(object_id) else {
+                break;
+            };
+            if self.objects[index].destroyed
+                || !self.objects[index].state.status.is_active()
+                || self.objects[index].state.ocf & flag == 0
+            {
+                continue;
+            }
+            let _ = tolerate_script_error(self.call_object_function(
+                index,
+                callback,
+                Vec::new(),
+            ))?;
+        }
+
+        if let Some(index) = self.find_object_index(object_id).filter(|&index| {
+            self.objects[index].state.container == Some(collector_id)
+        }) {
+            self.copy_motion_from_container(index);
+        }
+        Ok(true)
+    }
+
     /// ObjectComPut's synchronous transfer. Unlike ordinary C4CMD_Enter,
     /// it supplies the RejectCollect pointer, then fires Put/Collection
     /// only after a successful Enter (C4ObjectCom.cpp:591-622).
@@ -42139,6 +42408,14 @@ impl Engine {
                 .get(&self.objects[target_index].definition_id)
                 .is_none_or(|definition| definition.grab_put_get() & GRAB_PUT_GET_PUT == 0)
         {
+            let owner = self.objects[actor_index].state.owner;
+            if self
+                .players
+                .get(&owner)
+                .is_some_and(|player| player.control.last_com_down_double != 0)
+            {
+                return self.object_com_drop(actor_id, object_id);
+            }
             return Ok(false);
         }
         if self.objects[target_index].state.ocf & ocf::FULL_CON == 0 {
@@ -42174,6 +42451,74 @@ impl Engine {
             ))?;
         }
         Ok(true)
+    }
+
+    /// ObjectComPutTake's inline put-or-menu operation. Throw/Drop ignore
+    /// this helper's boolean, but all callbacks must finish before their
+    /// original command is marked complete (C4ObjectCom.cpp:700-721).
+    fn try_object_com_put_take(
+        &mut self,
+        actor_id: ObjectId,
+        target_id: ObjectId,
+        requested_item: Option<ObjectId>,
+    ) -> Result<ObjectComPutTakeOutcome, EngineError> {
+        let Some(actor_index) = self.find_object_index(actor_id) else {
+            return Ok(ObjectComPutTakeOutcome::Finished);
+        };
+        let (contents, container, controller, owner) = {
+            let actor = &self.objects[actor_index];
+            (
+                actor.state.contents.clone(),
+                actor.state.container,
+                actor.state.controller,
+                actor.state.owner,
+            )
+        };
+        let item_id = match requested_item {
+            Some(item_id) if contents.contains(&item_id) => Some(item_id),
+            Some(item_id)
+                if self
+                    .find_object_index(item_id)
+                    .is_some_and(|index| {
+                        !self.objects[index].destroyed
+                            && self.objects[index].state.status != ObjectStatus::Deleted
+                    }) =>
+            {
+                return Ok(ObjectComPutTakeOutcome::NeedsGet(item_id));
+            }
+            Some(_) | None => contents.first().copied(),
+        };
+
+        if let Some(item_id) = item_id {
+            let _ = self.try_object_com_put(actor_id, target_id, item_id)?;
+            return Ok(ObjectComPutTakeOutcome::Finished);
+        }
+
+        let request = if container == Some(target_id) {
+            Some(MenuRequest {
+                crew_id: actor_id,
+                owner: controller,
+                kind: MenuRequestKind::Activate,
+            })
+        } else {
+            let grab_get = self
+                .find_object_index(target_id)
+                .and_then(|index| self.definitions.get(&self.objects[index].definition_id))
+                .is_some_and(|definition| {
+                    definition.grab_put_get() & GRAB_PUT_GET_GET != 0
+                });
+            grab_get.then_some(MenuRequest {
+                crew_id: actor_id,
+                owner,
+                kind: MenuRequestKind::Get {
+                    container: target_id,
+                },
+            })
+        };
+        if let Some(request) = request {
+            self.apply_container_menu_request(request)?;
+        }
+        Ok(ObjectComPutTakeOutcome::Finished)
     }
 
     /// C4Object::PutAwayUnusedObject, with the Tutorial04-critical direct
@@ -42384,23 +42729,15 @@ impl Engine {
             return Ok(false);
         };
         let definition_id = self.objects[actor_index].definition_id.clone();
-        let action_library = self
+        let current_procedure = self
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?
             .action_library()
-            .clone();
-        let current_action = self.objects[actor_index].state.action.name.clone();
-        if action_library.procedure_for_action(&current_action) != ActionProcedure::Walk
-            || !action_library.contains("Throw")
-            || (action_library.blocks_other_actions(&current_action) && current_action != "Throw")
-        {
+            .procedure_for_action(&self.objects[actor_index].state.action.name);
+        if current_procedure != ActionProcedure::Walk {
             return Ok(false);
         }
-        if !self.objects[actor_index].state.contents.contains(&object_id) {
-            return Ok(false);
-        }
-
         // Force and direction precede SetAction in C++ and therefore cannot
         // be changed by Throw's StartCall/Walk's AbortCall.
         let throw_force = math::val_by_physical(400, self.object_physical(actor_index).throw);
@@ -42409,26 +42746,9 @@ impl Engine {
         } else {
             1
         };
-        let previous_action = self.objects[actor_index].state.action.clone();
-        let action_update = ActionUpdate::default()
-            .with_name("Throw")
-            .with_force(false);
-        let result = self.objects[actor_index]
-            .state
-            .action
-            .apply_update_with_library(&action_update, &action_library);
-        if !matches!(result, ActionUpdateResult::Applied) {
+        if !self.action_with_calls(actor_index, &definition_id, "Throw")? {
             return Ok(false);
         }
-        self.objects[actor_index].fixed_position = FixedVec2::from_ints(
-            self.objects[actor_index].state.position.x,
-            self.objects[actor_index].state.position.y,
-        );
-        if previous_action.name != self.objects[actor_index].state.action.name {
-            self.objects[actor_index]
-                .record_action_event(previous_action.clone(), ActionTransitionKind::Forced);
-        }
-        self.trigger_action_callbacks(actor_index, Some(previous_action.name))?;
 
         let Some(actor_index) = self.find_object_index(actor_id) else {
             return Ok(true);
@@ -42445,49 +42765,14 @@ impl Engine {
         let Some(previous_container) = self.objects[object_index].state.container else {
             return Ok(true);
         };
-
-        if let Some(container_index) = self.find_object_index(previous_container) {
-            self.objects[container_index]
-                .state
-                .contents
-                .retain(|&child| child != object_id);
-            self.refresh_object_ocf(container_index);
-        }
-        {
-            let object = &mut self.objects[object_index];
-            object.state.container = None;
-            object.set_position(Vector2::new(position.x, position.y + shape_top - 1));
-            object.state.rotation = rotation;
-            object.fixed_rotation = itofix(rotation);
-            object.fixed_velocity = FixedVec2::new(
-                throw_force * direction,
-                -throw_force,
-            );
-            object.state.velocity = object.velocity_pixels();
-            object.rotation_velocity = throw_force * direction;
-            object.state.mobile = true;
-            object.state.in_liquid = false;
-            object.state.menu = None;
-        }
-        self.update_sector_for_index(object_index);
-        self.refresh_object_ocf(object_index);
-
-        // Exit calls Ejection first and Departure second; both are fail-safe
-        // and may re-enter the object (C4Object.cpp:1532-1563).
-        if let Some(container_index) = self.find_object_index(previous_container) {
-            let _ = tolerate_script_error(self.call_object_function(
-                container_index,
-                "Ejection",
-                vec![object_reference_value(object_id)],
-            ))?;
-        }
-        if let Some(object_index) = self.find_object_index(object_id) {
-            let _ = tolerate_script_error(self.call_object_function(
-                object_index,
-                "Departure",
-                vec![object_reference_value(previous_container)],
-            ))?;
-        }
+        let _ = self.exit_object_at_position_with_full_motion(
+            object_id,
+            previous_container,
+            Vector2::new(position.x, position.y + shape_top - 1),
+            rotation,
+            FixedVec2::new(throw_force * direction, -throw_force),
+            throw_force * direction,
+        )?;
         // ObjectActionThrow ignores Exit's boolean (including callback
         // re-entry) and reports success once SetAction succeeded.
         Ok(true)
@@ -42841,23 +43126,91 @@ impl Engine {
                     self.execute_command_failure_feedback(actor_id, feedback, None)?;
                 }
             }
+            CommandEvent::ObjectComPutTake {
+                actor_id,
+                target_id,
+                requested_item,
+                command,
+                command_instance_id,
+            } => {
+                let result = self.try_object_com_put_take(
+                    actor_id,
+                    target_id,
+                    requested_item,
+                )?;
+                if let Some(actor_index) = self.find_object_index(actor_id) {
+                    match result {
+                        ObjectComPutTakeOutcome::Finished => match command {
+                            CommandId::Throw => {
+                                self.objects[actor_index]
+                                    .commands
+                                    .finish_pending_throw(command_instance_id);
+                            }
+                            CommandId::Drop => {
+                                self.objects[actor_index]
+                                    .commands
+                                    .finish_pending_drop(command_instance_id);
+                            }
+                            _ => {
+                                debug_assert!(false, "ObjectComPutTake must come from Throw/Drop")
+                            }
+                        },
+                        ObjectComPutTakeOutcome::NeedsGet(item_id) => {
+                            if self.objects[actor_index]
+                                .commands
+                                .clear_pending_put_take(command, command_instance_id)
+                            {
+                                let _ = self.objects[actor_index].commands.push_front(
+                                    CommandRequest::new(CommandId::Get)
+                                        .with_target(Some(item_id))
+                                        .with_update_interval(40)
+                                        .with_mode(CommandMode::SilentSub),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             CommandEvent::ThrowObject {
                 actor_id,
                 object_id,
                 complete_command_on_success,
+                command_instance_id,
             } => {
                 let success = self.try_object_action_throw(actor_id, object_id)?;
-                if success && complete_command_on_success {
-                    self.complete_command(actor_id, CommandId::Throw)?;
+                if success || !complete_command_on_success {
+                    if let Some(actor_index) = self.find_object_index(actor_id) {
+                        self.objects[actor_index]
+                            .commands
+                            .finish_command_instance(CommandId::Throw, command_instance_id);
+                    }
                 }
             }
             CommandEvent::ObjectComDrop {
                 actor_id,
                 object_id,
+                command_instance_id,
             } => {
                 let _ = self.object_com_drop(actor_id, object_id)?;
                 if let Some(actor_index) = self.find_object_index(actor_id) {
-                    self.objects[actor_index].commands.finish_pending_drop();
+                    self.objects[actor_index]
+                        .commands
+                        .finish_pending_drop(command_instance_id);
+                }
+            }
+            CommandEvent::ObjectComUnGrabCommand {
+                actor_id,
+                command_instance_id,
+            } => {
+                if let Some(actor_index) = self.find_object_index(actor_id) {
+                    let _ = self.object_com_ungrab(actor_index)?;
+                }
+                if let Some(actor_index) = self.find_object_index(actor_id) {
+                    self.objects[actor_index].state.command_direction =
+                        CommandDirection::Stop;
+                    self.objects[actor_index]
+                        .commands
+                        .finish_command_instance(CommandId::UnGrab, command_instance_id);
                 }
             }
             CommandEvent::ObjectComJump { object_id, tx } => {
@@ -42880,6 +43233,31 @@ impl Engine {
                     let _ = self.object_com_stop_live(object_id)?;
                 }
                 let _ = self.object_com_build_live(object_id, target_id)?;
+            }
+            CommandEvent::ObjectComStopThrow {
+                object_id,
+                command_instance_id,
+            } => {
+                let _ = self.object_com_stop_live(object_id)?;
+                self.resume_throw_after_prelude(object_id, command_instance_id)?;
+            }
+            CommandEvent::ObjectComStopDrop {
+                object_id,
+                command_instance_id,
+            } => {
+                let _ = self.object_com_stop_live(object_id)?;
+                self.resume_drop_after_prelude(object_id, command_instance_id)?;
+            }
+            CommandEvent::ObjectComSetDirThrow {
+                object_id,
+                direction,
+                command_instance_id,
+            } => {
+                if let Some(index) = self.find_object_index(object_id) {
+                    let definition_id = self.objects[index].definition_id.clone();
+                    self.set_command_action_direction(index, &definition_id, direction)?;
+                }
+                self.resume_throw_after_prelude(object_id, command_instance_id)?;
             }
             CommandEvent::AttemptGrab {
                 actor_id,
@@ -46607,6 +46985,7 @@ impl Engine {
                     .filter(|mode| *mode != 0)
                     .unwrap_or(definition_blit_mode),
                 contents: Vec::new(),
+                contents_link_generation: 0,
                 // C4Object::Init copies Def->Component and immediately
                 // ComponentConCutoff-scales it to Con; NewObject's initial
                 // DoCon then gains the same floor-scaled counts
@@ -47670,6 +48049,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         blit_mode: snapshot.blit_mode,
         picture_rect: snapshot.picture_rect,
         contents: snapshot.contents.clone(),
+        contents_link_generation: 0,
         components: snapshot.components.clone(),
         component_order,
         status: snapshot.status,
@@ -47736,6 +48116,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     action_library: ActionLibrary::default(),
                     action_graphics: HashMap::new(),
                     value: 0,
+                    allow_picture_stack: 0,
                     mass: 0,
                     no_component_mass: false,
                     constructable: false,
@@ -51089,15 +51470,77 @@ mod put_command_regression {
 
     fn put_fixture_engine() -> Engine {
         let actor_script = r#"#strict
-local tracked;
+local tracked, nested_throw, reject_contents_seen, menu_after_nested, menu_selection_after_nested;
+local put_depth, finish_nested_throw, command_after_nested, menu_during_value, menu_selection_during_value;
+local mutate_menu_during_value, spawn_menu_item, reexecute_same_throw, command_after_same_reentry;
+local command_during_throw_start, departure_seen;
+public func NoteRejectContents()
+{
+  reject_contents_seen = 1;
+  return(1);
+}
+public func NoteDeparture()
+{
+  departure_seen = 1;
+  return(1);
+}
+public func RunOutsideThrow()
+{
+  AddCommand(this, "Throw");
+  ExecuteCommand();
+  return(1);
+}
+protected func StartThrow()
+{
+  command_during_throw_start = GetCommand();
+  return(1);
+}
+protected func CalcValue(pInBase, iForPlr)
+{
+  menu_during_value = GetMenu();
+  menu_selection_during_value = GetMenuSelection();
+  if (mutate_menu_during_value) SetMenuSize(3, 4);
+  if (spawn_menu_item)
+  {
+    spawn_menu_item = 0;
+    var added = CreateObject(NITM, 0, 0, -1);
+    if (added) added->Enter(pInBase);
+  }
+  return(7);
+}
 protected func Put()
 {
+  put_depth++;
+  if (put_depth == 2 && finish_nested_throw)
+  {
+    FinishCommand(this, 1, 0);
+    ExecuteCommand();
+  }
+  if (put_depth == 1 && nested_throw)
+  {
+    AddCommand(this, "Throw");
+    ExecuteCommand();
+    menu_after_nested = GetMenu();
+    menu_selection_after_nested = GetMenuSelection();
+    command_after_nested = GetCommand();
+  }
+  if (put_depth == 1 && reexecute_same_throw)
+  {
+    ExecuteCommand();
+    command_after_same_reentry = GetCommand();
+  }
   tracked->Mark(5);
+  put_depth--;
   return(1);
 }
 "#;
         let target_script = r#"#strict
-local reject;
+local reject, reject_contents_actor;
+protected func RejectContents()
+{
+  if (reject_contents_actor) reject_contents_actor->NoteRejectContents();
+  return(0);
+}
 protected func RejectCollect(idItem, pItem)
 {
   pItem->Mark(2);
@@ -51131,6 +51574,11 @@ protected func Entrance(pTarget)
   Mark(4);
   return(1);
 }
+protected func Departure(pTarget)
+{
+  pTarget->NoteDeparture();
+  return(1);
+}
 "#;
 
         let mut actor =
@@ -51146,6 +51594,12 @@ protected func Entrance(pTarget)
                 (
                     "Walk".to_string(),
                     ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Throw".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("THROW")
+                        .with_start_call("StartThrow"),
                 ),
             ]),
         );
@@ -51210,6 +51664,37 @@ protected func Entrance(pTarget)
                     .with_ty(Some(1)),
             )
             .expect("Put queues");
+        (actor, item, target)
+    }
+
+    fn spawn_contained_put_take_triplet(
+        engine: &mut Engine,
+        reject: bool,
+        command: CommandId,
+    ) -> (ObjectId, ObjectId, ObjectId) {
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("TARG").with_local_vars(HashMap::from([(
+                    "reject".to_string(),
+                    Value::Int(i32::from(reject)),
+                )])),
+            )
+            .expect("target spawns");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_container(target))
+            .expect("contained actor spawns");
+        let item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+            .expect("carried item spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index]
+            .state
+            .local_vars
+            .insert("tracked".to_string(), object_reference_value(item));
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(command).with_target(Some(item)))
+            .expect("put/take command queues");
         (actor, item, target)
     }
 
@@ -51288,6 +51773,1103 @@ protected func Entrance(pTarget)
                 .is_empty(),
             "helper failure finishes Put and must not queue Ty-UnGrab"
         );
+    }
+
+    #[test]
+    fn contained_throw_and_drop_run_object_com_put_callbacks_before_finishing() {
+        for command in [CommandId::Throw, CommandId::Drop] {
+            let mut accepted = put_fixture_engine();
+            let (actor, item, target) =
+                spawn_contained_put_take_triplet(&mut accepted, false, command);
+            accepted
+                .execute_object_command_now(actor)
+                .expect("accepted ObjectComPutTake executes");
+
+            let item_state = &accepted.objects[accepted
+                .find_object_index(item)
+                .expect("accepted item remains")]
+                .state;
+            assert_eq!(item_state.container, Some(target), "{command:?} transfers");
+            assert_eq!(
+                item_state.local_vars.get("callback_order"),
+                Some(&Value::Int(123_456)),
+                "{command:?}: RejectEntrance -> RejectCollect -> Collection2 -> Entrance -> Put -> Collection"
+            );
+            assert!(
+                accepted.objects[accepted
+                    .find_object_index(actor)
+                    .expect("accepted actor remains")]
+                    .commands
+                    .snapshot()
+                    .is_empty(),
+                "{command:?} finishes after the callback tail"
+            );
+
+            let mut rejected = put_fixture_engine();
+            let (actor, item, _) =
+                spawn_contained_put_take_triplet(&mut rejected, true, command);
+            rejected
+                .execute_object_command_now(actor)
+                .expect("rejected ObjectComPutTake executes");
+            let item_state = &rejected.objects[rejected
+                .find_object_index(item)
+                .expect("rejected item remains")]
+                .state;
+            assert_eq!(
+                item_state.container,
+                Some(actor),
+                "{command:?} honors RejectCollect"
+            );
+            assert_eq!(
+                item_state.local_vars.get("callback_order"),
+                Some(&Value::Int(12)),
+                "Put/Collection must not run after RejectCollect"
+            );
+            assert!(
+                rejected.objects[rejected
+                    .find_object_index(actor)
+                    .expect("rejected actor remains")]
+                    .commands
+                    .snapshot()
+                    .is_empty(),
+                "{command:?} ignores the helper result and still finishes"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_put_take_does_not_consume_the_outer_put_result_marker() {
+        let mut engine = put_fixture_engine();
+        engine
+            .definitions
+            .get_mut(&DefinitionId::from("TARG"))
+            .expect("target definition exists")
+            .set_collection_limit(Some(1));
+        let (actor, first_item, target) = spawn_push_put_triplet(&mut engine, false);
+        let second_item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+            .expect("second carried item spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index]
+            .state
+            .local_vars
+            .insert("nested_throw".to_string(), Value::Int(1));
+
+        engine
+            .execute_object_command_now(actor)
+            .expect("outer Put and nested Throw execute");
+
+        assert_eq!(
+            engine
+                .object_snapshot(first_item)
+                .expect("first item remains")
+                .container,
+            Some(target),
+            "the outer Put succeeds before its Put callback"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(second_item)
+                .expect("second item remains")
+                .container,
+            Some(actor),
+            "the nested Throw's put is rejected by the now-full target"
+        );
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        assert_eq!(
+            engine.objects[actor_index]
+                .commands
+                .snapshot()
+                .command_names(),
+            ["UnGrab", "Put"],
+            "the nested false PutTake result must not fail the outer successful Put"
+        );
+
+        engine
+            .execute_object_command_now(actor)
+            .expect("Ty cleanup UnGrab executes");
+        engine
+            .execute_object_command_now(actor)
+            .expect("outer Put observes the transferred item and completes");
+        assert!(
+            engine.objects[engine.find_object_index(actor).expect("actor remains")]
+                .commands
+                .snapshot()
+                .is_empty(),
+            "the outer Put retained and consumed its own success result"
+        );
+    }
+
+    #[test]
+    fn removed_nested_throw_does_not_finish_the_outer_throw_instance() {
+        let mut engine = put_fixture_engine();
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_container(target))
+            .expect("actor spawns contained");
+        let first_item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+            .expect("first item spawns");
+        let second_item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+            .expect("second item spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index].state.local_vars.extend([
+            ("tracked".to_string(), object_reference_value(first_item)),
+            ("nested_throw".to_string(), Value::Int(1)),
+            ("finish_nested_throw".to_string(), Value::Int(1)),
+        ]);
+        engine.objects[actor_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Throw).with_target(Some(first_item)),
+            )
+            .expect("outer Throw queues");
+
+        engine
+            .execute_object_command_now(actor)
+            .expect("outer and nested Throw execute");
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        assert_eq!(
+            engine.objects[actor_index]
+                .state
+                .local_vars
+                .get("command_after_nested"),
+            Some(&Value::String("Throw".to_string())),
+            "removing the inner Throw while its helper returns leaves the outer instance live"
+        );
+        assert!(
+            engine.objects[actor_index].commands.snapshot().is_empty(),
+            "the outer Throw finishes only when its own helper returns"
+        );
+        for item in [first_item, second_item] {
+            assert_eq!(
+                engine.object_snapshot(item).expect("item remains").container,
+                Some(target)
+            );
+        }
+    }
+
+    #[test]
+    fn callback_execute_command_reenters_the_same_in_flight_throw() {
+        let mut engine = put_fixture_engine();
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_container(target))
+            .expect("actor spawns contained");
+        let item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+            .expect("item spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index].state.local_vars.extend([
+            ("tracked".to_string(), object_reference_value(item)),
+            ("reexecute_same_throw".to_string(), Value::Int(1)),
+        ]);
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(item)))
+            .expect("Throw queues");
+
+        engine
+            .execute_object_command_now(actor)
+            .expect("Throw and callback reentry execute");
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        assert_eq!(
+            engine.objects[actor_index]
+                .state
+                .local_vars
+                .get("command_after_same_reentry"),
+            Some(&Value::String("Get".to_string())),
+            "the in-flight Throw reexecutes and queues Get after its requested item moved"
+        );
+        assert_eq!(
+            engine.objects[actor_index]
+                .commands
+                .snapshot()
+                .command_names(),
+            ["Get", "Throw"],
+            "the reentrant child remains above the exact finished outer Throw"
+        );
+    }
+
+    #[test]
+    fn script_execute_command_runs_outside_throw_callbacks_before_returning() {
+        let mut engine = put_fixture_engine();
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_action(ActionState::new("Walk")))
+            .expect("walking actor spawns");
+        let item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+            .expect("carried item spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index]
+            .state
+            .local_vars
+            .insert("tracked".to_string(), object_reference_value(item));
+
+        engine
+            .call_object_function(actor_index, "RunOutsideThrow", Vec::new())
+            .expect("script ExecuteCommand returns");
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let actor_state = &engine.objects[actor_index].state;
+        assert_eq!(
+            actor_state.local_vars.get("command_during_throw_start"),
+            Some(&Value::String("Throw".to_string())),
+            "StartCall sees the exact executing Throw before Finish(true)"
+        );
+        assert_eq!(
+            actor_state.local_vars.get("departure_seen"),
+            Some(&Value::Int(1)),
+            "Departure runs before script ExecuteCommand returns"
+        );
+        assert!(engine.objects[actor_index].commands.snapshot().is_empty());
+        assert_eq!(
+            engine.object_snapshot(item).expect("item remains").container,
+            None
+        );
+    }
+
+    #[test]
+    fn script_throw_from_no_other_action_dig_uses_callbackful_object_com_stop() {
+        let script = r#"#strict
+public func RunExecute()
+{
+  ExecuteCommand();
+  return(1);
+}
+"#;
+        let mut actor =
+            Definition::from_script("NDIG", "NoOtherAction digger", script)
+                .expect("actor compiles");
+        actor.set_c4_callback_convention(true);
+        actor.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Dig".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("DIG")
+                        .with_no_other_action(true),
+                ),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Throw".to_string(),
+                    ActionSpec::default().with_procedure("THROW"),
+                ),
+            ]),
+        );
+        let mut item =
+            Definition::from_script("NDIT", "NoOtherAction item", "#strict")
+                .expect("item compiles");
+        item.set_collectible(true);
+
+        let mut engine = Engine::with_seed(119);
+        engine.register_definition(actor).expect("actor registers");
+        engine.register_definition(item).expect("item registers");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("NDIG")
+                    .with_action(ActionState::new("Dig"))
+                    .with_velocity(Vector2::new(7, -3)),
+            )
+            .expect("digger spawns");
+        let item = engine
+            .spawn_object(SpawnConfig::new("NDIT").with_container(actor))
+            .expect("item spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(item)))
+            .expect("Throw queues");
+
+        engine
+            .call_object_function(actor_index, "RunExecute", Vec::new())
+            .expect("script ExecuteCommand returns");
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        assert_eq!(engine.objects[actor_index].state.action.name, "Dig");
+        assert_eq!(
+            engine.objects[actor_index].fixed_velocity,
+            FixedVec2::from_ints(7, -3),
+            "failed Idle/Walk transitions do not zero the digging velocity"
+        );
+        assert_eq!(
+            engine.objects[actor_index].state.command_direction,
+            CommandDirection::Stop,
+            "ObjectActionStand writes ComDir before its rejected Walk"
+        );
+        assert_eq!(
+            engine.object_snapshot(item).expect("item remains").container,
+            Some(actor),
+            "ObjectComThrow rejects the still-Dig procedure"
+        );
+        assert!(engine.objects[actor_index].commands.snapshot().is_empty());
+    }
+
+    #[test]
+    fn script_drop_from_dig_runs_object_com_stop_callbacks_before_dropping() {
+        let script = r#"#strict
+local callback_order;
+public func RunExecute()
+{
+  ExecuteCommand();
+  return(1);
+}
+protected func AbortDig()
+{
+  callback_order = callback_order * 10 + 1;
+  return(1);
+}
+protected func StartWalk()
+{
+  callback_order = callback_order * 10 + 2;
+  return(1);
+}
+"#;
+        let mut actor = Definition::from_script("DDIG", "Digging dropper", script)
+            .expect("actor compiles");
+        actor.set_c4_callback_convention(true);
+        actor.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Dig".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("DIG")
+                        .with_abort_call("AbortDig"),
+                ),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_start_call("StartWalk"),
+                ),
+            ]),
+        );
+        let mut item = Definition::from_script("DDIT", "Dropped item", "#strict")
+            .expect("item compiles");
+        item.set_collectible(true);
+
+        let mut engine = Engine::with_seed(121);
+        engine.register_definition(actor).expect("actor registers");
+        engine.register_definition(item).expect("item registers");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("DDIG")
+                    .with_action(ActionState::new("Dig"))
+                    .with_velocity(Vector2::new(7, -3)),
+            )
+            .expect("digger spawns");
+        let item = engine
+            .spawn_object(SpawnConfig::new("DDIT").with_container(actor))
+            .expect("item spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::Drop).with_target(Some(item)))
+            .expect("Drop queues");
+
+        engine
+            .call_object_function(actor_index, "RunExecute", Vec::new())
+            .expect("script ExecuteCommand returns");
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        assert_eq!(engine.objects[actor_index].state.action.name, "Walk");
+        assert_eq!(engine.objects[actor_index].fixed_velocity, FixedVec2::ZERO);
+        assert_eq!(
+            engine.objects[actor_index]
+                .state
+                .local_vars
+                .get("callback_order"),
+            Some(&Value::Int(12)),
+            "Dig Abort and Walk Start finish before ObjectComDrop"
+        );
+        assert_eq!(
+            engine.object_snapshot(item).expect("item remains").container,
+            None
+        );
+        assert!(engine.objects[actor_index].commands.snapshot().is_empty());
+    }
+
+    #[test]
+    fn ungrab_command_respects_no_other_action_and_suppresses_release_callbacks() {
+        let actor_script = r#"#strict
+local grab_calls;
+protected func Grab(object target, bool grab)
+{
+  grab_calls++;
+  return(1);
+}
+"#;
+        let target_script = r#"#strict
+local grabbed_calls;
+protected func Grabbed(object actor, bool grab)
+{
+  grabbed_calls++;
+  return(1);
+}
+"#;
+        let mut actor = Definition::from_script("UNGA", "Locked pusher", actor_script)
+            .expect("actor compiles");
+        actor.set_c4_callback_convention(true);
+        actor.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Push".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("PUSH")
+                        .with_no_other_action(true),
+                ),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+            ]),
+        );
+        let mut target = Definition::from_script("UNGT", "Push target", target_script)
+            .expect("target compiles");
+        target.set_c4_callback_convention(true);
+
+        let mut engine = Engine::new();
+        engine.register_definition(actor).expect("actor registers");
+        engine.register_definition(target).expect("target registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("UNGT"))
+            .expect("target spawns");
+        let mut push = ActionState::new("Push");
+        push.target = Some(target);
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("UNGA")
+                    .with_action(push)
+                    .with_velocity(Vector2::new(4, -2)),
+            )
+            .expect("actor spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index].state.command_direction = CommandDirection::Left;
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::UnGrab))
+            .expect("UnGrab queues");
+
+        engine
+            .execute_object_command_now(actor)
+            .expect("UnGrab executes");
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        assert_eq!(engine.objects[actor_index].state.action.name, "Push");
+        assert_eq!(engine.objects[actor_index].state.action.target, Some(target));
+        assert_eq!(
+            engine.objects[actor_index].fixed_velocity,
+            FixedVec2::from_ints(4, -2)
+        );
+        assert_eq!(
+            engine.objects[actor_index].state.command_direction,
+            CommandDirection::Stop,
+            "C4Command::UnGrab writes Stop even when ObjectComUnGrab fails"
+        );
+        assert_eq!(
+            engine.objects[actor_index].state.local_vars.get("grab_calls"),
+            None
+        );
+        let target_index = engine.find_object_index(target).expect("target remains");
+        assert_eq!(
+            engine.objects[target_index]
+                .state
+                .local_vars
+                .get("grabbed_calls"),
+            None
+        );
+        assert!(engine.objects[actor_index].commands.snapshot().is_empty());
+    }
+
+    #[test]
+    fn object_com_ungrab_uses_raw_status_gates_after_grab_callback() {
+        let actor_script = r#"#strict
+local grab_calls, remove_self;
+protected func Grab(object target, bool grab)
+{
+  grab_calls++;
+  if (!grab && remove_self) RemoveObject();
+  return(1);
+}
+"#;
+        let target_script = r#"#strict
+local grabbed_calls;
+protected func Grabbed(object actor, bool grab)
+{
+  grabbed_calls++;
+  return(1);
+}
+"#;
+        let mut actor = Definition::from_script("UGRA", "Pusher", actor_script)
+            .expect("actor compiles");
+        actor.set_c4_callback_convention(true);
+        actor.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Push".to_string(),
+                    ActionSpec::default().with_procedure("PUSH"),
+                ),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+            ]),
+        );
+        let mut target = Definition::from_script("UGRT", "Target", target_script)
+            .expect("target compiles");
+        target.set_c4_callback_convention(true);
+        let mut engine = Engine::new();
+        engine.register_definition(actor).expect("actor registers");
+        engine.register_definition(target).expect("target registers");
+
+        let inactive_target = engine
+            .spawn_object(
+                SpawnConfig::new("UGRT").with_status(ObjectStatus::Inactive),
+            )
+            .expect("inactive target spawns");
+        let mut push = ActionState::new("Push");
+        push.target = Some(inactive_target);
+        let first_actor = engine
+            .spawn_object(SpawnConfig::new("UGRA").with_action(push))
+            .expect("first actor spawns");
+        let first_actor_index = engine
+            .find_object_index(first_actor)
+            .expect("first actor exists");
+        assert!(engine
+            .object_com_ungrab(first_actor_index)
+            .expect("inactive target ungrab succeeds"));
+        let first_actor_index = engine
+            .find_object_index(first_actor)
+            .expect("first actor remains");
+        assert_eq!(engine.objects[first_actor_index].state.action.name, "Walk");
+        assert_eq!(
+            engine.objects[first_actor_index]
+                .state
+                .local_vars
+                .get("grab_calls"),
+            Some(&Value::Int(1))
+        );
+        let inactive_target_index = engine
+            .find_object_index(inactive_target)
+            .expect("inactive target remains");
+        assert_eq!(
+            engine.objects[inactive_target_index]
+                .state
+                .local_vars
+                .get("grabbed_calls"),
+            Some(&Value::Int(1)),
+            "inactive Status is nonzero and still receives Grabbed(false)"
+        );
+
+        let live_target = engine
+            .spawn_object(SpawnConfig::new("UGRT"))
+            .expect("live target spawns");
+        let mut push = ActionState::new("Push");
+        push.target = Some(live_target);
+        let removing_actor = engine
+            .spawn_object(SpawnConfig::new("UGRA").with_action(push))
+            .expect("removing actor spawns");
+        let removing_actor_index = engine
+            .find_object_index(removing_actor)
+            .expect("removing actor exists");
+        engine.objects[removing_actor_index]
+            .state
+            .local_vars
+            .insert("remove_self".to_string(), Value::Int(1));
+        assert!(engine
+            .object_com_ungrab(removing_actor_index)
+            .expect("callback-removing ungrab returns"));
+        assert_eq!(
+            engine
+                .object_snapshot(removing_actor)
+                .expect("removed actor storage remains")
+                .status,
+            ObjectStatus::Deleted
+        );
+        let live_target_index = engine
+            .find_object_index(live_target)
+            .expect("live target remains");
+        assert_eq!(
+            engine.objects[live_target_index]
+                .state
+                .local_vars
+                .get("grabbed_calls"),
+            None,
+            "actor Status=0 after Grab(false) suppresses target Grabbed(false)"
+        );
+    }
+
+    #[test]
+    fn script_targeted_throw_runs_turn_action_before_object_com_throw() {
+        let script = r#"#strict
+local turn_started, throw_saw_turn;
+public func RunExecute()
+{
+  ExecuteCommand();
+  return(1);
+}
+protected func StartTurn()
+{
+  turn_started = 1;
+  return(1);
+}
+protected func StartThrow()
+{
+  throw_saw_turn = turn_started;
+  return(1);
+}
+"#;
+        let mut actor =
+            Definition::from_script("TTRN", "Turning thrower", script)
+                .expect("actor compiles");
+        actor.set_c4_callback_convention(true);
+        actor.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        actor.set_physical(PhysicalInfo {
+            throw: 50_000,
+            ..PhysicalInfo::default()
+        });
+        actor.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_directions(2)
+                        .with_turn_action("Turn"),
+                ),
+                (
+                    "Turn".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_directions(2)
+                        .with_start_call("StartTurn"),
+                ),
+                (
+                    "Throw".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("THROW")
+                        .with_start_call("StartThrow"),
+                ),
+            ]),
+        );
+        let mut item =
+            Definition::from_script("TIT2", "Turning throw item", "#strict")
+                .expect("item compiles");
+        item.set_collectible(true);
+
+        let mut engine = Engine::with_seed(120);
+        let mut landscape = Landscape::flat(200, 100);
+        landscape.set_world_height(150);
+        engine.set_landscape(landscape);
+        engine.register_definition(actor).expect("actor registers");
+        engine.register_definition(item).expect("item registers");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("TTRN")
+                    .with_position(Vector2::new(99, 99))
+                    .with_direction(Direction::Left)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("thrower spawns");
+        let item = engine
+            .spawn_object(SpawnConfig::new("TIT2").with_container(actor))
+            .expect("item spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Throw)
+                    .with_target(Some(item))
+                    .with_tx(Some(100))
+                    .with_ty(Some(70)),
+            )
+            .expect("targeted Throw queues");
+
+        engine
+            .call_object_function(actor_index, "RunExecute", Vec::new())
+            .expect("script ExecuteCommand returns");
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        assert_eq!(engine.objects[actor_index].state.direction, Direction::Right);
+        assert_eq!(
+            engine.objects[actor_index].state.local_vars.get("turn_started"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine.objects[actor_index]
+                .state
+                .local_vars
+                .get("throw_saw_turn"),
+            Some(&Value::Int(1)),
+            "SetDir's TurnAction completes before Throw's StartCall"
+        );
+        assert_eq!(
+            engine.object_snapshot(item).expect("item remains").container,
+            None
+        );
+        assert!(engine.objects[actor_index].commands.snapshot().is_empty());
+    }
+
+    #[test]
+    fn object_action_throw_runs_full_exit_bounds_motion_and_callbacks() {
+        let actor_script = r#"#strict
+protected func Ejection(pObject)
+{
+  pObject->RecordThrowStep(2);
+  return(1);
+}
+"#;
+        let item_script = r#"#strict
+local throw_order;
+public func RecordThrowStep(iStep)
+{
+  throw_order = throw_order * 10 + iStep;
+  return(1);
+}
+protected func ContactTop()
+{
+  RecordThrowStep(1);
+  return(0);
+}
+protected func Departure(pContainer)
+{
+  RecordThrowStep(3);
+  return(1);
+}
+"#;
+
+        let mut engine = Engine::with_seed(118);
+        let mut actor =
+            Definition::from_script("TACT", "Throw actor", actor_script).expect("actor compiles");
+        actor.set_c4_callback_convention(true);
+        actor.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Throw".to_string(),
+                    ActionSpec::default().with_procedure("THROW"),
+                ),
+            ]),
+        );
+        actor.set_physical(PhysicalInfo {
+            throw: 50_000,
+            ..PhysicalInfo::default()
+        });
+        engine
+            .register_definition(actor)
+            .expect("actor registers");
+
+        let mut item =
+            Definition::from_script("TITM", "Thrown item", item_script).expect("item compiles");
+        item.set_c4_callback_convention(true);
+        item.set_contact_function_calls(true);
+        item.set_border_bound(C4D_BORDER_TOP);
+        item.set_shape_rect(Some(DefinitionRect::new(0, 0, 4, 4)));
+        engine.register_definition(item).expect("item registers");
+
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("TACT")
+                    .with_position(Vector2::new(20, 0))
+                    .with_direction(Direction::Right)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("actor spawns");
+        let item = engine
+            .spawn_object(SpawnConfig::new("TITM").with_container(actor))
+            .expect("item spawns");
+        let item_index = engine.find_object_index(item).expect("item exists");
+        engine.objects[item_index].state.shape_override =
+            Some(DefinitionRect::new(0, 0, 6, 6));
+        engine.objects[item_index].fixed_velocity =
+            FixedVec2::new(itofix(7), itofix(-9));
+
+        assert!(engine
+            .try_object_action_throw(actor, item)
+            .expect("ObjectActionThrow succeeds"));
+
+        let force = math::val_by_physical(400, 50_000);
+        let item_index = engine.find_object_index(item).expect("item remains");
+        let item = &engine.objects[item_index];
+        assert_eq!(item.state.container, None);
+        assert_eq!(item.state.position, Vector2::new(20, 0));
+        assert_eq!(item.fixed_velocity, FixedVec2::new(force, -force));
+        assert_eq!(item.rotation_velocity, force);
+        assert_eq!(item.state.shape_override, None);
+        assert_eq!(
+            item.state.local_vars.get("throw_order"),
+            Some(&Value::Int(123)),
+            "BoundsCheck ContactTop runs before Ejection and Departure"
+        );
+    }
+
+    #[test]
+    fn nested_empty_put_take_runs_reject_contents_and_opens_menu_before_return() {
+        let mut engine = put_fixture_engine();
+        let mut new_item =
+            Definition::from_script("NITM", "New menu item", "#strict")
+                .expect("new item compiles");
+        new_item.set_category(CATEGORY_STRUCTURE);
+        engine
+            .register_definition(new_item)
+            .expect("new item registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("ACTR")
+                    .with_container(target)
+                    .with_category(CATEGORY_OBJECT),
+            )
+            .expect("contained actor spawns");
+        let item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+            .expect("carried item spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index].state.local_vars.extend([
+            ("tracked".to_string(), object_reference_value(item)),
+            ("nested_throw".to_string(), Value::Int(1)),
+            ("mutate_menu_during_value".to_string(), Value::Int(1)),
+            ("spawn_menu_item".to_string(), Value::Int(1)),
+        ]);
+        let target_index = engine.find_object_index(target).expect("target exists");
+        engine.objects[target_index].state.local_vars.insert(
+            "reject_contents_actor".to_string(),
+            object_reference_value(actor),
+        );
+        engine.objects[actor_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Put)
+                    .with_target(Some(target))
+                    .with_target2(Some(item)),
+            )
+            .expect("outer Put queues");
+
+        engine
+            .execute_object_command_now(actor)
+            .expect("outer Put callback executes nested empty Throw");
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let actor_state = &engine.objects[actor_index].state;
+        assert_eq!(
+            actor_state.local_vars.get("reject_contents_seen"),
+            Some(&Value::Int(1)),
+            "RejectContents runs inside nested ExecuteCommand"
+        );
+        assert_eq!(
+            actor_state.local_vars.get("menu_after_nested"),
+            Some(&Value::Int(6)),
+            "GetMenu observes C4MN_Activate before ExecuteCommand returns"
+        );
+        assert_eq!(
+            actor_state.local_vars.get("menu_selection_after_nested"),
+            Some(&Value::Int(0)),
+            "the activate menu has already refilled and selected its first row"
+        );
+        assert_eq!(
+            actor_state.local_vars.get("menu_during_value"),
+            Some(&Value::Int(6)),
+            "CalcValue sees the already-installed Activate menu during refill"
+        );
+        assert_eq!(
+            actor_state.local_vars.get("menu_selection_during_value"),
+            Some(&Value::Int(-1)),
+            "selection adjustment stays frozen until the full refill completes"
+        );
+        let menu = actor_state.menu.as_ref().expect("activate menu remains open");
+        assert_eq!(menu.identification, Value::Int(6));
+        assert_eq!(menu.refill_object, Some(target));
+        assert_eq!((menu.columns, menu.lines), (3, 4));
+        assert_eq!(
+            menu.items
+                .iter()
+                .find(|entry| entry.item_id == "ACTR")
+                .and_then(|entry| entry.value),
+            Some(7)
+        );
+        assert!(
+            menu.items.iter().any(|entry| entry.item_id == "NITM"),
+            "an item entered after the iterator's current row is included in the same refill"
+        );
+        assert_eq!(
+            engine.objects[actor_index]
+                .commands
+                .snapshot()
+                .command_names(),
+            ["Put"],
+            "the nested Throw finished without disturbing the outer Put"
+        );
+    }
+
+    #[test]
+    fn object_com_put_without_grab_put_uses_any_nonzero_down_double_as_drop() {
+        for (down_double, should_drop) in [(0, false), (-3, true)] {
+            let mut engine = put_fixture_engine();
+            engine
+                .register_definition(
+                    Definition::from_script("NOPU", "No put", "#strict")
+                        .expect("no-put target compiles"),
+                )
+                .expect("no-put target registers");
+            engine
+                .register_player(PlayerConfig::new(1, "PutTake owner"))
+                .expect("player registers");
+            engine
+                .player_mut(1)
+                .expect("player remains")
+                .control
+                .last_com_down_double = down_double;
+            let target = engine
+                .spawn_object(SpawnConfig::new("NOPU"))
+                .expect("no-put target spawns");
+            let mut push = ActionState::new("Push");
+            push.target = Some(target);
+            let actor = engine
+                .spawn_object(
+                    SpawnConfig::new("ACTR")
+                        .with_owner(1)
+                        .with_action(push),
+                )
+                .expect("pushing actor spawns");
+            let item = engine
+                .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+                .expect("carried item spawns");
+            let actor_index = engine.find_object_index(actor).expect("actor exists");
+            engine.objects[actor_index]
+                .commands
+                .push_front(
+                    CommandRequest::new(CommandId::Throw).with_target(Some(item)),
+                )
+                .expect("Throw queues");
+
+            engine
+                .execute_object_command_now(actor)
+                .expect("PutTake attempt executes");
+
+            assert_eq!(
+                engine
+                    .object_snapshot(item)
+                    .expect("item remains")
+                    .container,
+                if should_drop { None } else { Some(actor) },
+                "LastComDownDouble={down_double}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_contained_throw_and_drop_open_the_activate_menu_before_finishing() {
+        for command in [CommandId::Throw, CommandId::Drop] {
+            let mut engine = put_fixture_engine();
+            let target = engine
+                .spawn_object(SpawnConfig::new("TARG"))
+                .expect("target spawns");
+            let actor = engine
+                .spawn_object(SpawnConfig::new("ACTR").with_container(target))
+                .expect("empty contained actor spawns");
+            let actor_index = engine.find_object_index(actor).expect("actor exists");
+            engine.objects[actor_index]
+                .commands
+                .push_front(CommandRequest::new(command))
+                .expect("empty put/take command queues");
+
+            engine
+                .execute_object_command_now(actor)
+                .expect("empty ObjectComPutTake executes");
+
+            let actor_index = engine.find_object_index(actor).expect("actor remains");
+            let actor_state = &engine.objects[actor_index].state;
+            let menu = actor_state.menu.as_ref().expect("activate menu opens");
+            assert_eq!(menu.identification, Value::Int(6));
+            assert_eq!(menu.refill_object, Some(target));
+            assert!(
+                engine.objects[actor_index].commands.snapshot().is_empty(),
+                "{command:?} finishes after opening the menu"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_pushing_throw_and_drop_open_get_only_for_grab_get_targets() {
+        for command in [CommandId::Throw, CommandId::Drop] {
+            let mut engine = put_fixture_engine();
+            let mut target_definition =
+                Definition::from_script("GETT", "Get target", "#strict")
+                    .expect("get target compiles");
+            target_definition.set_grab_put_get(GRAB_PUT_GET_GET);
+            engine
+                .register_definition(target_definition)
+                .expect("get target registers");
+            let target = engine
+                .spawn_object(SpawnConfig::new("GETT"))
+                .expect("get target spawns");
+            let mut push = ActionState::new("Push");
+            push.target = Some(target);
+            let actor = engine
+                .spawn_object(SpawnConfig::new("ACTR").with_action(push))
+                .expect("empty pusher spawns");
+            let actor_index = engine.find_object_index(actor).expect("actor exists");
+            engine.objects[actor_index]
+                .commands
+                .push_front(CommandRequest::new(command))
+                .expect("empty pushing command queues");
+
+            engine
+                .execute_object_command_now(actor)
+                .expect("empty pushing ObjectComPutTake executes");
+
+            let actor_index = engine.find_object_index(actor).expect("actor remains");
+            let menu = engine.objects[actor_index]
+                .state
+                .menu
+                .as_ref()
+                .expect("get menu opens");
+            assert_eq!(menu.identification, Value::Int(13));
+            assert_eq!(menu.refill_object, Some(target));
+            assert!(engine.objects[actor_index].commands.snapshot().is_empty());
+
+            let mut denied = put_fixture_engine();
+            let target = denied
+                .spawn_object(SpawnConfig::new("TARG"))
+                .expect("non-GrabGet target spawns");
+            let mut push = ActionState::new("Push");
+            push.target = Some(target);
+            let actor = denied
+                .spawn_object(SpawnConfig::new("ACTR").with_action(push))
+                .expect("empty denied pusher spawns");
+            let actor_index = denied.find_object_index(actor).expect("actor exists");
+            denied.objects[actor_index]
+                .commands
+                .push_front(CommandRequest::new(command))
+                .expect("denied pushing command queues");
+            denied
+                .execute_object_command_now(actor)
+                .expect("denied empty PutTake executes");
+            let actor_index = denied.find_object_index(actor).expect("actor remains");
+            assert!(denied.objects[actor_index].state.menu.is_none());
+            assert!(denied.objects[actor_index].commands.snapshot().is_empty());
+        }
     }
 }
 

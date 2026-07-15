@@ -1231,28 +1231,59 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             })
         },
     )?;
-    let metal_x = player
-        .engine()
-        .object_snapshot(metal)
-        .expect("flung WOOD survives")
-        .position
-        .x;
-    let catapult_clonk_x = player
-        .engine()
-        .object_snapshot(catapult_clonk)
-        .expect("right-hill CLNK survives")
-        .position
-        .x;
-    let collect_direction = if metal_x < catapult_clonk_x {
-        COM_LEFT
-    } else {
-        COM_RIGHT
-    };
-    player.hold_until(
-        collect_direction,
+    // The second projectile can still carry horizontal speed when it enters
+    // this corridor. Follow its live position instead of committing to the
+    // side it occupied on the first frame: a landscape bounce may otherwise
+    // send it behind a Clonk that keeps walking away. Every steering edge is
+    // still a physical C4Player::InCom input, and collection still has to
+    // happen through C4GameObjects::CrossCheck.
+    let mut pursuit_direction = None;
+    for _ in 0..180 {
+        if player
+            .engine()
+            .object_snapshot(metal)
+            .is_some_and(|object| object.container == Some(catapult_clonk))
+        {
+            break;
+        }
+        let metal_x = player
+            .engine()
+            .object_snapshot(metal)
+            .expect("flung WOOD survives during collection")
+            .position
+            .x;
+        let catapult_clonk_x = player
+            .engine()
+            .object_snapshot(catapult_clonk)
+            .expect("right-hill CLNK survives during collection")
+            .position
+            .x;
+        let desired_direction = match metal_x - catapult_clonk_x {
+            ..=-6 => Some(COM_LEFT),
+            6.. => Some(COM_RIGHT),
+            _ => pursuit_direction,
+        };
+        if desired_direction != pursuit_direction {
+            if let Some(direction) = pursuit_direction {
+                player.release(direction)?;
+            }
+            if let Some(direction) = desired_direction {
+                player.press(direction)?;
+            }
+            pursuit_direction = desired_direction;
+        }
+        player.ticks(1)?;
+    }
+    if let Some(direction) = pursuit_direction {
+        player.release(direction)?;
+    }
+    player.assert_milestone(
         "the right-hill CLNK naturally collects flung WOOD",
-        180,
-        |engine| clonk_carries(engine, catapult_clonk, remaining_definition.as_str()),
+        |engine| {
+            engine
+                .object_snapshot(metal)
+                .is_some_and(|object| object.container == Some(catapult_clonk))
+        },
     )?;
     let hill_cata_x = player
         .engine()
@@ -1280,10 +1311,48 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
                 .object_snapshot(catapult_clonk)
                 .zip(engine.object_snapshot(hill_cata))
                 .is_some_and(|(clonk, cata)| {
-                    clonk.action.name == "Walk" && (clonk.position.x - cata.position.x).abs() <= 6
+                    let distance = (clonk.position.x - cata.position.x).abs();
+                    (clonk.action.name == "Walk" && distance <= 6)
+                        || (clonk.action.name == "Scale" && distance <= 32)
                 })
         },
     )?;
+    // Inline C4Command::Drop -> ObjectComPutTake timing gives the second
+    // projectile the C++ route and can leave this Clonk attached to the
+    // short wall immediately beside CATA. Classic left control intentionally
+    // stops a left-facing scaler, so descend with a real physical control and
+    // finish the approach on foot instead of relying on the old delayed-Put
+    // trajectory to miss the wall.
+    if player
+        .engine()
+        .object_snapshot(catapult_clonk)
+        .is_some_and(|clonk| clonk.action.name == "Scale")
+    {
+        player.hold_until(
+            COM_DOWN,
+            "the WOOD-carrying right-hill CLNK descends beside CATA",
+            80,
+            |engine| {
+                engine
+                    .object_snapshot(catapult_clonk)
+                    .is_some_and(|clonk| clonk.action.name != "Scale")
+            },
+        )?;
+        player.hold_until(
+            reach_hill_cata,
+            "the WOOD-carrying right-hill CLNK finishes the CATA approach",
+            120,
+            |engine| {
+                engine
+                    .object_snapshot(catapult_clonk)
+                    .zip(engine.object_snapshot(hill_cata))
+                    .is_some_and(|(clonk, cata)| {
+                        clonk.action.name == "Walk"
+                            && (clonk.position.x - cata.position.x).abs() <= 6
+                    })
+            },
+        )?;
+    }
     player.double_tap(COM_DOWN)?;
     player.wait_until(
         "the right-hill CLNK re-grabs CATA with WOOD",

@@ -4732,6 +4732,7 @@ global func Step(state, frame, random)
                         permanent: false,
                         extra: crate::ObjectMenuExtra::default(),
                         extra_data: 0,
+                        internal_refill_token: 0,
                         selection: 0,
                         user_menu: false,
                         command_object: Some(crew),
