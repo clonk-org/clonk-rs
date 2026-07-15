@@ -17023,14 +17023,7 @@ fn get_name(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(info_name) = info_name {
             return Ok(Value::String(info_name));
         }
-        let definition = context
-            .get_world_object(target)
-            .map(|object| object.definition_id().to_string())
-            .or_else(|| {
-                context
-                    .object_scope(target)
-                    .and_then(|scope| scope.definition_id.clone())
-            });
+        let definition = context.object_effective_definition_id(target);
         Ok(definition
             .and_then(|id| context.definition_metadata(&id))
             .map(|metadata| Value::String(metadata.name.clone()))
@@ -39545,6 +39538,121 @@ func Trigger()
             Some(&Value::String("Caller".into()))
         );
         assert_eq!(snapshot.custom_name, None);
+    }
+
+    #[test]
+    fn get_name_prefers_live_crew_info_and_tracks_same_call_definition_changes() {
+        // C4Object::GetName is CustomName -> Info->Name -> Def->Name.
+        // MakeCrewMember installs Info synchronously, clearing CustomName
+        // must reveal it again, and ChangeDef changes the final fallback in
+        // the same call (C4Object.cpp:2103-2116, C4Player.cpp:1167-1210).
+        let script = r#"#strict 2
+func Probe(object crew, object plain)
+{
+    var made = MakeCrewMember(crew, 0);
+    var info_name = GetName(crew);
+    var set = SetName("Alias", crew);
+    var alias = GetName(crew);
+    var cleared = SetName(nil, crew);
+    var restored = GetName(crew);
+    var plain_name = GetName(plain);
+    var changed = ChangeDef(NEWW, plain);
+    var changed_name = GetName(plain);
+    return [made, info_name, set, alias, cleared, restored,
+            plain_name, changed, changed_name];
+}
+func Read(object crew) { return GetName(crew); }
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Player"))
+            .expect("player registers");
+        engine.set_standard_names(Some("Twonky\n".to_owned()));
+        engine
+            .register_definition(
+                crate::Definition::from_script("CALL", "Caller", script)
+                    .expect("driver compiles"),
+            )
+            .expect("driver registers");
+        let mut crew =
+            crate::Definition::from_script("CREW", "Crew", "").expect("crew compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("PLAI", "Plain", "")
+                    .expect("plain compiles"),
+            )
+            .expect("plain registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("NEWW", "Changed", "")
+                    .expect("changed compiles"),
+            )
+            .expect("changed registers");
+
+        let caller = engine
+            .spawn_object(crate::SpawnConfig::new("CALL"))
+            .expect("driver spawns");
+        let crew = engine
+            .spawn_object(
+                crate::SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("crew spawns");
+        let plain = engine
+            .spawn_object(crate::SpawnConfig::new("PLAI"))
+            .expect("plain object spawns");
+        let caller_index = engine.find_object_index(caller).expect("driver exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Probe",
+                    vec![
+                        Value::Object(crew.as_u64()),
+                        Value::Object(plain.as_u64()),
+                    ],
+                )
+                .expect("name probe runs"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::String("Twonky".into()),
+                Value::Bool(true),
+                Value::String("Alias".into()),
+                Value::Bool(true),
+                Value::String("Twonky".into()),
+                Value::String("Plain".into()),
+                Value::Bool(true),
+                Value::String("Changed".into()),
+            ])
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Read",
+                    vec![Value::Object(crew.as_u64())],
+                )
+                .expect("folded crew name reads"),
+            Value::String("Twonky".into())
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew remains")
+                .custom_name,
+            None
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(plain)
+                .expect("plain remains")
+                .definition_id,
+            "NEWW"
+        );
     }
 
     #[test]
