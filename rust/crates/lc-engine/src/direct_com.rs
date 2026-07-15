@@ -1214,8 +1214,10 @@ impl Engine {
         let base = &self.objects[base_index];
         let base_id = base.id;
         let base_definition = base.definition_id.clone();
+        let base_owner = base.state.owner;
         let base_player = base.state.base;
         let base_is_container = base.state.ocf & ocf::CONTAINER != 0;
+        let base_grab_put_get = self.definition_grab_put_get(&base_definition);
         let caption = self
             .definitions
             .get(&base_definition)
@@ -1274,7 +1276,14 @@ impl Engine {
             decoration: None,
         });
 
-        if base_is_container && self.objects[crew_index].state.container == Some(base_id) {
+        let crew_in_base = self.objects[crew_index].state.container == Some(base_id);
+        let crew_pushing_base = self.object_procedure(crew_index) == ActionProcedure::Push
+            && self.objects[crew_index].state.action.target == Some(base_id);
+        if base_is_container
+            && (crew_in_base
+                || (crew_pushing_base
+                    && base_grab_put_get & crate::GRAB_PUT_GET_PUT != 0))
+        {
             if let Some(first_carried_definition) = first_carried_definition {
                 let command2 = if crew_contents.len() > 1
                     || self.selected_crew(crew_owner).len() > 1
@@ -1309,6 +1318,14 @@ impl Engine {
                     text_display_progress: -1,
                 });
             }
+        }
+        if base_is_container
+            && (crew_in_base
+                || (crew_pushing_base
+                    && base_grab_put_get & crate::GRAB_PUT_GET_GET != 0)
+                || (self.players.contains_key(&base_owner)
+                    && !self.players_hostile(base_owner, crew_owner)))
+        {
             items.push(item(
                 "Contents",
                 format!(
@@ -10158,6 +10175,185 @@ func ContextUse(menu) { [Use] return 1; }
                 "ProtectedCall(Object({}),\"ControlDigDouble\",this)",
                 target.as_u64()
             )
+        );
+    }
+
+    #[test]
+    fn context_container_rows_include_put_for_pushed_grab_put_target() {
+        // C4MN_Context exposes Put while the Clonk is pushing the target when
+        // the target definition has C4D_Grab_Put. The >1 inventory condition
+        // supplies the same Put-all secondary command as containment
+        // (C4ObjectMenu.cpp:335-359).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut container =
+            Definition::from_script("CONT", "Container", "#strict\n").expect("container");
+        container.set_category(crate::CATEGORY_VEHICLE);
+        container.set_grab_put_get(crate::GRAB_PUT_GET_PUT);
+        engine
+            .register_definition(container)
+            .expect("register container");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", "#strict\n").expect("item"),
+            )
+            .expect("register item");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(crew))
+            .expect("first carried item");
+        engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(crew))
+            .expect("second carried item");
+        let target = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container target");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.action = ActionState::new("Push");
+        engine.objects[crew_index].state.action.target = Some(target);
+
+        let menu = open_native_context(&mut engine, crew, target);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["Put"]
+        );
+        assert_eq!(
+            menu.items[0].command,
+            format!(
+                "PlayerObjectCommand(1, \"Put\", Object({}), 0, 0) && ExecuteCommand()",
+                target.as_u64()
+            )
+        );
+        assert_eq!(
+            menu.items[0].command2,
+            format!(
+                "PlayerObjectCommand(1, \"Put\", Object({}), 1000, 0) && ExecuteCommand()",
+                target.as_u64()
+            )
+        );
+    }
+
+    #[test]
+    fn context_container_rows_include_contents_for_pushed_grab_get_target() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut container =
+            Definition::from_script("CONT", "Container", "#strict\n").expect("container");
+        container.set_category(crate::CATEGORY_VEHICLE);
+        container.set_grab_put_get(crate::GRAB_PUT_GET_GET);
+        engine
+            .register_definition(container)
+            .expect("register container");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let target = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container target");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.action = ActionState::new("Push");
+        engine.objects[crew_index].state.action.target = Some(target);
+
+        let menu = open_native_context(&mut engine, crew, target);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["Contents"]
+        );
+        assert_eq!(
+            menu.items[0].command,
+            format!(
+                "SetCommand(this,\"Get\",Object({}),0,0,,2)&&ExecuteCommand()",
+                target.as_u64()
+            )
+        );
+    }
+
+    #[test]
+    fn context_container_rows_include_contents_for_friendly_remote_target() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut container =
+            Definition::from_script("CONT", "Container", "#strict\n").expect("container");
+        container.set_category(crate::CATEGORY_STRUCTURE);
+        container.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        engine
+            .register_definition(container)
+            .expect("register container");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player one");
+        engine
+            .register_player(PlayerConfig::new(2, "Friend"))
+            .expect("player two");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let target = engine
+            .spawn_object(SpawnConfig::new("CONT").with_owner(2))
+            .expect("friendly container");
+
+        let menu = open_native_context(&mut engine, crew, target);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["Contents"]
+        );
+
+        engine.set_hostility(1, 2, true).expect("set hostility");
+        let menu = open_native_context(&mut engine, crew, target);
+        assert!(
+            menu.items.iter().all(|item| item.caption != "Contents"),
+            "hostile ownership must suppress the remote Contents row"
+        );
+    }
+
+    #[test]
+    fn context_container_rows_preserve_contained_put_contents_and_exit() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut container =
+            Definition::from_script("CONT", "Container", "#strict\n").expect("container");
+        container.set_category(crate::CATEGORY_STRUCTURE);
+        container.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        engine
+            .register_definition(container)
+            .expect("register container");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", "#strict\n").expect("item"),
+            )
+            .expect("register item");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(crew))
+            .expect("carried item");
+        let target = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container target");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(target))
+            .expect("enter container");
+
+        let menu = open_native_context(&mut engine, crew, target);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["Put", "Contents", "Exit"]
         );
     }
 
