@@ -14623,7 +14623,6 @@ pub fn procedure_t_attach(
         | ActionProcedure::Kneel
         | ActionProcedure::Throw
         | ActionProcedure::Bridge
-        | ActionProcedure::Build
         | ActionProcedure::Push
         | ActionProcedure::Pull
         | ActionProcedure::Chop
@@ -23733,7 +23732,9 @@ impl Engine {
                     let increment_live_time = object.state.action.name == exec_action_source
                         && !matches!(
                             action_library.procedure_for_action(&exec_action_source),
-                            ActionProcedure::Bridge | ActionProcedure::Lift
+                            ActionProcedure::Bridge
+                                | ActionProcedure::Build
+                                | ActionProcedure::Lift
                         );
                     action_library.advance_state_from_action_by(
                         &mut object.state.action,
@@ -30262,10 +30263,16 @@ impl Engine {
             }
         }
 
-        if matches!(procedure, ActionProcedure::Build)
-            && !self.apply_build_procedure(idx, &definition_id)?
-        {
-            return Ok(false);
+        if matches!(procedure, ActionProcedure::Build) {
+            // Action.Time++ precedes the procedure switch in C++
+            // (C4Object.cpp:4755-4756), including every early BUILD return.
+            // The external phase tail still advances Phase/PhaseDelay but
+            // must not increment Time a second time.
+            self.objects[idx].state.action.time =
+                self.objects[idx].state.action.time.saturating_add(1);
+            if !self.apply_build_procedure(idx)? {
+                return Ok(true);
+            }
         }
 
         if matches!(procedure, ActionProcedure::Chop)
@@ -31289,8 +31296,8 @@ impl Engine {
     fn apply_build_procedure(
         &mut self,
         idx: usize,
-        definition_id: &DefinitionId,
     ) -> Result<bool, EngineError> {
+        let builder_id = self.objects[idx].id;
         let category = self.objects[idx].state.category;
         let is_structure = (category & (CATEGORY_STRUCTURE | CATEGORY_STATIC_BACK)) != 0;
 
@@ -31300,30 +31307,75 @@ impl Engine {
                 if is_structure {
                     return Ok(true);
                 }
-                let _ = self.object_com_stop_action(idx, definition_id)?;
+                let _ = self.object_com_stop_build(builder_id)?;
                 return Ok(false);
             }
         };
-        let builder_id = self.objects[idx].id;
 
         let target_idx = match self.find_object_index(target_id) {
             Some(index) if index != idx => index,
             _ => {
-                let _ = self.object_com_stop_action(idx, definition_id)?;
+                let _ = self.object_com_stop_build(builder_id)?;
                 return Ok(false);
             }
         };
 
         if self.objects[target_idx].destroyed || !self.objects[target_idx].state.status.is_active()
         {
-            let _ = self.object_com_stop_action(idx, definition_id)?;
+            let _ = self.object_com_stop_build(builder_id)?;
+            return Ok(false);
+        }
+
+        // An internal construction is supported only while its live
+        // container is itself building and has power (C4Object.cpp:
+        // 5016-5020). This bare return deliberately precedes both the area
+        // and completed-target checks and does not stop the builder.
+        if let Some(container_id) = self.objects[target_idx].state.container {
+            let supported = self
+                .find_object_index(container_id)
+                .is_some_and(|container_idx| {
+                    let container = &self.objects[container_idx];
+                    !container.state.need_energy
+                        && self
+                            .definitions
+                            .get(&container.definition_id)
+                            .is_some_and(|definition| {
+                                definition
+                                    .action_library()
+                                    .procedure_for_action(&container.state.action.name)
+                                    == ActionProcedure::Build
+                            })
+                });
+            if !supported {
+                return Ok(false);
+            }
+        }
+
+        // C++ tests the builder's integer position against the target's
+        // current C4Shape, with inclusive Inside bounds. A definition-less
+        // shape is the native zero rectangle, not the expanded sector area.
+        let builder_position = self.objects[idx].state.position;
+        let target_position = self.objects[target_idx].state.position;
+        let shape = self.objects[target_idx]
+            .current_shape_rect()
+            .unwrap_or_default();
+        let dx = i64::from(builder_position.x)
+            - (i64::from(target_position.x) + i64::from(shape.x));
+        let dy = i64::from(builder_position.y)
+            - (i64::from(target_position.y) + i64::from(shape.y));
+        let in_target_area = dx >= 0
+            && dx <= i64::from(shape.width)
+            && dy >= -16
+            && dy <= i64::from(shape.height) + 16;
+        if !in_target_area {
+            let _ = self.object_com_stop_build(builder_id)?;
             return Ok(false);
         }
 
         if self.objects[target_idx].state.construction >= FULL_CON {
-            // Target::Build returns false once full; DFA_BUILD calls
-            // ObjectComStop in that same frame (C4Object.cpp:5033-5042).
-            let _ = self.object_com_stop_action(idx, definition_id)?;
+            // Target::Build returns false once full. The common failure tail
+            // stops first and then may SetCommand(Exit) on an internal target.
+            self.finish_failed_build(builder_id)?;
             return Ok(false);
         }
 
@@ -31428,16 +31480,9 @@ impl Engine {
                 }
             }
 
-            // Target::Build returned false because the next construction
-            // fraction has no material: DFA_BUILD calls ObjectComStop before
-            // returning (C4Object.cpp:5033-5050).
-            if let Some(builder_idx) = self.find_object_index(builder_id).filter(|&index| {
-                !self.objects[index].destroyed
-                    && !matches!(self.objects[index].state.status, ObjectStatus::Deleted)
-            }) {
-                let live_definition_id = self.objects[builder_idx].definition_id.clone();
-                let _ = self.object_com_stop_action(builder_idx, &live_definition_id)?;
-            }
+            // BuildNeedsMaterial may itself complete, remove, or retarget the
+            // construction. Re-read the native failure split before stopping.
+            self.finish_failed_build(builder_id)?;
             return Ok(false);
         }
 
@@ -31449,8 +31494,7 @@ impl Engine {
         };
         let mut build_speed = self.object_physical(builder_idx).can_construct;
         if build_speed == 0 {
-            let live_definition_id = self.objects[builder_idx].definition_id.clone();
-            let _ = self.object_com_stop_action(builder_idx, &live_definition_id)?;
+            self.finish_failed_build(builder_id)?;
             return Ok(false);
         }
         if build_speed <= 1 {
@@ -31458,8 +31502,7 @@ impl Engine {
         }
 
         let Some(target_idx) = self.find_object_index(target_id) else {
-            let live_definition_id = self.objects[builder_idx].definition_id.clone();
-            let _ = self.object_com_stop_action(builder_idx, &live_definition_id)?;
+            self.finish_failed_build(builder_id)?;
             return Ok(false);
         };
         let target_mass = self
@@ -31548,7 +31591,77 @@ impl Engine {
             self.objects[target_idx].state.damage = 0;
         }
 
+        // Unlike most procedure attachment bits, DFA_BUILD adds Bottom only
+        // after Target::Build succeeds (C4Object.cpp:5052-5055). All guard
+        // and Build-failure returns retain only the pre-switch base bits.
+        if let Some(builder_idx) = self.find_object_index(builder_id) {
+            let builder = &mut self.objects[builder_idx];
+            builder.frame_t_attach |= CNAT_BOTTOM;
+            builder.state.t_attach = builder.frame_t_attach;
+        }
+
         Ok(true)
+    }
+
+    /// The ordinary (non-forced) ObjectComStop used by DFA_BUILD
+    /// (C4ObjectCom.cpp:239-245). Re-resolve after Idle because its callbacks
+    /// may remove the builder or change the definition used by Walk.
+    fn object_com_stop_build(&mut self, builder_id: ObjectId) -> Result<bool, EngineError> {
+        let Some(builder_idx) = self.find_object_index(builder_id).filter(|&index| {
+            !self.objects[index].destroyed
+                && !matches!(self.objects[index].state.status, ObjectStatus::Deleted)
+        }) else {
+            return Ok(false);
+        };
+        let definition_id = self.objects[builder_idx].definition_id.clone();
+        let _ = self.action_with_calls(builder_idx, &definition_id, "Idle")?;
+
+        let Some(builder_idx) = self.find_object_index(builder_id) else {
+            return Ok(false);
+        };
+        self.objects[builder_idx].state.command_direction = CommandDirection::Stop;
+        let definition_id = self.objects[builder_idx].definition_id.clone();
+        if !self.action_with_calls(builder_idx, &definition_id, "Walk")? {
+            return Ok(false);
+        }
+        if let Some(builder_idx) = self.find_object_index(builder_id) {
+            let builder = &mut self.objects[builder_idx];
+            builder.fixed_velocity = FixedVec2::ZERO;
+            builder.state.velocity = Vector2::ZERO;
+        }
+        Ok(true)
+    }
+
+    /// Shared false return from `C4Object::Build` (C4Object.cpp:5033-5051).
+    /// The complete/missing decision uses the live pre-stop Action.Target;
+    /// internal Exit uses the post-stop target because action callbacks may
+    /// clear, replace, remove, or recontain it.
+    fn finish_failed_build(&mut self, builder_id: ObjectId) -> Result<(), EngineError> {
+        let complete_or_missing = self
+            .find_object_index(builder_id)
+            .and_then(|builder_idx| self.objects[builder_idx].state.action.target)
+            .is_none_or(|target_id| {
+                self.find_object_index(target_id).is_none_or(|target_idx| {
+                    self.objects[target_idx].state.construction >= FULL_CON
+                })
+            });
+
+        let _ = self.object_com_stop_build(builder_id)?;
+
+        if !complete_or_missing {
+            return Ok(());
+        }
+        let Some(target_idx) = self
+            .find_object_index(builder_id)
+            .and_then(|builder_idx| self.objects[builder_idx].state.action.target)
+            .and_then(|target_id| self.find_object_index(target_id))
+            .filter(|&target_idx| {
+                self.objects[target_idx].state.container == Some(builder_id)
+            })
+        else {
+            return Ok(());
+        };
+        self.set_plain_exit_command(target_idx)
     }
 
     /// DFA_CHOP (C4Object.cpp:5202-5221): every Tick3 asks the current

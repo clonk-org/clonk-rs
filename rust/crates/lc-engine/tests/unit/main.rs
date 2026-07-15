@@ -11183,6 +11183,483 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(object.direction, Direction::Left);
     }
 
+    fn l067_builder_definition(
+        id: &str,
+        script: &str,
+        no_other_action: bool,
+    ) -> Definition {
+        let mut definition =
+            Definition::from_script(id, id, script).expect("builder definition compiles");
+        definition.set_category(CATEGORY_OBJECT);
+        definition.set_physical(PhysicalInfo {
+            can_construct: 100,
+            ..PhysicalInfo::default()
+        });
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Build".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("BUILD")
+                        .with_length(4)
+                        .with_delay(5)
+                        .with_no_other_action(no_other_action),
+                ),
+            ]),
+        );
+        definition
+    }
+
+    fn l067_target_definition(script: &str) -> Definition {
+        let mut definition =
+            Definition::from_script("BTGT", "Build target", script).expect("target compiles");
+        definition.set_category(CATEGORY_STRUCTURE);
+        definition.set_mass(100);
+        definition.set_shape_rect(Some(DefinitionRect::new(-10, -20, 20, 40)));
+        definition
+    }
+
+    #[test]
+    fn l067_build_contained_target_requires_live_powered_build_container() {
+        // DFA_BUILD's first target guard requires a contained target's live
+        // container to be building without NeedEnergy (C4Object.cpp:5016-5020).
+        // It precedes the full-target check and returns without stopping.
+        for (label, container_action, need_energy, inactive, construction, expected_delta) in [
+            ("idle", "Idle", false, false, 50_000, 0),
+            ("needs energy", "Build", true, false, 50_000, 0),
+            ("powered build", "Build", false, false, 50_000, 150),
+            ("inactive powered build", "Build", false, true, 50_000, 150),
+            ("idle full target", "Idle", false, false, FULL_CON, 0),
+        ] {
+            let mut engine = Engine::with_seed(67);
+            engine
+                .register_definition(l067_builder_definition("BLDR", "", false))
+                .expect("builder registers");
+            engine
+                .register_definition(l067_builder_definition("BCON", "", false))
+                .expect("container registers");
+            engine
+                .register_definition(l067_target_definition(""))
+                .expect("target registers");
+
+            let container = engine
+                .spawn_object(
+                    SpawnConfig::new("BCON")
+                        .with_action(ActionState::new(container_action))
+                        .with_need_energy(need_energy)
+                        .with_position(Vector2::new(100, 200)),
+                )
+                .expect("container spawns");
+            if inactive {
+                let container_idx = engine
+                    .find_object_index(container)
+                    .expect("container exists");
+                engine.objects[container_idx].state.status = ObjectStatus::Inactive;
+            }
+            let target = engine
+                .spawn_object(
+                    SpawnConfig::new("BTGT")
+                        .with_construction(construction)
+                        .with_position(Vector2::new(100, 200))
+                        .with_container(container),
+                )
+                .expect("target spawns");
+            let target_idx = engine.find_object_index(target).expect("target exists");
+            let target_position = engine.objects[target_idx].state.position;
+            let shape = engine.objects[target_idx]
+                .current_shape_rect()
+                .expect("target has a live shape");
+            let mut build = ActionState::new("Build");
+            build.target = Some(target);
+            build.phase = 2;
+            build.ticks = 3;
+            build.time = 41;
+            let sentinel_velocity = FixedVec2::new(fixed100(125), fixed100(-75));
+            let builder = engine
+                .spawn_object(
+                    SpawnConfig::new("BLDR")
+                        .with_position(Vector2::new(
+                            target_position.x + shape.x,
+                            target_position.y + shape.y,
+                        ))
+                        .with_fixed_velocity(sentinel_velocity)
+                        .with_command_direction(CommandDirection::Right)
+                        .with_action(build),
+                )
+                .expect("builder spawns");
+            let builder_idx = engine.find_object_index(builder).expect("builder exists");
+
+            let returned_early = engine
+                .apply_physics_at_index(builder_idx)
+                .expect("Build procedure executes");
+            let target_state = engine.object_snapshot(target).expect("target remains");
+            assert_eq!(
+                target_state.construction,
+                construction.saturating_add(expected_delta).min(FULL_CON),
+                "{label}"
+            );
+            let builder_idx = engine.find_object_index(builder).expect("builder remains");
+            let builder_state = &engine.objects[builder_idx];
+            assert_eq!(builder_state.state.action.name, "Build", "{label}");
+            assert_eq!(builder_state.state.action.time, 42, "{label}");
+            assert_eq!(builder_state.state.action.phase, 2, "{label}");
+            assert_eq!(builder_state.state.action.ticks, 3, "{label}");
+            if expected_delta == 0 {
+                assert!(returned_early, "{label} must return from ExecAction");
+                assert_eq!(builder_state.state.command_direction, CommandDirection::Right);
+                assert_eq!(builder_state.fixed_velocity, sentinel_velocity, "{label}");
+                assert_eq!(builder_state.frame_t_attach, CNAT_NONE, "{label}");
+                assert_eq!(builder_state.state.t_attach, CNAT_NONE, "{label}");
+            } else {
+                assert!(!returned_early, "{label} must reach the phase tail");
+                assert_eq!(builder_state.fixed_velocity, FixedVec2::ZERO);
+                assert_eq!(builder_state.frame_t_attach, CNAT_BOTTOM, "{label}");
+                assert_eq!(builder_state.state.t_attach, CNAT_BOTTOM, "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn l067_build_area_uses_live_shape_and_inclusive_vertical_margin() {
+        // DFA_BUILD compares the builder against the target's live Shape and
+        // uses inclusive Inside bounds, including Wdt and Hgt+16
+        // (C4Object.cpp:5027-5032).
+        for (label, position_case, should_build, no_other_action) in [
+            ("inclusive bottom-right", 0, true, false),
+            ("one past right", 1, false, false),
+            ("one past bottom margin", 2, false, false),
+            ("locked one past right", 1, false, true),
+        ] {
+            let mut engine = Engine::with_seed(67);
+            engine
+                .register_definition(l067_builder_definition(
+                    "BLDR",
+                    "",
+                    no_other_action,
+                ))
+                .expect("builder registers");
+            engine
+                .register_definition(l067_target_definition(""))
+                .expect("target registers");
+            let target = engine
+                .spawn_object(
+                    SpawnConfig::new("BTGT")
+                        .with_construction(50_000)
+                        .with_position(Vector2::new(100, 200)),
+                )
+                .expect("target spawns");
+            let target_idx = engine.find_object_index(target).expect("target exists");
+            engine.objects[target_idx].state.damage = 37;
+            let target_position = engine.objects[target_idx].state.position;
+            let shape = engine.objects[target_idx]
+                .current_shape_rect()
+                .expect("target has a live shape");
+            let origin = Vector2::new(
+                target_position.x + shape.x,
+                target_position.y + shape.y,
+            );
+            let builder_position = match position_case {
+                0 => Vector2::new(
+                    origin.x + shape.width,
+                    origin.y + shape.height + 16,
+                ),
+                1 => Vector2::new(origin.x + shape.width + 1, origin.y),
+                _ => Vector2::new(origin.x, origin.y + shape.height + 17),
+            };
+            let mut build = ActionState::new("Build");
+            build.target = Some(target);
+            let sentinel_velocity = FixedVec2::new(fixed100(200), fixed100(-100));
+            let builder = engine
+                .spawn_object(
+                    SpawnConfig::new("BLDR")
+                        .with_position(builder_position)
+                        .with_fixed_velocity(sentinel_velocity)
+                        .with_command_direction(CommandDirection::Right)
+                        .with_action(build),
+                )
+                .expect("builder spawns");
+            let builder_idx = engine.find_object_index(builder).expect("builder exists");
+
+            let returned_early = engine
+                .apply_physics_at_index(builder_idx)
+                .expect("Build procedure executes");
+            let target_state = engine.object_snapshot(target).expect("target remains");
+            let builder_idx = engine.find_object_index(builder).expect("builder remains");
+            let builder_state = &engine.objects[builder_idx];
+            if should_build {
+                assert!(!returned_early, "{label}");
+                assert_eq!(target_state.construction, 51_500, "{label}");
+                assert_eq!(builder_state.state.action.name, "Build", "{label}");
+                assert_eq!(builder_state.fixed_velocity, FixedVec2::ZERO, "{label}");
+            } else {
+                assert!(returned_early, "{label}");
+                assert_eq!(target_state.construction, 50_000, "{label}");
+                assert_eq!(target_state.damage, 37, "{label}");
+                assert_eq!(builder_state.state.command_direction, CommandDirection::Stop);
+                if no_other_action {
+                    assert_eq!(builder_state.state.action.name, "Build", "{label}");
+                    assert_eq!(builder_state.fixed_velocity, sentinel_velocity, "{label}");
+                } else {
+                    assert_eq!(builder_state.state.action.name, "Walk", "{label}");
+                    assert_eq!(builder_state.fixed_velocity, FixedVec2::ZERO, "{label}");
+                }
+                assert_eq!(builder_state.frame_t_attach, CNAT_NONE, "{label}");
+            }
+        }
+
+        // The range guard also precedes the completed-target branch. A full
+        // internal target outside the live shape stops the builder but must
+        // not receive SetCommand(Exit).
+        let mut engine = Engine::with_seed(68);
+        engine
+            .register_definition(l067_builder_definition("BLDR", "", false))
+            .expect("builder registers");
+        engine
+            .register_definition(l067_target_definition(""))
+            .expect("target registers");
+        let builder = engine
+            .spawn_object(
+                SpawnConfig::new("BLDR")
+                    .with_position(Vector2::new(100, 200))
+                    .with_action(ActionState::new("Build")),
+            )
+            .expect("builder spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("BTGT")
+                    .with_position(Vector2::new(100, 200))
+                    .with_construction(FULL_CON)
+                    .with_container(builder),
+            )
+            .expect("target spawns");
+        let target_idx = engine.find_object_index(target).expect("target exists");
+        let target_position = engine.objects[target_idx].state.position;
+        let shape = engine.objects[target_idx]
+            .current_shape_rect()
+            .expect("target has a live shape");
+        engine.objects[target_idx].state.no_collect_delay = 2;
+        engine.objects[target_idx]
+            .commands
+            .push_back(CommandRequest::new(CommandId::Wait).with_update_interval(90))
+            .expect("old Wait queues");
+        let builder_idx = engine.find_object_index(builder).expect("builder exists");
+        engine.objects[builder_idx].state.action.target = Some(target);
+        engine
+            .apply_object_update(
+                builder,
+                ObjectUpdate::new().with_position(Vector2::new(
+                    target_position.x + shape.x + shape.width + 1,
+                    target_position.y + shape.y,
+                )),
+            )
+            .expect("builder moves outside target shape");
+        let builder_idx = engine.find_object_index(builder).expect("builder remains");
+        assert!(
+            engine
+                .apply_physics_at_index(builder_idx)
+                .expect("out-of-range full Build executes")
+        );
+        let target_idx = engine.find_object_index(target).expect("target remains");
+        assert_eq!(engine.objects[target_idx].state.no_collect_delay, 2);
+        assert_eq!(
+            engine.objects[target_idx].commands.command_names(),
+            vec!["Wait".to_string()],
+            "area failure must run before completed-target Exit"
+        );
+    }
+
+    #[test]
+    fn l067_build_completed_internal_target_replaces_stack_with_base_exit() {
+        // Target::Build returns true on the FullCon crossing. The next BUILD
+        // tick stops, then calls plain SetCommand(Exit) on an internal target
+        // (C4Object.cpp:5033-5043; SetCommand :3937-3985).
+        let target_script = r#"#strict
+local own_control_calls;
+protected func ControlCommand() { own_control_calls++; return 1; }
+"#;
+        let mut engine = Engine::with_seed(67);
+        engine
+            .register_definition(l067_builder_definition("BLDR", "", false))
+            .expect("builder registers");
+        engine
+            .register_definition(l067_target_definition(target_script))
+            .expect("target registers");
+        let builder = engine
+            .spawn_object(
+                SpawnConfig::new("BLDR")
+                    .with_position(Vector2::new(100, 200))
+                    .with_action(ActionState::new("Build")),
+            )
+            .expect("builder spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("BTGT")
+                    .with_position(Vector2::new(100, 200))
+                    .with_construction(FULL_CON - 1)
+                    .with_controller(7)
+                    .with_container(builder),
+            )
+            .expect("target spawns");
+        let builder_idx = engine.find_object_index(builder).expect("builder exists");
+        engine.objects[builder_idx].state.action.target = Some(target);
+        let target_idx = engine.find_object_index(target).expect("target exists");
+        engine.objects[target_idx].state.controller = 7;
+        engine.objects[target_idx].state.no_collect_delay = 2;
+        engine.objects[target_idx]
+            .commands
+            .push_back(CommandRequest::new(CommandId::Wait).with_update_interval(90))
+            .expect("old Wait queues");
+        engine.objects[target_idx]
+            .commands
+            .push_back(CommandRequest::new(CommandId::MoveTo).with_tx(Some(10)))
+            .expect("old MoveTo queues");
+
+        assert!(
+            !engine
+                .apply_physics_at_index(builder_idx)
+                .expect("crossing Build executes")
+        );
+        let target_idx = engine.find_object_index(target).expect("target remains");
+        assert_eq!(engine.objects[target_idx].state.construction, FULL_CON);
+        assert_eq!(
+            engine.objects[target_idx].commands.command_names(),
+            vec!["Wait".to_string(), "MoveTo".to_string()],
+            "the successful FullCon crossing does not issue Exit yet"
+        );
+        assert_eq!(engine.objects[target_idx].state.no_collect_delay, 2);
+
+        let builder_idx = engine.find_object_index(builder).expect("builder remains");
+        assert!(
+            engine
+                .apply_physics_at_index(builder_idx)
+                .expect("completed Build executes")
+        );
+        let builder_state = engine.object_snapshot(builder).expect("builder remains");
+        assert_eq!(builder_state.action.name, "Walk");
+        assert_eq!(builder_state.command_direction, CommandDirection::Stop);
+        let target_idx = engine.find_object_index(target).expect("target remains");
+        assert_eq!(engine.objects[target_idx].state.container, Some(builder));
+        assert_eq!(engine.objects[target_idx].state.no_collect_delay, 1);
+        assert_eq!(
+            engine.objects[target_idx].commands.command_names(),
+            vec!["Exit".to_string()],
+            "SetCommand replaces the whole old stack"
+        );
+        let stack = serde_json::to_value(engine.objects[target_idx].commands.snapshot())
+            .expect("command stack serializes");
+        assert_eq!(stack["commands"][0]["mode"], serde_json::json!("Base"));
+        assert!(
+            engine.objects[target_idx]
+                .state
+                .local_vars
+                .get("own_control_calls")
+                .is_none(),
+            "plain SetCommand skips the target's own ControlCommand"
+        );
+    }
+
+    #[test]
+    fn l067_build_completed_internal_target_honors_inside_vehicle_control() {
+        let builder_script = r#"#strict
+local control_calls, control_command, control_by, control_action;
+protected func ControlCommand(command, target, tx, ty, target2, data, by)
+{
+    control_calls++;
+    control_command = command;
+    control_by = by;
+    control_action = GetAction();
+    return 1;
+}
+"#;
+        let target_script = r#"#strict
+local own_control_calls;
+protected func ControlCommand() { own_control_calls++; return 1; }
+"#;
+        let mut builder_definition = l067_builder_definition("BLDR", builder_script, false);
+        builder_definition.set_vehicle_control(VEHICLE_CONTROL_INSIDE);
+        let mut engine = Engine::with_seed(67);
+        engine
+            .register_definition(builder_definition)
+            .expect("builder registers");
+        engine
+            .register_definition(l067_target_definition(target_script))
+            .expect("target registers");
+        let builder = engine
+            .spawn_object(
+                SpawnConfig::new("BLDR")
+                    .with_position(Vector2::new(100, 200))
+                    .with_controller(1)
+                    .with_action(ActionState::new("Build")),
+            )
+            .expect("builder spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("BTGT")
+                    .with_position(Vector2::new(100, 200))
+                    .with_construction(FULL_CON)
+                    .with_controller(7)
+                    .with_container(builder),
+            )
+            .expect("target spawns");
+        let builder_idx = engine.find_object_index(builder).expect("builder exists");
+        engine.objects[builder_idx].state.action.target = Some(target);
+        let target_idx = engine.find_object_index(target).expect("target exists");
+        // C4Object::Enter normally inherits a nonliving target's controller
+        // from its container; seed a distinct saved/live value so the
+        // SetCommand vehicle-overload transfer is observable.
+        engine.objects[target_idx].state.controller = 7;
+        engine.objects[target_idx].state.no_collect_delay = 2;
+        engine.objects[target_idx]
+            .commands
+            .push_back(CommandRequest::new(CommandId::Wait).with_update_interval(90))
+            .expect("old Wait queues");
+
+        assert!(
+            engine
+                .apply_physics_at_index(builder_idx)
+                .expect("completed Build executes")
+        );
+
+        let target_idx = engine.find_object_index(target).expect("target remains");
+        assert_eq!(engine.objects[target_idx].state.no_collect_delay, 1);
+        assert!(
+            engine.objects[target_idx].commands.command_names().is_empty(),
+            "truthy inside control consumes Exit after clearing the old stack"
+        );
+        assert!(
+            engine.objects[target_idx]
+                .state
+                .local_vars
+                .get("own_control_calls")
+                .is_none(),
+            "plain SetCommand skips the target's own ControlCommand"
+        );
+        let builder_idx = engine.find_object_index(builder).expect("builder remains");
+        let builder_state = &engine.objects[builder_idx].state;
+        assert_eq!(builder_state.action.name, "Walk");
+        assert_eq!(builder_state.controller, 7);
+        assert_eq!(builder_state.local_vars.get("control_calls"), Some(&Value::Int(1)));
+        assert_eq!(
+            builder_state.local_vars.get("control_command"),
+            Some(&Value::String("Exit".to_string()))
+        );
+        assert_eq!(
+            builder_state.local_vars.get("control_by"),
+            Some(&compat::object_reference_value(target))
+        );
+        assert_eq!(
+            builder_state.local_vars.get("control_action"),
+            Some(&Value::String("Walk".to_string())),
+            "ObjectComStop precedes target SetCommand"
+        );
+    }
+
     #[test]
     fn build_procedure_requires_components_before_progress() -> Result<(), EngineError> {
         let script = r#"
@@ -11417,7 +11894,19 @@ protected func BuildAbort()
             count: 5,
         }]);
         let material_definition = Definition::from_script("Wood", "Wood", "#strict")?;
-        let container_definition = Definition::from_script("Cntn", "Container", "#strict")?;
+        let mut container_definition =
+            Definition::from_script("Cntn", "Container", "#strict")?;
+        container_definition.set_category(CATEGORY_STRUCTURE);
+        container_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Build".to_string(),
+                    ActionSpec::default().with_procedure("build"),
+                ),
+            ]),
+        );
 
         let mut engine = Engine::with_seed(9);
         engine.register_definition(builder_definition)?;
@@ -11426,7 +11915,9 @@ protected func BuildAbort()
         engine.register_definition(container_definition)?;
         engine.set_construction_needs_material(true);
 
-        let container_id = engine.spawn_object(SpawnConfig::new("Cntn"))?;
+        let container_id = engine.spawn_object(
+            SpawnConfig::new("Cntn").with_action(ActionState::new("Build")),
+        )?;
         let structure_id = engine.spawn_object(
             SpawnConfig::new("Site")
                 .with_construction(75_000)
@@ -48522,7 +49013,9 @@ protected func Initialize() {
         build.target = Some(target_id);
         let builder_id = engine.spawn_object(
             SpawnConfig::new("Builder")
-                .with_position(Vector2::new(40, 40))
+                // A zero/default target Shape admits y in [-16,+16]. Keep
+                // this completion fixture inside the native Build area.
+                .with_position(Vector2::new(40, 60))
                 .with_action(build),
         )?;
 
@@ -48541,19 +49034,21 @@ protected func Initialize() {
             1,
             "ELEV-style Initialize creates its child on live completion"
         );
+        let builder = engine
+            .object_snapshot(builder_id)
+            .expect("builder survives crossing");
         assert_eq!(
-            engine
-                .object_snapshot(builder_id)
-                .expect("builder survives crossing")
-                .action
-                .name,
+            builder.action.name,
             "Build",
             "the crossing tick still sees Target::Build succeed"
         );
+        assert_eq!(
+            builder.action.time, 1,
+            "pre-switch Action.Time increment must not repeat in the phase tail"
+        );
 
-        // The next Build frame sees an already-complete target and clears
-        // Action.Target; the following frame's no-target arm stands via
-        // ObjectActionWalk (C4Object.cpp:5010-5038).
+        // The next Build frame sees an already-complete target and stops;
+        // the following frame executes the resulting Walk action.
         engine.tick()?;
         engine.tick()?;
         assert_eq!(
