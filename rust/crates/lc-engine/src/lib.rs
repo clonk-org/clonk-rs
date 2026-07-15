@@ -949,6 +949,65 @@ pub struct TeamInfo {
     pub icon_spec: Option<String>,
 }
 
+/// Live `C4TeamList` settings queried by `GetTeamConfig`. Keep these
+/// independently of the team entries: an empty custom Teams.txt and a
+/// missing non-melee Teams.txt have different configuration values.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamConfiguration {
+    pub custom: bool,
+    pub active: bool,
+    pub allow_hostility_change: bool,
+    pub distribution: i32,
+    pub allow_team_switch: bool,
+    pub auto_generate_teams: bool,
+    pub team_colors: bool,
+}
+
+impl Default for TeamConfiguration {
+    fn default() -> Self {
+        // Raw C4TeamList constructor/Clear state (C4Teams.h:154-157).
+        Self {
+            custom: false,
+            active: true,
+            allow_hostility_change: true,
+            distribution: 0,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            team_colors: false,
+        }
+    }
+}
+
+impl TeamConfiguration {
+    pub(crate) fn script_value(self, query: i32) -> Option<i32> {
+        match query {
+            1 => Some(i32::from(self.custom)),
+            2 => Some(i32::from(self.active)),
+            3 => Some(i32::from(self.allow_hostility_change)),
+            4 => Some(self.distribution),
+            5 => Some(i32::from(self.allow_team_switch)),
+            6 => Some(i32::from(self.auto_generate_teams)),
+            7 => Some(i32::from(self.team_colors)),
+            _ => None,
+        }
+    }
+}
+
+impl From<&InitialNetworkTeamMetadata> for TeamConfiguration {
+    fn from(metadata: &InitialNetworkTeamMetadata) -> Self {
+        Self {
+            custom: metadata.custom,
+            active: metadata.active,
+            allow_hostility_change: metadata.allow_hostility_change,
+            distribution: metadata.team_distribution as i32,
+            allow_team_switch: metadata.allow_team_switch,
+            auto_generate_teams: metadata.auto_generate_teams,
+            team_colors: metadata.team_colors,
+        }
+    }
+}
+
 impl TeamInfo {
     pub fn new(id: i32, name: impl Into<String>, color: u32) -> Self {
         Self {
@@ -7241,6 +7300,11 @@ pub struct EngineState {
     pub forced_auto_context_menu: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub teams: Vec<TeamInfo>,
+    /// Full saved C4TeamList configuration. None keeps the scenario-seeded
+    /// values when loading Rust states written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[doc(hidden)]
+    pub team_configuration: Option<TeamConfiguration>,
     #[serde(default)]
     pub crew_selection: HashMap<i32, CrewSelectionState>,
     #[serde(default)]
@@ -7402,6 +7466,7 @@ impl EngineState {
             forced_control_style: None,
             forced_auto_context_menu: None,
             teams: Vec::new(),
+            team_configuration: None,
             crew_selection: snapshot.crew_selection.clone(),
             crew_roles: snapshot.crew_roles.clone(),
             crew_info_rosters: HashMap::new(),
@@ -12536,12 +12601,9 @@ pub struct Engine {
     forced_auto_context_menu: Option<bool>,
     /// Ordered `Game.Teams` entries loaded from the scenario's Teams.txt.
     teams: Rc<Vec<TeamInfo>>,
-    /// `C4TeamList::fTeamColors`: team assignment replaces the player-info
-    /// and joined runtime-player color when enabled (C4Teams.cpp:68-80).
-    team_colors: bool,
-    /// `C4TeamList::fAutoGenerateTeams`: team selection can always create a
-    /// new team (`TEAMID_New`) when enabled (C4Teams.cpp:900-907).
-    auto_generate_teams: bool,
+    /// Complete live `Game.Teams` configuration. The team vector alone is
+    /// insufficient to reconstruct Custom/Active/AutoGenerateTeams.
+    team_configuration: TeamConfiguration,
     /// `C4TeamList::IsRuntimeJoinTeamChoice`: custom, active team lists
     /// postpone teamless user ScenarioInit until a team control executes.
     runtime_join_team_choice: bool,
@@ -14347,8 +14409,7 @@ impl Engine {
             forced_control_style: None,
             forced_auto_context_menu: None,
             teams: Rc::new(Vec::new()),
-            team_colors: false,
-            auto_generate_teams: false,
+            team_configuration: TeamConfiguration::default(),
             runtime_join_team_choice: false,
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
@@ -14505,7 +14566,7 @@ impl Engine {
     }
 
     pub fn auto_generate_teams(&self) -> bool {
-        self.auto_generate_teams
+        self.team_configuration.auto_generate_teams
     }
 
     /// Returns the sole team this runtime player can join, or `None` when
@@ -14522,7 +14583,7 @@ impl Engine {
             }
             possible = Some(team.id);
         }
-        match (possible, self.auto_generate_teams) {
+        match (possible, self.team_configuration.auto_generate_teams) {
             (Some(_), true) => None,
             (Some(team), false) => Some(team),
             (None, true) => Some(-1),
@@ -14532,16 +14593,27 @@ impl Engine {
 
     #[doc(hidden)]
     pub fn set_team_colors(&mut self, enabled: bool) {
-        self.team_colors = enabled;
+        self.team_configuration.team_colors = enabled;
     }
 
     #[doc(hidden)]
     pub fn set_auto_generate_teams(&mut self, enabled: bool) {
-        self.auto_generate_teams = enabled;
+        self.team_configuration.auto_generate_teams = enabled;
+    }
+
+    #[doc(hidden)]
+    pub fn set_team_configuration(&mut self, mut config: TeamConfiguration) {
+        if self.league_game {
+            config.allow_team_switch = false;
+        }
+        self.runtime_join_team_choice = config.custom && config.active;
+        self.team_configuration = config;
     }
 
     #[doc(hidden)]
     pub fn set_runtime_join_team_choice(&mut self, enabled: bool) {
+        self.team_configuration.custom = enabled;
+        self.team_configuration.active = enabled;
         self.runtime_join_team_choice = enabled;
     }
 
@@ -14797,7 +14869,7 @@ impl Engine {
 
         config.team = selected_team.map(|selected| selected.id);
         let selected_team_color = selected_team
-            .filter(|selected| self.team_colors && selected.color != 0)
+            .filter(|selected| self.team_configuration.team_colors && selected.color != 0)
             .map(|selected| selected.color);
         self.player_mut(number)?.set_team(config.team);
         if let Some(color) = selected_team_color {
@@ -14811,7 +14883,7 @@ impl Engine {
     }
 
     fn generate_runtime_team(&mut self) -> Option<i32> {
-        if !self.auto_generate_teams {
+        if !self.team_configuration.auto_generate_teams {
             return None;
         }
         let id = self
@@ -16865,6 +16937,9 @@ impl Engine {
 
     pub fn set_league_game(&mut self, league_game: bool) {
         self.league_game = league_game;
+        if league_game {
+            self.team_configuration.allow_team_switch = false;
+        }
     }
 
     pub fn set_control_host(&mut self, control_host: bool) {
@@ -17182,11 +17257,7 @@ impl Engine {
                 .map(|section| section.name.as_str()),
         )
         .with_teams(Rc::clone(&self.teams))
-        .with_team_runtime_options(
-            self.auto_generate_teams,
-            self.team_colors,
-            self.league_game,
-        )
+        .with_team_runtime_options(self.team_configuration, self.league_game)
         .with_movement_solid_masks(self.ocf_solid_mask_overlay())
         .with_definition_order(Rc::clone(&self.runtime_definition_order))
         .with_color_by_owner_definitions(
@@ -23996,6 +24067,7 @@ impl Engine {
             forced_control_style: self.forced_control_style,
             forced_auto_context_menu: self.forced_auto_context_menu,
             teams: self.teams.as_ref().clone(),
+            team_configuration: Some(self.team_configuration),
             crew_selection,
             crew_roles,
             crew_info_rosters: self.crew_rosters.clone(),
@@ -24522,6 +24594,9 @@ impl Engine {
         self.forced_control_style = state.forced_control_style;
         self.forced_auto_context_menu = state.forced_auto_context_menu;
         self.teams = Rc::new(state.teams.clone());
+        if let Some(configuration) = state.team_configuration {
+            self.set_team_configuration(configuration);
+        }
         self.players_registered = !self.players.is_empty();
         self.next_mission = state.next_mission.clone();
         *self.scoreboard.borrow_mut() = state.scoreboard.clone();

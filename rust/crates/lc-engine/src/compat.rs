@@ -36,8 +36,9 @@ use crate::{
     MenuRequest, MenuRequestKind, ObjectBaseGraphics, ObjectGraphicsOverlay, ObjectId, ObjectState,
     ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer,
     ParticleScope, PathFinder, PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState,
-    QueuedCommand, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig, ScoreboardState, TeamInfo,
-    TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT,
+    QueuedCommand, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig, ScoreboardState,
+    TeamConfiguration, TeamInfo, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
+    CATEGORY_SORT_LIMIT,
     CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY,
     FULL_CON, OWNER_NONE,
 };
@@ -46,7 +47,7 @@ use lc_script::{Engine as ScriptEngine, HostCallArg, RuntimeError, Value};
 use indexmap::IndexMap;
 use std::mem;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 thread_local! {
     static SETACTION_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -1064,12 +1065,10 @@ pub struct HostWorldContext {
     /// `C4GameParameters::isLeague`: league games forbid every scripted
     /// team switch, including an otherwise successful same-team no-op.
     league_game: bool,
-    /// `C4TeamList::fAutoGenerateTeams`: permits the `TEAMID_New` (-1)
-    /// request handled by SetPlayerTeam.
-    auto_generate_teams: bool,
-    /// `C4TeamList::fTeamColors`: joining a team applies its color to the
-    /// player and matching owned objects.
-    team_colors: bool,
+    /// Complete live `Game.Teams` configuration. Empty team lists cannot be
+    /// used to infer these flags because present-empty and missing Teams.txt
+    /// take different C++ paths.
+    team_configuration: TeamConfiguration,
     /// `Game.Parameters.IsNetworkGame`, copied from the active
     /// `Game.NetworkActive` session during parameter setup
     /// (C4GameParameters.cpp:429-434).
@@ -1162,8 +1161,7 @@ impl Default for HostWorldContext {
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
             league_game: false,
-            auto_generate_teams: false,
-            team_colors: false,
+            team_configuration: TeamConfiguration::default(),
             network_game: false,
             control_host: true,
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
@@ -1364,8 +1362,7 @@ impl HostWorldContext {
             next_object_id,
             team_home_base_rule,
             league_game: false,
-            auto_generate_teams: false,
-            team_colors: false,
+            team_configuration: TeamConfiguration::default(),
             network_game: false,
             control_host: true,
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
@@ -1469,12 +1466,10 @@ impl HostWorldContext {
 
     pub(crate) fn with_team_runtime_options(
         mut self,
-        auto_generate_teams: bool,
-        team_colors: bool,
+        team_configuration: TeamConfiguration,
         league_game: bool,
     ) -> Self {
-        self.auto_generate_teams = auto_generate_teams;
-        self.team_colors = team_colors;
+        self.team_configuration = team_configuration;
         self.league_game = league_game;
         self
     }
@@ -1488,11 +1483,15 @@ impl HostWorldContext {
     }
 
     fn auto_generate_teams(&self) -> bool {
-        self.auto_generate_teams
+        self.team_configuration.auto_generate_teams
     }
 
     fn team_colors(&self) -> bool {
-        self.team_colors
+        self.team_configuration.team_colors
+    }
+
+    fn team_config_value(&self, query: i32) -> Option<i32> {
+        self.team_configuration.script_value(query)
     }
 
     /// Attach the scenario script for GameCall/GameCallEx resolution.
@@ -3149,6 +3148,27 @@ fn get_team_count(_args: &[Value]) -> Result<Value, RuntimeError> {
                 .unwrap_or(0),
         ))
     })
+}
+
+/// FnGetTeamConfig (C4Script.cpp:5785-5801): expose the live C4TeamList
+/// settings as integers. Boolean fields are C4ValueInt 0/1, not script bools.
+fn get_team_config(args: &[Value]) -> Result<Value, RuntimeError> {
+    let query = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetTeamConfig",
+        "config value",
+    )?;
+    if !(1..=7).contains(&query) {
+        error!(target: "lc-script", "GetTeamConfig: Unknown config value: {query}");
+        return Ok(Value::Nil);
+    }
+    Ok(HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.world.team_config_value(query))
+            .map(Value::Int)
+            .unwrap_or(Value::Nil)
+    }))
 }
 
 fn get_team_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -10166,6 +10186,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerTeam", get_player_team);
     script.register_host_function("SetPlayerTeam", set_player_team);
     script.register_host_function("SetMaxPlayer", set_max_player);
+    script.register_host_function("GetTeamConfig", get_team_config);
     script.register_host_function("GetTeamCount", get_team_count);
     script.register_host_function("GetTeamByIndex", get_team_by_index);
     script.register_host_function("GetTeamColor", get_team_color);
@@ -36971,6 +36992,7 @@ mod tests {
         "GetTaggedPlayerName",
         "GetTeamByIndex",
         "GetTeamColor",
+        "GetTeamConfig",
         "GetTeamCount",
         "GetTeamName",
         "GetTemperature",
@@ -41826,6 +41848,123 @@ public func RejectConstruction(x, y, builder)
         let args = [Value::Int(7)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_player_team(&args));
         assert_eq!(result.expect("GetPlayerTeam succeeds"), Value::Int(0));
+    }
+
+    #[test]
+    fn get_team_config_returns_all_seven_int_values_and_logs_unknown() {
+        // FnGetTeamConfig returns optional<C4ValueInt>: every boolean field
+        // is integer 0/1, TeamDist is its raw enum integer, and an unknown
+        // selector logs at error level before returning nil.
+        let mut engine = crate::Engine::with_seed(0);
+        engine.set_team_configuration(crate::TeamConfiguration {
+            custom: true,
+            active: false,
+            allow_hostility_change: true,
+            distribution: 4,
+            allow_team_switch: true,
+            auto_generate_teams: false,
+            team_colors: true,
+        });
+        engine
+            .register_definition(
+                crate::Definition::from_script(
+                    "TEAM",
+                    "Team config probe",
+                    r#"#strict 2
+public func Probe()
+{
+    return [GetTeamConfig(1), GetTeamConfig(2), GetTeamConfig(3),
+            GetTeamConfig(4), GetTeamConfig(5), GetTeamConfig(6),
+            GetTeamConfig(7), GetTeamConfig(6, 123), GetTeamConfig(99)];
+}
+"#,
+                )
+                .expect("team config probe compiles"),
+            )
+            .expect("team config probe registers");
+        let probe = engine
+            .spawn_object(SpawnConfig::new("TEAM"))
+            .expect("team config probe spawns");
+        let probe_index = engine.find_object_index(probe).expect("probe exists");
+
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let layer = RecordingLayer::new(Arc::clone(&records));
+        let subscriber = Registry::default().with(layer);
+        let value = subscriber::with_default(subscriber, || {
+            engine
+                .call_object_function(probe_index, "Probe", Vec::new())
+                .expect("GetTeamConfig probe runs")
+        });
+
+        assert_eq!(
+            value,
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(4),
+                Value::Int(1),
+                Value::Int(0),
+                Value::Int(1),
+                Value::Int(0),
+                Value::Nil,
+            ])
+        );
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].level, Level::ERROR);
+        assert_eq!(records[0].target, "lc-script");
+        assert_eq!(
+            records[0].message,
+            "GetTeamConfig: Unknown config value: 99"
+        );
+    }
+
+    #[test]
+    fn team_configuration_survives_engine_state_serialization() {
+        let configuration = crate::TeamConfiguration {
+            custom: true,
+            active: true,
+            allow_hostility_change: false,
+            distribution: 3,
+            allow_team_switch: true,
+            auto_generate_teams: true,
+            team_colors: true,
+        };
+        let mut engine = crate::Engine::with_seed(0);
+        engine.set_team_configuration(configuration);
+        let mut encoded = Vec::new();
+        engine
+            .capture_state()
+            .to_writer(&mut encoded)
+            .expect("team configuration serializes");
+        let state = crate::EngineState::from_reader(encoded.as_slice())
+            .expect("team configuration deserializes");
+        let mut restored = crate::Engine::with_seed(1);
+        restored
+            .restore_state(&state)
+            .expect("team configuration restores");
+
+        let world = restored.host_world_context();
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            Ok::<_, RuntimeError>(Value::Array(
+                (1..=7)
+                    .map(|query| get_team_config(&[Value::Int(query)]))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        });
+        assert_eq!(
+            result.expect("restored GetTeamConfig queries run"),
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(0),
+                Value::Int(3),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(1),
+            ])
+        );
     }
 
     #[test]

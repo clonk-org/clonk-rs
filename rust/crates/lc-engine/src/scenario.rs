@@ -2410,6 +2410,30 @@ impl Scenario {
         self.sky.as_ref()
     }
 
+    fn initial_team_configuration(&self) -> crate::TeamConfiguration {
+        let team_metadata = self
+            .legacy_team_metadata
+            .as_ref()
+            .map(|loaded| loaded.metadata.clone())
+            .or_else(|| {
+                self.legacy_core.as_ref().map(|core| {
+                    let core = core.after_load_conversion();
+                    InitialNetworkTeamMetadata::without_teams_file(&core.game)
+                })
+            });
+        team_metadata
+            .map(|teams| crate::TeamConfiguration {
+                custom: teams.custom,
+                active: teams.active,
+                allow_hostility_change: teams.allow_hostility_change,
+                distribution: teams.team_distribution as i32,
+                allow_team_switch: teams.allow_team_switch,
+                auto_generate_teams: teams.auto_generate_teams,
+                team_colors: teams.team_colors,
+            })
+            .unwrap_or_default()
+    }
+
     /// Applies the scenario through C4Game::InitGame and the subsequent
     /// synchronization pass, but deliberately leaves Script.Initialize for
     /// the caller. Fresh games use this boundary to run InitGameFinal before
@@ -2418,7 +2442,19 @@ impl Scenario {
         &self,
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
-        self.apply_before_players_with_final_synchronize(engine, true)
+        self.apply_before_players_with_final_synchronize(engine, true, None)
+    }
+
+    /// Applies a fresh or restored scenario after installing the authoritative
+    /// saved/runtime C4TeamList configuration. Definition and placement
+    /// callbacks therefore observe the same values as the eventual game.
+    #[doc(hidden)]
+    pub fn apply_before_players_with_team_configuration(
+        &self,
+        engine: &mut Engine,
+        team_configuration: crate::TeamConfiguration,
+    ) -> Result<Vec<ObjectId>, ScenarioError> {
+        self.apply_before_players_with_final_synchronize(engine, true, Some(team_configuration))
     }
 
     /// Applies the `C4Game::InitGame` phase of a network game, preserving the
@@ -2428,13 +2464,25 @@ impl Scenario {
         &self,
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
-        self.apply_before_players_with_final_synchronize(engine, false)
+        self.apply_before_players_with_final_synchronize(engine, false, None)
+    }
+
+    /// Network variant of
+    /// [`Scenario::apply_before_players_with_team_configuration`].
+    #[doc(hidden)]
+    pub fn apply_before_network_final_init_with_team_configuration(
+        &self,
+        engine: &mut Engine,
+        team_configuration: crate::TeamConfiguration,
+    ) -> Result<Vec<ObjectId>, ScenarioError> {
+        self.apply_before_players_with_final_synchronize(engine, false, Some(team_configuration))
     }
 
     fn apply_before_players_with_final_synchronize(
         &self,
         engine: &mut Engine,
         final_synchronize: bool,
+        team_configuration_override: Option<crate::TeamConfiguration>,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
         engine.clear_scenario_script();
         // C4Scenario::Load/ConvertGoals and C4Landscape::Init have completed
@@ -2471,20 +2519,13 @@ impl Scenario {
         // player joins (C4Player.cpp:670-777).
         engine.set_player_starts(self.player_starts.clone());
         engine.set_teams(self.teams.clone());
-        engine.set_team_colors(
-            self.legacy_team_metadata
-                .as_ref()
-                .is_some_and(|teams| teams.metadata.team_colors),
-        );
-        engine.set_auto_generate_teams(
-            self.legacy_team_metadata
-                .as_ref()
-                .is_some_and(|teams| teams.metadata.auto_generate_teams),
-        );
-        engine.set_runtime_join_team_choice(
-            self.legacy_team_metadata
-                .as_ref()
-                .is_some_and(|teams| teams.metadata.custom && teams.metadata.active),
+        // Game.Teams retains all seven script-queryable values. A missing or
+        // zero-byte Teams.txt uses the scenario-derived C4TeamList defaults;
+        // a compiled file keeps its independent flags even when it has no
+        // Team entries. Network and save callers may replace that static
+        // seed before any InitializeDef or placement callback can observe it.
+        engine.set_team_configuration(
+            team_configuration_override.unwrap_or_else(|| self.initial_team_configuration()),
         );
         engine.set_map_zoom(self.map_zoom);
         // A scenario Names.txt overrides the standard clonk names
@@ -6947,7 +6988,13 @@ fn load_legacy_teams<S: AsRef<str>>(
     if !group.exists("Teams.txt") {
         return Ok((Vec::new(), derive_legacy_teams_default(core)));
     }
-    let source = decode_legacy_script_text(&group.read_file("Teams.txt")?);
+    let source = group.read_file("Teams.txt")?;
+    if source.is_empty() {
+        // C4Group::LoadEntryString rejects a zero-sized entry, so the lobby
+        // projection must take the same scenario-derived branch as runtime.
+        return Ok((Vec::new(), derive_legacy_teams_default(core)));
+    }
+    let source = decode_legacy_script_text(&source);
     let source = localize_script_source(group, &source, languages)?;
     let metadata = parse_legacy_teams_source(&source);
     let teams = metadata
@@ -12516,6 +12563,37 @@ RandomTeamCount=2
         let (_, loaded) =
             load_initial_network_teams(&group, &["US"]).expect("load empty Teams.txt");
         assert!(loaded.is_none());
+
+        let core = parse_legacy_scenario_text("[Game]\nStructNeedEnergy=0\n")
+            .expect("default cooperative scenario")
+            .core;
+        let (_, lobby_teams) =
+            load_legacy_teams(&group, &["US"], &core).expect("load lobby team metadata");
+        assert_eq!(
+            lobby_teams.source(),
+            ScenarioTeamsSource::DerivedScenarioDefault
+        );
+        assert!(!lobby_teams.is_active());
+        assert!(!lobby_teams.is_custom());
+        assert!(lobby_teams.allows_hostility_change());
+        assert!(!lobby_teams.auto_generates_teams());
+
+        let mut scenario = scenario_with_retained_legacy_core(
+            "[Game]\nStructNeedEnergy=0\n",
+        );
+        scenario.legacy_team_metadata = loaded;
+        assert_eq!(
+            scenario.initial_team_configuration(),
+            crate::TeamConfiguration {
+                custom: false,
+                active: false,
+                allow_hostility_change: true,
+                distribution: 0,
+                allow_team_switch: false,
+                auto_generate_teams: false,
+                team_colors: false,
+            }
+        );
 
         let loaded = parse_legacy_team_metadata_source(concat!(
             "[Teams]\n",
@@ -18386,6 +18464,60 @@ public func ActualizePhase(pClonk)
                 .map(|cell| cell.borrow().clone()),
             Some(lc_script::Value::Int(1)),
             "scenario Initialize observes the completed definition phase"
+        );
+    }
+
+    #[test]
+    fn authoritative_team_configuration_precedes_definition_initialize() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            Some((
+                "INIT",
+                "static init_def_team_configuration;\n\
+                 func InitializeDef() {\n\
+                     init_def_team_configuration = [GetTeamConfig(1), GetTeamConfig(2), GetTeamConfig(3), GetTeamConfig(4), GetTeamConfig(5), GetTeamConfig(6), GetTeamConfig(7)];\n\
+                 }\n",
+            )),
+            "// no scenario script\n",
+        );
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario
+            .apply_before_network_final_init_with_team_configuration(
+                &mut engine,
+                crate::TeamConfiguration {
+                    custom: true,
+                    active: false,
+                    allow_hostility_change: true,
+                    distribution: 4,
+                    allow_team_switch: true,
+                    auto_generate_teams: false,
+                    team_colors: true,
+                },
+            )
+            .expect("network scenario applies");
+
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("init_def_team_configuration")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Array(vec![
+                lc_script::Value::Int(1),
+                lc_script::Value::Int(0),
+                lc_script::Value::Int(1),
+                lc_script::Value::Int(4),
+                lc_script::Value::Int(1),
+                lc_script::Value::Int(0),
+                lc_script::Value::Int(1),
+            ])),
+            "InitializeDef observes synchronized Game.Parameters.Teams"
         );
     }
 

@@ -83,9 +83,9 @@ use lc_engine::{
     MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MouseDragSource,
     MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerConfig, Recorder, Recording,
     RgbColor, Scenario, ScenarioError, ScoreboardPresentationRequest, SimulationSnapshot,
-    SkyConfig, SpawnConfig, SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT,
-    FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP,
-    FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
+    SkyConfig, SpawnConfig, SyncCheckPacket, TeamConfiguration, Vector2, FLAG_ALIGN_CENTER,
+    FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK,
+    FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::context_menu::{
     ClassicContextMenu, ContextMenuDirection, ContextMenuEntry, ContextMenuEvent, ContextMenuIcon,
@@ -412,6 +412,7 @@ struct PreparedGoLoadingState {
     status: lc_network::NetworkStatus,
     local_reached: bool,
     random_seed: u64,
+    team_configuration: TeamConfiguration,
 }
 
 #[derive(Debug)]
@@ -470,6 +471,7 @@ impl ScenarioLoadingState {
         data: Scenario,
         status: lc_network::NetworkStatus,
         random_seed: u64,
+        team_configuration: TeamConfiguration,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
         let _ = sender.send(ScenarioLoadingEvent::Finished(Ok(data)));
@@ -484,6 +486,7 @@ impl ScenarioLoadingState {
                 status,
                 local_reached: false,
                 random_seed,
+                team_configuration,
             }),
             offline_startup_players: None,
         }
@@ -6520,6 +6523,21 @@ fn synchronized_parameters_are_league(parameters: &lc_network::JoinGameParameter
     // C4GameParameters::isLeague checks LeagueAddress, not the display-name
     // League field (src/C4GameParameters.h:126-173).
     !parameters.league_address.is_empty()
+}
+
+fn synchronized_team_configuration(
+    parameters: &lc_network::JoinGameParametersEnvelope,
+) -> TeamConfiguration {
+    let teams = &parameters.teams;
+    TeamConfiguration {
+        custom: teams.custom != 0,
+        active: teams.active != 0,
+        allow_hostility_change: teams.allow_hostility_change != 0,
+        distribution: i32::from(teams.team_distribution),
+        allow_team_switch: teams.allow_team_switch != 0,
+        auto_generate_teams: teams.auto_generate_teams != 0,
+        team_colors: teams.team_colors != 0,
+    }
 }
 
 fn initial_network_is_league(network_mode: Option<&NetworkMode>) -> bool {
@@ -18116,6 +18134,7 @@ impl GameApp {
             scenario_data,
             status,
             random_seed,
+            synchronized_team_configuration(&join_data.parameters),
         ));
         self.pending_network_join_data = None;
         self.mode = AppMode::Loading;
@@ -23428,6 +23447,7 @@ impl GameApp {
                 scenario_data,
                 status,
                 random_seed,
+                TeamConfiguration::from(prepared.runtime_team_metadata()),
             ));
             self.mode = AppMode::Loading;
             return Ok(());
@@ -29606,6 +29626,11 @@ impl GameApp {
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| prepared.random_seed);
+        let prepared_team_configuration = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .map(|prepared| prepared.team_configuration);
         let offline_startup_players = self
             .loading_state
             .as_mut()
@@ -29647,10 +29672,16 @@ impl GameApp {
         engine.set_league_game(self.network_is_league);
         self.apply_material_library_to(&mut engine);
 
-        let apply_result = if network_game {
-            scenario_data.apply_before_network_final_init(&mut engine)
-        } else {
-            scenario_data.apply_before_players(&mut engine)
+        let apply_result = match (network_game, prepared_team_configuration) {
+            (true, Some(configuration)) => scenario_data
+                .apply_before_network_final_init_with_team_configuration(
+                    &mut engine,
+                    configuration,
+                ),
+            (true, None) => scenario_data.apply_before_network_final_init(&mut engine),
+            (false, Some(configuration)) => scenario_data
+                .apply_before_players_with_team_configuration(&mut engine, configuration),
+            (false, None) => scenario_data.apply_before_players(&mut engine),
         };
         if let Err(err) = apply_result {
             tracing::error!(
@@ -30206,15 +30237,21 @@ impl GameApp {
             // Restoring a save reloads definitions and world resources, but
             // C++ skips Script.Initialize for savegames. The captured engine
             // state below supplies the already-initialized world.
-            scenario_data
-                .apply_before_players(&mut self.engine)
-                .with_context(|| {
-                    format!(
-                        "failed to apply scenario `{}` from {}",
-                        scenario_info.title,
-                        path.display()
-                    )
-                })?;
+            let apply_result = match save.engine_state.team_configuration {
+                Some(configuration) => scenario_data
+                    .apply_before_players_with_team_configuration(
+                        &mut self.engine,
+                        configuration,
+                    ),
+                None => scenario_data.apply_before_players(&mut self.engine),
+            };
+            apply_result.with_context(|| {
+                format!(
+                    "failed to apply scenario `{}` from {}",
+                    scenario_info.title,
+                    path.display()
+                )
+            })?;
             self.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
                 modules: scenario_data
                     .definition_resource_paths()
@@ -53044,6 +53081,35 @@ mod tests {
         assert_eq!(
             app.network_control_clock,
             Some(NetworkControlClock::new(23, 3))
+        );
+    }
+
+    #[test]
+    fn synchronized_team_configuration_keeps_all_join_data_query_values() {
+        let host_config = lc_network::HostConfig::default();
+        let mut parameters = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData")
+            .parameters;
+        parameters.teams.custom = 1;
+        parameters.teams.active = 0;
+        parameters.teams.allow_hostility_change = 1;
+        parameters.teams.team_distribution = 4;
+        parameters.teams.allow_team_switch = 1;
+        parameters.teams.auto_generate_teams = 0;
+        parameters.teams.team_colors = 1;
+
+        assert_eq!(
+            synchronized_team_configuration(&parameters),
+            TeamConfiguration {
+                custom: true,
+                active: false,
+                allow_hostility_change: true,
+                distribution: 4,
+                allow_team_switch: true,
+                auto_generate_teams: false,
+                team_colors: true,
+            }
         );
     }
 
