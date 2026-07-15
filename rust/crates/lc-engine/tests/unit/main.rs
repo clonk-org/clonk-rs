@@ -2152,10 +2152,11 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
                 "BURN",
                 "Burner",
                 r#"#strict
-local ejection_count;
+local ejection_count, ejection_controller;
 func Ejection(pContent)
 {
     ejection_count = ejection_count + 1;
+    ejection_controller = pContent->GetController();
     return 1;
 }
 "#,
@@ -2184,7 +2185,12 @@ func Departure(pOldContainer)
                 "ATCH",
                 "Attached",
                 r#"#strict
-local abort_count, abort_saw_idle;
+local abort_count, abort_saw_idle, set_action_shadow_calls;
+func SetAction(szAction)
+{
+    set_action_shadow_calls = set_action_shadow_calls + 1;
+    return 0;
+}
 func AttachAbort()
 {
     abort_count = abort_count + 1;
@@ -2224,7 +2230,8 @@ func AttachAbort()
                     .with_rotation(73)
                     .with_rotation_velocity(itofix(20))
                     .with_in_liquid(true)
-                    .with_mobile(false),
+                    .with_mobile(false)
+                    .with_loaded(true),
             )?;
             let anchor = engine.spawn_object(SpawnConfig::new("ANCR"))?;
 
@@ -2234,6 +2241,24 @@ func AttachAbort()
             let attached = engine.spawn_object(
                 SpawnConfig::new("ATCH")
                     .with_action(attached_action)
+                    .with_local_vars(HashMap::from([(
+                        "set_action_shadow_calls".to_string(),
+                        Value::Int(0),
+                    )]))
+                    .with_loaded(true),
+            )?;
+
+            let mut target2_action = ActionState::new("Attach");
+            target2_action.target = Some(anchor);
+            target2_action.target2 = Some(burner);
+            target2_action.phase = 8;
+            let target2_attached = engine.spawn_object(
+                SpawnConfig::new("ATCH")
+                    .with_action(target2_action)
+                    .with_local_vars(HashMap::from([(
+                        "set_action_shadow_calls".to_string(),
+                        Value::Int(0),
+                    )]))
                     .with_loaded(true),
             )?;
 
@@ -2245,6 +2270,13 @@ func AttachAbort()
                     .with_action(unrelated_action)
                     .with_loaded(true),
             )?;
+            let content_idx = engine.find_object_index(content).expect("content exists");
+            engine.objects[content_idx].fixed_velocity =
+                FixedVec2::new(itofix(11), itofix(-7));
+            engine.objects[content_idx].state.velocity = Vector2::new(11, -7);
+            engine.objects[content_idx].fixed_rotation = itofix(73);
+            assert_ne!(engine.objects[content_idx].fixed_velocity, FixedVec2::ZERO);
+            assert_ne!(engine.objects[content_idx].fixed_rotation, C4Fixed::ZERO);
 
             if via_script {
                 let actor_idx = engine.find_object_index(actor).expect("actor exists");
@@ -2275,6 +2307,14 @@ func AttachAbort()
                 Some(&Value::Int(1)),
                 "{path} uses the Ejection seam"
             );
+            assert_eq!(
+                engine.objects[burner_idx]
+                    .state
+                    .local_vars
+                    .get("ejection_controller"),
+                Some(&Value::Int(7)),
+                "{path} updates Controller before Ejection"
+            );
 
             let content_idx = engine.find_object_index(content).expect("content remains");
             let content_state = &engine.objects[content_idx].state;
@@ -2299,6 +2339,13 @@ func AttachAbort()
             );
             assert_eq!(content_state.rotation, 0, "{path} uses real Exit");
             assert_eq!(
+                engine.objects[content_idx].fixed_velocity,
+                FixedVec2::ZERO,
+                "{path} Exit clears xdir and ydir"
+            );
+            assert_eq!(content_state.velocity, Vector2::ZERO);
+            assert_eq!(engine.objects[content_idx].fixed_rotation, C4Fixed::ZERO);
+            assert_eq!(
                 engine.objects[content_idx].rotation_velocity,
                 C4Fixed::ZERO,
                 "{path} Exit clears rotational velocity"
@@ -2306,23 +2353,44 @@ func AttachAbort()
             assert!(content_state.mobile, "{path} Exit mobilizes content");
             assert!(!content_state.in_liquid, "{path} Exit clears InLiquid");
 
+            for (candidate, label) in [(attached, "Target"), (target2_attached, "Target2")] {
+                let candidate_idx = engine
+                    .find_object_index(candidate)
+                    .expect("matching attacher remains");
+                let candidate_state = &engine.objects[candidate_idx].state;
+                assert_eq!(
+                    candidate_state.action.name, "Idle",
+                    "{path} detaches every DFA_ATTACH {label} match"
+                );
+                assert_eq!(
+                    candidate_state.local_vars.get("abort_count"),
+                    Some(&Value::Int(1)),
+                    "{path} dispatches every Attach AbortCall"
+                );
+                assert_eq!(
+                    candidate_state.local_vars.get("abort_saw_idle"),
+                    Some(&Value::Bool(true)),
+                    "the idle action is live before AbortCall"
+                );
+                assert_eq!(
+                    candidate_state.local_vars.get("set_action_shadow_calls"),
+                    Some(&Value::Int(0)),
+                    "native detach bypasses a script SetAction shadow"
+                );
+            }
             let attached_idx = engine.find_object_index(attached).expect("attacher remains");
-            let attached_state = &engine.objects[attached_idx].state;
-            assert_eq!(attached_state.action.name, "Idle", "{path} detaches DFA_ATTACH");
             assert_eq!(
-                attached_state.action.target,
+                engine.objects[attached_idx].state.action.target,
                 Some(burner),
-                "SetAction(ActIdle) preserves an unsupplied action target"
+                "SetAction(ActIdle) preserves an unsupplied primary target"
             );
+            let target2_idx = engine
+                .find_object_index(target2_attached)
+                .expect("Target2 attacher remains");
             assert_eq!(
-                attached_state.local_vars.get("abort_count"),
-                Some(&Value::Int(1)),
-                "{path} dispatches Attach AbortCall"
-            );
-            assert_eq!(
-                attached_state.local_vars.get("abort_saw_idle"),
-                Some(&Value::Bool(true)),
-                "the idle action is live before AbortCall"
+                engine.objects[target2_idx].state.action.target2,
+                Some(burner),
+                "FindObject action-target filtering includes Target2"
             );
 
             let unrelated_idx = engine
@@ -2341,10 +2409,10 @@ func AttachAbort()
     #[test]
     fn fire_start_rehomes_contents_through_enter_on_both_paths() -> Result<(), EngineError> {
         // A contained burning object sends its contents through the complete
-        // Enter transfer: old-container Ejection, content Departure,
-        // destination Collection2, then content Entrance. The fire cause is
-        // installed before that transfer; ordinary nonliving Enter then
-        // adopts the destination container's controller.
+        // Enter transfer: content RejectEntrance, old-container Ejection,
+        // content Departure, destination Collection2, then content Entrance.
+        // The fire cause is installed before that transfer; ordinary
+        // nonliving Enter then adopts the destination container's controller.
         for via_script in [false, true] {
             let path = if via_script { "compat" } else { "engine" };
             let mut engine = Engine::with_seed(97);
@@ -2380,8 +2448,15 @@ func Ejection(pContent) { pContent->Mark(1); return 1; }
                 "ITEM",
                 "Item",
                 r#"#strict
-local callback_order, departure_controller, departure_container, entrance_container;
+local callback_order, reject_container, reject_controller, departure_controller, departure_container, entrance_container;
 func Mark(iStep) { callback_order = callback_order * 10 + iStep; return 1; }
+func RejectEntrance(pContainer)
+{
+    Mark(5);
+    reject_container = pContainer;
+    reject_controller = GetController();
+    return 0;
+}
 func Departure(pOldContainer)
 {
     Mark(2);
@@ -2446,8 +2521,17 @@ func Entrance(pContainer)
             );
             assert_eq!(
                 content_state.local_vars.get("callback_order"),
-                Some(&Value::Int(1234)),
-                "{path} runs Ejection -> Departure -> Collection2 -> Entrance"
+                Some(&Value::Int(51234)),
+                "{path} runs RejectEntrance -> Ejection -> Departure -> Collection2 -> Entrance"
+            );
+            assert_eq!(
+                content_state.local_vars.get("reject_container"),
+                Some(&object_reference_value(parent))
+            );
+            assert_eq!(
+                content_state.local_vars.get("reject_controller"),
+                Some(&Value::Int(7)),
+                "the fire cause is assigned before RejectEntrance"
             );
             assert_eq!(
                 content_state.local_vars.get("departure_controller"),

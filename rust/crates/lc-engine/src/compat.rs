@@ -19369,10 +19369,9 @@ fn fire_effect_start_core(
                 })
             });
             if attached {
-                let _ = object_set_action(&[
-                    object_reference_value(candidate),
-                    Value::String("Idle".to_string()),
-                ]);
+                // C++ calls C4Object::SetAction(ActIdle) directly. A script
+                // function named SetAction must not intercept this detach.
+                let _ = native_set_action_by_name(candidate, "Idle")?;
             }
         }
     }
