@@ -11155,6 +11155,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("FxFireTimer", fx_fire_timer);
     script.register_host_function("FxFireStop", fx_fire_stop);
     script.register_host_function("FxFireInfo", fx_fire_info);
+    script.register_host_function("GetUnusedOverlayID", get_unused_overlay_id);
     script.register_host_function("SetGraphics", set_graphics);
     script.register_host_function("SetObjDrawTransform", set_obj_draw_transform);
     script.register_host_function("SetObjDrawTransform2", set_obj_draw_transform2);
@@ -28911,6 +28912,44 @@ fn get_ocf(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetUnusedOverlayID (C4Script.cpp:5942-5951): search away from a
+/// nonzero base index until the target object has no overlay in that slot.
+fn get_unused_overlay_id(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut overlay_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetUnusedOverlayID",
+        "base index",
+    )?;
+    let target = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GetUnusedOverlayID",
+        "object",
+    )?;
+    if overlay_id == 0 {
+        return Ok(Value::Nil);
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let target = target.or(context.script_object_context);
+        let Some(target) = target else {
+            return Ok(Value::Nil);
+        };
+        if context.object_scope(target).is_none() && context.get_world_object(target).is_none() {
+            return Ok(Value::Nil);
+        }
+
+        let search_step = if overlay_id < 0 { -1 } else { 1 };
+        while context.object_has_graphics_overlay(target, overlay_id) {
+            overlay_id = overlay_id.wrapping_add(search_step);
+        }
+        Ok(Value::Int(overlay_id))
+    })
+}
+
 fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
     // A null pGfxName restores the DEFAULT graphics (FnSetGraphics,
     // C4Script.cpp:4378).
@@ -35392,6 +35431,23 @@ impl EffectHostContext {
             })
     }
 
+    fn object_has_graphics_overlay(&self, target: ObjectId, overlay_id: i32) -> bool {
+        if let Some(scope) = self.object_scope(target) {
+            return scope
+                .graphics_overlays
+                .iter()
+                .any(|overlay| overlay.id == overlay_id);
+        }
+        self.get_world_object(target)
+            .and_then(|object| object.full_state().cloned())
+            .is_some_and(|state| {
+                state
+                    .graphics_overlays
+                    .iter()
+                    .any(|overlay| overlay.id == overlay_id)
+            })
+    }
+
     fn set_object_overlay_color_modulation(
         &mut self,
         target: ObjectId,
@@ -37970,6 +38026,7 @@ mod tests {
         "GetTemperature",
         "GetTexture",
         "GetType",
+        "GetUnusedOverlayID",
         "GetValue",
         "GetValues",
         "GetVertex",

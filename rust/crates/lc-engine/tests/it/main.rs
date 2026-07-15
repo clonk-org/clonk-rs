@@ -64,6 +64,7 @@ mod test_math_functions;
 mod test_object_id_reservation;
 mod test_transitive_includes;
 mod typed_arrow_caller_strictness;
+mod unused_overlay_id;
 mod virtual_player_harness;
 mod walk_movement;
 mod weather_audio;
