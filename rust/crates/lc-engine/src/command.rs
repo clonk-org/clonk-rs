@@ -6,8 +6,8 @@ use crate::transfer::{TransferZone, TransferZoneTable};
 use crate::{
     minimum_con_activation_denied, ocf, ActionProcedure, ActionUpdate, CommandDirection,
     DefinitionId, DefinitionRect, Direction, ObjectId, ObjectStatus, ObjectUpdate, PlayerStatus,
-    Vector2, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, CATEGORY_VEHICLE, FULL_CON,
-    LINE_CONNECT_POWER_INPUT, OWNER_NONE,
+    Vector2, CATEGORY_SORT_LIMIT, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, CATEGORY_VEHICLE,
+    FULL_CON, LINE_CONNECT_POWER_INPUT, OWNER_NONE,
 };
 use lc_resources::PhysicalInfo;
 use serde::{Deserialize, Serialize};
@@ -121,6 +121,30 @@ impl CommandObjectSnapshot {
     pub fn at_point(&self, x: i32, y: i32) -> bool {
         self.shape.contains_point(x, y)
     }
+
+    /// Raw absolute `C4Object::Shape` used by `Game.OverlapObject`.
+    /// `shape` normally carries the eighteen-pixel `At` expansion, so undo
+    /// that expansion when the snapshot fields identify it. Hand-built
+    /// fixtures and vertex fallbacks keep their explicit rectangle.
+    fn raw_shape_rect(&self) -> DefinitionRect {
+        let add_top = (18 - self.shape_height).max(0);
+        let expanded_top = self
+            .position
+            .y
+            .saturating_add(self.shape_top)
+            .saturating_sub(add_top);
+        let expanded_height = self.shape_height.saturating_add(add_top);
+        if self.shape.y == expanded_top && self.shape.height == expanded_height {
+            DefinitionRect::new(
+                self.shape.x,
+                self.position.y.saturating_add(self.shape_top),
+                self.shape.width,
+                self.shape_height,
+            )
+        } else {
+            self.shape
+        }
+    }
 }
 
 impl CommandObjectSnapshot {
@@ -184,6 +208,15 @@ impl CommandPlayerSnapshot {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommandDefinitionSnapshot {
     pub value: i32,
+    /// Raw definition shape used by construction-site search/checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<DefinitionRect>,
+    /// Raw DefCore category used by `Game.OverlapObject` construction vetoes.
+    #[serde(default)]
+    pub category: i32,
+    /// DefCore `ConSizeOff`, subtracted from shape height by ConstructionCheck.
+    #[serde(default)]
+    pub construction_offset: i32,
     /// Positive DefCore `CollectionLimit`; `None` means unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection_limit: Option<u32>,
@@ -457,6 +490,12 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("expected {id:?} PushFront operation, got {operations:?}"))
+    }
+
+    fn continue_construct_script(state: &mut ConstructState) {
+        state.script_pending = true;
+        state.script_invoked = true;
+        state.script_result = Some(AcquireScriptResult::Continue);
     }
 
     fn command_view(id: CommandId, target: Option<ObjectId>) -> CommandView {
@@ -6880,6 +6919,7 @@ mod tests {
         kit.construction = FULL_CON;
         kit.container = Some(builder_id);
         kit.position = builder.position;
+        kit.alive = false;
 
         let mut objects = HashMap::new();
         objects.insert(builder_id, builder.clone());
@@ -6934,6 +6974,7 @@ mod tests {
                 .with_tx(Some(10))
                 .with_ty(Some(0)),
         );
+        continue_construct_script(&mut state);
 
         let first = state.step(&ctx);
         assert_eq!(first.status, CommandStatus::Running);
@@ -7000,8 +7041,10 @@ mod tests {
             CommandOperation::PushFront(request) => {
                 assert_eq!(request.id, CommandId::Build);
                 assert_eq!(request.target, Some(construction_id));
-                assert_eq!(request.tx, Some(10));
-                assert_eq!(request.ty, Some(0));
+                assert_eq!(request.tx, None);
+                assert_eq!(request.ty, None);
+                assert_eq!(request.update_interval, 0);
+                assert_eq!(request.mode, CommandMode::SilentSub);
             }
             other => panic!("unexpected operation: {:?}", other),
         }
@@ -7141,6 +7184,7 @@ mod tests {
                 .with_tx(Some(8))
                 .with_ty(Some(2)),
         );
+        continue_construct_script(&mut state);
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -7150,9 +7194,303 @@ mod tests {
             CommandOperation::PushFront(request) => {
                 assert_eq!(request.id, CommandId::Acquire);
                 assert_eq!(request.mode, CommandMode::Sub);
+                assert_eq!(request.update_interval, 50);
+                assert_eq!(request.retries, 5);
             }
             other => panic!("unexpected operation: {:?}", other),
         }
+    }
+
+    #[test]
+    fn construct_helper_adopts_build_and_tracks_the_primary_construct() {
+        let builder_id = ObjectId::new(1);
+        let primary_id = ObjectId::new(2);
+        let construction_id = ObjectId::new(3);
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.physical.can_construct = 1;
+        let mut primary = snapshot_with_id(primary_id.as_u64());
+        primary.commands = vec![
+            command_view(CommandId::Build, Some(construction_id)),
+            command_view(CommandId::Construct, None),
+        ];
+        let mut objects = HashMap::from([
+            (builder_id, builder.clone()),
+            (primary_id, primary.clone()),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        let request = CommandRequest::new(CommandId::Construct)
+            .with_target(Some(primary_id))
+            .with_data(CommandData::Text("MISSING".into()))
+            .with_tx(Some(6))
+            .with_ty(Some(0));
+        let mut state = ConstructState::from_request(&request);
+
+        let adopted = state.step(&ctx);
+
+        assert_eq!(adopted.status, CommandStatus::Completed);
+        assert_eq!(adopted.operations.len(), 2);
+        let CommandOperation::PushFront(build) = &adopted.operations[0] else {
+            panic!("first helper command is Build");
+        };
+        assert_eq!(build.id, CommandId::Build);
+        assert_eq!(build.target, Some(construction_id));
+        assert_eq!(build.update_interval, 0);
+        assert_eq!(build.mode, CommandMode::SilentSub);
+        let CommandOperation::PushFront(move_to) = &adopted.operations[1] else {
+            panic!("second helper command is MoveTo");
+        };
+        assert_eq!(move_to.id, CommandId::MoveTo);
+        assert_eq!((move_to.tx, move_to.ty), (Some(6), Some(0)));
+        assert_eq!(move_to.update_interval, 50);
+
+        primary.commands = vec![command_view(CommandId::Construct, None)];
+        objects.insert(primary_id, primary.clone());
+        let mut wider_builder = builder.clone();
+        wider_builder.move_to_range = 6;
+        let wider_ctx = move_to_ctx_at_frame(
+            &wider_builder,
+            &objects,
+            &players,
+            &definitions,
+            1,
+        );
+        let mut waiting = ConstructState::from_request(&request);
+        let waited = waiting.step(&wider_ctx);
+        assert_eq!(waited.status, CommandStatus::Running);
+        let wait = pushed_request(&waited.operations, CommandId::Wait);
+        assert_eq!(wait.update_interval, 10);
+        assert_eq!(wait.mode, CommandMode::SilentSub);
+
+        primary.commands = vec![command_view(CommandId::Build, Some(construction_id))];
+        objects.insert(primary_id, primary);
+        let failed_ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 2);
+        let mut orphaned = ConstructState::from_request(&request);
+        let failed = orphaned.step(&failed_ctx);
+        assert_eq!(failed.status, CommandStatus::Failed);
+        assert_eq!(
+            pushed_request(&failed.operations, CommandId::Build).target,
+            Some(construction_id),
+            "native queues the adopted Build before noticing Construct vanished"
+        );
+    }
+
+    #[test]
+    fn construct_auto_site_stages_control_override_results() {
+        let builder_id = ObjectId::new(10);
+        let target2_id = ObjectId::new(11);
+        let definition_id = "STRT".to_string();
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.position = Vector2::new(50, 40);
+        builder.physical.can_construct = 1;
+        builder.owner = 7;
+        let objects = HashMap::from([(builder_id, builder.clone())]);
+        let players = HashMap::new();
+        let definition = CommandDefinitionSnapshot {
+            shape: Some(DefinitionRect::new(-10, -20, 20, 20)),
+            category: CATEGORY_STRUCTURE,
+            constructable: false,
+            ..CommandDefinitionSnapshot::default()
+        };
+        let definitions = HashMap::from([(definition_id.clone(), definition)]);
+        let mut landscape = crate::Landscape::flat(200, 100);
+        landscape.set_world_height(400);
+        let expected = landscape
+            .find_con_site_spot(50, 40, 20, 20, 20, |_, _, _, _| false)
+            .map(|(x, y)| Vector2::new(x, y))
+            .expect("flat landscape has a construction site");
+        let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        ctx.landscape = Some(&landscape);
+        let request = CommandRequest::new(CommandId::Construct)
+            .with_target2(Some(target2_id))
+            .with_data(CommandData::Text(definition_id.clone()));
+        let mut state = ConstructState::from_request(&request);
+
+        let first = state.step(&ctx);
+
+        assert_eq!(first.status, CommandStatus::Running);
+        assert_eq!(state.site, Some(expected));
+        assert!(matches!(
+            first.events.as_slice(),
+            [CommandEvent::ControlCommandConstruction {
+                caller,
+                target: None,
+                site,
+                target2: Some(event_target2),
+                definition_id: event_definition,
+            }] if *caller == builder_id
+                && *site == expected
+                && *event_target2 == target2_id
+                && event_definition == &definition_id
+        ));
+
+        state.script_result = Some(AcquireScriptResult::Handled);
+        let handled = state.step(&ctx);
+        assert_eq!(handled.status, CommandStatus::Running);
+        assert!(handled.events.is_empty());
+        let repeated = state.step(&ctx);
+        assert!(matches!(
+            repeated.events.as_slice(),
+            [CommandEvent::ControlCommandConstruction { .. }]
+        ));
+
+        state.script_result = Some(AcquireScriptResult::Complete);
+        assert_eq!(state.step(&ctx).status, CommandStatus::Completed);
+
+        let mut failed = ConstructState::from_request(&request);
+        failed.site = Some(expected);
+        failed.script_pending = true;
+        failed.script_invoked = true;
+        failed.script_result = Some(AcquireScriptResult::Failed);
+        assert_eq!(failed.step(&ctx).status, CommandStatus::Failed);
+
+        let mut continued = ConstructState::from_request(&request);
+        continued.site = Some(expected);
+        continue_construct_script(&mut continued);
+        let fallback = continued.step(&ctx);
+        assert_eq!(fallback.status, CommandStatus::Running);
+        assert_eq!(
+            pushed_request(&fallback.operations, CommandId::Acquire).retries,
+            5,
+            "late constructability does not preempt the overload or Acquire"
+        );
+    }
+
+    #[test]
+    fn construct_move_range_and_construction_check_match_cpp_order() {
+        let builder_id = ObjectId::new(20);
+        let kit_id = ObjectId::new(21);
+        let blocker_id = ObjectId::new(22);
+        let definition_id = "STRT".to_string();
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.physical.can_construct = 1;
+        builder.owner = 9;
+        builder.contents.push(kit_id);
+        let mut kit = snapshot_with_id(kit_id.as_u64());
+        kit.definition_id = CONKIT_DEFINITION.into();
+        kit.container = Some(builder_id);
+        kit.alive = false;
+        let definition = CommandDefinitionSnapshot {
+            shape: Some(DefinitionRect::new(-10, -20, 20, 20)),
+            category: CATEGORY_STRUCTURE,
+            constructable: true,
+            ..CommandDefinitionSnapshot::default()
+        };
+        let definitions = HashMap::from([(definition_id.clone(), definition.clone())]);
+        let players = HashMap::new();
+        let objects = HashMap::from([(builder_id, builder.clone()), (kit_id, kit.clone())]);
+        let ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+        let request = CommandRequest::new(CommandId::Construct)
+            .with_data(CommandData::Text(definition_id.clone()))
+            .with_tx(Some(6))
+            .with_ty(Some(0));
+        let mut state = ConstructState::from_request(&request);
+        continue_construct_script(&mut state);
+
+        let moved = state.step(&ctx);
+
+        let move_to = pushed_request(&moved.operations, CommandId::MoveTo);
+        assert_eq!(move_to.update_interval, 50);
+        assert_eq!(move_to.mode, CommandMode::SilentSub);
+
+        let mut wider_builder = builder.clone();
+        wider_builder.move_to_range = 6;
+        let wider_objects = HashMap::from([
+            (builder_id, wider_builder.clone()),
+            (kit_id, kit.clone()),
+        ]);
+        let wider_ctx =
+            move_to_ctx_at_frame(&wider_builder, &wider_objects, &players, &definitions, 1);
+        let mut wider_state = ConstructState::from_request(&request);
+        continue_construct_script(&mut wider_state);
+        let spawned = wider_state.step(&wider_ctx);
+        assert!(spawned
+            .events
+            .iter()
+            .any(|event| matches!(event, CommandEvent::SpawnObject { .. })));
+
+        let mut landscape = crate::Landscape::flat(200, 100);
+        landscape.set_world_height(400);
+        let site = landscape
+            .find_con_site_spot(50, 40, 20, 20, 20, |_, _, _, _| false)
+            .map(|(x, y)| Vector2::new(x, y))
+            .expect("flat landscape has a site");
+        let mut at_site_builder = builder.clone();
+        at_site_builder.position = site;
+        let mut blocker = snapshot_with_id(blocker_id.as_u64());
+        blocker.category = CATEGORY_STRUCTURE;
+        blocker.shape = DefinitionRect::new(site.x - 5, site.y - 20, 10, 20);
+        let blocked_objects = HashMap::from([
+            (builder_id, at_site_builder.clone()),
+            (kit_id, kit),
+            (blocker_id, blocker),
+        ]);
+        let mut blocked_ctx = move_to_ctx_at_frame(
+            &at_site_builder,
+            &blocked_objects,
+            &players,
+            &definitions,
+            2,
+        );
+        blocked_ctx.landscape = Some(&landscape);
+        let mut blocked_state = ConstructState::from_request(
+            &CommandRequest::new(CommandId::Construct)
+                .with_data(CommandData::Text(definition_id))
+                .with_tx(Some(site.x))
+                .with_ty(Some(site.y)),
+        );
+        continue_construct_script(&mut blocked_state);
+        let blocked = blocked_state.step(&blocked_ctx);
+        assert_eq!(blocked.status, CommandStatus::Failed);
+        assert!(blocked.events.is_empty(), "failed checks retain the conkit");
+    }
+
+    #[test]
+    fn construct_overlap_checks_the_builder_and_raw_live_shape() {
+        let builder_id = ObjectId::new(30);
+        let blocker_id = ObjectId::new(31);
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.position = Vector2::new(50, 50);
+        builder.category = CATEGORY_STRUCTURE;
+        builder.shape_top = -10;
+        builder.shape_height = 10;
+        builder.shape = DefinitionRect::new(45, 40, 10, 10);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut objects = HashMap::from([(builder_id, builder.clone())]);
+        let ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+
+        assert!(ConstructState::overlaps_construction_rect(
+            &ctx,
+            40,
+            30,
+            20,
+            20,
+            CATEGORY_STRUCTURE,
+        ));
+
+        builder.category = 0;
+        objects.insert(builder_id, builder.clone());
+        let mut short_blocker = snapshot_with_id(blocker_id.as_u64());
+        short_blocker.position = Vector2::new(50, 55);
+        short_blocker.category = CATEGORY_STRUCTURE;
+        short_blocker.shape_top = 0;
+        short_blocker.shape_height = 5;
+        short_blocker.shape = DefinitionRect::new(45, 42, 10, 18);
+        objects.insert(blocker_id, short_blocker);
+        let ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 1);
+        assert!(
+            !ConstructState::overlaps_construction_rect(
+                &ctx,
+                40,
+                30,
+                20,
+                20,
+                CATEGORY_STRUCTURE,
+            ),
+            "the eighteen-pixel action-area expansion is not C4Object::Shape"
+        );
     }
 
     #[test]
@@ -14433,6 +14771,16 @@ pub enum CommandEvent {
         ignore_container: Option<ObjectId>,
         definition_id: DefinitionId,
     },
+    /// `~ControlCommandConstruction(Target,Tx,Ty,Target2,Data)` runs after
+    /// site resolution and before conkit/range/construction checks. Its
+    /// integer result uses the same 0/1/2/3 contract as Acquire.
+    ControlCommandConstruction {
+        caller: ObjectId,
+        target: Option<ObjectId>,
+        site: Vector2,
+        target2: Option<ObjectId>,
+        definition_id: DefinitionId,
+    },
     SpawnObject {
         definition_id: DefinitionId,
         owner: i32,
@@ -16322,6 +16670,16 @@ impl CommandStack {
         false
     }
 
+    pub fn set_construct_script_result(&mut self, result: AcquireScriptResult) -> bool {
+        for entry in &mut self.entries {
+            if let CommandState::Construct(state) = &mut entry.state {
+                state.script_result = Some(result);
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<CommandStepResult> {
         let result = self.execute_front(ctx);
         self.clear_finished_fronts();
@@ -17879,71 +18237,179 @@ impl BuildState {
 struct ConstructState {
     target: Option<ObjectId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    target2: Option<ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     definition_id: Option<DefinitionId>,
     site: Option<Vector2>,
     update_interval: u32,
-    last_move_order: Option<u64>,
-    acquire_requested: bool,
-    exit_requested: bool,
-    ungrab_requested: bool,
     spawn_requested: bool,
     construction_id: Option<ObjectId>,
+    #[serde(default)]
+    script_pending: bool,
+    #[serde(default)]
+    script_invoked: bool,
+    #[serde(default)]
+    script_result: Option<AcquireScriptResult>,
 }
 
 impl ConstructState {
     fn from_request(request: &CommandRequest) -> Self {
         let definition_id = command_data_to_definition_id(&request.data);
-        let site = match (request.tx, request.ty) {
-            (Some(x), Some(y)) => Some(Vector2::new(x, y)),
-            _ => None,
-        };
+        let site = Some(Vector2::new(
+            request.tx.unwrap_or(0),
+            request.ty.unwrap_or(0),
+        ));
         Self {
             target: request.target,
+            target2: request.target2,
             definition_id,
             site,
             update_interval: request.update_interval.max(1),
-            last_move_order: None,
-            acquire_requested: false,
-            exit_requested: false,
-            ungrab_requested: false,
             spawn_requested: false,
             construction_id: None,
-        }
-    }
-
-    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
-        if ctx.object.command_direction != CommandDirection::Stop {
-            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
-        } else {
-            None
-        }
-    }
-
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
+            script_pending: false,
+            script_invoked: false,
+            script_result: None,
         }
     }
 
     fn builder_has_conkit(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
         ctx.object.contents.iter().copied().find(|id| {
             ctx.resolve(*id)
-                .map(|snapshot| snapshot.definition_id == CONKIT_DEFINITION && snapshot.is_active())
+                .map(|snapshot| {
+                    snapshot.definition_id == CONKIT_DEFINITION
+                        && snapshot.is_status_active()
+                })
                 .unwrap_or(false)
         })
     }
 
     fn at_site(&self, ctx: &CommandRuntimeContext<'_>, site: Vector2) -> bool {
-        const APPROACH_HORIZONTAL: i32 = 9;
         const APPROACH_VERTICAL: i32 = 20;
+        let approach_horizontal = if ctx.object.move_to_range > 0 {
+            ctx.object.move_to_range
+        } else {
+            5
+        };
         let dx = site.x - ctx.position.x;
         let dy = site.y - ctx.position.y;
-        dx.abs() <= APPROACH_HORIZONTAL && dy.abs() <= APPROACH_VERTICAL
+        dx.abs() <= approach_horizontal && dy.abs() <= APPROACH_VERTICAL
+    }
+
+    fn find_command(
+        object: &CommandObjectSnapshot,
+        command: CommandId,
+    ) -> Option<&CommandView> {
+        object
+            .commands
+            .iter()
+            .find(|entry| entry.name == command.to_name())
+    }
+
+    fn overlaps_construction_rect(
+        ctx: &CommandRuntimeContext<'_>,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        category: i32,
+    ) -> bool {
+        ctx.objects.values().any(|object| {
+            let shape = object.raw_shape_rect();
+            object.is_status_active()
+                && object.container.is_none()
+                && object.category & category & CATEGORY_SORT_LIMIT != 0
+                && x < shape.x + shape.width
+                && shape.x < x + width
+                && y < shape.y + shape.height
+                && shape.y < y + height
+        })
+    }
+
+    fn find_construction_site(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        definition: &CommandDefinitionSnapshot,
+    ) -> Option<Vector2> {
+        let landscape = ctx.landscape?;
+        let (width, height) = definition
+            .shape
+            .map(|shape| (shape.width, shape.height))
+            .unwrap_or((0, 0));
+        landscape
+            .find_con_site_spot(
+                ctx.position.x,
+                ctx.position.y,
+                width,
+                height,
+                20,
+                |x, y, width, height| {
+                    Self::overlaps_construction_rect(
+                        ctx,
+                        x,
+                        y,
+                        width,
+                        height,
+                        definition.category,
+                    )
+                },
+            )
+            .map(|(x, y)| Vector2::new(x, y))
+    }
+
+    fn construction_check(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        definition: &CommandDefinitionSnapshot,
+        site: Vector2,
+    ) -> bool {
+        if !definition.constructable {
+            return false;
+        }
+
+        let (raw_width, raw_height) = definition
+            .shape
+            .map(|shape| (shape.width, shape.height))
+            .unwrap_or((20, 40));
+        let width = raw_width.max(1);
+        let height = raw_height.max(1);
+        let effective_height = height
+            .saturating_sub(definition.construction_offset)
+            .max(1);
+        let left = site.x - width / 2;
+        let top = site.y - effective_height;
+
+        let Some(landscape) = ctx.landscape else {
+            return true;
+        };
+        if left < 0 || left.saturating_add(width) > landscape.width() as i32 {
+            return false;
+        }
+
+        let solid_count = (top..site.y)
+            .flat_map(|y| (left..left.saturating_add(width)).map(move |x| (x, y)))
+            .filter(|&(x, y)| landscape.is_solid_at(x, y))
+            .count()
+            .min(i32::MAX as usize) as i32;
+        let support_count = (site.y..site.y.saturating_add(5))
+            .flat_map(|y| (left..left.saturating_add(width)).map(move |x| (x, y)))
+            .filter(|&(x, y)| landscape.is_solid_at(x, y))
+            .count()
+            .min(i32::MAX as usize) as i32;
+        let area_threshold = ((i64::from(width) * i64::from(effective_height)) / 20)
+            .clamp(0, i64::from(i32::MAX)) as i32;
+        if solid_count > area_threshold || support_count < width.saturating_mul(2) {
+            return false;
+        }
+
+        !Self::overlaps_construction_rect(
+            ctx,
+            left,
+            top,
+            width,
+            effective_height,
+            definition.category,
+        )
     }
 
     fn find_spawned_construction(
@@ -17992,111 +18458,160 @@ impl ConstructState {
             ]);
         };
 
-        if self.target.is_some() {
-            return CommandStepResult::failed(None);
+        if let Some(target_id) = self.target {
+            if let Some(target) = ctx.resolve(target_id) {
+                let mut operations = Vec::new();
+                let adopted_build = Self::find_command(target, CommandId::Build);
+                if let Some(build) = adopted_build {
+                    operations.push(CommandOperation::PushFront(
+                        CommandRequest::new(CommandId::Build)
+                            .with_target(build.target)
+                            .with_mode(CommandMode::SilentSub),
+                    ));
+                }
+
+                if Self::find_command(target, CommandId::Construct).is_none() {
+                    return CommandStepResult::failed(None).with_operations(operations);
+                }
+
+                let site = self.site.unwrap_or(Vector2::ZERO);
+                let request = if site != Vector2::ZERO && !self.at_site(ctx, site) {
+                    CommandRequest::new(CommandId::MoveTo)
+                        .with_tx(Some(site.x))
+                        .with_ty(Some(site.y))
+                        .with_update_interval(50)
+                        .with_mode(CommandMode::SilentSub)
+                } else {
+                    CommandRequest::new(CommandId::Wait)
+                        .with_update_interval(10)
+                        .with_mode(CommandMode::SilentSub)
+                };
+                operations.push(CommandOperation::PushFront(request));
+                return if adopted_build.is_some() {
+                    CommandStepResult::completed(None).with_operations(operations)
+                } else {
+                    CommandStepResult::running(None).with_operations(operations)
+                };
+            }
+            // C4Game::ClearObjectPtrs turns a removed helper target into the
+            // ordinary primary-construction path.
+            self.target = None;
         }
 
         let owner = ctx.object.owner;
-        if owner == OWNER_NONE {
-            return CommandStepResult::failed(None);
-        }
-
         let definition = match ctx.definition(&definition_id) {
             Some(definition) => definition,
             None => return CommandStepResult::failed(None),
         };
 
-        if !definition.constructable {
+        if ctx
+            .player(owner)
+            .is_some_and(|player| !player.knows(&definition_id))
+        {
             return CommandStepResult::failed(None);
         }
-
-        let player = match ctx.player(owner) {
-            Some(player) if player.is_active() => player,
-            _ => return CommandStepResult::failed(None),
-        };
-
-        if !player.knows(&definition_id) {
-            return CommandStepResult::failed(None);
-        }
-
-        let update_to_stop = self.update_to_stop(ctx);
-
-        if ctx.object.container.is_some() {
-            if !self.exit_requested {
-                self.exit_requested = true;
-                let mut result = CommandStepResult::running(update_to_stop.clone());
-                let request = CommandRequest::new(CommandId::Exit)
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::SilentSub);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
-            }
-            return CommandStepResult::running(update_to_stop);
-        }
-        self.exit_requested = false;
-
-        if ctx.object.action_procedure == ActionProcedure::Push {
-            if !self.ungrab_requested {
-                self.ungrab_requested = true;
-                let mut result = CommandStepResult::running(update_to_stop.clone());
-                let request = CommandRequest::new(CommandId::UnGrab)
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::SilentSub);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
-            }
-            return CommandStepResult::running(update_to_stop);
-        }
-        self.ungrab_requested = false;
-
-        let site = match self.site {
-            Some(site) => site,
-            None => return CommandStepResult::failed(None),
-        };
 
         if matches!(
             ctx.object.action_procedure,
             ActionProcedure::Build | ActionProcedure::Chop | ActionProcedure::Dig
         ) {
-            let mut update = update_to_stop.unwrap_or_default();
+            let mut update = ObjectUpdate::new();
+            if ctx.object.command_direction != CommandDirection::Stop {
+                update.command_direction = Some(CommandDirection::Stop);
+            }
             let idle_action = ActionUpdate::default().with_name("Idle").with_force(true);
             update = update.with_action_update(idle_action);
             return CommandStepResult::running(Some(update));
         }
 
+        if ctx.object.action_procedure == ActionProcedure::Push
+            && ctx.object.action_target.is_some()
+        {
+            let request = CommandRequest::new(CommandId::UnGrab)
+                .with_update_interval(50)
+                .with_mode(CommandMode::SilentSub);
+            return CommandStepResult::running(None)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+
+        let mut site = self.site.unwrap_or(Vector2::ZERO);
+        if site == Vector2::ZERO {
+            let Some(found) = self.find_construction_site(ctx, definition) else {
+                return CommandStepResult::failed(None);
+            };
+            site = found;
+            self.site = Some(site);
+        }
+
         if !self.spawn_requested {
+            if self.script_pending {
+                let Some(script_result) = self.script_result.take() else {
+                    return CommandStepResult::running(None);
+                };
+                self.script_pending = false;
+                match script_result {
+                    AcquireScriptResult::Handled => {
+                        self.script_invoked = false;
+                        return CommandStepResult::running(None);
+                    }
+                    AcquireScriptResult::Complete => {
+                        self.script_invoked = false;
+                        return CommandStepResult::completed(None);
+                    }
+                    AcquireScriptResult::Failed => {
+                        self.script_invoked = false;
+                        return CommandStepResult::failed(None);
+                    }
+                    AcquireScriptResult::Continue => {
+                        // Continue the same evaluated Construct pass below.
+                    }
+                }
+            }
+
+            if !self.script_invoked {
+                self.script_pending = true;
+                self.script_invoked = true;
+                return CommandStepResult::running(None).with_events(vec![
+                    CommandEvent::ControlCommandConstruction {
+                        caller: ctx.object.id,
+                        target: self.target,
+                        site,
+                        target2: self.target2,
+                        definition_id: definition_id.clone(),
+                    },
+                ]);
+            }
+
             let kit_id = match self.builder_has_conkit(ctx) {
                 Some(id) => id,
                 None => {
-                    if !self.acquire_requested {
-                        if let Some(c4id) = definition_id_to_c4id(CONKIT_DEFINITION) {
-                            let request = CommandRequest::new(CommandId::Acquire)
-                                .with_data(CommandData::Integer(c4id))
-                                .with_update_interval(ACQUIRE_REQUEST_INTERVAL)
-                                .with_mode(CommandMode::Sub);
-                            let mut result = CommandStepResult::running(update_to_stop.clone());
-                            result.operations.push(CommandOperation::PushFront(request));
-                            self.acquire_requested = true;
-                            return result;
-                        }
-                        return CommandStepResult::failed(None);
+                    self.script_invoked = false;
+                    if let Some(c4id) = definition_id_to_c4id(CONKIT_DEFINITION) {
+                        let request = CommandRequest::new(CommandId::Acquire)
+                            .with_data(CommandData::Integer(c4id))
+                            .with_update_interval(ACQUIRE_REQUEST_INTERVAL)
+                            .with_retries(5)
+                            .with_mode(CommandMode::Sub);
+                        return CommandStepResult::running(None)
+                            .with_operations(vec![CommandOperation::PushFront(request)]);
                     }
-                    return CommandStepResult::running(update_to_stop);
+                    return CommandStepResult::failed(None);
                 }
             };
-            self.acquire_requested = false;
 
             if !self.at_site(ctx, site) {
-                if self.should_issue_move(ctx.frame) {
-                    let request = CommandRequest::new(CommandId::MoveTo)
-                        .with_tx(Some(site.x))
-                        .with_ty(Some(site.y))
-                        .with_update_interval(10);
-                    let mut result = CommandStepResult::running(update_to_stop.clone());
-                    result.operations.push(CommandOperation::PushFront(request));
-                    return result;
-                }
-                return CommandStepResult::running(update_to_stop);
+                self.script_invoked = false;
+                let request = CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(site.x))
+                    .with_ty(Some(site.y))
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::SilentSub);
+                return CommandStepResult::running(None)
+                    .with_operations(vec![CommandOperation::PushFront(request)]);
+            }
+
+            if !self.construction_check(ctx, definition, site) {
+                return CommandStepResult::failed(None);
             }
 
             let mut events = Vec::new();
@@ -18120,7 +18635,7 @@ impl ConstructState {
             });
 
             self.spawn_requested = true;
-            return CommandStepResult::running(update_to_stop).with_events(events);
+            return CommandStepResult::running(None).with_events(events);
         }
 
         if self.construction_id.is_none() {
@@ -18129,7 +18644,7 @@ impl ConstructState {
             {
                 self.construction_id = Some(construction_id);
             } else {
-                return CommandStepResult::running(update_to_stop);
+                return CommandStepResult::running(None);
             }
         }
 
@@ -18138,13 +18653,10 @@ impl ConstructState {
         operations.push(CommandOperation::PushFront(
             CommandRequest::new(CommandId::Build)
                 .with_target(Some(construction_id))
-                .with_tx(Some(site.x))
-                .with_ty(Some(site.y))
-                .with_update_interval(50)
                 .with_mode(CommandMode::SilentSub),
         ));
 
-        CommandStepResult::completed(update_to_stop).with_operations(operations)
+        CommandStepResult::completed(None).with_operations(operations)
     }
 }
 
@@ -21723,6 +22235,8 @@ impl CommandState {
                 view.target2 = state.ignore_container;
             }
             CommandState::Construct(state) => {
+                view.target = state.target;
+                view.target2 = state.target2;
                 if let Some(site) = state.site {
                     view.tx = Some(site.x);
                     view.ty = Some(site.y);
@@ -21763,6 +22277,7 @@ impl CommandState {
             }
             CommandState::Construct(state) => {
                 denumerate_object_reference(&mut state.target, object_numbers);
+                denumerate_object_reference(&mut state.target2, object_numbers);
                 denumerate_object_reference(&mut state.construction_id, object_numbers);
             }
             CommandState::Activate(state) => {
@@ -21825,7 +22340,9 @@ impl CommandState {
                 changed
             }
             CommandState::Construct(state) => {
-                clear(&mut state.target) | clear(&mut state.construction_id)
+                clear(&mut state.target)
+                    | clear(&mut state.target2)
+                    | clear(&mut state.construction_id)
             }
             CommandState::Activate(state) => {
                 clear(&mut state.target) | clear(&mut state.container)

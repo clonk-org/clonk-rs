@@ -39280,6 +39280,9 @@ impl EffectHostContext {
                     id.clone(),
                     CommandDefinitionSnapshot {
                         value: metadata.value,
+                        shape: metadata.shape,
+                        category: metadata.category,
+                        construction_offset: metadata.construction_offset,
                         collection_limit: u32::try_from(metadata.collection_limit)
                             .ok()
                             .filter(|limit| *limit > 0),

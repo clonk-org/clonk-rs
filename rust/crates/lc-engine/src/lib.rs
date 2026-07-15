@@ -23780,6 +23780,9 @@ impl Engine {
                     id.clone(),
                     CommandDefinitionSnapshot {
                         value: definition.value(),
+                        shape: definition.shape_rect(),
+                        category: definition.category(),
+                        construction_offset: definition.construction_offset(),
                         collection_limit: definition.collection_limit(),
                         collection_rect: definition.collection_rect(),
                         fragile: definition.fragile(),
@@ -24093,6 +24096,9 @@ impl Engine {
                     id.clone(),
                     CommandDefinitionSnapshot {
                         value: definition.value(),
+                        shape: definition.shape_rect(),
+                        category: definition.category(),
+                        construction_offset: definition.construction_offset(),
                         collection_limit: definition.collection_limit(),
                         collection_rect: definition.collection_rect(),
                         fragile: definition.fragile(),
@@ -43332,6 +43338,22 @@ impl Engine {
                 )?;
                 self.set_acquire_script_result(caller, result)?;
             }
+            CommandEvent::ControlCommandConstruction {
+                caller,
+                target,
+                site,
+                target2,
+                definition_id,
+            } => {
+                let result = self.call_control_command_construction(
+                    caller,
+                    target,
+                    site,
+                    target2,
+                    &definition_id,
+                )?;
+                self.set_construct_script_result(caller, result)?;
+            }
             CommandEvent::SpawnObject {
                 definition_id,
                 owner,
@@ -43886,6 +43908,20 @@ impl Engine {
         Ok(())
     }
 
+    fn set_construct_script_result(
+        &mut self,
+        object_id: ObjectId,
+        result: AcquireScriptResult,
+    ) -> Result<(), EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        if let Some(object) = self.objects.get_mut(index) {
+            let _ = object.commands.set_construct_script_result(result);
+        }
+        Ok(())
+    }
+
     fn call_control_command_acquire(
         &mut self,
         caller: ObjectId,
@@ -43923,6 +43959,37 @@ impl Engine {
             Some(result) => result,
             None => AcquireScriptResult::Continue,
         })
+    }
+
+    fn call_control_command_construction(
+        &mut self,
+        caller: ObjectId,
+        target: Option<ObjectId>,
+        site: Vector2,
+        target2: Option<ObjectId>,
+        definition_id: &str,
+    ) -> Result<AcquireScriptResult, EngineError> {
+        let Some(index) = self.find_object_index(caller) else {
+            return Ok(AcquireScriptResult::Continue);
+        };
+        let args = vec![
+            target.map(object_reference_value).unwrap_or(Value::Nil),
+            Value::Int(site.x),
+            Value::Int(site.y),
+            target2.map(object_reference_value).unwrap_or(Value::Nil),
+            definition_id_to_c4id(definition_id)
+                .map(Value::Int)
+                .unwrap_or_else(|| Value::String(definition_id.to_string())),
+        ];
+        let value = self.call_object_function(index, "~ControlCommandConstruction", args)?;
+        let code = match value {
+            Value::Int(code) => Some(code),
+            Value::Bool(flag) => Some(if flag { 1 } else { 0 }),
+            _ => None,
+        };
+        Ok(code
+            .and_then(AcquireScriptResult::from_code)
+            .unwrap_or(AcquireScriptResult::Continue))
     }
 
     /// C4Game::ClearObjectPtrs fallback for engine-owned removal paths.
