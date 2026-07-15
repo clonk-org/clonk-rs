@@ -35633,6 +35633,9 @@ impl EffectHostContext {
                 let local_shape = metadata
                     .and_then(|metadata| metadata.shape)
                     .unwrap_or_else(|| DefinitionRect::new(-1, -1, 2, 2));
+                let shape_height = live_object_shape(self, id)
+                    .map(|shape| shape.height)
+                    .unwrap_or(local_shape.height);
                 let shape = DefinitionRect::new(
                     position.x.saturating_add(local_shape.x),
                     position.y.saturating_add(local_shape.y),
@@ -35740,6 +35743,7 @@ impl EffectHostContext {
                         .map(ObjectScopeContext::effective_action_ticks)
                         .unwrap_or(object.action_ticks),
                     shape_top: local_shape.y,
+                    shape_height,
                     shape,
                     entrance: None,
                 };
@@ -35829,10 +35833,18 @@ impl EffectHostContext {
             base_sell_enabled: self.world.base_sell_enabled,
             transfer_zones: &transfers,
         };
+        let gravity = PHYSICS_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|context| fixed100(context.gravity()) / 5)
+                .unwrap_or_else(|| PhysicsSettings::default().gravity_as_c4fixed())
+        });
 
         let (mut events, finished) = {
             let scope = self.object_scope_mut(target)?;
-            let result = scope.live_commands.execute_front(&context);
+            let result = scope
+                .live_commands
+                .execute_front_with_gravity(&context, gravity);
             if result.is_some() {
                 scope.command_stack_replaced = true;
             }

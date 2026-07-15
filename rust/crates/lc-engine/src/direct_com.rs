@@ -21,8 +21,10 @@ use crate::math::{self, itofix};
 use crate::player::CountedControlType;
 use crate::{
     ocf, tolerate_script_error, C4Fixed, CommandDirection, Direction, Engine, EngineError,
-    FixedVec2, Landscape, MouseDragSource, ObjectId, Value, Vector2, CATEGORY_MOUSE_SELECT,
+    FixedVec2, MouseDragSource, ObjectId, Value, Vector2, CATEGORY_MOUSE_SELECT,
 };
+#[cfg(test)]
+use crate::Landscape;
 
 /// `C4DoubleClick` (C4Constants.h:156): frames within which a repeated com
 /// becomes a COM_Double, and after which a buffered com flushes as
@@ -166,92 +168,6 @@ pub(crate) fn sim_flight_to_density(
             return true;
         }
     }
-}
-
-/// `Distance` (C4Math.cpp:22-31), used by the mouse throwing-position
-/// trajectory probe.
-fn mouse_c4_distance(first: Vector2, second: Vector2) -> i32 {
-    let dx = i64::from(first.x) - i64::from(second.x);
-    let dy = i64::from(first.y) - i64::from(second.y);
-    let squared = dx * dx + dy * dy;
-    let mut distance = (squared as f64).sqrt() as i64;
-    if distance * distance < squared {
-        distance += 1;
-    }
-    if distance * distance > squared {
-        distance -= 1;
-    }
-    distance as i32
-}
-
-/// `TrajectoryDistance` (C4Landscape.cpp:2055-2068): follow a fixed-point
-/// ballistic path until it leaves the landscape or strikes solid terrain and
-/// retain the closest whole-pixel distance to the mouse target.
-fn mouse_trajectory_distance(
-    landscape: &Landscape,
-    start: Vector2,
-    mut velocity: FixedVec2,
-    target: Vector2,
-    gravity: C4Fixed,
-) -> i32 {
-    let mut closest = mouse_c4_distance(start, target);
-    let mut position = FixedVec2::from_ints(start.x, start.y);
-    let width = i32::try_from(landscape.width()).unwrap_or(i32::MAX);
-    let height = landscape.estimated_height();
-    loop {
-        let pixel = Vector2::new(math::fixtoi(position.x), math::fixtoi(position.y));
-        if !(0..width).contains(&pixel.x)
-            || !(0..height).contains(&pixel.y)
-            || landscape.is_solid_at(pixel.x, pixel.y)
-        {
-            return closest;
-        }
-        closest = closest.min(mouse_c4_distance(pixel, target));
-        position.x += velocity.x;
-        position.y += velocity.y;
-        velocity.y += gravity;
-    }
-}
-
-/// `FindThrowingPosition` (C4Landscape.cpp:2070-2100), reduced to the success
-/// predicate needed by `C4MouseControl::DragMoving`.
-fn mouse_has_throwing_position(
-    landscape: &Landscape,
-    target: Vector2,
-    velocity: FixedVec2,
-    height: i32,
-    gravity: C4Fixed,
-) -> bool {
-    let width = i32::try_from(landscape.width()).unwrap_or(i32::MAX);
-    let Some(mut y) = landscape.semi_above_solid(target.x, target.y) else {
-        return false;
-    };
-    if !(-50..=50).contains(&(y - target.y)) {
-        return false;
-    }
-    let direction = if velocity.x > C4Fixed::ZERO { -1 } else { 1 };
-    let mut x = target.x;
-    for _ in 0..=60 {
-        if !(0..width).contains(&x) {
-            return false;
-        }
-        let Some(surface_y) = landscape.semi_above_solid(x, y) else {
-            return false;
-        };
-        y = surface_y;
-        if mouse_trajectory_distance(
-            landscape,
-            Vector2::new(x, y - height),
-            velocity,
-            target,
-            gravity,
-        ) <= 2
-        {
-            return true;
-        }
-        x += direction;
-    }
-    false
 }
 
 impl Engine {
@@ -1443,13 +1359,14 @@ impl Engine {
         [preferred_direction, -preferred_direction]
             .into_iter()
             .any(|direction| {
-                mouse_has_throwing_position(
-                    landscape,
-                    position,
-                    FixedVec2::new(throw_force * direction, -throw_force),
-                    throw_height,
-                    self.physics.gravity_as_c4fixed(),
-                )
+                landscape
+                    .find_throwing_position(
+                        position,
+                        FixedVec2::new(throw_force * direction, -throw_force),
+                        throw_height,
+                        self.physics.gravity_as_c4fixed(),
+                    )
+                    .is_some()
             })
             .then_some(CommandId::Throw)
     }

@@ -89,6 +89,10 @@ pub struct CommandObjectSnapshot {
     /// Current shape top (C4Object Shape.y) for the top-free scans
     /// (C4Command.cpp:1867).
     pub shape_top: i32,
+    /// Raw current C4Shape::Hgt. Unlike [`Self::shape`], this is not expanded
+    /// to the eighteen-pixel `At`/`Height` action area; ballistic Throw uses
+    /// the shape field verbatim (C4Command.cpp:942).
+    pub shape_height: i32,
     /// The absolute (position-applied) shape rect for `C4Object::At`
     /// point-in-shape tests (C4Object.cpp At(), used by C4Command::Enter
     /// :587-588 and Grab :690-691).
@@ -325,6 +329,7 @@ mod tests {
             contact: 0,
             action_time: 0,
             shape_top: 0,
+            shape_height: 20,
             shape: DefinitionRect::new(-8, -10, 16, 20),
             entrance: None,
             id: ObjectId::new(id),
@@ -5498,12 +5503,13 @@ mod tests {
     }
 
     #[test]
-    fn throw_requests_acquire_when_item_missing() {
+    fn throw_requests_get_for_the_exact_missing_item() {
         let actor_id = ObjectId::new(410);
         let target_id = ObjectId::new(420);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.contents.clear();
+        actor.action_procedure = ActionProcedure::Push;
 
         let mut item = snapshot_with_id(target_id.as_u64());
         item.definition_id = "STON".into();
@@ -5535,6 +5541,8 @@ mod tests {
         let mut state = ThrowState::from_request(
             &CommandRequest::new(CommandId::Throw)
                 .with_target(Some(target_id))
+                .with_tx(Some(100))
+                .with_ty(Some(70))
                 .with_update_interval(1),
         )
         .expect("state created");
@@ -5542,33 +5550,55 @@ mod tests {
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert!(result.update.is_none());
-        assert_eq!(result.operations.len(), 1);
-        match &result.operations[0] {
-            CommandOperation::PushFront(request) => {
-                assert_eq!(request.id, CommandId::Acquire);
-                assert_eq!(request.mode, CommandMode::SilentSub);
-                match &request.data {
-                    CommandData::Text(text) => assert_eq!(text, "STON"),
-                    other => panic!("unexpected acquire data: {:?}", other),
-                }
-            }
-            other => panic!("unexpected operation: {:?}", other),
-        }
-        let first_acquire = pushed_request(&result.operations, CommandId::Acquire);
+        let expected = CommandRequest::new(CommandId::Get)
+            .with_target(Some(target_id))
+            .with_update_interval(40)
+            .with_mode(CommandMode::SilentSub);
+        assert_eq!(
+            result.operations,
+            vec![CommandOperation::PushFront(expected.clone())],
+            "a specific Target is fetched by object identity, never by definition"
+        );
         let reissued = state.step(&ctx);
         assert_eq!(
-            pushed_request(&reissued.operations, CommandId::Acquire),
-            first_acquire,
-            "Throw reissues Acquire on its next execution"
+            reissued.operations,
+            vec![CommandOperation::PushFront(expected)],
+            "Throw reissues the same exact-object Get on its next execution"
         );
     }
 
     #[test]
-    fn throw_pushes_move_to_target_when_out_of_range() {
+    fn throw_coordinate_sentinel_treats_each_missing_field_as_zero() {
+        let x_only = ThrowState::from_request(
+            &CommandRequest::new(CommandId::Throw).with_tx(Some(17)),
+        )
+        .expect("x-only Throw");
+        assert_eq!(x_only.throw_position(), Some(Vector2::new(17, 0)));
+
+        let y_only = ThrowState::from_request(
+            &CommandRequest::new(CommandId::Throw).with_ty(Some(-9)),
+        )
+        .expect("y-only Throw");
+        assert_eq!(y_only.throw_position(), Some(Vector2::new(0, -9)));
+
+        let zero = ThrowState::from_request(
+            &CommandRequest::new(CommandId::Throw)
+                .with_tx(Some(0))
+                .with_ty(Some(0)),
+        )
+        .expect("zero Throw");
+        assert_eq!(zero.throw_position(), None);
+    }
+
+    #[test]
+    fn throw_moves_to_the_computed_ballistic_position() {
         let actor_id = ObjectId::new(430);
         let target_id = ObjectId::new(440);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(100, 99);
+        actor.action_procedure = ActionProcedure::Walk;
+        actor.physical.throw = 50_000;
         actor.contents = vec![target_id];
 
         let mut item = snapshot_with_id(target_id.as_u64());
@@ -5581,10 +5611,26 @@ mod tests {
         objects.insert(actor.id, actor.clone());
         objects.insert(item.id, item);
 
+        let mut landscape = crate::Landscape::flat(200, 100);
+        landscape.set_world_height(150);
+        let gravity = math::fixed100(20);
+        let raw_target = Vector2::new(100, 70);
+        let throw_force = math::val_by_physical(400, actor.physical.throw);
+        assert_eq!(
+            landscape.find_throwing_position(
+                raw_target,
+                FixedVec2::new(throw_force, -throw_force),
+                actor.shape_height,
+                gravity,
+            ),
+            Some(Vector2::new(94, 99)),
+            "the preferred +X launch searches left from the target"
+        );
+
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
-            landscape: None,
+            landscape: Some(&landscape),
             frame: 48,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -5602,30 +5648,106 @@ mod tests {
         let mut state = ThrowState::from_request(
             &CommandRequest::new(CommandId::Throw)
                 .with_target(Some(target_id))
-                .with_tx(Some(actor.position.x + 64))
-                .with_ty(Some(actor.position.y))
+                .with_tx(Some(raw_target.x))
+                .with_ty(Some(raw_target.y))
                 .with_update_interval(1),
         )
         .expect("state created");
 
-        let result = state.step(&ctx);
+        let result = state.step_with_gravity(&ctx, gravity);
         assert_eq!(result.status, CommandStatus::Running);
         assert_eq!(result.operations.len(), 1);
         match &result.operations[0] {
             CommandOperation::PushFront(request) => {
                 assert_eq!(request.id, CommandId::MoveTo);
-                assert_eq!(request.tx, Some(actor.position.x + 64));
-                assert_eq!(request.ty, Some(actor.position.y));
+                assert_eq!((request.tx, request.ty), (Some(94), Some(99)));
+                assert_eq!(request.update_interval, 20);
+                assert_eq!(request.mode, CommandMode::SilentSub);
+                assert_ne!(
+                    (request.tx, request.ty),
+                    (Some(raw_target.x), Some(raw_target.y)),
+                    "MoveTo must use FindThrowingPosition, not raw Throw coordinates"
+                );
             }
             other => panic!("unexpected operation: {:?}", other),
         }
         let first_move = pushed_request(&result.operations, CommandId::MoveTo);
-        let reissued = state.step(&ctx);
+        let reissued = state.step_with_gravity(&ctx, gravity);
         assert_eq!(
             pushed_request(&reissued.operations, CommandId::MoveTo),
             first_move,
             "Throw reissues MoveTo on its next execution"
         );
+    }
+
+    #[test]
+    fn targeted_throw_fails_when_both_ballistic_searches_hit_walls() {
+        let actor_id = ObjectId::new(441);
+        let item_id = ObjectId::new(442);
+        let raw_target = Vector2::new(100, 70);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(100, 99);
+        actor.action_procedure = ActionProcedure::Walk;
+        actor.physical.throw = 50_000;
+        actor.contents = vec![item_id];
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+
+        // Full-height two-column walls catch the exact two-pixel trajectory
+        // samples in each direction. The adjacent wall column then makes
+        // SemiAboveSolid abort that directional surface search.
+        let mut surface = vec![100; 200];
+        for x in [98_usize, 99, 101, 102] {
+            surface[x] = 0;
+        }
+        let mut landscape = crate::Landscape::new(200, surface).expect("walled landscape");
+        landscape.set_world_height(150);
+        let gravity = math::fixed100(20);
+        let throw_force = math::val_by_physical(400, actor.physical.throw);
+        for direction in [-1, 1] {
+            assert_eq!(
+                landscape.find_throwing_position(
+                    raw_target,
+                    FixedVec2::new(throw_force * direction, -throw_force),
+                    actor.shape_height,
+                    gravity,
+                ),
+                None
+            );
+        }
+
+        let objects = HashMap::from([(actor_id, actor.clone()), (item_id, item)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: Some(&landscape),
+            frame: 49,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = ThrowState::from_request(
+            &CommandRequest::new(CommandId::Throw)
+                .with_target(Some(item_id))
+                .with_tx(Some(raw_target.x))
+                .with_ty(Some(raw_target.y)),
+        )
+        .expect("Throw state");
+
+        let result = state.step_with_gravity(&ctx, gravity);
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result.update.is_none());
+        assert!(result.operations.is_empty());
+        assert!(result.events.is_empty());
     }
 
     #[test]
@@ -5637,12 +5759,15 @@ mod tests {
         let target_id = ObjectId::new(460);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(100, 200);
+        // FindThrowingPosition returns (94,99); x=99 is the inclusive
+        // default MoveToRange boundary, while the raw target is (100,70).
+        actor.position = Vector2::new(99, 99);
         actor.shape_top = -10;
-        actor.direction = Direction::Right;
+        actor.direction = Direction::Left;
         actor.action_procedure = ActionProcedure::Walk;
         actor.physical.throw = 50_000;
         actor.contents = vec![target_id];
+        actor.container = Some(ObjectId::new(999));
 
         let mut item = snapshot_with_id(target_id.as_u64());
         item.definition_id = "STON".into();
@@ -5654,12 +5779,15 @@ mod tests {
         objects.insert(actor.id, actor.clone());
         objects.insert(item.id, item);
 
+        let mut landscape = crate::Landscape::flat(200, 100);
+        landscape.set_world_height(150);
+        let gravity = math::fixed100(20);
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let rng = std::cell::RefCell::new(crate::LcgRng::seed_from_u64(7));
         let expected_rng = rng.borrow().clone();
         let ctx = CommandRuntimeContext {
-            landscape: None,
+            landscape: Some(&landscape),
             frame: 52,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -5677,14 +5805,15 @@ mod tests {
         let mut state = ThrowState::from_request(
             &CommandRequest::new(CommandId::Throw)
                 .with_target(Some(target_id))
-                .with_tx(Some(actor.position.x + 8))
-                .with_ty(Some(actor.position.y))
+                .with_tx(Some(100))
+                .with_ty(Some(70))
                 .with_update_interval(1),
         )
         .expect("state created");
 
-        let result = state.step(&ctx);
+        let result = state.step_with_gravity(&ctx, gravity);
         assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.operations.is_empty());
         let update = result.update.expect("throw should update actor");
         assert_eq!(update.command_direction, Some(CommandDirection::Stop));
         assert!(update.action.is_none(), "the engine event gates SetAction");
@@ -5696,7 +5825,7 @@ mod tests {
             complete_command_on_success,
         } = &result.events[0]
         else {
-            panic!("outdoor Throw must emit one atomic throw event")
+            panic!("targeted Throw must emit its atomic throw event even while contained")
         };
         assert_eq!(*event_actor, actor_id);
         assert_eq!(*object_id, target_id);
@@ -11251,13 +11380,27 @@ impl CommandStack {
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
     ) -> Option<CommandStepResult> {
+        self.execute_front_with_gravity(
+            ctx,
+            crate::PhysicsSettings::default().gravity_as_c4fixed(),
+        )
+    }
+
+    /// Engine execution supplies the live scenario gravity separately from
+    /// the object/landscape command snapshots. Only ballistic Throw consumes
+    /// it; the public fixture seam above retains default-physics behavior.
+    pub(crate) fn execute_front_with_gravity(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+    ) -> Option<CommandStepResult> {
         let (mode, mut result) = {
             let front = self.entries.front_mut()?;
             if front.finished.is_some() {
                 return None;
             }
             let mode = front.mode;
-            let result = front.step(ctx);
+            let result = front.step(ctx, gravity);
             if matches!(
                 result.status,
                 CommandStatus::Completed | CommandStatus::Failed
@@ -15030,13 +15173,22 @@ impl ThrowState {
     }
 
     fn throw_position(&self) -> Option<Vector2> {
-        match (self.tx, self.ty) {
-            (Some(x), Some(y)) if x != 0 || y != 0 => Some(Vector2::new(x, y)),
-            _ => None,
-        }
+        let position = Vector2::new(self.tx.unwrap_or(0), self.ty.unwrap_or(0));
+        (position != Vector2::ZERO).then_some(position)
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        self.step_with_gravity(
+            ctx,
+            crate::PhysicsSettings::default().gravity_as_c4fixed(),
+        )
+    }
+
+    fn step_with_gravity(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+    ) -> CommandStepResult {
         let mut pending_update = None;
 
         if ctx.object.action_procedure == ActionProcedure::Dig {
@@ -15051,7 +15203,22 @@ impl ThrowState {
             );
         }
 
-        if ctx.object.action_procedure == ActionProcedure::Push && self.throw_position().is_some() {
+        if let Some(target_id) = self.target {
+            if !ctx.object.contents.contains(&target_id) {
+                let get_request = CommandRequest::new(CommandId::Get)
+                    .with_target(Some(target_id))
+                    .with_update_interval(40)
+                    .with_mode(CommandMode::SilentSub);
+                let mut result = CommandStepResult::running(pending_update);
+                result
+                    .operations
+                    .push(CommandOperation::PushFront(get_request));
+                return result;
+            }
+        }
+
+        let target_position = self.throw_position();
+        if ctx.object.action_procedure == ActionProcedure::Push && target_position.is_some() {
             let request = CommandRequest::new(CommandId::UnGrab)
                 .with_update_interval(50)
                 .with_mode(CommandMode::SilentSub);
@@ -15060,46 +15227,44 @@ impl ThrowState {
             return result;
         }
 
-        if let Some(target_id) = self.target {
-            let mut has_item = false;
-            for id in &ctx.object.contents {
-                if *id == target_id {
-                    has_item = true;
-                    break;
-                }
-            }
-            if !has_item {
-                let target_snapshot = match ctx.resolve(target_id) {
-                    Some(snapshot) => snapshot,
-                    None => return CommandStepResult::failed(self.update_to_stop(ctx)),
-                };
-                if !target_snapshot.is_active() {
-                    return CommandStepResult::failed(self.update_to_stop(ctx));
-                }
-                let acquire_request = CommandRequest::new(CommandId::Acquire)
-                    .with_data(CommandData::Text(target_snapshot.definition_id.clone()))
-                    .with_update_interval(ACQUIRE_REQUEST_INTERVAL)
-                    .with_mode(CommandMode::SilentSub)
-                    .with_tx(Some(500))
-                    .with_ty(Some(250));
-                let mut result = CommandStepResult::running(pending_update);
-                result
-                    .operations
-                    .push(CommandOperation::PushFront(acquire_request));
-                return result;
-            }
-        }
+        if let Some(target_position) = target_position {
+            let preferred_direction = if ctx.position.x > target_position.x {
+                -1
+            } else {
+                1
+            };
+            let throw_force = math::val_by_physical(400, ctx.object.physical.throw);
+            let throwing_position = ctx.landscape.and_then(|landscape| {
+                [preferred_direction, -preferred_direction]
+                    .into_iter()
+                    .find_map(|direction| {
+                        landscape.find_throwing_position(
+                            target_position,
+                            FixedVec2::new(throw_force * direction, -throw_force),
+                            ctx.object.shape_height,
+                            gravity,
+                        )
+                    })
+            });
+            let Some(throwing_position) = throwing_position else {
+                return CommandStepResult::failed(pending_update);
+            };
 
-        if let Some(position) = self.throw_position() {
-            const THROW_HORIZONTAL_RANGE: i32 = 15;
+            const THROW_HORIZONTAL_RANGE_DEFAULT: i32 = 5;
             const THROW_VERTICAL_RANGE: i32 = 15;
-            let dx = position.x - ctx.position.x;
-            let dy = position.y - ctx.position.y;
-            if dx.abs() > THROW_HORIZONTAL_RANGE || dy.abs() > THROW_VERTICAL_RANGE {
+            let horizontal_range = if ctx.object.move_to_range > 0 {
+                ctx.object.move_to_range
+            } else {
+                THROW_HORIZONTAL_RANGE_DEFAULT
+            };
+            let dx = throwing_position.x - ctx.position.x;
+            let dy = throwing_position.y - ctx.position.y;
+            if dx.abs() > horizontal_range || dy.abs() > THROW_VERTICAL_RANGE {
                 let request = CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(position.x))
-                    .with_ty(Some(position.y))
-                    .with_update_interval(20);
+                    .with_tx(Some(throwing_position.x))
+                    .with_ty(Some(throwing_position.y))
+                    .with_update_interval(20)
+                    .with_mode(CommandMode::SilentSub);
                 let mut result = CommandStepResult::running(pending_update);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
@@ -15110,25 +15275,27 @@ impl ThrowState {
         // the outside Throw action (C4Command.cpp:966-970). ObjectComPutTake
         // chooses the requested item or the actor's first content and enters
         // it into the containing object (C4ObjectCom.cpp:700-712).
-        if let Some(container_id) = ctx.object.container {
-            let item_id = self
-                .target
-                .filter(|target| ctx.object.contents.contains(target))
-                .or_else(|| ctx.object.contents.first().copied());
-            let events = item_id
-                .map(|object_id| CommandEvent::ApplyObjectUpdate {
-                    object_id,
-                    update: ObjectUpdate::new().with_container(container_id),
-                })
-                .into_iter()
-                .collect();
-            return CommandStepResult::completed(pending_update).with_events(events);
+        if target_position.is_none() {
+            if let Some(container_id) = ctx.object.container {
+                let item_id = self
+                    .target
+                    .filter(|target| ctx.object.contents.contains(target))
+                    .or_else(|| ctx.object.contents.first().copied());
+                let events = item_id
+                    .map(|object_id| CommandEvent::ApplyObjectUpdate {
+                        object_id,
+                        update: ObjectUpdate::new().with_container(container_id),
+                    })
+                    .into_iter()
+                    .collect();
+                return CommandStepResult::completed(pending_update).with_events(events);
+            }
         }
 
         // Untargeted Throw while pushing is the grabbed-object twin of the
         // contained branch above: ObjectComPutTake uses Action.Target and the
         // command finishes without ungrabbing (C4Command.cpp:973-979).
-        if ctx.object.action_procedure == ActionProcedure::Push {
+        if target_position.is_none() && ctx.object.action_procedure == ActionProcedure::Push {
             let item_id = self
                 .target
                 .filter(|target| ctx.object.contents.contains(target))
@@ -15148,7 +15315,7 @@ impl ThrowState {
 
         let mut update = pending_update.unwrap_or_default();
 
-        if let Some(position) = self.throw_position() {
+        if let Some(position) = target_position {
             update.command_direction = Some(CommandDirection::Stop);
             if position.x > ctx.position.x {
                 update.direction = Some(Direction::Right);
@@ -15165,7 +15332,7 @@ impl ThrowState {
             .target
             .filter(|target| ctx.object.contents.contains(target))
             .or_else(|| ctx.object.contents.first().copied());
-        let targeted = self.throw_position().is_some();
+        let targeted = target_position.is_some();
         let Some(object_id) = item_id else {
             return if targeted {
                 CommandStepResult::running(Some(update))
@@ -16939,7 +17106,11 @@ impl ActiveCommand {
         self.state.id()
     }
 
-    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+    fn step(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+    ) -> CommandStepResult {
         if self.failures > 0 {
             if self.retries > 0 {
                 self.failures = 0;
@@ -16975,7 +17146,7 @@ impl ActiveCommand {
             CommandState::Transfer(state) => state.step(ctx),
             CommandState::Chop(state) => state.step(ctx),
             CommandState::Grab(state) => state.step(ctx),
-            CommandState::Throw(state) => state.step(ctx),
+            CommandState::Throw(state) => state.step_with_gravity(ctx, gravity),
             CommandState::UnGrab(state) => state.step(ctx),
             CommandState::Jump(state) => state.step(ctx),
             CommandState::Wait(state) => state.step(ctx),

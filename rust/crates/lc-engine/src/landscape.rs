@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::material::TemperatureDirection;
-use crate::{MaterialId, MaterialSet, Vector2};
+use crate::{math, C4Fixed, FixedVec2, MaterialId, MaterialSet, Vector2};
 #[cfg(test)]
 use crate::EnvironmentSettings;
 use serde::de::Error as _;
@@ -3144,6 +3144,75 @@ impl Landscape {
             }
             cy1 -= 1;
             cy2 += 1;
+        }
+        None
+    }
+
+    /// Follow one fixed-point ballistic path until it leaves the landscape
+    /// or strikes solid terrain, retaining the closest whole-pixel distance
+    /// to `target` (`TrajectoryDistance`, C4Landscape.cpp:2055-2068).
+    fn throwing_trajectory_distance(
+        &self,
+        start: Vector2,
+        mut velocity: FixedVec2,
+        target: Vector2,
+        gravity: C4Fixed,
+    ) -> i32 {
+        let mut closest = math::integer_distance(start.x, start.y, target.x, target.y);
+        let mut position = FixedVec2::from_ints(start.x, start.y);
+        let width = i32::try_from(self.width()).unwrap_or(i32::MAX);
+        let height = self.estimated_height();
+        loop {
+            let pixel = Vector2::new(math::fixtoi(position.x), math::fixtoi(position.y));
+            if !(0..width).contains(&pixel.x)
+                || !(0..height).contains(&pixel.y)
+                || self.is_solid_at(pixel.x, pixel.y)
+            {
+                return closest;
+            }
+            closest = closest.min(math::integer_distance(
+                pixel.x, pixel.y, target.x, target.y,
+            ));
+            position.x += velocity.x;
+            position.y += velocity.y;
+            velocity.y += gravity;
+        }
+    }
+
+    /// Find the first surface point from which `launch` passes within two
+    /// pixels of `target`. The search starts beneath the target and walks at
+    /// most sixty pixels opposite the horizontal launch direction
+    /// (`FindThrowingPosition`, C4Landscape.cpp:2073-2103).
+    pub(crate) fn find_throwing_position(
+        &self,
+        target: Vector2,
+        launch: FixedVec2,
+        object_height: i32,
+        gravity: C4Fixed,
+    ) -> Option<Vector2> {
+        let width = i32::try_from(self.width()).unwrap_or(i32::MAX);
+        let mut y = self.semi_above_solid(target.x, target.y)?;
+        if !(-50..=50).contains(&(y - target.y)) {
+            return None;
+        }
+
+        let direction = if launch.x > C4Fixed::ZERO { -1 } else { 1 };
+        let mut x = target.x;
+        for _ in 0..=60 {
+            if !(0..width).contains(&x) {
+                return None;
+            }
+            y = self.semi_above_solid(x, y)?;
+            if self.throwing_trajectory_distance(
+                Vector2::new(x, y - object_height),
+                launch,
+                target,
+                gravity,
+            ) <= 2
+            {
+                return Some(Vector2::new(x, y));
+            }
+            x += direction;
         }
         None
     }

@@ -6042,8 +6042,12 @@ impl Object {
         }
     }
 
-    fn step_command_stack(&mut self, ctx: CommandRuntimeContext<'_>) -> Option<CommandStepResult> {
-        self.commands.execute_front(&ctx)
+    fn step_command_stack(
+        &mut self,
+        ctx: CommandRuntimeContext<'_>,
+        gravity: C4Fixed,
+    ) -> Option<CommandStepResult> {
+        self.commands.execute_front_with_gravity(&ctx, gravity)
     }
 
     #[doc(hidden)]
@@ -21974,6 +21978,10 @@ impl Engine {
             no_transfer_zones,
             contact: object.frame_t_contact,
             shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
+            shape_height: object
+                .current_shape_rect()
+                .map(|rect| rect.height)
+                .unwrap_or(0),
             shape: self.object_shape_rect(object),
             entrance: self.object_entrance_area(object),
             status: object.state.status,
@@ -22089,7 +22097,8 @@ impl Engine {
             base_sell_enabled: self.base_sell_enabled,
             transfer_zones: &transfer_zones,
         };
-        let result = self.objects[index].step_command_stack(command_context);
+        let command_gravity = self.physics.gravity_as_c4fixed();
+        let result = self.objects[index].step_command_stack(command_context, command_gravity);
         self.rng = command_rng.into_inner();
 
         if let Some(result) = result {
@@ -22247,6 +22256,10 @@ impl Engine {
                     contact: object.frame_t_contact,
                     action_time: object.state.action.time,
                     shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
+                    shape_height: object
+                        .current_shape_rect()
+                        .map(|rect| rect.height)
+                        .unwrap_or(0),
                     shape: self.object_shape_rect(object),
                     entrance: self.object_entrance_area(object),
                     status: object.state.status,
@@ -22446,6 +22459,7 @@ impl Engine {
             let previous_action_state = self.objects[idx].state.action.clone();
             let previous_action_name = previous_action_state.name.clone();
             let mut landscape_slot = self.landscape.take();
+            let command_gravity = self.physics.gravity_as_c4fixed();
             let (
                 queued_spawns,
                 queue_destroy,
@@ -22485,7 +22499,7 @@ impl Engine {
                     base_sell_enabled: self.base_sell_enabled,
                     transfer_zones: &self.transfer_zones,
                 };
-                let step_result = object.step_command_stack(command_context);
+                let step_result = object.step_command_stack(command_context, command_gravity);
                 self.rng = command_rng.take();
                 if let Some(result) = step_result {
                     if result.update.is_some() || !result.events.is_empty() {
@@ -23481,6 +23495,10 @@ impl Engine {
                     shape_top: self.objects[idx]
                         .current_shape_rect()
                         .map(|rect| rect.y)
+                        .unwrap_or(0),
+                    shape_height: self.objects[idx]
+                        .current_shape_rect()
+                        .map(|rect| rect.height)
                         .unwrap_or(0),
                     shape: self.object_shape_rect(&self.objects[idx]),
                     entrance: self.object_entrance_area(&self.objects[idx]),
