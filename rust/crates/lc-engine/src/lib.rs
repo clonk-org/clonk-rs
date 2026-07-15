@@ -35744,19 +35744,63 @@ impl Engine {
             })
             .unwrap_or(true);
         if detach_attached {
-            let candidates = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
-            for candidate in candidates {
+            // C++ repeats Game.FindObject(..., pFindNext) against the live
+            // forward master list. Rebuild that view after every AbortCall:
+            // callbacks may remove or reorder the cursor, and a removed
+            // pFindNext makes the following search terminate.
+            let mut previous = None;
+            loop {
+                let master_ids = self
+                    .exec_list
+                    .iter()
+                    .rev()
+                    .copied()
+                    .filter(|candidate| {
+                        self.find_object_index(*candidate).is_some_and(|index| {
+                            self.objects[index].state.status != ObjectStatus::Inactive
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let start = match previous {
+                    Some(previous) => {
+                        let Some(position) = master_ids
+                            .iter()
+                            .position(|candidate| *candidate == previous)
+                        else {
+                            break;
+                        };
+                        position + 1
+                    }
+                    None => 0,
+                };
+                let candidate = master_ids.into_iter().skip(start).find(|candidate| {
+                    let Some(index) = self.find_object_index(*candidate) else {
+                        return false;
+                    };
+                    let object = &self.objects[index];
+                    if object.destroyed
+                        || !object.state.status.is_active()
+                        || (object.state.action.target != Some(target_id)
+                            && object.state.action.target2 != Some(target_id))
+                    {
+                        return false;
+                    }
+                    self.definitions
+                        .get(&object.definition_id)
+                        .is_some_and(|definition| {
+                            !definition
+                                .action_library()
+                                .is_idle_action(&object.state.action.name)
+                        })
+                });
+                let Some(candidate) = candidate else {
+                    break;
+                };
+                previous = Some(candidate);
                 let Some(candidate_index) = self.find_object_index(candidate) else {
                     continue;
                 };
                 let object = &self.objects[candidate_index];
-                if object.destroyed
-                    || !object.state.status.is_active()
-                    || (object.state.action.target != Some(target_id)
-                        && object.state.action.target2 != Some(target_id))
-                {
-                    continue;
-                }
                 let definition_id = object.definition_id.clone();
                 let attached = self.definitions.get(&definition_id).is_some_and(|definition| {
                     definition

@@ -2395,7 +2395,10 @@ func Departure(pOldContainer)
                 "ATCH",
                 "Attached",
                 r#"#strict
-local abort_count, abort_saw_idle, set_action_shadow_calls;
+static detach_order;
+local marker, deactivate_on_abort, remove_on_abort, abort_count, abort_saw_idle, set_action_shadow_calls;
+func ResetDetachOrder() { detach_order = 0; return 1; }
+func GetDetachOrder() { return detach_order; }
 func SetAction(szAction)
 {
     set_action_shadow_calls = set_action_shadow_calls + 1;
@@ -2403,8 +2406,11 @@ func SetAction(szAction)
 }
 func AttachAbort()
 {
+    detach_order = detach_order * 10 + marker;
     abort_count = abort_count + 1;
     abort_saw_idle = ActIdle();
+    if (remove_on_abort) RemoveObject(this());
+    if (deactivate_on_abort) SetObjectStatus(2, this(), false);
     return 1;
 }
 "#,
@@ -2451,10 +2457,10 @@ func AttachAbort()
             let attached = engine.spawn_object(
                 SpawnConfig::new("ATCH")
                     .with_action(attached_action)
-                    .with_local_vars(HashMap::from([(
-                        "set_action_shadow_calls".to_string(),
-                        Value::Int(0),
-                    )]))
+                    .with_local_vars(HashMap::from([
+                        ("marker".to_string(), Value::Int(1)),
+                        ("set_action_shadow_calls".to_string(), Value::Int(0)),
+                    ]))
                     .with_loaded(true),
             )?;
 
@@ -2465,10 +2471,10 @@ func AttachAbort()
             let target2_attached = engine.spawn_object(
                 SpawnConfig::new("ATCH")
                     .with_action(target2_action)
-                    .with_local_vars(HashMap::from([(
-                        "set_action_shadow_calls".to_string(),
-                        Value::Int(0),
-                    )]))
+                    .with_local_vars(HashMap::from([
+                        ("marker".to_string(), Value::Int(2)),
+                        ("set_action_shadow_calls".to_string(), Value::Int(0)),
+                    ]))
                     .with_loaded(true),
             )?;
 
@@ -2478,6 +2484,10 @@ func AttachAbort()
             let unrelated = engine.spawn_object(
                 SpawnConfig::new("ATCH")
                     .with_action(unrelated_action)
+                    .with_local_vars(HashMap::from([(
+                        "marker".to_string(),
+                        Value::Int(3),
+                    )]))
                     .with_loaded(true),
             )?;
             let content_idx = engine.find_object_index(content).expect("content exists");
@@ -2487,6 +2497,10 @@ func AttachAbort()
             engine.objects[content_idx].fixed_rotation = itofix(73);
             assert_ne!(engine.objects[content_idx].fixed_velocity, FixedVec2::ZERO);
             assert_ne!(engine.objects[content_idx].fixed_rotation, C4Fixed::ZERO);
+            let attached_idx = engine.find_object_index(attached).expect("attacher exists");
+            engine
+                .call_object_function(attached_idx, "ResetDetachOrder", Vec::new())
+                .expect("detach order resets");
 
             if via_script {
                 let actor_idx = engine.find_object_index(actor).expect("actor exists");
@@ -2590,6 +2604,13 @@ func AttachAbort()
             }
             let attached_idx = engine.find_object_index(attached).expect("attacher remains");
             assert_eq!(
+                engine
+                    .call_object_function(attached_idx, "GetDetachOrder", Vec::new())
+                    .expect("detach order reads"),
+                Value::Int(21),
+                "{path} follows forward main-list order: newer Target2 peer before Target peer"
+            );
+            assert_eq!(
                 engine.objects[attached_idx].state.action.target,
                 Some(burner),
                 "SetAction(ActIdle) preserves an unsupplied primary target"
@@ -2611,6 +2632,226 @@ func AttachAbort()
                 engine.objects[unrelated_idx].state.action.target,
                 Some(anchor),
                 "{path} only detaches objects targeting the burner"
+            );
+
+            let mut incomplete_definition = simple_definition("INCO");
+            incomplete_definition.set_incomplete_activity(true);
+            engine.register_definition(incomplete_definition)?;
+            let mut no_decay_definition = simple_definition("NBDC");
+            no_decay_definition.set_fire_properties(0, true, false);
+            engine.register_definition(no_decay_definition)?;
+
+            for (definition_id, label, marker) in
+                [("INCO", "IncompleteActivity", 4), ("NBDC", "NoBurnDecay", 5)]
+            {
+                let gated_burner = engine.spawn_object(
+                    SpawnConfig::new(definition_id)
+                        .with_position(Vector2::new(50 + marker * 5, 30)),
+                )?;
+                let mut gated_action = ActionState::new("Attach");
+                gated_action.target = Some(gated_burner);
+                let gated_attacher = engine.spawn_object(
+                    SpawnConfig::new("ATCH")
+                        .with_action(gated_action)
+                        .with_local_vars(HashMap::from([(
+                            "marker".to_string(),
+                            Value::Int(marker),
+                        )]))
+                        .with_loaded(true),
+                )?;
+
+                if via_script {
+                    let actor_idx = engine.find_object_index(actor).expect("actor exists");
+                    assert_eq!(
+                        engine.call_object_function(
+                            actor_idx,
+                            "Ignite",
+                            vec![object_reference_value(gated_burner)],
+                        )?,
+                        Value::Bool(true)
+                    );
+                } else {
+                    let burner_idx = engine
+                        .find_object_index(gated_burner)
+                        .expect("gated burner exists");
+                    assert!(engine.incinerate_object(burner_idx, 7, false, None)?);
+                }
+
+                let attacher_idx = engine
+                    .find_object_index(gated_attacher)
+                    .expect("gated attacher remains");
+                let state = &engine.objects[attacher_idx].state;
+                assert_eq!(
+                    state.action.name, "Attach",
+                    "{path} {label} keeps targeting attachers attached"
+                );
+                assert_eq!(state.action.target, Some(gated_burner));
+                assert!(state
+                    .local_vars
+                    .get("abort_count")
+                    .is_none_or(|value| matches!(value, Value::Nil | Value::Int(0))));
+            }
+
+            // C++ performs one fresh FindObject(..., previous) walk per
+            // match. If the first attacher's Abort removes that previous
+            // object from Game.Objects, the next lookup cannot find its
+            // cursor and stops instead of detaching the remaining peer.
+            let live_cursor_burner = engine.spawn_object(
+                SpawnConfig::new("BURN").with_position(Vector2::new(90, 30)),
+            )?;
+            let mut tail_action = ActionState::new("Attach");
+            tail_action.target = Some(live_cursor_burner);
+            let tail_attacher = engine.spawn_object(
+                SpawnConfig::new("ATCH")
+                    .with_action(tail_action)
+                    .with_local_vars(HashMap::from([(
+                        "marker".to_string(),
+                        Value::Int(7),
+                    )]))
+                    .with_loaded(true),
+            )?;
+            let mut cursor_action = ActionState::new("Attach");
+            cursor_action.target = Some(live_cursor_burner);
+            let cursor_attacher = engine.spawn_object(
+                SpawnConfig::new("ATCH")
+                    .with_action(cursor_action)
+                    .with_local_vars(HashMap::from([
+                        ("marker".to_string(), Value::Int(8)),
+                        ("deactivate_on_abort".to_string(), Value::Bool(true)),
+                    ]))
+                    .with_loaded(true),
+            )?;
+            engine
+                .call_object_function(attached_idx, "ResetDetachOrder", Vec::new())
+                .expect("detach order resets");
+
+            if via_script {
+                let actor_idx = engine.find_object_index(actor).expect("actor exists");
+                assert_eq!(
+                    engine.call_object_function(
+                        actor_idx,
+                        "Ignite",
+                        vec![object_reference_value(live_cursor_burner)],
+                    )?,
+                    Value::Bool(true)
+                );
+            } else {
+                let burner_idx = engine
+                    .find_object_index(live_cursor_burner)
+                    .expect("live-cursor burner exists");
+                assert!(engine.incinerate_object(burner_idx, 7, false, None)?);
+            }
+
+            let cursor_idx = engine
+                .find_object_index(cursor_attacher)
+                .expect("cursor attacher remains allocated");
+            assert_eq!(
+                engine.objects[cursor_idx].state.status,
+                ObjectStatus::Inactive,
+                "{path} Abort removes the FindObject cursor from the main list"
+            );
+            assert_eq!(engine.objects[cursor_idx].state.action.name, "Idle");
+            assert_eq!(
+                engine.objects[cursor_idx].state.local_vars.get("abort_count"),
+                Some(&Value::Int(1))
+            );
+            assert_eq!(
+                engine.objects[cursor_idx]
+                    .state
+                    .local_vars
+                    .get("abort_saw_idle"),
+                Some(&Value::Bool(true))
+            );
+            let tail_idx = engine
+                .find_object_index(tail_attacher)
+                .expect("tail attacher remains");
+            assert_eq!(engine.objects[tail_idx].state.status, ObjectStatus::Normal);
+            assert_eq!(
+                engine.objects[tail_idx].state.action.name, "Attach",
+                "{path} stops when the previous FindObject cursor disappears"
+            );
+            assert_eq!(
+                engine.objects[tail_idx].state.action.target,
+                Some(live_cursor_burner)
+            );
+            assert!(engine.objects[tail_idx]
+                .state
+                .local_vars
+                .get("abort_count")
+                .is_none_or(|value| matches!(value, Value::Nil | Value::Int(0))));
+            assert_eq!(
+                engine
+                    .call_object_function(attached_idx, "GetDetachOrder", Vec::new())
+                    .expect("detach order reads"),
+                Value::Int(8)
+            );
+
+            // AssignRemoval leaves its Status=Deleted link in Game.Objects
+            // until DeleteObjects. Unlike an inactive cursor, that link is
+            // still found as pFindNext and iteration continues after it.
+            let deleted_cursor_burner = engine.spawn_object(
+                SpawnConfig::new("BURN").with_position(Vector2::new(110, 30)),
+            )?;
+            let mut after_deleted_action = ActionState::new("Attach");
+            after_deleted_action.target = Some(deleted_cursor_burner);
+            let after_deleted = engine.spawn_object(
+                SpawnConfig::new("ATCH")
+                    .with_action(after_deleted_action)
+                    .with_local_vars(HashMap::from([(
+                        "marker".to_string(),
+                        Value::Int(9),
+                    )]))
+                    .with_loaded(true),
+            )?;
+            let mut deleted_cursor_action = ActionState::new("Attach");
+            deleted_cursor_action.target = Some(deleted_cursor_burner);
+            let _deleted_cursor = engine.spawn_object(
+                SpawnConfig::new("ATCH")
+                    .with_action(deleted_cursor_action)
+                    .with_local_vars(HashMap::from([
+                        ("marker".to_string(), Value::Int(6)),
+                        ("remove_on_abort".to_string(), Value::Bool(true)),
+                    ]))
+                    .with_loaded(true),
+            )?;
+            engine
+                .call_object_function(attached_idx, "ResetDetachOrder", Vec::new())
+                .expect("detach order resets");
+
+            if via_script {
+                let actor_idx = engine.find_object_index(actor).expect("actor exists");
+                assert_eq!(
+                    engine.call_object_function(
+                        actor_idx,
+                        "Ignite",
+                        vec![object_reference_value(deleted_cursor_burner)],
+                    )?,
+                    Value::Bool(true)
+                );
+            } else {
+                let burner_idx = engine
+                    .find_object_index(deleted_cursor_burner)
+                    .expect("deleted-cursor burner exists");
+                assert!(engine.incinerate_object(burner_idx, 7, false, None)?);
+            }
+
+            let after_deleted_idx = engine
+                .find_object_index(after_deleted)
+                .expect("attacher after deleted cursor remains");
+            assert_eq!(engine.objects[after_deleted_idx].state.action.name, "Idle");
+            assert_eq!(
+                engine.objects[after_deleted_idx]
+                    .state
+                    .local_vars
+                    .get("abort_count"),
+                Some(&Value::Int(1))
+            );
+            assert_eq!(
+                engine
+                    .call_object_function(attached_idx, "GetDetachOrder", Vec::new())
+                    .expect("detach order reads"),
+                Value::Int(69),
+                "{path} continues past a deleted cursor link"
             );
         }
         Ok(())

@@ -20066,13 +20066,64 @@ fn fire_effect_start_core(
             .unwrap_or(true)
     });
     if detach_attached {
-        let candidates = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .map(EffectHostContext::master_object_ids)
-                .unwrap_or_default()
-        });
-        for candidate in candidates {
+        // C++ performs a fresh FindObject(..., pFindNext) against the live
+        // forward master list after every AbortCall. In particular, removing
+        // pFindNext from Game.Objects makes the next search stop.
+        let mut previous = None;
+        loop {
+            let candidate = HOST_CONTEXT.with(|cell| {
+                let borrow = cell.borrow();
+                let context = borrow.as_ref()?;
+                let master_ids = context
+                    .master_object_ids()
+                    .into_iter()
+                    .filter(|candidate| {
+                        if let Some(scope) = context.object_scope(*candidate) {
+                            return scope.status() != ObjectStatus::Inactive;
+                        }
+                        context
+                            .get_world_object(*candidate)
+                            .is_some_and(|object| object.status() != ObjectStatus::Inactive)
+                    })
+                    .collect::<Vec<_>>();
+                let start = match previous {
+                    Some(previous) => {
+                        master_ids
+                            .iter()
+                            .position(|candidate| *candidate == previous)?
+                            + 1
+                    }
+                    None => 0,
+                };
+                master_ids.into_iter().skip(start).find(|candidate| {
+                    if let Some(scope) = context.object_scope(*candidate) {
+                        return !scope.destroy
+                            && scope.status().is_active()
+                            && !scope
+                                .action_library
+                                .is_idle_action(scope.effective_action_name())
+                            && (scope.effective_action_target(0) == Some(target)
+                                || scope.effective_action_target(1) == Some(target));
+                    }
+                    context.get_world_object(*candidate).is_some_and(|object| {
+                        object.status().is_active()
+                            && context
+                                .world
+                                .definition_metadata(object.definition_id())
+                                .is_some_and(|metadata| {
+                                    !metadata
+                                        .action_library
+                                        .is_idle_action(object.action_name())
+                                })
+                            && (object.action_target(0) == Some(target)
+                                || object.action_target(1) == Some(target))
+                    })
+                })
+            });
+            let Some(candidate) = candidate else {
+                break;
+            };
+            previous = Some(candidate);
             // Earlier SetAction callbacks may remove or retarget later
             // candidates; test the live state immediately before detaching.
             let attached = HOST_CONTEXT.with(|cell| {
