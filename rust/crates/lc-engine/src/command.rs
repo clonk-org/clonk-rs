@@ -6801,8 +6801,8 @@ mod tests {
         let destination_id = ObjectId::new(402);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.action_procedure = ActionProcedure::Push;
-        actor.action_target = Some(target_id);
+        actor.action_procedure = ActionProcedure::Dig;
+        actor.command_direction = CommandDirection::Right;
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.container = Some(destination_id);
@@ -6842,6 +6842,10 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
+        assert!(
+            result.update.is_none(),
+            "container fulfillment precedes PushTo's work-action stop"
+        );
         assert!(result.operations.is_empty());
     }
 
@@ -6854,6 +6858,7 @@ mod tests {
         let actor = snapshot_with_id(actor_id.as_u64());
 
         let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(30, 0);
         target.container = Some(container_id);
         target.ocf |= ocf::GRAB;
 
@@ -7623,6 +7628,7 @@ mod tests {
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.action_procedure = ActionProcedure::Walk;
         let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(30, 0);
         target.ocf |= ocf::GRAB;
         let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
         let players = HashMap::new();
@@ -7791,11 +7797,10 @@ mod tests {
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.command_direction = CommandDirection::Right;
-        actor.action_procedure = ActionProcedure::Push;
-        actor.action_target = Some(target_id);
+        actor.action_procedure = ActionProcedure::Dig;
 
         let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(95, 5);
+        target.position = Vector2::new(5, -5);
         target.ocf |= ocf::GRAB;
 
         let mut objects = HashMap::new();
@@ -7820,33 +7825,28 @@ mod tests {
             rng: None,
         };
 
-        let mut state = PushToState::from_request(
-            &CommandRequest::new(CommandId::PushTo)
-                .with_target(Some(target_id))
-                .with_tx(Some(100))
-                .with_ty(Some(0)),
-        )
-        .expect("state created");
-
-        let result = state.step(&ctx);
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::PushTo).with_target(Some(target_id)))
+            .expect("PushTo queues");
+        let result = stack.step(&ctx).expect("PushTo executes");
         assert_eq!(result.status, CommandStatus::Completed);
         let update = result.update.expect("push_to should stop actor");
         assert_eq!(update.command_direction, Some(CommandDirection::Stop));
-        assert_eq!(result.operations.len(), 2);
-        match &result.operations[0] {
-            CommandOperation::PushFront(request) => {
-                assert_eq!(request.id, CommandId::UnGrab);
-                assert_eq!(request.update_interval, 50);
-            }
-            other => panic!("expected ungrab request, got {:?}", other),
-        }
-        match &result.operations[1] {
-            CommandOperation::PushFront(request) => {
-                assert_eq!(request.id, CommandId::Wait);
-                assert_eq!(request.update_interval, 10);
-            }
-            other => panic!("expected wait request, got {:?}", other),
-        }
+        assert!(
+            update.action.is_none(),
+            "position fulfillment precedes PushTo's work-action stop"
+        );
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.command_names(), vec!["Wait", "UnGrab", "PushTo"]);
+        assert_eq!(snapshot.commands[0].update_interval, Some(10));
+        assert_eq!(snapshot.commands[0].mode, CommandMode::SilentSub);
+        assert_eq!(snapshot.commands[1].update_interval, Some(0));
+        assert_eq!(snapshot.commands[1].mode, CommandMode::SilentSub);
+        assert_eq!(
+            snapshot.commands[2].finished,
+            Some(CommandStatus::Completed)
+        );
     }
 
     #[test]
@@ -19973,6 +19973,12 @@ impl PushToState {
         })
     }
 
+    fn destination(&self) -> Vector2 {
+        // C4Command::Tx is a C4Value and Ty is an integer; both read as
+        // zero when AddCommand left their slots empty.
+        Vector2::new(self.tx.unwrap_or(0), self.ty.unwrap_or(0))
+    }
+
     fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
         if !matches!(
             ctx.object.action_procedure,
@@ -20006,22 +20012,20 @@ impl PushToState {
             return CommandStepResult::failed(None);
         }
 
-        let update = self.prepare_update(ctx);
-
         if let Some(destination) = self.container {
             if target_snapshot.container == Some(destination) {
-                return CommandStepResult::completed(update);
+                return CommandStepResult::completed(None);
             }
-        } else if let (Some(tx), Some(ty)) = (self.tx, self.ty) {
-            let dx = target_snapshot.position.x - tx;
-            let dy = target_snapshot.position.y - ty;
+        } else {
+            let destination = self.destination();
+            let dx = target_snapshot.position.x - destination.x;
+            let dy = target_snapshot.position.y - destination.y;
             if dx.abs() <= PUSH_TO_RANGE && dy.abs() <= PUSH_TO_RANGE {
-                let mut completion_update = update.clone().unwrap_or_default();
-                completion_update.command_direction = Some(CommandDirection::Stop);
+                let completion_update =
+                    ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
                 let mut result = CommandStepResult::completed(Some(completion_update));
                 let mut operations = Vec::new();
                 let ungrab_request = CommandRequest::new(CommandId::UnGrab)
-                    .with_update_interval(50)
                     .with_mode(CommandMode::SilentSub);
                 operations.push(CommandOperation::PushFront(ungrab_request));
                 let wait_request = CommandRequest::new(CommandId::Wait)
@@ -20032,6 +20036,8 @@ impl PushToState {
                 return result;
             }
         }
+
+        let update = self.prepare_update(ctx);
 
         if let Some(target_container) = target_snapshot.container {
             if Some(target_container) != self.container {
@@ -20069,14 +20075,11 @@ impl PushToState {
             return result;
         }
 
-        if self.tx.is_none() || self.ty.is_none() {
-            return CommandStepResult::failed(update);
-        }
-
+        let destination = self.destination();
         let mut result = CommandStepResult::running(update.clone());
         let request = CommandRequest::new(CommandId::MoveTo)
-            .with_tx(self.tx)
-            .with_ty(self.ty)
+            .with_tx(Some(destination.x))
+            .with_ty(Some(destination.y))
             .with_update_interval(40)
             .with_mode(CommandMode::SilentSub)
             .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET));
