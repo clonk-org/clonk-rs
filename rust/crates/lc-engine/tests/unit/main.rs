@@ -13937,7 +13937,7 @@ protected func GrabLost()
             wagon,
             Vector2::new(100, 0),
             None,
-            false,
+            true,
         );
         let wagon_index = engine.find_object_index(wagon).expect("wagon exists");
         engine
@@ -13950,7 +13950,12 @@ protected func GrabLost()
 
         engine.tick().expect("horse loses the distant wagon");
 
-        assert_l073_pull_stopped(&engine, horse, &["Wait"], "horse range loss");
+        assert_l073_pull_stopped(
+            &engine,
+            horse,
+            &["Wait", "MoveTo"],
+            "horse range loss without PushTo",
+        );
         let horse_index = engine.find_object_index(horse).expect("horse remains");
         assert_eq!(engine.objects[horse_index].state.action.target, None);
         let wagon_index = engine.find_object_index(wagon).expect("wagon remains");
@@ -13963,6 +13968,74 @@ protected func GrabLost()
                 .get("action_seen"),
             Some(&Value::String("Walk".to_string())),
             "GrabLost observes StopActionDelayCommand first"
+        );
+    }
+
+    #[test]
+    fn l080_pull_range_loss_clears_back_to_push_to() {
+        let mut engine = l073_pull_failure_engine();
+        let wagon = engine
+            .spawn_object(
+                SpawnConfig::new("L73W")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::ZERO)
+                    .with_controller(3),
+            )
+            .expect("wagon spawns");
+        let horse = l073_spawn_puller(
+            &mut engine,
+            wagon,
+            Vector2::new(100, 0),
+            None,
+            false,
+        );
+        let wagon_index = engine.find_object_index(wagon).expect("wagon exists");
+        engine
+            .call_object_function(
+                wagon_index,
+                "Arm",
+                vec![compat::object_reference_value(horse)],
+            )
+            .expect("wagon arms loss trace");
+
+        let horse_index = engine.find_object_index(horse).expect("horse exists");
+        let commands = &mut engine.objects[horse_index].commands;
+        commands
+            .push_back(CommandRequest::new(CommandId::MoveTo).with_tx(Some(20)))
+            .expect("approach queues");
+        commands
+            .push_back(CommandRequest::new(CommandId::PushTo).with_target(Some(wagon)))
+            .expect("PushTo queues");
+        commands
+            .push_back(CommandRequest::new(CommandId::Wait).with_update_interval(90))
+            .expect("tail Wait queues");
+
+        assert!(
+            !engine
+                .apply_physics_at_index(horse_index)
+                .expect("horse loses the distant wagon")
+        );
+
+        let horse_index = engine.find_object_index(horse).expect("horse remains");
+        let horse = &engine.objects[horse_index];
+        assert_eq!(horse.state.action.name, "Walk");
+        assert_eq!(horse.state.command_direction, CommandDirection::Stop);
+        assert_eq!(horse.fixed_velocity, FixedVec2::ZERO);
+        assert_eq!(horse.state.velocity, Vector2::ZERO);
+        assert_eq!(horse.state.action.target, None);
+        assert_eq!(
+            horse.commands.command_names(),
+            vec!["PushTo", "Wait"],
+            "GrabLost removes the new delay and approach but preserves PushTo's tail"
+        );
+        let wagon_index = engine.find_object_index(wagon).expect("wagon remains");
+        assert_eq!(
+            engine.objects[wagon_index]
+                .state
+                .local_vars
+                .get("action_seen"),
+            Some(&Value::String("Walk".to_string())),
+            "StopActionDelayCommand precedes GrabLost"
         );
     }
 
