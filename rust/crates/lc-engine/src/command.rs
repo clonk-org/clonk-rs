@@ -4858,7 +4858,7 @@ mod tests {
         let first = stack.step(&first_ctx).expect("Enter executes");
         assert!(matches!(
             first.events.as_slice(),
-            [CommandEvent::CallObjectFunction { function, .. }] if function == "ActivateEntrance"
+            [CommandEvent::ActivateEntrance { .. }]
         ));
 
         objects
@@ -4916,8 +4916,7 @@ mod tests {
             assert_eq!(result.status, CommandStatus::Running);
             assert!(matches!(
                 result.events.as_slice(),
-                [CommandEvent::CallObjectFunction { function, .. }]
-                    if function == "ActivateEntrance"
+                [CommandEvent::ActivateEntrance { .. }]
             ));
 
             if execution == 17 {
@@ -7921,21 +7920,16 @@ mod tests {
         assert!(result.update.is_none(), "walking Exit does not pre-stop");
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
-            CommandEvent::CallObjectFunction {
+            CommandEvent::ActivateEntrance {
                 object_id,
-                function,
                 caller,
                 on_result,
-                ..
             } => {
                 assert_eq!(*object_id, container_id);
-                assert_eq!(function, "ActivateEntrance");
                 assert_eq!(*caller, actor_id);
                 assert_eq!(
                     on_result,
-                    &Some(CallResultAction::FailCommandOnFalse {
-                        command: CommandId::Exit,
-                    })
+                    &Some(CallResultAction::ResolveExitActivation)
                 );
             }
             other => panic!("unexpected event: {other:?}"),
@@ -7945,13 +7939,13 @@ mod tests {
         stack
             .push_back(CommandRequest::new(CommandId::Exit))
             .expect("Exit command queues");
-        assert!(stack.fail_front_if(CommandId::Exit));
-        assert_eq!(stack.snapshot().commands[0].failures, 1);
-        assert_eq!(
-            stack.step(&ctx).expect("armed failure executes").status,
-            CommandStatus::Failed,
-            "ActivateEntrance=false follows C4Command::Finish(false)"
-        );
+        let armed = stack.execute_front(&ctx).expect("Exit arms activation");
+        assert!(matches!(
+            armed.events.as_slice(),
+            [CommandEvent::ActivateEntrance { .. }]
+        ));
+        assert!(stack.resolve_exit_activation(false).is_some());
+        assert!(stack.finished_front_view().is_some());
     }
 
     #[test]
@@ -7979,7 +7973,7 @@ mod tests {
         let first = state.step(&first_ctx);
         assert!(matches!(
             first.events.as_slice(),
-            [CommandEvent::CallObjectFunction { function, .. }] if function == "ActivateEntrance"
+            [CommandEvent::ActivateEntrance { .. }]
         ));
 
         objects
@@ -12720,6 +12714,16 @@ pub enum CommandEvent {
         #[serde(default)]
         on_result: Option<CallResultAction>,
     },
+    /// Run C4Object::ActivateEntrance rather than directly dispatching the
+    /// same-named script callback. The native method applies the hostile-base
+    /// and current OCF_Entrance gates before calling ~ActivateEntrance
+    /// (C4Object.cpp:1654-1670).
+    ActivateEntrance {
+        object_id: ObjectId,
+        caller: ObjectId,
+        #[serde(default)]
+        on_result: Option<CallResultAction>,
+    },
     /// C4Command::Fail's mode/retry-gated tail. The engine executes this
     /// synchronously after the command handler's own events and before
     /// `~ControlCommandFinished`, because CallFailed may replace the stack
@@ -12749,9 +12753,13 @@ pub enum CommandEvent {
 pub enum CallResultAction {
     CompleteCommandOnFalse { command: CommandId },
     CompleteCommandOnTrue { command: CommandId },
-    /// C4Command::Finish(false): arm a command failure for its next
-    /// Execute rather than completing it successfully.
+    /// Legacy queued-event form retained for save compatibility. Native
+    /// entrance activation now uses ResolveExitActivation so newly emitted
+    /// events resolve the exact in-flight Exit synchronously.
     FailCommandOnFalse { command: CommandId },
+    /// Resolve only the Exit which emitted a native ActivateEntrance event.
+    /// Callback-side command replacement must not inherit its result.
+    ResolveExitActivation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -13052,6 +13060,11 @@ pub(crate) enum GetAttemptDisposition {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GetAttemptResolution {
+    pub feedback: Option<CommandFailureFeedback>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExitActivationResolution {
     pub feedback: Option<CommandFailureFeedback>,
 }
 
@@ -13697,6 +13710,71 @@ impl CommandStack {
 
         self.entries[index].finished = Some(CommandStatus::Failed);
         self.record_failure_at(index)
+    }
+
+    /// Freeze the failure feedback of the Exit which emitted
+    /// ActivateEntrance. A callback may detach that command before its false
+    /// result arrives, but C++ still runs the old command's Fail tail.
+    pub(crate) fn pending_exit_activation_failure_feedback(
+        &self,
+    ) -> Option<CommandFailureFeedback> {
+        let index = self.entries.iter().position(|entry| {
+            matches!(
+                &entry.state,
+                CommandState::Exit(state) if state.activation_pending != 0
+            )
+        })?;
+        let mode = self.entries[index].mode;
+        let base = self
+            .entries
+            .iter()
+            .skip(index + 1)
+            .find(|entry| entry.finished.is_none());
+        let execute_feedback = match mode {
+            CommandMode::SilentSub => base.is_none(),
+            CommandMode::Sub => base.is_none_or(|entry| entry.retries == 0),
+            CommandMode::Base => true,
+            CommandMode::SilentBase => false,
+        };
+        execute_feedback.then(|| {
+            let entry = &self.entries[index];
+            CommandFailureFeedback {
+                command: CommandView::from_entry(
+                    entry
+                        .state
+                        .id()
+                        .map(CommandId::to_name)
+                        .unwrap_or("None")
+                        .to_string(),
+                    entry.request.as_ref(),
+                    &entry.state,
+                ),
+            }
+        })
+    }
+
+    /// Resolve one nested activation depth on the exact Exit which emitted
+    /// it. Callback-installed replacement Exits have no pending depth and
+    /// remain untouched (C4Command.cpp:644-650,1575-1582).
+    pub(crate) fn resolve_exit_activation(
+        &mut self,
+        activated: bool,
+    ) -> Option<ExitActivationResolution> {
+        let index = self.entries.iter().position(|entry| {
+            matches!(
+                &entry.state,
+                CommandState::Exit(state) if state.activation_pending != 0
+            )
+        })?;
+        if let CommandState::Exit(state) = &mut self.entries[index].state {
+            state.activation_pending = state.activation_pending.saturating_sub(1);
+        }
+        if activated {
+            return Some(ExitActivationResolution { feedback: None });
+        }
+        self.entries[index].finished = Some(CommandStatus::Failed);
+        let feedback = self.record_failure_at(index);
+        Some(ExitActivationResolution { feedback })
     }
 
     pub fn set_acquire_script_result(&mut self, result: AcquireScriptResult) -> bool {
@@ -14806,14 +14884,9 @@ impl EnterState {
                 return CommandStepResult::completed(Some(update)).with_events(vec![event]);
             }
             if !target_snapshot.entrance_status {
-                let event = CommandEvent::CallObjectFunction {
+                let event = CommandEvent::ActivateEntrance {
                     object_id: target,
-                    function: "ActivateEntrance".into(),
                     caller: ctx.object.id,
-                    tx: None,
-                    tx_definition: None,
-                    ty: None,
-                    target2: None,
                     on_result: None,
                 };
                 return CommandStepResult::running(Some(update)).with_events(vec![event]);
@@ -14856,12 +14929,15 @@ impl EnterState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ExitState {
     update_interval: u32,
+    #[serde(default, skip_serializing_if = "crate::u32_is_zero")]
+    activation_pending: u32,
 }
 
 impl ExitState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
         Ok(Self {
             update_interval: request.update_interval.max(1),
+            activation_pending: 0,
         })
     }
 
@@ -14909,17 +14985,11 @@ impl ExitState {
         // container to open and leaves this Exit command pending; a false
         // ActivateEntrance result fails it (C4Command.cpp:644-650).
         if !container_snapshot.entrance_status {
-            let event = CommandEvent::CallObjectFunction {
+            self.activation_pending = self.activation_pending.saturating_add(1);
+            let event = CommandEvent::ActivateEntrance {
                 object_id: container_id,
-                function: "ActivateEntrance".into(),
                 caller: ctx.object.id,
-                tx: None,
-                tx_definition: None,
-                ty: None,
-                target2: None,
-                on_result: Some(CallResultAction::FailCommandOnFalse {
-                    command: CommandId::Exit,
-                }),
+                on_result: Some(CallResultAction::ResolveExitActivation),
             };
             let update = (!update.is_empty()).then_some(update);
             return CommandStepResult::running(update).with_events(vec![event]);

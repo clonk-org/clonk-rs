@@ -7,6 +7,7 @@ mod support;
 mod action_attach;
 mod action_build;
 mod action_procedure;
+mod activate_entrance_native;
 mod component_natives;
 mod component_order;
 mod creation_owner_strictness;

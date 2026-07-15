@@ -7958,6 +7958,10 @@ pub struct EngineState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[doc(hidden)]
     pub scenario_values: Option<scenario::ScenarioValueStore>,
+    /// Saved BASEFUNC_RejectEntrance projection. None keeps the scenario
+    /// value already installed when restoring states written before L051.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_reject_entrance_enabled: Option<bool>,
     #[serde(default)]
     pub objects: Vec<PersistedObject>,
     /// Main object-list order in execution direction (the C++ list reversed).
@@ -8133,6 +8137,7 @@ impl EngineState {
             next_object_id,
             landscape: snapshot.landscape.clone(),
             scenario_values: None,
+            base_reject_entrance_enabled: None,
             objects,
             object_order: snapshot.render_order.clone(),
             inactive_object_order: Vec::new(),
@@ -13412,6 +13417,7 @@ struct RuntimeScenarioSection {
     saved_objects: Option<Vec<PersistedObject>>,
     saved_object_order: Vec<ObjectId>,
     scenario_values: scenario::ScenarioValueStore,
+    base_reject_entrance_enabled: bool,
     environment: EnvironmentSettings,
 }
 
@@ -13739,6 +13745,7 @@ pub struct Engine {
     base_buy_enabled: bool,
     base_sell_enabled: bool,
     base_auto_sell_enabled: bool,
+    base_reject_entrance_enabled: bool,
     base_regenerate_energy_enabled: bool,
     base_regenerate_energy_price: i32,
     landscape_insert_thrust: bool,
@@ -15703,6 +15710,7 @@ impl Engine {
             base_buy_enabled: true,
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
+            base_reject_entrance_enabled: true,
             base_regenerate_energy_enabled: true,
             base_regenerate_energy_price: 5,
             landscape_insert_thrust: false,
@@ -15799,6 +15807,10 @@ impl Engine {
 
     pub fn set_base_auto_sell_enabled(&mut self, enabled: bool) {
         self.base_auto_sell_enabled = enabled;
+    }
+
+    pub fn set_base_reject_entrance_enabled(&mut self, enabled: bool) {
+        self.base_reject_entrance_enabled = enabled;
     }
 
     pub fn set_base_regenerate_energy_enabled(&mut self, enabled: bool) {
@@ -15937,6 +15949,7 @@ impl Engine {
                         saved_objects: None,
                         saved_object_order: Vec::new(),
                         scenario_values: section.scenario_values.clone(),
+                        base_reject_entrance_enabled: section.base_reject_entrance_enabled,
                         environment: section.environment,
                     },
                 )
@@ -19482,7 +19495,12 @@ impl Engine {
         .with_scoreboard(Rc::clone(&self.scoreboard))
         .with_scoreboard_presentations(Rc::clone(&self.scoreboard_presentations))
         .with_scenario_script_counter(self.scenario_script_counter)
-        .with_command_settings(self.frame, self.base_buy_enabled, self.base_sell_enabled)
+        .with_command_settings(
+            self.frame,
+            self.base_buy_enabled,
+            self.base_sell_enabled,
+            self.base_reject_entrance_enabled,
+        )
         .with_structures_need_energy(self.structures_need_energy)
         .with_crew_name_sources(
             self.standard_names.clone(),
@@ -27002,6 +27020,7 @@ impl Engine {
             next_object_id: self.next_object_id,
             landscape: self.landscape.clone(),
             scenario_values: Some(self.scenario_values.as_ref().clone()),
+            base_reject_entrance_enabled: Some(self.base_reject_entrance_enabled),
             objects,
             object_order: self.exec_list.clone(),
             inactive_object_order: self.inactive_exec_list.clone(),
@@ -27066,6 +27085,9 @@ impl Engine {
         self.landscape = state.landscape.clone();
         if let Some(values) = &state.scenario_values {
             self.scenario_values = Rc::new(values.clone());
+        }
+        if let Some(enabled) = state.base_reject_entrance_enabled {
+            self.base_reject_entrance_enabled = enabled;
         }
         // C4MassMoverSet::Load semantics (C4MassMover.cpp:204-217): the
         // saved slots restore verbatim; nothing is re-derived from the
@@ -28884,6 +28906,8 @@ impl Engine {
                 if flags & 1 != 0 {
                     current.landscape = state.landscape.clone();
                     current.scenario_values = self.scenario_values.as_ref().clone();
+                    current.base_reject_entrance_enabled =
+                        self.base_reject_entrance_enabled;
                     current.environment = self.environment;
                 }
                 if let Some(objects) = saved_objects {
@@ -28920,6 +28944,7 @@ impl Engine {
         state.rng = self.rng.clone();
         state.landscape = target.landscape.clone();
         state.scenario_values = Some(target.scenario_values.clone());
+        state.base_reject_entrance_enabled = Some(target.base_reject_entrance_enabled);
         state.environment = target.environment;
         state.global_effects.clear();
         state.particles.clear();
@@ -41883,6 +41908,36 @@ impl Engine {
                     self.apply_call_result(action, caller, value.as_bool())?;
                 }
             }
+            CommandEvent::ActivateEntrance {
+                object_id,
+                caller,
+                on_result,
+            } => {
+                let detached_feedback = matches!(
+                    &on_result,
+                    Some(CallResultAction::ResolveExitActivation)
+                )
+                .then(|| {
+                    self.find_object_index(caller).and_then(|index| {
+                        self.objects[index]
+                            .commands
+                            .pending_exit_activation_failure_feedback()
+                    })
+                })
+                .flatten();
+                let result = self.activate_object_entrance(object_id, caller)?;
+                match on_result {
+                    Some(CallResultAction::ResolveExitActivation) => {
+                        self.resolve_exit_activation_result(
+                            caller,
+                            result,
+                            detached_feedback,
+                        )?;
+                    }
+                    Some(action) => self.apply_call_result(action, caller, result)?,
+                    None => {}
+                }
+            }
             CommandEvent::FailureFeedback { actor_id, feedback } => {
                 self.execute_command_failure_feedback(actor_id, feedback, None)?;
             }
@@ -42163,6 +42218,72 @@ impl Engine {
         Ok(())
     }
 
+    /// C4Object::ActivateEntrance (C4Object.cpp:1654-1670). This is a native
+    /// gate, not a generic call to the same-named script function: command
+    /// Enter/Exit must reject hostile bases first and then require the
+    /// receiver's current cached OCF_Entrance.
+    fn activate_object_entrance(
+        &mut self,
+        object_id: ObjectId,
+        caller: ObjectId,
+    ) -> Result<bool, EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        if self.objects[index].destroyed
+            || self.objects[index].state.status == ObjectStatus::Deleted
+        {
+            return Ok(false);
+        }
+        let Some(caller_index) = self.find_object_index(caller) else {
+            return Ok(false);
+        };
+        if self.objects[caller_index].destroyed
+            || self.objects[caller_index].state.status == ObjectStatus::Deleted
+        {
+            return Ok(false);
+        }
+        let by_player = self.objects[caller_index].state.controller;
+        let (base, owner) = {
+            let object = &self.objects[index];
+            (object.state.base, object.state.owner)
+        };
+
+        if self.base_reject_entrance_enabled && self.players_hostile(by_player, base) {
+            if let Some(owner_name) = self
+                .players
+                .get(&owner)
+                .map(|player| player.name().to_string())
+            {
+                self.messages.add_message(MessageSpec {
+                    kind: message::MessageKind::Target,
+                    text: format!("{owner_name} hostile.|No entrance!"),
+                    target: Some(object_id),
+                    player: None,
+                    offset: Vector2::ZERO,
+                    color: 0xffff_ffff,
+                    flags: 0,
+                    width: None,
+                    decoration: None,
+                    frame_decoration: None,
+                    portrait: None,
+                });
+            }
+            return Ok(false);
+        }
+
+        if self.object_ocf_at_index(index) & ocf::ENTRANCE == 0 {
+            return Ok(false);
+        }
+
+        let value = tolerate_script_error(self.call_object_function(
+            index,
+            "ActivateEntrance",
+            vec![object_reference_value(caller)],
+        ))?;
+        Ok(value.is_some_and(|value| value.as_bool()))
+    }
+
     fn apply_call_result(
         &mut self,
         action: CallResultAction,
@@ -42185,6 +42306,31 @@ impl Engine {
                     self.fail_command(caller, command)?;
                 }
             }
+            CallResultAction::ResolveExitActivation => {
+                self.resolve_exit_activation_result(caller, result, None)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_exit_activation_result(
+        &mut self,
+        caller: ObjectId,
+        result: bool,
+        detached_feedback: Option<CommandFailureFeedback>,
+    ) -> Result<(), EngineError> {
+        let resolution = self.find_object_index(caller).and_then(|index| {
+            self.objects[index]
+                .commands
+                .resolve_exit_activation(result)
+        });
+        let feedback = match resolution {
+            Some(resolution) => resolution.feedback,
+            None if !result => detached_feedback,
+            None => None,
+        };
+        if let Some(feedback) = feedback {
+            self.execute_command_failure_feedback(caller, feedback, None)?;
         }
         Ok(())
     }
@@ -50049,6 +50195,7 @@ mod scenario_section_random_regression {
             objects: Vec::new(),
             scenario_values: scenario::ScenarioValueStore::default(),
             environment: EnvironmentSettings::default(),
+            base_reject_entrance_enabled: true,
         }
     }
 

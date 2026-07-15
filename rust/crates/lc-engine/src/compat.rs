@@ -4,7 +4,7 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 use crate::command::{
-    definition_id_to_c4id, CommandData, CommandDefinitionSnapshot, CommandEvent,
+    definition_id_to_c4id, CallResultAction, CommandData, CommandDefinitionSnapshot, CommandEvent,
     CommandFailureFeedback, CommandId, CommandMode, CommandObjectSnapshot, CommandOperation,
     CommandPlayerSnapshot, CommandRequest, CommandRuntimeContext, CommandStack,
     CommandStackSnapshot, CommandView, MAX_COMMAND_STACK,
@@ -1296,6 +1296,7 @@ pub struct HostWorldContext {
     base_buy_enabled: bool,
     base_sell_enabled: bool,
     base_auto_sell_enabled: bool,
+    base_reject_entrance_enabled: bool,
     /// Raw `C4Sky::Modulation`/`BackClr` at callback entry.
     sky_adjustment: SkyAdjustment,
     /// Engine-owned surrogate for process config `MissionAccess`, shared so
@@ -1358,6 +1359,7 @@ impl Default for HostWorldContext {
             base_buy_enabled: true,
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
+            base_reject_entrance_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
             mission_access: Rc::new(RefCell::new(String::new())),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
@@ -1382,10 +1384,12 @@ impl HostWorldContext {
         frame: u64,
         base_buy_enabled: bool,
         base_sell_enabled: bool,
+        base_reject_entrance_enabled: bool,
     ) -> Self {
         self.frame = frame;
         self.base_buy_enabled = base_buy_enabled;
         self.base_sell_enabled = base_sell_enabled;
+        self.base_reject_entrance_enabled = base_reject_entrance_enabled;
         self
     }
 
@@ -1570,6 +1574,7 @@ impl HostWorldContext {
             base_buy_enabled: true,
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
+            base_reject_entrance_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
             mission_access: Rc::new(RefCell::new(String::new())),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
@@ -26762,6 +26767,81 @@ fn preview_grab_attempt(actor: ObjectId, target: ObjectId) -> Result<(), Runtime
     Ok(())
 }
 
+/// Synchronous C4Object::ActivateEntrance twin for script ExecuteCommand.
+/// The ordinary engine event cannot be deferred past the enclosing VM call:
+/// C++ exposes the gate, callback, and Exit result to the very next script
+/// instruction (C4Script.cpp:884-888; C4Object.cpp:1654-1670).
+fn preview_activate_entrance(target: ObjectId, caller: ObjectId) -> bool {
+    let should_call = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        let objects = context.command_runtime_data().0;
+        let (Some(target_snapshot), Some(caller_snapshot)) =
+            (objects.get(&target), objects.get(&caller))
+        else {
+            return false;
+        };
+        if target_snapshot.destroyed
+            || target_snapshot.status == ObjectStatus::Deleted
+            || caller_snapshot.destroyed
+            || caller_snapshot.status == ObjectStatus::Deleted
+        {
+            return false;
+        }
+        let target_ocf = context
+            .object_scope(target)
+            .map(ObjectScopeContext::ocf)
+            .or_else(|| context.get_world_object(target).map(|object| object.ocf()))
+            .unwrap_or(target_snapshot.ocf);
+
+        let by_player = caller_snapshot.controller;
+        let base = target_snapshot.base;
+        let hostile = if by_player == base {
+            false
+        } else {
+            match (context.player_state(by_player), context.player_state(base)) {
+                (Some(player), Some(base_player)) => {
+                    player.is_hostile_towards(base) || base_player.is_hostile_towards(by_player)
+                }
+                _ => false,
+            }
+        };
+        if context.world.base_reject_entrance_enabled && hostile {
+            if let Some(owner_name) = context
+                .player_state(target_snapshot.owner)
+                .map(|player| player.name.clone())
+            {
+                context.register_message(MessageCommand::Add(MessageSpec {
+                    kind: MessageKind::Target,
+                    text: format!("{owner_name} hostile.|No entrance!"),
+                    target: Some(target),
+                    player: None,
+                    offset: Vector2::ZERO,
+                    color: 0xffff_ffff,
+                    flags: 0,
+                    width: None,
+                    decoration: None,
+                    frame_decoration: None,
+                    portrait: None,
+                }));
+            }
+            return false;
+        }
+        target_ocf & ocf::ENTRANCE != 0
+    });
+    if !should_call {
+        return false;
+    }
+    call_object_own_fail_safe(
+        target,
+        "ActivateEntrance",
+        &[object_reference_value(caller)],
+    )
+    .as_bool()
+}
+
 fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     let active = active_object_id();
     let target = match args.first() {
@@ -26789,6 +26869,7 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
         mut finished,
         grab_attempts,
         drop_attempts,
+        entrance_attempts,
         failure_feedback,
         move_to_stops,
     )) = preview else {
@@ -26797,6 +26878,7 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let had_live_attempt = !grab_attempts.is_empty()
         || !drop_attempts.is_empty()
+        || !entrance_attempts.is_empty()
         || !failure_feedback.is_empty()
         || !move_to_stops.is_empty();
     for actor_id in move_to_stops {
@@ -26821,6 +26903,59 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
                 .and_then(|context| context.object_scope_mut(actor_id))
             .map(|scope| scope.live_commands.finish_pending_drop())
         });
+    }
+    for (object_id, caller, on_result) in entrance_attempts {
+        let detached_feedback = matches!(
+            &on_result,
+            Some(CallResultAction::ResolveExitActivation)
+        )
+        .then(|| {
+            HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.object_scope(caller))
+                    .and_then(|scope| {
+                        scope
+                            .live_commands
+                            .pending_exit_activation_failure_feedback()
+                    })
+            })
+        })
+        .flatten();
+        let activated = preview_activate_entrance(object_id, caller);
+        let feedback = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let context = borrow.as_mut()?;
+            let scope = context.object_scope_mut(caller)?;
+            let feedback = match on_result {
+                Some(CallResultAction::ResolveExitActivation) => {
+                    match scope.live_commands.resolve_exit_activation(activated) {
+                        Some(resolution) => resolution.feedback,
+                        None if !activated => detached_feedback,
+                        None => None,
+                    }
+                }
+                Some(CallResultAction::CompleteCommandOnFalse { command }) if !activated => {
+                    scope.live_commands.complete_front_if(command);
+                    None
+                }
+                Some(CallResultAction::CompleteCommandOnTrue { command }) if activated => {
+                    scope.live_commands.complete_front_if(command);
+                    None
+                }
+                Some(CallResultAction::FailCommandOnFalse { command }) if !activated => {
+                    scope.live_commands.fail_front_if(command);
+                    None
+                }
+                _ => None,
+            };
+            scope.command_stack_replaced = true;
+            scope.command_count = scope.live_commands.len();
+            Some(feedback)
+        });
+        if let Some(feedback) = feedback.flatten() {
+            preview_command_failure_feedback(caller, feedback)?;
+        }
     }
     for (actor_id, feedback) in failure_feedback {
         preview_command_failure_feedback(actor_id, feedback)?;
@@ -37399,9 +37534,9 @@ impl EffectHostContext {
                     controller: scope
                         .map(ObjectScopeContext::controller)
                         .unwrap_or_else(|| object.controller()),
-                    base: object
-                        .full_state()
-                        .map(|state| state.base)
+                    base: scope
+                        .and_then(|scope| scope.pending_update.base)
+                        .or_else(|| object.full_state().map(|state| state.base))
                         .unwrap_or(OWNER_NONE),
                     crew_member: scope
                         .map(|scope| scope.crew_member)
@@ -37505,6 +37640,7 @@ impl EffectHostContext {
         Option<CommandView>,
         Vec<(ObjectId, ObjectId)>,
         Vec<(ObjectId, ObjectId)>,
+        Vec<(ObjectId, ObjectId, Option<CallResultAction>)>,
         Vec<(ObjectId, CommandFailureFeedback)>,
         Vec<ObjectId>,
     )> {
@@ -37554,6 +37690,7 @@ impl EffectHostContext {
         let mut deferred_events = Vec::new();
         let mut grab_attempts = Vec::new();
         let mut drop_attempts = Vec::new();
+        let mut entrance_attempts = Vec::new();
         let mut failure_feedback = Vec::new();
         let mut move_to_stops = Vec::new();
         for event in events.drain(..) {
@@ -37566,6 +37703,11 @@ impl EffectHostContext {
                     actor_id,
                     object_id,
                 } => drop_attempts.push((actor_id, object_id)),
+                CommandEvent::ActivateEntrance {
+                    object_id,
+                    caller,
+                    on_result,
+                } => entrance_attempts.push((object_id, caller, on_result)),
                 CommandEvent::FailureFeedback { actor_id, feedback } => {
                     failure_feedback.push((actor_id, feedback));
                 }
@@ -37587,6 +37729,7 @@ impl EffectHostContext {
             finished,
             grab_attempts,
             drop_attempts,
+            entrance_attempts,
             failure_feedback,
             move_to_stops,
         ))
