@@ -173,7 +173,118 @@ pub(crate) struct ScriptContextFunction {
     pub label: String,
     pub description: Option<String>,
     pub image: Option<String>,
+    pub image_phase: i32,
     pub condition: Option<String>,
+    pub has_description: bool,
+}
+
+fn script_context_function_metadata(function: &lc_script::Function) -> ScriptContextFunction {
+    let mut label = String::new();
+    let mut image = None;
+    let mut image_phase = 0;
+    let mut condition = None;
+    let mut description = None;
+    if let Some(raw) = function.description.as_deref() {
+        let mut segments = raw.split('|');
+        label = segments.next().unwrap_or_default().trim().to_owned();
+        for segment in segments {
+            let Some((key, value)) = segment.split_once('=') else {
+                continue;
+            };
+            let value = value.trim();
+            match key.trim() {
+                "Image" => {
+                    let (identifier, phase) = value
+                        .split_once(':')
+                        .map_or((value, None), |(identifier, phase)| {
+                            (identifier, Some(phase))
+                        });
+                    image = Some(identifier.to_owned());
+                    image_phase = phase.and_then(|phase| phase.parse().ok()).unwrap_or(0);
+                }
+                "Condition" => condition = Some(value.to_owned()),
+                "Desc" => description = (!value.is_empty()).then(|| value.to_owned()),
+                _ => {}
+            }
+        }
+    }
+    ScriptContextFunction {
+        function: function.name.clone(),
+        label,
+        description,
+        image,
+        image_phase,
+        condition,
+        has_description: function
+            .description
+            .as_deref()
+            .is_some_and(|description| !description.is_empty()),
+    }
+}
+
+fn script_function_declaration_position(source: &str, name: &str) -> Option<usize> {
+    fn identifier_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'_'
+    }
+
+    let bytes = source.as_bytes();
+    let mut position = 0;
+    let mut found = None;
+    while position < bytes.len() {
+        if bytes[position] == b'"' {
+            position += 1;
+            while position < bytes.len() {
+                if bytes[position] == b'\\' {
+                    position = position.saturating_add(2);
+                } else if bytes[position] == b'"' {
+                    position += 1;
+                    break;
+                } else {
+                    position += 1;
+                }
+            }
+            continue;
+        }
+        if bytes.get(position..position + 2) == Some(b"//") {
+            position += 2;
+            while bytes.get(position).is_some_and(|byte| *byte != b'\n') {
+                position += 1;
+            }
+            continue;
+        }
+        if bytes.get(position..position + 2) == Some(b"/*") {
+            position += 2;
+            while position + 1 < bytes.len()
+                && bytes.get(position..position + 2) != Some(b"*/")
+            {
+                position += 1;
+            }
+            position = position.saturating_add(2).min(bytes.len());
+            continue;
+        }
+        if bytes.get(position..position + 4) == Some(b"func")
+            && (position == 0 || !identifier_byte(bytes[position - 1]))
+            && bytes
+                .get(position + 4)
+                .is_some_and(u8::is_ascii_whitespace)
+        {
+            let mut cursor = position + 4;
+            while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                cursor += 1;
+            }
+            let identifier_start = cursor;
+            while bytes.get(cursor).is_some_and(|byte| identifier_byte(*byte)) {
+                cursor += 1;
+            }
+            if &source[identifier_start..cursor] == name {
+                found = Some(position);
+            }
+            position = cursor;
+            continue;
+        }
+        position += 1;
+    }
+    found
 }
 
 use command::{
@@ -2794,6 +2905,9 @@ pub enum ObjectMenuSymbol {
     InfoTitle,
     /// `fctExit` (C4ObjectMenu.cpp:422-427).
     Exit,
+    /// `GfxR->fctConstruction` for the context-menu BuildInfo row
+    /// (C4ObjectMenu.cpp:401-408).
+    Construction,
 }
 
 impl ObjectMenuSymbol {
@@ -8917,51 +9031,37 @@ impl Definition {
     /// and parses caption/Image/Condition/Desc from the raw description
     /// segments (C4Aul.cpp:357-379; C4AulParse.cpp:309-380).
     pub(crate) fn script_context_functions(&self) -> Vec<ScriptContextFunction> {
+        self.script_menu_functions("Context")
+            .into_iter()
+            .filter(|function| function.has_description)
+            .collect()
+    }
+
+    /// Effective script functions whose names start with `prefix`, in the
+    /// reverse declaration order used by C4AulScript::GetSFunc(index,
+    /// prefix). Unlike the public Context-menu projection above, native
+    /// AddContextFunctions also enumerates functions with no description.
+    pub(crate) fn script_menu_functions(&self, prefix: &str) -> Vec<ScriptContextFunction> {
         let mut functions = self
             .script
             .functions()
-            .values()
-            .filter(|function| function.name.starts_with("Context"))
-            .filter_map(|function| {
-                function.description.as_deref().map(|raw| {
-                    let mut segments = raw.split('|');
-                    let label = segments.next().unwrap_or_default().trim().to_owned();
-                    let mut image = None;
-                    let mut condition = None;
-                    let mut description = None;
-                    for segment in segments {
-                        let Some((key, value)) = segment.split_once('=') else {
-                            continue;
-                        };
-                        let value = value.trim();
-                        match key.trim() {
-                            "Image" => {
-                                image = Some(
-                                    value
-                                        .split_once(':')
-                                        .map_or(value, |(identifier, _)| identifier)
-                                        .to_owned(),
-                                );
-                            }
-                            "Condition" => condition = Some(value.to_owned()),
-                            "Desc" => description = (!value.is_empty()).then(|| value.to_owned()),
-                            _ => {}
-                        }
-                    }
-                    let declaration_position = self
-                        .script_source
-                        .find(&format!("func {}", function.name));
-                    (
-                        declaration_position,
-                        ScriptContextFunction {
-                            function: function.name.clone(),
-                            label,
-                            description,
-                            image,
-                            condition,
-                        },
-                    )
-                })
+            .keys()
+            .filter(|name| name.starts_with(prefix))
+            .filter_map(|name| self.script.resolve_function(name, false))
+            .map(|resolution| {
+                let function = resolution.function;
+                let declaration_position =
+                    script_function_declaration_position(&self.script_source, &function.name);
+                let mut metadata = script_context_function_metadata(function.as_ref());
+                if metadata.condition.as_ref().is_some_and(|condition| {
+                    self.script.resolve_function(condition, true).is_none()
+                }) {
+                    // C4Aul stores the resolved condition pointer in the
+                    // annotation. An unresolved name is therefore equivalent
+                    // to omitting Condition, not a deferred failing call.
+                    metadata.condition = None;
+                }
+                (declaration_position, metadata)
             })
             .collect::<Vec<_>>();
         functions.sort_by(|(left_position, left), (right_position, right)| {
@@ -8973,6 +9073,21 @@ impl Definition {
             .into_iter()
             .map(|(_, function)| function)
             .collect()
+    }
+
+    pub(crate) fn script_menu_function(&self, name: &str) -> Option<ScriptContextFunction> {
+        self.script
+            .resolve_function(name, false)
+            .map(|resolution| {
+                let mut metadata =
+                    script_context_function_metadata(resolution.function.as_ref());
+                if metadata.condition.as_ref().is_some_and(|condition| {
+                    self.script.resolve_function(condition, true).is_none()
+                }) {
+                    metadata.condition = None;
+                }
+                metadata
+            })
     }
 
     pub fn set_description(&mut self, description: Option<String>) {
@@ -21415,6 +21530,43 @@ impl Engine {
                 Arc::make_mut(script).set_global_functions(table.clone());
             }
         }
+    }
+
+    fn global_menu_callback_script(
+        &self,
+        function: &str,
+    ) -> Option<(String, Arc<ScriptEngine>)> {
+        self.script_link_sources.iter().find_map(|source| {
+            let (name, script) = match source {
+                ScriptLinkSource::Script { name, script, .. } => {
+                    (name.clone(), Arc::clone(script))
+                }
+                ScriptLinkSource::Definition(id) => {
+                    let definition = self.definitions.get(id.as_str())?;
+                    (id.to_string(), definition.script_arc())
+                }
+                ScriptLinkSource::Scenario => {
+                    let scenario = self.scenario_script.as_ref()?;
+                    (scenario.name.clone(), scenario.script_arc())
+                }
+            };
+            script
+                .resolve_function(function, true)
+                .is_some_and(|resolution| {
+                    resolution.scope == lc_script::ScriptFunctionScope::Global
+                        && resolution.host_identity == script.host_identity()
+                })
+                .then_some((name, script))
+        })
+    }
+
+    fn global_menu_condition_resolves(&self, function: &str, condition: &str) -> bool {
+        self.global_menu_callback_script(function)
+            .is_some_and(|(_, script)| script.resolve_function(condition, true).is_some())
+            || self
+                .global_script_functions
+                .as_deref()
+                .is_some_and(|functions| functions.contains_key(condition))
     }
 
     pub fn install_global_scripts(&mut self, sources: &[(String, String)]) -> usize {
@@ -46634,15 +46786,14 @@ fn effect_stop_reason_value(reason: EffectStopReason) -> Value {
     }
 }
 
-/// Advance one node of C4Effect::Execute's live list walk. Dead nodes are
-/// unlinked only when the cursor reaches them; a callback can therefore
-/// mutate the suffix before its nodes advance, and an effect inserted after
-/// the current node can still execute in this frame.
-fn advance_effect_frame_cursor(
-    effects: &mut Vec<EffectState>,
+/// Locate the suffix after a stable live-effect cursor. Identity wins while
+/// the node remains linked; priority/list order recovers the same suffix when
+/// a callback unlinks the current node.
+fn effect_frame_cursor_next_index(
+    effects: &[EffectState],
     cursor: Option<EffectFrameCursor>,
-) -> Option<(EffectFrameCursor, Option<EffectEvent>)> {
-    let index = match cursor {
+) -> usize {
+    match cursor {
         None => 0,
         Some(cursor) => effects
             .iter()
@@ -46666,7 +46817,18 @@ fn advance_effect_frame_cursor(
                     })
                     .unwrap_or(effects.len())
             }),
-    };
+    }
+}
+
+/// Advance one node of C4Effect::Execute's live list walk. Dead nodes are
+/// unlinked only when the cursor reaches them; a callback can therefore
+/// mutate the suffix before its nodes advance, and an effect inserted after
+/// the current node can still execute in this frame.
+fn advance_effect_frame_cursor(
+    effects: &mut Vec<EffectState>,
+    cursor: Option<EffectFrameCursor>,
+) -> Option<(EffectFrameCursor, Option<EffectEvent>)> {
+    let index = effect_frame_cursor_next_index(effects, cursor);
 
     loop {
         let effect = effects.get(index)?;

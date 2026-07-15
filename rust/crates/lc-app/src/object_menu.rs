@@ -650,6 +650,7 @@ fn command_image_for_menu_symbol(
         },
         ObjectMenuSymbol::Info | ObjectMenuSymbol::InfoTitle => CommandImage::InfoMenu { picture },
         ObjectMenuSymbol::Exit => CommandImage::Exit,
+        ObjectMenuSymbol::Construction => CommandImage::Picture(gfx.hud.construction.clone()),
     }
 }
 
@@ -5061,11 +5062,11 @@ mod tests {
     }
 
     #[test]
-    fn engine_context_menu_draws_cpp_composite_symbols_and_exit_close_icon() {
+    fn engine_context_menu_draws_cpp_composite_construction_and_exit_symbols() {
         // C4ObjectMenu::RefillInternal composes carried picture+Hand(0) for
         // Put, a definition picture for Contents, DrawMenuSymbol for
-        // Buy/Sell, target+OKCancel(0,1) for Info and fctExit for Exit
-        // (src/C4ObjectMenu.cpp:335-427;
+        // Buy/Sell, fctConstruction for BuildInfo, target+OKCancel(0,1) for
+        // Info and fctExit for Exit (src/C4ObjectMenu.cpp:335-427;
         // src/C4Menu.cpp:43-70). AutoContextMenu's close command contains
         // "Exit", so the command strip also draws fctExit (:874-880).
         fn solid(width: u32, height: u32, rgba: [u8; 4]) -> ImageData {
@@ -5119,6 +5120,11 @@ mod tests {
                 "NONE",
                 lc_engine::ObjectMenuSymbol::Sell { owner: 7 },
             ),
+            make_item(
+                "Construction material",
+                "NONE",
+                lc_engine::ObjectMenuSymbol::Construction,
+            ),
             make_item("Info", "HUT3", lc_engine::ObjectMenuSymbol::Info),
             make_item("Exit", "NONE", lc_engine::ObjectMenuSymbol::Exit),
         ];
@@ -5131,6 +5137,7 @@ mod tests {
         let orange = Color::opaque(240, 120, 20);
         let cyan = Color::opaque(20, 220, 220);
         let purple = Color::opaque(160, 20, 220);
+        let brown = Color::opaque(170, 90, 30);
         let mut arrow = vec![0_u8; 16 * 8 * 4];
         for y in 0..8 {
             for x in 0..16 {
@@ -5155,6 +5162,7 @@ mod tests {
                 arrow: Some(ImageData::new(16, 8, arrow)),
                 exit: Some(solid(8, 8, [cyan.r, cyan.g, cyan.b, cyan.a])),
                 hand: Some(solid(8, 8, [purple.r, purple.g, purple.b, purple.a])),
+                construction: Some(solid(8, 8, [brown.r, brown.g, brown.b, brown.a])),
                 control: Some(control.clone()),
                 ..lc_frontend::HudGraphics::default()
             },
@@ -5167,6 +5175,7 @@ mod tests {
         let item_icons = vec![
             Some(picture.clone()),
             Some(picture.clone()),
+            None,
             None,
             None,
             Some(picture),
@@ -5212,13 +5221,14 @@ mod tests {
                 "missing Sell {color:?}"
             );
         }
+        assert!(contains_color(&surface, row(4), brown));
         for color in [gray, orange] {
             assert!(
-                contains_color(&surface, row(4), color),
+                contains_color(&surface, row(5), color),
                 "missing Info {color:?}"
             );
         }
-        assert!(contains_color(&surface, row(5), cyan));
+        assert!(contains_color(&surface, row(6), cyan));
         let command_strip = Rect::new(
             layout.bounds.x,
             layout.bounds.y + layout.bounds.height as i32 - CLASSIC_COMMAND_HEIGHT,

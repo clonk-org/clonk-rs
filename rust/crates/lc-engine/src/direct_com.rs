@@ -584,73 +584,612 @@ impl Engine {
         Ok(())
     }
 
-    /// The annotated `Context*` portion of
-    /// `C4ObjectMenu::AddContextFunctions` (C4ObjectMenu.cpp:670-685).
-    fn script_context_menu_items(
+    fn context_function_item(
+        &self,
+        function: &crate::ScriptContextFunction,
+        caption: String,
+        command: String,
+        fallback_picture: Option<ObjectId>,
+    ) -> crate::ObjectMenuItem {
+        const C4MN_ITEM_NO_COUNT: i32 = 12_345_678;
+        let image = function
+            .image
+            .as_deref()
+            .filter(|image| !image.is_empty())
+            .unwrap_or("NONE");
+        let fallback_picture = (image == "NONE" || !self.definitions.contains_key(image))
+            .then_some(fallback_picture)
+            .flatten();
+        let fallback_snapshot = fallback_picture
+            .and_then(|object| self.find_object_index(object))
+            .map(|index| {
+                let object = &self.objects[index];
+                crate::ObjectMenuPictureSnapshot {
+                    definition_id: object.definition_id.clone(),
+                    symbol_size: 35,
+                    base_graphics: object.state.base_graphics.clone(),
+                    graphics_overlays: object.state.graphics_overlays.clone(),
+                    blit_mode: object.state.blit_mode,
+                    color: object.state.color,
+                    color_modulation: object.state.color_modulation,
+                    picture_rect: object.state.picture_rect,
+                    rank: None,
+                }
+            });
+        crate::ObjectMenuItem {
+            caption,
+            info_caption: crate::normalize_menu_info_caption(
+                function.description.clone().unwrap_or_default(),
+            ),
+            command,
+            command2: String::new(),
+            count: C4MN_ITEM_NO_COUNT,
+            item_id: "NONE".to_owned(),
+            symbol: crate::ObjectMenuSymbol::Definition,
+            image: if image != "NONE" && self.definitions.contains_key(image) {
+                crate::ObjectMenuImage::Indexed {
+                    index: function.image_phase,
+                }
+            } else if let Some(object) = fallback_picture {
+                crate::ObjectMenuImage::Object { object }
+            } else {
+                crate::ObjectMenuImage::None
+            },
+            presentation_definition_id: (image != "NONE" && self.definitions.contains_key(image))
+                .then(|| image.to_owned()),
+            picture_snapshot: fallback_snapshot,
+            picture_object: None,
+            components: Vec::new(),
+            selectable: true,
+            value: None,
+            text_display_progress: -1,
+        }
+    }
+
+    fn add_native_context_menu_item(
+        &mut self,
+        menu_object: ObjectId,
+        item: crate::ObjectMenuItem,
+    ) {
+        let Some(menu_index) = self.find_object_index(menu_object) else {
+            return;
+        };
+        let Some(menu) = self.objects[menu_index]
+            .state
+            .menu
+            .as_mut()
+            .filter(|menu| menu.identification == Value::Int(14))
+        else {
+            return;
+        };
+        if menu.selection == -1 && item.selectable {
+            menu.selection = menu.items.len() as i32;
+        }
+        menu.items.push(item);
+    }
+
+    fn record_context_function_item(
+        &mut self,
+        menu_object: ObjectId,
+        publish: bool,
+        items: &mut Vec<crate::ObjectMenuItem>,
+        item: crate::ObjectMenuItem,
+    ) {
+        if publish {
+            self.add_native_context_menu_item(menu_object, item.clone());
+        }
+        items.push(item);
+    }
+
+    fn context_condition_on_object(
+        &mut self,
+        object_index: usize,
+        function: &crate::ScriptContextFunction,
+        arguments: &str,
+        label: &str,
+    ) -> Result<bool, EngineError> {
+        let Some(condition) = function.condition.as_deref() else {
+            return Ok(true);
+        };
+        let source = format!("{condition}({arguments})");
+        Ok(tolerate_script_error(self.direct_exec_on_object(
+            object_index,
+            &source,
+            label,
+        ))?
+        .is_some_and(|value| compat::value_raw_truthy(&value)))
+    }
+
+    fn global_script_menu_functions(&self, prefix: &str) -> Vec<crate::ScriptContextFunction> {
+        let Some(global_functions) = self.global_script_functions.as_deref() else {
+            return Vec::new();
+        };
+        let mut functions = global_functions
+            .values()
+            .filter(|function| function.name.starts_with(prefix))
+            .map(|function| {
+                let mut metadata = crate::script_context_function_metadata(function);
+                if metadata
+                    .condition
+                    .as_ref()
+                    .is_some_and(|condition| {
+                        !self.global_menu_condition_resolves(&function.name, condition)
+                    })
+                {
+                    metadata.condition = None;
+                }
+                metadata
+            })
+            .collect::<Vec<_>>();
+        // The global table does not retain source offsets. Keep enumeration
+        // deterministic; ordinary definition hosts use exact reverse source
+        // order through Definition::script_menu_functions.
+        functions.sort_by(|left, right| left.function.cmp(&right.function));
+        functions
+    }
+
+    /// All native classes of `C4ObjectMenu::AddContextFunctions`, in their
+    /// C++ order: ActionContext, effect Fx*Context, AttachContext,
+    /// Activate/ControlDigDouble, then target Context* functions
+    /// (C4ObjectMenu.cpp:544-685).
+    fn context_function_menu_items(
         &mut self,
         target_index: usize,
         menu_object: ObjectId,
+        publish: bool,
     ) -> Result<Vec<crate::ObjectMenuItem>, EngineError> {
-        const C4MN_ITEM_NO_COUNT: i32 = 12_345_678;
+        let Some(menu_index) = self.find_object_index(menu_object) else {
+            return Ok(Vec::new());
+        };
         let target_id = self.objects[target_index].id;
         let target_definition = self.objects[target_index].definition_id.clone();
-        let context_functions = self
-            .definitions
-            .get(&target_definition)
-            .map(|definition| definition.script_context_functions())
-            .unwrap_or_default();
+        let target_action_name = self.objects[target_index].state.action.name.clone();
+        let target_action_active =
+            self.definitions
+                .get(&target_definition)
+                .is_some_and(|definition| {
+                    !definition
+                        .action_library()
+                        .is_idle_action(&target_action_name)
+                });
+        let target_action_target = self.objects[target_index].state.action.target;
         let mut items = Vec::new();
-        for context in context_functions {
-            let image = context.image.as_deref().unwrap_or("NONE");
-            let enabled = match context.condition.as_deref() {
-                Some(condition) => {
-                    // ParseDesc stores the resolved C4Aul function pointer;
-                    // that pointer may name an engine-global `global func`
-                    // such as MCLK's IsComboSystemEnabled. DirectExec in the
-                    // target context preserves own-before-global resolution
-                    // and the two legacy condition arguments
-                    // (C4AulParse.cpp:349-352; C4ObjectMenu.cpp:673-675).
-                    let source = format!(
-                        "{}(Object({}), C4Id(\"{}\"))",
-                        condition,
+
+        // ActionContext functions of the target's first action target.
+        if target_action_active {
+            if let Some(action_target_index) =
+                target_action_target.and_then(|id| self.find_object_index(id))
+            {
+                let action_target_id = self.objects[action_target_index].id;
+                let definition_id = self.objects[action_target_index].definition_id.clone();
+                let functions = self
+                    .definitions
+                    .get(&definition_id)
+                    .map(|definition| definition.script_menu_functions("ActionContext"))
+                    .unwrap_or_default();
+                for function in functions {
+                    let image = function.image.as_deref().unwrap_or("NONE");
+                    let arguments = format!(
+                        "Object({}), C4Id(\"{}\"), Object({})",
+                        menu_object.as_u64(),
+                        image,
+                        target_id.as_u64()
+                    );
+                    if !self.context_condition_on_object(
+                        action_target_index,
+                        &function,
+                        &arguments,
+                        "ActionContextCondition",
+                    )? {
+                        continue;
+                    }
+                    let command = format!(
+                        "ProtectedCall(Object({}),\"{}\",this,Object({}))",
+                        action_target_id.as_u64(),
+                        function.function,
+                        target_id.as_u64()
+                    );
+                    let item = self.context_function_item(
+                        &function,
+                        function.label.clone(),
+                        command,
+                        None,
+                    );
+                    self.record_context_function_item(
+                        menu_object,
+                        publish,
+                        &mut items,
+                        item,
+                    );
+                }
+            }
+        }
+
+        // Active effect context functions use the callback script selected
+        // by the live command target object/id, or the global script host.
+        let mut effect_cursor = None;
+        loop {
+            let effects = &self.objects[target_index].state.effects;
+            let mut effect_index = crate::effect_frame_cursor_next_index(effects, effect_cursor);
+            let Some(effect) = (loop {
+                let Some(effect) = effects.get(effect_index).cloned() else {
+                    break None;
+                };
+                effect_index += 1;
+                if effect.priority > 0 {
+                    break Some(effect);
+                }
+            }) else {
+                break;
+            };
+            effect_cursor = Some(crate::EffectFrameCursor {
+                number: effect.number,
+                priority: effect.priority.unsigned_abs(),
+            });
+            let prefix = format!("Fx{}Context", effect.name);
+            let command_target = effect.command_target.and_then(|number| {
+                u64::try_from(number)
+                    .ok()
+                    .map(ObjectId::new)
+                    .and_then(|id| self.find_object_index(id))
+                    .filter(|&index| {
+                        !self.objects[index].destroyed
+                            && self.objects[index].state.status != crate::ObjectStatus::Deleted
+                    })
+            });
+            let (functions, condition_object, callback_definition) = if let Some(command_index) =
+                command_target
+            {
+                let definition_id = self.objects[command_index].definition_id.clone();
+                if let Some(live_effect) = self.objects[target_index]
+                    .state
+                    .effects
+                    .iter_mut()
+                    .find(|live_effect| live_effect.number == effect.number)
+                {
+                    // GetCallbackScript refreshes idCommandTarget while the
+                    // object target is alive, preserving a definition
+                    // fallback if a condition deletes that object.
+                    live_effect.command_id = Some(definition_id.clone());
+                }
+                let functions = self
+                    .definitions
+                    .get(&definition_id)
+                    .map(|definition| definition.script_menu_functions(&prefix))
+                    .unwrap_or_default();
+                (functions, Some(command_index), Some(definition_id))
+            } else if let Some(definition_id) = effect
+                .command_id
+                .clone()
+                .filter(|definition_id| self.definitions.contains_key(definition_id))
+            {
+                let functions = self
+                    .definitions
+                    .get(&definition_id)
+                    .map(|definition| definition.script_menu_functions(&prefix))
+                    .unwrap_or_default();
+                (functions, None, Some(definition_id))
+            } else {
+                (self.global_script_menu_functions(&prefix), None, None)
+            };
+            for function in functions {
+                let image = function.image.as_deref().unwrap_or("NONE");
+                let arguments = format!(
+                    "Object({}),{},Object({}),C4Id(\"{}\")",
+                    target_id.as_u64(),
+                    effect.number,
+                    menu_object.as_u64(),
+                    image
+                );
+                let enabled = if let Some(command_index) = condition_object {
+                    self.context_condition_on_object(
+                        command_index,
+                        &function,
+                        &arguments,
+                        "EffectContextCondition",
+                    )?
+                } else if let Some(definition_id) = callback_definition.as_deref() {
+                    if let Some(condition) = function.condition.as_deref() {
+                        let source = format!(
+                            "DefinitionCall({}, \"{}\", {})",
+                            definition_id, condition, arguments
+                        );
+                        tolerate_script_error(self.direct_exec_on_object(
+                            menu_index,
+                            &source,
+                            "EffectContextCondition",
+                        ))?
+                        .is_some_and(|value| compat::value_raw_truthy(&value))
+                    } else {
+                        true
+                    }
+                } else if let Some(condition) = function.condition.as_deref() {
+                    if let Some((script_name, script)) =
+                        self.global_menu_callback_script(&function.function)
+                    {
+                        let source = format!("{condition}({arguments})");
+                        let value = self.direct_exec_script_control_host(
+                            &script_name,
+                            script.as_ref(),
+                            &source,
+                            None,
+                        )?;
+                        compat::value_raw_truthy(&value)
+                    } else {
+                        let source = format!("global->~{condition}({arguments})");
+                        tolerate_script_error(self.direct_exec_on_object(
+                            menu_index,
+                            &source,
+                            "EffectContextCondition",
+                        ))?
+                        .is_some_and(|value| compat::value_raw_truthy(&value))
+                    }
+                } else {
+                    true
+                };
+                if !enabled {
+                    continue;
+                }
+                let live_effect = self.objects[target_index]
+                    .state
+                    .effects
+                    .iter()
+                    .find(|live_effect| live_effect.number == effect.number)
+                    .cloned();
+                let live_command_target = live_effect
+                    .as_ref()
+                    .map_or(effect.command_target, |live_effect| live_effect.command_target)
+                    .and_then(|number| u64::try_from(number).ok())
+                    .map(ObjectId::new)
+                    .and_then(|id| self.find_object_index(id))
+                    .filter(|&index| {
+                        !self.objects[index].destroyed
+                            && self.objects[index].state.status != crate::ObjectStatus::Deleted
+                    });
+                let live_definition = live_effect
+                    .as_ref()
+                    .and_then(|live_effect| live_effect.command_id.clone())
+                    .filter(|definition_id| self.definitions.contains_key(definition_id))
+                    .or_else(|| callback_definition.clone());
+                let command = if let Some(command_index) = live_command_target {
+                    let command_id = self.objects[command_index].id;
+                    format!(
+                        "ProtectedCall(Object({}),\"{}\",Object({}),{},Object({}),{})",
+                        command_id.as_u64(),
+                        function.function,
+                        target_id.as_u64(),
+                        effect.number,
                         menu_object.as_u64(),
                         image
-                    );
-                    let value = self.direct_exec_on_object(
-                        target_index,
-                        &source,
-                        "ContextCondition",
-                    )?;
-                    compat::value_raw_truthy(&value)
-                }
-                None => true,
+                    )
+                } else if let Some(definition_id) = live_definition.as_deref() {
+                    format!(
+                        "DefinitionCall({}, \"{}\", Object({}),{},Object({}),{})",
+                        definition_id,
+                        function.function,
+                        target_id.as_u64(),
+                        effect.number,
+                        menu_object.as_u64(),
+                        image
+                    )
+                } else {
+                    format!(
+                        "global->~{}(Object({}),{},Object({}),{})",
+                        function.function,
+                        target_id.as_u64(),
+                        effect.number,
+                        menu_object.as_u64(),
+                        image
+                    )
+                };
+                let item = self.context_function_item(
+                    &function,
+                    function.label.clone(),
+                    command,
+                    None,
+                );
+                self.record_context_function_item(
+                    menu_object,
+                    publish,
+                    &mut items,
+                    item,
+                );
+            }
+        }
+
+        // AttachContext functions of every active DFA_ATTACH object whose
+        // first action target is the context target, in global object order.
+        let attached_objects = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        for attached_id in attached_objects {
+            let Some(attached_index) = self.find_object_index(attached_id) else {
+                continue;
             };
-            if !enabled {
+            let still_attached = {
+                let object = &self.objects[attached_index];
+                let action_active =
+                    self.definitions
+                        .get(&object.definition_id)
+                        .is_some_and(|definition| {
+                            !definition
+                                .action_library()
+                                .is_idle_action(&object.state.action.name)
+                        });
+                !object.destroyed
+                    && object.state.status.is_active()
+                    && object.state.action.target == Some(target_id)
+                    && action_active
+                    && self.object_procedure(attached_index) == ActionProcedure::Attach
+            };
+            if !still_attached {
                 continue;
             }
-            items.push(crate::ObjectMenuItem {
-                caption: context.label,
-                info_caption: crate::normalize_menu_info_caption(
-                    context.description.unwrap_or_default(),
-                ),
-                command: format!(
+            let definition_id = self.objects[attached_index].definition_id.clone();
+            let functions = self
+                .definitions
+                .get(&definition_id)
+                .map(|definition| definition.script_menu_functions("AttachContext"))
+                .unwrap_or_default();
+            for function in functions {
+                let image = function.image.as_deref().unwrap_or("NONE");
+                let arguments = format!(
+                    "Object({}), C4Id(\"{}\"), Object({})",
+                    menu_object.as_u64(),
+                    image,
+                    target_id.as_u64()
+                );
+                if !self.context_condition_on_object(
+                    attached_index,
+                    &function,
+                    &arguments,
+                    "AttachContextCondition",
+                )? {
+                    continue;
+                }
+                let command = format!(
+                    "ProtectedCall(Object({}),\"{}\",this,Object({}))",
+                    attached_id.as_u64(),
+                    function.function,
+                    target_id.as_u64()
+                );
+                let item = self.context_function_item(
+                    &function,
+                    function.label.clone(),
+                    command,
+                    None,
+                );
+                self.record_context_function_item(
+                    menu_object,
+                    publish,
+                    &mut items,
+                    item,
+                );
+            }
+        }
+
+        // Exact Activate and ControlDigDouble rows, with the Context*
+        // DescText duplicate scan performed independently for each row.
+        for name in ["Activate", "ControlDigDouble"] {
+            let eligible = if name == "Activate" {
+                self.objects[target_index].state.container == Some(menu_object)
+            } else {
+                self.object_procedure(menu_index) == ActionProcedure::Push
+                    && self.objects[menu_index].state.action.target == Some(target_id)
+            };
+            if !eligible {
+                continue;
+            }
+            let Some(function) = self
+                .definitions
+                .get(&target_definition)
+                .and_then(|definition| definition.script_menu_function(name))
+            else {
+                continue;
+            };
+            let image = function.image.as_deref().unwrap_or("NONE");
+            let arguments = format!("Object({}), C4Id(\"{}\")", menu_object.as_u64(), image);
+            if !self.context_condition_on_object(
+                target_index,
+                &function,
+                &arguments,
+                "ContextFunctionCondition",
+            )? {
+                continue;
+            }
+            let caption = if function.has_description {
+                function.label.clone()
+            } else {
+                self.objects[target_index]
+                    .state
+                    .custom_name
+                    .clone()
+                    .or_else(|| {
+                        self.crew_object_infos
+                            .get(&target_id)
+                            .map(|info| info.name.clone())
+                    })
+                    .or_else(|| {
+                        self.definitions
+                            .get(&target_definition)
+                            .map(|definition| definition.name().to_owned())
+                    })
+                    .unwrap_or_else(|| target_definition.clone())
+            };
+            let duplicate_functions = self
+                .definitions
+                .get(&target_definition)
+                .map(|definition| definition.script_menu_functions("Context"))
+                .unwrap_or_default();
+            let mut duplicate = false;
+            for context in duplicate_functions {
+                let context_image = context.image.as_deref().unwrap_or("NONE");
+                let arguments = format!(
+                    "Object({}), C4Id(\"{}\")",
+                    menu_object.as_u64(),
+                    context_image
+                );
+                if self.context_condition_on_object(
+                    target_index,
+                    &context,
+                    &arguments,
+                    "ContextFunctionCondition",
+                )? && caption == context.label
+                {
+                    duplicate = true;
+                }
+            }
+            if duplicate {
+                continue;
+            }
+            let command = format!(
+                "ProtectedCall(Object({}),\"{}\",this)",
+                target_id.as_u64(),
+                function.function
+            );
+            let item = self.context_function_item(&function, caption, command, Some(target_id));
+            self.record_context_function_item(menu_object, publish, &mut items, item);
+        }
+
+        // Target Context* functions: crew members must be owned by the menu
+        // object and living targets must still be alive.
+        let target = &self.objects[target_index].state;
+        let menu_owner = self.objects[menu_index].state.owner;
+        if (target.ocf & ocf::CREW_MEMBER == 0 || target.owner == menu_owner)
+            && (target.category & crate::CATEGORY_LIVING == 0 || target.alive)
+        {
+            let functions = self
+                .definitions
+                .get(&target_definition)
+                .map(|definition| definition.script_menu_functions("Context"))
+                .unwrap_or_default();
+            for function in functions {
+                let image = function.image.as_deref().unwrap_or("NONE");
+                let arguments = format!("Object({}), C4Id(\"{}\")", menu_object.as_u64(), image);
+                if !self.context_condition_on_object(
+                    target_index,
+                    &function,
+                    &arguments,
+                    "ContextCondition",
+                )? {
+                    continue;
+                }
+                let command = format!(
                     "ProtectedCall(Object({}),\"{}\",this)",
                     target_id.as_u64(),
-                    context.function
-                ),
-                command2: String::new(),
-                count: C4MN_ITEM_NO_COUNT,
-                item_id: image.to_owned(),
-                symbol: crate::ObjectMenuSymbol::Definition,
-                image: crate::ObjectMenuImage::default(),
-                presentation_definition_id: None,
-                picture_snapshot: None,
-                picture_object: None,
-                components: Vec::new(),
-                selectable: true,
-                value: None,
-                text_display_progress: -1,
-            });
+                    function.function
+                );
+                let item = self.context_function_item(
+                    &function,
+                    function.label.clone(),
+                    command,
+                    None,
+                );
+                self.record_context_function_item(
+                    menu_object,
+                    publish,
+                    &mut items,
+                    item,
+                );
+            }
         }
         Ok(items)
     }
@@ -667,10 +1206,6 @@ impl Engine {
         const C4MN_ITEM_NO_COUNT: i32 = 12_345_678;
         let crew_id = self.objects[crew_index].id;
         let crew_owner = self.objects[crew_index].state.owner;
-        let crew_container = self.objects[crew_index].state.container;
-        let crew_action_target = self.objects[crew_index].state.action.target;
-        let crew_is_alive = self.objects[crew_index].state.category & crate::CATEGORY_LIVING == 0
-            || self.objects[crew_index].state.alive;
         let crew_contents = self.objects[crew_index].state.contents.clone();
         let first_carried_definition = crew_contents
             .first()
@@ -680,8 +1215,12 @@ impl Engine {
         let base_id = base.id;
         let base_definition = base.definition_id.clone();
         let base_player = base.state.base;
-        let base_container = base.state.container;
         let base_is_container = base.state.ocf & ocf::CONTAINER != 0;
+        let caption = self
+            .definitions
+            .get(&base_definition)
+            .map(|definition| definition.name().to_string())
+            .unwrap_or_else(|| base_definition.clone());
         let mut items = Vec::new();
         let item =
             |caption: &str,
@@ -704,6 +1243,36 @@ impl Engine {
             value: None,
             text_display_progress: -1,
         };
+
+        // ActivateMenu closes and initializes C4MN_Context before Refill
+        // evaluates any scripted conditions. Keep the live menu installed
+        // throughout the build so GetMenu/AddMenuItem/SelectMenuItem observe
+        // the same partially populated menu as C++.
+        let _ = self.close_object_menu(crew_id, true)?;
+        let Some(crew_index) = self.find_object_index(crew_id) else {
+            return Ok(());
+        };
+        self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
+            caption,
+            symbol_id: base_definition.clone(),
+            title_symbol: crate::ObjectMenuSymbol::default(),
+            identification: Value::Int(14),
+            style: 1,
+            equal_item_height: false,
+            permanent,
+            extra: crate::ObjectMenuExtra::default(),
+            extra_data: 0,
+            selection: -1,
+            user_menu: false,
+            command_object: Some(crew_id),
+            refill_object: Some(base_id),
+            refill_object_contents_count: 0,
+            items: Vec::new(),
+            columns: 1,
+            lines: 0,
+            text_progressing: false,
+            decoration: None,
+        });
 
         if base_is_container && self.objects[crew_index].state.container == Some(base_id) {
             if let Some(first_carried_definition) = first_carried_definition {
@@ -776,16 +1345,23 @@ impl Engine {
                 ));
             }
         }
-        // AddContextFunctions(target): effective `Context*` functions with a
-        // description block are evaluated on the target and inserted before
-        // Info/Exit (C4ObjectMenu.cpp:398-399,670-682). The menu command runs
-        // on the crew and ProtectedCall dispatches back to the target.
-        items.extend(self.script_context_menu_items(base_index, crew_id)?);
+        // AddContextFunctions(target) inserts every native context-function
+        // class before BuildInfo/Info/Exit (C4ObjectMenu.cpp:398-408,
+        // 544-685).
+        for item in items.drain(..) {
+            self.add_native_context_menu_item(crew_id, item);
+        }
+        let _ = self.context_function_menu_items(base_index, crew_id, true)?;
         // AddContextFunctions' final branch exposes the menu Clonk's own
         // context actions when it is inside, pushing, or carrying the clicked
         // target. Building/grab contexts collapse more than two actions into a
         // Clonk submenu; inventory contexts inline every action
         // (C4ObjectMenu.cpp:687-713).
+        let crew_container = self.objects[crew_index].state.container;
+        let crew_action_target = self.objects[crew_index].state.action.target;
+        let crew_is_alive = self.objects[crew_index].state.category & crate::CATEGORY_LIVING == 0
+            || self.objects[crew_index].state.alive;
+        let base_container = self.objects[base_index].state.container;
         let crew_related_to_target = crew_container == Some(base_id)
             || (self.object_procedure(crew_index) == ActionProcedure::Push
                 && crew_action_target == Some(base_id))
@@ -793,10 +1369,10 @@ impl Engine {
         if crew_id != base_id && crew_related_to_target && crew_is_alive {
             let submenu_threshold = (base_container != Some(crew_id)).then_some(2_usize);
             let crew_context_count = self
-                .script_context_menu_items(crew_index, crew_id)?
+                .context_function_menu_items(crew_index, crew_id, false)?
                 .len();
             if submenu_threshold.is_none_or(|threshold| crew_context_count <= threshold) {
-                items.extend(self.script_context_menu_items(crew_index, crew_id)?);
+                let _ = self.context_function_menu_items(crew_index, crew_id, true)?;
             } else {
                 let crew_definition = self.objects[crew_index].definition_id.clone();
                 let crew_name = self
@@ -807,13 +1383,29 @@ impl Engine {
                 let mut submenu = item(
                     &crew_name,
                     "SetCommand(this,\"Context\",,0,0,this)&&ExecuteCommand()".to_string(),
-                    crew_definition,
+                    "NONE".to_string(),
                     crate::ObjectMenuSymbol::Definition,
                 );
+                submenu.presentation_definition_id = Some(crew_definition);
                 submenu.info_caption =
                     "Opens a sub menu with command options for this clonk.".to_string();
                 items.push(submenu);
             }
+        }
+        if self.objects[base_index].state.ocf & ocf::CONSTRUCT != 0
+            && self.objects[crew_index].state.rotation == 0
+            && self.construction_needs_material
+        {
+            items.push(item(
+                "Construction material",
+                format!(
+                    "PlayerMessage(GetOwner(), Object({})->GetNeededMatStr(), Object({}))",
+                    base_id.as_u64(),
+                    base_id.as_u64()
+                ),
+                "NONE".to_string(),
+                crate::ObjectMenuSymbol::Construction,
+            ));
         }
         if self
             .definitions
@@ -836,38 +1428,9 @@ impl Engine {
                 crate::ObjectMenuSymbol::Exit,
             ));
         }
-        let selection = i32::from(!items.is_empty()) - 1;
-        let caption = self
-            .definitions
-            .get(&base_definition)
-            .map(|definition| definition.name().to_string())
-            .unwrap_or_else(|| base_definition.clone());
-
-        let _ = self.close_object_menu(crew_id, true)?;
-        let Some(crew_index) = self.find_object_index(crew_id) else {
-            return Ok(());
-        };
-        self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
-            caption,
-            symbol_id: base_definition,
-            title_symbol: crate::ObjectMenuSymbol::default(),
-            identification: Value::Int(14),
-            style: 1,
-            equal_item_height: false,
-            permanent,
-            extra: crate::ObjectMenuExtra::default(),
-            extra_data: 0,
-            selection,
-            user_menu: false,
-            command_object: Some(crew_id),
-            refill_object: Some(base_id),
-            refill_object_contents_count: 0,
-            items,
-            columns: 1,
-            lines: 0,
-            text_progressing: false,
-            decoration: None,
-        });
+        for item in items {
+            self.add_native_context_menu_item(crew_id, item);
+        }
         Ok(())
     }
 
@@ -5545,6 +6108,33 @@ mod tests {
         crew
     }
 
+    fn register_menu_image_definitions(engine: &mut Engine, ids: &[&str]) {
+        for id in ids {
+            engine
+                .register_definition(
+                    Definition::from_script(*id, *id, "#strict 2\n")
+                        .expect("image definition compiles"),
+                )
+                .expect("register image definition");
+        }
+    }
+
+    fn open_native_context(
+        engine: &mut Engine,
+        crew: ObjectId,
+        target: ObjectId,
+    ) -> crate::ObjectMenuState {
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        engine
+            .open_context_menu(crew_index, target_index, false)
+            .expect("context menu opens");
+        engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew survives")
+            .expect("context menu exists")
+    }
+
     fn line_pickup_gate_fixture(
         collection_limit: Option<u32>,
         actor_has_rock: bool,
@@ -9081,6 +9671,696 @@ protected func IsBuilt() { return GetCon() >= 100; }
                 .identification,
             Value::C4Id("CXCN".to_owned())
         );
+    }
+
+    #[test]
+    fn native_context_conditions_observe_and_extend_the_live_menu() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "TARG",
+                    "Target",
+                    r#"
+#strict 2
+func ContextReady(menu) {
+    [Native|Condition=MenuReady]
+    return 1;
+}
+func MenuReady(menu, image) {
+    if (GetMenu(menu) != 14) return false;
+    AddMenuItem("Injected", "", NONE, menu);
+    return true;
+}
+func ContextMissingCondition(menu) {
+    [Missing|Condition=DoesNotExist]
+    return 1;
+}
+"#,
+                )
+                .expect("target compiles"),
+            )
+            .expect("register target");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target");
+
+        let menu = open_native_context(&mut engine, crew, target);
+        assert_eq!(menu.identification, Value::Int(14));
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["Missing", "Injected", "Native"]
+        );
+    }
+
+    #[test]
+    fn native_context_effect_walk_survives_current_effect_removal() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "EHST",
+                    "Effect host",
+                    r#"
+#strict 2
+func FxFirstContextOpen(target, number, menu, image) {
+    [First|Condition=DropCurrent]
+    return 1;
+}
+func DropCurrent(target, number, menu, image) {
+    RemoveEffect(0, target, number);
+    return true;
+}
+func FxSecondContextOpen(target, number, menu, image) {
+    [Second]
+    return 1;
+}
+"#,
+                )
+                .expect("effect host compiles"),
+            )
+            .expect("register effect host");
+        engine
+            .register_definition(
+                Definition::from_script("TARG", "Target", "#strict 2\n")
+                    .expect("target compiles"),
+            )
+            .expect("register target");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let host = engine
+            .spawn_object(SpawnConfig::new("EHST"))
+            .expect("effect host");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        let mut first = crate::EffectState::new("First");
+        first.number = 2;
+        first.priority = 100;
+        first.command_target = Some(host.as_u64() as i32);
+        let mut second = crate::EffectState::new("Second");
+        second.number = 1;
+        second.priority = 100;
+        second.command_target = Some(host.as_u64() as i32);
+        engine.objects[target_index].state.effects = vec![first, second];
+
+        let menu = open_native_context(&mut engine, crew, target);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["First", "Second"]
+        );
+        assert_eq!(
+            menu.items[0].command,
+            format!(
+                "ProtectedCall(Object({}),\"FxFirstContextOpen\",Object({}),2,Object({}),NONE)",
+                host.as_u64(),
+                target.as_u64(),
+                crew.as_u64()
+            )
+        );
+    }
+
+    #[test]
+    fn native_context_effect_command_falls_back_when_condition_deletes_host() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "LHST",
+                    "Live host",
+                    r#"
+#strict 2
+func FxLiveContextOpen(target, number, menu, image) {
+    [Fallback|Condition=DeleteHost]
+    return 1;
+}
+func DeleteHost(target, number, menu, image) {
+    RemoveObject(this());
+    return true;
+}
+"#,
+                )
+                .expect("live host compiles"),
+            )
+            .expect("register live host");
+        engine
+            .register_definition(
+                Definition::from_script("TARG", "Target", "#strict 2\n")
+                    .expect("target compiles"),
+            )
+            .expect("register target");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let host = engine
+            .spawn_object(SpawnConfig::new("LHST"))
+            .expect("live host");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        let mut effect = crate::EffectState::new("Live");
+        effect.number = 4;
+        effect.command_target = Some(host.as_u64() as i32);
+        engine.objects[target_index].state.effects = vec![effect];
+
+        let menu = open_native_context(&mut engine, crew, target);
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(
+            menu.items[0].command,
+            format!(
+                "DefinitionCall(LHST, \"FxLiveContextOpen\", Object({}),4,Object({}),NONE)",
+                target.as_u64(),
+                crew.as_u64()
+            )
+        );
+        assert!(engine.objects[engine.find_object_index(host).expect("host slot")].destroyed);
+    }
+
+    #[test]
+    fn native_context_classes_keep_cpp_order_conditions_and_commands() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        register_menu_image_definitions(&mut engine, &["ACIM", "FXIM", "ATIM", "ACTI", "CTXI"]);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "AHST",
+                    "Action host",
+                    r#"
+#strict 2
+func ActionContextRide(menu, image, target) {
+    [Action|Image=ACIM:1|Condition=AllowAction]
+    return 1;
+}
+func AllowAction(menu, image, target) {
+    return GetID(this()) == AHST && GetID(menu) == CLNK && image == ACIM && GetID(target) == TARG;
+}
+"#,
+                )
+                .expect("action host compiles"),
+            )
+            .expect("register action host");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "EHST",
+                    "Effect host",
+                    r#"
+#strict 2
+func FxGlowContextInspect(target, number, menu, image) {
+    [Effect|Image=FXIM:2|Condition=AllowEffect]
+    return 1;
+}
+func AllowEffect(target, number, menu, image) {
+    return GetID(this()) == EHST && GetID(target) == TARG && number == 7 && GetID(menu) == CLNK && image == FXIM;
+}
+"#,
+                )
+                .expect("effect host compiles"),
+            )
+            .expect("register effect host");
+        let mut attached_definition = Definition::from_script(
+            "ATCH",
+            "Attachment",
+            r#"
+#strict 2
+func AttachContextDetach(menu, image, target) {
+    [Attach|Image=ATIM:3|Condition=AllowAttach]
+    return 1;
+}
+func AllowAttach(menu, image, target) {
+    return GetID(this()) == ATCH && GetID(menu) == CLNK && image == ATIM && GetID(target) == TARG;
+}
+"#,
+        )
+        .expect("attachment compiles");
+        attached_definition.configure_actions(
+            None,
+            HashMap::from([(
+                "Attached".to_string(),
+                ActionSpec::default().with_procedure("attach"),
+            )]),
+        );
+        engine
+            .register_definition(attached_definition)
+            .expect("register attachment");
+        let mut target_definition = Definition::from_script(
+            "TARG",
+            "Target",
+            r#"
+#strict 2
+func Activate(menu) {
+    [Activate|Image=ACTI:4|Condition=AllowActivate]
+    return 1;
+}
+func AllowActivate(menu, image) { return GetID(menu) == CLNK && image == ACTI; }
+func ContextInspect(menu) {
+    [Context|Image=CTXI:5|Condition=AllowContext]
+    return 1;
+}
+func AllowContext(menu, image) { return GetID(menu) == CLNK && image == CTXI; }
+"#,
+        )
+        .expect("target compiles");
+        target_definition.configure_actions(
+            None,
+            HashMap::from([("Use".to_string(), ActionSpec::default())]),
+        );
+        engine
+            .register_definition(target_definition)
+            .expect("register target");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let action_host = engine
+            .spawn_object(SpawnConfig::new("AHST"))
+            .expect("action host");
+        let effect_host = engine
+            .spawn_object(SpawnConfig::new("EHST"))
+            .expect("effect host");
+        let mut target_action = ActionState::new("Use");
+        target_action.target = Some(action_host);
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("TARG")
+                    .with_container(crew)
+                    .with_action(target_action),
+            )
+            .expect("target");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        let mut glow = crate::EffectState::new("Glow");
+        glow.number = 7;
+        glow.command_target = Some(effect_host.as_u64() as i32);
+        engine.objects[target_index].state.effects.push(glow);
+        let mut attached_action = ActionState::new("Attached");
+        attached_action.target = Some(target);
+        let attached = engine
+            .spawn_object(SpawnConfig::new("ATCH").with_action(attached_action))
+            .expect("attached object");
+
+        let menu = open_native_context(&mut engine, crew, target);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["Action", "Effect", "Attach", "Activate", "Context"]
+        );
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.command.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                format!(
+                    "ProtectedCall(Object({}),\"ActionContextRide\",this,Object({}))",
+                    action_host.as_u64(),
+                    target.as_u64()
+                ),
+                format!(
+                    "ProtectedCall(Object({}),\"FxGlowContextInspect\",Object({}),7,Object({}),FXIM)",
+                    effect_host.as_u64(),
+                    target.as_u64(),
+                    crew.as_u64()
+                ),
+                format!(
+                    "ProtectedCall(Object({}),\"AttachContextDetach\",this,Object({}))",
+                    attached.as_u64(),
+                    target.as_u64()
+                ),
+                format!(
+                    "ProtectedCall(Object({}),\"Activate\",this)",
+                    target.as_u64()
+                ),
+                format!(
+                    "ProtectedCall(Object({}),\"ContextInspect\",this)",
+                    target.as_u64()
+                ),
+            ]
+        );
+        assert!(menu.items.iter().all(|item| item.item_id == "NONE"));
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.presentation_definition_id.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                Some("ACIM"),
+                Some("FXIM"),
+                Some("ATIM"),
+                Some("ACTI"),
+                Some("CTXI")
+            ]
+        );
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.image.clone())
+                .collect::<Vec<_>>(),
+            (1..=5)
+                .map(|index| crate::ObjectMenuImage::Indexed { index })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn native_context_activate_falls_back_and_equal_context_suppresses_it() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "ACTV",
+                    "Relic",
+                    "#strict 2\nfunc Activate(menu) { return 1; }\n",
+                )
+                .expect("activate target compiles"),
+            )
+            .expect("register activate target");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "DUPL",
+                    "Duplicate",
+                    r#"
+#strict 2
+func Activate(menu) { [Use] return 1; }
+func ContextUse(menu) { [Use] return 1; }
+"#,
+                )
+                .expect("duplicate target compiles"),
+            )
+            .expect("register duplicate target");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let relic = engine
+            .spawn_object(SpawnConfig::new("ACTV").with_container(crew))
+            .expect("relic");
+
+        let menu = open_native_context(&mut engine, crew, relic);
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(menu.items[0].caption, "Relic");
+        assert_eq!(
+            menu.items[0].command,
+            format!(
+                "ProtectedCall(Object({}),\"Activate\",this)",
+                relic.as_u64()
+            )
+        );
+        assert_eq!(
+            menu.items[0].image,
+            crate::ObjectMenuImage::Object { object: relic }
+        );
+        assert_eq!(
+            menu.items[0]
+                .picture_snapshot
+                .as_ref()
+                .map(|picture| picture.definition_id.as_str()),
+            Some("ACTV")
+        );
+        assert_eq!(menu.items[0].picture_object, None);
+        assert_eq!(menu.items[0].item_id, "NONE");
+
+        let duplicate = engine
+            .spawn_object(SpawnConfig::new("DUPL").with_container(crew))
+            .expect("duplicate");
+        let menu = open_native_context(&mut engine, crew, duplicate);
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(menu.items[0].caption, "Use");
+        assert_eq!(
+            menu.items[0].command,
+            format!(
+                "ProtectedCall(Object({}),\"ContextUse\",this)",
+                duplicate.as_u64()
+            )
+        );
+    }
+
+    #[test]
+    fn native_context_pushed_target_exposes_control_dig_double() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "MACH",
+                    "Machine",
+                    "#strict 2\nfunc ControlDigDouble(menu) { [Drill] return 1; }\n",
+                )
+                .expect("machine compiles"),
+            )
+            .expect("register machine");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let target = engine
+            .spawn_object(SpawnConfig::new("MACH"))
+            .expect("machine");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.action = ActionState::new("Push");
+        engine.objects[crew_index].state.action.target = Some(target);
+
+        let menu = open_native_context(&mut engine, crew, target);
+        let drill = menu
+            .items
+            .iter()
+            .find(|item| item.caption == "Drill")
+            .expect("ControlDigDouble row");
+        assert_eq!(
+            drill.command,
+            format!(
+                "ProtectedCall(Object({}),\"ControlDigDouble\",this)",
+                target.as_u64()
+            )
+        );
+    }
+
+    #[test]
+    fn native_context_effect_commands_use_live_numbers_and_callback_hosts() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        register_menu_image_definitions(&mut engine, &["LIMG", "DIMG", "GIMG"]);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "LHST",
+                    "Live host",
+                    r#"
+#strict 2
+func FxLiveContextOpen(target, number, menu, image) {
+    [Live|Image=LIMG|Condition=AllowLive]
+    return 1;
+}
+func AllowLive(target, number, menu, image) {
+    return GetID(target) == TARG && number == 4 && GetID(menu) == CLNK && image == LIMG;
+}
+"#,
+                )
+                .expect("live host compiles"),
+            )
+            .expect("register live host");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "DHST",
+                    "Definition host",
+                    "#strict 2\nfunc FxDefContextOpen(target, number, menu, image) { [Definition|Image=DIMG] return 1; }\n",
+                )
+                .expect("definition host compiles"),
+            )
+            .expect("register definition host");
+        engine
+            .register_definition(
+                Definition::from_script("TARG", "Target", "#strict 2\n").expect("target compiles"),
+            )
+            .expect("register target");
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/Context.c".to_string(),
+                r#"#strict 2
+global func FxWorldContextOpen(target, number, menu, image) {
+    [Global|Image=GIMG|Condition=AllowWorld]
+    return 1;
+}
+func AllowWorld(target, number, menu, image) {
+    return GetID(target) == TARG && number == 11 && GetID(menu) == CLNK && image == GIMG && GetMenu(menu) == 14;
+}
+"#
+                .to_string(),
+            )]),
+            1
+        );
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let live_host = engine
+            .spawn_object(SpawnConfig::new("LHST"))
+            .expect("live host");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        let mut live = crate::EffectState::new("Live");
+        live.number = 4;
+        live.command_target = Some(live_host.as_u64() as i32);
+        let mut definition = crate::EffectState::new("Def");
+        definition.number = 8;
+        definition.command_id = Some("DHST".to_string());
+        let mut global = crate::EffectState::new("World");
+        global.number = 11;
+        engine.objects[target_index].state.effects = vec![live, definition, global];
+
+        let menu = open_native_context(&mut engine, crew, target);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.command.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                format!(
+                    "ProtectedCall(Object({}),\"FxLiveContextOpen\",Object({}),4,Object({}),LIMG)",
+                    live_host.as_u64(),
+                    target.as_u64(),
+                    crew.as_u64()
+                ),
+                format!(
+                    "DefinitionCall(DHST, \"FxDefContextOpen\", Object({}),8,Object({}),DIMG)",
+                    target.as_u64(),
+                    crew.as_u64()
+                ),
+                format!(
+                    "global->~FxWorldContextOpen(Object({}),11,Object({}),GIMG)",
+                    target.as_u64(),
+                    crew.as_u64()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn native_context_build_info_follows_rule_rotation_and_row_order() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        let mut site = Definition::from_script(
+            "SITE",
+            "Site",
+            "#strict 2\nfunc ContextInspect(menu) { [Inspect] return 1; }\n",
+        )
+        .expect("site compiles");
+        site.set_constructable(true);
+        site.set_description(Some("An unfinished site.".to_string()));
+        engine.register_definition(site).expect("register site");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let site = engine
+            .spawn_object(SpawnConfig::new("SITE").with_construction(crate::FULL_CON / 2))
+            .expect("site");
+        let site_index = engine.find_object_index(site).expect("site exists");
+        assert_ne!(engine.objects[site_index].state.ocf & ocf::CONSTRUCT, 0);
+        engine.set_construction_needs_material(true);
+
+        let menu = open_native_context(&mut engine, crew, site);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["Inspect", "Construction material", "Info"]
+        );
+        let build = &menu.items[1];
+        assert_eq!(
+            build.command,
+            format!(
+                "PlayerMessage(GetOwner(), Object({})->GetNeededMatStr(), Object({}))",
+                site.as_u64(),
+                site.as_u64()
+            )
+        );
+        assert_eq!(build.symbol, crate::ObjectMenuSymbol::Construction);
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.rotation = 1;
+        let menu = open_native_context(&mut engine, crew, site);
+        assert!(
+            menu.items
+                .iter()
+                .all(|item| item.caption != "Construction material"),
+            "the C++ gate checks the menu object's rotation"
+        );
+    }
+
+    #[test]
+    fn native_context_clonk_submenu_threshold_counts_every_class() {
+        let mut engine = Engine::new();
+        register_clonk(
+            &mut engine,
+            "CLNK",
+            r#"
+#strict 2
+func ContextOne(menu) { [One] return 1; }
+func ContextTwo(menu) { [Two] return 1; }
+func FxPulseContextThree(target, number, menu, image) { [Pulse] return 1; }
+"#,
+        );
+        let mut base =
+            Definition::from_script("BASE", "Base", "#strict 2\n").expect("base compiles");
+        base.set_category(crate::CATEGORY_STRUCTURE);
+        base.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));
+        engine.register_definition(base).expect("register base");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let base = engine.spawn_object(SpawnConfig::new("BASE")).expect("base");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(base))
+            .expect("enter base");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let mut pulse = crate::EffectState::new("Pulse");
+        pulse.number = 3;
+        pulse.command_target = Some(crew.as_u64() as i32);
+        engine.objects[crew_index].state.effects.push(pulse);
+
+        let menu = open_native_context(&mut engine, crew, base);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["Contents", "CLNK", "Exit"]
+        );
+        let submenu = &menu.items[1];
+        assert_eq!(
+            submenu.command,
+            "SetCommand(this,\"Context\",,0,0,this)&&ExecuteCommand()"
+        );
+        assert_eq!(submenu.item_id, "NONE");
+        assert_eq!(submenu.presentation_definition_id.as_deref(), Some("CLNK"));
     }
 
     #[test]
