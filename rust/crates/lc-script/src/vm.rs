@@ -2,8 +2,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
-use indexmap::IndexMap;
-
 use crate::ast::{
     AccessLevel, AssignmentTarget, BinaryOp, Expr, ForInit, Function, NavigationOperation,
     Parameter, SafeNavigationStep, Stmt, UnaryOp, VarDecl,
@@ -11,7 +9,7 @@ use crate::ast::{
 use crate::debugger::DebuggerHooks;
 use crate::engine::{HostFunction, HostReferenceFunction};
 use crate::error::RuntimeError;
-use crate::value::{Literal, Value};
+use crate::value::{Literal, Value, ValueMap};
 
 /// Maximum script call-stack depth, matching C++ `MAX_CONTEXT_STACK`
 /// (C4AulExec.cpp:62). A script recursing within this bound runs; beyond it the
@@ -223,7 +221,7 @@ pub(crate) enum RawIdentity {
 pub(crate) enum HeapIdentity {
     Opaque,
     Array(Vec<Option<RawIdentity>>),
-    Proplist(HashMap<String, Option<RawIdentity>>),
+    Proplist(HashMap<Value, Option<RawIdentity>>),
 }
 
 impl HeapIdentity {
@@ -251,8 +249,10 @@ impl HeapIdentity {
             (Self::Array(identities), PathSegment::Index(index)) => identities
                 .get(array_index(index).ok()?)
                 .and_then(Option::as_ref),
-            (Self::Proplist(identities), PathSegment::Property(key))
-            | (Self::Proplist(identities), PathSegment::Index(Value::String(key))) => {
+            (Self::Proplist(identities), PathSegment::Property(key)) => identities
+                .get(&Value::String(key.clone()))
+                .and_then(Option::as_ref),
+            (Self::Proplist(identities), PathSegment::Index(key)) => {
                 identities.get(key).and_then(Option::as_ref)
             }
             _ => None,
@@ -297,8 +297,7 @@ impl HeapIdentity {
                 };
                 Self::Array(identities)
             }
-            (Value::Proplist(entries), PathSegment::Property(key))
-            | (Value::Proplist(entries), PathSegment::Index(Value::String(key))) => {
+            (Value::Proplist(entries), segment @ (PathSegment::Property(_) | PathSegment::Index(_))) => {
                 let mut identities = match current {
                     Some(Self::Proplist(identities)) => identities.clone(),
                     _ => match Self::opaque_for(value) {
@@ -306,17 +305,21 @@ impl HeapIdentity {
                         _ => unreachable!(),
                     },
                 };
-                let Some(child) = entries.get(key) else {
-                    identities.remove(key);
+                let key = match segment {
+                    PathSegment::Property(key) => Value::String(key.clone()),
+                    PathSegment::Index(key) => key.clone(),
+                };
+                let Some(child) = entries.get_key(&key) else {
+                    identities.remove(&key);
                     return Self::Proplist(identities);
                 };
-                let current_child = identities.get(key).and_then(Option::as_ref);
+                let current_child = identities.get(&key).and_then(Option::as_ref);
                 let identity = if rest.is_empty() {
                     replacement
                 } else {
                     RawIdentity::after_path_write(current_child, child, rest, replacement)
                 };
-                identities.insert(key.clone(), identity);
+                identities.insert(key, identity);
                 Self::Proplist(identities)
             }
             _ => current.cloned().unwrap_or_else(|| Self::opaque_for(value)),
@@ -427,12 +430,21 @@ impl TrackedValue {
         }
     }
 
-    fn proplist(entries: Vec<(String, Self)>) -> Self {
-        let mut values = IndexMap::with_capacity(entries.len());
+    fn proplist(entries: Vec<(Value, Self)>) -> Self {
+        let mut values = ValueMap::with_capacity(entries.len());
         let mut identities = HashMap::with_capacity(entries.len());
         for (key, entry) in entries {
+            if matches!(&entry.value, Value::Nil)
+                && values
+                    .get_key(&key)
+                    .is_some_and(|value| !matches!(value, Value::Nil))
+            {
+                values.shift_remove_key(&key);
+                identities.remove(&key);
+                continue;
+            }
             identities.insert(key.clone(), entry.identity);
-            values.insert(key, entry.value);
+            values.insert_key(key, entry.value);
         }
         Self {
             value: Value::Proplist(values),
@@ -797,15 +809,10 @@ fn read_path(value: &Value, segments: &[PathSegment]) -> Result<Value, RuntimeEr
                 .cloned()
                 .unwrap_or(Value::Nil),
             (PathSegment::Index(index), Value::String(text)) => string_index(&text, index)?,
-            (PathSegment::Index(Value::String(key)), Value::Proplist(entries)) => {
-                entries.get(key).cloned().unwrap_or(Value::Nil)
-            }
-            (PathSegment::Index(index), Value::Proplist(_)) => {
-                return Err(RuntimeError::new(format!(
-                    "proplist keys must be strings, got {}",
-                    index.type_name()
-                )))
-            }
+            (PathSegment::Index(key), Value::Proplist(entries)) => entries
+                .get_key(key)
+                .cloned()
+                .unwrap_or(Value::Nil),
             (PathSegment::Index(_), other) => {
                 return Err(RuntimeError::new(format!(
                     "cannot index into value of type {}",
@@ -827,14 +834,8 @@ fn write_path(
         return Ok(());
     };
 
-    match segment {
-        PathSegment::Property(property) => {
-            let Value::Proplist(entries) = value else {
-                return Err(RuntimeError::new(format!(
-                    "cannot assign property '{property}' on value of type {}",
-                    value.type_name()
-                )));
-            };
+    match (value, segment) {
+        (Value::Proplist(entries), PathSegment::Property(property)) => {
             if rest.is_empty() {
                 if matches!(new_value, Value::Nil) {
                     entries.shift_remove(property);
@@ -851,15 +852,11 @@ fn write_path(
                 write_path(next, rest, new_value)
             }
         }
-        PathSegment::Index(index @ Value::Int(_))
-        | PathSegment::Index(index @ Value::Bool(_))
-        | PathSegment::Index(index @ Value::Nil) => {
-            let Value::Array(elements) = value else {
-                return Err(RuntimeError::new(format!(
-                    "cannot index into value of type {}",
-                    value.type_name()
-                )));
-            };
+        (other, PathSegment::Property(property)) => Err(RuntimeError::new(format!(
+            "cannot assign property '{property}' on value of type {}",
+            other.type_name()
+        ))),
+        (Value::Array(elements), PathSegment::Index(index)) => {
             let index = array_index(index)?;
             if index >= ARRAY_MAX_SIZE {
                 return Err(RuntimeError::new("out of memory"));
@@ -874,32 +871,24 @@ fn write_path(
                 write_path(&mut elements[index], rest, new_value)
             }
         }
-        PathSegment::Index(Value::String(key)) => {
-            let Value::Proplist(entries) = value else {
-                return Err(RuntimeError::new(format!(
-                    "cannot index into value of type {}",
-                    value.type_name()
-                )));
-            };
+        (Value::Proplist(entries), PathSegment::Index(key)) => {
             if rest.is_empty() {
                 if matches!(new_value, Value::Nil) {
-                    entries.shift_remove(key);
+                    entries.shift_remove_key(key);
                 } else {
-                    entries.insert(key.clone(), new_value);
+                    entries.insert_key(key.clone(), new_value);
                 }
                 Ok(())
             } else {
-                let Some(next) = entries.get_mut(key) else {
-                    return Err(RuntimeError::new(format!(
-                        "cannot access property '{key}' on nil"
-                    )));
+                let Some(next) = entries.get_key_mut(key) else {
+                    return Err(RuntimeError::new(format!("cannot access map key {key} on nil")));
                 };
                 write_path(next, rest, new_value)
             }
         }
-        PathSegment::Index(index) => Err(RuntimeError::new(format!(
-            "array index must be an integer, got {}",
-            index.type_name()
+        (other, PathSegment::Index(_)) => Err(RuntimeError::new(format!(
+            "cannot index into value of type {}",
+            other.type_name()
         ))),
     }
 }
@@ -1869,9 +1858,7 @@ impl<'a> Vm<'a> {
                     match &iterable_value {
                         Value::Proplist(entries) => entries
                             .iter()
-                            .map(|(key, value)| {
-                                (Value::String(key.clone()), Some(value.clone()))
-                            })
+                            .map(|(key, value)| (key.clone(), Some(value.clone())))
                             .collect(),
                         other => {
                             return Err(RuntimeError::new(format!(
@@ -2441,10 +2428,19 @@ impl<'a> Vm<'a> {
                 Ok(Value::Array(values))
             }
             Expr::Proplist(entries) => {
-                let mut map = IndexMap::with_capacity(entries.len());
-                for (key, expr) in entries {
-                    let value = self.evaluate(expr, env, depth)?;
-                    map.insert(key.clone(), value);
+                let mut map = ValueMap::with_capacity(entries.len());
+                for (key_expr, value_expr) in entries {
+                    let key = self.evaluate(key_expr, env, depth)?;
+                    let value = self.evaluate(value_expr, env, depth)?;
+                    if matches!(&value, Value::Nil)
+                        && map
+                            .get_key(&key)
+                            .is_some_and(|value| !matches!(value, Value::Nil))
+                    {
+                        map.shift_remove_key(&key);
+                    } else {
+                        map.insert_key(key, value);
+                    }
                 }
                 Ok(Value::Proplist(map))
             }
@@ -2547,8 +2543,10 @@ impl<'a> Vm<'a> {
             }
             Expr::Proplist(entries) => {
                 let mut tracked = Vec::with_capacity(entries.len());
-                for (key, value) in entries {
-                    tracked.push((key.clone(), self.evaluate_tracked(value, env, depth)?));
+                for (key_expr, value_expr) in entries {
+                    let key = self.evaluate(key_expr, env, depth)?;
+                    let value = self.evaluate_tracked(value_expr, env, depth)?;
+                    tracked.push((key, value));
                 }
                 Ok(TrackedValue::proplist(tracked))
             }
@@ -3415,13 +3413,9 @@ impl<'a> Vm<'a> {
                 .cloned()
                 .unwrap_or(Value::Nil)),
             (Value::String(text), index) => string_index(text, &index),
-            (Value::Proplist(entries), Value::String(key)) => {
-                Ok(entries.get(&key).cloned().unwrap_or(Value::Nil))
+            (Value::Proplist(entries), key) => {
+                Ok(entries.get_key(&key).cloned().unwrap_or(Value::Nil))
             }
-            (Value::Proplist(_), other) => Err(RuntimeError::new(format!(
-                "proplist keys must be strings, got {}",
-                other.type_name()
-            ))),
             (other, _) => Err(RuntimeError::new(format!(
                 "cannot index value of type {}",
                 other.type_name()
@@ -5159,7 +5153,7 @@ mod tests {
 
         assert_eq!(
             execute_script(source, "Test", &[]).expect("declared map foreach runs"),
-            Value::Proplist(IndexMap::from([
+            Value::Proplist(ValueMap::from([
                 ("alpha".to_string(), Value::Int(11)),
                 ("beta".to_string(), Value::Int(22)),
             ]))

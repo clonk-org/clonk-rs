@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::convert::TryFrom;
 use std::rc::Rc;
 
@@ -43,8 +43,7 @@ use crate::{
     FULL_CON, OWNER_NONE,
 };
 use lc_resources::PhysicalInfo;
-use lc_script::{Engine as ScriptEngine, HostCallArg, RuntimeError, Value};
-use indexmap::IndexMap;
+use lc_script::{Engine as ScriptEngine, HostCallArg, RuntimeError, Value, ValueMap};
 use std::mem;
 use std::sync::Arc;
 use tracing::{debug, error, info};
@@ -10641,11 +10640,15 @@ fn value_to_data_string(value: &Value) -> String {
             if entries.is_empty() {
                 "{}".to_string()
             } else {
-                let mut items: Vec<_> = entries.iter().collect();
-                items.sort_by(|a, b| a.0.cmp(b.0));
-                let inner = items
-                    .into_iter()
-                    .map(|(key, value)| format!("{key} = {}", value_to_data_string(value)))
+                let inner = entries
+                    .iter()
+                    .map(|(key, value)| {
+                        format!(
+                            "{} = {}",
+                            value_to_data_string(key),
+                            value_to_data_string(value)
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("{{ {inner} }}")
@@ -11297,10 +11300,7 @@ fn get_keys(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let mut keys: Vec<_> = map.keys().cloned().collect();
-    keys.sort();
-    let values = keys.into_iter().map(Value::String).collect();
-    Ok(Value::Array(values))
+    Ok(Value::Array(map.keys().cloned().collect()))
 }
 
 fn get_values(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -11317,13 +11317,7 @@ fn get_values(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let mut entries: Vec<_> = map.iter().collect();
-    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-    let values = entries
-        .into_iter()
-        .map(|(_, value)| value.clone())
-        .collect();
-    Ok(Value::Array(values))
+    Ok(Value::Array(map.values().cloned().collect()))
 }
 
 fn get_type(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -20766,11 +20760,11 @@ fn get_path(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(path) => path,
             None => return Ok(Value::Nil),
         };
-        let mut result = IndexMap::new();
+        let mut result = ValueMap::new();
         result.insert("Length".into(), Value::Int(path.length));
         let mut waypoints = Vec::with_capacity(path.waypoints.len());
         for waypoint in path.waypoints {
-            let mut map = IndexMap::new();
+            let mut map = ValueMap::new();
             map.insert("X".into(), Value::Int(waypoint.x));
             map.insert("Y".into(), Value::Int(waypoint.y));
             if let Some(target) = waypoint.transfer_target {
@@ -29340,13 +29334,8 @@ fn push_reflected_c4value(
         Value::Proplist(values) => {
             reflection.push(path, Value::String("m".to_string()));
             reflection.push(path, Value::Int(values.len() as i32));
-            // Rust proplists only retain string keys and not C++'s keyOrder.
-            // Keep the complete recursive stream deterministic; exact loaded
-            // insertion order requires an ordered arbitrary-C4Value map.
-            let mut entries = values.iter().collect::<Vec<_>>();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-            for (key, value) in entries {
-                push_reflected_c4value(reflection, path, &Value::String(key.clone()));
+            for (key, value) in values {
+                push_reflected_c4value(reflection, path, key);
                 push_reflected_c4value(reflection, path, value);
             }
             return;
@@ -32207,10 +32196,10 @@ fn value_to_effect_var(value: &Value) -> EffectVarValue {
             EffectVarValue::Array(vars)
         }
         Value::Proplist(map) => {
-            let mut entries = BTreeMap::new();
-            for (key, value) in map {
-                entries.insert(key.clone(), value_to_effect_var(value));
-            }
+            let entries = map
+                .iter()
+                .map(|(key, value)| (key.clone(), value_to_effect_var(value)))
+                .collect();
             EffectVarValue::Proplist(entries)
         }
         Value::Nil => EffectVarValue::Nil,
@@ -32229,9 +32218,9 @@ pub(crate) fn effect_var_to_value(value: &EffectVarValue) -> Value {
             Value::Array(vars)
         }
         EffectVarValue::Proplist(map) => {
-            let mut entries = IndexMap::with_capacity(map.len());
+            let mut entries = ValueMap::with_capacity(map.len());
             for (key, value) in map {
-                entries.insert(key.clone(), effect_var_to_value(value));
+                entries.insert_key(key.clone(), effect_var_to_value(value));
             }
             Value::Proplist(entries)
         }
@@ -32491,12 +32480,26 @@ fn clear_removed_object_references(value: &mut Value, removed: &HashSet<ObjectId
             }
         }
         Value::Proplist(entries) => {
-            for value in entries.values_mut() {
-                clear_removed_object_references(value, removed);
+            let previous = std::mem::take(entries);
+            let mut rebuilt = ValueMap::with_capacity(previous.len());
+            for (mut key, mut value) in previous {
+                if is_removed_object_value(&key, removed)
+                    || is_removed_object_value(&value, removed)
+                {
+                    continue;
+                }
+                clear_removed_object_references(&mut key, removed);
+                clear_removed_object_references(&mut value, removed);
+                rebuilt.insert_key(key, value);
             }
+            *entries = rebuilt;
         }
         _ => {}
     }
+}
+
+fn is_removed_object_value(value: &Value, removed: &HashSet<ObjectId>) -> bool {
+    matches!(value, Value::Object(id) if removed.contains(&ObjectId::new(*id)))
 }
 
 /// A completed nested call's scope plus its VM-final local variables, kept so
@@ -37973,7 +37976,7 @@ mod tests {
     }
 
     fn empty_state() -> Value {
-        let mut map = IndexMap::new();
+        let mut map = ValueMap::new();
         map.insert("effects".into(), Value::Array(Vec::new()));
         Value::Proplist(map)
     }
@@ -38161,21 +38164,102 @@ mod tests {
     }
 
     #[test]
-    fn get_keys_returns_sorted_keys() {
-        let mut map = HashMap::new();
+    fn get_keys_returns_c4valuehash_key_order() {
+        let mut map = ValueMap::new();
         map.insert("beta".into(), Value::Int(2));
         map.insert("alpha".into(), Value::Int(1));
-        let result = get_keys(&[Value::Proplist(map.into_iter().collect())])
-            .expect("GetKeys succeeds");
+        map.insert_key(Value::Int(7), Value::String("seven".into()));
+        let result = get_keys(&[Value::Proplist(map)]).expect("GetKeys succeeds");
         match result {
             Value::Array(entries) => {
                 assert_eq!(
                     entries,
-                    vec![Value::String("alpha".into()), Value::String("beta".into())]
+                    vec![
+                        Value::String("beta".into()),
+                        Value::String("alpha".into()),
+                        Value::Int(7),
+                    ]
                 );
             }
             other => panic!("expected array, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn map_data_string_uses_typed_keys_in_insertion_order() {
+        let mut map = ValueMap::new();
+        map.insert("beta".into(), Value::Int(2));
+        map.insert_key(Value::Int(7), Value::String("seven".into()));
+
+        assert_eq!(
+            value_to_data_string(&Value::Proplist(map)),
+            r#"{ "beta" = 2, 7 = "seven" }"#
+        );
+    }
+
+    #[test]
+    fn removed_direct_object_map_entries_are_erased_but_nested_refs_are_cleared() {
+        let removed_id = ObjectId::new(7);
+        let mut map = ValueMap::new();
+        map.insert_key(Value::Object(7), Value::Int(1));
+        map.insert("direct_value".into(), Value::Object(7));
+        map.insert_key(
+            Value::Array(vec![Value::Object(7)]),
+            Value::String("nested_key".into()),
+        );
+        map.insert(
+            "nested_value".into(),
+            Value::Array(vec![Value::Object(7)]),
+        );
+        map.insert_key(Value::Object(8), Value::String("live".into()));
+        let mut value = Value::Proplist(map);
+
+        clear_removed_object_references(&mut value, &HashSet::from([removed_id]));
+
+        let Value::Proplist(map) = value else {
+            panic!("map remains a map");
+        };
+        assert_eq!(map.len(), 3);
+        assert_eq!(
+            map.get_key(&Value::Array(vec![Value::Nil])),
+            Some(&Value::String("nested_key".into()))
+        );
+        assert_eq!(
+            map.get("nested_value"),
+            Some(&Value::Array(vec![Value::Nil]))
+        );
+        assert_eq!(
+            map.get_key(&Value::Object(8)),
+            Some(&Value::String("live".into()))
+        );
+    }
+
+    #[test]
+    fn effect_var_json_round_trip_preserves_map_key_order_and_types() {
+        let mut map = ValueMap::new();
+        map.insert("beta".into(), Value::Int(2));
+        map.insert("alpha".into(), Value::Int(1));
+        map.insert_key(Value::Bool(true), Value::String("typed".into()));
+        let original = Value::Proplist(map);
+
+        let effect_value = value_to_effect_var(&original);
+        let json = serde_json::to_string(&effect_value).expect("effect value serializes");
+        let restored: EffectVarValue =
+            serde_json::from_str(&json).expect("effect value deserializes");
+        let restored = effect_var_to_value(&restored);
+
+        assert_eq!(restored, original);
+        let Value::Proplist(restored) = restored else {
+            unreachable!();
+        };
+        assert_eq!(
+            restored.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                Value::String("beta".into()),
+                Value::String("alpha".into()),
+                Value::Bool(true),
+            ]
+        );
     }
 
     #[test]
@@ -38862,15 +38946,22 @@ func Trigger(object pOther)
     }
 
     #[test]
-    fn get_values_returns_entries_sorted_by_key() {
-        let mut map = HashMap::new();
+    fn get_values_returns_c4valuehash_key_order() {
+        let mut map = ValueMap::new();
         map.insert("beta".into(), Value::Int(2));
         map.insert("alpha".into(), Value::Int(1));
-        let result = get_values(&[Value::Proplist(map.into_iter().collect())])
-            .expect("GetValues succeeds");
+        map.insert_key(Value::Int(7), Value::String("seven".into()));
+        let result = get_values(&[Value::Proplist(map)]).expect("GetValues succeeds");
         match result {
             Value::Array(entries) => {
-                assert_eq!(entries, vec![Value::Int(1), Value::Int(2)]);
+                assert_eq!(
+                    entries,
+                    vec![
+                        Value::Int(2),
+                        Value::Int(1),
+                        Value::String("seven".into()),
+                    ]
+                );
             }
             other => panic!("expected array, got {:?}", other),
         }
@@ -39543,7 +39634,7 @@ public func CheckGoals()
             get_type(&[Value::Array(vec![Value::Int(1)])]).expect("GetType succeeds"),
             Value::Int(C4V_ARRAY)
         );
-        let mut map = HashMap::new();
+        let mut map = ValueMap::new();
         map.insert("key".into(), Value::Int(1));
         assert_eq!(
             get_type(&[Value::Proplist(map.into_iter().collect())]).expect("GetType succeeds"),
@@ -39809,7 +39900,7 @@ public func RejectConstruction(x, y, builder)
             get_length(&[Value::Array(vec![Value::Int(1), Value::Int(2)])]).expect("array length");
         assert_eq!(result, Value::Int(2));
 
-        let mut map = HashMap::new();
+        let mut map = ValueMap::new();
         map.insert("a".into(), Value::Int(1));
         map.insert("b".into(), Value::Bool(true));
         let result = get_length(&[Value::Proplist(map.into_iter().collect())])
@@ -44504,7 +44595,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
     #[test]
     fn add_effect_records_command_target_metadata() {
         let state = empty_state();
-        let mut target_map = HashMap::new();
+        let mut target_map = ValueMap::new();
         target_map.insert("id".into(), Value::Int(42));
         let target = Value::Proplist(target_map.into_iter().collect());
 
@@ -45640,7 +45731,7 @@ func Probe(state) {
         );
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
-            let mut target = HashMap::new();
+            let mut target = ValueMap::new();
             target.insert("id".into(), Value::Int(23));
             get_action_data(&[Value::Proplist(target.into_iter().collect())])
         });
@@ -45652,7 +45743,7 @@ func Probe(state) {
     #[test]
     fn get_action_data_respects_target_filter() {
         let (result, _) = with_object_host_context(|| {
-            let mut target = HashMap::new();
+            let mut target = ValueMap::new();
             target.insert("id".into(), Value::Int(99));
             get_action_data(&[Value::Proplist(target.into_iter().collect())])
         });
@@ -45868,7 +45959,7 @@ func Probe(state) {
             None,
         )]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
-            let mut target = HashMap::new();
+            let mut target = ValueMap::new();
             target.insert("id".into(), Value::Int(42));
             get_procedure(&[Value::Proplist(target.into_iter().collect())])
         });
@@ -45880,7 +45971,7 @@ func Probe(state) {
     #[test]
     fn get_action_respects_target_filter() {
         let (result, _) = with_object_host_context(|| {
-            let mut target = HashMap::new();
+            let mut target = ValueMap::new();
             target.insert("id".into(), Value::Int(99));
             let target = Value::Proplist(target.into_iter().collect());
             get_action(&[target])
@@ -45912,7 +46003,7 @@ func Probe(state) {
         );
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_object_host_context_with_world(world, || {
-            let mut target = HashMap::new();
+            let mut target = ValueMap::new();
             target.insert("id".into(), Value::Int(99));
             get_action(&[Value::Proplist(target.into_iter().collect())])
         });
@@ -45942,7 +46033,7 @@ func Probe(state) {
             None,
         )]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
-            let mut target = HashMap::new();
+            let mut target = ValueMap::new();
             target.insert("id".into(), Value::Int(7));
             get_action(&[Value::Proplist(target.into_iter().collect())])
         });
@@ -46078,7 +46169,7 @@ func Probe(state) {
         );
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_effect_context(None, &[], world, 1, || {
-            let mut target = HashMap::new();
+            let mut target = ValueMap::new();
             target.insert("id".into(), Value::Int(23));
             get_act_time(&[Value::Proplist(target.into_iter().collect())])
         });
@@ -47090,7 +47181,7 @@ func Probe(state) {
 
     #[test]
     fn set_action_targets_records_target_updates() {
-        let mut target_map = IndexMap::new();
+        let mut target_map = ValueMap::new();
         target_map.insert("id".into(), Value::Int(42));
 
         let (result, outcome) =
@@ -47117,9 +47208,9 @@ func Probe(state) {
 
     #[test]
     fn set_action_targets_updates_second_slot_when_provided() {
-        let mut first = IndexMap::new();
+        let mut first = ValueMap::new();
         first.insert("id".into(), Value::Int(5));
-        let mut second = IndexMap::new();
+        let mut second = ValueMap::new();
         second.insert("id".into(), Value::Int(6));
 
         let (result, outcome) = with_object_host_context(|| {
@@ -47242,7 +47333,7 @@ func Probe(state) {
 
     #[test]
     fn get_action_target_reflects_pending_update() {
-        let mut target_map = IndexMap::new();
+        let mut target_map = ValueMap::new();
         target_map.insert("id".into(), Value::Int(12));
 
         let (result, outcome) = with_object_host_context(|| {
@@ -49437,7 +49528,7 @@ func Probe(object other)
 
     #[test]
     fn set_x_dir_respects_target_filter() {
-        let mut target = IndexMap::new();
+        let mut target = ValueMap::new();
         target.insert("id".into(), Value::Int(99));
         let args = [Value::Int(4), Value::Proplist(target)];
         let (result, outcome) = with_object_host_context(|| set_x_dir(&args));
@@ -49448,7 +49539,7 @@ func Probe(object other)
 
     #[test]
     fn set_r_dir_respects_target_filter() {
-        let mut target = IndexMap::new();
+        let mut target = ValueMap::new();
         target.insert("id".into(), Value::Int(99));
         let args = [Value::Int(4), Value::Proplist(target)];
         let (result, outcome) = with_object_host_context(|| set_r_dir(&args));
@@ -49470,7 +49561,7 @@ func Probe(object other)
 
     #[test]
     fn set_position_respects_target_filter() {
-        let mut target = IndexMap::new();
+        let mut target = ValueMap::new();
         target.insert("id".into(), Value::Int(42));
         let args = [Value::Int(5), Value::Int(6), Value::Proplist(target)];
         let (result, outcome) = with_object_host_context(|| set_position(&args));
@@ -49733,7 +49824,7 @@ func Probe(object other)
     #[test]
     fn get_effect_returns_command_target_metadata() {
         let state = empty_state();
-        let mut target_map = IndexMap::new();
+        let mut target_map = ValueMap::new();
         target_map.insert("id".into(), Value::Int(7));
         let target = Value::Proplist(target_map);
 
@@ -50111,20 +50202,20 @@ public func Probe(object carrier)
 
     #[test]
     fn get_effect_count_reads_state_snapshot_when_no_context() {
-        let mut glow = IndexMap::new();
+        let mut glow = ValueMap::new();
         glow.insert("name".into(), Value::String("Glow".into()));
         glow.insert("priority".into(), Value::Int(100));
         glow.insert("interval".into(), Value::Int(1));
         glow.insert("timer".into(), Value::Int(0));
 
-        let mut spark = IndexMap::new();
+        let mut spark = ValueMap::new();
         spark.insert("name".into(), Value::String("Spark".into()));
         spark.insert("priority".into(), Value::Int(60));
         spark.insert("interval".into(), Value::Int(1));
         spark.insert("timer".into(), Value::Int(0));
 
         let state = {
-            let mut map = IndexMap::new();
+            let mut map = ValueMap::new();
             map.insert(
                 "effects".into(),
                 Value::Array(vec![Value::Proplist(glow), Value::Proplist(spark)]),
@@ -50197,7 +50288,7 @@ public func Probe(object carrier)
 
     #[test]
     fn effect_var_reads_from_state_without_context() {
-        let mut effect_map = IndexMap::new();
+        let mut effect_map = ValueMap::new();
         effect_map.insert("name".into(), Value::String("Glow".into()));
         effect_map.insert("priority".into(), Value::Int(80));
         effect_map.insert("interval".into(), Value::Int(1));
@@ -50207,7 +50298,7 @@ public func Probe(object carrier)
             Value::Array(vec![Value::Int(9), Value::String("pulse".into())]),
         );
 
-        let mut state_map = IndexMap::new();
+        let mut state_map = ValueMap::new();
         state_map.insert(
             "effects".into(),
             Value::Array(vec![Value::Proplist(effect_map.clone())]),
@@ -50245,7 +50336,7 @@ public func Probe(object carrier)
         // FnSetAction (C4Script.cpp:747-753): the object arguments are the
         // ACTION's targets — SetActionByName(name, pTarget, pTarget2) —
         // never a which-object guard.
-        let mut target_map = IndexMap::new();
+        let mut target_map = ValueMap::new();
         target_map.insert("id".into(), Value::Int(2));
         let args = vec![Value::String("Jump".into()), Value::Proplist(target_map)];
         let (result, outcome) =
@@ -51817,7 +51908,7 @@ public func Probe(object carrier)
 
     #[test]
     fn do_energy_respects_target_argument() {
-        let mut target = IndexMap::new();
+        let mut target = ValueMap::new();
         target.insert("id".into(), Value::Int(99));
         let args = [Value::Int(-10), Value::Proplist(target)];
         let (result, outcome) = with_object_host_context(|| do_energy(&args));
@@ -51843,7 +51934,7 @@ public func Probe(object carrier)
 
     #[test]
     fn do_damage_respects_target_argument() {
-        let mut target = IndexMap::new();
+        let mut target = ValueMap::new();
         target.insert("id".into(), Value::Int(77));
         let args = [Value::Int(5), Value::Proplist(target)];
         let (result, outcome) = with_object_host_context(|| do_damage(&args));
@@ -56009,7 +56100,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let first_value = first_result.expect("FindObject closest succeeds");
         assert_eq!(first_value, object_reference_value(ObjectId::new(20)));
 
-        let mut find_next = IndexMap::new();
+        let mut find_next = ValueMap::new();
         find_next.insert("id".into(), Value::Int(20));
         let args_with_next = [
             Value::String("Dummy".into()),
@@ -56732,7 +56823,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                     Value::Int(1000),
                     Value::Int(-250),
                     Value::Proplist({
-                        let mut map = IndexMap::new();
+                        let mut map = ValueMap::new();
                         map.insert("id".into(), Value::Int(object_id.as_u64() as i32));
                         map
                     }),

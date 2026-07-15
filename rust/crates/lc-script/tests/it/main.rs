@@ -40,6 +40,7 @@ mod test_localn_named_locals;
 mod test_localn_two_args;
 mod test_lock_issue;
 mod test_logical_operand_return;
+mod test_map_keys;
 mod test_method_dispatch;
 mod test_method_slot_assignment;
 mod test_multi_var_decl;

@@ -6,8 +6,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use indexmap::IndexMap;
-use lc_script::{Engine, Script, Value};
+use lc_script::{Engine, Script, Value, ValueMap};
 
 fn diagnostic_messages(source: &str) -> Vec<String> {
     match Script::compile(source) {
@@ -94,7 +93,7 @@ fn strict3_safe_navigation_supports_method_index_and_property_access() {
         engine
             .call(
                 "ReadProperty",
-                &[Value::Proplist(IndexMap::from([(
+                &[Value::Proplist(ValueMap::from([(
                     "key".to_string(),
                     Value::String("value".into()),
                 )]))],
@@ -224,7 +223,7 @@ fn guard_covers_the_contiguous_suffix_but_not_a_new_nonnil_intermediate() {
         Value::Nil
     );
 
-    let empty = Value::Proplist(IndexMap::new());
+    let empty = Value::Proplist(ValueMap::new());
     let error = engine
         .call("Contiguous", std::slice::from_ref(&empty))
         .expect_err("a nil intermediate is not guarded by the receiver's question mark");

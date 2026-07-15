@@ -2281,6 +2281,7 @@ dependencies = [
  "criterion",
  "indexmap 2.11.4",
  "serde",
+ "serde_json",
  "stacker",
  "thiserror 1.0.69",
 ]

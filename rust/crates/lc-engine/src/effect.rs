@@ -1,5 +1,5 @@
+use lc_script::Value;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EffectVarValue {
@@ -12,9 +12,68 @@ pub enum EffectVarValue {
     C4Id(String),
     Object(u64),
     Array(Vec<EffectVarValue>),
-    Proplist(BTreeMap<String, EffectVarValue>),
+    Proplist(
+        #[serde(with = "effect_var_map_serde")]
+        Vec<(Value, EffectVarValue)>,
+    ),
     #[default]
     Nil,
+}
+
+/// Keep the established JSON object representation for string-only effect
+/// maps, while retaining arbitrary C4Value keys in the general case. The
+/// sequence representation is unambiguous and preserves C4ValueHash key order.
+mod effect_var_map_serde {
+    use indexmap::IndexMap;
+    use lc_script::Value;
+    use serde::ser::SerializeMap;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::EffectVarValue;
+
+    pub fn serialize<S>(
+        entries: &[(Value, EffectVarValue)],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if entries
+            .iter()
+            .all(|(key, _)| matches!(key, Value::String(_)))
+        {
+            let mut map = serializer.serialize_map(Some(entries.len()))?;
+            for (key, value) in entries {
+                let Value::String(key) = key else {
+                    unreachable!("all keys were checked as strings");
+                };
+                map.serialize_entry(key, value)?;
+            }
+            map.end()
+        } else {
+            entries.serialize(serializer)
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<(Value, EffectVarValue)>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Legacy(IndexMap<String, EffectVarValue>),
+            Entries(Vec<(Value, EffectVarValue)>),
+        }
+
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Legacy(entries) => entries
+                .into_iter()
+                .map(|(key, value)| (Value::String(key), value))
+                .collect(),
+            Repr::Entries(entries) => entries,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +176,42 @@ impl EffectState {
 
     pub fn vars(&self) -> &[EffectVarValue] {
         &self.vars
+    }
+}
+
+#[cfg(test)]
+mod map_serde_tests {
+    use super::*;
+
+    #[test]
+    fn effect_var_string_map_keeps_legacy_json_shape() {
+        let value = EffectVarValue::Proplist(vec![
+            (Value::String("beta".into()), EffectVarValue::Int(2)),
+            (Value::String("alpha".into()), EffectVarValue::Int(1)),
+        ]);
+
+        let encoded = serde_json::to_string(&value).expect("effect map serializes");
+        assert_eq!(
+            encoded,
+            r#"{"Proplist":{"beta":{"Int":2},"alpha":{"Int":1}}}"#
+        );
+        let decoded: EffectVarValue =
+            serde_json::from_str(&encoded).expect("legacy effect map deserializes");
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn effect_var_map_round_trips_arbitrary_keys_in_order() {
+        let value = EffectVarValue::Proplist(vec![
+            (Value::Int(7), EffectVarValue::String("seven".into())),
+            (Value::Bool(true), EffectVarValue::Object(42)),
+        ]);
+
+        let encoded = serde_json::to_value(&value).expect("effect map serializes");
+        assert!(encoded["Proplist"].is_array());
+        let decoded: EffectVarValue =
+            serde_json::from_value(encoded).expect("effect map deserializes");
+        assert_eq!(decoded, value);
     }
 }
 

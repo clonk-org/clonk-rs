@@ -1,6 +1,7 @@
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
-use indexmap::IndexMap;
+use indexmap::{Equivalent, IndexMap};
 
 const C4V_ANY: usize = 0;
 const C4V_INT: usize = 1;
@@ -123,7 +124,230 @@ pub fn cnv_fn(from: C4VType, to: C4VType) -> CnvFn {
     C4_SCRIPT_CNV_MAP[from.index()][to.index()]
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+/// A C4Script map: arbitrary [`Value`] keys with stable insertion order.
+///
+/// C++ uses an unordered map for lookup plus a separate insertion-order list.
+/// `IndexMap` provides the same externally visible behavior: replacing an
+/// existing key keeps its position, while removing and reinserting appends it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ValueMap(IndexMap<Value, Value>);
+
+impl ValueMap {
+    pub fn new() -> Self {
+        Self(IndexMap::new())
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(IndexMap::with_capacity(capacity))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> indexmap::map::Iter<'_, Value, Value> {
+        self.0.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> indexmap::map::IterMut<'_, Value, Value> {
+        self.0.iter_mut()
+    }
+
+    pub fn keys(&self) -> indexmap::map::Keys<'_, Value, Value> {
+        self.0.keys()
+    }
+
+    pub fn values(&self) -> indexmap::map::Values<'_, Value, Value> {
+        self.0.values()
+    }
+
+    pub fn values_mut(&mut self) -> indexmap::map::ValuesMut<'_, Value, Value> {
+        self.0.values_mut()
+    }
+
+    /// String-property lookup (`map.foo` and the overwhelmingly common engine
+    /// access pattern) without allocating a temporary [`Value::String`].
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.0.get(&StringQuery(key))
+    }
+
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+        self.0.get_mut(&StringQuery(key))
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.0.contains_key(&StringQuery(key))
+    }
+
+    pub fn insert(&mut self, key: String, value: Value) -> Option<Value> {
+        self.insert_key(Value::String(key), value)
+    }
+
+    pub fn shift_remove(&mut self, key: &str) -> Option<Value> {
+        self.0.shift_remove(&StringQuery(key))
+    }
+
+    pub fn get_key(&self, key: &Value) -> Option<&Value> {
+        self.0.get(key)
+    }
+
+    pub fn get_key_mut(&mut self, key: &Value) -> Option<&mut Value> {
+        self.0.get_mut(key)
+    }
+
+    pub fn contains_value_key(&self, key: &Value) -> bool {
+        self.0.contains_key(key)
+    }
+
+    pub fn insert_key(&mut self, key: Value, value: Value) -> Option<Value> {
+        self.0.insert(key, value)
+    }
+
+    pub fn shift_remove_key(&mut self, key: &Value) -> Option<Value> {
+        self.0.shift_remove(key)
+    }
+}
+
+impl<K> Extend<(K, Value)> for ValueMap
+where
+    K: Into<Value>,
+{
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = (K, Value)>,
+    {
+        for (key, value) in iter {
+            self.insert_key(key.into(), value);
+        }
+    }
+}
+
+impl<K> FromIterator<(K, Value)> for ValueMap
+where
+    K: Into<Value>,
+{
+    fn from_iter<T>(iter: T) -> Self
+    where
+        T: IntoIterator<Item = (K, Value)>,
+    {
+        let iter = iter.into_iter();
+        let mut map = Self::with_capacity(iter.size_hint().0);
+        map.extend(iter);
+        map
+    }
+}
+
+impl<K, const N: usize> From<[(K, Value); N]> for ValueMap
+where
+    K: Into<Value>,
+{
+    fn from(entries: [(K, Value); N]) -> Self {
+        entries.into_iter().collect()
+    }
+}
+
+impl<K> From<IndexMap<K, Value>> for ValueMap
+where
+    K: Into<Value>,
+{
+    fn from(entries: IndexMap<K, Value>) -> Self {
+        entries.into_iter().collect()
+    }
+}
+
+impl IntoIterator for ValueMap {
+    type Item = (Value, Value);
+    type IntoIter = indexmap::map::IntoIter<Value, Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ValueMap {
+    type Item = (&'a Value, &'a Value);
+    type IntoIter = indexmap::map::Iter<'a, Value, Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut ValueMap {
+    type Item = (&'a Value, &'a mut Value);
+    type IntoIter = indexmap::map::IterMut<'a, Value, Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter_mut()
+    }
+}
+
+impl serde::Serialize for ValueMap {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if self.keys().all(|key| matches!(key, Value::String(_))) {
+            use serde::ser::SerializeMap;
+
+            let mut map = serializer.serialize_map(Some(self.len()))?;
+            for (key, value) in self {
+                let Value::String(key) = key else {
+                    unreachable!("all map keys were checked as strings")
+                };
+                map.serialize_entry(key, value)?;
+            }
+            map.end()
+        } else {
+            use serde::ser::SerializeSeq;
+
+            let mut entries = serializer.serialize_seq(Some(self.len()))?;
+            for entry in self {
+                entries.serialize_element(&entry)?;
+            }
+            entries.end()
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ValueMap {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Legacy(IndexMap<String, Value>),
+            Entries(Vec<(Value, Value)>),
+        }
+
+        Ok(match <Repr as serde::Deserialize>::deserialize(deserializer)? {
+            Repr::Legacy(entries) => entries.into_iter().collect(),
+            Repr::Entries(entries) => entries.into_iter().collect(),
+        })
+    }
+}
+
+struct StringQuery<'a>(&'a str);
+
+impl Hash for StringQuery<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        c4_string_hash(self.0).hash(state);
+    }
+}
+
+impl Equivalent<Value> for StringQuery<'_> {
+    fn equivalent(&self, key: &Value) -> bool {
+        matches!(key, Value::String(value) if value == self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Int(i32),
     Bool(bool),
@@ -131,8 +355,26 @@ pub enum Value {
     C4Id(String),
     Object(u64),
     Array(Vec<Value>),
-    Proplist(IndexMap<String, Value>),
+    Proplist(ValueMap),
     Nil,
+}
+
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.c4_value_hash().hash(state);
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_owned())
+    }
 }
 
 impl Value {
@@ -190,9 +432,7 @@ impl Value {
         match self {
             Value::Int(value) => c4_hash_typed(C4V_INT, hash_i32(*value)),
             Value::Bool(value) => c4_hash_typed(C4V_BOOL, *value as usize),
-            Value::String(value) => {
-                c4_hash_typed(C4V_STRING, cpp_string_view_hash(value.as_bytes()))
-            }
+            Value::String(value) => c4_string_hash(value),
             Value::C4Id(value) => c4_hash_typed(C4V_C4ID, hash_i32(c4_id_raw(value) as i32)),
             Value::Object(id) => c4_hash_typed(C4V_C4OBJECT, *id as usize),
             Value::Array(values) => values.iter().fold(C4V_ARRAY, |hash, value| {
@@ -200,10 +440,7 @@ impl Value {
             }),
             Value::Proplist(entries) => {
                 let content_hash = entries.iter().fold(0, |content_hash, (key, value)| {
-                    let item_hash = c4_hash_combine(
-                        c4_hash_typed(C4V_STRING, cpp_string_view_hash(key.as_bytes())),
-                        value.c4_value_hash(),
-                    );
+                    let item_hash = c4_hash_combine(key.c4_value_hash(), value.c4_value_hash());
                     content_hash ^ item_hash
                 });
                 c4_hash_combine(C4V_MAP, content_hash)
@@ -304,6 +541,10 @@ fn c4_hash_combine_inner(hash: usize, next_hash: usize) -> usize {
 
 fn c4_hash_typed(type_hash: usize, value_hash: usize) -> usize {
     c4_hash_combine(type_hash, value_hash)
+}
+
+fn c4_string_hash(value: &str) -> usize {
+    c4_hash_typed(C4V_STRING, cpp_string_view_hash(value.as_bytes()))
 }
 
 fn hash_i32(value: i32) -> usize {
@@ -646,11 +887,9 @@ impl fmt::Display for Value {
                 write!(f, "]")
             }
             Value::Proplist(entries) => {
-                let mut items: Vec<_> = entries.iter().collect();
-                items.sort_by(|a, b| a.0.cmp(b.0));
                 let mut first = true;
                 write!(f, "{{")?;
-                for (key, value) in items {
+                for (key, value) in entries {
                     if !first {
                         write!(f, ", ")?;
                     }
@@ -661,6 +900,94 @@ impl fmt::Display for Value {
             }
             Value::Nil => write!(f, "nil"),
         }
+    }
+}
+
+#[cfg(test)]
+mod map_tests {
+    use super::*;
+
+    #[test]
+    fn arbitrary_keys_coexist_with_string_properties_in_insertion_order() {
+        let mut map = ValueMap::new();
+        map.insert("name".into(), Value::Int(1));
+        map.insert_key(Value::Int(42), Value::String("answer".into()));
+        map.insert_key(Value::Bool(true), Value::Int(3));
+
+        assert_eq!(map.get("name"), Some(&Value::Int(1)));
+        assert_eq!(
+            map.get_key(&Value::Int(42)),
+            Some(&Value::String("answer".into()))
+        );
+        assert!(map.contains_key("name"));
+        assert!(map.contains_value_key(&Value::Bool(true)));
+        assert_eq!(
+            map.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                Value::String("name".into()),
+                Value::Int(42),
+                Value::Bool(true)
+            ]
+        );
+
+        // Replacement keeps the original key position. Removal followed by
+        // reinsertion appends, matching C4ValueHash::keyOrder.
+        map.insert_key(Value::Int(42), Value::Int(2));
+        assert_eq!(map.keys().nth(1), Some(&Value::Int(42)));
+        assert_eq!(map.shift_remove_key(&Value::Int(42)), Some(Value::Int(2)));
+        map.insert_key(Value::Int(42), Value::Int(4));
+        assert_eq!(map.keys().last(), Some(&Value::Int(42)));
+    }
+
+    #[test]
+    fn map_equality_and_c4_hash_ignore_insertion_order() {
+        let forward = Value::Proplist(ValueMap::from([
+            (Value::Int(7), Value::String("seven".into())),
+            (Value::String("flag".into()), Value::Bool(true)),
+        ]));
+        let reverse = Value::Proplist(ValueMap::from([
+            (Value::String("flag".into()), Value::Bool(true)),
+            (Value::Int(7), Value::String("seven".into())),
+        ]));
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.c4_value_hash(), reverse.c4_value_hash());
+    }
+
+    #[test]
+    fn serde_keeps_legacy_string_map_shape() {
+        let map = ValueMap::from([("alpha".to_string(), Value::Int(1))]);
+        let encoded = serde_json::to_string(&map).expect("string map serializes");
+        assert_eq!(encoded, r#"{"alpha":{"Int":1}}"#);
+
+        let decoded: ValueMap = serde_json::from_str(&encoded).expect("string map deserializes");
+        assert_eq!(decoded, map);
+
+        let legacy: ValueMap = serde_json::from_str(r#"{"old":{"Bool":true}}"#)
+            .expect("legacy object representation remains accepted");
+        assert_eq!(legacy.get("old"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn serde_round_trips_non_string_keys_as_ordered_entries() {
+        let map = ValueMap::from([
+            (Value::Int(42), Value::String("answer".into())),
+            (Value::C4Id("CLNK".into()), Value::Object(7)),
+            (Value::Bool(false), Value::Int(0)),
+        ]);
+        let encoded = serde_json::to_value(&map).expect("arbitrary-key map serializes");
+        assert!(
+            encoded.is_array(),
+            "non-string keys require an entry sequence"
+        );
+
+        let decoded: ValueMap =
+            serde_json::from_value(encoded).expect("arbitrary-key map deserializes");
+        assert_eq!(decoded, map);
+        assert_eq!(
+            decoded.keys().cloned().collect::<Vec<_>>(),
+            map.keys().cloned().collect::<Vec<_>>()
+        );
     }
 }
 
@@ -680,7 +1007,7 @@ mod cnv_tests {
         assert_eq!(Value::Object(42).c4v_type(), C4VType::C4Object);
         assert_eq!(Value::String("x".into()).c4v_type(), C4VType::String);
         assert_eq!(Value::Array(vec![]).c4v_type(), C4VType::Array);
-        assert_eq!(Value::Proplist(IndexMap::new()).c4v_type(), C4VType::Map);
+        assert_eq!(Value::Proplist(ValueMap::new()).c4v_type(), C4VType::Map);
     }
 
     #[test]
@@ -758,6 +1085,6 @@ mod cnv_tests {
         assert!(Value::Object(42).convert_to(C4Object, true));
         assert!(Value::Object(42).convert_to(Bool, true));
         assert!(Value::Array(vec![]).convert_to(Array, true));
-        assert!(Value::Proplist(IndexMap::new()).convert_to(Bool, true));
+        assert!(Value::Proplist(ValueMap::new()).convert_to(Bool, true));
     }
 }

@@ -21,6 +21,6 @@ pub use crate::vm::{
     ValueReference,
 };
 pub use crate::error::{ParseError, RuntimeError, ScriptError};
-pub use crate::value::{c4_hash_combine, cnv_fn, C4VType, CnvFn, Value};
+pub use crate::value::{c4_hash_combine, cnv_fn, C4VType, CnvFn, Value, ValueMap};
 
 mod value;

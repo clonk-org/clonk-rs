@@ -2,10 +2,8 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
 
-use indexmap::IndexMap;
-
 use crate::engine::Engine;
-use crate::value::Value;
+use crate::value::{Value, ValueMap};
 
 pub struct EngineHandle(Engine);
 
@@ -37,7 +35,7 @@ pub struct LcScriptValue {
 
 #[repr(C)]
 pub struct LcScriptMapEntry {
-    pub key: *mut c_char,
+    pub key: LcScriptValue,
     pub value: LcScriptValue,
 }
 
@@ -166,15 +164,10 @@ fn lc_value_to_rust(value: &LcScriptValue) -> Result<Value, ()> {
         }
         LcScriptValueKind::Proplist => {
             let entries = lc_map_entry_slice(value)?;
-            let mut map = IndexMap::with_capacity(entries.len());
+            let mut map = ValueMap::with_capacity(entries.len());
             for entry in entries {
-                if entry.key.is_null() {
-                    return Err(());
-                }
-                let key = unsafe { CStr::from_ptr(entry.key) }
-                    .to_string_lossy()
-                    .into_owned();
-                map.insert(key, lc_value_to_rust(&entry.value)?);
+                let key = lc_value_to_rust(&entry.key)?;
+                map.insert_key(key, lc_value_to_rust(&entry.value)?);
             }
             Ok(Value::Proplist(map))
         }
@@ -228,19 +221,8 @@ fn rust_value_to_lc(value: &Value) -> LcScriptValue {
         Value::Proplist(entries) => {
             let mut ffi_entries = Vec::with_capacity(entries.len());
             for (key, value) in entries {
-                let key = match CString::new(key.as_str()) {
-                    Ok(key) => key.into_raw(),
-                    Err(_) => {
-                        for entry in &mut ffi_entries {
-                            unsafe {
-                                free_lc_map_entry(entry);
-                            }
-                        }
-                        return LcScriptValue::default();
-                    }
-                };
                 ffi_entries.push(LcScriptMapEntry {
-                    key,
+                    key: rust_value_to_lc(key),
                     value: rust_value_to_lc(value),
                 });
             }
@@ -323,10 +305,7 @@ unsafe fn free_lc_value_fields(value: &mut LcScriptValue) {
 }
 
 unsafe fn free_lc_map_entry(entry: &mut LcScriptMapEntry) {
-    if !entry.key.is_null() {
-        drop(CString::from_raw(entry.key));
-        entry.key = ptr::null_mut();
-    }
+    free_lc_value_fields(&mut entry.key);
     free_lc_value_fields(&mut entry.value);
 }
 
@@ -354,7 +333,7 @@ mod tests {
 
     #[test]
     fn rust_to_lc_preserves_proplists() {
-        let value = Value::Proplist(IndexMap::from([
+        let value = Value::Proplist(ValueMap::from([
             ("flag".to_string(), Value::Bool(true)),
             (
                 "items".to_string(),
@@ -364,9 +343,9 @@ mod tests {
             ("object".to_string(), Value::Object(42)),
             (
                 "nested".to_string(),
-                Value::Proplist(IndexMap::from([("answer".to_string(), Value::Int(42))])),
+                Value::Proplist(ValueMap::from([("answer".to_string(), Value::Int(42))])),
             ),
-            ("empty".to_string(), Value::Proplist(IndexMap::new())),
+            ("empty".to_string(), Value::Proplist(ValueMap::new())),
         ]));
 
         let mut ffi_value = rust_value_to_lc(&value);
@@ -374,15 +353,36 @@ mod tests {
         let ffi_keys: Vec<_> = lc_map_entry_slice(&ffi_value)
             .expect("FFI map entries")
             .iter()
-            .map(|entry| {
-                unsafe { CStr::from_ptr(entry.key) }
-                    .to_string_lossy()
-                    .into_owned()
-            })
+            .map(|entry| lc_value_to_rust(&entry.key).expect("valid FFI key"))
             .collect();
-        assert_eq!(ffi_keys, ["flag", "items", "id", "object", "nested", "empty"]);
+        assert_eq!(
+            ffi_keys,
+            ["flag", "items", "id", "object", "nested", "empty"]
+                .map(|key| Value::String(key.to_string()))
+        );
         assert_eq!(lc_value_to_rust(&ffi_value), Ok(value));
 
+        lc_script_value_free(&mut ffi_value);
+    }
+
+    #[test]
+    fn rust_to_lc_preserves_arbitrary_map_keys() {
+        let mut entries = ValueMap::new();
+        entries.insert_key(Value::Int(7), Value::String("int".into()));
+        entries.insert_key(Value::Bool(true), Value::String("bool".into()));
+        entries.insert_key(Value::Object(42), Value::String("object".into()));
+        entries.insert_key(
+            Value::Array(vec![Value::Int(1), Value::Bool(false)]),
+            Value::String("array".into()),
+        );
+        entries.insert_key(
+            Value::Proplist(ValueMap::from([("nested", Value::Int(9))])),
+            Value::String("map".into()),
+        );
+        let value = Value::Proplist(entries);
+
+        let mut ffi_value = rust_value_to_lc(&value);
+        assert_eq!(lc_value_to_rust(&ffi_value), Ok(value));
         lc_script_value_free(&mut ffi_value);
     }
 }

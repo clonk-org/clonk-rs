@@ -1078,6 +1078,7 @@ enum C4V_Type_Oracle
     C4V_Int_Oracle = 1,
     C4V_Bool_Oracle = 2,
     C4V_C4ID_Oracle = 3,
+    C4V_C4Object_Oracle = 4,
     C4V_String_Oracle = 5,
     C4V_Array_Oracle = 6,
     C4V_Map_Oracle = 7,
@@ -1124,6 +1125,13 @@ static std::size_t hashId(std::string_view value)
 {
     std::size_t hash = std::hash<C4V_Type_Oracle>{}(C4V_C4ID_Oracle);
     hashCombine(hash, std::hash<int32_t>{}(static_cast<int32_t>(oracleC4Id(value))));
+    return hash;
+}
+
+static std::size_t hashObject(int32_t number)
+{
+    std::size_t hash = std::hash<C4V_Type_Oracle>{}(C4V_C4Object_Oracle);
+    hashCombine(hash, std::hash<int32_t>{}(number));
     return hash;
 }
 
@@ -1439,6 +1447,23 @@ int main()
     printHashValueCase("map_a1_b23", hashMap({{hashString("a"), hashInt(1)}, {hashString("b"), array23}}));
     printf(",");
     printHashValueCase("map_b23_a1", hashMap({{hashString("b"), array23}, {hashString("a"), hashInt(1)}}));
+    printf(",");
+    const auto mixedMap = std::initializer_list<std::pair<std::size_t, std::size_t>>{
+        {hashInt(42), hashString("int")},
+        {hashBool(true), hashInt(7)},
+        {hashId("CLNK"), hashBool(false)},
+        {hashObject(77), hashString("object")},
+        {hashArray({hashInt(1), hashBool(true)}), hashId("1337")},
+    };
+    printHashValueCase("map_mixed_keys", hashMap(mixedMap));
+    printf(",");
+    printHashValueCase("map_mixed_keys_reversed", hashMap({
+        {hashArray({hashInt(1), hashBool(true)}), hashId("1337")},
+        {hashObject(77), hashString("object")},
+        {hashId("CLNK"), hashBool(false)},
+        {hashBool(true), hashInt(7)},
+        {hashInt(42), hashString("int")},
+    }));
     printf("]}");
     printf(",\n");
 

@@ -22,8 +22,7 @@
 //! On any divergence the test panics with the first mismatch (section, index,
 //! field, C++ value vs Rust value).
 
-use lc_script::{c4_hash_combine, cnv_fn, C4VType, Value as ScriptValue};
-use indexmap::IndexMap;
+use lc_script::{c4_hash_combine, cnv_fn, C4VType, Value as ScriptValue, ValueMap};
 use serde_json::Value;
 
 use crate::landscape::{Landscape, LandscapeRasterState, PixelGrid};
@@ -199,7 +198,7 @@ fn convert_case_value(name: &str) -> ScriptValue {
         "id_CLNK" => ScriptValue::C4Id("CLNK".to_string()),
         "string" => ScriptValue::String("x".to_string()),
         "array" => ScriptValue::Array(Vec::new()),
-        "map" => ScriptValue::Proplist(IndexMap::new()),
+        "map" => ScriptValue::Proplist(ValueMap::new()),
         other => panic!("unknown script_value_convert case `{other}`"),
     }
 }
@@ -1625,18 +1624,34 @@ fn parity_differential_matches_cpp_golden() {
             );
         }
 
-        let mut map = IndexMap::new();
+        let mut map = ValueMap::new();
         map.insert("a".to_string(), ScriptValue::Int(1));
         map.insert(
             "b".to_string(),
             ScriptValue::Array(vec![ScriptValue::Int(2), ScriptValue::Int(3)]),
         );
-        let mut reversed = IndexMap::new();
+        let mut reversed = ValueMap::new();
         reversed.insert(
             "b".to_string(),
             ScriptValue::Array(vec![ScriptValue::Int(2), ScriptValue::Int(3)]),
         );
         reversed.insert("a".to_string(), ScriptValue::Int(1));
+
+        let mixed_entries = [
+            (ScriptValue::Int(42), ScriptValue::String("int".into())),
+            (ScriptValue::Bool(true), ScriptValue::Int(7)),
+            (ScriptValue::C4Id("CLNK".into()), ScriptValue::Bool(false)),
+            (
+                ScriptValue::Object(77),
+                ScriptValue::String("object".into()),
+            ),
+            (
+                ScriptValue::Array(vec![ScriptValue::Int(1), ScriptValue::Bool(true)]),
+                ScriptValue::C4Id("1337".into()),
+            ),
+        ];
+        let mixed = ValueMap::from(mixed_entries.clone());
+        let mixed_reversed = mixed_entries.into_iter().rev().collect();
 
         let cases = [
             ("nil", ScriptValue::Nil),
@@ -1678,6 +1693,11 @@ fn parity_differential_matches_cpp_golden() {
             ),
             ("map_a1_b23", ScriptValue::Proplist(map)),
             ("map_b23_a1", ScriptValue::Proplist(reversed)),
+            ("map_mixed_keys", ScriptValue::Proplist(mixed)),
+            (
+                "map_mixed_keys_reversed",
+                ScriptValue::Proplist(mixed_reversed),
+            ),
         ];
         for (idx, (name, value)) in cases.iter().enumerate() {
             let entry = section["values"]

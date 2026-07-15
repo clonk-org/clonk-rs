@@ -2081,13 +2081,19 @@ impl<'a> Parser<'a> {
         Ok(Expr::Proplist(entries))
     }
 
-    fn parse_proplist_key(&mut self) -> Result<String, ParseError> {
+    fn parse_proplist_key(&mut self) -> Result<Expr, ParseError> {
+        if self.consume_if_symbol(Symbol::LBracket)?.is_some() {
+            let key = self.parse_expression()?;
+            self.expect_symbol(Symbol::RBracket, "expected ']' after computed map key")?;
+            return Ok(key);
+        }
+
         let token = self.consume()?;
         match token.kind {
-            TokenKind::Identifier(name) => Ok(name),
-            TokenKind::String(value) => Ok(value),
+            TokenKind::Identifier(name) => Ok(Expr::Literal(Literal::String(name))),
+            TokenKind::String(value) => Ok(Expr::Literal(Literal::String(value))),
             _ => Err(ParseError::new(
-                "expected identifier or string for proplist key",
+                "expected identifier, string, or computed key for map key",
                 token.line,
                 token.column,
             )),
@@ -2583,6 +2589,47 @@ fn static_const_multi_declarators_parse() {
     fn parse_nested_proplist_assignment() {
         let result = parse_script("func Test() { var obj = {n={}}; obj.n.prop = 1; }");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_map_literal_computed_keys_as_expressions() {
+        let script = parse_script(
+            r#"func Test(object_key) {
+                return { bare = 1, "quoted" = 2, [42] = 3, [CLNK] = 4, [object_key] = 5 };
+            }"#,
+        )
+        .expect("computed map keys parse");
+        let Stmt::Return(Some(Expr::Proplist(entries))) = &script.functions[0].body[0] else {
+            panic!("expected returned map literal");
+        };
+
+        assert_eq!(entries.len(), 5);
+        assert!(matches!(
+            &entries[0].0,
+            Expr::Literal(Literal::String(key)) if key == "bare"
+        ));
+        assert!(matches!(
+            &entries[1].0,
+            Expr::Literal(Literal::String(key)) if key == "quoted"
+        ));
+        assert!(matches!(&entries[2].0, Expr::Literal(Literal::Int(42))));
+        assert!(matches!(
+            &entries[3].0,
+            Expr::Literal(Literal::C4Id(id)) if id == "CLNK"
+        ));
+        assert!(matches!(
+            &entries[4].0,
+            Expr::Variable(name) if name == "object_key"
+        ));
+    }
+
+    #[test]
+    fn computed_map_key_requires_closing_bracket() {
+        let error = parse_script("func Test() { return { [42) = 1 }; }")
+            .expect_err("unterminated computed key must fail");
+        assert!(error
+            .message()
+            .contains("expected ']' after computed map key"));
     }
 
     #[test]

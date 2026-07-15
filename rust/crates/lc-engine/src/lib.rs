@@ -218,8 +218,7 @@ use lc_resources::{
 pub use lc_resources::PhysicalInfo;
 pub use lc_script::ScriptError;
 
-use lc_script::{DebuggerHooks, Engine as ScriptEngine, Value};
-use indexmap::IndexMap;
+use lc_script::{DebuggerHooks, Engine as ScriptEngine, Value, ValueMap};
 use mass_mover::MassMoverSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sky::{SkyAdjustment, SkyState};
@@ -6985,16 +6984,60 @@ fn denumerate_script_value(value: &Value, object_numbers: &HashSet<u64>) -> Valu
         Value::Proplist(entries) => Value::Proplist(
             entries
                 .iter()
-                .map(|(key, value)| {
-                    (
-                        key.clone(),
+                .filter_map(|(key, value)| {
+                    if is_missing_script_object(key, object_numbers)
+                        || is_missing_script_object(value, object_numbers)
+                    {
+                        return None;
+                    }
+                    Some((
+                        denumerate_script_value(key, object_numbers),
                         denumerate_script_value(value, object_numbers),
-                    )
+                    ))
                 })
                 .collect(),
         ),
         value => value.clone(),
     }
+}
+
+fn is_missing_script_object(value: &Value, object_numbers: &HashSet<u64>) -> bool {
+    matches!(value, Value::Object(id) if !object_numbers.contains(id))
+}
+
+#[cfg(test)]
+#[test]
+fn map_denumeration_erases_missing_direct_object_entries() {
+    let mut map = ValueMap::new();
+    map.insert_key(Value::Object(7), Value::Int(1));
+    map.insert("direct_value".into(), Value::Object(7));
+    map.insert_key(
+        Value::Array(vec![Value::Object(7)]),
+        Value::String("nested_key".into()),
+    );
+    map.insert(
+        "nested_value".into(),
+        Value::Array(vec![Value::Object(7)]),
+    );
+    map.insert_key(Value::Object(8), Value::String("live".into()));
+
+    let restored = denumerate_script_value(&Value::Proplist(map), &HashSet::from([8]));
+    let Value::Proplist(map) = restored else {
+        panic!("map remains a map");
+    };
+    assert_eq!(map.len(), 3);
+    assert_eq!(
+        map.get_key(&Value::Array(vec![Value::Nil])),
+        Some(&Value::String("nested_key".into()))
+    );
+    assert_eq!(
+        map.get("nested_value"),
+        Some(&Value::Array(vec![Value::Nil]))
+    );
+    assert_eq!(
+        map.get_key(&Value::Object(8)),
+        Some(&Value::String("live".into()))
+    );
 }
 
 fn denumerate_object_reference(
@@ -7017,8 +7060,16 @@ fn denumerate_effect_value(value: &mut EffectVarValue, object_numbers: &HashSet<
             }
         }
         EffectVarValue::Proplist(entries) => {
-            for value in entries.values_mut() {
-                denumerate_effect_value(value, object_numbers);
+            let previous = std::mem::take(entries);
+            for (mut key, mut value) in previous {
+                if is_missing_script_object(&key, object_numbers)
+                    || matches!(&value, EffectVarValue::Object(id) if !object_numbers.contains(id))
+                {
+                    continue;
+                }
+                key = denumerate_script_value(&key, object_numbers);
+                denumerate_effect_value(&mut value, object_numbers);
+                entries.push((key, value));
             }
         }
         _ => {}
@@ -39212,7 +39263,7 @@ fn build_state_value(
     state: &ObjectState,
     library: &ActionLibrary,
 ) -> Value {
-    let mut map = IndexMap::with_capacity(8);
+    let mut map = ValueMap::with_capacity(8);
     map.insert(
         "definition".into(),
         Value::String(definition_id.to_string()),
@@ -39251,7 +39302,7 @@ fn build_state_value(
         .map(|id| Value::Int(truncate_to_i32(id.as_u64())))
         .collect();
     map.insert("contents".into(), Value::Array(contents));
-    let mut action = IndexMap::with_capacity(7);
+    let mut action = ValueMap::with_capacity(7);
     action.insert("name".into(), Value::String(state.action.name.clone()));
     action.insert("phase".into(), Value::Int(state.action.phase));
     let ticks = (state.action.ticks).min(i32::MAX as u32) as i32;
@@ -39287,7 +39338,7 @@ fn build_state_value(
         .effects
         .iter()
         .map(|effect| {
-            let mut props = IndexMap::with_capacity(6);
+            let mut props = ValueMap::with_capacity(6);
             props.insert("name".into(), Value::String(effect.name.clone()));
             props.insert("priority".into(), Value::Int(effect.priority));
             props.insert("interval".into(), Value::Int(effect.interval));
@@ -39306,7 +39357,7 @@ fn build_state_value(
 }
 
 fn build_menu_selection_value(selection: &MenuCommandSelection) -> Value {
-    let mut map = IndexMap::with_capacity(4);
+    let mut map = ValueMap::with_capacity(4);
     map.insert(
         "primary".into(),
         Value::Int(truncate_to_i32(selection.primary_id.as_u64())),
@@ -39326,7 +39377,7 @@ fn build_menu_selection_value(selection: &MenuCommandSelection) -> Value {
 }
 
 fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
-    let mut map = IndexMap::with_capacity(11);
+    let mut map = ValueMap::with_capacity(11);
     map.insert(
         "definition".into(),
         Value::String(snapshot.definition_id.clone()),
@@ -39373,7 +39424,7 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
         .map(|id| Value::Int(truncate_to_i32(id.as_u64())))
         .collect();
     map.insert("contents".into(), Value::Array(contents));
-    let mut action = IndexMap::with_capacity(7);
+    let mut action = ValueMap::with_capacity(7);
     action.insert("name".into(), Value::String(snapshot.action.name.clone()));
     action.insert("phase".into(), Value::Int(snapshot.action.phase));
     let ticks = snapshot.action.ticks.min(i32::MAX as u32) as i32;
@@ -39628,7 +39679,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
 }
 
 fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {
-    let mut map = IndexMap::with_capacity(5);
+    let mut map = ValueMap::with_capacity(5);
     let frame_value = if snapshot.frame > i32::MAX as u64 {
         i32::MAX
     } else {
@@ -39663,8 +39714,8 @@ fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {
     Value::Proplist(map)
 }
 
-fn physics_to_map(settings: PhysicsSettings) -> IndexMap<String, Value> {
-    let mut map = IndexMap::with_capacity(4);
+fn physics_to_map(settings: PhysicsSettings) -> ValueMap {
+    let mut map = ValueMap::with_capacity(4);
     map.insert("gravity".into(), Value::Int(settings.gravity));
     map.insert("max_fall_speed".into(), Value::Int(settings.max_fall_speed));
     map.insert("max_rise_speed".into(), Value::Int(settings.max_rise_speed));
@@ -39675,8 +39726,8 @@ fn physics_to_map(settings: PhysicsSettings) -> IndexMap<String, Value> {
     map
 }
 
-fn environment_frame_to_map(frame: &EnvironmentFrame) -> IndexMap<String, Value> {
-    let mut map = IndexMap::with_capacity(12);
+fn environment_frame_to_map(frame: &EnvironmentFrame) -> ValueMap {
+    let mut map = ValueMap::with_capacity(12);
     let settings = frame.settings;
     map.insert("wind".into(), Value::Int(settings.wind));
     map.insert("wind_variation".into(), Value::Int(settings.wind_variation));
@@ -39769,6 +39820,13 @@ fn parse_scenario_command(
         Value::Proplist(map) => {
             let mut batch = ScenarioBatch::default();
             for (key, value) in map.into_iter() {
+                let Value::String(key) = key else {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: definition.to_string(),
+                        function: function.to_string(),
+                        detail: format!("unexpected key `{key}`"),
+                    });
+                };
                 match key.as_str() {
                     "spawn" => {
                         batch
@@ -40003,10 +40061,17 @@ fn parse_command(
 fn parse_command_from_proplist(
     definition: &str,
     function: &str,
-    map: IndexMap<String, Value>,
+    map: ValueMap,
 ) -> Result<CommandBatch, EngineError> {
     let mut batch = CommandBatch::default();
     for (key, value) in map.into_iter() {
+        let Value::String(key) = key else {
+            return Err(EngineError::InvalidScriptOutput {
+                definition: definition.to_string(),
+                function: function.to_string(),
+                detail: format!("unexpected key `{key}`"),
+            });
+        };
         match key.as_str() {
             "position" => {
                 batch.delta.position = Some(value_to_vector(definition, function, value)?);
@@ -40113,10 +40178,17 @@ fn value_to_action(
 fn parse_action_update(
     definition: &str,
     function: &str,
-    map: IndexMap<String, Value>,
+    map: ValueMap,
 ) -> Result<ActionUpdate, EngineError> {
     let mut update = ActionUpdate::default();
     for (key, value) in map.into_iter() {
+        let Value::String(key) = key else {
+            return Err(EngineError::InvalidScriptOutput {
+                definition: definition.to_string(),
+                function: function.to_string(),
+                detail: format!("unexpected key `{key}` in action proplist"),
+            });
+        };
         match key.as_str() {
             "name" => match value {
                 Value::String(name) => update.set_name(name),
@@ -40213,6 +40285,13 @@ fn value_to_physics_delta(
         Value::Proplist(map) => {
             let mut delta = PhysicsDelta::default();
             for (key, entry) in map.into_iter() {
+                let Value::String(key) = key else {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: definition.to_string(),
+                        function: function.to_string(),
+                        detail: format!("unexpected physics key `{key}`"),
+                    });
+                };
                 match key.as_str() {
                     "gravity" => match entry {
                         Value::Int(val) => delta.gravity = Some(val),
@@ -40498,6 +40577,13 @@ fn value_to_commands(
         let mut landscape_ops = Vec::new();
 
         for (key, value) in map.into_iter() {
+            let Value::String(key) = key else {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function: function.to_string(),
+                    detail: format!("unexpected key `{key}` in command entry"),
+                });
+            };
             match key.as_str() {
                 "delay" => {
                     let raw_delay = value_to_int(definition, function, value)?;

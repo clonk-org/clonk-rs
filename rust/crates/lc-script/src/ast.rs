@@ -319,7 +319,7 @@ pub enum Expr {
         forward_rest: bool,
     },
     Array(Vec<Expr>),
-    Proplist(Vec<(String, Expr)>),
+    Proplist(Vec<(Expr, Expr)>),
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
     ArrayAppend(Box<Expr>),
