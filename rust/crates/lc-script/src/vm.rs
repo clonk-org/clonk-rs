@@ -159,18 +159,19 @@ fn slot_cell(slots: &SlotMap, index: i32) -> ValueCell {
 }
 
 /// The script frame immediately calling a native host function. C++ exposes
-/// both pieces through `cthr->Caller`: `NumVars` backs `Var(n)`, while
-/// `Func->Owner->Strict` controls compatibility behavior in native functions
-/// such as CreateObject.
+/// all pieces through `cthr->Caller`: `NumVars` backs `Var(n)`, while native
+/// compatibility functions select either `Func->Owner->Strict` or
+/// `Func->pOrgScript->Strict` depending on their C++ implementation.
 #[derive(Clone)]
 pub(crate) struct ScriptCallerContext {
     var_slots: SlotMap,
-    strict_level: Option<u8>,
+    owner_strict_level: Option<u8>,
+    origin_strict_level: Option<u8>,
 }
 
 thread_local! {
     /// None while a native host function has no script caller (an
-    /// engine-driven direct call). `strict_level == None` inside a PRESENT
+    /// engine-driven direct call). A missing strict level inside a PRESENT
     /// frame instead means a NONSTRICT script caller.
     static HOST_CALLER_CONTEXT: RefCell<Option<ScriptCallerContext>> = const {
         RefCell::new(None)
@@ -191,7 +192,21 @@ pub enum HostCallerStrictness {
 pub fn caller_strictness() -> HostCallerStrictness {
     HOST_CALLER_CONTEXT.with(|cell| match cell.borrow().as_ref() {
         None => HostCallerStrictness::NoCaller,
-        Some(context) => match context.strict_level {
+        Some(context) => match context.owner_strict_level {
+            None | Some(0) => HostCallerStrictness::NonStrict,
+            Some(level) => HostCallerStrictness::Strict(level),
+        },
+    })
+}
+
+/// Strictness of the script that originally defined the immediately calling
+/// function (`cthr->Caller->Func->pOrgScript->Strict`). Included/appended
+/// functions retain this level even when their destination owner has a
+/// different strictness.
+pub fn caller_origin_strictness() -> HostCallerStrictness {
+    HOST_CALLER_CONTEXT.with(|cell| match cell.borrow().as_ref() {
+        None => HostCallerStrictness::NoCaller,
+        Some(context) => match context.origin_strict_level {
             None | Some(0) => HostCallerStrictness::NonStrict,
             Some(level) => HostCallerStrictness::Strict(level),
         },
@@ -973,6 +988,179 @@ impl HostCallArg {
             CallArg::Reference(reference) => reference.write(value).map(|()| true),
         }
     }
+
+    /// Read an array argument as tracked child arguments. This preserves the
+    /// C4Value backing identity of strings/arrays/maps stored in the array,
+    /// which native functions need for NONSTRICT/STRICT1 raw comparisons.
+    pub fn array_items(&self) -> Result<Option<Vec<Self>>, RuntimeError> {
+        let tracked = self.0.read_tracked()?;
+        let Value::Array(values) = tracked.value else {
+            return Ok(None);
+        };
+        let identities = match tracked.identity {
+            Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
+                HeapIdentity::Array(identities) => Some(identities.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        Ok(Some(values.into_iter().enumerate().map(|(index, value)| {
+            let identity = identities
+                .as_ref()
+                .and_then(|identities| identities.get(index))
+                .cloned()
+                .flatten()
+                .or_else(|| TrackedValue::runtime_identity(&value));
+            Self(CallArg::Value(TrackedValue { value, identity }))
+        }).collect()))
+    }
+
+    /// `C4Value::Equals` for native host functions, retaining raw backing
+    /// identity below STRICT2 and the asymmetric C4Value operator semantics at
+    /// STRICT2 and above. `strict_level` is the numeric C4Aul strict level.
+    pub fn c4_equals(&self, other: &Self, strict_level: u8) -> Result<bool, RuntimeError> {
+        let left = self.0.read_tracked()?;
+        let right = other.0.read_tracked()?;
+        Ok(c4_values_equal(
+            &left.value,
+            &right.value,
+            Some(strict_level),
+            left.identity.as_ref(),
+            right.identity.as_ref(),
+        ))
+    }
+}
+
+/// `C4Value::Equals` plus the backing-pointer provenance needed by its raw
+/// NONSTRICT/STRICT1 branch. STRICT2 deliberately keeps the left-tag
+/// asymmetry of `C4Value::operator==` (notably Bool versus C4ID), while
+/// STRICT3 checks only the outer type before container content recurses
+/// through that same operator.
+fn c4_values_equal(
+    left: &Value,
+    right: &Value,
+    strict: Option<u8>,
+    left_identity: Option<&RawIdentity>,
+    right_identity: Option<&RawIdentity>,
+) -> bool {
+    match strict.unwrap_or(0) {
+        0 | 1 => c4_raw_equal(left, right, left_identity, right_identity),
+        2 => c4_operator_equal(left, right),
+        _ => c4_typed_equal(left, right),
+    }
+}
+
+fn c4_raw_scalar(value: &Value) -> Option<u64> {
+    match value {
+        Value::Nil => Some(0),
+        // C++ zeroes the full Data union and then writes its 32-bit Int/ID
+        // member, so negative integers retain a zero upper half on 64-bit.
+        Value::Int(value) => Some(u64::from(*value as u32)),
+        Value::Bool(value) => Some(u64::from(*value as u8)),
+        Value::C4Id(value) => Some(crate::value::c4_id_raw(value) as u64),
+        Value::Object(0) => Some(0),
+        Value::Object(_) | Value::String(_) | Value::Array(_) | Value::Proplist(_) => None,
+    }
+}
+
+fn c4_raw_equal(
+    left: &Value,
+    right: &Value,
+    left_identity: Option<&RawIdentity>,
+    right_identity: Option<&RawIdentity>,
+) -> bool {
+    let left_pointer = matches!(left, Value::String(_) | Value::Array(_) | Value::Proplist(_));
+    let right_pointer = matches!(right, Value::String(_) | Value::Array(_) | Value::Proplist(_));
+    if left_pointer || right_pointer {
+        return left_identity
+            .zip(right_identity)
+            .is_some_and(|(left, right)| left == right);
+    }
+    if let (Some(left), Some(right)) = (c4_raw_scalar(left), c4_raw_scalar(right)) {
+        return left == right;
+    }
+    // Rust object handles are stable numeric IDs rather than process pointer
+    // addresses. Their observable raw identity is therefore equality of the
+    // handle; unlike a C++ address, it must not be compared with script ints.
+    matches!((left, right), (Value::Object(left), Value::Object(right)) if left == right)
+}
+
+fn c4_scalar_payload(value: &Value) -> Option<u64> {
+    match value {
+        Value::Nil => Some(0),
+        Value::Int(value) => Some(u64::from(*value as u32)),
+        Value::Bool(value) => Some(u64::from(*value as u8)),
+        Value::C4Id(value) => Some(crate::value::c4_id_raw(value) as u64),
+        Value::Object(0) => Some(0),
+        _ => None,
+    }
+}
+
+fn c4_effective_nil(value: &Value) -> bool {
+    matches!(value, Value::Nil | Value::Object(0))
+        || matches!(value, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
+}
+
+fn c4_operator_equal(left: &Value, right: &Value) -> bool {
+    if c4_effective_nil(left) {
+        // Zero C4ID/object constructors collapse to C4V_Any in C++.
+        return c4_scalar_payload(right) == Some(0);
+    }
+    if c4_effective_nil(right) {
+        return c4_scalar_payload(left) == Some(0);
+    }
+    match left {
+        // C4V_Any has Data == 0 and compares that union payload without a
+        // right-tag check.
+        Value::Nil => c4_scalar_payload(right) == Some(0),
+        Value::Int(left) => matches!(right, Value::Nil | Value::Int(_) | Value::Bool(_) | Value::C4Id(_))
+            && c4_scalar_payload(right) == Some(u64::from(*left as u32)),
+        Value::Bool(left) => matches!(right, Value::Nil | Value::Int(_) | Value::Bool(_))
+            && c4_scalar_payload(right) == Some(u64::from(*left as u8)),
+        Value::C4Id(left) => matches!(right, Value::Nil | Value::Int(_) | Value::C4Id(_))
+            && c4_scalar_payload(right) == Some(crate::value::c4_id_raw(left) as u64),
+        Value::Object(left) => matches!(right, Value::Object(right) if left == right),
+        Value::String(left) => matches!(right, Value::String(right) if left == right),
+        Value::Array(left) => matches!(right, Value::Array(right) if c4_array_operator_equal(left, right)),
+        Value::Proplist(left) => matches!(right, Value::Proplist(right) if c4_map_operator_equal(left, right)),
+    }
+}
+
+fn c4_typed_equal(left: &Value, right: &Value) -> bool {
+    let left_nil = c4_effective_nil(left);
+    let right_nil = c4_effective_nil(right);
+    if left_nil || right_nil {
+        return left_nil && right_nil;
+    }
+    match (left, right) {
+        (Value::Nil, Value::Nil) => true,
+        (Value::Int(left), Value::Int(right)) => left == right,
+        (Value::Bool(left), Value::Bool(right)) => left == right,
+        (Value::C4Id(left), Value::C4Id(right)) => {
+            crate::value::c4_id_raw(left) == crate::value::c4_id_raw(right)
+        }
+        (Value::Object(left), Value::Object(right)) => left == right,
+        (Value::String(left), Value::String(right)) => left == right,
+        (Value::Array(left), Value::Array(right)) => c4_array_operator_equal(left, right),
+        (Value::Proplist(left), Value::Proplist(right)) => c4_map_operator_equal(left, right),
+        _ => false,
+    }
+}
+
+fn c4_array_operator_equal(left: &[Value], right: &[Value]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| c4_operator_equal(left, right))
+}
+
+fn c4_map_operator_equal(left: &ValueMap, right: &ValueMap) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(left_key, left_value)| {
+            right.iter()
+                .find(|(right_key, _)| c4_typed_equal(left_key, right_key))
+                // C4ValueHash::operator== spells this `other[key] != value`,
+                // so the other map's value is the asymmetric operator lhs.
+                .is_some_and(|(_, right_value)| c4_operator_equal(right_value, left_value))
+        })
 }
 
 enum ReturnValue {
@@ -3073,6 +3261,7 @@ impl<'a> Vm<'a> {
             Literal::Int(i) => Value::Int(*i),
             Literal::Bool(b) => Value::Bool(*b),
             Literal::String(s) => Value::String(s.clone()),
+            Literal::C4Id(id) if crate::value::c4_id_raw(id) == 0 => Value::Nil,
             Literal::C4Id(id) => Value::C4Id(id.clone()),
             Literal::Nil => Value::Nil,
         }
@@ -3506,44 +3695,7 @@ impl<'a> Vm<'a> {
         left_identity: Option<&RawIdentity>,
         right_identity: Option<&RawIdentity>,
     ) -> bool {
-        let level = strict.unwrap_or(0);
-        if level < 2 {
-            let left_pointer = matches!(
-                left,
-                Value::String(_) | Value::Array(_) | Value::Proplist(_)
-            );
-            let right_pointer = matches!(
-                right,
-                Value::String(_) | Value::Array(_) | Value::Proplist(_)
-            );
-            if left_pointer || right_pointer {
-                return left_identity
-                    .zip(right_identity)
-                    .is_some_and(|(left, right)| left == right);
-            }
-        }
-        if level < 3 {
-            if let (Some(a), Some(b)) = (left.as_c4_int(), right.as_c4_int()) {
-                return a == b;
-            }
-        }
-        self.values_equal_typed(left, right)
-    }
-
-    /// Type-checked equality (`#strict 3`, C4Value.cpp:835-849): different types
-    /// are never equal, same type compares by content.
-    fn values_equal_typed(&self, left: &Value, right: &Value) -> bool {
-        match (left, right) {
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::String(a), Value::String(b)) => a == b,
-            (Value::C4Id(a), Value::C4Id(b)) => a == b,
-            (Value::Object(a), Value::Object(b)) => a == b,
-            (Value::Array(a), Value::Array(b)) => a == b,
-            (Value::Proplist(a), Value::Proplist(b)) => a == b,
-            (Value::Nil, Value::Nil) => true,
-            _ => false,
-        }
+        c4_values_equal(left, right, strict, left_identity, right_identity)
     }
 
     fn eval_index(&self, collection: Value, index: Value) -> Result<Value, RuntimeError> {
@@ -4697,7 +4849,8 @@ impl Environment {
     fn caller_context(&self) -> ScriptCallerContext {
         ScriptCallerContext {
             var_slots: self.var_slots.clone(),
-            strict_level: self.caller_owner_strict_level,
+            owner_strict_level: self.caller_owner_strict_level,
+            origin_strict_level: self.strict_level,
         }
     }
 

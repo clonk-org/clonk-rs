@@ -11016,7 +11016,13 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_reference_function("Set", [0], set_reference);
     script.register_host_reference_function("SetLength", [0], set_length);
     script.register_host_function("GetLength", get_length);
-    script.register_host_function("GetIndexOf", get_index_of);
+    // Keep tracked argument provenance even though neither parameter is a
+    // writable reference: NONSTRICT/STRICT1 compare C4Value backing pointers.
+    script.register_host_reference_function(
+        "GetIndexOf",
+        std::iter::empty::<usize>(),
+        get_index_of,
+    );
     script.register_host_function("GetKeys", get_keys);
     script.register_host_function("GetValues", get_values);
     script.register_host_function("Contents", contents);
@@ -11952,21 +11958,21 @@ fn cast_arg(args: &[Value]) -> &Value {
     args.first().unwrap_or(&Value::Nil)
 }
 
-fn cast_c4id_payload(id: &str) -> u64 {
+fn cast_c4id_payload(id: &str) -> usize {
     if id.len() < 4 || id == "NONE" {
         return 0;
     }
     if id.bytes().all(|byte| byte.is_ascii_digit()) {
-        return id.bytes().fold(0_u64, |raw, byte| {
+        return id.bytes().fold(0_usize, |raw, byte| {
             raw.wrapping_mul(10)
-                .wrapping_add(u64::from(byte - b'0'))
+                .wrapping_add(usize::from(byte - b'0'))
         });
     }
     let mut bytes = [0_u8; 4];
     for (index, byte) in id.bytes().take(4).enumerate() {
         bytes[index] = byte;
     }
-    u64::from(u32::from_le_bytes(bytes))
+    u32::from_le_bytes(bytes) as usize
 }
 
 fn render_cast_c4id(raw: i32) -> String {
@@ -12141,27 +12147,42 @@ fn get_length(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 }
 
-fn get_index_of(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 2 {
-        return Err(RuntimeError::new(
-            "GetIndexOf expects 2 arguments: value and array",
-        ));
-    }
-
-    let search = &args[0];
-    let array = match &args[1] {
-        Value::Array(values) => values,
-        Value::Nil => return Ok(Value::Int(-1)),
-        _ => return Ok(Value::Int(-1)),
+fn get_index_of(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
+    // Native calls normally always have a script caller. C++'s no-caller,
+    // nonnil-array path dereferences a null Caller; strict3 is the conservative
+    // defined fallback for engine-driven Rust calls.
+    let strict_level = match lc_script::caller_origin_strictness() {
+        lc_script::HostCallerStrictness::NoCaller => 3,
+        lc_script::HostCallerStrictness::NonStrict => 0,
+        lc_script::HostCallerStrictness::Strict(level) => level,
     };
 
-    if let Some(index) = array.iter().position(|entry| entry == search) {
-        let index = i32::try_from(index)
-            .map_err(|_| RuntimeError::new("GetIndexOf: index exceeds i32 range"))?;
-        Ok(Value::Int(index))
-    } else {
-        Ok(Value::Int(-1))
+    // C4Aul pads missing parameters with nil, and a nil array pointer is the
+    // documented GetIndexOf(x, 0) fast path.
+    let (Some(search), Some(array_arg)) = (args.first(), args.get(1)) else {
+        return Ok(Value::Int(-1));
+    };
+    let array_value = array_arg.read()?;
+    let Some(array) = array_arg.array_items()? else {
+        let is_nil = matches!(&array_value, Value::Nil | Value::Object(0))
+            || matches!(&array_value, Value::C4Id(id) if cast_c4id_payload(id) == 0);
+        if is_nil || (strict_level < 3 && !array_value.as_bool()) {
+            return Ok(Value::Int(-1));
+        }
+        return Err(RuntimeError::new(format!(
+            "call to \"GetIndexOf\" parameter 2: got \"{}\", but expected \"array\"!",
+            array_value.type_name()
+        )));
+    };
+
+    for (index, entry) in array.iter().enumerate() {
+        if search.c4_equals(entry, strict_level)? {
+            let index = i32::try_from(index)
+                .map_err(|_| RuntimeError::new("GetIndexOf: index exceeds i32 range"))?;
+            return Ok(Value::Int(index));
+        }
     }
+    Ok(Value::Int(-1))
 }
 
 fn format_string(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -16528,8 +16549,8 @@ fn modulo(args: &[Value]) -> Result<Value, RuntimeError> {
 fn c4_id(args: &[Value]) -> Result<Value, RuntimeError> {
     let name = parse_optional_string(args.first(), "C4Id", "id")?;
     Ok(match name {
-        Some(name) if !name.is_empty() => Value::C4Id(name),
-        _ => Value::Int(0),
+        Some(name) if cast_c4id_payload(&name) != 0 => Value::C4Id(name),
+        _ => Value::Nil,
     })
 }
 
@@ -40837,24 +40858,267 @@ public func RejectConstruction(x, y, builder)
     }
 
     #[test]
-    fn get_index_of_returns_matching_index_or_negative_one() {
-        let array = Value::Array(vec![
-            Value::Int(5),
-            Value::String("target".into()),
-            Value::Int(7),
-        ]);
+    fn get_index_of_strict2_and_older_use_cpp_scalar_equality() {
+        for directive in ["", "#strict\n", "#strict 2\n"] {
+            let bool_id_index = if directive == "#strict 2\n" { -1 } else { 0 };
+            let wide_id_mismatch = if cfg!(target_pointer_width = "64") { -1 } else { 0 };
+            let mut script = ScriptEngine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(&format!(
+                    r#"{directive}
+                    func Probe() {{
+                        var id = C4Id("ROCK");
+                        var packed = CastInt(id);
+                        var wide_id = C4Id("4294967297");
+                        return [
+                            GetIndexOf(0, CreateArray(3)),
+                            GetIndexOf(nil, [0]),
+                            GetIndexOf(false, [0]),
+                            GetIndexOf(0, [false]),
+                            GetIndexOf(true, [1]),
+                            GetIndexOf(1, [true]),
+                            GetIndexOf(packed, [id]),
+                            GetIndexOf(id, [packed]),
+                            GetIndexOf(true, [C4Id("0001")]),
+                            GetIndexOf(C4Id("0001"), [true]),
+                            GetIndexOf(2, [true]),
+                            GetIndexOf(wide_id, [C4Id("0001")]),
+                            GetIndexOf(1, [wide_id]),
+                            GetIndexOf(wide_id, [wide_id])
+                        ];
+                    }}
+                    "#
+                ))
+                .expect("GetIndexOf scalar probe loads");
 
-        let found = get_index_of(&[Value::String("target".into()), array.clone()])
-            .expect("GetIndexOf succeeds");
-        assert_eq!(found, Value::Int(1));
+            assert_eq!(
+                script.call("Probe", &[]).expect("scalar probe runs"),
+                Value::Array(vec![
+                    Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(0),
+                    Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(0),
+                    Value::Int(bool_id_index), Value::Int(bool_id_index), Value::Int(-1),
+                    Value::Int(wide_id_mismatch), Value::Int(wide_id_mismatch), Value::Int(0),
+                ]),
+                "directive {directive:?}"
+            );
+        }
+    }
 
-        let missing =
-            get_index_of(&[Value::String("missing".into()), array]).expect("missing handled");
-        assert_eq!(missing, Value::Int(-1));
+    #[test]
+    fn get_index_of_strict3_checks_outer_type_only() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"
+                #strict 3
+                func Probe() {
+                    var id = C4Id("ROCK");
+                    var packed = CastInt(id);
+                    return [
+                        GetIndexOf(0, [nil]),
+                        GetIndexOf(nil, [0]),
+                        GetIndexOf(1, [true]),
+                        GetIndexOf(true, [1]),
+                        GetIndexOf(packed, [id]),
+                        GetIndexOf(id, [packed]),
+                        GetIndexOf(nil, [nil]),
+                        GetIndexOf(false, [false]),
+                        GetIndexOf(0, [0]),
+                        GetIndexOf(id, [id]),
+                        GetIndexOf([1], [[true]]),
+                        GetIndexOf(C4Id("4294967297"), [C4Id("0001")]),
+                        GetIndexOf(C4Id("4294967297"), [C4Id("4294967297")]),
+                        GetIndexOf(C4Id("NONE"), [nil])
+                    ];
+                }
+                func ManualZeroId(value) { return GetIndexOf(value, [nil]); }
+                func ManualZeroEntry(value) { return GetIndexOf(false, [value]); }
+                "#,
+            )
+            .expect("strict3 GetIndexOf probe loads");
 
-        let non_array =
-            get_index_of(&[Value::Int(1), Value::Bool(true)]).expect("non-array handled");
-        assert_eq!(non_array, Value::Int(-1));
+        assert_eq!(
+            script.call("Probe", &[]).expect("strict3 probe runs"),
+            Value::Array(vec![
+                Value::Int(-1), Value::Int(-1), Value::Int(-1), Value::Int(-1),
+                Value::Int(-1), Value::Int(-1), Value::Int(0), Value::Int(0),
+                Value::Int(0), Value::Int(0), Value::Int(0),
+                Value::Int(if cfg!(target_pointer_width = "64") { -1 } else { 0 }),
+                Value::Int(0), Value::Int(0),
+            ])
+        );
+        assert_eq!(
+            script.call("ManualZeroId", &[Value::C4Id("NONE".into())])
+                .expect("zero-payload ID is canonical nil"),
+            Value::Int(0)
+        );
+        assert_eq!(
+            script.call("ManualZeroEntry", &[Value::C4Id("NONE".into())])
+                .expect("strict3 keeps false distinct from canonical nil"),
+            Value::Int(-1)
+        );
+    }
+
+    #[test]
+    fn get_index_of_preserves_object_string_and_array_matching() {
+        for level in [2, 3] {
+            let mut script = ScriptEngine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(&format!(
+                    r#"
+                    #strict {level}
+                    func Probe(object first, object other) {{
+                        var dynamic = "tar" .. "get";
+                        return [
+                            GetIndexOf(first, [other, first]),
+                            GetIndexOf(first, [other]),
+                            GetIndexOf(dynamic, ["target"]),
+                            GetIndexOf(dynamic, ["other"]),
+                            GetIndexOf([1, "x"], [[0], [1, "x"]]),
+                            GetIndexOf([1, "x"], [[1, "y"]])
+                        ];
+                    }}
+                    "#
+                ))
+                .expect("content matching probe loads");
+
+            assert_eq!(
+                script.call("Probe", &[Value::Object(41), Value::Object(42)])
+                    .expect("content matching probe runs"),
+                Value::Array(vec![
+                    Value::Int(1), Value::Int(-1), Value::Int(0),
+                    Value::Int(-1), Value::Int(1), Value::Int(-1),
+                ]),
+                "strict level {level}"
+            );
+        }
+    }
+
+    #[test]
+    fn get_index_of_pre_strict2_uses_backing_identity() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"
+                #strict 1
+                func Probe() {
+                    var array = [1], array_alias = array, other_array = [1];
+                    var string = "x" .. "y", string_alias = string, other_string = "x" .. "y";
+                    return [
+                        GetIndexOf(array, [array_alias]),
+                        GetIndexOf(array, [other_array]),
+                        GetIndexOf(string, [string_alias]),
+                        GetIndexOf(string, [other_string])
+                    ];
+                }
+                "#,
+            )
+            .expect("identity probe loads");
+
+        assert_eq!(
+            script.call("Probe", &[]).expect("identity probe runs"),
+            Value::Array(vec![
+                Value::Int(0), Value::Int(-1), Value::Int(0), Value::Int(-1),
+            ])
+        );
+    }
+
+    #[test]
+    fn get_index_of_uses_calling_functions_origin_strictness() {
+        let mut strict3_source = ScriptEngine::new();
+        strict3_source
+            .load_script("#strict 3\nfunc Probe() { return GetIndexOf(0, [nil]); }")
+            .expect("strict3 source loads");
+
+        let mut strict2_destination = ScriptEngine::new();
+        register_host_functions(&mut strict2_destination);
+        strict2_destination
+            .load_script("#strict 2\nfunc Own() { return 1; }")
+            .expect("strict2 destination loads");
+        strict2_destination.merge_from(&strict3_source);
+        assert_eq!(
+            strict2_destination.call("Probe", &[])
+                .expect("included strict3 function runs"),
+            Value::Int(-1)
+        );
+
+        let mut strict2_source = ScriptEngine::new();
+        strict2_source
+            .load_script("#strict 2\nfunc Probe() { return GetIndexOf(0, [nil]); }")
+            .expect("strict2 source loads");
+
+        let mut strict3_destination = ScriptEngine::new();
+        register_host_functions(&mut strict3_destination);
+        strict3_destination
+            .load_script("#strict 3\nfunc Own() { return 1; }")
+            .expect("strict3 destination loads");
+        strict3_destination.merge_from(&strict2_source);
+        assert_eq!(
+            strict3_destination.call("Probe", &[])
+                .expect("included strict2 function runs"),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn get_index_of_keeps_cpp_array_parameter_conversion() {
+        let mut strict2 = ScriptEngine::new();
+        register_host_functions(&mut strict2);
+        strict2
+            .load_script(
+                r#"
+                #strict 2
+                func Missing() { return GetIndexOf(1); }
+                func Zero() { return GetIndexOf(1, 0); }
+                func False() { return GetIndexOf(1, false); }
+                func Wrong() { return GetIndexOf(1, true); }
+                func Passed(value) { return GetIndexOf(1, value); }
+                func Entry(value) { return GetIndexOf(false, [value]); }
+                "#,
+            )
+            .expect("strict2 parameter probe loads");
+        for function in ["Missing", "Zero", "False"] {
+            assert_eq!(
+                strict2.call(function, &[]).expect("nil array is accepted"),
+                Value::Int(-1)
+            );
+        }
+        assert!(strict2.call("Wrong", &[])
+            .expect_err("truthy non-array is rejected").to_string()
+            .contains("expected \"array\""));
+        assert_eq!(
+            strict2.call("Passed", &[Value::C4Id("NONE".into())])
+                .expect("zero-payload ID array is nil"),
+            Value::Int(-1)
+        );
+        for value in [Value::C4Id("NONE".into()), Value::Object(0)] {
+            assert_eq!(
+                strict2.call("Entry", &[value])
+                    .expect("zero-payload entry is canonical nil"),
+                Value::Int(0)
+            );
+        }
+
+        let mut strict3 = ScriptEngine::new();
+        register_host_functions(&mut strict3);
+        strict3
+            .load_script(
+                "#strict 3\nfunc Zero() { return GetIndexOf(1, 0); }\n\
+                 func Passed(value) { return GetIndexOf(1, value); }"
+            )
+            .expect("strict3 parameter probe loads");
+        assert!(strict3.call("Zero", &[])
+            .expect_err("strict3 retains typed zero").to_string()
+            .contains("expected \"array\""));
+        assert_eq!(
+            strict3.call("Passed", &[Value::C4Id("0000".into())])
+                .expect("strict3 zero-payload ID array is nil"),
+            Value::Int(-1)
+        );
     }
 
     #[test]

@@ -415,7 +415,7 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Int(i) => *i != 0,
             Value::String(_) => true,
-            Value::C4Id(id) => !id.is_empty(),
+            Value::C4Id(id) => c4_id_raw(id) != 0,
             Value::Object(id) => *id != 0,
             Value::Array(_) => true,
             Value::Proplist(_) => true,
@@ -579,7 +579,7 @@ fn hash_i32(value: i32) -> usize {
     value as usize
 }
 
-fn c4_id_raw(id: &str) -> usize {
+pub(crate) fn c4_id_raw(id: &str) -> usize {
     if id.len() < 4 || id == "NONE" {
         return 0;
     }
