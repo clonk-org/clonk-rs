@@ -25,6 +25,7 @@ const COMMAND_FLAG_ENTER_PUSH_TARGET: i32 = 0b10;
 const COMMAND_FLAG_MOVE_TO_NO_POS_ADJUST: i32 = 0b1;
 const COMMAND_FLAG_MOVE_TO_PUSH_TARGET: i32 = 0b10;
 const DIG_MOVE_TO_RANGE_DEFAULT: i32 = 5;
+const DIG_OUT_POSITION_RANGE: i32 = 15;
 const DIG_DIRECTION_RANGE: i32 = 1;
 const PUSH_TO_RANGE: i32 = 10;
 
@@ -1956,22 +1957,48 @@ mod tests {
     }
 
     #[test]
-    fn get_reissues_dig_while_target_remains_in_solid() {
+    fn get_in_solid_uses_inclusive_dig_range_and_reissues_dig() {
         let actor_id = ObjectId::new(503);
         let target_id = ObjectId::new(504);
         let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(100, 100);
+        // The flat-landscape scans below both select (90,98). This is the
+        // inclusive -15 horizontal edge of DigOutPositionRange.
+        actor.position = Vector2::new(75, 98);
         let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(104, 103);
+        target.position = Vector2::new(100, 100);
         target.collectible = true;
         target.construction = FULL_CON;
         target.ocf |= ocf::IN_SOLID;
+
+        let mut landscape = crate::Landscape::flat(300, 100);
+        landscape.set_world_height(200);
+        assert_eq!(
+            landscape.find_closest_free(target.position, -120, 120, -1, -1),
+            Some(Vector2::new(90, 98))
+        );
+        assert_eq!(
+            landscape.find_closest_free(target.position, -140, 140, -40, 40),
+            Some(Vector2::new(90, 98))
+        );
 
         let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 10);
+        let ctx = CommandRuntimeContext {
+            landscape: Some(&landscape),
+            frame: 10,
+            position: actor.position,
+            object: actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
         let mut state = GetState::from_request(
             &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
         )
@@ -1979,6 +2006,10 @@ mod tests {
 
         let first = state.step(&ctx);
         let first_dig = pushed_request(&first.operations, CommandId::Dig);
+        assert_eq!(first_dig.target, None);
+        assert_eq!((first_dig.tx, first_dig.ty), (Some(100), Some(104)));
+        assert_eq!(first_dig.update_interval, 50);
+        assert_eq!(first_dig.mode, CommandMode::SilentSub);
         let reissued = state.step(&ctx);
 
         assert_eq!(
@@ -1989,36 +2020,159 @@ mod tests {
     }
 
     #[test]
-    fn get_reissues_move_to_while_far_target_remains_in_solid() {
+    fn get_in_solid_moves_to_the_preferred_free_staging_position() {
         let actor_id = ObjectId::new(505);
         let target_id = ObjectId::new(506);
         let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(100, 100);
+        actor.position = Vector2::new(20, 20);
         let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(106, 100);
+        target.position = Vector2::new(100, 100);
         target.collectible = true;
         target.construction = FULL_CON;
         target.ocf |= ocf::IN_SOLID;
+
+        // The all-angle scan first reaches (100,90) at r=10,a=0. The
+        // good-angle scan excludes a=-40..40 and first reaches (80,100) at
+        // r=20,a=-90, which is still less than ten times farther away.
+        let mut landscape = crate::Landscape::flat(200, 200);
+        landscape.set_world_height(200);
+        let mut pixels = vec![1; 200 * 200];
+        pixels[90 * 200 + 100] = 0;
+        pixels[100 * 200 + 80] = 0;
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            200,
+            200,
+            pixels,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+        assert_eq!(
+            landscape.find_closest_free(target.position, -120, 120, -1, -1),
+            Some(Vector2::new(100, 90))
+        );
+        assert_eq!(
+            landscape.find_closest_free(target.position, -140, 140, -40, 40),
+            Some(Vector2::new(80, 100))
+        );
 
         let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let actor = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 10);
+        let ctx = CommandRuntimeContext {
+            landscape: Some(&landscape),
+            frame: 10,
+            position: actor.position,
+            object: actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
         let mut state = GetState::from_request(
             &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
         )
         .expect("Get state");
 
-        let first = state.step(&ctx);
-        let first_move = pushed_request(&first.operations, CommandId::MoveTo);
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        let move_to = pushed_request(&result.operations, CommandId::MoveTo);
+        assert_eq!(move_to.target, None);
+        assert_eq!((move_to.tx, move_to.ty), (Some(80), Some(100)));
+        assert_eq!(move_to.update_interval, 50);
+        assert_eq!(move_to.mode, CommandMode::SilentSub);
         let reissued = state.step(&ctx);
-
         assert_eq!(
             pushed_request(&reissued.operations, CommandId::MoveTo),
-            first_move,
-            "Get reissues MoveTo inside the former 12-frame cooldown"
+            move_to,
+            "Get reissues its computed staging MoveTo on the next evaluation"
         );
+    }
+
+    #[test]
+    fn get_in_solid_rejects_a_good_angle_position_exactly_ten_times_farther() {
+        let target = Vector2::new(100, 100);
+        let mut landscape = crate::Landscape::flat(200, 200);
+        landscape.set_world_height(200);
+        let mut pixels = vec![1; 200 * 200];
+        // General: r=10,a=0 => (100,90). Good-angle: r=100,a=-90
+        // => (0,100). The latter is exactly ten times farther, and C++'s
+        // strict comparison must retain the general result.
+        pixels[90 * 200 + 100] = 0;
+        pixels[100 * 200] = 0;
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            200,
+            200,
+            pixels,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+        assert_eq!(
+            landscape.find_closest_free(target, -120, 120, -1, -1),
+            Some(Vector2::new(100, 90))
+        );
+        assert_eq!(
+            landscape.find_closest_free(target, -140, 140, -40, 40),
+            Some(Vector2::new(0, 100))
+        );
+        assert_eq!(
+            GetState::dig_out_position(&landscape, target),
+            Some(Vector2::new(100, 90))
+        );
+    }
+
+    #[test]
+    fn get_in_solid_fails_when_find_closest_free_finds_no_pixel() {
+        let actor_id = ObjectId::new(507);
+        let target_id = ObjectId::new(508);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(150, 150);
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(150, 150);
+        target.collectible = true;
+        target.construction = FULL_CON;
+        target.ocf |= ocf::IN_SOLID;
+
+        let mut landscape = crate::Landscape::flat(300, 0);
+        landscape.set_world_height(300);
+        assert_eq!(
+            landscape.find_closest_free(target.position, -120, 120, -1, -1),
+            None
+        );
+
+        let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            landscape: Some(&landscape),
+            frame: 10,
+            position: actor.position,
+            object: actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = GetState::from_request(
+            &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
+        )
+        .expect("Get state");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result.operations.is_empty());
+        assert!(result.events.is_empty());
     }
 
     #[test]
@@ -14852,10 +15006,37 @@ impl GetState {
         CommandStepResult::failed(self.ensure_stop(ctx, update))
     }
 
+    fn dig_out_position(
+        landscape: &crate::Landscape,
+        target_position: Vector2,
+    ) -> Option<Vector2> {
+        let mut staging_position =
+            landscape.find_closest_free(target_position, -120, 120, -1, -1)?;
+        if let Some(good_angle_position) =
+            landscape.find_closest_free(target_position, -140, 140, -40, 40)
+        {
+            let closest_distance = math::integer_distance(
+                target_position.x,
+                target_position.y,
+                staging_position.x,
+                staging_position.y,
+            );
+            let good_angle_distance = math::integer_distance(
+                target_position.x,
+                target_position.y,
+                good_angle_position.x,
+                good_angle_position.y,
+            );
+            if good_angle_distance < 10 * closest_distance {
+                staging_position = good_angle_position;
+            }
+        }
+        Some(staging_position)
+    }
+
     fn handle_in_solid_target(
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
-        target_id: ObjectId,
         target_snapshot: &CommandObjectSnapshot,
         update: Option<ObjectUpdate>,
     ) -> CommandStepResult {
@@ -14868,21 +15049,30 @@ impl GetState {
             return result;
         }
 
-        let dx = target_snapshot.position.x - ctx.position.x;
-        let dy = target_snapshot.position.y - ctx.position.y;
-        if dx.abs() > DIG_MOVE_TO_RANGE_DEFAULT || dy.abs() > DIG_MOVE_TO_RANGE_DEFAULT {
+        let Some(landscape) = ctx.landscape else {
+            return CommandStepResult::failed(self.ensure_stop(ctx, update));
+        };
+        let target_position = target_snapshot.position;
+        let Some(staging_position) = Self::dig_out_position(landscape, target_position) else {
+            return CommandStepResult::failed(self.ensure_stop(ctx, update));
+        };
+
+        let dx = staging_position.x - ctx.position.x;
+        let dy = staging_position.y - ctx.position.y;
+        if dx.abs() > DIG_OUT_POSITION_RANGE || dy.abs() > DIG_OUT_POSITION_RANGE {
             let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
             let request = CommandRequest::new(CommandId::MoveTo)
-                .with_target(Some(target_id))
-                .with_update_interval(10);
+                .with_tx(Some(staging_position.x))
+                .with_ty(Some(staging_position.y))
+                .with_update_interval(50);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
         }
 
         let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
         let request = CommandRequest::new(CommandId::Dig)
-            .with_tx(Some(target_snapshot.position.x))
-            .with_ty(Some(target_snapshot.position.y + 4))
+            .with_tx(Some(target_position.x))
+            .with_ty(Some(target_position.y + 4))
             .with_update_interval(50)
             .with_mode(CommandMode::SilentSub);
         result.operations.push(CommandOperation::PushFront(request));
@@ -14969,7 +15159,7 @@ impl GetState {
         }
 
         if target_snapshot.ocf & ocf::IN_SOLID != 0 {
-            return self.handle_in_solid_target(ctx, target_id, target_snapshot, update);
+            return self.handle_in_solid_target(ctx, target_snapshot, update);
         }
 
         if ctx.object.container.is_some() {

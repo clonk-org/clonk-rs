@@ -3217,6 +3217,38 @@ impl Landscape {
         None
     }
 
+    /// Search expanding ten-pixel rings for the first in-bounds pixel that
+    /// is not semi-solid (`FindClosestFree`, C4Landscape.cpp:2102-2123).
+    /// Angles are visited in ascending order with an exclusive upper bound;
+    /// the exclusion interval is inclusive like C++ `Inside`.
+    pub(crate) fn find_closest_free(
+        &self,
+        origin: Vector2,
+        angle_start: i32,
+        angle_end: i32,
+        exclude_start: i32,
+        exclude_end: i32,
+    ) -> Option<Vector2> {
+        let width = i32::try_from(self.width()).unwrap_or(i32::MAX);
+        let height = self.estimated_height();
+        for radius in (10..200).step_by(10) {
+            for angle in (angle_start..angle_end).step_by(10) {
+                if (exclude_start..=exclude_end).contains(&angle) {
+                    continue;
+                }
+                let x = origin.x + math::fixtoi(math::itofix(angle).sin_deg() * radius);
+                let y = origin.y - math::fixtoi(math::itofix(angle).cos_deg() * radius);
+                if (0..width).contains(&x)
+                    && (0..height).contains(&y)
+                    && !self.is_semi_solid_at(x, y)
+                {
+                    return Some(Vector2::new(x, y));
+                }
+            }
+        }
+        None
+    }
+
     /// `FindSolidGround` (C4Landscape.cpp:1843-1869): starting from (x, y),
     /// search left and right for a `width`-long run of columns with solid
     /// ground; returns the bottom center of the surface found (run-center
