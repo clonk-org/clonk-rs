@@ -33682,6 +33682,27 @@ impl Engine {
             }
         }
 
+        // A stopped scaler that loses its wall pushes away from the wall
+        // instead of retaining its old velocity (C4Object.cpp:4290-4301).
+        // ObjectActionJump installs these dirs only when the Jump succeeds.
+        let scale_stop_launch = if matches!(procedure, ActionProcedure::Scale) {
+            self.find_object_index(object_id).and_then(|live_idx| {
+                let state = &self.objects[live_idx].state;
+                (state.command_direction == CommandDirection::Stop).then(|| {
+                    FixedVec2::new(
+                        if state.direction == Direction::Left {
+                            itofix(1)
+                        } else {
+                            itofix(-1)
+                        },
+                        C4Fixed::ZERO,
+                    )
+                })
+            })
+        } else {
+            None
+        };
+
         // Pushing off an attachment first notifies the vehicle and restores
         // the PushTo command before falling through to ObjectActionJump
         // (C4Object.cpp:4302-4306).
@@ -33756,6 +33777,9 @@ impl Engine {
         // the walker keeps steering mid-flight and resumes on landing.
         if matches!(result, ActionUpdateResult::Applied) {
             if next_action == "Jump" {
+                if let Some(launch) = scale_stop_launch {
+                    object.set_fixed_velocity(launch);
+                }
                 // ObjectActionJump mobilizes (C4ObjectCom.cpp:56).
                 object.state.mobile = true;
             }

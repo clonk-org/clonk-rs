@@ -49834,6 +49834,62 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
     }
 
     #[test]
+    fn stopped_scaler_no_attach_jumps_away_from_each_wall() {
+        let mut scaler = simple_definition("STSC");
+        scaler.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Scale".to_string(),
+                    ActionSpec::default().with_procedure("SCALE"),
+                ),
+                (
+                    "Jump".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(scaler).expect("scaler registers");
+        let actions = engine
+            .definitions
+            .get("STSC")
+            .expect("scaler definition exists")
+            .action_library()
+            .clone();
+
+        for (direction, expected_x) in [(Direction::Left, 1), (Direction::Right, -1)] {
+            let id = engine
+                .spawn_object(
+                    SpawnConfig::new("STSC")
+                        .with_action(ActionState::new("Scale"))
+                        .with_direction(direction)
+                        .with_command_direction(CommandDirection::Stop),
+                )
+                .expect("scaler spawns");
+            let idx = engine.find_object_index(id).expect("scaler exists");
+            engine.objects[idx]
+                .set_fixed_velocity(FixedVec2::new(itofix(7), itofix(-3)));
+            let definition_id = engine.objects[idx].definition_id.clone();
+
+            engine
+                .apply_no_attach_action(idx, &definition_id, &actions, &[])
+                .expect("no-attach transition succeeds");
+
+            let object = &engine.objects[idx];
+            assert_eq!(object.state.action.name, "Jump");
+            assert_eq!(
+                object.fixed_velocity,
+                FixedVec2::new(itofix(expected_x), C4Fixed::ZERO),
+                "a stopped {direction:?} scaler jumps away from its wall"
+            );
+            assert_eq!(object.state.velocity, Vector2::new(expected_x, 0));
+        }
+    }
+
+    #[test]
     fn upward_scaler_corner_scales_when_attachment_is_lost() {
         // C++ NoAttachAction tries ObjectActionCornerScale before its Jump
         // fallback whenever DFA_SCALE is moving upward
