@@ -5803,7 +5803,7 @@ impl Engine {
 
     /// `ObjectComLetGo` (C4ObjectCom.cpp:310-314): jump off a wall/ceiling.
     fn object_com_let_go(&mut self, index: usize, xdirf: i32) -> Result<bool, EngineError> {
-        self.object_action_jump_com(index, itofix(xdirf), crate::C4Fixed::from_raw(0), true)
+        self.object_action_jump(index, itofix(xdirf), crate::C4Fixed::from_raw(0), true)
     }
 
     /// `ObjectComGrab` (C4ObjectCom.cpp:247-259): ordinary, non-forced Push
@@ -6088,7 +6088,7 @@ impl Engine {
         {
             return Ok(true);
         }
-        self.object_action_jump_com(index, launch.x, launch.y, true)
+        self.object_action_jump(index, launch.x, launch.y, true)
     }
 
     /// `SimFlightHitsLiquid` (C4Movement.cpp:657-670), including the
@@ -6180,7 +6180,7 @@ impl Engine {
 
     /// `ObjectActionJump` (C4ObjectCom.cpp:48-61): the scripted OnActionJump
     /// override, then the hardcoded Jump action with launch velocity.
-    fn object_action_jump_com(
+    pub(crate) fn object_action_jump(
         &mut self,
         index: usize,
         xdir: crate::C4Fixed,

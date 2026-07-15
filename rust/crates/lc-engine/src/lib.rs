@@ -33828,12 +33828,7 @@ impl Engine {
                         // Slide off (C4Object.cpp:4437/4491).
                         let xdir = self.objects[idx].fixed_velocity.x / 2;
                         let ydir = self.objects[idx].fixed_velocity.y;
-                        if self.force_action_with_calls(idx, definition_id, "Jump")? {
-                            let object = &mut self.objects[idx];
-                            object.fixed_velocity = FixedVec2::new(xdir, ydir);
-                            object.state.velocity = object.velocity_pixels();
-                            object.state.mobile = true;
-                        }
+                        let _ = self.object_action_jump(idx, xdir, ydir, false)?;
                     }
                     return Ok(());
                 }
@@ -34348,26 +34343,28 @@ impl Engine {
             }
         }
 
-        // A stopped scaler that loses its wall pushes away from the wall
-        // instead of retaining its old velocity (C4Object.cpp:4290-4301).
-        // ObjectActionJump installs these dirs only when the Jump succeeds.
-        let scale_stop_launch = if matches!(procedure, ActionProcedure::Scale) {
-            self.find_object_index(object_id).and_then(|live_idx| {
+        // A stopped scaler that loses its wall first tries to jump away from
+        // it. A failed SetAction falls through to the generic jump below, so
+        // OnActionJump can run twice in that narrow case (C4Object.cpp:
+        // 4290-4299).
+        if matches!(procedure, ActionProcedure::Scale) {
+            let stopped_scale = self.find_object_index(object_id).and_then(|live_idx| {
                 let state = &self.objects[live_idx].state;
-                (state.command_direction == CommandDirection::Stop).then(|| {
-                    FixedVec2::new(
-                        if state.direction == Direction::Left {
-                            itofix(1)
-                        } else {
-                            itofix(-1)
-                        },
-                        C4Fixed::ZERO,
-                    )
-                })
-            })
-        } else {
-            None
-        };
+                (state.command_direction == CommandDirection::Stop).then_some((
+                    live_idx,
+                    if state.direction == Direction::Left {
+                        itofix(1)
+                    } else {
+                        itofix(-1)
+                    },
+                ))
+            });
+            if let Some((live_idx, xdir)) = stopped_scale {
+                if self.object_action_jump(live_idx, xdir, C4Fixed::ZERO, false)? {
+                    return Ok(());
+                }
+            }
+        }
 
         // Pushing off an attachment first notifies the vehicle and restores
         // the PushTo command before falling through to ObjectActionJump
@@ -34396,63 +34393,8 @@ impl Engine {
         }) else {
             return Ok(());
         };
-        let live_definition_id = self.objects[idx].definition_id.clone();
-        let live_library = self
-            .definitions
-            .get(&live_definition_id)
-            .ok_or_else(|| EngineError::UnknownDefinition(live_definition_id.clone()))?
-            .action_library()
-            .clone();
-        let previous = self.objects[idx].state.action.clone();
-
-        // ObjectActionJump is `if (!SetActionByName("Jump")) return false;`
-        // (C4ObjectCom.cpp:54) — a def without a Jump action keeps its
-        // current action untouched (the GoldRush coach stays in Turn even
-        // while its attach probe finds no ground at the map edge).
-        if !live_library.contains("Jump") {
-            return Ok(());
-        }
-        let next_action = "Jump";
-
-        let update = ActionUpdate {
-            name: Some(next_action.to_string()),
-            phase: Some(0),
-            ticks: Some(0),
-            force: true,
-            data: None,
-            // SetAction assigns targets only when given (C4Object.cpp:
-            // 4122-4123) — ObjectActionJump keeps the old ones (the
-            // falling HORS keeps its ConnectWagon target).
-            target: None,
-            target2: None,
-            callbacks_dispatched: false,
-        };
-
-        let object = &mut self.objects[idx];
-        let result = object
-            .state
-            .action
-            .apply_update_with_library(&update, &live_library);
-        // SetAction fix resync (C4Object.cpp:4144) — only past the
-        // NoOtherAction early returns.
-        if update.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
-            object.fixed_position =
-                FixedVec2::from_ints(object.state.position.x, object.state.position.y);
-        }
-        // ObjectActionJump never touches ComDir (C4ObjectCom.cpp:49-62):
-        // the walker keeps steering mid-flight and resumes on landing.
-        if matches!(result, ActionUpdateResult::Applied) {
-            if next_action == "Jump" {
-                if let Some(launch) = scale_stop_launch {
-                    object.set_fixed_velocity(launch);
-                }
-                // ObjectActionJump mobilizes (C4ObjectCom.cpp:56).
-                object.state.mobile = true;
-            }
-            if previous.name != object.state.action.name {
-                object.record_action_event(previous, ActionTransitionKind::Forced);
-            }
-        }
+        let launch = self.objects[idx].fixed_velocity;
+        let _ = self.object_action_jump(idx, launch.x, launch.y, false)?;
         Ok(())
     }
 

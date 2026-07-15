@@ -25633,6 +25633,10 @@ func Death(by) { death_by = by; return 1; }
             .expect("walker spawns");
         let actor_idx = engine.find_object_index(actor).expect("walker exists");
         engine.objects[actor_idx].last_energy_loss_cause = 7;
+        engine.objects[actor_idx].state.t_attach = CNAT_BOTTOM | CNAT_RIGHT;
+        engine.objects[actor_idx].frame_t_attach = CNAT_BOTTOM | CNAT_RIGHT;
+        engine.objects[actor_idx]
+            .set_fixed_velocity(FixedVec2::new(itofix(-4), itofix(-5)));
         let definition_id = engine.objects[actor_idx].definition_id.clone();
         let actions = engine
             .definitions
@@ -25645,6 +25649,13 @@ func Death(by) { death_by = by; return 1; }
             .apply_no_attach_action(actor_idx, &definition_id, &actions, &[])
             .expect("no-attach transition succeeds");
         assert_eq!(engine.objects[actor_idx].state.action.name, "Jump");
+        assert_eq!(
+            engine.objects[actor_idx].fixed_velocity,
+            FixedVec2::new(itofix(-4), itofix(-5))
+        );
+        assert!(engine.objects[actor_idx].state.mobile);
+        assert_eq!(engine.objects[actor_idx].state.t_attach, CNAT_RIGHT);
+        assert_eq!(engine.objects[actor_idx].frame_t_attach, CNAT_RIGHT);
         assert_eq!(
             engine.objects[actor_idx].last_energy_loss_cause, 7,
             "the NoAttachAction path only rewrites Fight kill tracing"
@@ -50772,6 +50783,216 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
             CommandDirection::Down,
             "failed corner probes must run Fish ContactTop before the free range-6 probe"
         );
+    }
+
+    #[test]
+    fn engine_internal_jump_sites_use_hook_args_and_unstick_on_fallback(
+    ) -> Result<(), EngineError> {
+        fn jump_definition(id: &str, script: &str) -> Result<Definition, EngineError> {
+            let mut definition = Definition::from_script(id, id, script)?;
+            definition.set_c4_callback_convention(true);
+            definition.configure_actions(
+                Some("Idle".to_owned()),
+                HashMap::from([
+                    ("Idle".to_owned(), ActionSpec::default()),
+                    (
+                        "Walk".to_owned(),
+                        ActionSpec::default().with_procedure("WALK"),
+                    ),
+                    (
+                        "Scale".to_owned(),
+                        ActionSpec::default().with_procedure("SCALE"),
+                    ),
+                    (
+                        "Jump".to_owned(),
+                        ActionSpec::default().with_procedure("FLIGHT"),
+                    ),
+                ]),
+            );
+            Ok(definition)
+        }
+
+        let hook_script = r#"#strict
+local jump_calls, jump_xdir, jump_ydir, jump_by_com;
+protected func OnActionJump(int xdir, int ydir, bool by_com)
+{
+    jump_calls++;
+    jump_xdir = xdir;
+    jump_ydir = ydir;
+    jump_by_com = by_com;
+    return true;
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(jump_definition("HOOK", hook_script)?)?;
+        engine.register_definition(jump_definition("FALL", "#strict")?)?;
+        let hook_definition_id = "HOOK".to_owned();
+        let fallback_definition_id = "FALL".to_owned();
+
+        let hooked_wall = engine.spawn_object(
+            SpawnConfig::new("HOOK")
+                .with_action(ActionState::new("Walk"))
+                .with_command_direction(CommandDirection::Right)
+                .with_fixed_velocity(FixedVec2::new(itofix(6), itofix(-2))),
+        )?;
+        let hooked_wall_idx = engine
+            .find_object_index(hooked_wall)
+            .expect("hooked wall walker exists");
+        engine.objects[hooked_wall_idx].state.t_attach = CNAT_BOTTOM | CNAT_LEFT;
+        engine.objects[hooked_wall_idx].frame_t_attach = CNAT_BOTTOM | CNAT_LEFT;
+        engine.exec_contact_action(
+            hooked_wall_idx,
+            CNAT_LEFT,
+            &hook_definition_id,
+            &[],
+        )?;
+
+        let hooked_wall_idx = engine
+            .find_object_index(hooked_wall)
+            .expect("hooked wall walker survives");
+        let hooked_wall = &engine.objects[hooked_wall_idx];
+        assert_eq!(hooked_wall.state.action.name, "Walk");
+        assert_eq!(
+            hooked_wall.fixed_velocity,
+            FixedVec2::new(itofix(6), itofix(-2))
+        );
+        assert_eq!(hooked_wall.state.t_attach, CNAT_BOTTOM | CNAT_LEFT);
+        assert_eq!(hooked_wall.frame_t_attach, CNAT_BOTTOM | CNAT_LEFT);
+        assert_eq!(
+            hooked_wall.state.local_vars.get("jump_calls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            hooked_wall.state.local_vars.get("jump_xdir"),
+            Some(&Value::Int(300))
+        );
+        assert_eq!(
+            hooked_wall.state.local_vars.get("jump_ydir"),
+            Some(&Value::Int(-200))
+        );
+        assert_eq!(
+            hooked_wall.state.local_vars.get("jump_by_com"),
+            Some(&Value::Nil)
+        );
+
+        let hooked_no_attach = engine.spawn_object(
+            SpawnConfig::new("HOOK")
+                .with_action(ActionState::new("Walk"))
+                .with_fixed_velocity(FixedVec2::new(itofix(-4), itofix(-5))),
+        )?;
+        let hooked_no_attach_idx = engine
+            .find_object_index(hooked_no_attach)
+            .expect("hooked no-attach walker exists");
+        engine.objects[hooked_no_attach_idx].state.t_attach = CNAT_BOTTOM | CNAT_RIGHT;
+        engine.objects[hooked_no_attach_idx].frame_t_attach = CNAT_BOTTOM | CNAT_RIGHT;
+        let hook_actions = engine
+            .definitions
+            .get("HOOK")
+            .expect("hook definition exists")
+            .action_library()
+            .clone();
+        engine.apply_no_attach_action(
+            hooked_no_attach_idx,
+            &hook_definition_id,
+            &hook_actions,
+            &[],
+        )?;
+
+        let hooked_no_attach_idx = engine
+            .find_object_index(hooked_no_attach)
+            .expect("hooked no-attach walker survives");
+        let hooked_no_attach = &engine.objects[hooked_no_attach_idx];
+        assert_eq!(hooked_no_attach.state.action.name, "Walk");
+        assert_eq!(
+            hooked_no_attach.fixed_velocity,
+            FixedVec2::new(itofix(-4), itofix(-5))
+        );
+        assert_eq!(hooked_no_attach.state.t_attach, CNAT_BOTTOM | CNAT_RIGHT);
+        assert_eq!(hooked_no_attach.frame_t_attach, CNAT_BOTTOM | CNAT_RIGHT);
+        assert_eq!(
+            hooked_no_attach.state.local_vars.get("jump_calls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            hooked_no_attach.state.local_vars.get("jump_xdir"),
+            Some(&Value::Int(-400))
+        );
+        assert_eq!(
+            hooked_no_attach.state.local_vars.get("jump_ydir"),
+            Some(&Value::Int(-500))
+        );
+        assert_eq!(
+            hooked_no_attach.state.local_vars.get("jump_by_com"),
+            Some(&Value::Nil)
+        );
+
+        let hooked_scale = engine.spawn_object(
+            SpawnConfig::new("HOOK")
+                .with_action(ActionState::new("Scale"))
+                .with_direction(Direction::Left)
+                .with_command_direction(CommandDirection::Stop)
+                .with_fixed_velocity(FixedVec2::new(itofix(7), itofix(-3))),
+        )?;
+        let hooked_scale_idx = engine
+            .find_object_index(hooked_scale)
+            .expect("hooked scaler exists");
+        engine.apply_no_attach_action(
+            hooked_scale_idx,
+            &hook_definition_id,
+            &hook_actions,
+            &[],
+        )?;
+        let hooked_scale = &engine.objects[hooked_scale_idx];
+        assert_eq!(hooked_scale.state.action.name, "Scale");
+        assert_eq!(
+            hooked_scale.fixed_velocity,
+            FixedVec2::new(itofix(7), itofix(-3))
+        );
+        assert_eq!(
+            hooked_scale.state.local_vars.get("jump_calls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            hooked_scale.state.local_vars.get("jump_xdir"),
+            Some(&Value::Int(100))
+        );
+        assert_eq!(
+            hooked_scale.state.local_vars.get("jump_ydir"),
+            Some(&Value::Nil)
+        );
+        assert_eq!(
+            hooked_scale.state.local_vars.get("jump_by_com"),
+            Some(&Value::Nil)
+        );
+
+        let fallback_wall = engine.spawn_object(
+            SpawnConfig::new("FALL")
+                .with_action(ActionState::new("Walk"))
+                .with_command_direction(CommandDirection::Right)
+                .with_fixed_velocity(FixedVec2::new(itofix(6), itofix(-2))),
+        )?;
+        let fallback_wall_idx = engine
+            .find_object_index(fallback_wall)
+            .expect("fallback wall walker exists");
+        engine.objects[fallback_wall_idx].state.t_attach = CNAT_BOTTOM | CNAT_LEFT;
+        engine.objects[fallback_wall_idx].frame_t_attach = CNAT_BOTTOM | CNAT_LEFT;
+        engine.exec_contact_action(
+            fallback_wall_idx,
+            CNAT_LEFT,
+            &fallback_definition_id,
+            &[],
+        )?;
+        let fallback_wall = &engine.objects[fallback_wall_idx];
+        assert_eq!(fallback_wall.state.action.name, "Jump");
+        assert_eq!(
+            fallback_wall.fixed_velocity,
+            FixedVec2::new(itofix(3), itofix(-2))
+        );
+        assert!(fallback_wall.state.mobile);
+        assert_eq!(fallback_wall.state.t_attach, CNAT_LEFT);
+        assert_eq!(fallback_wall.frame_t_attach, CNAT_LEFT);
+
+        Ok(())
     }
 
     #[test]
