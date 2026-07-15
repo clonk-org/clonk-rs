@@ -3578,6 +3578,184 @@ mod tests {
         assert!(stack.is_empty());
     }
 
+    fn enter_push_fixture(
+        vehicle_grab: i32,
+        pushed_target: ObjectId,
+        actor_position: Vector2,
+        vehicle_position: Vector2,
+    ) -> (
+        CommandObjectSnapshot,
+        HashMap<ObjectId, CommandObjectSnapshot>,
+        HashMap<DefinitionId, CommandDefinitionSnapshot>,
+    ) {
+        let actor_id = ObjectId::new(31);
+        let vehicle_id = ObjectId::new(41);
+        let entrance_id = ObjectId::new(42);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = actor_position;
+        actor.command_direction = CommandDirection::Right;
+        actor.action_procedure = ActionProcedure::Push;
+        actor.action_target = Some(pushed_target);
+        actor.controller = 7;
+
+        let mut vehicle = snapshot_with_id(vehicle_id.as_u64());
+        vehicle.position = vehicle_position;
+        vehicle.controller = 9;
+
+        let mut entrance = snapshot_with_id(entrance_id.as_u64());
+        entrance.position = Vector2::new(100, 0);
+        entrance.shape = DefinitionRect::new(90, -10, 20, 20);
+        entrance.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
+        entrance.entrance_status = false;
+        entrance.category = CATEGORY_STRUCTURE;
+
+        let objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (vehicle_id, vehicle.clone()),
+            (entrance_id, entrance.clone()),
+        ]);
+        let definitions = HashMap::from([
+            (
+                vehicle.definition_id.clone(),
+                CommandDefinitionSnapshot {
+                    value: 0,
+                    can_chop: false,
+                    chop_action: None,
+                    constructable: false,
+                    grab: vehicle_grab,
+                },
+            ),
+            (
+                entrance.definition_id.clone(),
+                CommandDefinitionSnapshot {
+                    value: 0,
+                    can_chop: false,
+                    chop_action: None,
+                    constructable: false,
+                    grab: 1,
+                },
+            ),
+        ]);
+        (actor, objects, definitions)
+    }
+
+    fn assert_enter_requests_ungrab(result: &CommandStepResult) {
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none());
+        assert!(result.events.is_empty());
+        assert!(matches!(
+            result.operations.as_slice(),
+            [CommandOperation::PushFront(request)]
+                if request.id == CommandId::UnGrab
+                    && request.update_interval == 50
+                    && request.mode == CommandMode::SilentSub
+        ));
+    }
+
+    #[test]
+    fn enter_push_ungrabs_grab_only_vehicle_or_missing_push_flag() {
+        let vehicle_id = ObjectId::new(41);
+        let entrance_id = ObjectId::new(42);
+        let players = HashMap::new();
+
+        for (grab, push_flag) in [(2, true), (1, false)] {
+            let (actor, objects, definitions) = enter_push_fixture(
+                grab,
+                vehicle_id,
+                Vector2::ZERO,
+                Vector2::new(100, 0),
+            );
+            let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
+            let mut request =
+                CommandRequest::new(CommandId::Enter).with_target(Some(entrance_id));
+            if push_flag {
+                request = request.with_data(CommandData::Integer(
+                    COMMAND_FLAG_ENTER_PUSH_TARGET,
+                ));
+            }
+            let mut state = EnterState::from_request(&request).expect("Enter state");
+            assert_enter_requests_ungrab(&state.step(&ctx));
+        }
+    }
+
+    #[test]
+    fn enter_push_ungrabs_when_vehicle_is_the_entrance_target() {
+        let entrance_id = ObjectId::new(42);
+        let (actor, objects, definitions) = enter_push_fixture(
+            1,
+            entrance_id,
+            Vector2::new(100, 0),
+            Vector2::ZERO,
+        );
+        let players = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
+        let request = CommandRequest::new(CommandId::Enter)
+            .with_target(Some(entrance_id))
+            .with_data(CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
+        let mut state = EnterState::from_request(&request).expect("Enter state");
+        assert_enter_requests_ungrab(&state.step(&ctx));
+    }
+
+    #[test]
+    fn enter_push_uses_vehicle_position_and_sets_its_enter_command() {
+        let vehicle_id = ObjectId::new(41);
+        let entrance_id = ObjectId::new(42);
+        let players = HashMap::new();
+        let request = CommandRequest::new(CommandId::Enter)
+            .with_target(Some(entrance_id))
+            .with_data(CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
+
+        // Actor inside but vehicle outside: the Enter must keep approaching.
+        let (actor, objects, definitions) = enter_push_fixture(
+            1,
+            vehicle_id,
+            Vector2::new(100, 0),
+            Vector2::ZERO,
+        );
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
+        let mut state = EnterState::from_request(&request).expect("Enter state");
+        let outside = state.step(&ctx);
+        assert_eq!(outside.status, CommandStatus::Running);
+        assert!(outside.events.is_empty());
+        assert!(matches!(
+            outside.operations.as_slice(),
+            [CommandOperation::PushFront(request)]
+                if request.id == CommandId::MoveTo
+                    && request.data
+                        == CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET)
+        ));
+
+        // Actor outside but vehicle inside: assign Enter to the vehicle and
+        // finish the actor's command without entering the actor itself.
+        let (actor, objects, definitions) = enter_push_fixture(
+            1,
+            vehicle_id,
+            Vector2::ZERO,
+            Vector2::new(100, 0),
+        );
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
+        let mut state = EnterState::from_request(&request).expect("Enter state");
+        let inside = state.step(&ctx);
+        assert_eq!(inside.status, CommandStatus::Completed);
+        assert!(inside.operations.is_empty());
+        assert_eq!(
+            inside.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Stop)
+        );
+        assert!(matches!(
+            inside.events.as_slice(),
+            [CommandEvent::SetObjectCommand {
+                object_id,
+                controller: None,
+                request,
+            }] if *object_id == vehicle_id
+                && request.id == CommandId::Enter
+                && request.target == Some(entrance_id)
+                && request.mode == CommandMode::Base
+        ));
+    }
+
     #[test]
     fn enter_requests_move_when_far() {
         let actor_id = ObjectId::new(31);
@@ -7293,7 +7471,7 @@ mod tests {
                 request,
             } => {
                 assert_eq!(*object_id, target_id);
-                assert_eq!(*controller, 23);
+                assert_eq!(*controller, Some(23));
                 assert_eq!(request.id, CommandId::Exit);
             }
             other => panic!("unexpected event: {:?}", other),
@@ -10529,12 +10707,14 @@ pub enum CommandEvent {
         actor_id: ObjectId,
         target_id: ObjectId,
     },
-    /// Assign a fresh command stack to another object. C4CMD_Activate
-    /// uses `Target->SetCommand(C4CMD_Exit)` rather than exiting the
-    /// target inline (C4Command.cpp:1335-1362).
+    /// Assign a fresh command stack to another object. C4CMD_Activate uses
+    /// `Target->SetCommand(C4CMD_Exit)` with the actor's controller, while
+    /// push-target Enter assigns the vehicle's Enter without changing its
+    /// controller (C4Command.cpp:594-597,1335-1362).
     SetObjectCommand {
         object_id: ObjectId,
-        controller: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller: Option<i32>,
         request: CommandRequest,
     },
     ControlCommandAcquire {
@@ -12238,15 +12418,45 @@ impl EnterState {
             return CommandStepResult::completed(self.update_to_stop(ctx));
         }
 
+        let pushed_target = (ctx.object.action_procedure == ActionProcedure::Push)
+            .then_some(ctx.object.action_target)
+            .flatten();
+        if let Some(pushed_id) = pushed_target {
+            let grab_only = ctx
+                .resolve(pushed_id)
+                .and_then(|snapshot| ctx.definition(snapshot.definition_id.as_str()))
+                .is_some_and(|definition| definition.grab == 2);
+            if grab_only || !self.push_target || pushed_id == self.target {
+                let ungrab = CommandRequest::new(CommandId::UnGrab)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::SilentSub);
+                return CommandStepResult::running(None)
+                    .with_operations(vec![CommandOperation::PushFront(ungrab)]);
+            }
+        }
+
         if target_snapshot.ocf & ocf::ENTRANCE == 0 {
             return CommandStepResult::failed(self.update_to_stop(ctx));
         }
 
+        let position = pushed_target
+            .and_then(|id| ctx.resolve_position(id))
+            .unwrap_or(ctx.position);
         // "If in entrance range": C4Command::Enter tests the clonk point
-        // against the target's shape (Target->At(cx, cy, ocf),
-        // C4Command.cpp:586-588).
-        if target_snapshot.at_point(ctx.position.x, ctx.position.y) {
+        // (or pushed vehicle point) against the target's shape
+        // (Target->At(cx, cy, ocf), C4Command.cpp:577-588).
+        if target_snapshot.at_point(position.x, position.y) {
             let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
+            if let Some(pushed_id) = pushed_target {
+                let event = CommandEvent::SetObjectCommand {
+                    object_id: pushed_id,
+                    controller: None,
+                    request: CommandRequest::new(CommandId::Enter)
+                        .with_target(Some(self.target))
+                        .with_mode(CommandMode::Base),
+                };
+                return CommandStepResult::completed(Some(update)).with_events(vec![event]);
+            }
             if !target_snapshot.entrance_status {
                 let event = CommandEvent::CallObjectFunction {
                     object_id: self.target,
@@ -13516,7 +13726,7 @@ impl ActivateState {
 
         result.events.push(CommandEvent::SetObjectCommand {
             object_id: target_id,
-            controller: ctx.object.controller,
+            controller: Some(ctx.object.controller),
             request: CommandRequest::new(CommandId::Exit).with_mode(CommandMode::Base),
         });
 

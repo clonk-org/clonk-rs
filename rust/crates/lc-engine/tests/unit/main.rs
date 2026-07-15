@@ -19396,6 +19396,124 @@ protected func GrabLost()
         );
     }
 
+    #[test]
+    fn command_enter_push_target_replaces_vehicle_stack_without_controller_transfer() {
+        // C4Command::Enter hands the pushed vehicle its own Enter command
+        // once the vehicle (rather than the actor) reaches the entrance.
+        // Unlike C4Object::Push, this SetCommand does not transfer Controller
+        // (C4Command.cpp:577-597).
+        let mut actor = Definition::from_script("ACTR", "Actor", "#strict")
+            .expect("actor compiles");
+        actor.configure_actions(
+            Some("Push".to_string()),
+            HashMap::from([(
+                "Push".to_string(),
+                ActionSpec::default().with_procedure("PUSH"),
+            )]),
+        );
+        actor.set_physical(PhysicalInfo {
+            walk: 35_000,
+            push: 45_000,
+            ..PhysicalInfo::default()
+        });
+
+        // Leave this event-handler fixture non-grabbable so the actor's
+        // later same-frame PUSH physics cannot independently copy Controller.
+        // The command-state regression above uses a normal Grab=1 vehicle.
+        let vehicle = simple_definition("VEHI");
+
+        let mut entrance = simple_definition("ENTR");
+        entrance.set_shape_rect(Some(DefinitionRect::new(-20, -20, 40, 40)));
+        entrance.set_entrance_rect(Some(DefinitionRect::new(-20, -20, 40, 40)));
+
+        let mut engine = Engine::with_seed(7);
+        engine.register_definition(actor).expect("actor registers");
+        engine
+            .register_definition(vehicle)
+            .expect("vehicle registers");
+        engine
+            .register_definition(entrance)
+            .expect("entrance registers");
+
+        // Loaded objects append to the execution list in this exact order.
+        // The vehicle therefore consumes its old Wait before the actor
+        // replaces that stack later in the same frame.
+        let entrance_id = engine
+            .spawn_object(
+                SpawnConfig::new("ENTR")
+                    .with_category(CATEGORY_STRUCTURE)
+                    .with_position(Vector2::new(100, 100))
+                    .with_entrance_status(true)
+                    .with_loaded(true),
+            )
+            .expect("entrance spawns");
+        let vehicle_id = engine
+            .spawn_object(
+                SpawnConfig::new("VEHI")
+                    // Keep ExecAction from performing a real Push and
+                    // independently transferring the actor's controller.
+                    .with_category(CATEGORY_STATIC_BACK)
+                    .with_position(Vector2::new(100, 100))
+                    .with_controller(9)
+                    .with_loaded(true),
+            )
+            .expect("vehicle spawns");
+        let vehicle_index = engine
+            .find_object_index(vehicle_id)
+            .expect("vehicle exists");
+        engine.objects[vehicle_index]
+            .commands
+            .push_back(CommandRequest::new(CommandId::Wait).with_update_interval(90))
+            .expect("old Wait queues");
+
+        let mut push = ActionState::new("Push");
+        push.target = Some(vehicle_id);
+        let actor_id = engine
+            .spawn_object(
+                SpawnConfig::new("ACTR")
+                    .with_position(Vector2::new(0, 100))
+                    .with_controller(7)
+                    .with_action(push)
+                    .with_loaded(true),
+            )
+            .expect("actor spawns");
+        let actor_index = engine.find_object_index(actor_id).expect("actor exists");
+        engine.objects[actor_index]
+            .commands
+            .push_back(
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(entrance_id))
+                    .with_data(CommandData::Integer(2)),
+            )
+            .expect("actor Enter queues");
+
+        engine.tick().expect("actor hands Enter to vehicle");
+
+        let actor = engine.object_snapshot(actor_id).expect("actor remains");
+        assert!(
+            !actor.command_stack.command_names().contains(&"Enter".to_string()),
+            "actor Enter completes"
+        );
+        let vehicle = engine
+            .object_snapshot(vehicle_id)
+            .expect("vehicle remains");
+        let commands = vehicle.command_stack.command_views();
+        assert_eq!(commands.len(), 1, "SetCommand replaces the old Wait");
+        assert_eq!(commands[0].name, "Enter");
+        assert_eq!(commands[0].target, Some(entrance_id));
+        assert_eq!(vehicle.controller, 9, "SetCommand preserves Controller");
+        assert_eq!(vehicle.container, None, "vehicle executes on its next turn");
+
+        engine.tick().expect("vehicle executes its Enter");
+        assert_eq!(
+            engine
+                .object_snapshot(vehicle_id)
+                .expect("vehicle remains")
+                .container,
+            Some(entrance_id)
+        );
+    }
+
     fn push_pull_fixture() -> (Engine, ObjectId, ObjectId) {
         let script = r#"
         global func Initialize(state, random) {

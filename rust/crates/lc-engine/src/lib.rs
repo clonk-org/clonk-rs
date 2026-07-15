@@ -38446,7 +38446,9 @@ impl Engine {
                 request,
             } => {
                 if let Some(index) = self.find_object_index(object_id) {
-                    self.objects[index].state.controller = controller;
+                    if let Some(controller) = controller {
+                        self.objects[index].state.controller = controller;
+                    }
                     self.objects[index].apply_command_operations([
                         CommandOperation::DecrementNoCollectDelay,
                         CommandOperation::Clear,
