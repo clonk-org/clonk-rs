@@ -29743,6 +29743,33 @@ impl Engine {
                         info.name = name;
                     }
                 }
+                PlayerCommand::SetCrewExtraData {
+                    object_id,
+                    link,
+                    name,
+                    value,
+                } => {
+                    let write_slot = |slots: &mut Vec<(String, Value)>| {
+                        match slots.iter_mut().find(|(slot, _)| *slot == name) {
+                            Some((_, stored)) => *stored = value.clone(),
+                            None => slots.push((name.clone(), value.clone())),
+                        }
+                    };
+                    if let Some(link) = link {
+                        if let Some(entry) = self
+                            .crew_rosters
+                            .get_mut(&link.player_id)
+                            .and_then(|roster| roster.get_mut(link.roster_index))
+                        {
+                            write_slot(&mut entry.extra_data);
+                        }
+                    }
+                    if let Some(info) =
+                        Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id)
+                    {
+                        write_slot(&mut info.extra_data);
+                    }
+                }
                 PlayerCommand::SetCrewInfoPhysical { link, physical } => {
                     self.set_linked_crew_info_physical(link, physical);
                 }

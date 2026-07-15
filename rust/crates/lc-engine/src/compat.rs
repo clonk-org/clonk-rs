@@ -497,6 +497,14 @@ pub enum PlayerCommand {
         link: Option<CrewInfoLink>,
         name: String,
     },
+    /// `FnSetCrewExtraData`: an incremental named-slot write on the exact
+    /// C4ObjectInfo pointer and, when linked, its persistent roster entry.
+    SetCrewExtraData {
+        object_id: ObjectId,
+        link: Option<CrewInfoLink>,
+        name: String,
+        value: Value,
+    },
     /// Persist one `C4ObjectInfo::Physical` training write through the exact
     /// owning roster pointer. The object-scope copy is carried separately by
     /// `ObjectUpdate::physicals`.
@@ -4387,8 +4395,7 @@ fn get_crew_extra_data(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
-        let Some(target) = target.or_else(|| context.object_context().map(|object| object.id()))
-        else {
+        let Some(target) = target.or(context.script_object_context) else {
             return Ok(Value::Nil);
         };
         // An existing scope is authoritative even when its Info was cleared
@@ -4401,6 +4408,100 @@ fn get_crew_extra_data(args: &[Value]) -> Result<Value, RuntimeError> {
             .and_then(|info| info.extra_data.iter().find(|(slot, _)| slot == name))
             .map(|(_, value)| value.clone())
             .unwrap_or(Value::Nil))
+    })
+}
+
+/// `FnSetCrewExtraData` (C4Script.cpp:4743-4784): validate the slot name and
+/// serializable value type, then update the caller's (for nil) or explicit
+/// object's C4ObjectInfo. Every failure returns nil.
+fn set_crew_extra_data(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "SetCrewExtraData",
+        "crew",
+    )?;
+    let Some(Value::String(name)) = args.get(1) else {
+        return Ok(Value::Nil);
+    };
+    if name.is_empty() {
+        return Ok(Value::Nil);
+    }
+    if !is_extra_data_identifier(name) {
+        let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
+        tracing::error!(
+            target: "lc-script",
+            "SetCrewExtraData: Ignoring invalid data name \"{}\"! Only alphanumerics, _ and - are allowed.",
+            escaped_name
+        );
+        return Ok(Value::Nil);
+    }
+    let data = args.get(2).cloned().unwrap_or(Value::Nil);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        let Some(target) = target.or(context.script_object_context) else {
+            return Ok(Value::Nil);
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Nil);
+        }
+        let (link, mut info) = {
+            let Some(scope) = context.object_scope(target) else {
+                return Ok(Value::Nil);
+            };
+            let Some(info) = scope.info_core().cloned() else {
+                return Ok(Value::Nil);
+            };
+            (scope.info_link(), info)
+        };
+        // C4V_Any/Int/Bool/C4ID only, checked after Info
+        // (C4Script.cpp:4757-4763).
+        if !matches!(
+            data,
+            Value::Nil | Value::Int(_) | Value::Bool(_) | Value::C4Id(_)
+        ) {
+            return Ok(Value::Nil);
+        }
+
+        match info.extra_data.iter_mut().find(|(slot, _)| slot == name) {
+            Some((_, value)) => *value = data.clone(),
+            None => info.extra_data.push((name.clone(), data.clone())),
+        }
+        context
+            .object_scope_mut(target)
+            .expect("ensured object scope")
+            .set_info_core(Some(info));
+
+        if let Some(link) = link {
+            let mut state = context.world.crew_info_state.borrow_mut();
+            if let Some(entry) = state.entries.get_mut(&link) {
+                match entry.extra_data.iter_mut().find(|(slot, _)| slot == name) {
+                    Some((_, value)) => *value = data.clone(),
+                    None => entry.extra_data.push((name.clone(), data.clone())),
+                }
+            }
+            for entries in state.idle.values_mut() {
+                for (candidate, entry) in entries {
+                    if *candidate != link {
+                        continue;
+                    }
+                    match entry.extra_data.iter_mut().find(|(slot, _)| slot == name) {
+                        Some((_, value)) => *value = data.clone(),
+                        None => entry.extra_data.push((name.clone(), data.clone())),
+                    }
+                }
+            }
+        }
+        context.record_player_command(PlayerCommand::SetCrewExtraData {
+            object_id: target,
+            link,
+            name: name.clone(),
+            value: data.clone(),
+        });
+        Ok(data)
     })
 }
 
@@ -12052,11 +12153,12 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetHostility", set_hostility);
     script.register_host_function("SetFoW", set_fow);
     script.register_host_function("SetScoreboardData", set_scoreboard_data);
-    // Player and crew C4ValueMapData readers (C4Script.cpp:4692-4800,
-    // AddFunc :6660-6663). The crew setter lands in its own queue item.
+    // Player and crew C4ValueMapData functions (C4Script.cpp:4692-4800,
+    // AddFunc :6660-6663).
     script.register_host_function("GetPlrExtraData", get_plr_extra_data);
     script.register_host_function("SetPlrExtraData", set_plr_extra_data);
     script.register_host_function("GetCrewExtraData", get_crew_extra_data);
+    script.register_host_function("SetCrewExtraData", set_crew_extra_data);
     script.register_host_function("GetScenarioVal", get_scenario_val);
     script.register_host_function("LoadScenarioSection", load_scenario_section);
     script.register_host_function("GetLeague", get_league);
@@ -43698,6 +43800,7 @@ mod tests {
         "SetContactDensity",
         "SetController",
         "SetCrewEnabled",
+        "SetCrewExtraData",
         "SetCrewStatus",
         "SetCursor",
         "SetDir",
@@ -50609,6 +50712,238 @@ func Probe(object crew, object info_less)
         let state: crate::EngineState = serde_json::from_str(&json).expect("state deserializes");
         engine.restore_state(&state).expect("state restores");
         assert_eq!(probe(&mut engine), expected);
+    }
+
+    #[test]
+    fn crew_extra_data_setter_validates_orders_and_persists_like_cpp() {
+        // FnSetCrewExtraData (C4Script.cpp:4743-4784) writes nil/int/bool/ID
+        // values into the exact C4ObjectInfo map. Overwrites retain slot
+        // order; invalid names and string/object values return nil without
+        // mutation; a nil object defaults to the caller.
+        let script = r#"#strict 2
+func Mutate(object crew, object info_less, id_value)
+{
+    return [SetCrewExtraData(crew, "visited", 1),
+            GetCrewExtraData(crew, "visited"),
+            SetCrewExtraData(0, "visited", 2),
+            GetCrewExtraData(0, "visited"),
+            SetCrewExtraData(crew, "flag", true),
+            GetCrewExtraData(crew, "flag"),
+            SetCrewExtraData(crew, "kind", id_value),
+            GetCrewExtraData(crew, "kind"),
+            SetCrewExtraData(crew, "empty", nil),
+            SetCrewExtraData(crew, "", 3),
+            SetCrewExtraData(crew, "bad name!", 3),
+            SetCrewExtraData(crew, "visited", "blocked"),
+            GetCrewExtraData(crew, "visited"),
+            SetCrewExtraData(crew, "visited", crew),
+            GetCrewExtraData(crew, "visited"),
+            SetCrewExtraData(info_less, "visited", 9),
+            GetCrewExtraData(info_less, "visited")];
+}
+
+func Read()
+{
+    return [GetCrewExtraData(0, "visited"),
+            GetCrewExtraData(0, "flag"),
+            GetCrewExtraData(0, "kind"),
+            GetCrewExtraData(0, "empty")];
+}
+
+func Transfer(object donor, object recipient)
+{
+    return [SetCrewExtraData(donor, "before_transfer", 7),
+            GrabObjectInfo(donor, recipient),
+            SetCrewExtraData(recipient, "after_transfer", 8),
+            GetCrewExtraData(recipient, "before_transfer"),
+            GetCrewExtraData(recipient, "after_transfer"),
+            GetCrewExtraData(donor, "before_transfer")];
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        let mut definition = crate::Definition::from_script("CREW", "Crew", script)
+            .expect("crew extra-data setter fixture compiles");
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("crew extra-data setter fixture registers");
+
+        let mut start = crate::scenario::PlayerStart::default();
+        start.ready_crew = vec![("CREW".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Extra data owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![crate::player_file::CrewInfo {
+                    id: "CREW".to_string(),
+                    name: "Ada".to_string(),
+                    rank: 0,
+                    experience: 0,
+                    physical: crate::PhysicalInfo::default(),
+                    death_count: 0,
+                    total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
+                    participation: 1,
+                    in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                    extra_data: Vec::new(),
+                }],
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("extra data owner joins");
+
+        let crew = engine.player(0).expect("player exists").crew()[0];
+        let info_less = engine
+            .spawn_object(crate::SpawnConfig::new("CREW"))
+            .expect("info-less comparison object spawns");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
+        let result = subscriber::with_default(subscriber, || {
+            engine
+                .call_object_function(
+                    crew_index,
+                    "Mutate",
+                    vec![
+                        Value::Object(crew.as_u64()),
+                        Value::Object(info_less.as_u64()),
+                        Value::C4Id("ROCK".into()),
+                    ],
+                )
+                .expect("SetCrewExtraData probe runs")
+        });
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(2),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::C4Id("ROCK".into()),
+                Value::C4Id("ROCK".into()),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Int(2),
+                Value::Nil,
+                Value::Int(2),
+                Value::Nil,
+                Value::Nil,
+            ])
+        );
+        let records = records.lock().expect("log records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].level, Level::ERROR);
+        assert_eq!(records[0].target, "lc-script");
+        assert_eq!(
+            records[0].message,
+            "SetCrewExtraData: Ignoring invalid data name \"bad name!\"! Only alphanumerics, _ and - are allowed."
+        );
+        drop(records);
+
+        let expected_slots = vec![
+            ("visited".to_string(), Value::Int(2)),
+            ("flag".to_string(), Value::Bool(true)),
+            ("kind".to_string(), Value::C4Id("ROCK".into())),
+            ("empty".to_string(), Value::Nil),
+        ];
+        let read_expected = Value::Array(vec![
+            Value::Int(2),
+            Value::Bool(true),
+            Value::C4Id("ROCK".into()),
+            Value::Nil,
+        ]);
+        let read = |engine: &mut crate::Engine| {
+            let index = engine.find_object_index(crew).expect("crew remains live");
+            engine
+                .call_object_function(index, "Read", Vec::new())
+                .expect("GetCrewExtraData readback runs")
+        };
+        assert_eq!(read(&mut engine), read_expected);
+        assert_eq!(
+            engine
+                .crew_object_info(crew)
+                .expect("crew retains live info")
+                .extra_data,
+            expected_slots
+        );
+        let state = engine.capture_state();
+        let link = state.crew_info_links[&crew];
+        assert_eq!(
+            state.crew_info_rosters[&link.player_id][link.roster_index].extra_data,
+            expected_slots
+        );
+
+        let json = serde_json::to_string(&state).expect("state serializes");
+        let state: crate::EngineState = serde_json::from_str(&json).expect("state deserializes");
+        engine.restore_state(&state).expect("state restores");
+        assert_eq!(read(&mut engine), read_expected);
+        assert_eq!(
+            engine
+                .crew_object_info(crew)
+                .expect("crew retains restored info")
+                .extra_data,
+            expected_slots
+        );
+
+        let transfer = engine
+            .call_object_function(
+                engine.find_object_index(crew).expect("donor remains live"),
+                "Transfer",
+                vec![
+                    Value::Object(crew.as_u64()),
+                    Value::Object(info_less.as_u64()),
+                ],
+            )
+            .expect("ExtraData follows GrabObjectInfo");
+        assert_eq!(
+            transfer,
+            Value::Array(vec![
+                Value::Int(7),
+                Value::Bool(true),
+                Value::Int(8),
+                Value::Int(7),
+                Value::Int(8),
+                Value::Nil,
+            ])
+        );
+        assert!(engine.crew_object_info(crew).is_none());
+        let transferred_slots = engine
+            .crew_object_info(info_less)
+            .expect("recipient owns the transferred info")
+            .extra_data
+            .clone();
+        assert_eq!(
+            transferred_slots,
+            expected_slots
+                .into_iter()
+                .chain([
+                    ("before_transfer".to_string(), Value::Int(7)),
+                    ("after_transfer".to_string(), Value::Int(8)),
+                ])
+                .collect::<Vec<_>>()
+        );
+        let state = engine.capture_state();
+        assert_eq!(state.crew_info_links.get(&info_less), Some(&link));
+        assert!(!state.crew_info_links.contains_key(&crew));
+        assert_eq!(
+            state.crew_info_rosters[&link.player_id][link.roster_index].extra_data,
+            transferred_slots
+        );
     }
 
     #[test]
