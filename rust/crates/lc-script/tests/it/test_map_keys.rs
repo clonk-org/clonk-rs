@@ -47,6 +47,41 @@ fn computed_map_keys_round_trip_through_literals_and_indexed_assignment() {
 }
 
 #[test]
+fn host_returned_id_and_object_keys_round_trip_without_missing_read_insertion() {
+    let mut engine = Engine::new();
+    engine.register_host_function("GetID", |_| Ok(Value::C4Id("CLNK".into())));
+    engine
+        .load_script(
+            r#"
+            #strict 3
+            func Test(object obj) {
+                var entries = { [GetID()] = 1, [obj] = 2, ["5"] = 3, [5] = 4 };
+                entries[GetID()] = 11;
+                var missing = entries[999];
+                var count = 0;
+                for (var key, value in entries) count += 1;
+                return [entries[GetID()], entries[obj], entries["5"], entries[5], missing, count];
+            }
+            "#,
+        )
+        .expect("script should load");
+
+    assert_eq!(
+        engine
+            .call("Test", &[Value::Object(77)])
+            .expect("typed map keys should run"),
+        Value::Array(vec![
+            Value::Int(11),
+            Value::Int(2),
+            Value::Int(3),
+            Value::Int(4),
+            Value::Nil,
+            Value::Int(4),
+        ])
+    );
+}
+
+#[test]
 fn maxstrict_map_key_equality_keeps_value_types_distinct() {
     let source = r#"
         #strict 3
