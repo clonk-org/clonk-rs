@@ -9468,18 +9468,21 @@ fn do_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-fn value_to_bool(value: &Value, function: &str, parameter: &str) -> Result<bool, RuntimeError> {
-    match value {
-        Value::Bool(flag) => Ok(*flag),
-        Value::Int(int) => Ok(*int != 0),
-        Value::Nil => Ok(false),
-        other => Err(RuntimeError::new(format!(
-            "{}: expected bool or int for {}, got {}",
-            function,
-            parameter,
-            other.type_name()
-        ))),
-    }
+fn value_to_bool(
+    value: &Value,
+    _function: &str,
+    _parameter: &str,
+) -> Result<bool, RuntimeError> {
+    Ok(match value {
+        Value::Bool(flag) => *flag,
+        Value::Int(int) => *int != 0,
+        Value::Nil => false,
+        Value::C4Id(id) => cast_c4id_payload(id) != 0,
+        Value::Object(id) => *id != 0,
+        // C++ tests the non-null pointer stored in the C4Value union, so
+        // allocated values stay truthy even when their contents are empty.
+        Value::String(_) | Value::Array(_) | Value::Proplist(_) => true,
+    })
 }
 
 fn parse_optional_i32(

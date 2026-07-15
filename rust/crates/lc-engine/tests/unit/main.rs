@@ -12713,6 +12713,91 @@ func Trigger() {
         );
     }
 
+    fn bool_parameter_hostility_fixture() -> (Engine, ObjectId) {
+        let script = r#"
+        func ApplyHostility(value) {
+            SetHostility(1, 2, value, true, true);
+            return Hostile(1, 2, true);
+        }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", script).expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Alice"))
+            .expect("Alice registers");
+        engine
+            .register_player(PlayerConfig::new(2, "Bob"))
+            .expect("Bob registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        engine.tick().expect("tick succeeds");
+        (engine, caller)
+    }
+
+    #[test]
+    fn bool_host_parameter_accepts_every_truthy_non_scalar_value() {
+        let (mut engine, caller) = bool_parameter_hostility_fixture();
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        for argument in [
+            Value::Object(caller.as_u64()),
+            Value::String("truthy".into()),
+            Value::String(String::new()),
+            Value::C4Id("CLNK".into()),
+            Value::Array(Vec::new()),
+            Value::Proplist(Default::default()),
+        ] {
+            assert_eq!(
+                engine
+                    .call_object_function(
+                        caller_index,
+                        "ApplyHostility",
+                        vec![Value::Bool(false)],
+                    )
+                    .expect("false resets hostility"),
+                Value::Bool(false)
+            );
+            assert_eq!(
+                engine
+                    .call_object_function(caller_index, "ApplyHostility", vec![argument.clone()])
+                    .expect("truthy non-scalar bool parameter is accepted"),
+                Value::Bool(true),
+                "{argument:?} must coerce to true"
+            );
+        }
+    }
+
+    #[test]
+    fn bool_host_parameter_preserves_scalar_and_zero_payload_coercions() {
+        let (mut engine, caller) = bool_parameter_hostility_fixture();
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        for (argument, expected) in [
+            (Value::Bool(true), true),
+            (Value::Bool(false), false),
+            (Value::Int(-7), true),
+            (Value::Int(0), false),
+            (Value::Nil, false),
+            (Value::Object(0), false),
+            (Value::C4Id(String::new()), false),
+            (Value::C4Id("NONE".into()), false),
+            (Value::C4Id("0000".into()), false),
+        ] {
+            assert_eq!(
+                engine
+                    .call_object_function(caller_index, "ApplyHostility", vec![argument.clone()])
+                    .expect("bool parameter is accepted"),
+                Value::Bool(expected),
+                "{argument:?} bool coercion changed"
+            );
+        }
+    }
+
     fn team_switch_fixture(
         switcher_team: i32,
         league_game: bool,
