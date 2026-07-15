@@ -191,6 +191,8 @@ pub(crate) struct HostWorldObject {
 pub(crate) struct DefinitionFireMetadata {
     /// C4Shape::FireTop, reflected through GetDefCoreVal.
     pub fire_top: i32,
+    /// DefCore LiftTop, reflected for System.c4g's GetDefLiftTop helper.
+    pub lift_top: i32,
     /// BlastIncinerate threshold (0 = off).
     pub blast_incinerate: i32,
     /// BurnTurnTo changedef target (C4Effect.cpp:579-585).
@@ -9246,6 +9248,7 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "CollectionLimit" => Value::Int(metadata.collection_limit),
             "GrabPutGet" => Value::Int(metadata.grab_put_get),
             "FireTop" => Value::Int(metadata.fire.fire_top),
+            "LiftTop" => Value::Int(metadata.fire.lift_top),
             "Value" => Value::Int(metadata.value),
             "Mass" => Value::Int(metadata.mass),
             // C4Def::CompileFunc's line bitfields (C4Def.cpp:333-351).

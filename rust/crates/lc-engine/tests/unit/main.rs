@@ -8824,9 +8824,10 @@ protected func OnOldAbort()
     }
 
     #[test]
-    fn lift_procedure_adjusts_target_velocity() {
+    fn lift_procedure_matches_cpp_mass_scaled_force_and_terminal_speeds() {
         let lifter_definition = build_lift_definition("Lifter");
-        let crate_definition = build_idle_definition("Crate");
+        let mut crate_definition = build_idle_definition("Crate");
+        crate_definition.set_mass(100);
 
         let mut engine = Engine::with_seed(31);
         engine
@@ -8835,15 +8836,15 @@ protected func OnOldAbort()
         engine
             .register_definition(crate_definition)
             .expect("crate registers");
-        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        // Deliberately tighter than Lift's +/-2 targets: C++ Lift does not
+        // apply the generic terminal-speed clamp.
+        engine.set_physics(PhysicsSettings::new(20, 1, -1));
 
         let target_id = engine
             .spawn_object(SpawnConfig::new("Crate").with_category(CATEGORY_OBJECT))
             .expect("target spawns");
         let target_idx = engine.find_object_index(target_id).expect("target exists");
-        engine.objects[target_idx]
-            .set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, C4Fixed::from_raw(300)));
-        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[target_idx].set_fixed_velocity(FixedVec2::ZERO);
         engine.objects[target_idx].state.mobile = true;
 
         let mut lift_action = ActionState::new("Lift");
@@ -8858,13 +8859,453 @@ protected func OnOldAbort()
             )
             .expect("lifter spawns");
 
-        let snapshot = engine.tick().expect("tick succeeds");
-        let target = snapshot.object(target_id).expect("target present");
-        assert!(target.velocity.y < 0, "lift should pull target upward");
+        let lifter_idx = engine.find_object_index(lifter_id).expect("lifter exists");
+        let target_definition_id = engine.objects[target_idx].definition_id.clone();
+        let target_actions = engine
+            .definitions
+            .get(&target_definition_id)
+            .expect("target definition exists")
+            .action_library()
+            .clone();
+        let mut expected_fix_y = engine.objects[target_idx].fixed_position.y.val();
+
+        // C4Object.cpp:1847-1855,5269-5280: FIXED100(50)*100/Mass=0.5
+        // works toward the constant +/-2 target without terminal-speed
+        // clamping. Each step is followed by the target's C++ DoMovement
+        // integration so both ydir and fix_y are pinned byte-for-byte.
+        for expected in [-32_768, -65_536, -98_304, -131_072, -131_072] {
+            engine
+                .apply_physics_at_index(lifter_idx)
+                .expect("upward lift succeeds");
+            assert_eq!(engine.objects[target_idx].fixed_velocity.y.val(), expected);
+            engine
+                .exec_object_movement(
+                    target_idx,
+                    &target_actions,
+                    &target_definition_id,
+                    &[],
+                )
+                .expect("target movement succeeds");
+            expected_fix_y += expected;
+            assert_eq!(engine.objects[target_idx].fixed_position.y.val(), expected_fix_y);
+        }
+
+        engine.objects[lifter_idx].state.command_direction = CommandDirection::Down;
+        for expected in [
+            -98_304, -65_536, -32_768, 0, 32_768, 65_536, 98_304, 131_072,
+        ] {
+            engine
+                .apply_physics_at_index(lifter_idx)
+                .expect("downward lift succeeds");
+            assert_eq!(engine.objects[target_idx].fixed_velocity.y.val(), expected);
+            engine
+                .exec_object_movement(
+                    target_idx,
+                    &target_actions,
+                    &target_definition_id,
+                    &[],
+                )
+                .expect("target movement succeeds");
+            expected_fix_y += expected;
+            assert_eq!(engine.objects[target_idx].fixed_position.y.val(), expected_fix_y);
+        }
+
+        engine.objects[lifter_idx].state.command_direction = CommandDirection::Stop;
+        for expected in [98_304, 65_536, 32_768, 0, -2_621] {
+            engine
+                .apply_physics_at_index(lifter_idx)
+                .expect("stopped lift succeeds");
+            assert_eq!(engine.objects[target_idx].fixed_velocity.y.val(), expected);
+            engine
+                .exec_object_movement(
+                    target_idx,
+                    &target_actions,
+                    &target_definition_id,
+                    &[],
+                )
+                .expect("target movement succeeds");
+            expected_fix_y += expected;
+            assert_eq!(engine.objects[target_idx].fixed_position.y.val(), expected_fix_y);
+        }
+        // COMD_Stop's target is exactly -GravAccel. The target's own
+        // DoGravity therefore cancels it byte-for-byte in the same cycle.
+        let held_fix_y = engine.objects[target_idx].fixed_position.y;
+        engine
+            .apply_physics_at_index(target_idx)
+            .expect("target gravity succeeds");
+        assert_eq!(engine.objects[target_idx].fixed_velocity.y, C4Fixed::ZERO);
+        engine
+            .exec_object_movement(
+                target_idx,
+                &target_actions,
+                &target_definition_id,
+                &[],
+            )
+            .expect("held target movement succeeds");
+        assert_eq!(
+            engine.objects[target_idx].fixed_position.y, held_fix_y,
+            "-GravAccel plus DoGravity produces no fix_y movement"
+        );
+
+        // A second live mass proves this is the C++ division, not a
+        // hard-coded half-pixel step: (Def Mass 100 + OwnMass 100) gives
+        // 32768*100/200 = raw 16384.
+        let mut heavy_definition = build_idle_definition("Heavy");
+        heavy_definition.set_mass(100);
+        engine
+            .register_definition(heavy_definition)
+            .expect("heavy target registers");
+        let heavy_id = engine
+            .spawn_object(SpawnConfig::new("Heavy").with_position(Vector2::new(7, 9)))
+            .expect("heavy target spawns");
+        let mut heavy_lift = ActionState::new("Lift");
+        heavy_lift.target = Some(heavy_id);
+        let heavy_lifter_id = engine
+            .spawn_object(
+                SpawnConfig::new("Lifter")
+                    .with_action(heavy_lift)
+                    .with_command_direction(CommandDirection::Up),
+            )
+            .expect("heavy lifter spawns");
+        let heavy_idx = engine.find_object_index(heavy_id).expect("heavy target exists");
+        engine.objects[heavy_idx].state.own_mass = 100;
+        engine.objects[heavy_idx].state.mobile = false;
+        engine.objects[heavy_idx].fixed_velocity =
+            FixedVec2::new(itofix(3), itofix(4));
+        engine.objects[heavy_idx].fixed_position = FixedVec2::new(
+            itofix(7) + fixed100(25),
+            itofix(9) + fixed100(25),
+        );
+        let heavy_lifter_idx = engine
+            .find_object_index(heavy_lifter_id)
+            .expect("heavy lifter exists");
+        engine
+            .apply_physics_at_index(heavy_lifter_idx)
+            .expect("heavy lift succeeds");
+        assert_eq!(engine.objects[heavy_idx].fixed_velocity.y.val(), -16_384);
+        assert_eq!(engine.objects[heavy_idx].fixed_velocity.x, C4Fixed::ZERO);
+        assert_eq!(
+            engine.objects[heavy_idx].fixed_position,
+            FixedVec2::from_ints(7, 9)
+        );
+        assert!(engine.objects[heavy_idx].state.mobile);
+    }
+
+    #[test]
+    fn lift_full_tick_matches_cpp_exec_order_for_raw_ydir_and_fix_y() {
+        let lifter_definition = build_lift_definition("Lifter");
+        let mut target_definition = build_idle_definition("Crate");
+        target_definition.set_mass(100);
+        let mut landscape = vehicle_grid_landscape(200, 200);
+        landscape.set_world_height(200);
+
+        let mut engine = Engine::with_seed(31);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(20, 20, -20));
+        engine
+            .register_definition(lifter_definition)
+            .expect("lifter registers");
+        engine
+            .register_definition(target_definition)
+            .expect("target registers");
+
+        // Loaded objects execute in file order. The target therefore runs
+        // DoGravity+DoMovement before the lifter applies its 0.5 force,
+        // exactly matching C4Game::ExecObjects for this two-object oracle.
+        let target_id = engine
+            .spawn_object(
+                SpawnConfig::new("Crate")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50, 100))
+                    .with_fixed_position(FixedVec2::from_ints(50, 100))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("target spawns");
+        let mut lift = ActionState::new("Lift");
+        lift.target = Some(target_id);
+        engine
+            .spawn_object(
+                SpawnConfig::new("Lifter")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50, 120))
+                    .with_action(lift)
+                    .with_command_direction(CommandDirection::Up)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("lifter spawns");
+
+        let initial_fix_y = itofix(100).val();
+        for (expected_ydir, expected_fix_delta) in [
+            (-30_147, 2_621),
+            (-60_294, -24_905),
+            (-90_441, -82_578),
+            (-120_588, -170_398),
+            (-131_072, -288_365),
+        ] {
+            engine.tick().expect("full lift frame succeeds");
+            let target_idx = engine.find_object_index(target_id).expect("target exists");
+            assert_eq!(
+                engine.objects[target_idx].fixed_velocity.y.val(),
+                expected_ydir
+            );
+            assert_eq!(
+                engine.objects[target_idx].fixed_position.y.val(),
+                initial_fix_y + expected_fix_delta
+            );
+        }
+    }
+
+    #[test]
+    fn lift_contact_reports_stuck_except_for_gravity_hold() {
+        let lifter_definition = build_lift_definition("Lifter");
+        let target_script = r#"#strict
+local stuck_calls;
+func Stuck()
+{
+    stuck_calls = stuck_calls + 1;
+}
+"#;
+        let mut target_definition =
+            Definition::from_script("Crate", "Crate", target_script).expect("script compiles");
+        target_definition.set_mass(100);
+        target_definition
+            .set_shape_vertices(vec![ObjectVertex::new(8, 0).with_cnat(CNAT_RIGHT)]);
+        target_definition.set_contact_density(50);
+
+        let mut landscape = vehicle_grid_landscape(32, 32);
+        landscape.set_world_height(32);
+        landscape.grid_write_byte(16, 10, 1);
+
+        let mut engine = Engine::with_seed(31);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(20, 20, -20));
+        engine
+            .register_definition(lifter_definition)
+            .expect("lifter registers");
+        engine
+            .register_definition(target_definition)
+            .expect("target registers");
+        let target_id = engine
+            .spawn_object(
+                SpawnConfig::new("Crate")
+                    .with_position(Vector2::new(8, 10))
+                    .with_fixed_position(FixedVec2::from_ints(8, 10)),
+            )
+            .expect("target spawns");
+        let mut lift = ActionState::new("Lift");
+        lift.target = Some(target_id);
+        let lifter_id = engine
+            .spawn_object(
+                SpawnConfig::new("Lifter")
+                    .with_action(lift)
+                    .with_command_direction(CommandDirection::Up),
+            )
+            .expect("lifter spawns");
+        let lifter_idx = engine.find_object_index(lifter_id).expect("lifter exists");
         let target_idx = engine.find_object_index(target_id).expect("target exists");
-        assert_eq!(engine.objects[target_idx].fixed_velocity.y.val(), -130772);
-        let lifter = snapshot.object(lifter_id).expect("lifter present");
-        assert_eq!(lifter.action.name, "Lift");
+
+        // Unlike Push, Lift runs ContactCheck on every non-hold call
+        // (C4Object.cpp:1856-1862), with no Tick35 gate.
+        engine
+            .apply_physics_at_index(lifter_idx)
+            .expect("upward lift succeeds");
+        assert_eq!(engine.objects[target_idx].frame_t_contact, CNAT_RIGHT);
+        assert_eq!(
+            engine.objects[target_idx]
+                .state
+                .local_vars
+                .get("stuck_calls"),
+            Some(&Value::Int(1))
+        );
+        let message = engine
+            .snapshot()
+            .hud
+            .messages
+            .into_iter()
+            .next()
+            .expect("stuck message emitted");
+        assert_eq!(message.kind, MessageKind::Target);
+        assert_eq!(message.target, Some(target_id));
+        assert_eq!(message.lines, vec!["Crate is stuck!"]);
+        let message_id = message.id;
+
+        // The exact -GravAccel hold bypasses ContactCheck altogether.
+        engine.objects[target_idx].frame_t_contact = CNAT_LEFT;
+        engine.objects[lifter_idx].state.command_direction = CommandDirection::Stop;
+        engine
+            .apply_physics_at_index(lifter_idx)
+            .expect("stopped lift succeeds");
+        assert_eq!(engine.objects[target_idx].frame_t_contact, CNAT_LEFT);
+        assert_eq!(
+            engine.objects[target_idx]
+                .state
+                .local_vars
+                .get("stuck_calls"),
+            Some(&Value::Int(1))
+        );
+        let messages = engine.snapshot().hud.messages;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].id, message_id,
+            "gravity hold must not replace the existing target message"
+        );
+    }
+
+    #[test]
+    fn lift_top_callback_runs_on_lifter_before_its_gravity() {
+        let lifter_script = r#"#strict
+local lift_top_calls, lift_top_seen_time, lift_top_seen_y_dir, lift_top_reflected;
+func LiftTop()
+{
+    lift_top_calls = lift_top_calls + 1;
+    lift_top_seen_time = GetActTime();
+    lift_top_seen_y_dir = GetYDir();
+    lift_top_reflected = GetDefCoreVal("LiftTop", "DefCore", LIFT);
+    SetGravity(40);
+    SetYDir(5);
+}
+"#;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Lift.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=LIFT\nName=Lifter\nCategory=C4D_Object\nLiftTop=20\n",
+        )
+        .expect("write DefCore");
+        std::fs::write(def_dir.join("Script.c"), lifter_script).expect("write Script.c");
+        std::fs::write(
+            def_dir.join("ActMap.txt"),
+            b"[Action]\nName=Lift\nProcedure=Lift\nLength=1\nNextAction=Lift\n",
+        )
+        .expect("write ActMap.txt");
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load definition resource");
+        let lifter_definition =
+            Definition::from_resource(&resource).expect("compile resource definition");
+        assert_eq!(lifter_definition.lift_top(), 20);
+        let mut legacy_definition =
+            Definition::from_script("LEGC", "Legacy lifter", "#strict")
+                .expect("compile legacy definition");
+        Engine::apply_resource_core(&mut legacy_definition, &resource.core);
+        assert_eq!(
+            legacy_definition.lift_top(),
+            20,
+            "legacy scenario core mapping retains LiftTop"
+        );
+        let mut target_definition = build_idle_definition("Crate");
+        target_definition.set_mass(100);
+
+        let mut engine = Engine::with_seed(31);
+        engine.set_physics(PhysicsSettings::new(20, 20, -20));
+        engine
+            .register_definition(lifter_definition)
+            .expect("lifter registers");
+        engine
+            .register_definition(target_definition)
+            .expect("target registers");
+        let target_id = engine
+            .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(10, 31)))
+            .expect("target spawns");
+        let mut lift = ActionState::new("Lift");
+        lift.target = Some(target_id);
+        let lifter_id = engine
+            .spawn_object(
+                SpawnConfig::new("LIFT")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_action(lift)
+                    .with_command_direction(CommandDirection::Up)
+                    .with_mobile(true),
+            )
+            .expect("lifter spawns");
+        let lifter_idx = engine.find_object_index(lifter_id).expect("lifter exists");
+
+        // One pixel outside the inclusive Def->LiftTop threshold must not
+        // call the hook even though the command direction is Up.
+        engine
+            .apply_physics_at_index(lifter_idx)
+            .expect("out-of-range lift succeeds");
+        assert_eq!(
+            engine.objects[lifter_idx]
+                .state
+                .local_vars
+                .get("lift_top_calls"),
+            None
+        );
+
+        let target_idx = engine.find_object_index(target_id).expect("target exists");
+        engine.objects[target_idx].state.position.y = 30;
+        engine.objects[target_idx].fixed_position.y = itofix(30);
+        engine.objects[lifter_idx].set_fixed_velocity(FixedVec2::ZERO);
+
+        // Inclusive boundary and order from C4Object.cpp:5281-5289:
+        // Action.Time has already advanced; LiftTop sees pre-gravity ydir,
+        // changes Gravity to 40 and sets ydir=fixed10(5), then DoGravity
+        // consumes the NEW raw GravAccel 5242 in this same call.
+        engine
+            .apply_physics_at_index(lifter_idx)
+            .expect("lift succeeds");
+        assert_eq!(
+            engine.objects[lifter_idx]
+                .state
+                .local_vars
+                .get("lift_top_calls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine.objects[lifter_idx]
+                .state
+                .local_vars
+                .get("lift_top_seen_time"),
+            Some(&Value::Int(2))
+        );
+        assert_eq!(
+            engine.objects[lifter_idx]
+                .state
+                .local_vars
+                .get("lift_top_seen_y_dir"),
+            Some(&Value::Int(0))
+        );
+        assert_eq!(
+            engine.objects[lifter_idx]
+                .state
+                .local_vars
+                .get("lift_top_reflected"),
+            Some(&Value::Int(20))
+        );
+        assert_eq!(
+            engine.objects[lifter_idx].fixed_velocity.y.val(),
+            math::fixed10(5).val() + 5_242
+        );
+
+        engine.objects[lifter_idx].state.command_direction = CommandDirection::Down;
+        engine
+            .apply_physics_at_index(lifter_idx)
+            .expect("downward lift succeeds");
+        assert_eq!(
+            engine.objects[lifter_idx]
+                .state
+                .local_vars
+                .get("lift_top_calls"),
+            Some(&Value::Int(1)),
+            "the height alone does not fire LiftTop while moving down"
+        );
+
+        engine.objects[lifter_idx].state.command_direction = CommandDirection::Up;
+        engine
+            .apply_physics_at_index(lifter_idx)
+            .expect("second upward lift succeeds");
+        assert_eq!(
+            engine.objects[lifter_idx]
+                .state
+                .local_vars
+                .get("lift_top_calls"),
+            Some(&Value::Int(2)),
+            "LiftTop is level-triggered on every qualifying frame"
+        );
     }
 
     #[test]
@@ -8888,6 +9329,41 @@ protected func OnOldAbort()
         let lifter = snapshot.object(lifter_id).expect("lifter present");
         assert_eq!(lifter.action.name, "Idle");
         assert!(lifter.action.target.is_none());
+
+        // Action.Time++ precedes the DFA_LIFT switch. If NoOtherAction
+        // rejects SetAction(Idle), C++ returns with the increment retained.
+        let mut locked_definition =
+            Definition::from_script("LockedLift", "LockedLift", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        locked_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Lift".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("lift")
+                        .with_no_other_action(true),
+                ),
+            ]),
+        );
+        let mut locked_engine = Engine::with_seed(37);
+        locked_engine
+            .register_definition(locked_definition)
+            .expect("locked definition registers");
+        let locked_id = locked_engine
+            .spawn_object(SpawnConfig::new("LockedLift").with_action(ActionState::new("Lift")))
+            .expect("locked lifter spawns");
+        let locked_idx = locked_engine
+            .find_object_index(locked_id)
+            .expect("locked lifter exists");
+        assert!(
+            locked_engine
+                .apply_physics_at_index(locked_idx)
+                .expect("invalid locked lift resolves")
+        );
+        assert_eq!(locked_engine.objects[locked_idx].state.action.name, "Lift");
+        assert_eq!(locked_engine.objects[locked_idx].state.action.time, 1);
     }
 
     #[test]

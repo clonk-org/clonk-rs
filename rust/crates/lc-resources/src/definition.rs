@@ -450,6 +450,9 @@ pub struct DefCore {
     pub shape: Option<PictureRect>,
     /// Shape-relative fire emission offset (C4Shape::FireTop).
     pub fire_top: i32,
+    /// `LiftTop` (C4Def.cpp:385): target height above the lifter at which
+    /// DFA_LIFT calls the lifter's `LiftTop` callback.
+    pub lift_top: i32,
     pub solid_mask: Option<TargetRect>,
     /// `TopFace` (C4Def.cpp:306): source facet plus object-relative draw target.
     pub top_face: Option<TargetRect>,
@@ -814,6 +817,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut shape_height: Option<i32> = None;
     let mut shape_offset: Option<(i32, i32)> = None;
     let mut fire_top: i32 = 0;
+    let mut lift_top: i32 = 0;
     let mut solid_mask: Option<TargetRect> = None;
     let mut top_face: Option<TargetRect> = None;
     let mut vertex_count: usize = 0;
@@ -1005,6 +1009,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "firetop" => {
                 fire_top = parse_i32(value).unwrap_or(0);
+            }
+            "lifttop" => {
+                lift_top = parse_i32(value).unwrap_or(0);
             }
             "solidmask" => {
                 solid_mask =
@@ -1252,6 +1259,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             )
         }),
         fire_top,
+        lift_top,
         solid_mask,
         top_face,
         vertices,
@@ -3272,6 +3280,18 @@ NextAction=Dup
         let defaulted =
             parse_def_core(b"[DefCore]\nid=NONE\n").expect("default def core parses");
         assert_eq!(defaulted.fire_top, 0);
+    }
+
+    #[test]
+    fn parse_def_core_lift_top_and_default() {
+        // C4Def.cpp:385 stores LiftTop as a signed DefCore integer.
+        let parsed = parse_def_core(b"[DefCore]\nid=ELEV\nLiftTop=20\n")
+            .expect("def core parses");
+        assert_eq!(parsed.lift_top, 20);
+
+        let defaulted =
+            parse_def_core(b"[DefCore]\nid=ELEV\n").expect("default def core parses");
+        assert_eq!(defaulted.lift_top, 0);
     }
 
     #[test]

@@ -8478,6 +8478,9 @@ pub struct Definition {
     shape: Option<DefinitionRect>,
     /// C4Shape::FireTop (C4Shape.cpp:509).
     fire_top: i32,
+    /// DefCore `LiftTop` (C4Def.cpp:385), used by DFA_LIFT's target-height
+    /// callback gate (C4Object.cpp:5281-5286).
+    lift_top: i32,
     solid_mask: Option<DefinitionTargetRect>,
     /// DefCore `TopFace` (C4Def.cpp:306), drawn in the second object pass.
     top_face: Option<DefinitionTargetRect>,
@@ -8720,6 +8723,7 @@ impl Definition {
             sprite_variants: HashMap::new(),
             shape: None,
             fire_top: 0,
+            lift_top: 0,
             solid_mask: None,
             top_face: None,
             shape_vertices: Vec::new(),
@@ -9049,6 +9053,7 @@ impl Definition {
         }
         definition.set_shape_rect(resource.core.shape.map(DefinitionRect::from));
         definition.set_fire_top(resource.core.fire_top);
+        definition.set_lift_top(resource.core.lift_top);
         definition.set_shape_vertex_slots(
             resource.core.vertices.len(),
             &resource
@@ -9962,6 +9967,14 @@ impl Definition {
 
     pub fn set_fire_top(&mut self, fire_top: i32) {
         self.fire_top = fire_top;
+    }
+
+    pub fn lift_top(&self) -> i32 {
+        self.lift_top
+    }
+
+    pub fn set_lift_top(&mut self, lift_top: i32) {
+        self.lift_top = lift_top;
     }
 
     pub fn set_collection_rect(&mut self, rect: Option<DefinitionRect>) {
@@ -18662,6 +18675,7 @@ impl Engine {
                                 .map(|names| names.bytes().filter(|&b| b == b'\n').count() as i32),
                             fire: compat::DefinitionFireMetadata {
                                 fire_top: definition.fire_top(),
+                                lift_top: definition.lift_top(),
                                 blast_incinerate: definition.blast_incinerate(),
                                 burn_turn_to: definition.burn_turn_to().map(str::to_string),
                                 incomplete_activity: definition.incomplete_activity(),
@@ -23370,7 +23384,7 @@ impl Engine {
                     let increment_live_time = object.state.action.name == exec_action_source
                         && !matches!(
                             action_library.procedure_for_action(&exec_action_source),
-                            ActionProcedure::Bridge
+                            ActionProcedure::Bridge | ActionProcedure::Lift
                         );
                     action_library.advance_state_from_action_by(
                         &mut object.state.action,
@@ -29636,14 +29650,14 @@ impl Engine {
         }
         let mut swim_walk_transition = false;
 
-        let definition_id = self.objects[idx].definition_id.clone();
+        let mut definition_id = self.objects[idx].definition_id.clone();
         let command_direction = self.objects[idx].state.command_direction;
         let action_target = self.objects[idx].state.action.target;
 
         let (
             procedure,
             movement_profile,
-            gravity_component,
+            mut gravity_component,
             is_idle,
             action_attach,
             action_disabled,
@@ -29834,6 +29848,41 @@ impl Engine {
                 return Ok(false);
             }
             pull_handled = true;
+        }
+
+        // DFA_LIFT applies the target force and all target callbacks before
+        // the lifter's trailing DoGravity (C4Object.cpp:5266-5289). Keep this
+        // ahead of the generic gravity block below so LiftTop observes the
+        // pre-gravity lifter state.
+        if matches!(procedure, ActionProcedure::Lift) {
+            // Action.Time++ precedes the procedure switch in C++
+            // (C4Object.cpp:4755-4756), so Contact/Stuck and LiftTop see the
+            // incremented value. The outer phase tail must not add it again.
+            self.objects[idx].state.action.time = self.objects[idx]
+                .state
+                .action
+                .time
+                .saturating_add(1);
+            let lifter_id = self.objects[idx].id;
+            if !self.apply_lift_to_target(idx, command_direction, action_target)? {
+                // C++ uses ordinary SetAction(ActIdle), including its
+                // Start/Abort calls and NoOtherAction gate, then returns.
+                let _ = self.action_with_calls(idx, &definition_id, "Idle")?;
+                return Ok(true);
+            }
+            let Some(live_idx) = self.find_object_index(lifter_id) else {
+                return Ok(true);
+            };
+            idx = live_idx;
+            if self.objects[idx].destroyed
+                || self.objects[idx].state.status == ObjectStatus::Deleted
+            {
+                return Ok(true);
+            }
+            // LiftTop may ChangeDef the lifter. DoGravity reads the live Def
+            // (notably its Float line) and live GravAccel after that callback.
+            definition_id = self.objects[idx].definition_id.clone();
+            gravity_component = self.physics.gravity_as_c4fixed();
         }
 
         // DFA_FLIGHT contained fall-out (C4Object.cpp:4893-4900): on
@@ -30211,7 +30260,7 @@ impl Engine {
             // (C4Object.cpp:4893-4904). In particular, its free-fall
             // velocity is not subject to the synthetic PhysicsSettings
             // terminal-speed bounds; DoGravity keeps adding GravAccel.
-            if !matches!(procedure, ActionProcedure::Flight) {
+            if !matches!(procedure, ActionProcedure::Flight | ActionProcedure::Lift) {
                 self.physics
                     .clamp_fixed_velocity(&mut object.fixed_velocity);
             }
@@ -30278,11 +30327,6 @@ impl Engine {
             self.set_exec_action_direction(idx, &definition_id, direction)?;
         }
 
-        if matches!(procedure, ActionProcedure::Lift)
-            && !self.apply_lift_to_target(idx, command_direction, action_target)
-        {
-            self.reset_lift_action(idx, &definition_id);
-        }
         // Free-fall swim exit: ObjectActionWalk (SetActionByName("Walk"),
         // xdir = ydir = 0, C4ObjectCom.cpp:34-39); the DFA_SWIM case
         // `return`s so the phase advance is skipped this frame
@@ -30303,37 +30347,40 @@ impl Engine {
         lifter_idx: usize,
         command_direction: CommandDirection,
         action_target: Option<ObjectId>,
-    ) -> bool {
+    ) -> Result<bool, EngineError> {
+        let lifter_id = self.objects[lifter_idx].id;
         let target_id = match action_target {
             Some(id) => id,
-            None => return false,
+            None => return Ok(false),
         };
         let target_idx = match self.find_object_index(target_id) {
             Some(idx) => idx,
-            None => return false,
+            None => return Ok(false),
         };
         if self.objects[target_idx].destroyed
-            || !self.objects[target_idx].state.status.is_active()
+            || self.objects[target_idx].state.status == ObjectStatus::Deleted
             || self.objects[target_idx].state.container.is_some()
+            || !self
+                .definitions
+                .contains_key(&self.objects[target_idx].definition_id)
         {
-            return false;
+            return Ok(false);
         }
 
-        let base_gravity = self.physics.gravity.abs().max(1);
-        let lift_speed = base_gravity.saturating_mul(2).max(2);
+        let gravity = self.physics.gravity_as_c4fixed();
         let desired_velocity = match command_direction {
-            CommandDirection::Up => -lift_speed,
-            CommandDirection::Down => lift_speed,
-            CommandDirection::Stop => -self.physics.gravity,
-            _ => 0,
+            CommandDirection::Up => -itofix(2),
+            CommandDirection::Stop => -gravity,
+            CommandDirection::Down => itofix(2),
+            _ => C4Fixed::ZERO,
         };
-        let lift_force = lift_speed.max(1);
-        let physics = self.physics;
-        let desired_velocity = itofix(desired_velocity);
-        let lift_force = itofix(lift_force);
+        // C4Object::Lift divides the constant 0.5 force by the LIVE object
+        // mass, including construction, OwnMass and (normally) contents.
+        let lift_force = math::fixed100(50) * 100 / self.effective_object_mass(target_idx).max(1);
 
-        let adjust_velocity = |object: &mut Object| {
-            // C4Object::Lift pre-mobilization (C4Object.cpp:1815-1817):
+        {
+            let object = &mut self.objects[target_idx];
+            // C4Object::Lift pre-mobilization (C4Object.cpp:1841-1845):
             // zero dirs, snap fix to the pixel position, mobilize.
             if !object.state.mobile {
                 object.fixed_velocity = FixedVec2::ZERO;
@@ -30343,24 +30390,126 @@ impl Engine {
                 );
                 object.state.mobile = true;
             }
-            object.fixed_velocity.y =
-                step_fixed_toward(object.fixed_velocity.y, desired_velocity, lift_force);
-            physics.clamp_fixed_velocity(&mut object.fixed_velocity);
+            math::towards(
+                &mut object.fixed_velocity.y,
+                desired_velocity,
+                lift_force,
+            );
             object.refresh_velocity_from_fixed();
-        };
-
-        if target_idx == lifter_idx {
-            let object = &mut self.objects[target_idx];
-            adjust_velocity(object);
-        } else if target_idx < lifter_idx {
-            let (targets, _) = self.objects.split_at_mut(lifter_idx);
-            adjust_velocity(&mut targets[target_idx]);
-        } else {
-            let (_, targets) = self.objects.split_at_mut(target_idx);
-            adjust_velocity(&mut targets[0]);
         }
 
-        true
+        // Lift's stuck probe is unthrottled. The exact -GravAccel hold is
+        // the sole bypass, even for noncanonical ComDir values that happen
+        // to request the same raw fixed velocity.
+        if desired_velocity != -gravity {
+            let definition_id = self.objects[target_idx].definition_id.clone();
+            let position = self.objects[target_idx].state.position;
+            let solid_mask_indices = self.active_solid_mask_indices();
+            let contacted = self
+                .object_contact_check_at(
+                    target_idx,
+                    &definition_id,
+                    position,
+                    &solid_mask_indices,
+                )?
+                .is_some_and(|contact| contact.is_contact());
+            if contacted {
+                // Contact callbacks above may have changed or removed the
+                // target. C++ queues the object message before ~Stuck.
+                if let Some(target_idx) = self.find_object_index(target_id).filter(|&index| {
+                    !self.objects[index].destroyed
+                        && self.objects[index].state.status != ObjectStatus::Deleted
+                }) {
+                    let object = &self.objects[target_idx];
+                    let name = object
+                        .state
+                        .custom_name
+                        .clone()
+                        .or_else(|| {
+                            self.crew_object_infos
+                                .get(&target_id)
+                                .map(|info| info.name.clone())
+                        })
+                        .or_else(|| {
+                            self.definitions
+                                .get(&object.definition_id)
+                                .map(|definition| definition.name().to_string())
+                        })
+                        .unwrap_or_else(|| object.definition_id.clone());
+                    self.messages.add_message(MessageSpec {
+                        kind: message::MessageKind::Target,
+                        text: format!("{name} is stuck!"),
+                        target: Some(target_id),
+                        player: None,
+                        offset: Vector2::ZERO,
+                        color: 0xffff_ffff,
+                        flags: 0,
+                        width: None,
+                        decoration: None,
+                        frame_decoration: None,
+                        portrait: None,
+                    });
+                    let callback_definition_id = self.objects[target_idx].definition_id.clone();
+                    if let Some(action_library) = self
+                        .definitions
+                        .get(&callback_definition_id)
+                        .map(|definition| definition.action_library().clone())
+                    {
+                        let _ = tolerate_script_error(self.call_movement_object_function(
+                            target_idx,
+                            "Stuck",
+                            &[],
+                            &action_library,
+                            target_id,
+                            &callback_definition_id,
+                        ))?;
+                    }
+                }
+            }
+        }
+
+        // Re-read the lifter's live action/definition after target Contact
+        // and Stuck callbacks. LiftTop is level-triggered on the lifter and
+        // runs before the caller's trailing DoGravity.
+        if let Some(lifter_idx) = self.find_object_index(lifter_id).filter(|&index| {
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != ObjectStatus::Deleted
+        }) {
+            let object = &self.objects[lifter_idx];
+            let live_target = object.state.action.target;
+            let definition_id = object.definition_id.clone();
+            let lift_top = self
+                .definitions
+                .get(&definition_id)
+                .map(Definition::lift_top)
+                .unwrap_or(0);
+            let should_call = lift_top != 0
+                && object.state.command_direction == CommandDirection::Up
+                && live_target
+                    .and_then(|id| self.find_object_index(id))
+                    .is_some_and(|index| {
+                        self.objects[index].state.position.y
+                            <= object.state.position.y.wrapping_add(lift_top)
+                    });
+            if should_call {
+                if let Some(action_library) = self
+                    .definitions
+                    .get(&definition_id)
+                    .map(|definition| definition.action_library().clone())
+                {
+                    let _ = tolerate_script_error(self.call_movement_object_function(
+                        lifter_idx,
+                        "LiftTop",
+                        &[],
+                        &action_library,
+                        lifter_id,
+                        &definition_id,
+                    ))?;
+                }
+            }
+        }
+
+        Ok(true)
     }
 
     fn apply_dig_procedure(&mut self, idx: usize, definition_id: &DefinitionId) {
@@ -31210,10 +31359,6 @@ impl Engine {
         {
             object.record_action_event(previous, ActionTransitionKind::Forced);
         }
-    }
-
-    fn reset_lift_action(&mut self, idx: usize, definition_id: &DefinitionId) {
-        self.reset_action_to_default(idx, definition_id, true);
     }
 
     /// `ReduceLineSegments` (C4Object.cpp:4683-4694): remove the first
@@ -36433,6 +36578,7 @@ impl Engine {
         definition.set_top_face(core.top_face.map(DefinitionTargetRect::from));
         definition.set_shape_rect(core.shape.map(DefinitionRect::from));
         definition.set_fire_top(core.fire_top);
+        definition.set_lift_top(core.lift_top);
         definition.set_shape_vertex_slots(
             core.vertices.len(),
             &core
