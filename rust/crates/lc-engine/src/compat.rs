@@ -6978,6 +6978,29 @@ fn call_object_own_fail_safe(target: ObjectId, function: &str, args: &[Value]) -
     }
 }
 
+/// Fail-safe own-script call that also accepts an already-active object
+/// scope which has not joined the world list yet. Plain Engine spawns run
+/// Construction/Initialize in exactly that pre-insertion state.
+fn call_inflight_object_own_fail_safe(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+) -> Value {
+    match call_world_object_own_function_inflight(target, function, args) {
+        Some(Ok(value)) => value,
+        Some(Err(error)) => {
+            tracing::warn!(
+                %error,
+                object = target.as_u64(),
+                callback = function,
+                "script error in object callback; continuing like C++ fail-safe Call"
+            );
+            Value::Nil
+        }
+        None => Value::Nil,
+    }
+}
+
 fn object_is_present(target: ObjectId) -> bool {
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -33842,6 +33865,111 @@ fn set_category(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// Live host-side `C4Object::SetOwner`. The callback must run before the
+/// outer VM resumes, so this cannot be deferred to ObjectUpdate folding.
+fn set_owner_live(target: ObjectId, new_owner: i32) -> bool {
+    let staged: Option<Option<i32>> = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        if new_owner != OWNER_NONE && context.player_state(new_owner).is_none() {
+            return None;
+        }
+        if !context.ensure_object_scope(target) {
+            return None;
+        }
+
+        // Bare host fixtures and a handful of legacy definition-less scopes
+        // still carry a valid C4Object owner slot.
+        let definition_id = context
+            .object_effective_definition_id(target)
+            .unwrap_or_default();
+        let graphics_definition_id = context
+            .object_scope(target)
+            .and_then(|scope| {
+                scope
+                    .base_graphics
+                    .as_ref()
+                    .map(|graphics| graphics.definition.as_str().to_string())
+            })
+            .unwrap_or_else(|| definition_id.clone());
+        let owner_color = (new_owner != OWNER_NONE
+            && context
+                .world
+                .definition_color_by_owner(&graphics_definition_id))
+        .then(|| {
+            context
+                .player_state(new_owner)
+                .and_then(|player| player.color)
+                .map(|color| {
+                    u32::from(color.r) << 16
+                        | u32::from(color.g) << 8
+                        | u32::from(color.b)
+                })
+                .unwrap_or(0)
+        });
+
+        let (old_owner, flag_base_target) = {
+            let object = context.object_scope_mut(target)?;
+            // C++ refreshes the currently selected ColorByOwner graphics
+            // before its same-owner early return.
+            if let Some(color) = owner_color {
+                object.pending_update.color = Some(color);
+            }
+            let old_owner = object.owner();
+            if old_owner == new_owner {
+                return Some(None);
+            }
+            let flag_base_target = (definition_id == "FLAG"
+                && object.effective_action_name() == "FlyBase")
+                .then(|| object.effective_action_target(0))
+                .flatten();
+            object.set_owner(new_owner);
+            (old_owner, flag_base_target)
+        };
+
+        // A flying flag transfers only a still-present base that belongs to
+        // the old owner. Inactive targets have nonzero C++ Status and count.
+        if let Some(base_target) = flag_base_target {
+            let base = context
+                .object_scope(base_target)
+                .and_then(|scope| scope.pending_update.base)
+                .or_else(|| {
+                    context
+                        .get_world_object(base_target)
+                        .and_then(|object| object.full_state().map(|state| state.base))
+                });
+            if context.object_status_present(base_target)
+                && base == Some(old_owner)
+                && context.ensure_object_scope(base_target)
+            {
+                if let Some(base) = context.object_scope_mut(base_target) {
+                    base.pending_update.base = Some(new_owner);
+                }
+            }
+        }
+        Some(Some(old_owner))
+    });
+
+    let Some(old_owner) = staged else {
+        return false;
+    };
+    if let Some(old_owner) = old_owner {
+        let present = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|context| context.object_status_present(target))
+        });
+        if present {
+            let _ = call_inflight_object_own_fail_safe(
+                target,
+                "OnOwnerChanged",
+                &[Value::Int(new_owner), Value::Int(old_owner)],
+            );
+        }
+    }
+    true
+}
+
 fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
     // Unfilled iOwner is nil -> 0 (FnSetOwner, C4Script.cpp:820).
     let owner = match args.first().unwrap_or(&Value::Nil) {
@@ -33869,45 +33997,14 @@ fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let (valid_player, active) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref();
-        (
-            context
-                .map(|context| context.player_state(owner).is_some())
-                .unwrap_or(false),
-            context
-                .and_then(|context| context.object_context().map(|object| object.id())),
-        )
+    let target = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| target_id.or(context.script_object_context))
     });
-    // C4Object::SetOwner accepts only ValidPlr(owner) or NO_OWNER
-    // (C4Object.cpp:5493-5497).
-    if owner != OWNER_NONE && !valid_player {
-        return Ok(Value::Bool(false));
-    }
-
-    if let Some(target) = target_id {
-        if Some(target) != active {
-            return match call_world_object_function(target, "SetOwner", &[Value::Int(owner)]) {
-                Some(result) => result,
-                None => Ok(Value::Bool(false)),
-            };
-        }
-    }
-
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetOwner requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
-        };
-
-        object.set_owner(owner);
-        Ok(Value::Bool(true))
-    })
+    Ok(Value::Bool(
+        target.is_some_and(|target| set_owner_live(target, owner)),
+    ))
 }
 
 fn set_alive(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -35563,6 +35660,7 @@ fn call_world_object_reference_with(
                 false,
                 include_globals,
                 script_override,
+                false,
             )
         })
     })?;
@@ -35666,6 +35764,20 @@ pub(crate) fn call_world_object_own_function(
     call_world_object_function_with(target, function, args, false, false, None, false)
 }
 
+/// C4Object::Call for a scope that may still be in pre-insertion
+/// Construction/Initialize. Kept private to callbacks that C++ must run
+/// synchronously from that state; ordinary nested calls still require a
+/// world object.
+fn call_world_object_own_function_inflight(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    call_world_object_function_with_options(
+        target, function, args, false, false, None, false, true,
+    )
+}
+
 fn call_world_object_function_with(
     target: ObjectId,
     function: &str,
@@ -35675,6 +35787,28 @@ fn call_world_object_function_with(
     script_override: Option<Arc<ScriptEngine>>,
     preserve_caller: bool,
 ) -> Option<Result<Value, RuntimeError>> {
+    call_world_object_function_with_options(
+        target,
+        function,
+        args,
+        host_fallback,
+        include_globals,
+        script_override,
+        preserve_caller,
+        false,
+    )
+}
+
+fn call_world_object_function_with_options(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+    host_fallback: bool,
+    include_globals: bool,
+    script_override: Option<Arc<ScriptEngine>>,
+    preserve_caller: bool,
+    allow_scope_without_world_object: bool,
+) -> Option<Result<Value, RuntimeError>> {
     let prep = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut().as_mut().and_then(|context| {
             context.prepare_nested_call(
@@ -35683,6 +35817,7 @@ fn call_world_object_function_with(
                 host_fallback,
                 include_globals,
                 script_override,
+                allow_scope_without_world_object,
             )
         })
     })?;
@@ -36649,6 +36784,11 @@ impl EffectHostContext {
             object.direction = scope.current_direction.to_script_value();
             object.owner = scope.owner();
             object.controller = Some(scope.controller());
+            if let Some(base) = scope.pending_update.base {
+                if let Some(state) = object.state.as_mut() {
+                    Rc::make_mut(state).base = base;
+                }
+            }
             // Keep the whole-pixel mirror coherent for integer-velocity
             // consumers; `fixed_velocity` above retains exact sub-pixel dirs.
             if scope.pending_update.fixed_velocity.is_some()
@@ -37328,8 +37468,14 @@ impl EffectHostContext {
         host_fallback: bool,
         include_globals: bool,
         script_override: Option<Arc<ScriptEngine>>,
+        allow_scope_without_world_object: bool,
     ) -> Option<NestedCallPrep> {
-        let world_object = self.get_world_object(target)?;
+        let world_object = self.get_world_object(target);
+        if world_object.is_none()
+            && !(allow_scope_without_world_object && self.object_scope(target).is_some())
+        {
+            return None;
+        }
         // Namespaced calls (`obj->ID::Func`) run the NAMED def's script in
         // the target's scope (AB_CALLNS); plain calls resolve on the
         // target's own def.
@@ -37353,8 +37499,14 @@ impl EffectHostContext {
         // VM sessions own their locals, so a call onto an in-flight scope
         // reads the pre-call snapshot (divergence noted in PORT_STATUS).
         let mut snapshot_locals = world_object
-            .full_state()
+            .as_ref()
+            .and_then(|object| object.full_state())
             .map(|state| state.local_vars.clone())
+            .or_else(|| {
+                self.session_local_cells
+                    .get(&target)
+                    .map(lc_script::LocalCells::snapshot)
+            })
             .unwrap_or_default();
         // Earlier cross-object LocalN writes are part of the target's
         // current state.
@@ -37383,7 +37535,7 @@ impl EffectHostContext {
         }
         let (scope, mut local_vars) = match self.nested_objects.remove(&target) {
             Some(state) => (state.scope, state.local_vars),
-            None => self.nested_scope_for(&world_object)?,
+            None => self.nested_scope_for(world_object.as_ref()?)?,
         };
         self.overlay_foreign_cells(target, &mut local_vars);
         self.clear_removed_references_in_locals(&mut local_vars);

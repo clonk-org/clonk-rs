@@ -3743,6 +3743,9 @@ impl ObjectState {
         } else if let Some(controller) = delta.controller {
             self.controller = controller;
         }
+        if let Some(base) = delta.base {
+            self.base = base;
+        }
         if let Some(category) = delta.category {
             self.category = category;
         }
@@ -3937,6 +3940,8 @@ struct ObjectDelta {
     action: Option<ActionUpdate>,
     status: Option<ObjectStatus>,
     owner: Option<i32>,
+    /// C4Object::Base overwrite used by FLAG/FlyBase SetOwner propagation.
+    base: Option<i32>,
     /// FnSetController (C4Script.cpp:1322-1331) / SetOwner's automatic
     /// controller update (C4Object.cpp:5499-5500).
     controller: Option<i32>,
@@ -4100,6 +4105,9 @@ impl ObjectDelta {
         if let Some(owner) = update.owner {
             self.owner = Some(owner);
         }
+        if let Some(base) = update.base {
+            self.base = Some(base);
+        }
         if let Some(controller) = update.controller {
             self.controller = Some(controller);
         }
@@ -4230,6 +4238,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             action: update.action,
             status: update.status,
             owner: update.owner,
+            base: update.base,
             controller: update.controller,
             category: update.category,
             crew_member: update.crew_member,
@@ -4408,6 +4417,9 @@ pub struct ObjectUpdate {
     pub ocf_override: Option<u32>,
     #[serde(default)]
     pub owner: Option<i32>,
+    /// C4Object::Base overwrite used by FLAG/FlyBase SetOwner propagation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<i32>,
     /// FnSetController (C4Script.cpp:1322-1331); also recorded by
     /// SetOwner's automatic controller update (C4Object.cpp:5499-5500).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4655,6 +4667,11 @@ impl ObjectUpdate {
         self
     }
 
+    pub fn with_base(mut self, base: i32) -> Self {
+        self.base = Some(base);
+        self
+    }
+
     pub fn with_category(mut self, category: i32) -> Self {
         self.category = Some(category);
         self
@@ -4763,6 +4780,7 @@ impl ObjectUpdate {
             && self.status.is_none()
             && self.ocf_override.is_none()
             && self.owner.is_none()
+            && self.base.is_none()
             && self.controller.is_none()
             && self.category.is_none()
             && self.crew_member.is_none()
@@ -17572,13 +17590,13 @@ impl Engine {
             }
         }
 
-        self.set_owner_from_owner_removed(object_id, new_owner)
+        self.set_object_owner(object_id, new_owner)
     }
 
-    /// The `C4Object::SetOwner` portion reached by the native removal
-    /// fallback: owner color, owner/controller write, FLAG base propagation,
-    /// and the synchronous ordinary `OnOwnerChanged(new, old)` callback.
-    fn set_owner_from_owner_removed(
+    /// Native `C4Object::SetOwner`: owner color, owner/controller write,
+    /// FLAG base propagation, and the synchronous ordinary
+    /// `OnOwnerChanged(new, old)` callback.
+    fn set_object_owner(
         &mut self,
         object_id: ObjectId,
         new_owner: i32,
@@ -17590,15 +17608,27 @@ impl Engine {
             return Ok(());
         };
         let definition_id = self.objects[index].definition_id.clone();
+        let graphics_definition_id = self.objects[index]
+            .state
+            .base_graphics
+            .as_ref()
+            .map(|graphics| graphics.definition.clone())
+            .unwrap_or_else(|| definition_id.clone());
         let color_by_owner = self
             .definitions
-            .get(&definition_id)
+            .get(&graphics_definition_id)
             .is_some_and(Definition::color_by_owner);
         let owner_color = (new_owner != OWNER_NONE && color_by_owner)
-            .then(|| self.players.get(&new_owner).and_then(Player::color))
-            .flatten()
-            .map(|color| {
-                u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
+            .then(|| {
+                self.players
+                    .get(&new_owner)
+                    .and_then(Player::color)
+                    .map(|color| {
+                        u32::from(color.r) << 16
+                            | u32::from(color.g) << 8
+                            | u32::from(color.b)
+                    })
+                    .unwrap_or(0)
             });
 
         let (old_owner, flag_base_target) = {
@@ -17635,6 +17665,11 @@ impl Engine {
         let Some(index) = self.find_object_index(object_id) else {
             return Ok(());
         };
+        if self.objects[index].destroyed
+            || self.objects[index].state.status == ObjectStatus::Deleted
+        {
+            return Ok(());
+        }
         let _ = tolerate_script_error(self.call_object_function(
             index,
             "OnOwnerChanged",
@@ -24566,6 +24601,7 @@ impl Engine {
             action,
             status,
             owner,
+            base,
             controller,
             crew_member,
             plr_view_range,
@@ -24779,6 +24815,9 @@ impl Engine {
                 object.state.controller = controller.unwrap_or(owner);
             } else if let Some(controller) = controller {
                 object.state.controller = controller;
+            }
+            if let Some(base) = base {
+                object.state.base = base;
             }
             if let Some(crew_member) = crew_member {
                 object.state.crew_member = crew_member;
@@ -35663,10 +35702,7 @@ impl Engine {
                                 multiple: false,
                                 custom_falloff: None,
                             });
-                            self.apply_object_update(
-                                base_id,
-                                ObjectUpdate::new().with_owner(flag_owner),
-                            )?;
+                            self.set_object_owner(base_id, flag_owner)?;
                         }
                     }
                 }

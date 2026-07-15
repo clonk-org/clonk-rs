@@ -51173,6 +51173,200 @@ func ReadTeam(int player) { return GetPlayerTeam(player); }
     }
 
     #[test]
+    fn script_set_owner_runs_the_full_native_owner_change_sequence() -> Result<(), EngineError> {
+        // C4Object::SetOwner validates first, refreshes the CURRENT graphics'
+        // ColorByOwner surface, then writes Owner/Controller, transfers a
+        // FLAG/FlyBase target's Base, and finally calls OnOwnerChanged.
+        // An explicit foreign target must not redispatch to a script function
+        // named SetOwner on that target.
+        const FLAG_SCRIPT: &str = r#"#strict 2
+local base_target, owner_changes, seen_new, seen_old;
+local seen_owner, seen_controller, seen_color, seen_base, shadow_calls;
+
+public func Arm(object target) { base_target = target; return true; }
+public func SetOwner() { shadow_calls++; return false; }
+
+protected func OnOwnerChanged(int new_owner, int old_owner)
+{
+    owner_changes++;
+    seen_new = new_owner;
+    seen_old = old_owner;
+    seen_owner = GetOwner();
+    seen_controller = GetController();
+    seen_color = GetColorDw();
+    seen_base = GetBase(base_target);
+    return true;
+}
+"#;
+        const CALLER_SCRIPT: &str = r#"#strict 2
+public func Prepare(object target, object base)
+{
+    target->Arm(base);
+    return SetGraphics(nil, target, SKIN);
+}
+public func Change(object target, int owner) { return SetOwner(owner, target); }
+public func RefreshSame(object target)
+{
+    SetColorDw(0x123456, target);
+    SetController(1, target);
+    return SetOwner(GetOwner(target), target);
+}
+"#;
+        const BIRTH_SCRIPT: &str = r#"#strict 2
+local owner_changes, seen_after, seen_new, seen_old, seen_controller;
+
+protected func Construction()
+{
+    SetOwner(2);
+    seen_after = owner_changes;
+}
+
+protected func OnOwnerChanged(int new_owner, int old_owner)
+{
+    owner_changes++;
+    seen_new = new_owner;
+    seen_old = old_owner;
+    seen_controller = GetController();
+}
+"#;
+
+        let mut engine = Engine::new();
+        engine.register_player(
+            PlayerConfig::new(1, "Old")
+                .with_color(Some(RgbColor::new(0xaa, 0, 0))),
+        )?;
+        engine.register_player(
+            PlayerConfig::new(2, "New")
+                .with_color(Some(RgbColor::new(0x44, 0x55, 0x66))),
+        )?;
+
+        engine.register_definition(simple_definition("BASE"))?;
+        let mut skin = simple_definition("SKIN");
+        skin.set_color_by_owner(true);
+        engine.register_definition(skin)?;
+        let mut flag = Definition::from_script("FLAG", "Flag", FLAG_SCRIPT)?;
+        flag.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                ("FlyBase".to_string(), ActionSpec::default()),
+            ]),
+        );
+        engine.register_definition(flag)?;
+        engine.register_definition(Definition::from_script(
+            "CALL",
+            "Caller",
+            CALLER_SCRIPT,
+        )?)?;
+        engine.register_definition(Definition::from_script(
+            "BORN",
+            "Construction owner probe",
+            BIRTH_SCRIPT,
+        )?)?;
+
+        let base = engine.spawn_object(
+            SpawnConfig::new("BASE")
+                .with_owner(1)
+                .with_status(ObjectStatus::Inactive),
+        )?;
+        engine.apply_object_update(base, ObjectUpdate::new().with_base(1))?;
+        let mut fly_base = ActionState::new("FlyBase");
+        fly_base.target = Some(base);
+        let flag = engine.spawn_object(
+            SpawnConfig::new("FLAG")
+                .with_owner(1)
+                .with_action(fly_base),
+        )?;
+        let caller = engine.spawn_object(SpawnConfig::new("CALL").with_owner(1))?;
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine.call_object_function(
+                caller_index,
+                "Prepare",
+                vec![object_reference_value(flag), object_reference_value(base)],
+            )?,
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine.call_object_function(
+                caller_index,
+                "Change",
+                vec![object_reference_value(flag), Value::Int(2)],
+            )?,
+            Value::Bool(true)
+        );
+
+        let changed = engine.object_snapshot(flag).expect("flag survives");
+        assert_eq!((changed.owner, changed.controller), (2, 2));
+        assert_eq!(changed.color, 0x0044_5566);
+        assert_eq!(
+            engine.object_snapshot(base).map(|object| object.base),
+            Some(2),
+            "inactive FlyBase targets still have nonzero C++ Status"
+        );
+        for (name, value) in [
+            ("owner_changes", Value::Int(1)),
+            ("seen_new", Value::Int(2)),
+            ("seen_old", Value::Int(1)),
+            ("seen_owner", Value::Int(2)),
+            ("seen_controller", Value::Int(2)),
+            ("seen_color", Value::Int(0x0044_5566)),
+            ("seen_base", Value::Int(2)),
+            ("shadow_calls", Value::Nil),
+        ] {
+            assert_eq!(changed.local_vars.get(name), Some(&value), "local {name}");
+        }
+
+        // Invalid owners are a true no-op and do not fire the callback.
+        assert_eq!(
+            engine.call_object_function(
+                caller_index,
+                "Change",
+                vec![object_reference_value(flag), Value::Int(99)],
+            )?,
+            Value::Bool(false)
+        );
+        let invalid = engine.object_snapshot(flag).expect("flag survives");
+        assert_eq!((invalid.owner, invalid.controller, invalid.color), (2, 2, 0x0044_5566));
+        assert_eq!(invalid.local_vars.get("owner_changes"), Some(&Value::Int(1)));
+        assert_eq!(engine.object_snapshot(base).map(|object| object.base), Some(2));
+
+        // Same-owner refresh occurs before the early return, but Controller
+        // and callback state stay untouched.
+        assert_eq!(
+            engine.call_object_function(
+                caller_index,
+                "RefreshSame",
+                vec![object_reference_value(flag)],
+            )?,
+            Value::Bool(true)
+        );
+        let same = engine.object_snapshot(flag).expect("flag survives");
+        assert_eq!((same.owner, same.controller), (2, 1));
+        assert_eq!(same.color, 0x0044_5566);
+        assert_eq!(same.local_vars.get("owner_changes"), Some(&Value::Int(1)));
+        assert_eq!(same.local_vars.get("shadow_calls"), Some(&Value::Nil));
+
+        // Plain engine spawns run Construction before joining self.objects;
+        // SetOwner must still enter the callback synchronously so the rest
+        // of Construction observes its local writes.
+        let born = engine.spawn_object(SpawnConfig::new("BORN").with_owner(1))?;
+        let born = engine.object_snapshot(born).expect("spawn survives");
+        assert_eq!((born.owner, born.controller), (2, 2));
+        for (name, value) in [
+            ("owner_changes", Value::Int(1)),
+            ("seen_after", Value::Int(1)),
+            ("seen_new", Value::Int(2)),
+            ("seen_old", Value::Int(1)),
+            ("seen_controller", Value::Int(2)),
+        ] {
+            assert_eq!(born.local_vars.get(name), Some(&value), "local {name}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn remove_player_assigns_departing_crew_removal() -> Result<(), EngineError> {
         // C4PlayerList::Remove calls C4Player::RemoveCrewObjects before deleting
         // the player; every crew object receives AssignRemoval(true)
