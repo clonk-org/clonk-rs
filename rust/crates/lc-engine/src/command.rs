@@ -364,6 +364,16 @@ mod tests {
         }
     }
 
+    fn pushed_request(operations: &[CommandOperation], id: CommandId) -> CommandRequest {
+        operations
+            .iter()
+            .find_map(|operation| match operation {
+                CommandOperation::PushFront(request) if request.id == id => Some(request.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected {id:?} PushFront operation, got {operations:?}"))
+    }
+
     fn walking_jumper(position: Vector2) -> CommandObjectSnapshot {
         let mut walker = snapshot_with_id(1);
         walker.position = position;
@@ -1615,6 +1625,13 @@ mod tests {
             }
             other => panic!("expected move request, got {:?}", other),
         }
+        let first_move = pushed_request(&result.operations, CommandId::MoveTo);
+        let reissued = state.step(&ctx);
+        assert_eq!(
+            pushed_request(&reissued.operations, CommandId::MoveTo),
+            first_move,
+            "Follow reissues MoveTo on its next execution"
+        );
     }
 
     // FnGetCommand serves the LIVE C4Command fields (C4Script.cpp:
@@ -1897,6 +1914,83 @@ mod tests {
             rng.borrow().count,
             crate::LcgRng::seed_from_u64(7).count + 1,
             "exactly one ledger draw"
+        );
+        let reissued = state.step(&ctx);
+        assert_eq!(
+            pushed_request(&reissued.operations, CommandId::MoveTo).update_interval,
+            25,
+            "Get reissues its pursuit MoveTo on the next execution"
+        );
+        assert_eq!(
+            rng.borrow().count,
+            crate::LcgRng::seed_from_u64(7).count + 2,
+            "reissued pursuit performs the next C++ random-offset draw"
+        );
+    }
+
+    #[test]
+    fn get_reissues_dig_while_target_remains_in_solid() {
+        let actor_id = ObjectId::new(503);
+        let target_id = ObjectId::new(504);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(100, 100);
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(104, 103);
+        target.collectible = true;
+        target.construction = FULL_CON;
+        target.ocf |= ocf::IN_SOLID;
+
+        let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 10);
+        let mut state = GetState::from_request(
+            &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
+        )
+        .expect("Get state");
+
+        let first = state.step(&ctx);
+        let first_dig = pushed_request(&first.operations, CommandId::Dig);
+        let reissued = state.step(&ctx);
+
+        assert_eq!(
+            pushed_request(&reissued.operations, CommandId::Dig),
+            first_dig,
+            "Get reissues Dig on the next evaluation while OCF_InSolid remains set"
+        );
+    }
+
+    #[test]
+    fn get_reissues_move_to_while_far_target_remains_in_solid() {
+        let actor_id = ObjectId::new(505);
+        let target_id = ObjectId::new(506);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(100, 100);
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(106, 100);
+        target.collectible = true;
+        target.construction = FULL_CON;
+        target.ocf |= ocf::IN_SOLID;
+
+        let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 10);
+        let mut state = GetState::from_request(
+            &CommandRequest::new(CommandId::Get).with_target(Some(target_id)),
+        )
+        .expect("Get state");
+
+        let first = state.step(&ctx);
+        let first_move = pushed_request(&first.operations, CommandId::MoveTo);
+        let reissued = state.step(&ctx);
+
+        assert_eq!(
+            pushed_request(&reissued.operations, CommandId::MoveTo),
+            first_move,
+            "Get reissues MoveTo inside the former 12-frame cooldown"
         );
     }
 
@@ -2668,6 +2762,13 @@ mod tests {
             }),
             "drop should request movement towards target coordinates"
         );
+        let first_move = pushed_request(&result.operations, CommandId::MoveTo);
+        let reissued = state.step(&ctx);
+        assert_eq!(
+            pushed_request(&reissued.operations, CommandId::MoveTo),
+            first_move,
+            "Drop reissues MoveTo on its next execution"
+        );
     }
 
     #[test]
@@ -3298,6 +3399,13 @@ mod tests {
             }
             other => panic!("unexpected operation: {:?}", other),
         }
+        let first_move = pushed_request(&result.operations, CommandId::MoveTo);
+        let reissued = state.step(&ctx);
+        assert_eq!(
+            pushed_request(&reissued.operations, CommandId::MoveTo),
+            first_move,
+            "Enter reissues MoveTo on its next execution"
+        );
 
         // C4Command::Enter passes C4CMD_MoveTo_PushTarget through when
         // its own Data carries C4CMD_Enter_PushTarget (C4Command.cpp:615).
@@ -3319,6 +3427,44 @@ mod tests {
             }
             other => panic!("unexpected operation: {:?}", other),
         }
+    }
+
+    #[test]
+    fn enter_reissues_move_to_immediately_after_child_is_removed() {
+        let actor_id = ObjectId::new(42);
+        let target_id = ObjectId::new(43);
+        let actor = snapshot_with_id(actor_id.as_u64());
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(120, 0);
+        target.shape = DefinitionRect::new(110, -10, 20, 20);
+        target.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
+        let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::Enter).with_target(Some(target_id)))
+            .expect("Enter queues");
+
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 10);
+        stack.step(&ctx).expect("Enter requests MoveTo");
+        assert_eq!(stack.command_names(), vec!["MoveTo", "Enter"]);
+        let first_move = stack
+            .entries
+            .front()
+            .and_then(|entry| entry.request.clone())
+            .expect("MoveTo request retained");
+        assert!(stack.complete_front_if(CommandId::MoveTo));
+
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 11);
+        stack.step(&ctx).expect("Enter reissues MoveTo");
+        assert_eq!(stack.command_names(), vec!["MoveTo", "Enter"]);
+        assert_eq!(
+            stack.entries.front().and_then(|entry| entry.request.clone()),
+            Some(first_move)
+        );
     }
 
     #[test]
@@ -3424,6 +3570,13 @@ mod tests {
             }
             other => panic!("unexpected operation: {:?}", other),
         }
+        let first_move = pushed_request(&result.operations, CommandId::MoveTo);
+        let reissued = state.step(&ctx);
+        assert_eq!(
+            pushed_request(&reissued.operations, CommandId::MoveTo),
+            first_move,
+            "Grab reissues MoveTo on its next execution"
+        );
     }
 
     #[test]
@@ -4273,6 +4426,58 @@ mod tests {
             }
             other => panic!("expected grab request, got {:?}", other),
         }
+        let first_grab = pushed_request(&result.operations, CommandId::Grab);
+        let reissued = state.step(&ctx);
+        assert_eq!(
+            pushed_request(&reissued.operations, CommandId::Grab),
+            first_grab,
+            "PushTo reissues Grab on its next execution while not pushing the target"
+        );
+    }
+
+    #[test]
+    fn push_to_reissues_grab_after_failed_attempt_and_retry() {
+        let actor_id = ObjectId::new(422);
+        let target_id = ObjectId::new(423);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Walk;
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.ocf |= ocf::GRAB;
+        let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 10);
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::PushTo)
+                    .with_target(Some(target_id))
+                    .with_retries(1),
+            )
+            .expect("PushTo queues");
+
+        stack.step(&ctx).expect("PushTo requests Grab");
+        assert_eq!(stack.command_names(), vec!["Grab", "PushTo"]);
+
+        let attempt = stack.step(&ctx).expect("Grab attempts target");
+        assert_eq!(
+            attempt.events,
+            vec![CommandEvent::AttemptGrab {
+                actor_id,
+                target_id,
+            }]
+        );
+        assert_eq!(stack.resolve_grab_attempt(target_id, true), Some(true));
+        stack.clear_finished_fronts();
+
+        stack.step(&ctx).expect("PushTo schedules its retry");
+        assert_eq!(stack.command_names(), vec!["Retry", "PushTo"]);
+        assert!(stack.complete_front_if(CommandId::Retry));
+
+        stack.step(&ctx).expect("PushTo reissues Grab");
+        assert_eq!(stack.command_names(), vec!["Grab", "PushTo"]);
     }
 
     #[test]
@@ -4389,6 +4594,13 @@ mod tests {
             }
             other => panic!("expected moveto request, got {:?}", other),
         }
+        let first_move = pushed_request(&result.operations, CommandId::MoveTo);
+        let reissued = state.step(&ctx);
+        assert_eq!(
+            pushed_request(&reissued.operations, CommandId::MoveTo),
+            first_move,
+            "PushTo reissues MoveTo on its next execution"
+        );
     }
 
     #[test]
@@ -4851,6 +5063,13 @@ mod tests {
             }
             other => panic!("unexpected operation: {:?}", other),
         }
+        let first_acquire = pushed_request(&result.operations, CommandId::Acquire);
+        let reissued = state.step(&ctx);
+        assert_eq!(
+            pushed_request(&reissued.operations, CommandId::Acquire),
+            first_acquire,
+            "Throw reissues Acquire on its next execution"
+        );
     }
 
     #[test]
@@ -4909,6 +5128,13 @@ mod tests {
             }
             other => panic!("unexpected operation: {:?}", other),
         }
+        let first_move = pushed_request(&result.operations, CommandId::MoveTo);
+        let reissued = state.step(&ctx);
+        assert_eq!(
+            pushed_request(&reissued.operations, CommandId::MoveTo),
+            first_move,
+            "Throw reissues MoveTo on its next execution"
+        );
     }
 
     #[test]
@@ -6339,6 +6565,13 @@ mod tests {
             }
             other => panic!("expected MoveTo request, got {other:?}"),
         }
+        let first_move = pushed_request(&result.operations, CommandId::MoveTo);
+        let reissued = state.step(&ctx);
+        assert_eq!(
+            pushed_request(&reissued.operations, CommandId::MoveTo),
+            first_move,
+            "Build reissues MoveTo on its next execution"
+        );
     }
 
     #[test]
@@ -9091,6 +9324,13 @@ mod tests {
             CommandOperation::PushFront(request) => assert_eq!(request.id, CommandId::MoveTo),
             other => panic!("unexpected operation: {:?}", other),
         }
+        let first_move = pushed_request(&result.operations, CommandId::MoveTo);
+        let reissued = state.step(&ctx);
+        assert_eq!(
+            pushed_request(&reissued.operations, CommandId::MoveTo),
+            first_move,
+            "Chop reissues MoveTo on its next execution"
+        );
     }
 
     #[test]
@@ -11070,7 +11310,6 @@ struct EnterState {
     target: ObjectId,
     push_target: bool,
     update_interval: u32,
-    last_move_order: Option<u64>,
 }
 
 impl EnterState {
@@ -11084,7 +11323,6 @@ impl EnterState {
             target,
             push_target,
             update_interval: request.update_interval.max(1),
-            last_move_order: None,
         })
     }
 
@@ -11093,17 +11331,6 @@ impl EnterState {
             Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
         } else {
             None
-        }
-    }
-
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
         }
     }
 
@@ -11153,19 +11380,16 @@ impl EnterState {
         }
 
         let mut result = CommandStepResult::running(self.update_to_stop(ctx));
-        if self.should_issue_move(ctx.frame) {
-            // Move to the entrance with the push flag carried through:
-            // (Data & C4CMD_Enter_PushTarget) ? C4CMD_MoveTo_PushTarget
-            // : 0 (C4Command.cpp:615).
-            let mut request = CommandRequest::new(CommandId::MoveTo)
-                .with_target(Some(self.target))
-                .with_update_interval(50);
-            if self.push_target {
-                request =
-                    request.with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET));
-            }
-            result = result.with_operations(vec![CommandOperation::PushFront(request)]);
+        // Move to the entrance with the push flag carried through:
+        // (Data & C4CMD_Enter_PushTarget) ? C4CMD_MoveTo_PushTarget
+        // : 0 (C4Command.cpp:615).
+        let mut request = CommandRequest::new(CommandId::MoveTo)
+            .with_target(Some(self.target))
+            .with_update_interval(50);
+        if self.push_target {
+            request = request.with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET));
         }
+        result = result.with_operations(vec![CommandOperation::PushFront(request)]);
         result
     }
 }
@@ -11275,7 +11499,6 @@ impl ExitState {
 struct BuildState {
     target: ObjectId,
     site: Option<Vector2>,
-    last_move_order: Option<u64>,
     approach_horizontal: i32,
     approach_vertical: i32,
 }
@@ -11290,7 +11513,6 @@ impl BuildState {
         Ok(Self {
             target,
             site,
-            last_move_order: None,
             approach_horizontal: 9,
             approach_vertical: 20,
         })
@@ -11301,17 +11523,6 @@ impl BuildState {
         // Tx/Ty fields are not a construction-site override
         // (C4Command.cpp:823-899).
         ctx.resolve_position(self.target)
-    }
-
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_ORDER_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_ORDER_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
-        }
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -11399,7 +11610,7 @@ impl BuildState {
         }
 
         let mut operations = Vec::new();
-        if !is_structure && self.should_issue_move(ctx.frame) {
+        if !is_structure {
             let request = target_snapshot.container.map_or_else(
                 || {
                     CommandRequest::new(CommandId::MoveTo)
@@ -11901,8 +12112,6 @@ impl TransferState {
 struct ChopState {
     target: ObjectId,
     update_interval: u32,
-    last_move_order: Option<u64>,
-    ungrab_requested: bool,
 }
 
 impl ChopState {
@@ -11911,8 +12120,6 @@ impl ChopState {
         Ok(Self {
             target,
             update_interval: request.update_interval.max(1),
-            last_move_order: None,
-            ungrab_requested: false,
         })
     }
 
@@ -11921,17 +12128,6 @@ impl ChopState {
             Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
         } else {
             None
-        }
-    }
-
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
         }
     }
 
@@ -11970,18 +12166,13 @@ impl ChopState {
         }
 
         if ctx.object.action_procedure == ActionProcedure::Push {
-            if !self.ungrab_requested {
-                self.ungrab_requested = true;
-                let request = CommandRequest::new(CommandId::UnGrab)
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
-                let mut result = CommandStepResult::running(self.update_to_stop(ctx));
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
-            }
-            return CommandStepResult::running(self.update_to_stop(ctx));
+            let request = CommandRequest::new(CommandId::UnGrab)
+                .with_update_interval(50)
+                .with_mode(CommandMode::Sub);
+            let mut result = CommandStepResult::running(self.update_to_stop(ctx));
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
         }
-        self.ungrab_requested = false;
 
         if matches!(
             ctx.object.action_procedure,
@@ -12023,34 +12214,32 @@ impl ChopState {
 
         let mut result = CommandStepResult::running(self.update_to_stop(ctx));
 
-        if self.should_issue_move(ctx.frame) {
-            let approach_x = if ctx.position.x > target_snapshot.position.x {
-                target_snapshot.position.x + 6
+        let approach_x = if ctx.position.x > target_snapshot.position.x {
+            target_snapshot.position.x + 6
+        } else {
+            target_snapshot.position.x - 6
+        };
+        let mut operations = Vec::new();
+        let approach_request = CommandRequest::new(CommandId::MoveTo)
+            .with_tx(Some(approach_x))
+            .with_ty(Some(target_snapshot.position.y))
+            .with_update_interval(50);
+        operations.push(CommandOperation::PushFront(approach_request));
+
+        if dx.abs() < MIN_HORIZONTAL_RANGE {
+            let move_away_x = if ctx.position.x > target_snapshot.position.x {
+                target_snapshot.position.x + 15
             } else {
-                target_snapshot.position.x - 6
+                target_snapshot.position.x - 15
             };
-            let mut operations = Vec::new();
-            let approach_request = CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(approach_x))
+            let move_away_request = CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(move_away_x))
                 .with_ty(Some(target_snapshot.position.y))
                 .with_update_interval(50);
-            operations.push(CommandOperation::PushFront(approach_request));
-
-            if dx.abs() < MIN_HORIZONTAL_RANGE {
-                let move_away_x = if ctx.position.x > target_snapshot.position.x {
-                    target_snapshot.position.x + 15
-                } else {
-                    target_snapshot.position.x - 15
-                };
-                let move_away_request = CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(move_away_x))
-                    .with_ty(Some(target_snapshot.position.y))
-                    .with_update_interval(50);
-                operations.push(CommandOperation::PushFront(move_away_request));
-            }
-
-            result.operations.extend(operations);
+            operations.push(CommandOperation::PushFront(move_away_request));
         }
+
+        result.operations.extend(operations);
 
         result
     }
@@ -12236,8 +12425,6 @@ struct GrabState {
     offset_x: i32,
     offset_y: i32,
     update_interval: u32,
-    last_move_order: Option<u64>,
-    ungrab_requested: bool,
     #[serde(default, skip_serializing_if = "crate::is_false")]
     reject_pending: bool,
     #[serde(default, skip_serializing_if = "crate::is_false")]
@@ -12252,8 +12439,6 @@ impl GrabState {
             offset_x: request.tx.unwrap_or(0),
             offset_y: request.ty.unwrap_or(0),
             update_interval: request.update_interval.max(1),
-            last_move_order: None,
-            ungrab_requested: false,
             reject_pending: false,
             target_cleared: false,
         })
@@ -12264,17 +12449,6 @@ impl GrabState {
             Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
         } else {
             None
-        }
-    }
-
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
         }
     }
 
@@ -12325,16 +12499,12 @@ impl GrabState {
         if ctx.object.action_procedure == ActionProcedure::Push
             && ctx.object.action_target != Some(self.target)
         {
-            if !self.ungrab_requested {
-                self.ungrab_requested = true;
-                let request = CommandRequest::new(CommandId::UnGrab)
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
-                let mut result = CommandStepResult::running(pending_update);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
-            }
-            return CommandStepResult::running(pending_update);
+            let request = CommandRequest::new(CommandId::UnGrab)
+                .with_update_interval(50)
+                .with_mode(CommandMode::Sub);
+            let mut result = CommandStepResult::running(pending_update);
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
         }
 
         let approach_position = Vector2::new(
@@ -12360,17 +12530,13 @@ impl GrabState {
             ]);
         }
 
-        if self.should_issue_move(ctx.frame) {
-            let request = CommandRequest::new(CommandId::MoveTo)
-                .with_tx(Some(approach_position.x))
-                .with_ty(Some(approach_position.y))
-                .with_update_interval(50);
-            let mut result = CommandStepResult::running(pending_update);
-            result.operations.push(CommandOperation::PushFront(request));
-            return result;
-        }
-
-        CommandStepResult::running(pending_update)
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_tx(Some(approach_position.x))
+            .with_ty(Some(approach_position.y))
+            .with_update_interval(50);
+        let mut result = CommandStepResult::running(pending_update);
+        result.operations.push(CommandOperation::PushFront(request));
+        result
     }
 }
 
@@ -12624,10 +12790,6 @@ struct PushToState {
     tx: Option<i32>,
     ty: Option<i32>,
     update_interval: u32,
-    last_move_order: Option<u64>,
-    activate_requested: bool,
-    grab_requested: bool,
-    enter_requested: bool,
 }
 
 impl PushToState {
@@ -12639,10 +12801,6 @@ impl PushToState {
             tx: request.tx,
             ty: request.ty,
             update_interval: request.update_interval.max(1),
-            last_move_order: None,
-            activate_requested: false,
-            grab_requested: false,
-            enter_requested: false,
         })
     }
 
@@ -12667,17 +12825,6 @@ impl PushToState {
         }
 
         update
-    }
-
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
-        }
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -12721,73 +12868,53 @@ impl PushToState {
 
         if let Some(target_container) = target_snapshot.container {
             if Some(target_container) != self.container {
-                if !self.activate_requested {
-                    self.activate_requested = true;
-                    let mut result = CommandStepResult::running(update.clone());
-                    let request = CommandRequest::new(CommandId::Activate)
-                        .with_target(Some(self.target))
-                        .with_update_interval(40)
-                        .with_mode(CommandMode::Sub);
-                    result.operations.push(CommandOperation::PushFront(request));
-                    return result;
-                }
-                return CommandStepResult::running(update);
-            }
-        }
-        self.activate_requested = false;
-
-        let pushing_target = ctx.object.action_procedure == ActionProcedure::Push
-            && ctx.object.action_target == Some(self.target);
-
-        if !pushing_target {
-            self.enter_requested = false;
-            if !self.grab_requested {
-                self.grab_requested = true;
                 let mut result = CommandStepResult::running(update.clone());
-                let request = CommandRequest::new(CommandId::Grab)
+                let request = CommandRequest::new(CommandId::Activate)
                     .with_target(Some(self.target))
                     .with_update_interval(40)
                     .with_mode(CommandMode::Sub);
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
-            return CommandStepResult::running(update);
         }
-        self.grab_requested = false;
+
+        let pushing_target = ctx.object.action_procedure == ActionProcedure::Push
+            && ctx.object.action_target == Some(self.target);
+
+        if !pushing_target {
+            let mut result = CommandStepResult::running(update.clone());
+            let request = CommandRequest::new(CommandId::Grab)
+                .with_target(Some(self.target))
+                .with_update_interval(40)
+                .with_mode(CommandMode::Sub);
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
+        }
 
         if let Some(destination) = self.container {
-            if !self.enter_requested {
-                self.enter_requested = true;
-                let mut result = CommandStepResult::running(update.clone());
-                let request = CommandRequest::new(CommandId::Enter)
-                    .with_target(Some(destination))
-                    .with_update_interval(40)
-                    .with_mode(CommandMode::Sub)
-                    .with_data(CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
-            }
-            return CommandStepResult::running(update);
+            let mut result = CommandStepResult::running(update.clone());
+            let request = CommandRequest::new(CommandId::Enter)
+                .with_target(Some(destination))
+                .with_update_interval(40)
+                .with_mode(CommandMode::Sub)
+                .with_data(CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
         }
-        self.enter_requested = false;
 
         if self.tx.is_none() || self.ty.is_none() {
             return CommandStepResult::failed(update);
         }
 
-        if self.should_issue_move(ctx.frame) {
-            let mut result = CommandStepResult::running(update.clone());
-            let request = CommandRequest::new(CommandId::MoveTo)
-                .with_tx(self.tx)
-                .with_ty(self.ty)
-                .with_update_interval(40)
-                .with_mode(CommandMode::Sub)
-                .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET));
-            result.operations.push(CommandOperation::PushFront(request));
-            return result;
-        }
-
-        CommandStepResult::running(update)
+        let mut result = CommandStepResult::running(update.clone());
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_tx(self.tx)
+            .with_ty(self.ty)
+            .with_update_interval(40)
+            .with_mode(CommandMode::Sub)
+            .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET));
+        result.operations.push(CommandOperation::PushFront(request));
+        result
     }
 }
 
@@ -13124,9 +13251,6 @@ struct DropState {
     definition_id: Option<DefinitionId>,
     target_position: Option<Vector2>,
     update_interval: u32,
-    last_move_order: Option<u64>,
-    get_requested: bool,
-    ungrab_requested: bool,
     delegated_put: bool,
     delegated_container: Option<ObjectId>,
 }
@@ -13147,9 +13271,6 @@ impl DropState {
             definition_id: command_data_to_definition_id(&request.data),
             target_position,
             update_interval: request.update_interval.max(1),
-            last_move_order: None,
-            get_requested: false,
-            ungrab_requested: false,
             delegated_put: false,
             delegated_container: None,
         }
@@ -13160,17 +13281,6 @@ impl DropState {
             Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
         } else {
             None
-        }
-    }
-
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
         }
     }
 
@@ -13234,10 +13344,6 @@ impl DropState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        if ctx.object.action_procedure != ActionProcedure::Push {
-            self.ungrab_requested = false;
-        }
-
         let update = self.update_to_stop(ctx);
 
         let (item_id, item_snapshot) = match self.resolve_item(ctx) {
@@ -13261,19 +13367,14 @@ impl DropState {
             if item_snapshot.container.is_none() {
                 return CommandStepResult::completed(update);
             }
-            if !self.get_requested {
-                self.get_requested = true;
-                let mut result = CommandStepResult::running(update.clone());
-                let request = CommandRequest::new(CommandId::Get)
-                    .with_target(Some(item_id))
-                    .with_update_interval(40)
-                    .with_mode(CommandMode::Sub);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
-            }
-            return CommandStepResult::running(update);
+            let mut result = CommandStepResult::running(update.clone());
+            let request = CommandRequest::new(CommandId::Get)
+                .with_target(Some(item_id))
+                .with_update_interval(40)
+                .with_mode(CommandMode::Sub);
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
         }
-        self.get_requested = false;
 
         if let Some(container_id) = ctx.object.container {
             return self.delegate_put(item_id, container_id, update);
@@ -13292,8 +13393,7 @@ impl DropState {
             let dy = position.y - ctx.position.y;
 
             if dx.abs() > DROP_RANGE_HORIZONTAL || dy.abs() > DROP_RANGE_VERTICAL {
-                if ctx.object.action_procedure == ActionProcedure::Push && !self.ungrab_requested {
-                    self.ungrab_requested = true;
+                if ctx.object.action_procedure == ActionProcedure::Push {
                     let mut result = CommandStepResult::running(update.clone());
                     let request = CommandRequest::new(CommandId::UnGrab)
                         .with_update_interval(50)
@@ -13302,20 +13402,16 @@ impl DropState {
                     return result;
                 }
 
-                if self.should_issue_move(ctx.frame) {
-                    let mut result = CommandStepResult::running(update.clone());
-                    let request = CommandRequest::new(CommandId::MoveTo)
-                        .with_tx(Some(position.x))
-                        .with_ty(Some(position.y))
-                        .with_update_interval(20)
-                        .with_mode(CommandMode::Sub);
-                    result.operations.push(CommandOperation::PushFront(request));
-                    return result;
-                }
-                return CommandStepResult::running(update);
+                let mut result = CommandStepResult::running(update.clone());
+                let request = CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(position.x))
+                    .with_ty(Some(position.y))
+                    .with_update_interval(20)
+                    .with_mode(CommandMode::Sub);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
             }
-        } else if ctx.object.action_procedure == ActionProcedure::Push && !self.ungrab_requested {
-            self.ungrab_requested = true;
+        } else if ctx.object.action_procedure == ActionProcedure::Push {
             let mut result = CommandStepResult::running(update.clone());
             let request = CommandRequest::new(CommandId::UnGrab)
                 .with_update_interval(50)
@@ -13354,12 +13450,6 @@ struct GetState {
     menu_identification: Option<i32>,
     remaining: i32,
     update_interval: u32,
-    last_move_order: Option<u64>,
-    exit_requested: bool,
-    ungrab_requested: bool,
-    grab_requested: bool,
-    enter_requested: bool,
-    dig_requested: bool,
 }
 
 impl GetState {
@@ -13387,12 +13477,6 @@ impl GetState {
             menu_identification,
             remaining,
             update_interval: request.update_interval.max(1),
-            last_move_order: None,
-            exit_requested: false,
-            ungrab_requested: false,
-            grab_requested: false,
-            enter_requested: false,
-            dig_requested: false,
         })
     }
 
@@ -13422,17 +13506,6 @@ impl GetState {
             update = Some(object_update);
         }
         update
-    }
-
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
-        }
     }
 
     fn resolve_target(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
@@ -13495,27 +13568,19 @@ impl GetState {
         };
 
         if ctx.object.container == Some(container_id) {
-            self.enter_requested = false;
-            self.grab_requested = false;
             return self.transfer_to_actor(ctx, target_id, update);
         }
 
         if let Some(current_container) = ctx.object.container {
             if current_container != container_id {
-                if !self.exit_requested {
-                    self.exit_requested = true;
-                    let mut result =
-                        CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
-                    let request = CommandRequest::new(CommandId::Exit)
-                        .with_update_interval(50)
-                        .with_mode(CommandMode::Sub);
-                    result.operations.push(CommandOperation::PushFront(request));
-                    return result;
-                }
-                return CommandStepResult::running(self.ensure_stop(ctx, update));
+                let mut result =
+                    CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
+                let request = CommandRequest::new(CommandId::Exit)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::Sub);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
             }
-        } else {
-            self.exit_requested = false;
         }
 
         let Some(container_snapshot) = ctx.resolve(container_id) else {
@@ -13528,36 +13593,27 @@ impl GetState {
         if ctx.object.action_procedure == ActionProcedure::Push
             && ctx.object.action_target == Some(container_id)
         {
-            self.grab_requested = false;
             return self.transfer_to_actor(ctx, target_id, update);
         }
 
         if container_snapshot.ocf & ocf::GRAB != 0 {
-            if !self.grab_requested {
-                self.grab_requested = true;
-                let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
-                let request = CommandRequest::new(CommandId::Grab)
-                    .with_target(Some(container_id))
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
-            }
-            return CommandStepResult::running(self.ensure_stop(ctx, update));
+            let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
+            let request = CommandRequest::new(CommandId::Grab)
+                .with_target(Some(container_id))
+                .with_update_interval(50)
+                .with_mode(CommandMode::Sub);
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
         }
 
         if container_snapshot.ocf & ocf::ENTRANCE != 0 {
-            if !self.enter_requested {
-                self.enter_requested = true;
-                let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
-                let request = CommandRequest::new(CommandId::Enter)
-                    .with_target(Some(container_id))
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
-            }
-            return CommandStepResult::running(self.ensure_stop(ctx, update));
+            let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
+            let request = CommandRequest::new(CommandId::Enter)
+                .with_target(Some(container_id))
+                .with_update_interval(50)
+                .with_mode(CommandMode::Sub);
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
         }
 
         CommandStepResult::failed(self.ensure_stop(ctx, update))
@@ -13571,45 +13627,33 @@ impl GetState {
         update: Option<ObjectUpdate>,
     ) -> CommandStepResult {
         if ctx.object.container.is_some() {
-            if !self.exit_requested {
-                self.exit_requested = true;
-                let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
-                let request = CommandRequest::new(CommandId::Exit)
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
-            }
-            return CommandStepResult::running(self.ensure_stop(ctx, update));
-        }
-
-        let dx = target_snapshot.position.x - ctx.position.x;
-        let dy = target_snapshot.position.y - ctx.position.y;
-        if dx.abs() > DIG_MOVE_TO_RANGE_DEFAULT || dy.abs() > DIG_MOVE_TO_RANGE_DEFAULT {
-            if self.should_issue_move(ctx.frame) {
-                let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
-                let request = CommandRequest::new(CommandId::MoveTo)
-                    .with_target(Some(target_id))
-                    .with_update_interval(10);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
-            }
-            return CommandStepResult::running(self.ensure_stop(ctx, update));
-        }
-
-        if !self.dig_requested {
-            self.dig_requested = true;
             let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
-            let request = CommandRequest::new(CommandId::Dig)
-                .with_tx(Some(target_snapshot.position.x))
-                .with_ty(Some(target_snapshot.position.y + 4))
+            let request = CommandRequest::new(CommandId::Exit)
                 .with_update_interval(50)
                 .with_mode(CommandMode::Sub);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
         }
 
-        CommandStepResult::running(self.ensure_stop(ctx, update))
+        let dx = target_snapshot.position.x - ctx.position.x;
+        let dy = target_snapshot.position.y - ctx.position.y;
+        if dx.abs() > DIG_MOVE_TO_RANGE_DEFAULT || dy.abs() > DIG_MOVE_TO_RANGE_DEFAULT {
+            let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
+            let request = CommandRequest::new(CommandId::MoveTo)
+                .with_target(Some(target_id))
+                .with_update_interval(10);
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
+        }
+
+        let mut result = CommandStepResult::running(self.ensure_stop(ctx, update.clone()));
+        let request = CommandRequest::new(CommandId::Dig)
+            .with_tx(Some(target_snapshot.position.x))
+            .with_ty(Some(target_snapshot.position.y + 4))
+            .with_update_interval(50)
+            .with_mode(CommandMode::Sub);
+        result.operations.push(CommandOperation::PushFront(request));
+        result
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -13628,13 +13672,6 @@ impl GetState {
                     kind,
                 }),
             ]);
-        }
-
-        if ctx.object.container.is_none() {
-            self.exit_requested = false;
-        }
-        if ctx.object.action_procedure != ActionProcedure::Push {
-            self.ungrab_requested = false;
         }
 
         let update = self.prepare_update(ctx);
@@ -13668,8 +13705,7 @@ impl GetState {
 
         if ctx.object.action_procedure == ActionProcedure::Push {
             if let Some(container_id) = target_snapshot.container {
-                if ctx.object.action_target != Some(container_id) && !self.ungrab_requested {
-                    self.ungrab_requested = true;
+                if ctx.object.action_target != Some(container_id) {
                     let mut result = CommandStepResult::running(update.clone());
                     let request = CommandRequest::new(CommandId::UnGrab)
                         .with_update_interval(50)
@@ -13677,8 +13713,7 @@ impl GetState {
                     result.operations.push(CommandOperation::PushFront(request));
                     return result;
                 }
-            } else if !self.ungrab_requested {
-                self.ungrab_requested = true;
+            } else {
                 let mut result = CommandStepResult::running(update.clone());
                 let request = CommandRequest::new(CommandId::UnGrab)
                     .with_update_interval(50)
@@ -13686,33 +13721,23 @@ impl GetState {
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
-        } else {
-            self.ungrab_requested = false;
         }
 
         if target_snapshot.container.is_some() {
             return self.handle_container_target(ctx, target_id, target_snapshot, update);
         }
 
-        self.grab_requested = false;
-        self.enter_requested = false;
-
         if target_snapshot.ocf & ocf::IN_SOLID != 0 {
             return self.handle_in_solid_target(ctx, target_id, target_snapshot, update);
         }
-        self.dig_requested = false;
 
         if ctx.object.container.is_some() {
-            if !self.exit_requested {
-                self.exit_requested = true;
-                let mut result = CommandStepResult::running(update.clone());
-                let request = CommandRequest::new(CommandId::Exit)
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
-            }
-            return CommandStepResult::running(update);
+            let mut result = CommandStepResult::running(update.clone());
+            let request = CommandRequest::new(CommandId::Exit)
+                .with_update_interval(50)
+                .with_mode(CommandMode::Sub);
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
         }
 
         let dx = target_snapshot.position.x - ctx.position.x;
@@ -13798,7 +13823,6 @@ impl RetryState {
 struct FollowState {
     target: ObjectId,
     update_interval: u32,
-    last_move_order: Option<u64>,
 }
 
 impl FollowState {
@@ -13807,19 +13831,7 @@ impl FollowState {
         Ok(Self {
             target,
             update_interval: request.update_interval.max(1),
-            last_move_order: None,
         })
-    }
-
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
-        }
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -13885,12 +13897,10 @@ impl FollowState {
             None
         };
         let mut result = CommandStepResult::running(update);
-        if self.should_issue_move(ctx.frame) {
-            let request = CommandRequest::new(CommandId::MoveTo)
-                .with_target(Some(self.target))
-                .with_update_interval(10);
-            result = result.with_operations(vec![CommandOperation::PushFront(request)]);
-        }
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_target(Some(self.target))
+            .with_update_interval(10);
+        result = result.with_operations(vec![CommandOperation::PushFront(request)]);
         result
     }
 }
@@ -13901,9 +13911,6 @@ struct ThrowState {
     tx: Option<i32>,
     ty: Option<i32>,
     update_interval: u32,
-    last_move_order: Option<u64>,
-    acquire_requested: bool,
-    ungrab_requested: bool,
 }
 
 impl ThrowState {
@@ -13913,9 +13920,6 @@ impl ThrowState {
             tx: request.tx,
             ty: request.ty,
             update_interval: request.update_interval.max(1),
-            last_move_order: None,
-            acquire_requested: false,
-            ungrab_requested: false,
         })
     }
 
@@ -13931,17 +13935,6 @@ impl ThrowState {
         match (self.tx, self.ty) {
             (Some(x), Some(y)) if x != 0 || y != 0 => Some(Vector2::new(x, y)),
             _ => None,
-        }
-    }
-
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
         }
     }
 
@@ -13961,18 +13954,13 @@ impl ThrowState {
         }
 
         if ctx.object.action_procedure == ActionProcedure::Push && self.throw_position().is_some() {
-            if !self.ungrab_requested {
-                self.ungrab_requested = true;
-                let request = CommandRequest::new(CommandId::UnGrab)
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::Sub);
-                let mut result = CommandStepResult::running(pending_update);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
-            }
-            return CommandStepResult::running(pending_update);
+            let request = CommandRequest::new(CommandId::UnGrab)
+                .with_update_interval(50)
+                .with_mode(CommandMode::Sub);
+            let mut result = CommandStepResult::running(pending_update);
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
         }
-        self.ungrab_requested = false;
 
         if let Some(target_id) = self.target {
             let mut has_item = false;
@@ -13990,24 +13978,19 @@ impl ThrowState {
                 if !target_snapshot.is_active() {
                     return CommandStepResult::failed(self.update_to_stop(ctx));
                 }
-                if !self.acquire_requested {
-                    let acquire_request = CommandRequest::new(CommandId::Acquire)
-                        .with_data(CommandData::Text(target_snapshot.definition_id.clone()))
-                        .with_update_interval(ACQUIRE_REQUEST_INTERVAL)
-                        .with_mode(CommandMode::Sub)
-                        .with_tx(Some(500))
-                        .with_ty(Some(250));
-                    self.acquire_requested = true;
-                    let mut result = CommandStepResult::running(pending_update);
-                    result
-                        .operations
-                        .push(CommandOperation::PushFront(acquire_request));
-                    return result;
-                }
-                return CommandStepResult::running(pending_update);
+                let acquire_request = CommandRequest::new(CommandId::Acquire)
+                    .with_data(CommandData::Text(target_snapshot.definition_id.clone()))
+                    .with_update_interval(ACQUIRE_REQUEST_INTERVAL)
+                    .with_mode(CommandMode::Sub)
+                    .with_tx(Some(500))
+                    .with_ty(Some(250));
+                let mut result = CommandStepResult::running(pending_update);
+                result
+                    .operations
+                    .push(CommandOperation::PushFront(acquire_request));
+                return result;
             }
         }
-        self.acquire_requested = false;
 
         if let Some(position) = self.throw_position() {
             const THROW_HORIZONTAL_RANGE: i32 = 15;
@@ -14015,16 +13998,13 @@ impl ThrowState {
             let dx = position.x - ctx.position.x;
             let dy = position.y - ctx.position.y;
             if dx.abs() > THROW_HORIZONTAL_RANGE || dy.abs() > THROW_VERTICAL_RANGE {
-                if self.should_issue_move(ctx.frame) {
-                    let request = CommandRequest::new(CommandId::MoveTo)
-                        .with_tx(Some(position.x))
-                        .with_ty(Some(position.y))
-                        .with_update_interval(20);
-                    let mut result = CommandStepResult::running(pending_update);
-                    result.operations.push(CommandOperation::PushFront(request));
-                    return result;
-                }
-                return CommandStepResult::running(pending_update);
+                let request = CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(position.x))
+                    .with_ty(Some(position.y))
+                    .with_update_interval(20);
+                let mut result = CommandStepResult::running(pending_update);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
             }
         }
 
