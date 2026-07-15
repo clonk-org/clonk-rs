@@ -1255,6 +1255,9 @@ pub struct HostWorldContext {
     /// C4RULE_StructuresNeedEnergy (Game.Rules; FnEnergyCheck gates on
     /// it, C4Script.cpp:1845-1856).
     structures_need_energy: bool,
+    /// Cached `Game.Rules & C4RULE_FlagRemoveable`, refreshed by the engine
+    /// on InitRules/frame one/Tick255 like C++ UpdateRules.
+    flag_removeable: bool,
     /// Exact Game.Names text and per-definition ClonkNames sources used by
     /// C4ObjectInfoList::New inside a synchronous MakeCrewMember call.
     standard_crew_names: Option<String>,
@@ -1348,6 +1351,7 @@ impl Default for HostWorldContext {
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             scenario_script_counter: 0,
             structures_need_energy: false,
+            flag_removeable: false,
             standard_crew_names: None,
             definition_crew_names: Rc::new(HashMap::new()),
             crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
@@ -1404,6 +1408,11 @@ impl HostWorldContext {
         self
     }
 
+    pub(crate) fn with_flag_removeable(mut self, value: bool) -> Self {
+        self.flag_removeable = value;
+        self
+    }
+
     pub(crate) fn with_crew_name_sources(
         mut self,
         standard_names: Option<String>,
@@ -1418,6 +1427,10 @@ impl HostWorldContext {
 
     pub(crate) fn structures_need_energy(&self) -> bool {
         self.structures_need_energy
+    }
+
+    pub(crate) fn flag_removeable(&self) -> bool {
+        self.flag_removeable
     }
 
     #[cfg(test)]
@@ -1567,6 +1580,7 @@ impl HostWorldContext {
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             scenario_script_counter: 0,
             structures_need_energy: false,
+            flag_removeable: false,
             standard_crew_names: None,
             definition_crew_names: Rc::new(HashMap::new()),
             crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
@@ -8677,6 +8691,14 @@ fn enter(args: &[Value]) -> Result<Value, RuntimeError> {
 /// (C4Object.cpp:1566-1636,5693-5714). This must stay a live host operation,
 /// rather than a deferred container assignment: MFBL collects a same-call
 /// freshly-created FRBL and branches on the boolean result.
+pub(crate) fn flag_collection_blocked(
+    definition_id: &str,
+    action_name: &str,
+    flag_removeable: bool,
+) -> bool {
+    !flag_removeable && definition_id == "FLAG" && action_name == "FlyBase"
+}
+
 struct CollectDelayRestore {
     collector: ObjectId,
     old_delay: i32,
@@ -8763,6 +8785,27 @@ fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
         old_delay: old_no_collect_delay,
     };
     if !ready {
+        return Ok(Value::Bool(false));
+    }
+
+    // C4Object::Collect's first operation: an attached base flag is not
+    // collectable without cached C4RULE_FlagRemoveable. FnCollect's
+    // temporary NoCollectDelay/OCF work above deliberately precedes this
+    // native gate (C4Script.cpp:391-413; C4Object.cpp:5693-5700).
+    let blocked_flag = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        context.get_world_object(item).is_some_and(|item| {
+            flag_collection_blocked(
+                item.definition_id(),
+                item.action_name(),
+                context.world.flag_removeable(),
+            )
+        })
+    });
+    if blocked_flag {
         return Ok(Value::Bool(false));
     }
 

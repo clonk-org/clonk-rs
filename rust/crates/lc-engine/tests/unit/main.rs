@@ -60993,6 +60993,165 @@ protected func Collection2(pObject)
         Ok(())
     }
 
+    fn flag_collection_fixture(
+        flag_removeable: bool,
+    ) -> Result<(Engine, ObjectId, ObjectId), EngineError> {
+        let collector_script = r#"#strict
+local reject_collect_calls, collection_calls;
+public func Take(pItem) { return Collect(pItem); }
+protected func RejectCollect(idItem, pItem)
+{
+  reject_collect_calls = reject_collect_calls + 1;
+  return 0;
+}
+protected func Collection(pItem)
+{
+  collection_calls = collection_calls + 1;
+  return 1;
+}
+"#;
+        let flag_script = r#"#strict
+local reject_entrance_calls, entrance_calls;
+protected func RejectEntrance(pTarget)
+{
+  reject_entrance_calls = reject_entrance_calls + 1;
+  return 0;
+}
+protected func Entrance(pTarget)
+{
+  entrance_calls = entrance_calls + 1;
+  return 1;
+}
+"#;
+
+        let mut collector =
+            Definition::from_script("FLCN", "Flag collector", collector_script)?;
+        collector.set_c4_callback_convention(true);
+        collector.set_shape_rect(Some(DefinitionRect::new(-12, -9, 24, 18)));
+        collector.set_collection_rect(Some(DefinitionRect::new(-12, -9, 24, 18)));
+        let mut flag = Definition::from_script("FLAG", "Flag", flag_script)?;
+        flag.set_c4_callback_convention(true);
+        flag.set_collectible(true);
+        flag.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "FlyBase".to_string(),
+                    ActionSpec::default().with_procedure("ATTACH"),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::new();
+        engine.register_definition(collector)?;
+        engine.register_definition(flag)?;
+        engine.register_definition(simple_definition("FGRV"))?;
+        if flag_removeable {
+            engine.spawn_object(SpawnConfig::new("FGRV"))?;
+            // C4Game::InitRules calls UpdateRules before play; the runtime
+            // refresh repeats at frame one and every Tick255.
+            engine.tick()?;
+        }
+        let collector = engine.spawn_object(
+            SpawnConfig::new("FLCN")
+                .with_alive(true)
+                .with_position(Vector2::new(100, 100)),
+        )?;
+        let flag = engine.spawn_object(
+            SpawnConfig::new("FLAG")
+                .with_action(ActionState::new("FlyBase"))
+                .with_position(Vector2::new(100, 95)),
+        )?;
+        Ok((engine, collector, flag))
+    }
+
+    #[test]
+    fn script_collect_blocks_flybase_flag_unless_flag_removeable_rule(
+    ) -> Result<(), EngineError> {
+        let (mut blocked, collector, flag) = flag_collection_fixture(false)?;
+        let flag_before = blocked.object_snapshot(flag).expect("flag snapshot");
+        let collector_idx = blocked
+            .find_object_index(collector)
+            .expect("collector exists");
+
+        assert_eq!(
+            blocked.call_object_function(
+                collector_idx,
+                "Take",
+                vec![object_reference_value(flag)],
+            )?,
+            Value::Bool(false)
+        );
+        let blocked_collector = blocked
+            .object_snapshot(collector)
+            .expect("collector remains");
+        assert!(blocked_collector.contents.is_empty());
+        assert_eq!(
+            blocked_collector.local_vars.get("reject_collect_calls"),
+            Some(&Value::Nil),
+            "the special gate precedes RejectCollect"
+        );
+        assert_eq!(
+            blocked_collector.local_vars.get("collection_calls"),
+            Some(&Value::Nil),
+            "the special gate precedes Collection"
+        );
+        assert_eq!(
+            blocked.object_snapshot(flag),
+            Some(flag_before),
+            "the special gate precedes RejectEntrance and attach cancellation"
+        );
+
+        let (mut allowed, collector, flag) = flag_collection_fixture(true)?;
+        let collector_idx = allowed
+            .find_object_index(collector)
+            .expect("collector exists");
+        assert_eq!(
+            allowed.call_object_function(
+                collector_idx,
+                "Take",
+                vec![object_reference_value(flag)],
+            )?,
+            Value::Bool(true)
+        );
+        assert_eq!(
+            allowed.object_snapshot(flag).expect("flag remains").container,
+            Some(collector)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cross_check_blocks_flybase_flag_unless_flag_removeable_rule(
+    ) -> Result<(), EngineError> {
+        let (mut blocked, collector, flag) = flag_collection_fixture(false)?;
+        let collector_before = blocked
+            .object_snapshot(collector)
+            .expect("collector snapshot");
+        let flag_before = blocked.object_snapshot(flag).expect("flag snapshot");
+
+        blocked.cross_check(3)?;
+        assert_eq!(
+            blocked.object_snapshot(collector),
+            Some(collector_before),
+            "blocked auto-collection calls no collector callback"
+        );
+        assert_eq!(
+            blocked.object_snapshot(flag),
+            Some(flag_before),
+            "blocked auto-collection leaves the FlyBase flag exact"
+        );
+
+        let (mut allowed, collector, flag) = flag_collection_fixture(true)?;
+        allowed.cross_check(3)?;
+        assert_eq!(
+            allowed.object_snapshot(flag).expect("flag remains").container,
+            Some(collector)
+        );
+        Ok(())
+    }
+
     #[test]
     fn auto_collect_moves_carryable_into_inventory() -> Result<(), EngineError> {
         let mut engine = Engine::new();

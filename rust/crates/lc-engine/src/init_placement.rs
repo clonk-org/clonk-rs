@@ -621,9 +621,10 @@ impl Engine {
             }
         }
         // InitRules immediately calls UpdateRules. It derives these flags
-        // from the actual surviving CNMT/ENRG objects, including explicit
-        // Rules= entries when the obsolete realism fields are disabled
+        // from the actual surviving CNMT/ENRG/FGRV objects, including
+        // explicit Rules= entries when the obsolete realism fields are disabled
         // (C4Game.cpp:4016-4025,4038-4044).
+        self.refresh_flag_removeable_rule();
         if self.objects.iter().any(|object| {
             object.definition_id == "CNMT"
                 && !object.destroyed

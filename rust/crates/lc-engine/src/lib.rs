@@ -8070,6 +8070,10 @@ pub struct EngineState {
     /// derived Rules bitmask between its Tick255 refreshes (C4Game.cpp:1957).
     #[serde(default)]
     pub structures_snow_in: bool,
+    /// Saved `Game.Rules & C4RULE_FlagRemoveable`. Like the C++ Rules
+    /// bitmask, this stays cached between frame-one/Tick255 refreshes.
+    #[serde(default)]
+    pub flag_removeable: bool,
     /// The persistent C4MassMoverSet slots (MassMover.c4b in C++ saves,
     /// C4MassMover.cpp:181-217).
     #[serde(default)]
@@ -8210,6 +8214,7 @@ impl EngineState {
             round_results: snapshot.round_results.clone(),
             landscape_insert_thrust: false,
             structures_snow_in: false,
+            flag_removeable: false,
             // SimulationSnapshot carries no mover slots (the C++ snapshot
             // boundary is object-level); the set restores empty.
             mass_movers: MassMoverSet::new(),
@@ -13778,6 +13783,7 @@ pub struct Engine {
     construction_needs_material: bool,
     structures_need_energy: bool,
     structures_snow_in: bool,
+    flag_removeable: bool,
     base_buy_enabled: bool,
     base_sell_enabled: bool,
     base_auto_sell_enabled: bool,
@@ -15745,6 +15751,7 @@ impl Engine {
             construction_needs_material: false,
             structures_need_energy: false,
             structures_snow_in: false,
+            flag_removeable: false,
             base_buy_enabled: true,
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
@@ -19554,6 +19561,7 @@ impl Engine {
             self.base_reject_entrance_enabled,
         )
         .with_structures_need_energy(self.structures_need_energy)
+        .with_flag_removeable(self.flag_removeable)
         .with_crew_name_sources(
             self.standard_names.clone(),
             self.definitions
@@ -25010,6 +25018,7 @@ impl Engine {
         // Tick255 (plus frame one) (C4Game.cpp:845,4038-4047).
         if frame == 1 || frame % 255 == 0 {
             self.refresh_structures_snow_in_rule();
+            self.refresh_flag_removeable_rule();
         }
         self.refresh_elimination_state();
         self.check_game_over()?;
@@ -27096,6 +27105,7 @@ impl Engine {
             round_results: self.round_results.clone(),
             landscape_insert_thrust: self.landscape_insert_thrust,
             structures_snow_in: self.structures_snow_in,
+            flag_removeable: self.flag_removeable,
             mass_movers: self.mass_movers.clone(),
             sky: self.sky.as_ref().map(SkyState::snapshot),
             rng: self.rng.clone(),
@@ -27129,6 +27139,7 @@ impl Engine {
         self.gamma = state.gamma;
         self.landscape_insert_thrust = state.landscape_insert_thrust;
         self.structures_snow_in = state.structures_snow_in;
+        self.flag_removeable = state.flag_removeable;
         self.landscape = state.landscape.clone();
         if let Some(values) = &state.scenario_values {
             self.scenario_values = Rc::new(values.clone());
@@ -35425,6 +35436,17 @@ impl Engine {
                     if !collection_rect.contains_offset(dx, dy) {
                         continue;
                     }
+                    // C4Object::Collect rejects FLAG/FlyBase before Enter
+                    // when cached C4RULE_FlagRemoveable is off. Keep this
+                    // ahead of RejectEntrance and every mutation/callback
+                    // (C4Object.cpp:5693-5700).
+                    if compat::flag_collection_blocked(
+                        self.objects[candidate_idx].definition_id.as_str(),
+                        self.objects[candidate_idx].state.action.name.as_str(),
+                        self.flag_removeable,
+                    ) {
+                        continue;
+                    }
                     if coach_debug_id() == Some(candidate_id.as_u64())
                         || coach_debug_id() == Some(obj1_id.as_u64())
                     {
@@ -36819,6 +36841,17 @@ impl Engine {
         self.structures_snow_in = self.objects.iter().any(|object| {
             object.definition_id.as_str() == "STSN"
                 && object.state.status.is_active()
+                && !object.destroyed
+        });
+    }
+
+    /// `C4Game::UpdateRules` caches C4RULE_FlagRemoveable from Def.Count
+    /// for FGRV. Inactive and contained objects still contribute; only an
+    /// assigned removal/deleted object no longer counts.
+    pub(crate) fn refresh_flag_removeable_rule(&mut self) {
+        self.flag_removeable = self.objects.iter().any(|object| {
+            object.definition_id.as_str() == "FGRV"
+                && object.state.status != ObjectStatus::Deleted
                 && !object.destroyed
         });
     }
