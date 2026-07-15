@@ -15193,6 +15193,7 @@ global func Step(state, frame, random)
                     name: "Henry".to_string(),
                     rank: 1,
                     experience: 120,
+                    death_count: 0,
                     total_playing_time: 0,
                     participation: 1,
                     in_action: false,

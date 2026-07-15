@@ -36571,6 +36571,7 @@ mod tests {
                     name: "Clonk".to_string(),
                     rank: 0,
                     experience: 0,
+                    death_count: 0,
                     total_playing_time: 0,
                     participation: 1,
                     in_action: false,

@@ -23,6 +23,9 @@ pub struct CrewInfo {
     pub rank: i32,
     /// `Experience` (default 0) — GetIdle prefers the highest.
     pub experience: i32,
+    /// Persistent death tally (`C4ObjectInfoCore::DeathCount`).
+    #[serde(default)]
+    pub death_count: i32,
     /// Persistent active-play seconds (C4ObjectInfoCore::TotalPlayingTime).
     #[serde(default)]
     pub total_playing_time: i32,
@@ -60,6 +63,7 @@ impl CrewInfo {
             name: entry("ObjectInfo", "Name").unwrap_or_else(|| "Clonk".to_string()),
             rank: int("ObjectInfo", "Rank", 0),
             experience: int("ObjectInfo", "Experience", 0),
+            death_count: int("ObjectInfo", "DeathCount", 0),
             total_playing_time: int("ObjectInfo", "TotalPlayingTime", 0),
             participation: int("ObjectInfo", "Participation", 1),
             in_action: false,
@@ -335,7 +339,7 @@ mod tests {
         std::fs::create_dir_all(&first).expect("info dir");
         std::fs::write(
             first.join("ObjectInfo.txt"),
-            "[ObjectInfo]\nid=COWB\nName=Wipf\nRank=2\nExperience=900\nParticipation=1\n\n[Physical]\nWalk=80000\n",
+            "[ObjectInfo]\nid=COWB\nName=Wipf\nRank=2\nExperience=900\nDeathCount=7\nParticipation=1\n\n[Physical]\nWalk=80000\n",
         )
         .expect("write info");
 
@@ -372,6 +376,7 @@ mod tests {
         assert_eq!(wipf.id, "COWB");
         assert_eq!(wipf.rank, 2);
         assert_eq!(wipf.experience, 900);
+        assert_eq!(wipf.death_count, 7);
         assert_eq!(wipf.participation, 1);
         assert!(!wipf.in_action);
         assert!(!wipf.has_died);
@@ -382,6 +387,7 @@ mod tests {
             .expect("Zorro parsed");
         assert_eq!(zorro.id, "TRPR");
         assert_eq!(zorro.rank, 0, "Rank defaults to 0");
+        assert_eq!(zorro.death_count, 0, "DeathCount defaults to 0");
         assert_eq!(zorro.participation, 1, "Participation defaults to 1");
     }
 
@@ -415,6 +421,16 @@ mod tests {
             "AutoContextMenu inherits the default classic style (C4InfoCore.cpp:103-115)"
         );
         assert!(player.crew.is_empty());
+    }
+
+    #[test]
+    fn legacy_crew_json_defaults_death_count_to_zero() {
+        let info: CrewInfo = serde_json::from_str(
+            r#"{"id":"CLNK","name":"Clonk","rank":0,"experience":0,"total_playing_time":0,"participation":1,"in_action":false,"in_action_time":0,"has_died":false}"#,
+        )
+        .expect("pre-DeathCount crew JSON remains readable");
+
+        assert_eq!(info.death_count, 0);
     }
 
     #[test]

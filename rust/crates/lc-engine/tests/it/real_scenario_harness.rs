@@ -4516,6 +4516,7 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
             name: name.to_owned(),
             rank: 5,
             experience: 0,
+            death_count: 0,
             total_playing_time: 0,
             participation: 1,
             in_action: false,

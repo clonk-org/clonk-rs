@@ -16132,6 +16132,7 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                                 .unwrap_or_else(|| "Clonk".to_string()),
                             rank,
                             experience: 0,
+                            death_count: 0,
                         })
                     }),
                     scope.info_link(),
@@ -16364,6 +16365,7 @@ fn recruit_or_create_crew_info(
             name: entry.name.clone(),
             rank: entry.rank,
             experience: entry.experience,
+            death_count: entry.death_count,
         };
         return Ok(Some((link, info, None)));
     }
@@ -16429,6 +16431,7 @@ fn recruit_or_create_crew_info(
             name,
             rank: 0,
             experience: 0,
+            death_count: 0,
             total_playing_time: 0,
             participation: 1,
             in_action: false,
@@ -16444,6 +16447,7 @@ fn recruit_or_create_crew_info(
         name: entry.name.clone(),
         rank: entry.rank,
         experience: entry.experience,
+        death_count: entry.death_count,
     };
     if let Some(player) = context.player_state_mut(player) {
         player.crew_created = player.crew_created.wrapping_add(1);
@@ -31220,6 +31224,7 @@ fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "Name" => Value::String(info.name.clone()),
             "Rank" => Value::Int(info.rank),
             "Experience" => Value::Int(info.experience),
+            "DeathCount" => Value::Int(info.death_count),
             other => {
                 tracing::debug!(entry = other, "GetObjectInfoCoreVal entry not modeled; nil");
                 Value::Nil
@@ -40225,6 +40230,7 @@ func RenameInfo(object target, string name, bool make_valid)
             name: name.to_string(),
             rank: 0,
             experience,
+            death_count: 0,
             total_playing_time: 0,
             participation: 1,
             in_action: false,

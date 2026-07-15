@@ -1327,6 +1327,9 @@ pub struct CrewObjectInfo {
     pub name: String,
     pub rank: i32,
     pub experience: i32,
+    /// Persistent C4ObjectInfoCore death tally.
+    #[serde(default)]
+    pub death_count: i32,
 }
 
 /// Stable identity of one C4ObjectInfo inside a player's CrewInfoList.
@@ -16353,6 +16356,7 @@ impl Engine {
                 name: info.name.clone(),
                 rank: info.rank,
                 experience: info.experience,
+                death_count: info.death_count,
             },
         );
         Rc::make_mut(&mut self.crew_info_links).insert(
@@ -16540,6 +16544,7 @@ impl Engine {
             name,
             rank: 0,
             experience: 0,
+            death_count: 0,
             total_playing_time: 0,
             participation: 1,
             in_action: false,
@@ -26907,6 +26912,7 @@ impl Engine {
                                     name: entry.name.clone(),
                                     rank: entry.rank,
                                     experience: entry.experience,
+                                    death_count: entry.death_count,
                                 };
                                 adjust_crew_experience(&mut info, change);
                                 entry.rank = info.rank;
@@ -33431,7 +33437,7 @@ impl Engine {
     /// only; clear effects with the death reason and honor revival, set the
     /// "Dead" action, clear commands, eject contents at their stored positions,
     /// clean player crew/cursor/view pointers, then run the Death script callback
-    /// with the death-causing player. Crew Info death counters remain open.
+    /// with the death-causing player.
     #[doc(hidden)]
     pub fn assign_death(&mut self, idx: usize, forced: bool) -> Result<(), EngineError> {
         if !self.objects[idx].state.alive {
@@ -33481,8 +33487,9 @@ impl Engine {
         // ClearCommands (C4Object.cpp:1157)
         self.objects[idx].command_queue.clear();
         self.objects[idx].commands.clear();
-        // Info->HasDied=true; Info->Retire(), but the pointer remains on the
-        // dead object (C4Object.cpp:1185-1189).
+        // Info->HasDied=true; ++Info->DeathCount; Info->Retire(), but the
+        // pointer remains on the dead object (C4Object.cpp:1185-1190).
+        let mut death_count = None;
         if let Some(link) = self.crew_info_links.get(&object_id).copied() {
             if let Some(info) = self
                 .crew_rosters
@@ -33490,6 +33497,8 @@ impl Engine {
                 .and_then(|roster| roster.get_mut(link.roster_index))
             {
                 info.has_died = true;
+                info.death_count = info.death_count.wrapping_add(1);
+                death_count = Some(info.death_count);
                 if info.in_action {
                     info.total_playing_time = info
                         .total_playing_time
@@ -33498,21 +33507,41 @@ impl Engine {
                 }
             }
         }
-        // Lose contents (C4Object.cpp:1165)
-        let contents = std::mem::take(&mut self.objects[idx].state.contents);
-        for content_id in contents {
-            let position = self
-                .find_object_index(content_id)
-                .map(|content_idx| self.objects[content_idx].state.position)
-                .unwrap_or(self.objects[idx].state.position);
-            let update = ObjectUpdate::new()
-                .clear_container()
-                .with_position(position);
-            self.apply_object_update(content_id, update)?;
+        if let Some(death_count) = death_count {
+            if let Some(info) = Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id) {
+                info.death_count = death_count;
+            }
         }
+        // Lose contents by repeatedly exiting the current live list head
+        // (C4Object.cpp:1192). Ejection/Departure may mutate the remaining
+        // contents, so taking or cloning the list once is observably wrong.
+        loop {
+            let Some(idx) = self.find_object_index(object_id) else {
+                return Ok(());
+            };
+            let content_id = self.objects[idx]
+                .state
+                .contents
+                .iter()
+                .copied()
+                .find(|&content_id| {
+                    self.find_object_index(content_id).is_some_and(|content_idx| {
+                        let content = &self.objects[content_idx];
+                        !content.destroyed && content.state.status != ObjectStatus::Deleted
+                    })
+                });
+            let Some(content_id) = content_id else {
+                break;
+            };
+            let _ = self.exit_object_at_current_position(content_id)?;
+        }
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
         // C4Player::ClearPointers(this, true): remove from crew and clear a
         // matching cursor/view pointer, then choose a replacement cursor.
         let owner = self.objects[idx].state.owner;
+        let owner_player_exists = self.players.contains_key(&owner);
         let removed_cursor = self.crew_cursor(owner) == Some(object_id);
         if removed_cursor {
             if let Some(selection) = self.crew_selection.get_mut(&owner) {
@@ -33539,6 +33568,20 @@ impl Engine {
         }
         if removed_cursor {
             self.player_adjust_cursor_command(owner)?;
+        }
+        // C++ retains a dead living object's range only while the owning
+        // player's FoWViewObjs still contains it. Until the separately queued
+        // explicit FoWViewObjs model lands, a valid unchanged owner plus a
+        // nonzero range is the available normal-state membership projection.
+        if let Some(idx) = self.find_object_index(object_id) {
+            let state = &mut self.objects[idx].state;
+            let retained_by_owner_fow = owner_player_exists
+                && state.owner == owner
+                && state.category & CATEGORY_LIVING != 0
+                && state.plr_view_range != 0;
+            if !retained_by_owner_fow {
+                state.plr_view_range = 0;
+            }
         }
         // Engine script call (C4Object.cpp:1173)
         if let Some(idx) = self.find_object_index(object_id) {
@@ -35954,7 +35997,7 @@ impl Engine {
             return Ok(false);
         };
         let object = &self.objects[object_index];
-        if object.destroyed || !object.state.status.is_active() {
+        if object.destroyed || object.state.status == ObjectStatus::Deleted {
             return Ok(false);
         }
         let Some(previous) = object.state.container else {
@@ -35987,7 +36030,8 @@ impl Engine {
         }
 
         if let Some(previous_index) = self.find_object_index(previous).filter(|&index| {
-            !self.objects[index].destroyed && self.objects[index].state.status.is_active()
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != ObjectStatus::Deleted
         }) {
             let _ = tolerate_script_error(self.call_object_function(
                 previous_index,
@@ -35996,7 +36040,8 @@ impl Engine {
             ))?;
         }
         if let Some(object_index) = self.find_object_index(object_id).filter(|&index| {
-            !self.objects[index].destroyed && self.objects[index].state.status.is_active()
+            !self.objects[index].destroyed
+                && self.objects[index].state.status != ObjectStatus::Deleted
         }) {
             let _ = tolerate_script_error(self.call_object_function(
                 object_index,

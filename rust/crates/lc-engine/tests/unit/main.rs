@@ -1290,6 +1290,325 @@ mod tests {
     }
 
     #[test]
+    fn assign_death_exits_contents_with_zero_motion_and_resets_view_range(
+    ) -> Result<(), EngineError> {
+        let script = r#"#strict 2
+local death_view_range;
+func Death()
+{
+    death_view_range = GetObjectVal("PlrViewRange", 0, this());
+    return 1;
+}
+"#;
+        let mut corpse_definition = Definition::from_script("DCOR", "Death corpse", script)?;
+        corpse_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                ("Dead".to_string(), ActionSpec::default()),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(91);
+        engine.register_player(PlayerConfig::new(0, "Owner"))?;
+        engine.register_definition(corpse_definition)?;
+        engine.register_definition(simple_definition("DITM"))?;
+
+        let corpse = engine.spawn_object(
+            SpawnConfig::new("DCOR")
+                .with_owner(0)
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(50, 50))
+                .with_fixed_velocity(FixedVec2::new(itofix(7), itofix(-3)))
+                .with_plr_view_range(333)
+                .with_alive(true),
+        )?;
+        let item = engine.spawn_object(
+            SpawnConfig::new("DITM")
+                .with_loaded(true)
+                .with_container(corpse)
+                .with_status(ObjectStatus::Inactive)
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(47, 53))
+                .with_fixed_position(FixedVec2::new(
+                    itofix(47) + math::C4Fixed::from_raw(123),
+                    itofix(53) - math::C4Fixed::from_raw(321),
+                ))
+                .with_fixed_velocity(FixedVec2::new(itofix(-4), itofix(6)))
+                .with_rotation(73)
+                .with_fixed_rotation(itofix(73))
+                .with_rotation_velocity(itofix(2))
+                .with_in_liquid(true)
+                .with_mobile(false),
+        )?;
+        let item_idx = engine.find_object_index(item).expect("item exists");
+        let item_position = engine.objects[item_idx].state.position;
+        let item_fixed_position = engine.objects[item_idx].fixed_position;
+        assert_ne!(
+            item_fixed_position,
+            FixedVec2::from_ints(item_position.x, item_position.y)
+        );
+        assert_ne!(engine.objects[item_idx].fixed_velocity, FixedVec2::ZERO);
+        assert_ne!(engine.objects[item_idx].fixed_rotation, math::C4Fixed::ZERO);
+        assert_ne!(
+            engine.objects[item_idx].rotation_velocity,
+            math::C4Fixed::ZERO
+        );
+
+        let corpse_idx = engine.find_object_index(corpse).expect("corpse exists");
+        engine.assign_death(corpse_idx, false)?;
+
+        let item_idx = engine.find_object_index(item).expect("item remains");
+        let item_state = &engine.objects[item_idx];
+        assert_eq!(item_state.state.container, None);
+        assert_eq!(item_state.state.position, item_position);
+        assert_eq!(
+            item_state.fixed_position,
+            FixedVec2::from_ints(item_position.x, item_position.y),
+            "Exit(x, y) snaps a loaded item's subpixel position to its integer coordinates"
+        );
+        assert_eq!(item_state.state.rotation, 0);
+        assert_eq!(item_state.fixed_rotation, math::C4Fixed::ZERO);
+        assert_eq!(item_state.fixed_velocity, FixedVec2::ZERO);
+        assert_eq!(item_state.state.velocity, Vector2::ZERO);
+        assert_eq!(item_state.rotation_velocity, math::C4Fixed::ZERO);
+        assert!(item_state.state.mobile);
+        assert!(!item_state.state.in_liquid);
+
+        let corpse_state = engine.object_snapshot(corpse).expect("corpse remains");
+        assert_eq!(corpse_state.plr_view_range, 0);
+        assert_eq!(
+            corpse_state.local_vars.get("death_view_range"),
+            Some(&Value::Int(0)),
+            "nonliving range is cleared before Death"
+        );
+
+        let living = engine.spawn_object(
+            SpawnConfig::new("DCOR")
+                .with_owner(0)
+                .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                .with_plr_view_range(333)
+                .with_alive(true),
+        )?;
+        let living_idx = engine.find_object_index(living).expect("living exists");
+        engine.assign_death(living_idx, false)?;
+        let living_state = engine
+            .object_snapshot(living)
+            .expect("living corpse remains");
+        assert_eq!(living_state.plr_view_range, 333);
+        assert_eq!(
+            living_state.local_vars.get("death_view_range"),
+            Some(&Value::Int(333)),
+            "owned living FoW objects retain their range for dead-view decay"
+        );
+
+        let ownerless = engine.spawn_object(
+            SpawnConfig::new("DCOR")
+                .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                .with_plr_view_range(333)
+                .with_alive(true),
+        )?;
+        let ownerless_idx = engine
+            .find_object_index(ownerless)
+            .expect("ownerless living exists");
+        engine.assign_death(ownerless_idx, false)?;
+        let ownerless_state = engine
+            .object_snapshot(ownerless)
+            .expect("ownerless corpse remains");
+        assert_eq!(ownerless_state.plr_view_range, 0);
+        assert_eq!(
+            ownerless_state.local_vars.get("death_view_range"),
+            Some(&Value::Int(0)),
+            "a living object without a valid owner has no death-view exemption"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assign_death_runs_exit_callbacks_in_contents_order_before_death() -> Result<(), EngineError>
+    {
+        let corpse_script = r#"#strict 2
+local trace, remaining, added;
+func Mark(int step) { trace = trace * 10 + step; return 1; }
+func Ejection(object item)
+{
+    item->MarkEjection(this());
+    if (!added)
+    {
+        var new_item = CreateContents(OITM);
+        new_item->SetMarker(7);
+        added = 1;
+    }
+    remaining = remaining * 10 + ContentsCount();
+    return 1;
+}
+func Death() { return Mark(5); }
+"#;
+        let item_script = r#"#strict 2
+local marker;
+func SetMarker(int value) { marker = value; return 1; }
+func MarkEjection(object old_container)
+{
+    return old_container->Mark(marker);
+}
+func Departure(object old_container)
+{
+    return old_container->Mark(marker + 1);
+}
+"#;
+        let mut corpse_definition = Definition::from_script("DORD", "Death order", corpse_script)?;
+        corpse_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                ("Dead".to_string(), ActionSpec::default()),
+            ]),
+        );
+        let item_definition = Definition::from_script("OITM", "Ordered item", item_script)?;
+
+        let mut engine = Engine::with_seed(92);
+        engine.register_definition(corpse_definition)?;
+        engine.register_definition(item_definition)?;
+        let corpse = engine.spawn_object(SpawnConfig::new("DORD").with_alive(true))?;
+        let marker_three = engine.spawn_object(
+            SpawnConfig::new("OITM")
+                .with_container(corpse)
+                .with_local_vars(HashMap::from([("marker".to_string(), Value::Int(3))])),
+        )?;
+        let marker_one = engine.spawn_object(
+            SpawnConfig::new("OITM")
+                .with_container(corpse)
+                .with_local_vars(HashMap::from([("marker".to_string(), Value::Int(1))])),
+        )?;
+        let corpse_idx = engine.find_object_index(corpse).expect("corpse exists");
+        assert_eq!(
+            engine.objects[corpse_idx].state.contents,
+            vec![marker_one, marker_three],
+            "same-definition stContents insertion puts the newest item first"
+        );
+
+        engine.assign_death(corpse_idx, false)?;
+
+        let corpse_state = engine.object_snapshot(corpse).expect("corpse remains");
+        assert!(corpse_state.contents.is_empty());
+        assert_eq!(
+            corpse_state.local_vars.get("trace"),
+            Some(&Value::Int(1_278_345))
+        );
+        assert_eq!(
+            corpse_state.local_vars.get("remaining"),
+            Some(&Value::Int(210)),
+            "each Ejection observes callback-added contents in the live list"
+        );
+        for item in [marker_one, marker_three] {
+            assert_eq!(
+                engine
+                    .object_snapshot(item)
+                    .expect("item remains")
+                    .container,
+                None
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn assign_death_updates_crew_info_before_ejection() -> Result<(), EngineError> {
+        let crew_script = r#"#strict 2
+local replacement, count_seen, replacement_joined;
+func SetReplacement(object target) { replacement = target; return 1; }
+func Ejection(object item)
+{
+    count_seen = GetObjectInfoCoreVal("DeathCount", "ObjectInfo");
+    replacement_joined = MakeCrewMember(replacement, 0);
+    return 1;
+}
+"#;
+        let mut crew_definition = Definition::from_script("DCRW", "Death crew", crew_script)?;
+        crew_definition.set_crew_member(true);
+        crew_definition.set_category(CATEGORY_OBJECT | CATEGORY_LIVING);
+        crew_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                ("Dead".to_string(), ActionSpec::default()),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(93);
+        engine.register_definition(crew_definition)?;
+        engine.register_definition(simple_definition("CITM"))?;
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("DCRW".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine.join_player(lifecycle_join_config(
+            "Death-info owner",
+            vec![player_file::CrewInfo {
+                id: "DCRW".to_string(),
+                name: "Veteran".to_string(),
+                rank: 0,
+                experience: 0,
+                death_count: 4,
+                total_playing_time: 17,
+                participation: 1,
+                in_action: false,
+                in_action_time: 0,
+                has_died: false,
+            }],
+        ))?;
+        let crew = engine.player(0).expect("player joins").crew()[0];
+        let original_link = engine.capture_state().crew_info_links[&crew];
+        let replacement = engine.spawn_object(
+            SpawnConfig::new("DCRW")
+                .with_owner(0)
+                .with_crew_member(false)
+                .with_alive(true),
+        )?;
+        let crew_idx = engine.find_object_index(crew).expect("crew exists");
+        engine.call_object_function(
+            crew_idx,
+            "SetReplacement",
+            vec![Value::Object(replacement.as_u64())],
+        )?;
+        engine.spawn_object(SpawnConfig::new("CITM").with_container(crew))?;
+        engine.game_time = 23;
+
+        engine.assign_death(crew_idx, false)?;
+
+        let corpse = engine.object_snapshot(crew).expect("dead crew remains");
+        assert_eq!(corpse.local_vars.get("count_seen"), Some(&Value::Int(5)));
+        assert_eq!(
+            corpse.local_vars.get("replacement_joined"),
+            Some(&Value::Bool(true))
+        );
+        let state = engine.capture_state();
+        assert_eq!(state.crew_info_links[&crew], original_link);
+        assert_eq!(state.crew_object_infos[&crew].death_count, 5);
+        let replacement_link = state.crew_info_links[&replacement];
+        assert_ne!(
+            replacement_link, original_link,
+            "HasDied is already set, so Ejection cannot recycle the dead info"
+        );
+        assert_eq!(state.crew_info_rosters[&0].len(), 2);
+        let dead_info = &state.crew_info_rosters[&0][original_link.roster_index];
+        assert!(dead_info.has_died);
+        assert_eq!(dead_info.death_count, 5);
+        assert!(!dead_info.in_action);
+        assert_eq!(dead_info.total_playing_time, 40);
+        let encoded = state
+            .to_json_string()
+            .expect("death-count state serializes");
+        let decoded = EngineState::from_json_str(&encoded)
+            .expect("death-count state deserializes");
+        assert_eq!(
+            decoded.crew_info_rosters[&0][original_link.roster_index].death_count,
+            5
+        );
+        assert_eq!(decoded.crew_object_infos[&crew].death_count, 5);
+        Ok(())
+    }
+
+    #[test]
     fn assign_death_refreshes_ocf_before_dead_action_callbacks() -> Result<(), EngineError> {
         // SetAction("Dead") refreshes OCF before the new StartCall and old
         // AbortCall (C4Object.cpp:4141,4173). AssignDeath has already cleared
@@ -11320,6 +11639,7 @@ public func RemoveCaptain(int player)
                     name: "Runner-up".to_string(),
                     rank: 1,
                     experience: 1_000,
+                    death_count: 0,
                     total_playing_time: 0,
                     participation: 1,
                     in_action: false,
@@ -11331,6 +11651,7 @@ public func RemoveCaptain(int player)
                     name: "Captain".to_string(),
                     rank: 5,
                     experience: 5_000,
+                    death_count: 0,
                     total_playing_time: 0,
                     participation: 1,
                     in_action: false,
@@ -20518,6 +20839,7 @@ global func InitializePlayer(int player)
                 name: name.to_string(),
                 rank,
                 experience: 0,
+                death_count: 0,
                 total_playing_time: 0,
                 participation: 1,
                 in_action: false,
@@ -20868,6 +21190,7 @@ func ControlUpSingle()
             name: "Existing".to_string(),
             rank: 0,
             experience: 0,
+            death_count: 0,
             total_playing_time: 0,
             participation: 1,
             in_action: false,
@@ -29041,6 +29364,7 @@ func RemoveAndRecruit(object target) {
                         name: "First pointer".to_string(),
                         rank: 4,
                         experience: 900,
+                        death_count: 0,
                         total_playing_time: 0,
                         participation: 1,
                         in_action: false,
@@ -29052,6 +29376,7 @@ func RemoveAndRecruit(object target) {
                         name: "Second pointer".to_string(),
                         rank: 4,
                         experience: 900,
+                        death_count: 0,
                         total_playing_time: 0,
                         participation: 1,
                         in_action: false,
@@ -29254,6 +29579,7 @@ func RemoveAndRecruit(object target) {
                     name: "Rookie".to_string(),
                     rank: 0,
                     experience: 0,
+                    death_count: 0,
                     total_playing_time: 0,
                     participation: 1,
                     in_action: false,
@@ -29343,6 +29669,7 @@ func AwardSelf(int amount) {
                     name: "Rookie".to_string(),
                     rank: 0,
                     experience: 0,
+                    death_count: 0,
                     total_playing_time: 0,
                     participation: 1,
                     in_action: false,
@@ -29797,6 +30124,7 @@ func RemoveAndGrabSelf() {
                     name: "Veteran Ada".to_string(),
                     rank: 4,
                     experience: 8_000,
+                    death_count: 0,
                     total_playing_time: 17,
                     participation: 3,
                     in_action: false,
