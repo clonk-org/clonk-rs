@@ -1254,6 +1254,10 @@ impl<'a> Parser<'a> {
                 let base_target = Self::expression_to_assignment_target(*base, eq_token)?;
                 Ok(AssignmentTarget::Index(Box::new(base_target), index))
             }
+            Expr::ArrayAppend(base) => {
+                let base_target = Self::expression_to_assignment_target(*base, eq_token)?;
+                Ok(AssignmentTarget::ArrayAppend(Box::new(base_target)))
+            }
             // Special case: Local(expr), Var(expr), and EffectVar(args...) are assignable lvalues
             // Local() and Var() without arguments default to slot 0
             Expr::Call {
@@ -1331,7 +1335,10 @@ impl<'a> Parser<'a> {
 
     fn validate_lvalue(&self, expr: &Expr, token: &Token) -> Result<(), ParseError> {
         match expr {
-            Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) => Ok(()),
+            Expr::Variable(_)
+            | Expr::Property(_, _)
+            | Expr::Index(_, _)
+            | Expr::ArrayAppend(_) => Ok(()),
             // Prefix increment/decrement return lvalues (like in C++)
             // This allows patterns like ++++i or --(--i)
             Expr::PreIncrement(_) | Expr::PreDecrement(_) => Ok(()),
@@ -1357,6 +1364,16 @@ impl<'a> Parser<'a> {
                 token.line,
                 token.column,
             )),
+        }
+    }
+
+    fn assignment_target_contains_array_append(target: &AssignmentTarget) -> bool {
+        match target {
+            AssignmentTarget::ArrayAppend(_) => true,
+            AssignmentTarget::Property(base, _) | AssignmentTarget::Index(base, _) => {
+                Self::assignment_target_contains_array_append(base)
+            }
+            _ => false,
         }
     }
 
@@ -1459,35 +1476,23 @@ impl<'a> Parser<'a> {
                 return Ok(Expr::Assignment(target, Box::new(value)));
             }
 
-            // Desugar compound assignments: a += b becomes a = a + b
-            let final_value = match op_symbol {
-                Symbol::Equal => value,
-                Symbol::PlusEqual => Expr::Binary(Box::new(left), BinaryOp::Add, Box::new(value)),
-                Symbol::MinusEqual => Expr::Binary(Box::new(left), BinaryOp::Sub, Box::new(value)),
-                Symbol::StarEqual => Expr::Binary(Box::new(left), BinaryOp::Mul, Box::new(value)),
-                Symbol::SlashEqual => Expr::Binary(Box::new(left), BinaryOp::Div, Box::new(value)),
-                Symbol::PercentEqual => {
-                    Expr::Binary(Box::new(left), BinaryOp::Mod, Box::new(value))
-                }
-                Symbol::ConcatEqual => {
-                    Expr::Binary(Box::new(left), BinaryOp::Concat, Box::new(value))
-                }
-                // `a ??= b` ≙ `a = a ?? b` (AB_NilCoalescingIt,
-                // C4AulParse.cpp:477): `??`'s short-circuit keeps the rhs
-                // unevaluated when `a` is non-nil.
-                Symbol::QuestionQuestionEqual => {
-                    Expr::Binary(Box::new(left), BinaryOp::NilCoalescing, Box::new(value))
-                }
-                // Bitwise compound assignments
-                Symbol::AndEqual => Expr::Binary(Box::new(left), BinaryOp::BitAnd, Box::new(value)),
-                Symbol::OrEqual => Expr::Binary(Box::new(left), BinaryOp::BitOr, Box::new(value)),
-                Symbol::XorEqual => Expr::Binary(Box::new(left), BinaryOp::BitXor, Box::new(value)),
-                Symbol::LeftShiftEqual => {
-                    Expr::Binary(Box::new(left), BinaryOp::LeftShift, Box::new(value))
-                }
-                Symbol::RightShiftEqual => {
-                    Expr::Binary(Box::new(left), BinaryOp::RightShift, Box::new(value))
-                }
+            // Desugar compound assignments: a += b becomes a = a + b.
+            // `array[]` is the one side-effecting lvalue expression: retain
+            // its new slot across RHS evaluation instead of appending twice.
+            let operation = match op_symbol {
+                Symbol::Equal => None,
+                Symbol::PlusEqual => Some(BinaryOp::Add),
+                Symbol::MinusEqual => Some(BinaryOp::Sub),
+                Symbol::StarEqual => Some(BinaryOp::Mul),
+                Symbol::SlashEqual => Some(BinaryOp::Div),
+                Symbol::PercentEqual => Some(BinaryOp::Mod),
+                Symbol::ConcatEqual => Some(BinaryOp::Concat),
+                Symbol::QuestionQuestionEqual => Some(BinaryOp::NilCoalescing),
+                Symbol::AndEqual => Some(BinaryOp::BitAnd),
+                Symbol::OrEqual => Some(BinaryOp::BitOr),
+                Symbol::XorEqual => Some(BinaryOp::BitXor),
+                Symbol::LeftShiftEqual => Some(BinaryOp::LeftShift),
+                Symbol::RightShiftEqual => Some(BinaryOp::RightShift),
                 _ => {
                     return Err(ParseError::new(
                         format!("unknown assignment operator {op_symbol:?}"),
@@ -1497,6 +1502,19 @@ impl<'a> Parser<'a> {
                 }
             };
 
+            if Self::assignment_target_contains_array_append(&target) {
+                return Ok(Expr::ArrayAppendAssignment {
+                    target,
+                    operation,
+                    operator,
+                    value: Box::new(value),
+                });
+            }
+
+            let final_value = match operation {
+                Some(operation) => Expr::Binary(Box::new(left), operation, Box::new(value)),
+                None => value,
+            };
             Ok(Expr::Assignment(target, Box::new(final_value)))
         } else {
             Ok(left)
@@ -1866,7 +1884,18 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_navigation_operation(&mut self) -> Result<Option<NavigationOperation>, ParseError> {
-        if self.consume_if_symbol(Symbol::LBracket)?.is_some() {
+        if let Some(bracket) = self.consume_if_symbol(Symbol::LBracket)? {
+            if self.check_symbol(Symbol::RBracket)? {
+                if self.strict_level == 0 {
+                    return Err(ParseError::new(
+                        "unexpected '['".to_string(),
+                        bracket.line,
+                        bracket.column,
+                    ));
+                }
+                self.consume()?;
+                return Ok(Some(NavigationOperation::ArrayAppend));
+            }
             let index = self.parse_expression()?;
             self.expect_symbol(Symbol::RBracket, "expected ']' after index expression")?;
             return Ok(Some(NavigationOperation::Index(Box::new(index))));
@@ -1910,6 +1939,7 @@ impl<'a> Parser<'a> {
     fn apply_navigation_operation(expr: Expr, operation: NavigationOperation) -> Expr {
         match operation {
             NavigationOperation::Index(index) => Expr::Index(Box::new(expr), index),
+            NavigationOperation::ArrayAppend => Expr::ArrayAppend(Box::new(expr)),
             NavigationOperation::Property(name) => Expr::Property(Box::new(expr), name),
             NavigationOperation::MethodCall {
                 name,

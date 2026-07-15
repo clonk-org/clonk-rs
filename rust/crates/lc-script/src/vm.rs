@@ -2008,7 +2008,7 @@ impl<'a> Vm<'a> {
                     return self.evaluate(rhs, env, depth);
                 }
                 let right = self.evaluate(rhs, env, depth)?;
-                self.eval_binary(left, op, right, env.strict_level)
+                self.eval_binary(left, op, right, env.strict_level, None)
             }
             Expr::Call {
                 callee,
@@ -2434,6 +2434,17 @@ impl<'a> Vm<'a> {
                 )?;
                 self.eval_index(collection, idx)
             }
+            Expr::ArrayAppend(_) => self.expr_to_lvalue(expr, env, depth)?.read(),
+            Expr::ArrayAppendAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => self
+                .evaluate_array_append_assignment_tracked(
+                    target, operation, operator, value, env, depth,
+                )
+                .map(|tracked| tracked.value),
             Expr::Property(target, name) => {
                 let proplist = self.evaluate(target, env, depth)?;
                 self.eval_property(proplist, name)
@@ -2535,6 +2546,15 @@ impl<'a> Vm<'a> {
                 };
                 Ok(TrackedValue { value, identity })
             }
+            Expr::ArrayAppend(_) => self.expr_to_lvalue(expr, env, depth)?.read_tracked(),
+            Expr::ArrayAppendAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => self.evaluate_array_append_assignment_tracked(
+                target, operation, operator, value, env, depth,
+            ),
             Expr::Property(target, name) => {
                 let collection = self.evaluate_tracked(target, env, depth)?;
                 let identity = collection.identity_at(&PathSegment::Property(name.clone()));
@@ -2786,6 +2806,26 @@ impl<'a> Vm<'a> {
                     };
                     TrackedValue { value, identity }
                 }
+                // SetNoRef before AB_JUMPNIL makes the guarded base a value.
+                // AB_ARRAY_APPEND therefore operates on that detached value:
+                // it yields nil but does not grow the original array.
+                NavigationOperation::ArrayAppend => match current.value {
+                    Value::Array(elements) if elements.len() < ARRAY_MAX_SIZE => {
+                        TrackedValue::runtime(Value::Nil)
+                    }
+                    Value::Array(_) => return Err(RuntimeError::new("out of memory")),
+                    Value::Nil => {
+                        return Err(RuntimeError::new(
+                            "array append accesss: can't access nil as an array!",
+                        ))
+                    }
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "array append accesss: can't access {} as an array!",
+                            other.type_name()
+                        )))
+                    }
+                },
                 NavigationOperation::Property(name) => {
                     let identity = current.identity_at(&PathSegment::Property(name.clone()));
                     let value = self.eval_property(current.value, name)?;
@@ -2809,6 +2849,45 @@ impl<'a> Vm<'a> {
         }
 
         Ok(current)
+    }
+
+    fn evaluate_array_append_assignment_tracked(
+        &self,
+        target: &AssignmentTarget,
+        operation: &Option<BinaryOp>,
+        operator: &str,
+        value: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<TrackedValue, RuntimeError> {
+        // AB_ARRAY_APPEND creates and retains one reference before the RHS
+        // runs. Generic compound desugaring cannot model that side effect: it
+        // would evaluate `array[]` once for the old value and again for the
+        // write, appending two slots.
+        let reference = self.assignment_target_to_lvalue(env, target, depth)?;
+        let left = reference.read_tracked()?;
+        let result = if operation.is_none() {
+            self.evaluate_tracked(value, env, depth)?
+        } else if matches!(operation, Some(BinaryOp::NilCoalescing))
+            && !matches!(left.value, Value::Nil)
+        {
+            left
+        } else {
+            let right = self.evaluate_tracked(value, env, depth)?;
+            if matches!(operation, Some(BinaryOp::NilCoalescing)) {
+                right
+            } else {
+                TrackedValue::runtime(self.eval_binary(
+                    left.value,
+                    operation.as_ref().expect("compound operation exists"),
+                    right.value,
+                    env.strict_level,
+                    Some(operator),
+                )?)
+            }
+        };
+        reference.write_tracked(result.clone())?;
+        Ok(result)
     }
 
     /// Resolve an increment/decrement operand to its C4Value reference once,
@@ -2940,6 +3019,7 @@ impl<'a> Vm<'a> {
         op: &BinaryOp,
         right: Value,
         strict: Option<u8>,
+        display_symbol: Option<&str>,
     ) -> Result<Value, RuntimeError> {
         use BinaryOp::*;
         // Binary integer operators instantiate CheckOpPars with both
@@ -2965,6 +3045,7 @@ impl<'a> Vm<'a> {
             RightShift => Some(">>"),
             _ => None,
         } {
+            let symbol = display_symbol.unwrap_or(symbol);
             Self::reject_strict3_nil_operand(&left, strict, symbol, " left side")?;
             Self::reject_strict3_nil_operand(&right, strict, symbol, " right side")?;
         }
@@ -3589,7 +3670,11 @@ impl<'a> Vm<'a> {
     fn expr_can_be_lvalue(expr: &Expr) -> bool {
         matches!(
             expr,
-            Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) | Expr::Call { .. }
+            Expr::Variable(_)
+                | Expr::Property(_, _)
+                | Expr::Index(_, _)
+                | Expr::ArrayAppend(_)
+                | Expr::Call { .. }
         )
     }
 
@@ -3600,7 +3685,10 @@ impl<'a> Vm<'a> {
     /// a value (FnSimFlight's C4Value* parameters, C4Script.cpp:5309-5312).
     fn expr_can_be_host_reference(&self, expr: &Expr) -> bool {
         match expr {
-            Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) => true,
+            Expr::Variable(_)
+            | Expr::Property(_, _)
+            | Expr::Index(_, _)
+            | Expr::ArrayAppend(_) => true,
             Expr::Call { callee, .. } => match callee.as_ref() {
                 Expr::Variable(name) => {
                     matches!(
@@ -3919,6 +4007,10 @@ impl<'a> Vm<'a> {
                 reference.detach_container_identity_if_shared();
                 Ok(reference.append(PathSegment::Index(index)))
             }
+            AssignmentTarget::ArrayAppend(base) => {
+                let reference = self.assignment_target_to_lvalue(env, base, depth)?;
+                self.append_array_slot(reference)
+            }
             AssignmentTarget::LocalSlot(index_expr) => {
                 let index = self.evaluate_slot_index("Local()", index_expr, env, depth)?;
                 Ok(self.tracked_cell(env.object_state.local_slot_cell(index)))
@@ -4181,6 +4273,7 @@ impl<'a> Vm<'a> {
                 Self::grow_empty_negative_array(Some(&reference), &collection, &index)?;
                 Ok(Some(reference.append(PathSegment::Index(index))))
             }
+            Expr::ArrayAppend(_) => self.expr_to_lvalue(expr, env, depth).map(Some),
             Expr::Call {
                 callee,
                 is_optional,
@@ -4196,6 +4289,36 @@ impl<'a> Vm<'a> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// AB_ARRAY_APPEND grows the referenced array immediately and leaves a
+    /// live reference to its new nil slot (C4AulExec.cpp:971-981). Creating
+    /// the slot here, rather than waiting for a later write, preserves the
+    /// side effect of a plain `array[]` read and of an operator that errors.
+    fn append_array_slot(&self, reference: LValueRef) -> Result<LValueRef, RuntimeError> {
+        let array = reference.read()?;
+        let length = match array {
+            Value::Array(elements) => elements.len(),
+            Value::Nil => {
+                return Err(RuntimeError::new(
+                    "array append accesss: can't access nil as an array!",
+                ))
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "array append accesss: can't access {} as an array!",
+                    other.type_name()
+                )))
+            }
+        };
+        reference.detach_container_identity_if_shared();
+        if length >= ARRAY_MAX_SIZE {
+            return Err(RuntimeError::new("out of memory"));
+        }
+        let index = i32::try_from(length).map_err(|_| RuntimeError::new("out of memory"))?;
+        let appended = reference.append(PathSegment::Index(Value::Int(index)));
+        appended.write(Value::Nil)?;
+        Ok(appended)
     }
 
     fn grow_empty_negative_array(
@@ -4286,6 +4409,10 @@ impl<'a> Vm<'a> {
                     Box::new(base_target),
                     Box::new((**index).clone()),
                 ))
+            }
+            Expr::ArrayAppend(base) => {
+                let base_target = Self::expr_to_assignment_target(base)?;
+                Ok(AssignmentTarget::ArrayAppend(Box::new(base_target)))
             }
             // Special case: Local(expr), Var(expr), and EffectVar(args...) are valid for increment/decrement
             Expr::Call {

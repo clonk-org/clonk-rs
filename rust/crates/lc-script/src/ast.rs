@@ -283,6 +283,9 @@ pub enum AssignmentTarget {
     Variable(String),
     Property(Box<AssignmentTarget>, String),
     Index(Box<AssignmentTarget>, Box<Expr>), // arr[index] as lvalue
+    /// `array[]`: AB_ARRAY_APPEND grows the array immediately and yields a
+    /// reference to the new last slot.
+    ArrayAppend(Box<AssignmentTarget>),
     LocalSlot(Box<Expr>),                    // Local(expr) as lvalue - object-local slot
     VarSlot(Box<Expr>),                      // Var(expr) as lvalue - function-local slot
     EffectSlot(Vec<Expr>), // EffectVar(index, target, effect_num) as lvalue - effect variable slot
@@ -316,6 +319,16 @@ pub enum Expr {
     Proplist(Vec<(String, Expr)>),
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
+    ArrayAppend(Box<Expr>),
+    /// Assignment to `array[]` must retain the new append reference while the
+    /// RHS runs. Compound assignment also must not evaluate the append
+    /// expression a second time through the generic desugaring.
+    ArrayAppendAssignment {
+        target: AssignmentTarget,
+        operation: Option<BinaryOp>,
+        operator: &'static str,
+        value: Box<Expr>,
+    },
     /// Strict-3 `receiver?->Call()`, `receiver?[index]`, and
     /// `receiver?.property`. The first step and every step preceded by a
     /// later `?` guards the complete remaining suffix on nil; the node is
@@ -344,6 +357,7 @@ pub struct SafeNavigationStep {
 #[derive(Debug, Clone, PartialEq)]
 pub enum NavigationOperation {
     Index(Box<Expr>),
+    ArrayAppend,
     Property(String),
     MethodCall {
         name: String,
