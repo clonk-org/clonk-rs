@@ -36773,6 +36773,9 @@ mod tests {
             real_installed_scenario_app("Western.c4f/Goldrush.c4s", "Goldrush dialog parity");
         let mut baseline = vec![0_u8; 320 * 200 * 4];
         app.render(&mut baseline).expect("baseline renders");
+        app.engine
+            .tick()
+            .expect("settle native ATTACH containment callbacks");
 
         let owner = app.local_owner;
         let snapshot = app.engine.snapshot();

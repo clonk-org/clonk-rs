@@ -13569,6 +13569,337 @@ protected func GrabLost()
         }
     }
 
+    fn l075_attach_actor_definition(
+        id: &str,
+        script: &str,
+        abort_call: Option<&str>,
+    ) -> Definition {
+        let mut definition = Definition::from_script(id, id, script).expect("actor compiles");
+        definition.set_category(CATEGORY_OBJECT);
+        definition.set_c4_callback_convention(true);
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+        let mut attach = ActionSpec::default().with_procedure("ATTACH");
+        if let Some(abort_call) = abort_call {
+            attach = attach.with_abort_call(abort_call);
+        }
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                ("Attach".to_string(), attach),
+                ("Marker".to_string(), ActionSpec::default()),
+            ]),
+        );
+        definition
+    }
+
+    fn l075_point_definition(id: &str, script: &str) -> Definition {
+        let mut definition = Definition::from_script(id, id, script).expect("point compiles");
+        definition.set_category(CATEGORY_OBJECT);
+        definition.set_c4_callback_convention(true);
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+        definition
+    }
+
+    #[test]
+    fn l075_attach_lost_target_sets_idle_before_lost_callback() {
+        let script = r#"#strict 2
+local callback_order, abort_action, lost_action;
+
+protected func AttachAbort(int old_phase)
+{
+    callback_order = callback_order * 10 + 1;
+    abort_action = GetAction();
+    return 1;
+}
+
+protected func AttachTargetLost()
+{
+    callback_order = callback_order * 10 + 2;
+    lost_action = GetAction();
+    SetAction("Marker");
+    return 1;
+}
+"#;
+        let mut engine = Engine::with_seed(75);
+        engine
+            .register_definition(l075_attach_actor_definition(
+                "L75A",
+                script,
+                Some("AttachAbort"),
+            ))
+            .expect("actor registers");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("L75A")
+                    .with_action(ActionState::new("Attach"))
+                    .with_loaded(true),
+            )
+            .expect("actor spawns");
+        let index = engine.find_object_index(actor).expect("actor exists");
+
+        let _ = engine
+            .apply_physics_at_index(index)
+            .expect("lost Attach target resolves");
+
+        let index = engine.find_object_index(actor).expect("actor remains");
+        let object = &engine.objects[index];
+        assert_eq!(
+            object.state.local_vars.get("callback_order"),
+            Some(&Value::Int(12)),
+            "SetAction(ActIdle)'s Attach AbortCall precedes AttachTargetLost"
+        );
+        assert_eq!(
+            object.state.local_vars.get("abort_action"),
+            Some(&Value::String("Idle".to_string()))
+        );
+        assert_eq!(
+            object.state.local_vars.get("lost_action"),
+            Some(&Value::String("Idle".to_string()))
+        );
+        assert_eq!(
+            object.state.action.name, "Marker",
+            "AttachTargetLost runs after the Idle transition and may replace it"
+        );
+    }
+
+    #[test]
+    fn l075_attach_incomplete_target_respects_incomplete_activity() {
+        let actor_script = r#"#strict 2
+local lost_calls;
+protected func AttachTargetLost() { lost_calls += 1; return 1; }
+"#;
+        let mut blocked = l075_point_definition("L75N", "#strict 2");
+        blocked.set_incomplete_activity(false);
+        let mut allowed = l075_point_definition("L75Y", "#strict 2");
+        allowed.set_incomplete_activity(true);
+
+        let mut engine = Engine::with_seed(75);
+        engine
+            .register_definition(l075_attach_actor_definition("L75I", actor_script, None))
+            .expect("actor registers");
+        engine
+            .register_definition(blocked)
+            .expect("blocked target registers");
+        engine
+            .register_definition(allowed)
+            .expect("allowed target registers");
+
+        for (target_definition, permits_attach, offset) in
+            [("L75N", false, 0), ("L75Y", true, 20)]
+        {
+            let target_position = Vector2::new(50 + offset, 60);
+            let target = engine
+                .spawn_object(
+                    SpawnConfig::new(target_definition)
+                        .with_position(target_position)
+                        .with_construction(FULL_CON / 2)
+                        .with_loaded(true),
+                )
+                .expect("partial target spawns");
+            let actor_position = Vector2::new(5 + offset, 6);
+            let mut attach = ActionState::new("Attach");
+            attach.target = Some(target);
+            let actor = engine
+                .spawn_object(
+                    SpawnConfig::new("L75I")
+                        .with_position(actor_position)
+                        .with_action(attach)
+                        .with_loaded(true),
+                )
+                .expect("actor spawns");
+            let index = engine.find_object_index(actor).expect("actor exists");
+
+            let _ = engine
+                .apply_physics_at_index(index)
+                .expect("partial-target Attach resolves");
+
+            let index = engine.find_object_index(actor).expect("actor remains");
+            let object = &engine.objects[index];
+            assert_eq!(
+                object.state.local_vars.get("lost_calls"),
+                None,
+                "an extant incomplete target is not a lost target"
+            );
+            if permits_attach {
+                assert_eq!(object.state.action.name, "Attach");
+                assert_eq!(object.state.position, target_position);
+            } else {
+                assert_eq!(object.state.action.name, "Idle");
+                assert_eq!(object.state.position, actor_position);
+                assert_eq!(
+                    object.state.action.target,
+                    Some(target),
+                    "SetAction(ActIdle) preserves an unsupplied target"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn l075_attach_forced_enter_callbacks_recheck_cleared_target() {
+        let actor_script = r#"#strict 2
+local callback_order, lost_action;
+
+public func Mark(int step)
+{
+    callback_order = callback_order * 10 + step;
+    return 1;
+}
+
+protected func RejectEntrance(object container)
+{
+    Mark(1);
+    return 0;
+}
+
+protected func Entrance(object container)
+{
+    Mark(3);
+    SetActionTargets();
+    return 1;
+}
+
+protected func AttachTargetLost()
+{
+    Mark(4);
+    lost_action = GetAction();
+    return 1;
+}
+"#;
+        let container_script = r#"#strict 2
+protected func Collection2(object item) { item->Mark(2); return 1; }
+"#;
+        let mut engine = Engine::with_seed(75);
+        engine
+            .register_definition(l075_attach_actor_definition("L75E", actor_script, None))
+            .expect("actor registers");
+        engine
+            .register_definition(l075_point_definition("L75C", container_script))
+            .expect("container registers");
+        engine
+            .register_definition(l075_point_definition("L75T", "#strict 2"))
+            .expect("target registers");
+
+        let container = engine
+            .spawn_object(SpawnConfig::new("L75C"))
+            .expect("container spawns");
+        let target_position = Vector2::new(80, 90);
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("L75T")
+                    .with_position(target_position)
+                    .with_container(container)
+                    .with_loaded(true),
+            )
+            .expect("contained target spawns");
+        let actor_position = Vector2::new(5, 6);
+        let mut attach = ActionState::new("Attach");
+        attach.target = Some(target);
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("L75E")
+                    .with_position(actor_position)
+                    .with_action(attach)
+                    .with_loaded(true),
+            )
+            .expect("actor spawns");
+        let index = engine.find_object_index(actor).expect("actor exists");
+
+        let _ = engine
+            .apply_physics_at_index(index)
+            .expect("forced Enter resolves");
+
+        let index = engine.find_object_index(actor).expect("actor remains");
+        let object = &engine.objects[index];
+        assert_eq!(object.state.container, Some(container));
+        assert_eq!(
+            object.state.local_vars.get("callback_order"),
+            Some(&Value::Int(1234)),
+            "RejectEntrance -> Collection2 -> Entrance -> AttachTargetLost"
+        );
+        assert_eq!(
+            object.state.local_vars.get("lost_action"),
+            Some(&Value::String("Idle".to_string()))
+        );
+        assert_eq!(object.state.action.name, "Idle");
+        assert_eq!(object.state.action.target, None);
+        assert_eq!(
+            object.state.position,
+            Vector2::ZERO,
+            "Enter copies the container motion, and clearing the target prevents a later stale force-position"
+        );
+    }
+
+    #[test]
+    fn l075_attach_forced_exit_runs_ejection_and_departure() {
+        let actor_script = r#"#strict 2
+local callback_order;
+public func Mark(int step) { callback_order = callback_order * 10 + step; return 1; }
+protected func Departure(object container) { Mark(2); return 1; }
+"#;
+        let container_script = r#"#strict 2
+protected func Ejection(object item) { item->Mark(1); return 1; }
+"#;
+        let mut engine = Engine::with_seed(75);
+        engine
+            .register_definition(l075_attach_actor_definition("L75X", actor_script, None))
+            .expect("actor registers");
+        engine
+            .register_definition(l075_point_definition("L75O", container_script))
+            .expect("old container registers");
+        engine
+            .register_definition(l075_point_definition("L75U", "#strict 2"))
+            .expect("target registers");
+
+        let old_container = engine
+            .spawn_object(SpawnConfig::new("L75O"))
+            .expect("old container spawns");
+        let target_position = Vector2::new(70, 80);
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("L75U")
+                    .with_position(target_position)
+                    .with_loaded(true),
+            )
+            .expect("uncontained target spawns");
+        let mut attach = ActionState::new("Attach");
+        attach.target = Some(target);
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("L75X")
+                    .with_position(Vector2::new(7, 8))
+                    .with_rotation(37)
+                    .with_fixed_rotation(itofix(37))
+                    .with_rotation_velocity(itofix(4))
+                    .with_container(old_container)
+                    .with_action(attach)
+                    .with_loaded(true),
+            )
+            .expect("contained actor spawns");
+        let index = engine.find_object_index(actor).expect("actor exists");
+
+        let _ = engine
+            .apply_physics_at_index(index)
+            .expect("forced Exit resolves");
+
+        let index = engine.find_object_index(actor).expect("actor remains");
+        let object = &engine.objects[index];
+        assert_eq!(object.state.container, None);
+        assert_eq!(
+            object.state.local_vars.get("callback_order"),
+            Some(&Value::Int(12)),
+            "Ejection precedes Departure"
+        );
+        assert_eq!(object.state.action.name, "Attach");
+        assert_eq!(object.state.action.target, Some(target));
+        assert_eq!(object.state.position, target_position);
+        assert_eq!(object.state.rotation, 37);
+        assert_eq!(object.fixed_rotation, itofix(37));
+        assert_eq!(object.rotation_velocity, C4Fixed::ZERO);
+        assert_eq!(object.fixed_velocity, FixedVec2::ZERO);
+    }
+
     #[test]
     fn fight_procedure_moves_toward_target() {
         let script = r#"

@@ -30471,7 +30471,7 @@ impl Engine {
         }
 
         if matches!(procedure, ActionProcedure::Attach)
-            && !self.apply_attach_procedure(idx, &definition_id)
+            && !self.apply_attach_procedure(idx, &definition_id)?
         {
             return Ok(false);
         }
@@ -33445,57 +33445,122 @@ impl Engine {
         Ok(())
     }
 
-    fn apply_attach_procedure(&mut self, idx: usize, definition_id: &DefinitionId) -> bool {
+    /// The status-gated tail shared by DFA_ATTACH's two lost-target arms:
+    /// ordinary SetAction(ActIdle), then AttachTargetLost on the same live
+    /// object. The action transition may be denied or remove the object; its
+    /// result is deliberately ignored (C4Object.cpp:5317-5325, 5341-5349).
+    fn notify_attach_target_lost(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        if self.objects[idx].state.status == ObjectStatus::Deleted {
+            return Ok(());
+        }
+        let definition_id = self.objects[idx].definition_id.clone();
+        let _ = tolerate_script_error(self.action_with_calls(idx, &definition_id, "Idle"))?;
+        if let Some(idx) = self.find_object_index(object_id) {
+            let _ = tolerate_script_error(self.call_object_function(
+                idx,
+                "AttachTargetLost",
+                Vec::new(),
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn apply_attach_procedure(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+    ) -> Result<bool, EngineError> {
+        let object_id = self.objects[idx].id;
         let Some(target_id) = self.objects[idx].state.action.target else {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            self.notify_attach_target_lost(object_id)?;
+            return Ok(false);
         };
 
-        let Some(target_idx) = self.find_object_index(target_id) else {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+        let Some(target_idx) = self.find_object_index(target_id).filter(|&target_idx| {
+            !self.objects[target_idx].destroyed
+                && self.objects[target_idx].state.status != ObjectStatus::Deleted
+        }) else {
+            // AssignRemoval normally clears Action.Target before ExecAction.
+            // Keep malformed/dangling fixture state equivalent to that null
+            // pointer before dispatching the native lost-target sequence.
+            if let Some(idx) = self.find_object_index(object_id) {
+                if self.objects[idx].state.action.target == Some(target_id) {
+                    self.objects[idx].state.action.target = None;
+                }
+            }
+            self.notify_attach_target_lost(object_id)?;
+            return Ok(false);
         };
 
-        if target_idx == idx {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+        let target_is_incomplete = self.objects[target_idx].state.ocf & ocf::FULL_CON == 0;
+        let target_allows_incomplete_activity = self
+            .definitions
+            .get(&self.objects[target_idx].definition_id)
+            .is_some_and(Definition::incomplete_activity);
+        if target_is_incomplete && !target_allows_incomplete_activity {
+            let _ = tolerate_script_error(self.action_with_calls(
+                idx,
+                definition_id,
+                "Idle",
+            ))?;
+            return Ok(false);
         }
 
-        let (target_position, target_vertices, target_container, target_destroyed, target_status) = {
-            let target = &self.objects[target_idx];
-            (
-                target.state.position,
-                target.state.vertices.clone(),
-                target.state.container,
-                target.destroyed,
-                target.state.status,
-            )
-        };
+        let target_container = self.objects[target_idx].state.container;
+        let previous_container = self.objects[idx].state.container;
+        if previous_container != target_container {
+            match target_container {
+                Some(container_id) => {
+                    // Enter's bool result is intentionally ignored. A veto or
+                    // callback re-entry does not stop DFA_ATTACH from using
+                    // the live Action.Target below.
+                    let _ = self.try_object_enter(object_id, container_id)?;
+                }
+                None => {
+                    // This exact arm is Exit(x, y, r): preserve the current
+                    // rotation, zero all dirs, and run Ejection/Departure.
+                    let _ = self.exit_object_at_current_transform(object_id)?;
+                }
+            }
 
-        if target_destroyed || !target_status.is_active() {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            let Some(live_idx) = self.find_object_index(object_id) else {
+                return Ok(false);
+            };
+            if self.objects[live_idx].state.action.target.is_none() {
+                self.notify_attach_target_lost(object_id)?;
+                return Ok(false);
+            }
         }
 
-        let (object_id, previous_container, object_vertices, action_data) = {
-            let object = &self.objects[idx];
-            (
-                object.id,
-                object.state.container,
-                object.state.vertices.clone(),
-                object.state.action.data as u32,
-            )
+        // Enter/Exit callbacks may retarget, ChangeDef, change Action.Data,
+        // or replace either shape. Native DFA_ATTACH rereads all of those
+        // live fields, but deliberately does not repeat its completeness or
+        // containment checks (C4Object.cpp:5353-5359).
+        let Some(live_idx) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        let Some(live_target_id) = self.objects[live_idx].state.action.target else {
+            self.notify_attach_target_lost(object_id)?;
+            return Ok(false);
+        };
+        let Some(live_target_idx) = self.find_object_index(live_target_id).filter(|&target_idx| {
+            !self.objects[target_idx].destroyed
+                && self.objects[target_idx].state.status != ObjectStatus::Deleted
+        }) else {
+            if self.objects[live_idx].state.action.target == Some(live_target_id) {
+                self.objects[live_idx].state.action.target = None;
+            }
+            self.notify_attach_target_lost(object_id)?;
+            return Ok(false);
         };
 
-        if previous_container != target_container
-            && self
-                .apply_container_change(object_id, previous_container, target_container, false)
-                .is_err()
-        {
-            self.reset_action_to_default(idx, definition_id, true);
-            return false;
-        }
-
+        let target_position = self.objects[live_target_idx].state.position;
+        let target_vertices = self.objects[live_target_idx].state.vertices.clone();
+        let object_vertices = self.objects[live_idx].state.vertices.clone();
+        let action_data = self.objects[live_idx].state.action.data as u32;
         let self_vertex_index = ((action_data >> 8) & 0xFF) as usize;
         let target_vertex_index = (action_data & 0xFF) as usize;
 
@@ -33507,7 +33572,6 @@ impl Engine {
             .get(target_vertex_index)
             .map(|vertex| Vector2::new(vertex.x, vertex.y))
             .unwrap_or(Vector2::ZERO);
-
         let new_position = Vector2::new(
             target_position
                 .x
@@ -33523,7 +33587,7 @@ impl Engine {
             eprintln!(
                 "ATTDBG f{} obj={} tgt_pos={:?} tgt_off={:?} self_off={:?} data={:#x} -> {:?}",
                 self.frame,
-                self.objects[idx].id.as_u64(),
+                object_id.as_u64(),
                 target_position,
                 target_offset,
                 self_offset,
@@ -33531,11 +33595,14 @@ impl Engine {
                 new_position
             );
         }
-        let object = &mut self.objects[idx];
-        object.set_position(new_position);
-        object.set_velocity(Vector2::ZERO);
+        self.force_object_position(live_idx, new_position);
+        let object = &mut self.objects[live_idx];
+        object.fixed_velocity.x = C4Fixed::ZERO;
+        object.fixed_velocity.y = C4Fixed::ZERO;
+        object.state.velocity.x = 0;
+        object.state.velocity.y = 0;
 
-        true
+        Ok(true)
     }
 
     /// DFA_PULL with a nonzero Walk physical (C4Object.cpp:5099-5170):
@@ -40380,17 +40447,46 @@ impl Engine {
         };
         let position = object.state.position;
 
-        self.exit_object_at_position_with_zero_motion(object_id, previous, position)
+        self.exit_object_at_position_with_zero_motion(object_id, previous, position, 0)
     }
 
-    /// Engine-owned `C4Object::Exit(x, y, 0, 0, 0, 0)`. The caller supplies
-    /// the already-resolved previous container so the relation cannot drift
-    /// between the precondition and the live unlink.
+    /// DFA_ATTACH's direct `Exit(x, y, r)`: unlike ordinary Enter's
+    /// transfer `Exit(x, y)`, this preserves the current rotation while
+    /// zeroing every motion component and dispatching the normal callbacks.
+    fn exit_object_at_current_transform(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<bool, EngineError> {
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        let object = &self.objects[object_index];
+        if object.destroyed || object.state.status == ObjectStatus::Deleted {
+            return Ok(false);
+        }
+        let Some(previous) = object.state.container else {
+            return Ok(false);
+        };
+        let position = object.state.position;
+        let rotation = object.state.rotation;
+
+        self.exit_object_at_position_with_zero_motion(
+            object_id,
+            previous,
+            position,
+            rotation,
+        )
+    }
+
+    /// Engine-owned `C4Object::Exit(x, y, r, 0, 0, 0)`. The caller supplies
+    /// the already-resolved previous container and rotation so the relation
+    /// cannot drift between the precondition and the live unlink.
     fn exit_object_at_position_with_zero_motion(
         &mut self,
         object_id: ObjectId,
         previous: ObjectId,
         position: Vector2,
+        rotation: i32,
     ) -> Result<bool, EngineError> {
         let Some(object_index) = self.find_object_index(object_id) else {
             return Ok(false);
@@ -40424,8 +40520,8 @@ impl Engine {
             let previous_rect = object.current_shape_rect();
             let previous_construction = object.state.construction;
             object.set_position(position);
-            object.state.rotation = 0;
-            object.fixed_rotation = C4Fixed::ZERO;
+            object.state.rotation = rotation;
+            object.fixed_rotation = itofix(rotation);
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
             object.rotation_velocity = C4Fixed::ZERO;

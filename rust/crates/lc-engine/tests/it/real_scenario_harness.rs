@@ -1898,7 +1898,9 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw() {
     // C4Menu::Enter executes AddMenuItem's command on MART's command object
     // (C4ObjectMenu.cpp:505-527). Select AIR1, then the learned LGCN spell,
     // hit activation, no delay, and ally target through those real controls
-    // (Artefact.c4d/Script.c:198-218,266-421).
+    // (Artefact.c4d/Script.c:198-218,266-421). The attached ALC_ bag rejects
+    // ATTACH's forced Enter while its owner is contained, so MART's final
+    // NoContainer scan offers that nearby bag as a combo object.
     for item_id in ["AIR1", "LGCN", "FXQ1", "FXP1", "WIPF"] {
         let index = engine
             .cursor_object_menu(owner)
@@ -1915,6 +1917,20 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw() {
             .player_in_com(owner, COM_THROW, 0)
             .unwrap_or_else(|error| panic!("Throw enters {item_id}: {error}"));
     }
+    let combo_index = engine
+        .cursor_object_menu(owner)
+        .expect("MART offers the callback-rejected attached bag as a combo")
+        .1
+        .items
+        .iter()
+        .position(|item| item.item_id == "ALC_")
+        .expect("MART's combo menu exposes the shipped alchemy bag");
+    engine
+        .player_in_com(owner, COM_MENU_SELECT, combo_index as i32)
+        .expect("the pointer selects the alchemy bag");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw commits the selected combo object");
     assert!(
         engine.cursor_object_menu(owner).is_none(),
         "the target choice finishes MART's configuration menus"

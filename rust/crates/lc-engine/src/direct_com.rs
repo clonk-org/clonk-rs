@@ -4272,6 +4272,7 @@ impl Engine {
                     linekit_id,
                     previous,
                     Vector2::ZERO,
+                    0,
                 )?;
             }
             let _ = self.assign_object_removal(linekit_id)?;
