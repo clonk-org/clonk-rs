@@ -12841,10 +12841,14 @@ fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
         None
     };
 
-    let owner = match args.get(2) {
-        Some(Value::Nil) | None => OWNER_NONE,
-        Some(value) => value_to_i32(value, "CustomMessage", "owner")?,
-    };
+    // C4ValueInt parameter conversion maps both an unfilled slot and explicit
+    // nil to integer zero. Only an explicit -1 is NO_OWNER
+    // (C4Script.cpp:5995-6033; C4AulExec.cpp:1364-1396).
+    let owner = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "CustomMessage",
+        "owner",
+    )?;
 
     let offset_x = match args.get(3) {
         Some(Value::Nil) | None => 0,
@@ -46331,6 +46335,84 @@ func Trigger(object pOther)
                 ..
             })] if text.is_empty()
         ));
+    }
+
+    #[test]
+    fn custom_message_unfilled_owner_defaults_to_player_zero() {
+        // FnCustomMessage receives iOwner as C4ValueInt: omitted and nil
+        // arguments convert to zero, while only an explicit NO_OWNER (-1)
+        // selects the all-player message variants (C4Script.cpp:5995-6033).
+        let target = ObjectId::new(1);
+        let cases = [
+            (
+                vec![
+                    Value::String("target omitted".into()),
+                    object_reference_value(target),
+                ],
+                MessageKind::TargetPlayer,
+                Some(target),
+                Some(0),
+            ),
+            (
+                vec![
+                    Value::String("target nil".into()),
+                    object_reference_value(target),
+                    Value::Nil,
+                ],
+                MessageKind::TargetPlayer,
+                Some(target),
+                Some(0),
+            ),
+            (
+                vec![
+                    Value::String("target everyone".into()),
+                    object_reference_value(target),
+                    Value::Int(OWNER_NONE),
+                ],
+                MessageKind::Target,
+                Some(target),
+                None,
+            ),
+            (
+                vec![Value::String("global omitted".into())],
+                MessageKind::GlobalPlayer,
+                None,
+                Some(0),
+            ),
+            (
+                vec![
+                    Value::String("global nil".into()),
+                    Value::Nil,
+                    Value::Nil,
+                ],
+                MessageKind::GlobalPlayer,
+                None,
+                Some(0),
+            ),
+            (
+                vec![
+                    Value::String("global everyone".into()),
+                    Value::Nil,
+                    Value::Int(OWNER_NONE),
+                ],
+                MessageKind::Global,
+                None,
+                None,
+            ),
+        ];
+
+        for (args, expected_kind, expected_target, expected_player) in cases {
+            let (result, outcome) = with_object_host_context(|| custom_message(&args));
+            assert_eq!(result.expect("CustomMessage succeeds"), Value::Bool(true));
+            assert_eq!(outcome.messages.len(), 1);
+            match &outcome.messages[0] {
+                MessageCommand::Add(spec) => {
+                    assert_eq!(spec.kind, expected_kind);
+                    assert_eq!(spec.target, expected_target);
+                    assert_eq!(spec.player, expected_player);
+                }
+            }
+        }
     }
 
     #[test]
