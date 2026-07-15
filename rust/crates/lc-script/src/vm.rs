@@ -307,6 +307,7 @@ impl HeapIdentity {
                     },
                 };
                 let Some(child) = entries.get(key) else {
+                    identities.remove(key);
                     return Self::Proplist(identities);
                 };
                 let current_child = identities.get(key).and_then(Option::as_ref);
@@ -835,7 +836,11 @@ fn write_path(
                 )));
             };
             if rest.is_empty() {
-                entries.insert(property.clone(), new_value);
+                if matches!(new_value, Value::Nil) {
+                    entries.shift_remove(property);
+                } else {
+                    entries.insert(property.clone(), new_value);
+                }
                 Ok(())
             } else {
                 let Some(next) = entries.get_mut(property) else {
@@ -877,7 +882,11 @@ fn write_path(
                 )));
             };
             if rest.is_empty() {
-                entries.insert(key.clone(), new_value);
+                if matches!(new_value, Value::Nil) {
+                    entries.shift_remove(key);
+                } else {
+                    entries.insert(key.clone(), new_value);
+                }
                 Ok(())
             } else {
                 let Some(next) = entries.get_mut(key) else {
@@ -5211,6 +5220,74 @@ mod tests {
                 Value::String("third".to_string()),
                 Value::Int(3),
             ])
+        );
+    }
+
+    #[test]
+    fn vm_map_for_in_reinsert_moves_key_to_end_deterministically() {
+        let source = r#"#strict 3
+            func Test() {
+                var entries = {};
+                entries["a"] = 1;
+                entries["b"] = 2;
+                entries["a"] = 3;
+                entries["a"] = nil;
+                entries["a"] = 4;
+
+                var flattened = [];
+                var index = 0;
+                for (var key, value in entries) {
+                    flattened[index++] = key;
+                    flattened[index++] = value;
+                }
+                return flattened;
+            }
+        "#;
+        let expected = Value::Array(vec![
+            Value::String("b".to_string()),
+            Value::Int(2),
+            Value::String("a".to_string()),
+            Value::Int(4),
+        ]);
+
+        for _ in 0..2 {
+            assert_eq!(
+                execute_script(source, "Test", &[]).expect("map remove/reinsert foreach runs"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn vm_map_for_in_rejects_non_map_iterable() {
+        let source = r#"#strict 3
+            func Test() {
+                for (var key, value in 5) {}
+            }
+        "#;
+
+        let error = execute_script(source, "Test", &[]).expect_err("map foreach rejects int");
+        assert!(
+            error.message().contains("for: map expected, but got int!"),
+            "unexpected error: {}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn vm_map_entry_removal_clears_the_removed_value_identity() {
+        let source = r#"#strict 1
+            func Test() {
+                var entries = { entry = "same" };
+                var old_value = entries.entry;
+                entries.entry = nil;
+                return [entries.entry == old_value, entries.entry == nil];
+            }
+        "#;
+
+        assert_eq!(
+            execute_script(source, "Test", &[]).expect("map property removal runs"),
+            Value::Array(vec![Value::Bool(false), Value::Bool(true)])
         );
     }
 
