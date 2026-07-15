@@ -11936,6 +11936,241 @@ protected func Destruction()
             engine.objects[index].commands.snapshot().command_names(),
             vec!["Wait".to_string()]
         );
+        let stack = serde_json::to_value(engine.objects[index].commands.snapshot())
+            .expect("command stack serializes");
+        assert_eq!(stack["commands"][0]["mode"], serde_json::json!("SilentSub"));
+        assert_eq!(stack["commands"][0]["update_interval"], serde_json::json!(50));
+    }
+
+    fn push_containment_engine(with_physical: bool) -> Engine {
+        let mut pusher = Definition::from_script("PCPS", "Containment pusher", "")
+            .expect("pusher definition compiles");
+        pusher.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        if with_physical {
+            pusher.set_physical(PhysicalInfo {
+                walk: 35_000,
+                push: 45_000,
+                ..PhysicalInfo::default()
+            });
+        } else {
+            pusher.set_movement_profile(
+                MovementProfile::default()
+                    .with_walk_speed(6)
+                    .with_walk_acceleration(3),
+            );
+        }
+        pusher.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Push".to_string(),
+                    ActionSpec::default().with_procedure("PUSH"),
+                ),
+            ]),
+        );
+
+        let mut target = Definition::from_script("PCTG", "Containment target", "")
+            .expect("target definition compiles");
+        target.set_shape_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        target.set_grab(1);
+        target.set_mass(200);
+
+        let mut engine = Engine::with_seed(65);
+        engine.register_definition(pusher).expect("pusher registers");
+        engine.register_definition(target).expect("target registers");
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine
+    }
+
+    #[test]
+    fn push_inside_action_target_stops_before_force_and_controller_transfer() {
+        // DFA_PUSH checks no target first, then whether the PUSHER is inside
+        // Action.Target, before calculating or applying any force
+        // (C4Object.cpp:5058-5063). StopActionDelayCommand must leave the
+        // existing stack below its pristine SilentSub Wait(50).
+        let mut engine = push_containment_engine(true);
+        let target_id = engine
+            .spawn_object(
+                SpawnConfig::new("PCTG")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(10, 0))
+                    .with_controller(3)
+                    .with_fixed_velocity(FixedVec2::new(
+                        C4Fixed::from_raw(12_345),
+                        C4Fixed::ZERO,
+                    ))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("target spawns");
+        let mut push = ActionState::new("Push");
+        push.target = Some(target_id);
+        let pusher_id = engine
+            .spawn_object(
+                SpawnConfig::new("PCPS")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::ZERO)
+                    .with_container(target_id)
+                    .with_controller(7)
+                    .with_action(push)
+                    .with_command_direction(CommandDirection::Right)
+                    .with_fixed_velocity(FixedVec2::new(
+                        C4Fixed::from_raw(54_321),
+                        C4Fixed::from_raw(7_654),
+                    ))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("contained pusher spawns");
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
+        engine.objects[pusher_idx]
+            .commands
+            .push_back(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(20))
+                    .with_ty(Some(0)),
+            )
+            .expect("tail command queues");
+
+        assert!(
+            !engine
+                .apply_physics_at_index(pusher_idx)
+                .expect("inside-target Push resolves")
+        );
+
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher remains");
+        let pusher = &engine.objects[pusher_idx];
+        assert_eq!(pusher.state.action.name, "Walk");
+        assert_eq!(pusher.state.command_direction, CommandDirection::Stop);
+        assert_eq!(pusher.fixed_velocity, FixedVec2::ZERO);
+        assert_eq!(pusher.state.container, Some(target_id));
+        assert_eq!(
+            pusher.commands.command_names(),
+            vec!["Wait".to_string(), "MoveTo".to_string()]
+        );
+        let stack = serde_json::to_value(pusher.commands.snapshot())
+            .expect("command stack serializes");
+        assert_eq!(stack["commands"][0]["mode"], serde_json::json!("SilentSub"));
+        assert_eq!(stack["commands"][0]["update_interval"], serde_json::json!(50));
+
+        let target_idx = engine.find_object_index(target_id).expect("target remains");
+        assert_eq!(engine.objects[target_idx].fixed_velocity.x.val(), 12_345);
+        assert_eq!(engine.objects[target_idx].state.controller, 3);
+    }
+
+    #[test]
+    fn push_rejects_contained_target_on_zero_physical_fallback() {
+        // C4Object::Push rejects every contained target before applying force
+        // (C4Object.cpp:1785-1790). The zero-physical compatibility path does
+        // not call push_object, so ExecAction must preserve that gate too.
+        let mut engine = push_containment_engine(false);
+        let pusher_id = engine
+            .spawn_object(
+                SpawnConfig::new("PCPS")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::ZERO)
+                    .with_controller(7)
+                    .with_action(ActionState::new("Push"))
+                    .with_command_direction(CommandDirection::Right)
+                    .with_loaded(true),
+            )
+            .expect("pusher spawns");
+        let target_id = engine
+            .spawn_object(
+                SpawnConfig::new("PCTG")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(10, 0))
+                    .with_container(pusher_id)
+                    .with_controller(3)
+                    .with_fixed_velocity(FixedVec2::new(
+                        C4Fixed::from_raw(12_345),
+                        C4Fixed::ZERO,
+                    ))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("contained target spawns");
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
+        engine.objects[pusher_idx].state.action.target = Some(target_id);
+
+        assert!(
+            !engine
+                .apply_physics_at_index(pusher_idx)
+                .expect("contained-target Push resolves")
+        );
+
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher remains");
+        let target_idx = engine.find_object_index(target_id).expect("target remains");
+        assert_eq!(engine.objects[pusher_idx].state.action.name, "Walk");
+        assert_eq!(
+            engine.objects[pusher_idx].commands.command_names(),
+            vec!["Wait".to_string()]
+        );
+        assert_eq!(engine.objects[target_idx].state.container, Some(pusher_id));
+        assert_eq!(engine.objects[target_idx].fixed_velocity.x.val(), 12_345);
+        assert_eq!(engine.objects[target_idx].state.controller, 3);
+    }
+
+    #[test]
+    fn push_from_unrelated_container_still_applies_force() {
+        // `Contained == Action.Target` is identity, not a generic contained
+        // check. Being inside some other object must leave PUSH unchanged.
+        let mut engine = push_containment_engine(true);
+        let unrelated_id = engine
+            .spawn_object(
+                SpawnConfig::new("PCTG")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(-30, 0))
+                    .with_loaded(true),
+            )
+            .expect("unrelated container spawns");
+        let target_id = engine
+            .spawn_object(
+                SpawnConfig::new("PCTG")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(10, 0))
+                    .with_controller(3)
+                    .with_loaded(true),
+            )
+            .expect("target spawns");
+        let mut push = ActionState::new("Push");
+        push.target = Some(target_id);
+        let pusher_id = engine
+            .spawn_object(
+                SpawnConfig::new("PCPS")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::ZERO)
+                    .with_container(unrelated_id)
+                    .with_controller(7)
+                    .with_action(push)
+                    .with_command_direction(CommandDirection::Right)
+                    .with_loaded(true),
+            )
+            .expect("pusher spawns");
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
+
+        engine
+            .apply_physics_at_index(pusher_idx)
+            .expect("unrelated-container Push executes");
+
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher remains");
+        let target_idx = engine.find_object_index(target_id).expect("target remains");
+        assert_eq!(engine.objects[pusher_idx].state.action.name, "Push");
+        assert_eq!(engine.objects[pusher_idx].state.container, Some(unrelated_id));
+        assert_eq!(engine.objects[target_idx].state.container, None);
+        assert!(engine.objects[pusher_idx].commands.is_empty());
+        assert_eq!(engine.objects[pusher_idx].fixed_velocity.x.val(), 64_225);
+        assert_eq!(engine.objects[target_idx].fixed_velocity.x.val(), 36_864);
+        assert_eq!(engine.objects[target_idx].state.controller, 7);
     }
 
     #[test]

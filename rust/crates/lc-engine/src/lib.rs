@@ -33921,7 +33921,9 @@ impl Engine {
             self.stop_action_delay_command(idx, definition_id)?;
             return Ok(false);
         }
-        if self.objects[target_idx].state.container == Some(self.objects[idx].id) {
+        if self.objects[idx].state.container == Some(target_id)
+            || self.objects[target_idx].state.container.is_some()
+        {
             self.stop_action_delay_command(idx, definition_id)?;
             return Ok(false);
         }
