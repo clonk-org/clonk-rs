@@ -10150,6 +10150,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         );
         builder_definition.configure_actions(Some("Walk".to_string()), builder_actions);
         builder_definition.set_category(DEFAULT_CATEGORY);
+        builder_definition.set_crew_member(true);
         builder_definition.set_mass(50);
 
         let mut structure_definition = Definition::from_script("Structure", "Structure", script)?;
@@ -10183,6 +10184,9 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .spawn_object(
                 SpawnConfig::new("Builder")
                     .with_action(build_state)
+                    .with_alive(true)
+                    .with_crew_member(true)
+                    .with_controller(4)
                     .with_command_direction(CommandDirection::Right),
             )
             .expect("builder spawns");
@@ -10223,6 +10227,211 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             Some(CommandData::Text("Wood".to_owned())),
             "Acquire must request the exact missing component (C4Object.cpp:1725-1747)"
         );
+        assert_eq!(snapshot.hud.messages.len(), 1);
+        assert_eq!(snapshot.hud.messages[0].kind, MessageKind::Target);
+        assert_eq!(snapshot.hud.messages[0].target, Some(builder_id));
+        assert_eq!(snapshot.hud.messages[0].player, Some(4));
+        assert_eq!(
+            snapshot.hud.messages[0].lines,
+            vec!["Structure", "needs", "1x Wood"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_procedure_noncrew_reports_material_without_acquire() -> Result<(), EngineError> {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut builder_definition = Definition::from_script("Machine", "Machine", script)?;
+        builder_definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("walk"),
+                ),
+                (
+                    "Build".to_string(),
+                    ActionSpec::default().with_procedure("build"),
+                ),
+            ]),
+        );
+
+        let mut structure_definition = Definition::from_script("Site", "Site", script)?;
+        structure_definition.set_constructable(true);
+        structure_definition.set_category(CATEGORY_STRUCTURE);
+        structure_definition.set_components(vec![DefinitionComponent {
+            id: "Wood".to_string(),
+            count: 1,
+        }]);
+        let material_definition = Definition::from_script("Wood", "Wood", script)?;
+
+        let mut engine = Engine::with_seed(8);
+        engine.register_definition(builder_definition)?;
+        engine.register_definition(structure_definition)?;
+        engine.register_definition(material_definition)?;
+        engine.set_construction_needs_material(true);
+
+        let structure_id = engine.spawn_object(
+            SpawnConfig::new("Site")
+                .with_construction(1_000)
+                .with_ordered_components(vec![("Wood".to_owned(), 0)]),
+        )?;
+        let mut build_state = ActionState::new("Build");
+        build_state.target = Some(structure_id);
+        let builder_id = engine.spawn_object(
+            SpawnConfig::new("Machine")
+                .with_action(build_state)
+                .with_controller(6),
+        )?;
+
+        let snapshot = engine.tick()?;
+        let builder = snapshot.object(builder_id).expect("builder remains");
+        assert!(
+            builder.command_stack.is_empty(),
+            "noncrew builders must not receive Acquire"
+        );
+        assert_eq!(builder.action_procedure.as_deref(), Some("walk"));
+        assert_eq!(snapshot.hud.messages.len(), 1);
+        assert_eq!(snapshot.hud.messages[0].kind, MessageKind::Target);
+        assert_eq!(snapshot.hud.messages[0].target, Some(builder_id));
+        assert_eq!(snapshot.hud.messages[0].player, Some(6));
+        assert_eq!(
+            snapshot.hud.messages[0].lines,
+            vec!["Site", "needs", "1x Wood"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_needs_material_truthy_runs_after_grab_and_before_stop() -> Result<(), EngineError> {
+        let builder_script = r#"#strict 2
+local missing_id, missing_count, contents_seen, action_seen, callback_order;
+
+protected func BuildNeedsMaterial(id, count)
+{
+    missing_id = id;
+    missing_count = count;
+    contents_seen = ContentsCount();
+    action_seen = GetAction();
+    callback_order = callback_order * 10 + 1;
+    return 1;
+}
+
+protected func BuildAbort()
+{
+    callback_order = callback_order * 10 + 2;
+}
+"#;
+        let mut builder_definition =
+            Definition::from_script("Bldr", "Builder", builder_script)?;
+        builder_definition.set_c4_callback_convention(true);
+        builder_definition.set_crew_member(true);
+        builder_definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("walk"),
+                ),
+                (
+                    "Build".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("build")
+                        .with_abort_call("BuildAbort"),
+                ),
+            ]),
+        );
+
+        let mut structure_definition = Definition::from_script("Site", "Structure", "#strict")?;
+        structure_definition.set_constructable(true);
+        structure_definition.set_category(CATEGORY_STRUCTURE);
+        structure_definition.set_mass(100);
+        structure_definition.set_components(vec![DefinitionComponent {
+            id: "Wood".to_string(),
+            count: 5,
+        }]);
+        let material_definition = Definition::from_script("Wood", "Wood", "#strict")?;
+        let container_definition = Definition::from_script("Cntn", "Container", "#strict")?;
+
+        let mut engine = Engine::with_seed(9);
+        engine.register_definition(builder_definition)?;
+        engine.register_definition(structure_definition)?;
+        engine.register_definition(material_definition)?;
+        engine.register_definition(container_definition)?;
+        engine.set_construction_needs_material(true);
+
+        let container_id = engine.spawn_object(SpawnConfig::new("Cntn"))?;
+        let structure_id = engine.spawn_object(
+            SpawnConfig::new("Site")
+                .with_construction(75_000)
+                .with_ordered_components(vec![("Wood".to_owned(), 1)])
+                .with_container(container_id),
+        )?;
+        let mut build_state = ActionState::new("Build");
+        build_state.target = Some(structure_id);
+        let builder_id = engine.spawn_object(
+            SpawnConfig::new("Bldr")
+                .with_action(build_state)
+                .with_alive(true)
+                .with_crew_member(true),
+        )?;
+        let wood_id = engine.spawn_object(
+            SpawnConfig::new("Wood")
+                .with_construction(FULL_CON)
+                .with_container(builder_id),
+        )?;
+        let container_wood_id = engine.spawn_object(
+            SpawnConfig::new("Wood")
+                .with_construction(FULL_CON)
+                .with_container(container_id),
+        )?;
+
+        let snapshot = engine.tick()?;
+        let builder = snapshot.object(builder_id).expect("builder remains");
+        assert_eq!(
+            builder.local_vars.get("missing_id"),
+            Some(&Value::C4Id("Wood".into()))
+        );
+        assert_eq!(
+            builder.local_vars.get("missing_count"),
+            Some(&Value::Int(2))
+        );
+        assert_eq!(
+            builder.local_vars.get("contents_seen"),
+            Some(&Value::Int(0))
+        );
+        assert_eq!(
+            builder.local_vars.get("action_seen"),
+            Some(&Value::String("Build".to_owned()))
+        );
+        assert_eq!(
+            builder.local_vars.get("callback_order"),
+            Some(&Value::Int(12)),
+            "BuildNeedsMaterial must run before ObjectComStop's abort callback"
+        );
+        assert_eq!(builder.action_procedure.as_deref(), Some("walk"));
+        assert!(builder.command_stack.is_empty());
+        assert!(snapshot.hud.messages.is_empty());
+        assert!(
+            snapshot.object(wood_id).is_none(),
+            "grabbed material is consumed"
+        );
+        assert!(
+            snapshot.object(container_wood_id).is_none(),
+            "the construction-container pass also precedes the callback"
+        );
+        let structure = snapshot.object(structure_id).expect("structure remains");
+        assert_eq!(structure.construction, 75_000);
+        assert_eq!(structure.components.get("Wood"), Some(&3));
         Ok(())
     }
 

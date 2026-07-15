@@ -30023,22 +30023,93 @@ impl Engine {
                 )
             })
             .flatten();
-        if let Some(missing_component) = missing_component {
-            // C4Object::Build asks a crew builder to acquire the first
-            // component whose inserted ratio trails the current Con ratio.
-            // It is a retrying subcommand in front of the retained Build
-            // order (C4Object.cpp:1682-1750).
-            let acquire = CommandRequest::new(CommandId::Acquire)
-                .with_data(CommandData::Text(missing_component))
-                .with_update_interval(50)
-                .with_retries(1)
-                .with_mode(CommandMode::SilentSub);
-            self.objects[idx]
-                .apply_command_operations([CommandOperation::PushFront(acquire)]);
+        if let Some((missing_component, missing_count)) = missing_component {
+            let builder_id = self.objects[idx].id;
+            // C4Object::Build lets the builder override missing-material
+            // handling after the component-grab pass. Script errors are
+            // fail-safe/falsy like C4Object::Call (C4Object.cpp:1734-1748).
+            let handled = tolerate_script_error(self.call_object_function(
+                idx,
+                "BuildNeedsMaterial",
+                vec![
+                    Value::C4Id(missing_component.clone()),
+                    Value::Int(missing_count),
+                ],
+            ))?
+            .is_some_and(|value| compat::value_raw_truthy(&value));
+
+            if !handled {
+                // The callback may have changed the builder's controller,
+                // OCF, commands, or definition, so re-resolve its live state.
+                if let Some(builder_idx) = self.find_object_index(builder_id).filter(|&index| {
+                    !self.objects[index].destroyed
+                        && !matches!(self.objects[index].state.status, ObjectStatus::Deleted)
+                }) {
+                    if self.objects[builder_idx].state.ocf & ocf::CREW_MEMBER != 0 {
+                        // AddCommand(Acquire) is a retrying SilentSub in front
+                        // of the retained Build order.
+                        let acquire = CommandRequest::new(CommandId::Acquire)
+                            .with_data(CommandData::Text(missing_component))
+                            .with_update_interval(50)
+                            .with_retries(1)
+                            .with_mode(CommandMode::SilentSub);
+                        self.objects[builder_idx]
+                            .apply_command_operations([CommandOperation::PushFront(acquire)]);
+                    }
+
+                    // C4Object::GetNeededMatStr runs after the callback and
+                    // may itself call GetCustomComponents with the builder.
+                    // Evaluate the existing compatibility host in the
+                    // builder's context so it sees the same live state.
+                    let expression = format!("GetNeededMatStr(Object({target_id}))");
+                    let text = tolerate_script_error(self.direct_exec_on_object(
+                        builder_idx,
+                        &expression,
+                        "Build:GetNeededMatStr",
+                    ))?
+                    .and_then(|value| match value {
+                        Value::String(text) => Some(text),
+                        _ => None,
+                    });
+                    if let Some(text) = text {
+                        if let Some(builder_idx) =
+                            self.find_object_index(builder_id).filter(|&index| {
+                                !self.objects[index].destroyed
+                                    && !matches!(
+                                        self.objects[index].state.status,
+                                        ObjectStatus::Deleted
+                                    )
+                            })
+                        {
+                            let controller = self.objects[builder_idx].state.controller;
+                            self.messages.add_message(MessageSpec {
+                                kind: message::MessageKind::Target,
+                                text,
+                                target: Some(builder_id),
+                                player: (controller != OWNER_NONE).then_some(controller),
+                                offset: Vector2::new(-1, -1),
+                                color: 0xffff_ffff,
+                                flags: 0,
+                                width: None,
+                                decoration: None,
+                                frame_decoration: None,
+                                portrait: None,
+                            });
+                        }
+                    }
+                }
+            }
+
             // Target::Build returned false because the next construction
             // fraction has no material: DFA_BUILD calls ObjectComStop before
             // returning (C4Object.cpp:5033-5050).
-            let _ = self.object_com_stop_action(idx, definition_id)?;
+            if let Some(builder_idx) = self.find_object_index(builder_id).filter(|&index| {
+                !self.objects[index].destroyed
+                    && !matches!(self.objects[index].state.status, ObjectStatus::Deleted)
+            }) {
+                let live_definition_id = self.objects[builder_idx].definition_id.clone();
+                let _ = self.object_com_stop_action(builder_idx, &live_definition_id)?;
+            }
             return Ok(false);
         }
 
@@ -30153,15 +30224,14 @@ impl Engine {
         target_idx: usize,
         current_construction: i32,
         required: &[DefinitionComponent],
-    ) -> Option<DefinitionId> {
+    ) -> Option<(DefinitionId, i32)> {
         if required.is_empty() {
             return None;
         }
 
-        // Target::Build tries at most one full-con object of every missing
-        // component per invocation, first from the builder, then from the
-        // construction's container
-        // (C4Object.cpp:1694-1723).
+        // Target::Build makes two independent passes: at most one full-con
+        // object of every missing component from the builder, then at most
+        // one more from the construction's container (C4Object.cpp:1694-1723).
         for component in required {
             let mut inserted = self.objects[target_idx]
                 .state
@@ -30170,19 +30240,39 @@ impl Engine {
                 .copied()
                 .unwrap_or(0);
 
-            if inserted < component.count {
-                let consumed = self.consume_component_from_contents(builder_idx, &component.id)
-                    || self.consume_component_from_container_of(target_idx, &component.id);
-                if consumed {
-                    inserted = inserted.wrapping_add(1);
-                    let target_state = &mut self.objects[target_idx].state;
-                    if !target_state.components.contains_key(&component.id) {
-                        target_state.component_order.push(component.id.clone());
-                    }
-                    target_state
-                        .components
-                        .insert(component.id.clone(), inserted);
+            if inserted < component.count
+                && self.consume_component_from_contents(builder_idx, &component.id)
+            {
+                inserted = inserted.wrapping_add(1);
+                let target_state = &mut self.objects[target_idx].state;
+                if !target_state.components.contains_key(&component.id) {
+                    target_state.component_order.push(component.id.clone());
                 }
+                target_state
+                    .components
+                    .insert(component.id.clone(), inserted);
+            }
+        }
+
+        for component in required {
+            let mut inserted = self.objects[target_idx]
+                .state
+                .components
+                .get(&component.id)
+                .copied()
+                .unwrap_or(0);
+
+            if inserted < component.count
+                && self.consume_component_from_container_of(target_idx, &component.id)
+            {
+                inserted = inserted.wrapping_add(1);
+                let target_state = &mut self.objects[target_idx].state;
+                if !target_state.components.contains_key(&component.id) {
+                    target_state.component_order.push(component.id.clone());
+                }
+                target_state
+                    .components
+                    .insert(component.id.clone(), inserted);
             }
         }
 
@@ -30200,7 +30290,12 @@ impl Engine {
                     let construction_percent = i64::from(current_construction)
                         .saturating_mul(100)
                         / i64::from(FULL_CON);
-                    (inserted_percent < construction_percent).then(|| component.id.clone())
+                    (inserted_percent < construction_percent).then(|| {
+                        (
+                            component.id.clone(),
+                            component.count.wrapping_sub(inserted),
+                        )
+                    })
                 })
                 .flatten()
         })
