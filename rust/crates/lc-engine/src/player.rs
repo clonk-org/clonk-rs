@@ -71,6 +71,18 @@ impl Default for PlayerAtClient {
     }
 }
 
+fn bounded_at_client_name(mut name: String) -> String {
+    const C4_MAX_TITLE: usize = 512;
+    if name.len() > C4_MAX_TITLE {
+        let mut end = C4_MAX_TITLE;
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        name.truncate(end);
+    }
+    name
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlayerViewport {
     #[serde(default)]
@@ -116,6 +128,11 @@ pub struct PlayerState {
     /// recreating a player for the current network client association.
     #[serde(default, skip_serializing_if = "PlayerAtClient::is_unknown")]
     pub at_client: PlayerAtClient,
+    /// Join-time snapshot of `C4Player::AtClientName`. `None` is the C++
+    /// runtime default, `"Local"`; `Some("")` remains a real empty network
+    /// client name rather than being conflated with that default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_client_name: Option<String>,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -193,6 +210,14 @@ pub struct PlayerState {
     pub production_unit: u32,
     #[serde(default)]
     pub color: Option<RgbColor>,
+    /// Old-gfx palette index (`C4Player::Color`), distinct from RGB
+    /// `ColorDw`. `None` represents the live C++ sentinel -1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_index: Option<i32>,
+    /// Distributed startup-position slot (`C4Player::Position`). `None`
+    /// represents the live C++ sentinel -1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_index: Option<i32>,
     /// Saved `C4Player::fFogOfWar` setting (C4Player.cpp:1580).
     #[serde(default)]
     pub fog_of_war: bool,
@@ -327,6 +352,7 @@ pub struct Player {
     id: i32,
     player_info_id: i32,
     at_client: PlayerAtClient,
+    at_client_name: String,
     name: String,
     status: PlayerStatus,
     team: Option<i32>,
@@ -388,6 +414,7 @@ impl Player {
             id,
             player_info_id: 0,
             at_client: PlayerAtClient::UNKNOWN,
+            at_client_name: "Local".to_string(),
             name: name.into(),
             status: PlayerStatus::Active,
             team: None,
@@ -471,6 +498,7 @@ impl Player {
             id,
             player_info_id,
             at_client: PlayerAtClient::UNKNOWN,
+            at_client_name: "Local".to_string(),
             name,
             status,
             team,
@@ -520,6 +548,7 @@ impl Player {
             id,
             player_info_id,
             at_client,
+            at_client_name,
             name,
             status,
             team,
@@ -550,6 +579,8 @@ impl Player {
             production_delay,
             production_unit,
             color,
+            color_index,
+            position_index,
             fog_of_war,
             force_fog_of_war,
             show_control_position,
@@ -562,6 +593,9 @@ impl Player {
             id,
             player_info_id,
             at_client,
+            at_client_name: bounded_at_client_name(
+                at_client_name.unwrap_or_else(|| "Local".to_string()),
+            ),
             name,
             status,
             team,
@@ -599,8 +633,8 @@ impl Player {
             show_control_position,
             show_control,
             hostility: hostility.into_iter().collect(),
-            color_index: -1,
-            position_index: -1,
+            color_index: color_index.unwrap_or(-1),
+            position_index: position_index.unwrap_or(-1),
             control,
             extra_data,
         }
@@ -613,6 +647,7 @@ impl Player {
             id: self.id,
             player_info_id: self.player_info_id,
             at_client: self.at_client,
+            at_client_name: (self.at_client_name != "Local").then(|| self.at_client_name.clone()),
             name: self.name.clone(),
             status: self.status,
             team: self.team,
@@ -643,6 +678,8 @@ impl Player {
             production_delay: self.production_delay,
             production_unit: self.production_unit,
             color: self.color,
+            color_index: (self.color_index != -1).then_some(self.color_index),
+            position_index: (self.position_index != -1).then_some(self.position_index),
             fog_of_war: self.fog_of_war,
             force_fog_of_war: self.force_fog_of_war,
             show_control_position: self.show_control_position,
@@ -685,6 +722,14 @@ impl Player {
 
     pub fn set_at_client(&mut self, at_client: PlayerAtClient) {
         self.at_client = at_client;
+    }
+
+    pub fn at_client_name(&self) -> &str {
+        &self.at_client_name
+    }
+
+    pub fn set_at_client_name(&mut self, name: impl Into<String>) {
+        self.at_client_name = bounded_at_client_name(name.into());
     }
 
     pub fn name(&self) -> &str {
@@ -1529,6 +1574,25 @@ mod tests {
                 .and_then(serde_json::Value::as_i64),
             Some(7)
         );
+
+        let networked = PlayerState {
+            id: 3,
+            at_client: PlayerAtClient::new(8),
+            at_client_name: Some(String::new()),
+            color_index: Some(4),
+            position_index: Some(2),
+            ..PlayerState::default()
+        };
+        assert_eq!(Player::from_state(networked.clone()).to_state(), networked);
+
+        let mut bounded = Player::new(4, "Player");
+        bounded.set_at_client_name(format!("{}é", "x".repeat(511)));
+        assert_eq!(bounded.at_client_name().as_bytes().len(), 511);
+        let restored = Player::from_state(PlayerState {
+            at_client_name: Some("x".repeat(513)),
+            ..PlayerState::default()
+        });
+        assert_eq!(restored.at_client_name().as_bytes().len(), 512);
     }
 
     #[test]

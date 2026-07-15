@@ -2786,7 +2786,7 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
         "GetPlayerVal",
         "entry_nr",
     )?;
-    if entry_index != 0 || !matches!(section.as_deref(), None | Some("Player")) {
+    if entry_index != 0 || !matches!(section.as_deref(), None | Some("") | Some("Player")) {
         return Ok(Value::Nil);
     }
 
@@ -2821,6 +2821,13 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
             |object: Option<ObjectId>| object.map(|id| truncate_to_i32(id.as_u64())).unwrap_or(0);
         Ok(match entry.as_str() {
             "Status" => Value::Int(player_status),
+            "AtClient" => Value::Int(player.at_client.get()),
+            "AtClientName" => Value::String(
+                player
+                    .at_client_name
+                    .clone()
+                    .unwrap_or_else(|| "Local".to_string()),
+            ),
             "Index" | "ID" => Value::Int(player.id),
             "Eliminated" => Value::Int(i32::from(matches!(
                 player.status,
@@ -2829,6 +2836,8 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "Surrendered" => Value::Int(i32::from(
                 player.surrendered || matches!(player.status, crate::PlayerStatus::Surrendered),
             )),
+            "Evaluated" => Value::Bool(player.evaluated),
+            "Color" => Value::Int(player.color_index.unwrap_or(-1)),
             "ColorDw" => Value::Int(
                 player
                     .color
@@ -2837,7 +2846,9 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
                     })
                     .unwrap_or(0),
             ),
+            "AutoContextMenu" => Value::Int(i32::from(player.control.auto_context_menu)),
             "AutoStopControl" => Value::Int(i32::from(player.control.control_style)),
+            "Position" => Value::Int(player.position_index.unwrap_or(-1)),
             "ViewMode" => Value::Int(player.view_mode),
             "ViewX" => Value::Int(view_center.x),
             "ViewY" => Value::Int(view_center.y),
@@ -41335,6 +41346,74 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(
             result.expect("GetPlayerVal reads cursor view"),
             Value::Int(306)
+        );
+    }
+
+    #[test]
+    fn get_player_val_reads_join_identity_and_modeled_cpp_fields() {
+        // C4Player::CompileFunc exposes the join-time client identity and the
+        // old-gfx Color/Position indices as their own fields. Color is not
+        // ColorDw, and an unknown client is the integer sentinel -1 rather
+        // than nil (C4Player.cpp:1556-1580,1718-1728).
+        let mut control = PlayerControlState::default();
+        control.auto_context_menu = true;
+        let remote = PlayerState {
+            id: 4,
+            at_client: crate::PlayerAtClient::new(7),
+            at_client_name: Some("Remote Client".into()),
+            evaluated: true,
+            color_index: Some(3),
+            position_index: Some(2),
+            control,
+            ..PlayerState::default()
+        };
+        let unknown = PlayerState {
+            id: 5,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![remote, unknown],
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            let read = |entry: &str, section: Value, player: i32, index: i32| {
+                get_player_val(&[
+                    Value::String(entry.into()),
+                    section,
+                    Value::Int(player),
+                    Value::Int(index),
+                ])
+            };
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                read("AtClient", Value::Int(0), 4, 0)?,
+                read("AtClientName", Value::String(String::new()), 4, 0)?,
+                read("Color", Value::String("Player".into()), 4, 0)?,
+                read("Position", Value::Int(0), 4, 0)?,
+                read("Evaluated", Value::Int(0), 4, 0)?,
+                read("AutoContextMenu", Value::Int(0), 4, 0)?,
+                read("AtClient", Value::Int(0), 5, 0)?,
+                read("AtClientName", Value::Int(0), 5, 0)?,
+                read("Color", Value::Int(0), 5, 0)?,
+                read("Unknown", Value::Int(0), 4, 0)?,
+                read("AtClient", Value::Int(0), 4, 1)?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("GetPlayerVal modeled field reads run"),
+            Value::Array(vec![
+                Value::Int(7),
+                Value::String("Remote Client".into()),
+                Value::Int(3),
+                Value::Int(2),
+                Value::Bool(true),
+                Value::Int(1),
+                Value::Int(-1),
+                Value::String("Local".into()),
+                Value::Int(-1),
+                Value::Nil,
+                Value::Nil,
+            ])
         );
     }
 

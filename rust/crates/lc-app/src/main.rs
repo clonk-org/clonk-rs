@@ -6450,7 +6450,32 @@ fn initial_control_clients(
         .and_then(|network| i32::try_from(network.local_client_id()).ok())
         .unwrap_or(0);
     let activated = network.is_none() || matches!(network_mode, Some(NetworkMode::Host(_)));
-    clients.register(client_id, activated, false);
+    let string_name = |name: &str| {
+        let bytes = name
+            .as_bytes()
+            .iter()
+            .copied()
+            .take_while(|byte| *byte != 0)
+            .collect();
+        lc_engine::LegacyCString::from_bytes(bytes).unwrap_or_default()
+    };
+    let name = match network_mode {
+        Some(NetworkMode::Host(settings)) => settings
+            .prepared
+            .as_ref()
+            .map(|prepared| prepared.host_config().local_core.name.clone())
+            .unwrap_or_else(|| string_name(&settings.player_name)),
+        Some(NetworkMode::Client(settings)) => string_name(&settings.player_name),
+        None => string_name("Local"),
+    };
+    clients.replace_snapshot([lc_engine::ClientCoreControlData {
+        client_id,
+        activated,
+        observer: false,
+        name,
+        nick: lc_engine::LegacyCString::default(),
+        lobby_ready: false,
+    }]);
     clients
 }
 
@@ -25276,6 +25301,19 @@ impl GameApp {
             );
             return Ok(());
         };
+        let Some(at_client) = self.control_clients.state(join.at_client) else {
+            tracing::warn!(
+                info_id = join.info_id,
+                at_client = join.at_client,
+                "ignoring join for missing controlling client"
+            );
+            return Ok(());
+        };
+        let at_client_name = if self.network.is_none() && at_client.name.is_empty() {
+            "Local".to_string()
+        } else {
+            at_client.name.to_string_lossy().into_owned()
+        };
         let local_client_id = self
             .network
             .as_ref()
@@ -25343,9 +25381,10 @@ impl GameApp {
         };
         match self
             .engine
-            .join_player_at_client_with_info(
+            .join_player_at_client_with_info_and_name(
                 config,
                 lc_engine::PlayerAtClient::new(join.at_client),
+                at_client_name,
                 &info,
             )
         {
@@ -57895,6 +57934,20 @@ mod tests {
         let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
         let info_id = 73;
         let at_client = 3;
+        app.control_clients.replace_snapshot([
+            lc_engine::ClientCoreControlData {
+                client_id: 0,
+                name: lc_engine::LegacyCString::from_bytes(b"Host Client".to_vec())
+                    .expect("valid host client name"),
+                ..Default::default()
+            },
+            lc_engine::ClientCoreControlData {
+                client_id: at_client,
+                name: lc_engine::LegacyCString::from_bytes(b"Remote Client".to_vec())
+                    .expect("valid remote client name"),
+                ..Default::default()
+            },
+        ]);
         event_tx
             .send(NetworkEvent::ReadyTick {
                 tick,
@@ -57941,6 +57994,83 @@ mod tests {
                 .expect("runtime remote player")
                 .at_client(),
             lc_engine::PlayerAtClient::new(at_client)
+        );
+        assert_eq!(
+            app.engine
+                .player(joined.id)
+                .expect("runtime remote player")
+                .at_client_name(),
+            "Remote Client"
+        );
+    }
+
+    #[test]
+    fn synchronized_join_for_a_missing_client_is_ignored() {
+        // C4ControlJoinPlayer resolves AtClient before joining and returns
+        // immediately when that client has already disappeared
+        // (C4Control.cpp:714-716).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.engine.set_network_game(true);
+        let info_id = 74;
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 9,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    name: lc_engine::LegacyCString::from_bytes(b"Gone Owner".to_vec())
+                        .expect("valid player name"),
+                    id: info_id,
+                    ..Default::default()
+                }],
+                by_client: 1,
+                ..Default::default()
+            });
+
+        app.apply_join_player_control(lc_engine::JoinPlayerControlData {
+            filename: lc_engine::LegacyCString::from_bytes(b"RemotePlayer.c4p".to_vec())
+                .expect("valid legacy filename"),
+            at_client: 9,
+            info_id,
+            source: lc_engine::JoinPlayerSource::Embedded(
+                include_bytes!("../../lc-engine/tests/fixtures/embedded_player.c4p").to_vec(),
+            ),
+            by_client: 1,
+        })
+        .expect("missing-client join is ignored");
+
+        assert!(
+            app.engine
+                .players()
+                .all(|player| player.player_info_id() != info_id)
+        );
+    }
+
+    #[test]
+    fn initial_network_client_registry_keeps_the_local_client_name() {
+        let (manager, _event_tx) = NetworkManager::test_stub();
+        let mode = NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            player_name: "Named Host".to_string(),
+            prepared: None,
+        });
+        let clients = initial_control_clients(Some(&manager), Some(&mode));
+
+        assert_eq!(
+            clients
+                .state(0)
+                .expect("local host client is registered")
+                .name
+                .to_string_lossy(),
+            "Named Host"
+        );
+        assert_eq!(
+            initial_control_clients(None, None)
+                .state(0)
+                .expect("offline local client is registered")
+                .name
+                .to_string_lossy(),
+            "Local"
         );
     }
 

@@ -14640,6 +14640,7 @@ impl Engine {
         self.join_player_at_client_with_semantics(
             config,
             at_client,
+            "Local".to_string(),
             ControlJoinPlayerSemantics::default(),
         )
     }
@@ -14652,23 +14653,51 @@ impl Engine {
         at_client: PlayerAtClient,
         info: &ControlPlayerInfoEntry,
     ) -> Result<JoinPlayerOutcome, EngineError> {
-        self.join_player_at_client_with_semantics(config, at_client, info.into())
+        self.join_player_at_client_with_semantics(
+            config,
+            at_client,
+            "Local".to_string(),
+            info.into(),
+        )
+    }
+
+    /// Network-control form with the join-time client name supplied by the
+    /// current C4Client registry. C++ stores this snapshot in
+    /// `C4Player::AtClientName`; it is not a dynamic client-name lookup.
+    pub fn join_player_at_client_with_info_and_name(
+        &mut self,
+        config: JoinPlayerConfig,
+        at_client: PlayerAtClient,
+        at_client_name: impl Into<String>,
+        info: &ControlPlayerInfoEntry,
+    ) -> Result<JoinPlayerOutcome, EngineError> {
+        self.join_player_at_client_with_semantics(
+            config,
+            at_client,
+            at_client_name.into(),
+            info.into(),
+        )
     }
 
     fn join_player_at_client_with_semantics(
         &mut self,
         config: JoinPlayerConfig,
         at_client: PlayerAtClient,
+        at_client_name: String,
         semantics: ControlJoinPlayerSemantics,
     ) -> Result<JoinPlayerOutcome, EngineError> {
         let has_valid_team = config.team.is_some_and(|team_id| {
             self.teams.iter().any(|team| team.id == team_id)
         });
         if self.runtime_join_team_choice && !has_valid_team && !semantics.script_player {
-            let number = self.join_player_for_team_selection_at_client(config, at_client)?;
+            let number = self.join_player_for_team_selection_at_client_with_name(
+                config,
+                at_client,
+                at_client_name,
+            )?;
             return Ok(JoinPlayerOutcome::AwaitingTeamSelection { number });
         }
-        let number = self.register_joining_player(&config, at_client);
+        let number = self.register_joining_player(&config, at_client, &at_client_name);
         if !semantics.scenario_init {
             if let Some(extra_id) = semantics.extra_id.as_ref() {
                 self.initialize_script_player_from_definition(number, config.team, extra_id)?;
@@ -14703,7 +14732,20 @@ impl Engine {
         config: JoinPlayerConfig,
         at_client: PlayerAtClient,
     ) -> Result<i32, EngineError> {
-        let number = self.register_joining_player(&config, at_client);
+        self.join_player_for_team_selection_at_client_with_name(
+            config,
+            at_client,
+            "Local".to_string(),
+        )
+    }
+
+    fn join_player_for_team_selection_at_client_with_name(
+        &mut self,
+        config: JoinPlayerConfig,
+        at_client: PlayerAtClient,
+        at_client_name: String,
+    ) -> Result<i32, EngineError> {
+        let number = self.register_joining_player(&config, at_client, &at_client_name);
         self.player_mut(number)?
             .set_status(PlayerStatus::TeamSelection);
         self.pending_player_joins.insert(number, config);
@@ -14831,6 +14873,7 @@ impl Engine {
         &mut self,
         config: &JoinPlayerConfig,
         at_client: PlayerAtClient,
+        at_client_name: &str,
     ) -> i32 {
         // C4PlayerList::GetFreeNumber: lowest unused player number.
         let number = (0..)
@@ -14852,6 +14895,7 @@ impl Engine {
         }
         let mut player = player_config.with_color(Some(color)).build();
         player.set_at_client(at_client);
+        player.set_at_client_name(at_client_name);
         player.set_game_join_time(self.game_time);
         // C4Player::InitControl (C4Player.cpp:1747, 2371-2380): flash both
         // markers and let ForcedControlStyle override the player preference.

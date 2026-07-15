@@ -19358,6 +19358,115 @@ func CrewSelection()
     }
 
     #[test]
+    fn shipped_hazard_chooser_selects_the_lowest_client_id() {
+        // CHOS::ChoosePlayer identifies the host through the shipped
+        // GetPlrClientNr wrapper. Join the remote player first so a nil or
+        // player-number reflection cannot accidentally produce the C++ pick:
+        // client 0 must beat client 7 even though its player number is 1.
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..");
+        let system_group = lc_resources::Group::open(repository.join("planet/System.c4g"))
+            .expect("open shipped planet System.c4g");
+        let get_x_val = system_group
+            .read_file("GetXVal.c")
+            .expect("read shipped GetXVal wrappers");
+        let get_x_val = String::from_utf8_lossy(&get_x_val).into_owned();
+        let chooser_group = lc_resources::Group::open(
+            repository.join("content/Hazard.c4d/Rules.c4d/Chooser.c4d"),
+        )
+        .expect("open shipped Hazard Chooser definition");
+        let chooser_resource = ResourceDefinitionData::load(&chooser_group)
+            .expect("load shipped Hazard Chooser definition");
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_network_game(true);
+        engine.set_landscape(Landscape::flat(64, 64));
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "planet/System.c4g/GetXVal.c".to_string(),
+                get_x_val,
+            )]),
+            1,
+            "shipped GetXVal wrappers install"
+        );
+        engine
+            .register_definition(
+                Definition::from_resource(&chooser_resource)
+                    .expect("shipped Hazard Chooser script compiles"),
+            )
+            .expect("shipped Hazard Chooser definition registers");
+
+        let player_config = |name: &str, player_info_id: i32, pref_color: i32| {
+            JoinPlayerConfig {
+                name: name.to_string(),
+                player_info_id,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: if pref_color == 0 { 0xff0000 } else { 0x0000ff },
+                pref_color,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 2,
+            }
+        };
+        let info = ControlPlayerInfoEntry::default();
+        let remote = engine
+            .join_player_at_client_with_info_and_name(
+                player_config("Remote player", 1, 0),
+                PlayerAtClient::new(7),
+                "Remote Client",
+                &info,
+            )
+            .expect("remote player joins first");
+        let host = engine
+            .join_player_at_client_with_info_and_name(
+                player_config("Host player", 2, 1),
+                PlayerAtClient::HOST,
+                "Host Client",
+                &info,
+            )
+            .expect("host player joins second");
+        assert_eq!((remote.number(), host.number()), (0, 1));
+        assert_eq!(
+            engine.player(0).map(Player::at_client_name),
+            Some("Remote Client")
+        );
+        assert_eq!(engine.player(0).map(Player::color_index), Some(0));
+        assert_eq!(engine.player(1).map(Player::at_client_name), Some("Host Client"));
+        assert_eq!(engine.player(1).map(Player::color_index), Some(1));
+
+        let chooser = engine
+            .spawn_object(
+                SpawnConfig::new("CHOS")
+                    .with_loaded(true)
+                    .with_local_vars(HashMap::from([(
+                        "iChoosingPlr".to_string(),
+                        Value::Int(-1),
+                    )])),
+            )
+            .expect("loaded Hazard Chooser spawns without Initialize");
+        let chooser_index = engine
+            .find_object_index(chooser)
+            .expect("Hazard Chooser exists");
+        assert_eq!(
+            engine
+                .call_object_function(chooser_index, "ChoosePlayer", Vec::new())
+                .expect("shipped Hazard ChoosePlayer completes"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            engine.objects[chooser_index]
+                .state
+                .local_vars
+                .get("iChoosingPlr"),
+            Some(&Value::Int(1))
+        );
+    }
+
+    #[test]
     fn legacy_state_without_round_results_restores_cpp_defaults() {
         let state = Engine::new().capture_state();
         let mut value = serde_json::to_value(state)
