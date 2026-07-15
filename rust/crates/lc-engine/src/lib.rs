@@ -35218,7 +35218,8 @@ impl Engine {
                             let tydir = C4Fixed::from_raw(
                                 -(candidate_velocity.y.val() / 2).abs().wrapping_mul(50) / tmass,
                             );
-                            self.fling_object(idx, txdir, tydir);
+                            let caused_by = self.objects[candidate_idx].state.controller;
+                            self.fling_object(idx, txdir, tydir, caused_by);
                         }
                         let _ = self.call_object_function(
                             idx,
@@ -37583,10 +37584,25 @@ impl Engine {
         Ok(())
     }
 
-    /// `C4Object::Fling` (C4Object.cpp:1612-1625) without fAddSpeed: try the
-    /// Tumble action, then Jump (ObjectActionTumble/Jump,
+    /// `C4Object::Fling` (C4Object.cpp:1639-1652) without fAddSpeed: trace the
+    /// causing player, try the Tumble action, then Jump (ObjectActionTumble/Jump,
     /// C4ObjectCom.cpp:48-80), else set the velocity directly.
-    fn fling_object(&mut self, idx: usize, txdir: C4Fixed, tydir: C4Fixed) {
+    fn fling_object(
+        &mut self,
+        idx: usize,
+        txdir: C4Fixed,
+        tydir: C4Fixed,
+        caused_by: i32,
+    ) {
+        // C4Object::Fling attributes indirect kills before changing the
+        // action: living objects update their kill trace; an uncontained
+        // non-living object takes the causing player as Controller
+        // (C4Object.cpp:1641-1642).
+        if self.object_ocf_at_index(idx) & crate::ocf::ALIVE != 0 {
+            self.update_last_energy_loss_cause(idx, caused_by);
+        } else if self.objects[idx].state.container.is_none() {
+            self.objects[idx].state.controller = caused_by;
+        }
         let definition_id = self.objects[idx].definition_id.clone();
         let library = self
             .definitions
@@ -37622,9 +37638,9 @@ impl Engine {
                     // Tumble also turns the object (SetDir, C4ObjectCom.cpp:77)
                     if action == "Tumble" {
                         object.state.direction = if txdir < C4Fixed::ZERO {
-                            Direction::Left
-                        } else {
                             Direction::Right
+                        } else {
+                            Direction::Left
                         };
                     } else {
                         // ObjectActionJump mobilizes (C4ObjectCom.cpp:56);
@@ -37642,8 +37658,11 @@ impl Engine {
         let object = &mut self.objects[idx];
         object.fixed_velocity = FixedVec2::new(txdir, tydir);
         object.refresh_velocity_from_fixed();
-        // The raw-velocity fallback mobilizes (C4Object.cpp:1622).
+        // The raw-velocity fallback mobilizes and unhooks the bottom attach
+        // bit (C4Object.cpp:1647-1650). Keep both Rust mirrors in sync.
         object.state.mobile = true;
+        object.state.t_attach &= !CNAT_BOTTOM;
+        object.frame_t_attach &= !CNAT_BOTTOM;
     }
 
     fn apply_landscape_temperature_conversions(&mut self) {

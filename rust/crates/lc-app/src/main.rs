@@ -68239,10 +68239,10 @@ protected func InputCallback(string answer, int player)
             2,
             "C++ rotation accumulation lets one nearby WIPF enter LORY before the first hand delivery"
         );
-        // While the helper loads the WIPF labeled as stack entry five, one
-        // last surface WIPF reaches LORY under its own C++ movement. The
-        // deterministic ledger is therefore 2 -> 3 -> 4 -> 6.
-        for (delivery, expected_count) in [(3, 3), (4, 4), (5, 6)] {
+        // C4Object::Fling's `(txdir < 0)` direction quirk keeps the last
+        // surface WIPF away from LORY until the helper reaches it. The
+        // deterministic ledger is therefore 2 -> 3 -> 4 -> 5 -> 6.
+        for (delivery, expected_count) in [(3, 3), (4, 4), (5, 5), (6, 6)] {
             let caught = app_tutorial08_catch_and_load_one_wipf(&mut app, clonk, lorry, delivery);
             assert_eq!(
                 app.engine

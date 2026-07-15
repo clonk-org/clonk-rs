@@ -1273,6 +1273,141 @@ mod tests {
     }
 
     #[test]
+    fn cross_check_fling_uses_live_caused_by_and_cpp_tumble_direction() -> Result<(), EngineError> {
+        // DoEnergy marks the hit before Fx*Damage. Start both objects with
+        // Controller 9 and a pre-existing killer 7, so that first mark is
+        // suppressed by UpdatLastEnergyLossCause's self-damage guard. The
+        // hook then changes the victim Controller and the striker's live
+        // Controller; C4Object::Fling must re-read the latter and attribute
+        // the living victim to 11. Its Tumble SetDir(txdir < 0) quirk maps a
+        // negative x velocity to DIR_Right (C4Object.cpp:1641-1645).
+        let victim_script = r#"#strict
+func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
+{
+    SetController(-1, pTarget);
+    SetController(11, FindObject(ROCK));
+    return iChange;
+}
+"#;
+        let mut victim_def =
+            Definition::from_script("CLNK", "Clonk", victim_script).expect("victim compiles");
+        victim_def.set_c4_callback_convention(true);
+        victim_def.set_category(CATEGORY_LIVING);
+        victim_def.set_mass(100);
+        victim_def.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_directions(2),
+                ),
+                (
+                    "Tumble".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_directions(2),
+                ),
+            ]),
+        );
+        let mut rock_def = simple_definition("ROCK");
+        rock_def.set_category(CATEGORY_OBJECT);
+        rock_def.set_mass(50);
+
+        let mut engine = Engine::with_seed(42);
+        engine.register_player(PlayerConfig::new(11, "redirected striker"))?;
+        engine.register_definition(victim_def)?;
+        engine.register_definition(rock_def)?;
+        let victim = engine.spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_position(Vector2::new(50, 50))
+                .with_alive(true)
+                .with_energy(100_000)
+                .with_controller(9)
+                .with_action(ActionState::new("Walk"))
+                .add_effect(EffectState::new("Redirect")),
+        )?;
+        let rock = engine.spawn_object(
+            SpawnConfig::new("ROCK")
+                .with_position(Vector2::new(50, 50))
+                .with_velocity(Vector2::new(-5, 0))
+                .with_controller(9),
+        )?;
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].last_energy_loss_cause = 7;
+
+        engine.cross_check(1)?;
+
+        let victim_idx = engine.find_object_index(victim).expect("victim remains");
+        let rock_idx = engine.find_object_index(rock).expect("striker remains");
+        assert_eq!(engine.objects[victim_idx].state.controller, OWNER_NONE);
+        assert_eq!(engine.objects[rock_idx].state.controller, 11);
+        assert_eq!(
+            engine.objects[victim_idx].last_energy_loss_cause, 11,
+            "Fling re-attributes the living victim from the striker's live Controller"
+        );
+        assert_eq!(engine.objects[victim_idx].state.action.name, "Tumble");
+        assert_eq!(
+            engine.objects[victim_idx].state.direction,
+            Direction::Right,
+            "negative fling x uses C++ SetDir(true) == DIR_Right"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cross_check_dead_raw_fling_sets_controller_and_clears_bottom_attach(
+    ) -> Result<(), EngineError> {
+        // A lethal DoEnergy refreshes OCF before CrossCheck calls Fling.
+        // C4Object::Fling therefore takes its non-alive/uncontained arm and
+        // assigns the striker's Controller. With no Tumble or Jump action,
+        // the raw fallback mobilizes and clears only CNAT_Bottom from
+        // Action.t_attach (C4Object.cpp:1641-1650).
+        let mut engine = Engine::with_seed(43);
+        let mut victim_def = simple_definition("CLNK");
+        victim_def.set_category(CATEGORY_LIVING);
+        victim_def.set_mass(100);
+        engine.register_definition(victim_def)?;
+        let mut rock_def = simple_definition("ROCK");
+        rock_def.set_category(CATEGORY_OBJECT);
+        rock_def.set_mass(50);
+        engine.register_definition(rock_def)?;
+
+        let victim = engine.spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_position(Vector2::new(50, 50))
+                .with_alive(true)
+                .with_energy(1_000)
+                .with_controller(3),
+        )?;
+        let _rock = engine.spawn_object(
+            SpawnConfig::new("ROCK")
+                .with_position(Vector2::new(50, 50))
+                .with_velocity(Vector2::new(5, 0))
+                .with_controller(9),
+        )?;
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        let attach = CNAT_LEFT | CNAT_BOTTOM;
+        engine.objects[victim_idx].state.t_attach = attach;
+        engine.objects[victim_idx].frame_t_attach = attach;
+
+        engine.cross_check(1)?;
+
+        let victim_idx = engine.find_object_index(victim).expect("victim remains");
+        let victim = &engine.objects[victim_idx];
+        assert!(!victim.state.alive, "the hit is lethal before Fling");
+        assert_eq!(
+            victim.state.controller, 9,
+            "non-alive uncontained Fling takes the striker's Controller"
+        );
+        assert!(victim.state.mobile, "the raw fallback mobilizes");
+        assert_eq!(victim.state.t_attach, CNAT_LEFT);
+        assert_eq!(victim.frame_t_attach, CNAT_LEFT);
+        Ok(())
+    }
+
+    #[test]
     fn energy_loss_to_zero_assigns_death_like_cpp() -> Result<(), EngineError> {
         // C4Object::DoEnergy (C4Object.cpp:1361-1363): an alive object whose
         // energy first reaches zero dies. AssignDeath (C4Object.cpp:1137-1177)
