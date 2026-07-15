@@ -536,6 +536,12 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
         .expect("the shipped one-tick RACE timer accepts the finisher");
 
     let after_finish = engine.snapshot();
+    let winner_info_id = after_finish
+        .players
+        .iter()
+        .find(|player| player.id == winner)
+        .map(|player| player.player_info_id)
+        .expect("winner state remains present");
     let scoreboard = &after_finish.hud.scoreboard;
     let race_column = (0..scoreboard.column_count())
         .find(|column| {
@@ -544,7 +550,9 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
         })
         .expect("RACE::Initialize creates its progress column");
     let winner_row = (1..scoreboard.row_count())
-        .find(|row| scoreboard.cell(*row, 0).map(|cell| cell.value()) == Some(0))
+        .find(|row| {
+            scoreboard.cell(*row, 0).map(|cell| cell.value()) == Some(winner_info_id)
+        })
         .expect("RACE::InitializePlayer creates the winner row by player-info ID");
     assert_eq!(
         scoreboard

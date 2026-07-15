@@ -3095,7 +3095,8 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
                     .clone()
                     .unwrap_or_else(|| "Local".to_string()),
             ),
-            "Index" | "ID" => Value::Int(player.id),
+            "Index" => Value::Int(player.id),
+            "ID" => Value::Int(player.player_info_id),
             "Eliminated" => Value::Int(i32::from(matches!(
                 player.status,
                 crate::PlayerStatus::Eliminated
@@ -3207,11 +3208,9 @@ fn get_player_id(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
-        if context.player_state(player_id).is_some() {
-            Ok(Value::Int(player_id))
-        } else {
-            Ok(Value::Nil)
-        }
+        Ok(context
+            .player_state(player_id)
+            .map_or(Value::Nil, |player| Value::Int(player.player_info_id)))
     })
 }
 
@@ -42810,6 +42809,7 @@ public func RejectConstruction(x, y, builder)
         let captain = ObjectId::new(44);
         let mut player = PlayerState {
             id: 7,
+            player_info_id: 71,
             status: crate::PlayerStatus::Active,
             surrendered: true,
             cursor: Some(cursor),
@@ -42893,7 +42893,7 @@ public func RejectConstruction(x, y, builder)
             Value::Array(vec![
                 Value::Int(1),
                 Value::Int(7),
-                Value::Int(7),
+                Value::Int(71),
                 Value::Int(1),
                 Value::Int(0x12_34_56),
                 Value::Int(3),

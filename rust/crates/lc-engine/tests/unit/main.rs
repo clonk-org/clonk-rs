@@ -21217,6 +21217,65 @@ func ControlUpSingle()
     }
 
     #[test]
+    fn player_id_hosts_distinguish_player_info_ids_from_numbers() -> Result<(), EngineError> {
+        const PROBE: &str = r#"#strict
+public func ReadIDs(int first, int second)
+{
+    return [
+        GetPlayerID(first),
+        GetPlayerID(second),
+        GetPlayerID(99),
+        GetPlayerVal("ID", 0, first),
+        GetPlayerVal("Index", 0, first),
+        GetPlayerVal("ID", 0, second),
+        GetPlayerVal("Index", 0, second)
+    ];
+}
+"#;
+        let config = |name: &str, player_info_id| JoinPlayerConfig {
+            name: name.to_string(),
+            player_info_id,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0x00ff_0000,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            auto_context_menu: false,
+            startup_player_count: 2,
+        };
+
+        let mut engine = Engine::new();
+        engine.set_landscape(Landscape::flat(64, 48));
+        let first = engine.join_player(config("First", 41))?.number();
+        let second = engine.join_player(config("Second", 99))?.number();
+        assert_eq!((first, second), (0, 1));
+
+        engine.register_definition(Definition::from_script("PROB", "Probe", PROBE)?)?;
+        let probe = engine.spawn_object(SpawnConfig::new("PROB").with_loaded(true))?;
+        let probe_index = engine.find_object_index(probe).expect("probe exists");
+        assert_eq!(
+            engine.call_object_function(
+                probe_index,
+                "ReadIDs",
+                vec![Value::Int(first), Value::Int(second)],
+            )?,
+            Value::Array(vec![
+                Value::Int(41),
+                Value::Int(99),
+                Value::Nil,
+                Value::Int(41),
+                Value::Int(0),
+                Value::Int(99),
+                Value::Int(1),
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
     fn game_ticks_latch_exactly_one_second_increment() {
         // C4Game::Ticks only sets TimeGo; the external Sec1Timer consumes
         // that bool and increments Time once (C4Game.cpp:1755-1759,
