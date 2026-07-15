@@ -1607,7 +1607,7 @@ mod tests {
         stack
             .push_back(
                 CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(200))
+                    .with_tx(Some(100))
                     .with_ty(Some(100))
                     .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET))
                     .with_evaluated(true),
@@ -1624,6 +1624,27 @@ mod tests {
             "the intermediate waypoint measures x=95 from clonk x=100, not vehicle x=95"
         );
         assert_eq!(stack.command_names(), vec!["MoveTo", "MoveTo"]);
+
+        let mut pusher_at_waypoint = pusher.clone();
+        pusher_at_waypoint.position = Vector2::new(95, 160);
+        let waypoint_ctx =
+            move_to_ctx_at_frame(&pusher_at_waypoint, &objects, &players, &definitions, 2);
+        let waypoint = stack.step(&waypoint_ctx).expect("intermediate MoveTo completes");
+        assert_eq!(waypoint.status, CommandStatus::Completed);
+        assert_eq!(stack.command_names(), vec!["MoveTo"]);
+
+        let final_ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 3);
+        let final_result = stack.step(&final_ctx).expect("final MoveTo executes");
+        assert_eq!(final_result.status, CommandStatus::Running);
+        assert!(final_result.operations.is_empty(), "PushTarget keeps the grab");
+        assert_eq!(
+            final_result
+                .update
+                .and_then(|update| update.command_direction),
+            Some(CommandDirection::Right),
+            "the final waypoint uses factor-1 from vehicle x=95, not factor-3 or clonk x=100"
+        );
+        assert_eq!(stack.command_names(), vec!["MoveTo"]);
     }
 
     // C4Command::JumpControl trigger 1 (C4Command.cpp:1861-1872): target
