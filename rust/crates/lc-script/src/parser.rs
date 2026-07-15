@@ -1455,9 +1455,10 @@ impl<'a> Parser<'a> {
                 return Ok(Expr::Assignment(target, Box::new(value)));
             }
 
-            // Desugar compound assignments: a += b becomes a = a + b.
-            // `array[]` is the one side-effecting lvalue expression: retain
-            // its new slot across RHS evaluation instead of appending twice.
+            // Retain one evaluated target reference for compound assignment.
+            // Desugaring `a += b` to `a = a + b` evaluates side-effecting
+            // index/address expressions twice. `array[]` also needs this node
+            // for plain assignment because appending precedes RHS evaluation.
             let operation = match op_symbol {
                 Symbol::Equal => None,
                 Symbol::PlusEqual => Some(BinaryOp::Add),
@@ -1490,11 +1491,15 @@ impl<'a> Parser<'a> {
                 });
             }
 
-            let final_value = match operation {
-                Some(operation) => Expr::Binary(Box::new(left), operation, Box::new(value)),
-                None => value,
-            };
-            Ok(Expr::Assignment(target, Box::new(final_value)))
+            match operation {
+                Some(operation) => Ok(Expr::CompoundAssignment {
+                    target,
+                    operation,
+                    operator,
+                    value: Box::new(value),
+                }),
+                None => Ok(Expr::Assignment(target, Box::new(value))),
+            }
         } else {
             Ok(left)
         }

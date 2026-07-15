@@ -2458,8 +2458,28 @@ impl<'a> Vm<'a> {
                 operator,
                 value,
             } => self
-                .evaluate_array_append_assignment_tracked(
-                    target, operation, operator, value, env, depth,
+                .evaluate_reference_assignment_tracked(
+                    target,
+                    operation.as_ref(),
+                    operator,
+                    value,
+                    env,
+                    depth,
+                )
+                .map(|tracked| tracked.value),
+            Expr::CompoundAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => self
+                .evaluate_reference_assignment_tracked(
+                    target,
+                    Some(operation),
+                    operator,
+                    value,
+                    env,
+                    depth,
                 )
                 .map(|tracked| tracked.value),
             Expr::Property(target, name) => {
@@ -2571,8 +2591,26 @@ impl<'a> Vm<'a> {
                 operation,
                 operator,
                 value,
-            } => self.evaluate_array_append_assignment_tracked(
-                target, operation, operator, value, env, depth,
+            } => self.evaluate_reference_assignment_tracked(
+                target,
+                operation.as_ref(),
+                operator,
+                value,
+                env,
+                depth,
+            ),
+            Expr::CompoundAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => self.evaluate_reference_assignment_tracked(
+                target,
+                Some(operation),
+                operator,
+                value,
+                env,
+                depth,
             ),
             Expr::Property(target, name) => {
                 let collection = self.evaluate_tracked(target, env, depth)?;
@@ -2586,84 +2624,7 @@ impl<'a> Vm<'a> {
             Expr::Binary(left, BinaryOp::Concat, right) => {
                 let left = self.evaluate_tracked(left, env, depth)?;
                 let right = self.evaluate_tracked(right, env, depth)?;
-                match (&left.value, &right.value) {
-                    (Value::Array(_), Value::Array(_)) => {
-                        let mut identities = match left.identity.as_ref() {
-                            Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
-                                HeapIdentity::Array(identities) => identities.clone(),
-                                _ => unreachable!(),
-                            },
-                            _ => match HeapIdentity::opaque_for(&left.value) {
-                                HeapIdentity::Array(identities) => identities,
-                                _ => unreachable!(),
-                            },
-                        };
-                        let right_identities = match right.identity.as_ref() {
-                            Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
-                                HeapIdentity::Array(identities) => identities.clone(),
-                                _ => unreachable!(),
-                            },
-                            _ => match HeapIdentity::opaque_for(&right.value) {
-                                HeapIdentity::Array(identities) => identities,
-                                _ => unreachable!(),
-                            },
-                        };
-                        identities.extend(right_identities);
-                        let value = self.eval_concat(left.value, right.value)?;
-                        Ok(TrackedValue {
-                            value,
-                            identity: Some(RawIdentity::Heap(Rc::new(HeapIdentity::Array(
-                                identities,
-                            )))),
-                        })
-                    }
-                    (Value::Proplist(left_entries), Value::Proplist(right_entries)) => {
-                        let mut identities = match left.identity.as_ref() {
-                            Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
-                                HeapIdentity::Proplist(identities) => identities.clone(),
-                                _ => unreachable!(),
-                            },
-                            _ => match HeapIdentity::opaque_for(&left.value) {
-                                HeapIdentity::Proplist(identities) => identities,
-                                _ => unreachable!(),
-                            },
-                        };
-                        let right_identities = match right.identity.as_ref() {
-                            Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
-                                HeapIdentity::Proplist(identities) => identities.clone(),
-                                _ => unreachable!(),
-                            },
-                            _ => match HeapIdentity::opaque_for(&right.value) {
-                                HeapIdentity::Proplist(identities) => identities,
-                                _ => unreachable!(),
-                            },
-                        };
-                        for (key, value) in right_entries {
-                            if matches!(value, Value::Nil)
-                                && left_entries
-                                    .get_key(key)
-                                    .is_some_and(|current| !matches!(current, Value::Nil))
-                            {
-                                identities.remove(key);
-                            } else {
-                                identities.insert(
-                                    key.clone(),
-                                    right_identities.get(key).cloned().unwrap_or(None),
-                                );
-                            }
-                        }
-                        let value = self.eval_concat(left.value, right.value)?;
-                        Ok(TrackedValue {
-                            value,
-                            identity: Some(RawIdentity::Heap(Rc::new(HeapIdentity::Proplist(
-                                identities,
-                            )))),
-                        })
-                    }
-                    _ => self
-                        .eval_concat(left.value, right.value)
-                        .map(TrackedValue::runtime),
-                }
+                self.eval_concat_tracked(left, right)
             }
             Expr::Binary(left, BinaryOp::NilCoalescing, right) => {
                 let left = self.evaluate_tracked(left, env, depth)?;
@@ -2883,40 +2844,48 @@ impl<'a> Vm<'a> {
         Ok(current)
     }
 
-    fn evaluate_array_append_assignment_tracked(
+    fn evaluate_reference_assignment_tracked(
         &self,
         target: &AssignmentTarget,
-        operation: &Option<BinaryOp>,
+        operation: Option<&BinaryOp>,
         operator: &str,
         value: &Expr,
         env: &mut Environment,
         depth: usize,
     ) -> Result<TrackedValue, RuntimeError> {
-        // AB_ARRAY_APPEND creates and retains one reference before the RHS
-        // runs. Generic compound desugaring cannot model that side effect: it
-        // would evaluate `array[]` once for the old value and again for the
-        // write, appending two slots.
+        // C++ evaluates an assignment target into one reference before its
+        // RHS. Compound bytecodes read and mutate that retained reference;
+        // re-evaluating the target would repeat address-side effects.
         let reference = self.assignment_target_to_lvalue(env, target, depth)?;
-        let left = reference.read_tracked()?;
-        let result = if operation.is_none() {
+        let result = if matches!(operation, Some(BinaryOp::NilCoalescing)) {
+            let left = reference.read_tracked()?;
+            if !matches!(left.value, Value::Nil) {
+                // AB_NilCoalescingIt jumps over both the RHS and AB_Set.
+                return Ok(left);
+            }
             self.evaluate_tracked(value, env, depth)?
-        } else if matches!(operation, Some(BinaryOp::NilCoalescing))
-            && !matches!(left.value, Value::Nil)
-        {
-            left
-        } else {
+        } else if let Some(operation) = operation {
+            // The RHS runs while the reference is live. Read only afterward:
+            // it may have changed the referenced slot before AB_*It executes.
             let right = self.evaluate_tracked(value, env, depth)?;
-            if matches!(operation, Some(BinaryOp::NilCoalescing)) {
-                right
+            let left = reference.read_tracked()?;
+            if matches!(operation, BinaryOp::Concat) {
+                self.eval_concat_tracked(left, right)?
             } else {
                 TrackedValue::runtime(self.eval_binary(
                     left.value,
-                    operation.as_ref().expect("compound operation exists"),
+                    operation,
                     right.value,
                     env.strict_level,
                     Some(operator),
                 )?)
             }
+        } else {
+            // Path references validate lazily in Rust. Force the completed
+            // append target now so a nested nil access errors before the RHS,
+            // as AB_ARRAYA_R does while evaluating the target.
+            reference.read_tracked()?;
+            self.evaluate_tracked(value, env, depth)?
         };
         reference.write_tracked(result.clone())?;
         Ok(result)
@@ -3195,6 +3164,91 @@ impl<'a> Vm<'a> {
     /// appends, map .. map merges (right wins on key collision), otherwise both
     /// operands are converted to strings and joined. Unlike `+`, `..` never does
     /// integer arithmetic — `5 .. 3` is the string "53".
+    fn eval_concat_tracked(
+        &self,
+        left: TrackedValue,
+        right: TrackedValue,
+    ) -> Result<TrackedValue, RuntimeError> {
+        match (&left.value, &right.value) {
+            (Value::Array(_), Value::Array(_)) => {
+                let mut identities = match left.identity.as_ref() {
+                    Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
+                        HeapIdentity::Array(identities) => identities.clone(),
+                        _ => unreachable!(),
+                    },
+                    _ => match HeapIdentity::opaque_for(&left.value) {
+                        HeapIdentity::Array(identities) => identities,
+                        _ => unreachable!(),
+                    },
+                };
+                let right_identities = match right.identity.as_ref() {
+                    Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
+                        HeapIdentity::Array(identities) => identities.clone(),
+                        _ => unreachable!(),
+                    },
+                    _ => match HeapIdentity::opaque_for(&right.value) {
+                        HeapIdentity::Array(identities) => identities,
+                        _ => unreachable!(),
+                    },
+                };
+                identities.extend(right_identities);
+                let value = self.eval_concat(left.value, right.value)?;
+                Ok(TrackedValue {
+                    value,
+                    identity: Some(RawIdentity::Heap(Rc::new(HeapIdentity::Array(
+                        identities,
+                    )))),
+                })
+            }
+            (Value::Proplist(left_entries), Value::Proplist(right_entries)) => {
+                let mut identities = match left.identity.as_ref() {
+                    Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
+                        HeapIdentity::Proplist(identities) => identities.clone(),
+                        _ => unreachable!(),
+                    },
+                    _ => match HeapIdentity::opaque_for(&left.value) {
+                        HeapIdentity::Proplist(identities) => identities,
+                        _ => unreachable!(),
+                    },
+                };
+                let right_identities = match right.identity.as_ref() {
+                    Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
+                        HeapIdentity::Proplist(identities) => identities.clone(),
+                        _ => unreachable!(),
+                    },
+                    _ => match HeapIdentity::opaque_for(&right.value) {
+                        HeapIdentity::Proplist(identities) => identities,
+                        _ => unreachable!(),
+                    },
+                };
+                for (key, value) in right_entries {
+                    if matches!(value, Value::Nil)
+                        && left_entries
+                            .get_key(key)
+                            .is_some_and(|current| !matches!(current, Value::Nil))
+                    {
+                        identities.remove(key);
+                    } else {
+                        identities.insert(
+                            key.clone(),
+                            right_identities.get(key).cloned().unwrap_or(None),
+                        );
+                    }
+                }
+                let value = self.eval_concat(left.value, right.value)?;
+                Ok(TrackedValue {
+                    value,
+                    identity: Some(RawIdentity::Heap(Rc::new(HeapIdentity::Proplist(
+                        identities,
+                    )))),
+                })
+            }
+            _ => self
+                .eval_concat(left.value, right.value)
+                .map(TrackedValue::runtime),
+        }
+    }
+
     fn eval_concat(&self, left: Value, right: Value) -> Result<Value, RuntimeError> {
         match left {
             Value::Array(mut a) => match right {

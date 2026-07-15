@@ -332,6 +332,15 @@ pub enum Expr {
         operator: &'static str,
         value: Box<Expr>,
     },
+    /// Compound assignments retain one evaluated lvalue reference across
+    /// their read, operation, and write. Desugaring to `a = a op b` would
+    /// evaluate side-effecting target expressions twice.
+    CompoundAssignment {
+        target: AssignmentTarget,
+        operation: BinaryOp,
+        operator: &'static str,
+        value: Box<Expr>,
+    },
     /// Strict-3 `receiver?->Call()`, `receiver?[index]`, and
     /// `receiver?.property`. The first step and every step preceded by a
     /// later `?` guards the complete remaining suffix on nil; the node is

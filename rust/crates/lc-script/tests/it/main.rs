@@ -17,6 +17,7 @@ mod test_call_with_ref_args;
 mod test_caller_var_slots;
 mod test_comma_operator;
 mod test_complete_warp;
+mod test_compound_assignment_lvalues;
 mod test_concat_operator;
 mod test_context_annotation;
 mod test_cowb_issue;
