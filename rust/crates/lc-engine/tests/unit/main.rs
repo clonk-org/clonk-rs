@@ -12559,6 +12559,204 @@ protected func Destruction()
     }
 
     #[test]
+    fn fight_tick35_awards_experience_and_applies_one_native_promotion() {
+        let mut fighter_definition =
+            Definition::from_script("CREW", "Crew", "").expect("crew definition compiles");
+        fighter_definition.set_crew_member(true);
+        fighter_definition.configure_actions(
+            Some("Fight".to_string()),
+            HashMap::from([(
+                "Fight".to_string(),
+                ActionSpec::default().with_procedure("fight"),
+            )]),
+        );
+        fighter_definition.set_shape_vertices(vec![
+            ObjectVertex::new(-8, -8),
+            ObjectVertex::new(8, -8),
+            ObjectVertex::new(8, 8),
+            ObjectVertex::new(-8, 8),
+        ]);
+
+        let mut opponent_definition =
+            Definition::from_script("OPPN", "Opponent", "").expect("opponent compiles");
+        opponent_definition.configure_actions(
+            Some("Fight".to_string()),
+            HashMap::from([(
+                "Fight".to_string(),
+                ActionSpec::default().with_procedure("fight"),
+            )]),
+        );
+        opponent_definition.set_shape_vertices(vec![
+            ObjectVertex::new(-8, -8),
+            ObjectVertex::new(8, -8),
+            ObjectVertex::new(8, 8),
+            ObjectVertex::new(-8, 8),
+        ]);
+
+        let mut engine = Engine::with_seed(37);
+        engine
+            .register_definition(fighter_definition)
+            .expect("crew definition registers");
+        engine
+            .register_definition(opponent_definition)
+            .expect("opponent definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("CREW".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(JoinPlayerConfig {
+                name: "Fighter owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![player_file::CrewInfo {
+                    id: "CREW".to_string(),
+                    name: "Rookie".to_string(),
+                    rank: 0,
+                    experience: 998,
+                    death_count: 0,
+                    total_playing_time: 0,
+                    participation: 1,
+                    in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                }],
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("fighter owner joins");
+        let fighter_id = engine.player(0).expect("player exists").crew()[0];
+        let fighter_index = engine
+            .find_object_index(fighter_id)
+            .expect("fighter exists");
+        let position = engine.objects[fighter_index].state.position;
+
+        let mut opponent_action = ActionState::new("Fight");
+        opponent_action.target = Some(fighter_id);
+        let opponent_id = engine
+            .spawn_object(
+                SpawnConfig::new("OPPN")
+                    .with_position(position)
+                    .with_action(opponent_action),
+            )
+            .expect("opponent spawns");
+        engine
+            .apply_object_update(
+                fighter_id,
+                ObjectUpdate::new().with_action_update(
+                    ActionUpdate::default()
+                        .with_name("Fight")
+                        .with_target(Some(opponent_id)),
+                ),
+            )
+            .expect("fighter targets opponent");
+
+        let raw_physical = PhysicalInfo {
+            energy: 10_000,
+            breath: 12_345,
+            walk: 0,
+            jump: 23_456,
+            can_fly: 7,
+            corrosion_resist: 8,
+            breathe_water: 9,
+            ..PhysicalInfo::default()
+        };
+        engine.objects[fighter_index].state.info_physical = Some(raw_physical);
+        engine.objects[fighter_index].state.energy = 12_000;
+        engine.pending_audio.clear();
+
+        for expected_frame in 1..35 {
+            let snapshot = engine.tick().expect("pre-Tick35 fight succeeds");
+            assert_eq!(snapshot.frame, expected_frame);
+            assert!(snapshot.audio.iter().all(|command| !matches!(
+                command,
+                AudioCommand::PlaySound { name, target, .. }
+                    if name == "Trumpet" && *target == Some(fighter_id)
+            )));
+            assert_eq!(
+                engine
+                    .crew_object_info(fighter_id)
+                    .expect("fighter keeps info")
+                    .experience,
+                998,
+                "non-Tick35 fight frames do not award experience"
+            );
+        }
+
+        let promotion_frame = engine.tick().expect("Tick35 fight succeeds");
+        assert_eq!(promotion_frame.frame, 35);
+        let info = engine
+            .crew_object_info(fighter_id)
+            .expect("fighter keeps info");
+        assert_eq!((info.experience, info.rank), (1_000, 1));
+        let state = engine.capture_state();
+        let link = state.crew_info_links[&fighter_id];
+        let roster = &state.crew_info_rosters[&link.player_id][link.roster_index];
+        assert_eq!((roster.experience, roster.rank), (1_000, 1));
+
+        let fighter = promotion_frame
+            .object(fighter_id)
+            .expect("promoted fighter remains live");
+        assert_eq!(fighter.energy, 12_000, "promotion does not heal live Energy");
+        let promoted = fighter
+            .info_physical
+            .expect("promotion writes raw info physicals");
+        assert_eq!(promoted.energy, 55_000);
+        assert_eq!(
+            (
+                promoted.can_dig,
+                promoted.can_chop,
+                promoted.can_construct,
+                promoted.can_scale,
+                promoted.can_hangle,
+            ),
+            (1, 1, 1, 1, 1)
+        );
+        assert_eq!(promoted.breath, raw_physical.breath);
+        assert_eq!(promoted.walk, raw_physical.walk);
+        assert_eq!(promoted.jump, raw_physical.jump);
+        assert_eq!(promoted.can_fly, raw_physical.can_fly);
+        assert_eq!(promoted.corrosion_resist, raw_physical.corrosion_resist);
+        assert_eq!(promoted.breathe_water, raw_physical.breathe_water);
+
+        let promotion_messages = promotion_frame
+            .hud
+            .messages
+            .iter()
+            .filter(|message| message.target == Some(fighter_id))
+            .collect::<Vec<_>>();
+        assert_eq!(promotion_messages.len(), 1);
+        assert_eq!(
+            promotion_messages[0].lines,
+            ["Rookie is promoted".to_string(), "to Ensign!".to_string()]
+        );
+        assert_eq!(
+            promotion_frame
+                .audio
+                .iter()
+                .filter(|command| matches!(
+                    command,
+                    AudioCommand::PlaySound {
+                        name,
+                        target,
+                        volume: 100,
+                        looped: false,
+                        ..
+                    } if name == "Trumpet" && *target == Some(fighter_id)
+                ))
+                .count(),
+            1,
+            "native promotion emits one Trumpet"
+        );
+    }
+
+    #[test]
     fn find_func_condition_calls_function_on_candidates_like_cpp() {
         // C4FindObjectFunc (C4FindObject.cpp:124-136, 653-662): a
         // [C4FO_Func=60, name, pars...] criterion calls `name` on each
@@ -36610,6 +36808,17 @@ func AwardSelf(int amount) {
             .expect("experience owner joins");
         let crew_id = engine.player(0).expect("player").crew()[0];
         let crew_index = engine.find_object_index(crew_id).expect("crew index");
+        let raw_physical = PhysicalInfo {
+            energy: 10_000,
+            breath: 12_345,
+            walk: 23_456,
+            can_fly: 7,
+            corrosion_resist: 8,
+            breathe_water: 9,
+            ..PhysicalInfo::default()
+        };
+        engine.objects[crew_index].state.info_physical = Some(raw_physical);
+        engine.objects[crew_index].state.energy = 12_000;
         engine.pending_audio.clear();
 
         assert_eq!(
@@ -36619,17 +36828,58 @@ func AwardSelf(int amount) {
             Value::Array(vec![Value::Bool(true), Value::Int(1), Value::Int(8_000)]),
             "DoExperience promotes at most one rank and exposes the write immediately"
         );
-        assert!(engine.pending_audio.iter().any(|command| matches!(
-            command,
-            AudioCommand::PlaySound { name, target, volume: 100, looped: false, .. }
-                if name == "Trumpet" && *target == Some(crew_id)
-        )));
-        let promotion = engine
+        assert_eq!(
+            engine
+                .pending_audio
+                .iter()
+                .filter(|command| matches!(
+                    command,
+                    AudioCommand::PlaySound {
+                        name,
+                        target,
+                        volume: 100,
+                        looped: false,
+                        ..
+                    } if name == "Trumpet" && *target == Some(crew_id)
+                ))
+                .count(),
+            1,
+            "the host preview presents the promotion once; its deferred command must not repeat it"
+        );
+        let promoted_object = engine
+            .object_snapshot(crew_id)
+            .expect("promoted crew remains live");
+        assert_eq!(promoted_object.energy, 12_000, "promotion does not heal live Energy");
+        let promoted_physical = promoted_object
+            .info_physical
+            .expect("DoCrewExp writes raw info physicals");
+        assert_eq!(promoted_physical.energy, 55_000);
+        assert_eq!(
+            (
+                promoted_physical.can_dig,
+                promoted_physical.can_chop,
+                promoted_physical.can_construct,
+                promoted_physical.can_scale,
+                promoted_physical.can_hangle,
+            ),
+            (1, 1, 1, 1, 1)
+        );
+        assert_eq!(promoted_physical.breath, raw_physical.breath);
+        assert_eq!(promoted_physical.walk, raw_physical.walk);
+        assert_eq!(promoted_physical.can_fly, raw_physical.can_fly);
+        assert_eq!(
+            promoted_physical.corrosion_resist,
+            raw_physical.corrosion_resist
+        );
+        assert_eq!(promoted_physical.breathe_water, raw_physical.breathe_water);
+        let promotions = engine
             .capture_state()
             .messages
             .into_iter()
-            .find(|message| message.snapshot.target == Some(crew_id))
-            .expect("promotion message targets the crew");
+            .filter(|message| message.snapshot.target == Some(crew_id))
+            .collect::<Vec<_>>();
+        assert_eq!(promotions.len(), 1);
+        let promotion = &promotions[0];
         assert_eq!(
             promotion.snapshot.lines,
             vec!["Rookie is promoted".to_string(), "to Custom One!".to_string()]

@@ -4132,7 +4132,7 @@ const DEFAULT_RANK_NAMES: [&str; 11] = [
     "General",
 ];
 
-fn default_rank_name(rank: i32) -> Option<&'static str> {
+pub(crate) fn default_rank_name(rank: i32) -> Option<&'static str> {
     usize::try_from(rank)
         .ok()
         .and_then(|rank| DEFAULT_RANK_NAMES.get(rank).copied())
@@ -4167,6 +4167,11 @@ fn do_crew_exp(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(false));
         }
 
+        let info_definition_physical = context
+            .object_scope(target)
+            .and_then(ObjectScopeContext::info_core)
+            .and_then(|info| context.definition_metadata(info.definition_id.as_str()))
+            .map(|metadata| metadata.physical);
         let Some((link, info, promoted)) = context.object_scope_mut(target).and_then(|scope| {
             let link = scope.info_link();
             let mut info = scope.info_core()?.clone();
@@ -4174,6 +4179,16 @@ fn do_crew_exp(args: &[Value]) -> Result<Value, RuntimeError> {
             scope.set_info_core(Some(info.clone()));
             if promoted {
                 scope.set_info_rank(Some(info.rank));
+                let physical = scope
+                    .info_physical
+                    .or(info_definition_physical)
+                    .unwrap_or(scope.definition_physical);
+                scope.info_physical = Some(crate::promotion_updated_physical(
+                    physical,
+                    info.rank,
+                    None,
+                ));
+                scope.record_physicals();
             }
             Some((link, info, promoted))
         }) else {

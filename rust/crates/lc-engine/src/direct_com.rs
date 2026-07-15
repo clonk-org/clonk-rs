@@ -299,7 +299,7 @@ impl Engine {
         let control_count = self.crew_info_control_counts.entry(link).or_default();
         *control_count = control_count.wrapping_add(1);
         if *control_count % 5 == 0 {
-            self.adjust_object_info_experience(cursor, Some(link), 1);
+            self.do_object_experience(cursor, 1);
         }
     }
 

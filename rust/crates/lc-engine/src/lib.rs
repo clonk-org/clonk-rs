@@ -6577,7 +6577,7 @@ pub(crate) fn adjust_crew_experience(info: &mut CrewObjectInfo, change: i32) -> 
 /// (C4InfoCore.cpp:207-222), before its optional definition-script
 /// `GetFairCrewPhysical` overrides. Fair crew additionally trains Scale,
 /// Hangle, Swim and Fight linearly toward `C4MaxPhysical` by rank 20.
-fn promotion_updated_physical(
+pub(crate) fn promotion_updated_physical(
     mut physical: PhysicalInfo,
     rank: i32,
     training_definition: Option<PhysicalInfo>,
@@ -28225,7 +28225,7 @@ impl Engine {
         object_id: ObjectId,
         link: Option<CrewInfoLink>,
         change: i32,
-    ) {
+    ) -> Option<CrewObjectInfo> {
         // The C4ObjectInfo belongs to the player's persistent CrewInfoList
         // independently of the live object pointer. Apply there first so a
         // later Retire/Grab in the same ordered stream retains the change.
@@ -28241,28 +28241,103 @@ impl Engine {
                         experience: entry.experience,
                         death_count: entry.death_count,
                     };
-                    adjust_crew_experience(&mut info, change);
+                    let promoted = adjust_crew_experience(&mut info, change);
                     entry.rank = info.rank;
                     entry.experience = info.experience;
-                    (info.rank, info.experience)
+                    (info, promoted)
                 })
         });
 
         let live_values = {
             let infos = Rc::make_mut(&mut self.crew_object_infos);
             infos.get_mut(&object_id).map(|info| {
-                if let Some((rank, experience)) = roster_values {
-                    info.rank = rank;
-                    info.experience = experience;
+                let promoted = if let Some((roster_info, promoted)) = roster_values.as_ref() {
+                    info.rank = roster_info.rank;
+                    info.experience = roster_info.experience;
+                    *promoted
                 } else {
-                    adjust_crew_experience(info, change);
-                }
-                (info.rank, info.experience)
+                    adjust_crew_experience(info, change)
+                };
+                (info.clone(), promoted)
             })
         };
-        if let Some((rank, _)) = live_values.or(roster_values) {
-            Rc::make_mut(&mut self.crew_ranks).insert(object_id.as_u64(), rank);
+        let final_values = live_values.as_ref().or(roster_values.as_ref());
+        if let Some((info, _)) = final_values {
+            Rc::make_mut(&mut self.crew_ranks).insert(object_id.as_u64(), info.rank);
         }
+        final_values
+            .filter(|(_, promoted)| *promoted)
+            .map(|(info, _)| info.clone())
+    }
+
+    /// Native `C4Object::DoExperience`: mutate the persistent info first,
+    /// then run the promotion-only physical and presentation half exactly
+    /// once. Script `DoCrewExp` previews those effects in its host scope and
+    /// deliberately replays only [`Self::adjust_object_info_experience`].
+    fn do_object_experience(&mut self, object_id: ObjectId, change: i32) {
+        let link = self.crew_info_links.get(&object_id).copied();
+        let Some(info) = self.adjust_object_info_experience(object_id, link, change) else {
+            return;
+        };
+
+        let definition_physical = self
+            .definitions
+            .get(&info.definition_id)
+            .map(|definition| *definition.physical())
+            .unwrap_or_default();
+        if let Some(index) = self.find_object_index(object_id) {
+            let physical = self.objects[index]
+                .state
+                .info_physical
+                .unwrap_or(definition_physical);
+            self.objects[index].state.info_physical = Some(promotion_updated_physical(
+                physical,
+                info.rank,
+                None,
+            ));
+        }
+
+        // An exhausted custom rank table promotes silently; only definitions
+        // without a custom table fall back to the game-global rank names.
+        let rank_name = match self
+            .definitions
+            .get(&info.definition_id)
+            .and_then(Definition::rank_names)
+        {
+            Some(names) => usize::try_from(info.rank)
+                .ok()
+                .and_then(|rank| names.get(rank))
+                .cloned(),
+            None => compat::default_rank_name(info.rank).map(str::to_owned),
+        };
+        let Some(rank_name) = rank_name else {
+            return;
+        };
+        let object_name = self
+            .find_object_index(object_id)
+            .and_then(|index| self.objects[index].state.custom_name.clone())
+            .unwrap_or(info.name);
+        self.messages.add_message(MessageSpec {
+            kind: message::MessageKind::Target,
+            text: format!("{object_name} is promoted|to {rank_name}!"),
+            target: Some(object_id),
+            player: None,
+            offset: Vector2::ZERO,
+            color: 0xffff_ffff,
+            flags: 0,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        });
+        self.pending_audio.push(AudioCommand::PlaySound {
+            name: "Trumpet".to_string(),
+            target: Some(object_id),
+            volume: 100,
+            looped: false,
+            multiple: false,
+            custom_falloff: None,
+        });
     }
 
     #[doc(hidden)]
@@ -33128,12 +33203,16 @@ impl Engine {
             return false;
         }
 
-        // Other (C4Object.cpp:5235-5238): grounded fighting. The Tick35
-        // DoExperience(+2) needs the C4ObjectInfo model.
+        // Other (C4Object.cpp:5235-5238): grounded fighting and Tick35
+        // experience after every validity check above has succeeded.
+        let fighter_id = self.objects[idx].id;
         let fighter = &mut self.objects[idx];
         fighter.fixed_velocity.y = C4Fixed::ZERO;
         physics.clamp_fixed_velocity(&mut fighter.fixed_velocity);
         fighter.refresh_velocity_from_fixed();
+        if self.frame % 35 == 0 {
+            self.do_object_experience(fighter_id, 2);
+        }
 
         true
     }
