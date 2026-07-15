@@ -212,6 +212,19 @@ pub(crate) struct DefinitionFireMetadata {
     /// Grab (0 none, 1 grab+push, 2 grab-only) — the shockwave check's
     /// vehicle/FLOAT exemption reads it (Explode.c BlastObjectsShockwaveCheck).
     pub grab: i32,
+    /// DefCore Oversize removes DoCon's upper FullCon clamp.
+    pub oversize: bool,
+    /// Positive Collection rect enables OCF_Collection when construction,
+    /// capacity, action and delay gates pass.
+    pub collection_rect: Option<DefinitionRect>,
+    /// Positive Entrance rect enables OCF_Entrance at FullCon.
+    pub entrance_rect: Option<DefinitionRect>,
+    /// DefCore RotatedEntrance rotation cutoff.
+    pub rotated_entrance: i32,
+    /// DefCore AttractLightning is gated by FullCon.
+    pub attract_lightning: bool,
+    /// DefCore NoFight suppresses OCF_FightReady.
+    pub no_fight: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -400,6 +413,7 @@ impl HostSolidMaskImage {
 pub(crate) struct HostSolidMaskMetadata {
     shape: Option<DefinitionRect>,
     default_mask: Option<crate::DefinitionTargetRect>,
+    rotated_solid_masks: bool,
     default_image: Option<HostSolidMaskImage>,
     named_images: HashMap<String, HostSolidMaskImage>,
 }
@@ -408,12 +422,14 @@ impl HostSolidMaskMetadata {
     pub(crate) fn new(
         shape: Option<DefinitionRect>,
         default_mask: Option<crate::DefinitionTargetRect>,
+        rotated_solid_masks: bool,
         default_image: Option<HostSolidMaskImage>,
         named_images: HashMap<String, HostSolidMaskImage>,
     ) -> Self {
         Self {
             shape,
             default_mask,
+            rotated_solid_masks,
             default_image,
             named_images,
         }
@@ -807,7 +823,7 @@ impl HostWorldObject {
             collection_limit: None,
             energy,
             need_energy: false,
-            construction: construction.clamp(0, FULL_CON),
+            construction: construction.max(0),
             contact_density: crate::CONTACT_DENSITY_SOLID,
             damage,
             ocf: ocf::NORMAL,
@@ -1097,6 +1113,11 @@ pub struct HostWorldContext {
     /// CreateObject callbacks. Only same-call pending objects consume it;
     /// committed grid-world masks are already baked into `landscape`.
     solid_mask_metadata: Rc<HashMap<DefinitionId, HostSolidMaskMetadata>>,
+    /// Active grid-world C4SolidMask bakes, including each mask's saved
+    /// background buffer. A synchronous callback clones these alongside the
+    /// landscape so native operations such as DoCon can remove/re-put masks
+    /// before nested script callbacks inspect GBack*.
+    solid_mask_bakes: Rc<Vec<(ObjectId, crate::SolidMaskBake)>>,
     /// Definitions whose default graphics carry a ColorByOwner surface.
     /// This drives SetGraphics/ChangeDef's immediate Color reset.
     color_by_owner_definitions: Rc<HashSet<DefinitionId>>,
@@ -1215,6 +1236,7 @@ impl Default for HostWorldContext {
             movement_solid_masks: Rc::new(Vec::new()),
             definitions: Rc::new(HashMap::new()),
             solid_mask_metadata: Rc::new(HashMap::new()),
+            solid_mask_bakes: Rc::new(Vec::new()),
             color_by_owner_definitions: Rc::new(HashSet::new()),
             base_auto_sell_definitions: Rc::new(HashSet::new()),
             rebuyable_definitions: Rc::new(HashSet::new()),
@@ -1425,6 +1447,7 @@ impl HostWorldContext {
             movement_solid_masks: Rc::new(Vec::new()),
             definitions,
             solid_mask_metadata: Rc::new(HashMap::new()),
+            solid_mask_bakes: Rc::new(Vec::new()),
             color_by_owner_definitions: Rc::new(HashSet::new()),
             base_auto_sell_definitions: Rc::new(HashSet::new()),
             rebuyable_definitions: Rc::new(HashSet::new()),
@@ -1851,6 +1874,14 @@ impl HostWorldContext {
         self
     }
 
+    pub(crate) fn with_solid_mask_bakes(
+        mut self,
+        bakes: Vec<(ObjectId, crate::SolidMaskBake)>,
+    ) -> Self {
+        self.solid_mask_bakes = Rc::new(bakes);
+        self
+    }
+
     fn movement_density_at(&self, x: i32, y: i32) -> Option<i32> {
         Some(crate::movement_density_at(
             self.landscape_ref()?,
@@ -2055,6 +2086,60 @@ trait WorldAccessor {
     fn script_function_known(&self, name: &str) -> bool;
 }
 
+/// Snapshot fallback for C4Object::Mass. Live host calls use the scoped
+/// variant below, while standalone Find fixtures still need the complete
+/// cached-mass formula, including recursively contained objects.
+fn world_object_mass(
+    world: &impl WorldAccessor,
+    target: ObjectId,
+    visited: &mut HashSet<ObjectId>,
+) -> i32 {
+    if !visited.insert(target) {
+        return 0;
+    }
+    let Some(object) = world.get_object(target) else {
+        visited.remove(&target);
+        return 0;
+    };
+    let Some(metadata) = world.definition_metadata(object.definition_id()) else {
+        visited.remove(&target);
+        return 1;
+    };
+    let state = object.full_state();
+    let own_mass = state.map(|state| state.own_mass).unwrap_or(0);
+    let mut mass = metadata
+        .mass
+        .saturating_add(own_mass)
+        .saturating_mul(object.construction())
+        / FULL_CON;
+    mass = mass.max(1);
+    if !metadata.no_component_mass {
+        for child in object.contents() {
+            mass = mass.saturating_add(world_object_mass(world, *child, visited));
+        }
+    }
+    visited.remove(&target);
+    mass
+}
+
+/// C4SO_Mass reads the live cached `pFor->Mass`. The borrow-free Func-find
+/// path owns an older view by design, so prefer the current host scope when
+/// one exists; this also preserves mutations made by an earlier Find_Func or
+/// Sort_Func callback in the same search.
+fn sort_object_mass(world: &impl WorldAccessor, target: ObjectId) -> i32 {
+    let live = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.try_borrow().ok()?;
+        let context = borrow.as_ref()?;
+        context.get_world_object(target)?;
+        Some(reflected_object_mass(
+            context,
+            target,
+            &mut HashSet::new(),
+        ))
+    });
+    live.unwrap_or_else(|| world_object_mass(world, target, &mut HashSet::new()))
+}
+
 impl WorldAccessor for HostWorldContext {
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject> {
         self.get(id).cloned()
@@ -2215,9 +2300,23 @@ impl WorldAccessor for FuncFindView {
 /// Clones the active context's world view for a Func-criterion search.
 fn snapshot_func_find_view() -> Option<FuncFindView> {
     HOST_CONTEXT.with(|cell| {
-        cell.borrow().as_ref().map(|context| FuncFindView {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let mut pending_objects = context.pending_objects.clone();
+        let scoped_ids = context
+            .scopes_in_call_order()
+            .map(ObjectScopeContext::id)
+            .collect::<Vec<_>>();
+        for id in scoped_ids {
+            if let Some(object) = context.get_world_object(id) {
+                pending_objects.insert(id, object);
+            }
+        }
+        Some(FuncFindView {
             world: context.world.clone(),
-            pending_objects: context.pending_objects.clone(),
+            pending_objects,
+            // Existing scoped ids remain in the world's master order. Only
+            // genuinely new objects belong in this appended list.
             pending_order: context.pending_order.clone(),
         })
     })
@@ -6904,6 +7003,39 @@ fn object_has_status(target: ObjectId) -> bool {
     })
 }
 
+fn live_collection_eligible(
+    context: &EffectHostContext,
+    target: ObjectId,
+    ignore_no_collect_delay: bool,
+) -> bool {
+    let Some(scope) = context.object_scope(target) else {
+        return false;
+    };
+    let Some(definition_id) = context.object_effective_definition_id(target) else {
+        return false;
+    };
+    let Some(metadata) = context.definition_metadata(&definition_id) else {
+        return false;
+    };
+    let construction_ready = scope.construction() >= FULL_CON
+        || metadata.fire.incomplete_activity;
+    let positive_rect = metadata
+        .fire
+        .collection_rect
+        .is_some_and(|rect| rect.width > 0 && rect.height > 0);
+    let below_limit = metadata.collection_limit <= 0
+        || context
+            .get_world_object(target)
+            .is_some_and(|object| object.contents().len() < metadata.collection_limit as usize);
+    construction_ready
+        && positive_rect
+        && below_limit
+        && !scope
+            .action_library
+            .disables_object(scope.effective_action_name())
+        && (ignore_no_collect_delay || scope.no_collect_delay() == 0)
+}
+
 /// Presence check for ordered command previews: once a same-call scope
 /// exists, its removal state supersedes the immutable frame snapshot.
 fn preview_object_is_present(target: ObjectId) -> bool {
@@ -6928,12 +7060,43 @@ fn refresh_live_object_ocf(context: &mut EffectHostContext, target: ObjectId) ->
     if !context.ensure_object_scope(target) {
         return false;
     }
-    let Some((position, container)) = context
+    let Some(definition_id) = context.object_effective_definition_id(target) else {
+        return false;
+    };
+    let Some(metadata) = context.definition_metadata(&definition_id).cloned() else {
+        return false;
+    };
+    let Some((
+        position,
+        container,
+        construction,
+        rotation,
+        energy,
+        on_fire,
+        alive,
+        category,
+        action_disabled,
+    )) = context
         .object_scope(target)
-        .map(|scope| (scope.effective_position(), scope.container()))
+        .map(|scope| {
+            (
+                scope.effective_position(),
+                scope.container(),
+                scope.construction(),
+                scope.rotation(),
+                scope.energy(),
+                scope.ocf() & ocf::ON_FIRE != 0,
+                scope.alive(),
+                scope.category(),
+                scope
+                    .action_library
+                    .disables_object(scope.effective_action_name()),
+            )
+        })
     else {
         return false;
     };
+    let collection = live_collection_eligible(context, target, false);
     let solid_center = context
         .landscape_ref()
         .is_some_and(|landscape| landscape.is_solid_at(position.x, position.y));
@@ -6964,6 +7127,70 @@ fn refresh_live_object_ocf(context: &mut EffectHostContext, target: ObjectId) ->
     };
     scope.refresh_cached_ocf();
     let mut mask = scope.cached_ocf.unwrap_or(ocf::NORMAL);
+    // Every bit whose SetOCF predicate depends directly or indirectly on
+    // Con is rebuilt from the live definition/scope. DoCon calls SetOCF
+    // before UpdateFace and before any lifecycle callback.
+    mask &= !(ocf::CONSTRUCT
+        | ocf::FULL_CON
+        | ocf::ROTATE
+        | ocf::ENTRANCE
+        | ocf::COLLECTION
+        | ocf::LINE_CONSTRUCT
+        | ocf::ATTRACT_LIGHTNING
+        | ocf::POWER_CONSUMER
+        | ocf::POWER_SUPPLY
+        | ocf::CONTAINER
+        | ocf::FIGHT_READY);
+    if metadata.constructable && construction < FULL_CON && rotation == 0 && !on_fire {
+        mask |= ocf::CONSTRUCT;
+    }
+    if construction >= FULL_CON {
+        mask |= ocf::FULL_CON;
+    }
+    if metadata.rotateable > 0 && construction > 100 {
+        mask |= ocf::ROTATE;
+    }
+    if metadata
+        .fire
+        .entrance_rect
+        .is_some_and(|rect| rect.width > 0 && rect.height > 0)
+        && mask & ocf::FULL_CON != 0
+        && (metadata.fire.rotated_entrance == 1 || rotation <= metadata.fire.rotated_entrance)
+    {
+        mask |= ocf::ENTRANCE;
+    }
+    if collection {
+        mask |= ocf::COLLECTION;
+    }
+    if mask & ocf::FULL_CON != 0
+        && metadata.line_connect & !crate::LINE_CONNECT_ENERGY_HOLDER != 0
+    {
+        mask |= ocf::LINE_CONSTRUCT;
+    }
+    if metadata.fire.attract_lightning && mask & ocf::FULL_CON != 0 {
+        mask |= ocf::ATTRACT_LIGHTNING;
+    }
+    if metadata.line_connect & crate::LINE_CONNECT_POWER_CONSUMER != 0
+        && mask & ocf::FULL_CON != 0
+    {
+        mask |= ocf::POWER_CONSUMER;
+    }
+    if (metadata.line_connect & crate::LINE_CONNECT_POWER_GENERATOR != 0
+        || (metadata.line_connect & crate::LINE_CONNECT_POWER_OUTPUT != 0 && energy > 0))
+        && mask & ocf::FULL_CON != 0
+    {
+        mask |= ocf::POWER_SUPPLY;
+    }
+    if metadata.grab_put_get & 3 != 0 || mask & ocf::ENTRANCE != 0 {
+        mask |= ocf::CONTAINER;
+    }
+    if alive
+        && category & crate::CATEGORY_LIVING != 0
+        && !action_disabled
+        && !metadata.fire.no_fight
+    {
+        mask |= ocf::FIGHT_READY;
+    }
     mask &= !(ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE);
     if container.is_none() {
         if solid_center {
@@ -6983,33 +7210,7 @@ fn refresh_live_object_ocf(context: &mut EffectHostContext, target: ObjectId) ->
 }
 
 fn refresh_container_collection_ocf(context: &mut EffectHostContext, container: ObjectId) {
-    let available = context.get_world_object(container).is_some_and(|object| {
-        object.collection_enabled
-            && context
-                .object_scope(container)
-                .map(ObjectScopeContext::no_collect_delay)
-                .unwrap_or(object.no_collect_delay)
-                == 0
-            && object
-                .collection_limit
-                .is_none_or(|limit| object.contents().len() < limit as usize)
-    });
-    if !refresh_live_object_ocf(context, container) {
-        return;
-    }
-    if let Some(scope) = context.object_scope_mut(container) {
-        let available = available
-            && !scope
-                .action_library
-                .disables_object(scope.effective_action_name());
-        let mut mask = scope.ocf();
-        if available {
-            mask |= ocf::COLLECTION;
-        } else {
-            mask &= !ocf::COLLECTION;
-        }
-        scope.cached_ocf = Some(mask);
-    }
+    let _ = refresh_live_object_ocf(context, container);
 }
 
 /// Direct `C4Object::Exit(x, y)` with absolute coordinates. Unlike the
@@ -7640,13 +7841,25 @@ fn clear_effects_for_assign_removal(target: ObjectId) -> Result<bool, RuntimeErr
     Ok(true)
 }
 
-/// The synchronous callback-visible portion of `C4Object::AssignRemoval`.
-/// The final object/effect cleanup still rides the normal nested outcome,
-/// but status and references change immediately inside this VM call.
-fn mark_object_destroyed_with_info(context: &mut EffectHostContext, target: ObjectId) -> bool {
+/// `C4Object::AssignRemoval` sets Status=0 before killing contents, but it
+/// deliberately keeps Info, object references and the solid mask alive until
+/// after contents and containment have been cleaned up (C4Object.cpp:276-313).
+fn mark_object_status_deleted(context: &mut EffectHostContext, target: ObjectId) -> bool {
     if !context.ensure_object_scope(target) {
         return false;
     }
+    if let Some(scope) = context.object_scope_mut(target) {
+        scope.mark_destroy_status();
+        true
+    } else {
+        false
+    }
+}
+
+fn retire_object_info_and_clear_references(
+    context: &mut EffectHostContext,
+    target: ObjectId,
+) {
     let link = context.object_scope(target).and_then(ObjectScopeContext::info_link);
     if let Some(link) = link {
         if retire_host_crew_info(context, link) {
@@ -7657,15 +7870,15 @@ fn mark_object_destroyed_with_info(context: &mut EffectHostContext, target: Obje
         }
     }
     if let Some(scope) = context.object_scope_mut(target) {
-        scope.mark_destroy();
-        true
-    } else {
-        false
+        scope.clear_info_for_removal();
     }
+    context.clear_non_player_script_object_references(target);
 }
 
 fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, RuntimeError> {
-    if !object_is_present(target) {
+    // C4Object::AssignRemoval gates on raw Status truthiness. Inactive is a
+    // live nonzero status and is activated internally before deletion.
+    if !object_has_status(target) {
         return Ok(false);
     }
     let container = HOST_CONTEXT.with(|cell| {
@@ -7674,18 +7887,18 @@ fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, Ru
             .and_then(|context| context.get_world_object(target))
             .and_then(|object| object.container())
     });
-    if let Some(container) = container.filter(|container| object_is_present(*container)) {
+    if let Some(container) = container.filter(|container| object_has_status(*container)) {
         call_object_own_fail_safe(
             container,
             "ContentsDestruction",
             &[object_reference_value(target)],
         );
-        if !object_is_present(target) {
+        if !object_has_status(target) {
             return Ok(true);
         }
     }
     call_object_own_fail_safe(target, "Destruction", &[]);
-    if !object_is_present(target) {
+    if !object_has_status(target) {
         return Ok(true);
     }
     if !clear_effects_for_assign_removal(target)? {
@@ -7704,7 +7917,7 @@ fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, Ru
         }
     });
     let _ = native_set_action_by_name(target, "Idle")?;
-    if !object_is_present(target) {
+    if !object_has_status(target) {
         return Ok(true);
     }
 
@@ -7720,7 +7933,7 @@ fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, Ru
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else { return };
-        mark_object_destroyed_with_info(context, target);
+        mark_object_status_deleted(context, target);
     });
 
     loop {
@@ -7753,12 +7966,26 @@ fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, Ru
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else { return };
+        let removed_from = context.object_scope(target).and_then(ObjectScopeContext::container);
         if let Some(scope) = context.object_scope_mut(target) {
             scope.set_container(None);
         }
-        context.clear_non_player_script_object_references(target);
+        if let Some(container) = removed_from {
+            // AssignRemoval removes the child's link, then UpdateMass and
+            // SetOCF on the surviving parent (C4Object.cpp:297-305).
+            refresh_container_collection_ocf(context, container);
+        }
+        retire_object_info_and_clear_references(context, target);
     });
     clear_player_object_pointers_host(target);
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if let Some(context) = borrow.as_mut() {
+            // pSolidMaskData->Remove is the last modeled AssignRemoval side
+            // arm, after Game.ClearPointers (C4Object.cpp:309-313).
+            context.update_live_solid_mask(target);
+        }
+    });
     Ok(true)
 }
 
@@ -8260,6 +8487,29 @@ fn enter(args: &[Value]) -> Result<Value, RuntimeError> {
 /// (C4Object.cpp:1566-1636,5693-5714). This must stay a live host operation,
 /// rather than a deferred container assignment: MFBL collects a same-call
 /// freshly-created FRBL and branches on the boolean result.
+struct CollectDelayRestore {
+    collector: ObjectId,
+    old_delay: i32,
+}
+
+impl Drop for CollectDelayRestore {
+    fn drop(&mut self) {
+        if self.old_delay == 0 {
+            return;
+        }
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(scope) = borrow
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(self.collector))
+            else {
+                return;
+            };
+            scope.restore_no_collect_delay(self.old_delay);
+        });
+    }
+}
+
 fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(item) = parse_object_reference_argument(
         args.first().unwrap_or(&Value::Nil),
@@ -8282,35 +8532,46 @@ fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     }
 
-    let (ready, temporarily_recomputed) = HOST_CONTEXT.with(|cell| {
+    let (ready, old_no_collect_delay) = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return (false, false);
+            return (false, 0);
         };
         let item_ready = context
             .get_world_object(item)
             .is_some_and(|object| object.is_present());
         let collector_state = context.get_world_object(collector);
-        let collector_ready = collector_state.as_ref().is_some_and(|object| {
-            object.is_present() && object.collection_available_ignoring_delay()
-        });
-        // FnCollect temporarily clears NoCollectDelay and calls UpdateOCF
-        // before checking the bit. Keep that recomputed Collection bit live
-        // for the synchronous veto/callback chain too (C4Script.cpp:397-406).
-        let temporarily_recomputed = collector_ready
-            && collector_state
-                .as_ref()
-                .is_some_and(|object| object.ocf() & ocf::COLLECTION == 0);
-        if temporarily_recomputed
-            && context.ensure_object_scope(collector)
-        {
-            if let Some(scope) = context.object_scope_mut(collector) {
-                let recomputed = scope.ocf() | ocf::COLLECTION;
-                scope.cached_ocf = Some(recomputed);
-            }
+        let collector_present = collector_state
+            .as_ref()
+            .is_some_and(HostWorldObject::is_present);
+        if !collector_present || !context.ensure_object_scope(collector) {
+            return (false, 0);
         }
-        (item_ready && collector_ready, temporarily_recomputed)
+        let old_no_collect_delay = context
+            .object_scope(collector)
+            .map(ObjectScopeContext::no_collect_delay)
+            .unwrap_or(0);
+        // FnCollect trusts the existing cached OCF when the delay is already
+        // zero. Only a nonzero delay is cleared and followed by UpdateOCF.
+        if old_no_collect_delay != 0 {
+            if let Some(scope) = context.object_scope_mut(collector) {
+                scope.set_no_collect_delay(0);
+            }
+            let _ = refresh_live_object_ocf(context, collector);
+        }
+        let collector_ready = collector_present
+            && context
+                .object_scope(collector)
+                .is_some_and(|scope| scope.ocf() & ocf::COLLECTION != 0);
+        (item_ready && collector_ready, old_no_collect_delay)
     });
+    // Restore on every success, veto, error and early return after the
+    // temporary clear. C++ performs this after Collect returns, even when it
+    // failed (C4Script.cpp:410-413).
+    let _delay_restore = CollectDelayRestore {
+        collector,
+        old_delay: old_no_collect_delay,
+    };
     if !ready {
         return Ok(Value::Bool(false));
     }
@@ -8587,7 +8848,7 @@ fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
     // does not call UpdateOCF again (:412-413). Preserve the cache left by
     // the temporary recompute/Enter callbacks after the deferred outcome
     // fold performs its ordinary container refresh.
-    if temporarily_recomputed {
+    if old_no_collect_delay != 0 {
         HOST_CONTEXT.with(|cell| {
             let mut borrow = cell.borrow_mut();
             let Some(context) = borrow.as_mut() else {
@@ -10751,8 +11012,7 @@ fn energy_to_script_value(energy: i32) -> i32 {
 }
 
 fn construction_to_script_value(construction: i32) -> i32 {
-    let clamped = construction.clamp(0, FULL_CON);
-    ((clamped as i64) * 100 / (FULL_CON as i64)) as i32
+    ((construction.max(0) as i64) * 100 / (FULL_CON as i64)) as i32
 }
 
 fn construction_delta_from_percent(percent: i32) -> i32 {
@@ -13285,7 +13545,7 @@ impl<'a> HostObjectContext<'a> {
             need_energy: false,
             magic_energy: 0,
             damage,
-            construction: construction.clamp(0, FULL_CON),
+            construction: construction.max(0),
             alive: true,
             in_liquid: false,
             own_mass: 0,
@@ -16660,28 +16920,14 @@ fn get_mass(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         // UpdateMass: Mass = max((Def->Mass + OwnMass) * Con / FullCon, 1)
         // (C4Object.cpp:497-500); the active scope has the freshest OwnMass.
-        let scope_own_mass = context
-            .object_context()
-            .filter(|object| object.id() == id)
-            .map(|object| object.own_mass());
-        Ok(context
-            .get_world_object(id)
-            .and_then(|object| {
-                let metadata = context.world.definition_metadata(object.definition_id())?;
-                let state = object.full_state();
-                let construction = state
-                    .map(|state| state.construction)
-                    .unwrap_or(crate::FULL_CON);
-                let own_mass = scope_own_mass
-                    .or_else(|| state.map(|state| state.own_mass))
-                    .unwrap_or(0);
-                Some(Value::Int(
-                    ((metadata.mass.saturating_add(own_mass)).saturating_mul(construction)
-                        / crate::FULL_CON)
-                        .max(1),
-                ))
-            })
-            .unwrap_or(Value::Nil))
+        if context.get_world_object(id).is_none() {
+            return Ok(Value::Nil);
+        }
+        Ok(Value::Int(reflected_object_mass(
+            context,
+            id,
+            &mut HashSet::new(),
+        )))
     })
 }
 
@@ -18012,12 +18258,10 @@ fn get_con(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         if let Some(target) = target_id {
-            if let Some(object) = context.object_context() {
-                if object.id() == target {
-                    return Ok(Value::Int(construction_to_script_value(
-                        object.construction(),
-                    )));
-                }
+            if let Some(object) = context.object_scope(target) {
+                return Ok(Value::Int(construction_to_script_value(
+                    object.construction(),
+                )));
             }
             if let Some(other) = context.get_world_object(target) {
                 return Ok(Value::Int(construction_to_script_value(
@@ -18579,35 +18823,208 @@ fn do_con(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let active = active_object_id();
-    if let Some(target) = target_id {
-        if Some(target) != active {
-            return match call_world_object_function(
-                target,
-                "DoCon",
-                &[Value::Int(change_percent)],
-            ) {
-                Some(result) => result,
-                None => Ok(Value::Bool(false)),
-            };
+    // FnDoCon invokes the native method on its optional object parameter;
+    // it does not dispatch a target-local script function of the same name.
+    let target = target_id.or_else(active_object_id);
+    let Some(target) = target else {
+        return Ok(Value::Bool(false));
+    };
+    let delta = construction_delta_from_percent(change_percent);
+    Ok(Value::Bool(do_con_live(target, delta)?))
+}
+
+/// Synchronous host-context `C4Object::DoCon(..., fInitial=false)`. The
+/// low-level construction primitive is also used by NewObject's initial
+/// pass, so all non-initial side arms live here instead of in that primitive.
+fn do_con_live(target: ObjectId, delta: i32) -> Result<bool, RuntimeError> {
+    let staged = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        if !context.ensure_object_scope(target) {
+            return None;
+        }
+        let metadata = context
+            .object_effective_definition_id(target)
+            .and_then(|definition_id| context.definition_metadata(&definition_id).cloned())
+            .unwrap_or_default();
+        let before = context.object_scope(target)?.construction();
+        let entry_position = context.object_scope(target)?.effective_position();
+        let entry_shape = live_object_shape(context, target);
+        let previous_step = before / (FULL_CON / 100);
+        let was_full = before >= FULL_CON;
+        let after = context.stage_live_docon_construction(target, delta)?;
+        let step_diff = after / (FULL_CON / 100) - previous_step;
+        let refresh = crate::docon_refreshes_construction(before, after);
+        let _ = refresh_live_object_ocf(context, target);
+        if refresh {
+            if let Some(scope) = context.object_scope_mut(target) {
+                if metadata.line == 0 {
+                    scope.pending_update.shape_override = Some(None);
+                }
+                scope.refresh_shape_preview(&metadata);
+            }
+            // UpdateFace(true) recreates/puts the mask before contents
+            // ejection and SetAction(Idle), so callbacks fired by either
+            // path must already see the new landscape (C4Object.cpp:
+            // 1450-1472).
+            context.update_live_solid_mask(target);
+        }
+        Some((
+            metadata,
+            entry_position,
+            entry_shape,
+            previous_step,
+            step_diff,
+            was_full,
+            after,
+            refresh,
+        ))
+    });
+    let Some((
+        metadata,
+        entry_position,
+        entry_shape,
+        previous_step,
+        step_diff,
+        was_full,
+        after,
+        refresh,
+    )) = staged
+    else {
+        return Ok(false);
+    };
+
+    if refresh && after < FULL_CON {
+        if !metadata.fire.incomplete_activity {
+            loop {
+                let next = HOST_CONTEXT.with(|cell| {
+                    let borrow = cell.borrow();
+                    let context = borrow.as_ref()?;
+                    let object = context.get_world_object(target)?;
+                    Some((object.contents().first().copied()?, object.container()))
+                });
+                let Some((child, destination)) = next else {
+                    break;
+                };
+                let moved = if let Some(destination) = destination {
+                    enter_object_live(child, destination)?
+                } else {
+                    exit_object_at_current_position(child)?
+                };
+                if !moved {
+                    // A callback can remove/reparent the head while the
+                    // requested transfer itself reports false. Re-read like
+                    // C4ObjectList::GetObject; stop only if no progress was
+                    // made and the exact same child is still first.
+                    let same_head = HOST_CONTEXT.with(|cell| {
+                        cell.borrow()
+                            .as_ref()
+                            .and_then(|context| context.get_world_object(target))
+                            .and_then(|object| object.contents().first().copied())
+                            == Some(child)
+                    });
+                    if same_head {
+                        break;
+                    }
+                }
+            }
+        }
+        HOST_CONTEXT.with(|cell| {
+            if let Some(scope) = cell
+                .borrow_mut()
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(target))
+            {
+                scope.set_need_energy(false);
+            }
+        });
+    }
+
+    if refresh && was_full {
+        let should_idle = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            let scope = context.object_scope(target)?;
+            let definition = context.object_effective_definition_id(target)?;
+            let incomplete_activity = context
+                .definition_metadata(&definition)
+                .is_some_and(|metadata| metadata.fire.incomplete_activity);
+            Some(scope.construction() < FULL_CON && !incomplete_activity)
+        })
+        .unwrap_or(false);
+        if should_idle {
+            let _ = native_set_action_by_name(target, "Idle")?;
         }
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("DoCon requires an active engine context"))?;
-        let target = match context.object_context().map(ObjectScopeContext::id) {
-            Some(target) => target,
-            None => return Ok(Value::Bool(false)),
-        };
+    if refresh {
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else { return };
+            let Some(definition_id) = context.object_effective_definition_id(target) else {
+                return;
+            };
+            let Some(current_metadata) = context.definition_metadata(&definition_id).cloned() else {
+                return;
+            };
+            let current_shape = live_object_shape(context, target);
+            let moved = {
+                let Some(scope) = context.object_scope_mut(target) else {
+                    return;
+                };
+                let current_position = scope.effective_position();
+                let adjusted_y = crate::docon_adjusted_position_y(
+                    entry_position.y,
+                    entry_shape,
+                    current_position.y,
+                    current_shape,
+                    scope.rotation(),
+                    scope.category(),
+                    previous_step,
+                    step_diff,
+                    current_metadata.shape.map_or(0, |shape| shape.height),
+                );
+                scope.current_position.y = adjusted_y;
+                if let Some(position) = scope.pending_update.position.as_mut() {
+                    position.y = adjusted_y;
+                }
+                scope.pending_update.resolved_docon_position = Some(scope.current_position);
+                scope.pending_update.resolved_docon_fixed_position =
+                    Some(scope.current_fixed_position);
+                adjusted_y != current_position.y
+            };
+            // DoCon's keep-bottom/lift arm calls UpdateSolidMask again at
+            // the adjusted position before Completion/Initialize.
+            if moved {
+                context.update_live_solid_mask(target);
+            }
+        });
+    }
 
-        let delta = construction_delta_from_percent(change_percent);
-        Ok(Value::Bool(
-            context.adjust_object_construction(target, delta).is_some(),
-        ))
-    })
+    let crossed_full = !was_full
+        && HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.object_scope(target))
+                .is_some_and(|scope| scope.construction() >= FULL_CON)
+        });
+    if crossed_full {
+        call_object_own_fail_safe(target, "Completion", &[]);
+        if object_has_status(target) {
+            call_object_own_fail_safe(target, "Initialize", &[]);
+        }
+    }
+
+    let reached_zero = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_scope(target))
+            .is_some_and(|scope| scope.construction() <= 0)
+    });
+    if reached_zero && object_has_status(target) {
+        let _ = assign_removal_live(target, false)?;
+    }
+    Ok(true)
 }
 
 /// FnGetDamage (C4Script.cpp:1366-1370): `pObj->Damage`, the optional
@@ -19659,16 +20076,7 @@ fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     // Decay: DoCon(-100) every frame; burned away at zero construction
     // (C4Object.cpp:779-781 + the engine-side burn loop).
     if !state.no_burn_decay {
-        let destroyed = HOST_CONTEXT.with(|cell| {
-            cell.borrow_mut()
-                .as_mut()
-                .and_then(|context| context.adjust_object_construction(target, -100))
-                .map(|construction| construction == 0)
-                .unwrap_or(false)
-        });
-        if destroyed {
-            return Ok(Value::Int(0));
-        }
+        let _ = do_con_live(target, -100)?;
     }
     let target_value = object_reference_value(target);
     // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:783)
@@ -19976,6 +20384,8 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         // (C4Object.cpp:4144). If it follows DoCon in this staged call, that
         // later snap wins over DoCon's stale-fixed UpdatePos behavior.
         object.pending_update.construction_preserves_fixed_position = false;
+        let position = object.effective_position();
+        object.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
 
         // SetActionByName carries the action targets, and C4Object::SetAction
         // assigns them ONLY when non-null (C4Object.cpp:4123-4125:
@@ -20019,6 +20429,11 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
                 .abort_call_for_action(&current_action)
                 .map(str::to_string),
         ));
+        let object_id = object.id();
+        // SetAction calls SetOCF before Start/Abort callbacks. Use the full
+        // live refresh so leaving an ObjectDisabled action can re-add
+        // OCF_FightReady rather than only clearing stale bits.
+        let _ = refresh_live_object_ocf(context, object_id);
 
         Ok(Value::Bool(true))
     })?;
@@ -22873,11 +23288,11 @@ fn native_set_action_by_name_with_target(
         if let Some(action_target) = action_target {
             object.set_action_target(0, Some(action_target));
         }
-        object.current_fixed_position =
-            FixedVec2::from_ints(object.current_position.x, object.current_position.y);
+        let position = object.effective_position();
+        object.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
         object.refresh_cached_ocf();
 
-        Ok(Some((
+        let callbacks = (
             (actual_name != "Idle")
                 .then(|| object.action_library.start_call_for_action(actual_name))
                 .flatten()
@@ -22888,7 +23303,9 @@ fn native_set_action_by_name_with_target(
                 .map(str::to_string),
             previous_phase,
             definition,
-        )))
+        );
+        let _ = refresh_live_object_ocf(context, target);
+        Ok(Some(callbacks))
     })?;
     let Some((start_call, abort_call, previous_phase, definition)) = callbacks else {
         return Ok(false);
@@ -24247,7 +24664,9 @@ impl SortCriterion {
         match self {
             SortCriterion::Reverse(child) => child.uses_func(),
             SortCriterion::Multiple(children) => children.iter().any(SortCriterion::uses_func),
-            SortCriterion::Func { .. } => true,
+            // C4SO_Value calls C4Object::GetValue, which may dispatch the
+            // definition's CalcValue script just like C4SO_Func.
+            SortCriterion::Value | SortCriterion::Func { .. } => true,
             _ => false,
         }
     }
@@ -24308,31 +24727,19 @@ impl SortCriterion {
                 i64::from(square(vx).wrapping_add(square(vy)) != 0)
             }
             SortCriterion::Mass => {
-                // pFor->Mass is the LIVE UpdateMass field:
-                // (Def->Mass + OwnMass) * Con / FullCon, min 1
-                // (C4Object.cpp:497-500) — not the definition mass.
-                let definition_mass = world
-                    .definition_metadata(object.definition_id())
-                    .map(|metadata| metadata.mass)
-                    .unwrap_or(0);
-                let state = object.full_state();
-                let construction = state
-                    .map(|state| state.construction)
-                    .unwrap_or(crate::FULL_CON);
-                let own_mass = state.map(|state| state.own_mass).unwrap_or(0);
-                i64::from(
-                    (definition_mass
-                        .saturating_add(own_mass)
-                        .saturating_mul(construction)
-                        / crate::FULL_CON)
-                        .max(1),
-                )
+                // pFor->Mass is the LIVE UpdateMass field, including
+                // contents unless NoComponentMass (C4Object.cpp:497-505).
+                i64::from(sort_object_mass(world, object.id))
             }
             SortCriterion::Value => i64::from(
-                world
-                    .definition_metadata(object.definition_id())
-                    .map(|metadata| metadata.value)
-                    .unwrap_or(0),
+                get_value(&[
+                    object_reference_value(object.id),
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Int(OWNER_NONE),
+                ])?
+                .as_c4_int()
+                .unwrap_or(0),
             ),
             SortCriterion::Func { name, pars } => {
                 match call_world_object_function(object.id, name, pars) {
@@ -24701,7 +25108,15 @@ fn object_count2(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         let condition = condition.pruned(&view);
         if condition.is_ensured(&view) {
-            return Ok(Value::Int(truncate_to_i32(view.object_ids().len() as u64)));
+            let count = view
+                .master_object_ids()
+                .into_iter()
+                .filter(|id| {
+                    view.get_object(*id)
+                        .is_some_and(|object| object.status().is_active())
+                })
+                .count();
+            return Ok(Value::Int(truncate_to_i32(count as u64)));
         }
         let matches = find_condition_matches(&view, &condition)?;
         return Ok(Value::Int(truncate_to_i32(matches.len() as u64)));
@@ -24713,9 +25128,16 @@ fn object_count2(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         let condition = condition.pruned(context);
         if condition.is_ensured(context) {
-            return Ok(Value::Int(truncate_to_i32(
-                context.world_object_ids().len() as u64,
-            )));
+            let count = context
+                .master_object_ids()
+                .into_iter()
+                .filter(|id| {
+                    context
+                        .get_world_object(*id)
+                        .is_some_and(|object| object.status().is_active())
+                })
+                .count();
+            return Ok(Value::Int(truncate_to_i32(count as u64)));
         }
         Ok(Value::Int(truncate_to_i32(
             find_condition_matches(context, &condition)?.len() as u64,
@@ -34334,15 +34756,20 @@ fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 let Some(context) = borrow.as_mut() else {
                     return false;
                 };
-                mark_object_destroyed_with_info(context, target);
+                mark_object_status_deleted(context, target);
                 let removed = context.cancel_pending_spawn(target);
                 if removed {
-                    context.clear_non_player_script_object_references(target);
+                    retire_object_info_and_clear_references(context, target);
                 }
                 removed
             });
             if removed {
                 clear_player_object_pointers_host(target);
+                HOST_CONTEXT.with(|cell| {
+                    if let Some(context) = cell.borrow_mut().as_mut() {
+                        context.update_live_solid_mask(target);
+                    }
+                });
             }
             return Ok(Value::Bool(removed));
         }
@@ -35404,6 +35831,10 @@ struct EffectHostContext {
     /// call. Unlike `unlinked_content_links`, these are omitted from the
     /// snapshot base but remain eligible for the live Enter-growth pass.
     relinked_content_links: HashSet<(ObjectId, ObjectId)>,
+    /// Callback-private copy of every active grid solid-mask bake. This is
+    /// updated together with `world.landscape` so nested callbacks observe
+    /// C++'s immediate C4SolidMask Remove/Put lifecycle.
+    solid_mask_bakes: Vec<(ObjectId, crate::SolidMaskBake)>,
     world: HostWorldContext,
     /// Mutable C4Def metadata preview for this synchronous VM session.
     /// Definition writes are folded into Engine after the callback returns,
@@ -35487,6 +35918,7 @@ impl EffectHostContext {
             .landscape_ref()
             .and_then(Landscape::raster_state)
             .map(|state| state.texmap().clone());
+        let solid_mask_bakes = world.solid_mask_bakes.as_ref().clone();
         let mut object = object.map(|ctx| {
             let HostObjectContext {
                 id,
@@ -35640,6 +36072,7 @@ impl EffectHostContext {
             definition_context,
             script_object_context,
             global,
+            solid_mask_bakes,
             world,
             definition_metadata_overrides: HashMap::new(),
             player_overrides: HashMap::new(),
@@ -35712,6 +36145,168 @@ impl EffectHostContext {
         }
         self.pending_objects.insert(id, preview);
         self.pending_spawns.push(spawn);
+    }
+
+    /// The effective parameters C4Object::UpdateSolidMask would use for a
+    /// live object at this exact point in the synchronous callback.
+    fn live_solid_mask_spec(&self, id: ObjectId) -> Option<crate::SolidMaskSpec> {
+        let scope = self.object_scope(id)?;
+        if scope.destroy
+            || matches!(scope.status(), ObjectStatus::Deleted)
+            || scope.container().is_some()
+            || scope.construction() < FULL_CON
+        {
+            return None;
+        }
+        let definition_id = self.object_effective_definition_id(id)?;
+        let definition = self.world.solid_mask_metadata.get(&definition_id)?;
+        let rotation = scope.rotation();
+        if rotation != 0 && !definition.rotated_solid_masks {
+            return None;
+        }
+        // ChangeDef clears the old object's SolidMask override at the swap
+        // point; otherwise the frame-start override remains effective until
+        // a same-call SetSolidMask replaces it.
+        let persisted_override = scope
+            .pending_update
+            .change_def
+            .is_none()
+            .then(|| {
+                self.get_world_object(id)
+                    .and_then(|object| {
+                        object
+                            .full_state()
+                            .and_then(|state| state.solid_mask_override)
+                    })
+            })
+            .flatten();
+        let mask = match scope
+            .pending_update
+            .solid_mask_override
+            .or(persisted_override)
+        {
+            Some(mask) if mask.width <= 0 || mask.height <= 0 => return None,
+            Some(mask) => mask,
+            None => definition.default_mask?,
+        };
+        let (graphics_definition, graphics_name) = scope
+            .base_graphics
+            .as_ref()
+            .map(|graphics| {
+                (
+                    graphics.definition.as_str(),
+                    graphics.graphics_name.as_deref(),
+                )
+            })
+            .unwrap_or((definition_id.as_str(), None));
+        let (mask, pixels) = self
+            .world
+            .solid_mask_metadata
+            .get(graphics_definition)?
+            .mask_pixels(mask, graphics_name)?;
+        let shape = definition.shape?;
+        Some(crate::SolidMaskSpec {
+            mask,
+            pixels,
+            shape_x: shape.x,
+            shape_y: shape.y,
+            rotation,
+        })
+    }
+
+    /// Raster-only C4SolidMask::Remove for the callback-private landscape.
+    /// It restores saved bytes and re-puts every overlapping bake, including
+    /// refreshing those masks' buffers exactly like C4SolidMask.cpp:233-283.
+    fn remove_live_solid_mask(&mut self, id: ObjectId) -> Option<usize> {
+        let index = self
+            .solid_mask_bakes
+            .iter()
+            .position(|(object_id, _)| *object_id == id)?;
+        let (_, bake) = self.solid_mask_bakes.remove(index);
+        let landscape = self.world.landscape.as_mut().map(Rc::make_mut)?;
+        let vehicle = landscape.grid_vehicle_byte()?;
+        for cy in 0..bake.height {
+            for cx in 0..bake.width {
+                let saved = bake.buffer[(cy * bake.width + cx) as usize];
+                if saved == vehicle {
+                    continue;
+                }
+                let lx = bake.x + cx;
+                let ly = bake.y + cy;
+                if landscape.grid_byte_at(lx, ly) == Some(vehicle) {
+                    landscape.grid_write_byte(lx, ly, saved);
+                }
+            }
+        }
+        for (_, other) in &mut self.solid_mask_bakes {
+            if !other.overlaps(&bake) {
+                continue;
+            }
+            let clip_x0 = bake.x.max(other.x);
+            let clip_y0 = bake.y.max(other.y);
+            let clip_x1 = (bake.x + bake.width).min(other.x + other.width);
+            let clip_y1 = (bake.y + bake.height).min(other.y + other.height);
+            for ly in clip_y0..clip_y1 {
+                for lx in clip_x0..clip_x1 {
+                    let mx = other.tx + (lx - other.x);
+                    let my = other.ty + (ly - other.y);
+                    if !other.mask_set(mx, my) {
+                        continue;
+                    }
+                    let current = landscape.grid_byte_at(lx, ly).unwrap_or(0);
+                    if current != vehicle {
+                        other.buffer
+                            [((ly - other.y) * other.width + (lx - other.x)) as usize] =
+                            current;
+                    }
+                    landscape.grid_write_byte(lx, ly, vehicle);
+                }
+            }
+        }
+        Some(index)
+    }
+
+    /// Callback-time C4Object::UpdateSolidMask. The authoritative engine
+    /// performs the real update when this outcome folds; this copy exists
+    /// solely so callbacks nested before that fold see the same landscape.
+    fn update_live_solid_mask(&mut self, id: ObjectId) {
+        let previous_index = self.remove_live_solid_mask(id);
+        let Some(spec) = self.live_solid_mask_spec(id) else {
+            return;
+        };
+        let Some(position) = self
+            .object_scope(id)
+            .map(ObjectScopeContext::effective_position)
+        else {
+            return;
+        };
+        let Some(landscape) = self.world.landscape.as_mut().map(Rc::make_mut) else {
+            return;
+        };
+        let Some(bake) = crate::put_solid_mask_raster(landscape, spec, position) else {
+            return;
+        };
+        let insert_at = previous_index.unwrap_or_else(|| {
+            let rank = self
+                .world
+                .order
+                .iter()
+                .position(|object_id| *object_id == id)
+                .unwrap_or(usize::MAX);
+            self.solid_mask_bakes
+                .iter()
+                .position(|(other_id, _)| {
+                    self.world
+                        .order
+                        .iter()
+                        .position(|object_id| object_id == other_id)
+                        .unwrap_or(usize::MAX)
+                        > rank
+                })
+                .unwrap_or(self.solid_mask_bakes.len())
+        });
+        self.solid_mask_bakes
+            .insert(insert_at.min(self.solid_mask_bakes.len()), (id, bake));
     }
 
     /// The virtual C4SolidMask for one object created inside this still-
@@ -35794,7 +36389,15 @@ impl EffectHostContext {
                     .world
                     .movement_solid_masks
                     .iter()
-                    .any(|mask| mask.contains(x, y)))
+                    .any(|mask| {
+                        let remains_put = self.object_scope(mask.object_id).is_none_or(|scope| {
+                            !scope.destroy
+                                && scope.status() != ObjectStatus::Deleted
+                                && scope.container().is_none()
+                                && scope.construction() >= FULL_CON
+                        });
+                        remains_put && mask.contains(x, y)
+                    }))
         {
             return Some(crate::C4M_VEHICLE);
         }
@@ -36014,6 +36617,7 @@ impl EffectHostContext {
             object.fixed_rotation = scope.fixed_rotation();
             object.vertices = scope.vertices().to_vec();
             object.action_name = scope.current_action_name.clone();
+            object.action_procedure = scope.effective_procedure_name().map(str::to_string);
             object.action_phase = scope.current_action_phase;
             object.action_ticks = scope.current_action_ticks;
             object.action_target = scope.current_action_target;
@@ -36021,6 +36625,16 @@ impl EffectHostContext {
             object.action_data = scope.current_action_data;
             object.damage = scope.current_damage;
             object.need_energy = scope.need_energy();
+            let construction = scope.construction();
+            let own_mass = scope.own_mass();
+            object.construction = construction;
+            if let Some(state) = object.state.as_mut() {
+                if state.construction != construction || state.own_mass != own_mass {
+                    let state = Rc::make_mut(state);
+                    state.construction = construction;
+                    state.own_mass = own_mass;
+                }
+            }
             object.category = scope.category();
             if let Some(layer) = scope.pending_update.layer {
                 if let Some(state) = object.state.as_mut() {
@@ -36944,6 +37558,22 @@ impl EffectHostContext {
     /// cutoff/gain. Keeping this at call time preserves multiple DoCon and
     /// SetComponent ordering inside one script callback.
     fn adjust_object_construction(&mut self, target: ObjectId, delta: i32) -> Option<i32> {
+        self.adjust_object_construction_mode(target, delta, true)
+    }
+
+    /// The same construction/component fold for a live non-initial DoCon.
+    /// Its caller performs AssignRemoval synchronously after the callback and
+    /// position side arms, so zero construction must remain callable here.
+    fn stage_live_docon_construction(&mut self, target: ObjectId, delta: i32) -> Option<i32> {
+        self.adjust_object_construction_mode(target, delta, false)
+    }
+
+    fn adjust_object_construction_mode(
+        &mut self,
+        target: ObjectId,
+        delta: i32,
+        destroy_at_zero: bool,
+    ) -> Option<i32> {
         let scope = self.object_scope(target)?;
         let before = scope.construction();
         let definition_id = scope
@@ -36955,10 +37585,10 @@ impl EffectHostContext {
                 self.get_world_object(target)
                     .map(|object| object.definition_id().to_string())
             });
-        let definition_components = definition_id
+        let (definition_components, oversize) = definition_id
             .as_deref()
             .and_then(|id| self.definition_metadata(id))
-            .map(|metadata| metadata.components.clone())
+            .map(|metadata| (metadata.components.clone(), metadata.fire.oversize))
             .unwrap_or_default();
         let pending_components = scope.pending_update.components.clone();
         let pending_component_order = scope.pending_update.component_order.clone();
@@ -37003,7 +37633,9 @@ impl EffectHostContext {
                     .collect()
             });
 
-        let after = self.object_scope_mut(target)?.adjust_construction(delta);
+        let after = self
+            .object_scope_mut(target)?
+            .adjust_construction(delta, oversize);
         if crate::docon_refreshes_construction(before, after) {
             let components = crate::docon_component_counts(
                 &current_components,
@@ -37017,7 +37649,7 @@ impl EffectHostContext {
                 scope.pending_update.component_order = Some(current_component_order);
             }
         }
-        if after == 0 {
+        if destroy_at_zero && after == 0 {
             if let Some(scope) = self.object_scope_mut(target) {
                 scope.destroy = true;
             }
@@ -38408,7 +39040,7 @@ impl ObjectScopeContext {
     ) -> Self {
         let blocks_other_actions = action_library.blocks_other_actions(&action_name);
         let clamped_damage = damage.max(0);
-        let clamped_construction = construction.clamp(0, FULL_CON);
+        let clamped_construction = construction.max(0);
         Self {
             definition_id: None,
             id,
@@ -38889,6 +39521,21 @@ impl ObjectScopeContext {
         self.current_no_collect_delay = delay;
     }
 
+    fn restore_no_collect_delay(&mut self, old_delay: i32) {
+        if old_delay <= self.current_no_collect_delay {
+            return;
+        }
+        self.current_no_collect_delay = old_delay;
+        // FnCollect's restoration mutates the live field but deliberately
+        // does not call UpdateOCF. Persist the field together with the cache
+        // left by the temporary recompute/callback chain.
+        self.command_operations
+            .push(CommandOperation::SetNoCollectDelay {
+                value: old_delay,
+                ocf: self.ocf(),
+            });
+    }
+
     /// Record ObjectComDrop's adjacent NoCollectDelay assignment and
     /// SetOCF result after the live cache has been refreshed.
     fn record_no_collect_delay_assignment(&mut self) {
@@ -38915,6 +39562,11 @@ impl ObjectScopeContext {
     }
 
     fn finalize_persisted_ocf(&mut self) {
+        if self.pending_update.resolved_docon_position.is_some() {
+            self.pending_update.resolved_docon_position = Some(self.effective_position());
+            self.pending_update.resolved_docon_fixed_position =
+                Some(self.current_fixed_position);
+        }
         if !self.persist_final_ocf {
             return;
         }
@@ -39212,11 +39864,14 @@ impl ObjectScopeContext {
         self.cached_ocf = Some(mask);
     }
 
-    fn mark_destroy(&mut self) {
+    fn mark_destroy_status(&mut self) {
+        self.destroy = true;
+    }
+
+    fn clear_info_for_removal(&mut self) {
         self.set_info_rank(None);
         self.set_info_link(None);
         self.set_info_core(None);
-        self.destroy = true;
     }
 
     fn update_effective_action(&mut self, action: &str) -> bool {
@@ -39451,15 +40106,16 @@ impl ObjectScopeContext {
         self.pending_update.contact_density = Some(contact_density);
     }
 
-    fn adjust_construction(&mut self, delta: i32) -> i32 {
+    fn adjust_construction(&mut self, delta: i32, oversize: bool) -> i32 {
         let current = self.construction();
         let mut next = current.saturating_add(delta);
         if next < 0 {
             next = 0;
-        } else if next > FULL_CON {
+        } else if !oversize && next > FULL_CON {
             next = FULL_CON;
         }
-        self.set_construction(next);
+        self.current_construction = next;
+        self.pending_update.construction = Some(next);
         self.pending_update.construction_via_docon = true;
         self.pending_update.construction_preserves_fixed_position = true;
         next
@@ -39575,9 +40231,9 @@ impl ObjectScopeContext {
     }
 
     fn set_position(&mut self, position: Vector2) {
-        if self.effective_position() == position && self.pending_update.position.is_none() {
-            return;
-        }
+        // ForcePosition always resets fix_x/fix_y, including its
+        // same-integer-position fast path. Stage the write so that fixed
+        // resynchronization survives the deferred host fold.
         self.current_position = position;
         self.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
         self.pending_update.position = Some(position);
@@ -50850,7 +51506,9 @@ func Probe(state) {
                 Value::Int(3),
                 Value::Int(0),
                 Value::String("F".to_string()),
-                Value::Int(12_345),
+                // C4Object::SetAction resets fix_x/fix_y to the current
+                // integer position before returning (C4Object.cpp:4144).
+                Value::Int(itofix(11).val()),
                 Value::Int(22_222),
                 Value::Int(333),
                 Value::Int(-444),

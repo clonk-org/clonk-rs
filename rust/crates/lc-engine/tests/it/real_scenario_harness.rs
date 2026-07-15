@@ -3826,7 +3826,14 @@ fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step() {
         assert_eq!(spark.owner, OWNER_NONE);
         assert_eq!(spark.controller, OWNER_NONE);
         assert_eq!(spark.position.x, princess_before.position.x);
-        assert_eq!(spark.position.y, princess_before.position.y - 3);
+        let shape = engine
+            .object_current_shape_rect(spark.id)
+            .expect("SPRK keeps its definition-derived shape");
+        assert_eq!(
+            spark.position.y + shape.y + shape.height,
+            princess_before.position.y,
+            "Oversize Completion growth preserves the C++ spawn-bottom anchor"
+        );
         let fixed_velocity = spark.fixed_velocity.unwrap_or_else(|| {
             math::FixedVec2::from_ints(spark.velocity.x, spark.velocity.y)
         });

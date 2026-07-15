@@ -14,6 +14,11 @@ public func Open(bool uppercase, string prompt, int player)
     return CallMessageBoard(this(), uppercase, prompt, player);
 }
 
+public func OpenFor(object target, bool uppercase, string prompt, int player)
+{
+    return CallMessageBoard(target, uppercase, prompt, player);
+}
+
 public func AbortQuery(int player)
 {
     return AbortMessageBoard(this(), player);
@@ -121,7 +126,7 @@ fn object_number(object: ObjectId) -> i32 {
 
 #[test]
 fn call_message_board_rejects_invalid_players_and_status_zero_objects() {
-    let (mut engine, target, _) = fixture();
+    let (mut engine, target, driver) = fixture();
 
     assert_eq!(
         open(&mut engine, target, false, "invalid player", 999),
@@ -154,7 +159,17 @@ fn call_message_board_rejects_invalid_players_and_status_zero_objects() {
         ObjectStatus::Deleted
     );
     assert_eq!(
-        open(&mut engine, target, false, "deleted object", PLAYER),
+        call(
+            &mut engine,
+            driver,
+            "OpenFor",
+            vec![
+                Value::Object(target.as_u64()),
+                Value::Bool(false),
+                Value::String("deleted object".to_string()),
+                Value::Int(PLAYER),
+            ],
+        ),
         Value::Bool(false)
     );
     assert!(

@@ -520,6 +520,10 @@ pub struct DefCore {
     pub constructable: bool,
     pub con_size_off: i32,
     pub stretch_growth: bool,
+    /// `Oversize` (C4Def.cpp:392): DoCon has no upper FullCon clamp when
+    /// nonzero; construction-scaled mass, components and shape may exceed
+    /// 100 percent.
+    pub oversize: bool,
     /// `Placement=` (C4Def.cpp:312): 0 surface, 1 liquid, 2 air —
     /// PlaceVegetation/PlaceAnimal dispatch on it (C4Game.cpp:2978,3034).
     pub placement: i32,
@@ -851,6 +855,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut constructable = false;
     let mut con_size_off: i32 = 0;
     let mut stretch_growth = false;
+    let mut oversize = false;
     let mut placement: i32 = 0;
     let mut growth: i32 = 0;
     let mut basement: i32 = 0;
@@ -1134,6 +1139,11 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "stretchgrowth" => {
                 stretch_growth = parse_bool(value);
             }
+            "oversize" => {
+                // C4Compiler stores this BOOL through an integer adapter;
+                // every nonzero value is true, not just the conventional 1.
+                oversize = parse_i32(value).unwrap_or(0) != 0;
+            }
             "placement" => {
                 placement = parse_i32(value).unwrap_or(0);
             }
@@ -1290,6 +1300,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         constructable,
         con_size_off,
         stretch_growth,
+        oversize,
         placement,
         growth,
         basement,
@@ -3590,6 +3601,18 @@ Attach=1
 
         let defaulted = parse_def_core(b"[DefCore]\nid=JOLT\n").expect("defcore parsed");
         assert!(!defaulted.stretch_growth);
+    }
+
+    #[test]
+    fn parse_def_core_oversize_field_like_cpp() {
+        // C4Def.cpp:392: nonzero Oversize removes DoCon's upper FullCon
+        // clamp, while an omitted field defaults to zero.
+        let parsed = parse_def_core(b"[DefCore]\nid=GROW\nOversize=-2\n")
+            .expect("defcore parsed");
+        assert!(parsed.oversize, "every nonzero C++ BOOL value is true");
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=JOLT\n").expect("defcore parsed");
+        assert!(!defaulted.oversize);
     }
 
     #[test]

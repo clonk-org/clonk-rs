@@ -9489,8 +9489,7 @@ impl LegacyObjectRecord {
                 } else {
                     (value.clamp(0, 100) * FULL_CON) / 100
                 };
-                let clamped = raw.clamp(0, FULL_CON);
-                self.construction = Some(clamped);
+                self.construction = Some(raw.max(0));
             }
             "alive" => {
                 let alive = parse_bool(trimmed_value).ok_or_else(|| {
@@ -11816,6 +11815,17 @@ global func Step(state, frame, random)
     return nil;
 }
 "#;
+
+    #[test]
+    fn legacy_objects_size_preserves_oversize_construction() {
+        // C4Object::CompileFunc reads Size directly into Con. Loaded object
+        // state may therefore remain above FullCon even independently of a
+        // later DoCon clamp decision (C4Object.cpp:2763).
+        let records = parse_legacy_objects("[Object]\nid=OVSZ\nSize=150000\n")
+            .expect("Objects.txt parses");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].construction, Some(150_000));
+    }
 
     #[test]
     fn scenario_value_store_follows_c4value_compiler_indexing_and_types() {

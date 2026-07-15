@@ -359,7 +359,7 @@ fn definition_component_counts(
 /// the signed, scaled count (C4Object.cpp:197-199,510-526;
 /// C4Game.cpp:1129-1142).
 fn fresh_definition_component_count(count: i32, construction: i32) -> i32 {
-    let construction = construction.clamp(0, FULL_CON);
+    let construction = construction.max(0);
     let after_init_cutoff = count.min(0);
     if construction == 0 || !docon_refreshes_construction(0, construction) {
         after_init_cutoff
@@ -369,7 +369,7 @@ fn fresh_definition_component_count(count: i32, construction: i32) -> i32 {
 }
 
 fn scaled_definition_component_count(count: i32, construction: i32) -> i32 {
-    let product = i64::from(count) * i64::from(construction.clamp(0, FULL_CON));
+    let product = i64::from(count) * i64::from(construction.max(0));
     (product / i64::from(FULL_CON)) as i32
 }
 
@@ -3648,7 +3648,11 @@ impl ObjectState {
             self.magic_capacity = magic_capacity.max(0);
         }
         if let Some(construction) = delta.construction {
-            self.construction = construction.clamp(0, FULL_CON);
+            self.construction = if delta.construction_via_docon {
+                construction.max(0)
+            } else {
+                construction.clamp(0, FULL_CON)
+            };
         }
         if let Some(contact_density) = delta.contact_density {
             self.contact_density = contact_density;
@@ -3926,6 +3930,8 @@ struct ObjectDelta {
     /// No later SetAction/position write resynchronized fix_x/fix_y after the
     /// staged DoCon bottom adjustment.
     construction_preserves_fixed_position: bool,
+    resolved_docon_position: Option<Vector2>,
+    resolved_docon_fixed_position: Option<FixedVec2>,
     direction: Option<Direction>,
     command_direction: Option<CommandDirection>,
     action: Option<ActionUpdate>,
@@ -3984,6 +3990,16 @@ impl ObjectDelta {
                 .action
                 .as_ref()
                 .is_some_and(|action| action.name.is_some());
+        let replaces_docon_position = update.position.is_some()
+            || (writes_construction && !construction_via_docon);
+        if replaces_docon_position && update.resolved_docon_position.is_none() {
+            self.resolved_docon_position = None;
+        }
+        if (resynchronizes_fixed_position || replaces_docon_position)
+            && update.resolved_docon_fixed_position.is_none()
+        {
+            self.resolved_docon_fixed_position = None;
+        }
         if let Some(custom_name) = update.custom_name {
             self.custom_name = Some(custom_name);
         }
@@ -4007,6 +4023,12 @@ impl ObjectDelta {
         }
         if let Some(position) = update.position {
             self.position = Some(position);
+        }
+        if let Some(position) = update.resolved_docon_position {
+            self.resolved_docon_position = Some(position);
+        }
+        if let Some(position) = update.resolved_docon_fixed_position {
+            self.resolved_docon_fixed_position = Some(position);
         }
         if let Some(own_mass) = update.own_mass {
             self.own_mass = Some(own_mass);
@@ -4198,6 +4220,8 @@ impl From<ObjectUpdate> for ObjectDelta {
             construction_via_docon: update.construction_via_docon,
             construction_preserves_fixed_position: update
                 .construction_preserves_fixed_position,
+            resolved_docon_position: update.resolved_docon_position,
+            resolved_docon_fixed_position: update.resolved_docon_fixed_position,
             damage: update.damage,
             magic_energy: update.magic_energy,
             magic_capacity: update.magic_capacity,
@@ -4364,6 +4388,11 @@ pub struct ObjectUpdate {
     /// explicit position writes after DoCon clear this bit.
     #[serde(default, skip_serializing_if = "is_false")]
     pub construction_preserves_fixed_position: bool,
+    /// Runtime-only host fold of DoCon's sequential integer/fixed position.
+    #[serde(skip)]
+    pub resolved_docon_position: Option<Vector2>,
+    #[serde(skip)]
+    pub resolved_docon_fixed_position: Option<FixedVec2>,
     pub action: Option<ActionUpdate>,
     #[serde(default)]
     pub direction: Option<Direction>,
@@ -4708,6 +4737,8 @@ impl ObjectUpdate {
             && self.change_def_contents_sort.is_none()
             && !self.change_def_reset_action_time
             && self.position.is_none()
+            && self.resolved_docon_position.is_none()
+            && self.resolved_docon_fixed_position.is_none()
             && self.velocity.is_none()
             && self.fixed_velocity.is_none()
             && self.fixed_velocity_x.is_none()
@@ -5175,6 +5206,37 @@ impl Object {
         previous_rect: Option<DefinitionRect>,
         preserve_bottom: bool,
     ) {
+        self.refresh_shape_geometry();
+        if self.shape_template.line != 0 {
+            return;
+        }
+
+        let step_size = FULL_CON / 100;
+        let previous_step = previous_construction / step_size;
+        let current_step = self.state.construction / step_size;
+        let step_diff = current_step - previous_step;
+        let current_rect = self.current_shape_rect();
+        let adjusted_y = if preserve_bottom {
+            docon_adjusted_position_y(
+                self.state.position.y,
+                previous_rect,
+                self.state.position.y,
+                current_rect,
+                self.state.rotation,
+                self.state.category,
+                previous_step,
+                step_diff,
+                self.shape_template.rect.map_or(0, |rect| rect.height),
+            )
+        } else {
+            self.state.position.y
+        };
+        if adjusted_y != self.state.position.y {
+            self.set_position(Vector2::new(self.state.position.x, adjusted_y));
+        }
+    }
+
+    fn refresh_shape_geometry(&mut self) {
         if self.shape_template.line != 0 {
             // Line shape independent (C4Object.cpp:322-324).
             return;
@@ -5188,44 +5250,6 @@ impl Object {
         );
         self.state.shape_vertices.replace_active(&vertices);
         self.state.vertices = vertices;
-
-        let new_rect = self.current_shape_rect();
-        if preserve_bottom && self.state.rotation.rem_euclid(360) == 0 {
-            if let (Some(previous), Some(current)) = (previous_rect, new_rect) {
-                if previous.height != current.height || previous.y != current.y {
-                    let bottom = self
-                        .state
-                        .position
-                        .y
-                        .saturating_add(previous.y)
-                        .saturating_add(previous.height);
-                    self.set_position(Vector2::new(
-                        self.state.position.x,
-                        bottom
-                            .saturating_sub(current.height)
-                            .saturating_sub(current.y),
-                    ));
-                }
-            }
-        } else if self.state.category & CATEGORY_STRUCTURE != 0 {
-            let step_size = FULL_CON / 100;
-            let previous_step = previous_construction / step_size;
-            let current_step = self.state.construction / step_size;
-            let step_diff = current_step - previous_step;
-            if step_diff > 0 {
-                if let Some(rect) = self.shape_template.rect {
-                    let previous_lift = previous_step * rect.height / 100;
-                    let current_lift = current_step * rect.height / 100;
-                    let lift = current_lift - previous_lift;
-                    if lift != 0 {
-                        self.set_position(Vector2::new(
-                            self.state.position.x,
-                            self.state.position.y.saturating_sub(lift),
-                        ));
-                    }
-                }
-            }
-        }
     }
 
     fn set_owned_shape_vertices(&mut self, vertices: Vec<ObjectVertex>) {
@@ -5249,6 +5273,13 @@ impl Object {
         let previous_rect = self.current_shape_rect();
         let previous_construction = self.state.construction;
         self.state.construction = construction.clamp(0, FULL_CON);
+        self.refresh_shape_after_state_change(previous_construction, previous_rect, true);
+    }
+
+    fn set_construction_from_docon(&mut self, construction: i32) {
+        let previous_rect = self.current_shape_rect();
+        let previous_construction = self.state.construction;
+        self.state.construction = construction.max(0);
         self.refresh_shape_after_state_change(previous_construction, previous_rect, true);
     }
 
@@ -5301,6 +5332,13 @@ impl Object {
         if let Some(position) = delta.position {
             self.fixed_position = FixedVec2::from_ints(position.x, position.y);
         }
+        // A DoCon integer-y result is part of the live state seen by a later
+        // merged SetAction. Install it before SetAction resynchronizes the
+        // fixed coordinates; an explicit same-DoCon fixed result still wins
+        // below for the inverse (SetAction-before-bottom-adjust) ordering.
+        if let Some(position) = delta.resolved_docon_position {
+            self.state.position = position;
+        }
         // C4Object::SetAction resyncs the fixed coords to the integer
         // position once past its early returns (C4Object.cpp:4144).
         if outcome
@@ -5311,6 +5349,9 @@ impl Object {
         {
             self.fixed_position =
                 FixedVec2::from_ints(self.state.position.x, self.state.position.y);
+        }
+        if let Some(position) = delta.resolved_docon_fixed_position {
+            self.fixed_position = position;
         }
         // No reprojection from the fixed coords otherwise: C++ x/y only
         // change via explicit assignment or movement — DoCon's initial
@@ -5376,7 +5417,7 @@ impl Object {
             self.refresh_shape_after_state_change(
                 previous_construction,
                 previous_rect,
-                delta.construction.is_some(),
+                delta.construction.is_some() && delta.resolved_docon_position.is_none(),
             );
             if delta.construction_preserves_fixed_position {
                 // DoCon's straight-con bottom adjustment calls UpdatePos,
@@ -7045,7 +7086,10 @@ impl SpawnConfig {
     }
 
     pub fn with_construction(mut self, construction: i32) -> Self {
-        self.construction = construction.clamp(0, FULL_CON);
+        // Final clamping needs the target definition and the loaded-object
+        // flag, both resolved by spawn_single. Preserve the raw nonnegative
+        // C4Object::Con value here (Oversize and Objects.txt may exceed 100%).
+        self.construction = construction.max(0);
         self
     }
 
@@ -8506,6 +8550,8 @@ pub struct Definition {
     constructable: bool,
     construction_offset: i32,
     stretch_growth: bool,
+    /// DefCore `Oversize`: DoCon may grow beyond FullCon.
+    oversize: bool,
     /// `Placement=` (C4Def.cpp:312): 0 surface, 1 liquid, 2 air.
     placement: i32,
     /// `Growth=` (C4Def.cpp:358): PlaceVegetation's random-growth gate.
@@ -8739,6 +8785,7 @@ impl Definition {
             constructable: false,
             construction_offset: 0,
             stretch_growth: false,
+            oversize: false,
             placement: 0,
             growth: 0,
             basement: 0,
@@ -9099,6 +9146,7 @@ impl Definition {
         definition.set_can_be_base(resource.core.can_be_base);
         definition.set_construction_offset(resource.core.con_size_off);
         definition.set_stretch_growth(resource.core.stretch_growth);
+        definition.set_oversize(resource.core.oversize);
         definition.set_placement(resource.core.placement);
         definition.set_growth(resource.core.growth);
         definition.set_basement(resource.core.basement);
@@ -10190,6 +10238,14 @@ impl Definition {
 
     pub fn set_stretch_growth(&mut self, stretch_growth: bool) {
         self.stretch_growth = stretch_growth;
+    }
+
+    pub fn oversize(&self) -> bool {
+        self.oversize
+    }
+
+    pub fn set_oversize(&mut self, oversize: bool) {
+        self.oversize = oversize;
     }
 
     pub fn placement(&self) -> i32 {
@@ -13771,6 +13827,152 @@ impl SolidMaskBake {
     }
 }
 
+/// Raster-only half of `C4SolidMask::Put`. Script callbacks run against a
+/// copy-on-write landscape snapshot, so they need the exact same clipped
+/// bake (including the saved material buffer) without mutating the engine's
+/// authoritative object or producing instability/attachment side effects.
+fn put_solid_mask_raster(
+    landscape: &mut Landscape,
+    spec: SolidMaskSpec,
+    position: Vector2,
+) -> Option<SolidMaskBake> {
+    let vehicle = landscape.grid_vehicle_byte()?;
+    let (grid_width, grid_height) = landscape.grid_dimensions()?;
+    let SolidMaskSpec {
+        mask,
+        pixels,
+        shape_x,
+        shape_y,
+        rotation,
+    } = spec;
+
+    if rotation == 0 {
+        let ox = position.x + shape_x + mask.target_x;
+        let oy = position.y + shape_y + mask.target_y;
+        let mut rect_x = ox;
+        let mut tx = 0;
+        if rect_x < 0 {
+            tx = -rect_x;
+            rect_x = 0;
+        }
+        let mut rect_y = oy;
+        let mut ty = 0;
+        if rect_y < 0 {
+            ty = -rect_y;
+            rect_y = 0;
+        }
+        let width = (ox + mask.width).min(grid_width) - rect_x;
+        let height = (oy + mask.height).min(grid_height) - rect_y;
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        let mut bake = SolidMaskBake {
+            x: rect_x,
+            y: rect_y,
+            width,
+            height,
+            tx,
+            ty,
+            mask_width: mask.width,
+            pixels,
+            buffer: vec![vehicle; (width * height) as usize],
+            rotated: None,
+        };
+        for cy in 0..height {
+            for cx in 0..width {
+                if !bake.mask_set(tx + cx, ty + cy) {
+                    continue;
+                }
+                let lx = rect_x + cx;
+                let ly = rect_y + cy;
+                // A regular put saves MCVehic too; Remove simply never uses
+                // that buffer slot for restoration (C4SolidMask.cpp:92-96).
+                let old = landscape.grid_byte_at(lx, ly).unwrap_or(0);
+                bake.buffer[(cy * width + cx) as usize] = old;
+                landscape.grid_write_byte(lx, ly, vehicle);
+            }
+        }
+        return Some(bake);
+    }
+
+    // Rotated C4SolidMask::Put (C4SolidMask.cpp:108-174).
+    let mat_buff_pitch =
+        f64::from(mask.width * mask.width + mask.height * mask.height).sqrt() as i32 + 1;
+    let negated = itofix(-rotation);
+    let ma1 = negated.cos_deg();
+    let ma2 = -negated.sin_deg();
+    let mb1 = negated.sin_deg();
+    let mb2 = negated.cos_deg();
+    let center_x = shape_x + mask.target_x + mask.width / 2;
+    let center_y = shape_y + mask.target_y + mask.height / 2;
+    let xstart = position.x + fixtoi(ma1 * itofix(center_x) - ma2 * itofix(center_y))
+        - mat_buff_pitch / 2;
+    let ystart = position.y + fixtoi(-mb1 * itofix(center_x) + mb2 * itofix(center_y))
+        - mat_buff_pitch / 2;
+    let mut rect_x = xstart;
+    let mut tx = 0;
+    if rect_x < 0 {
+        tx = -rect_x;
+        rect_x = 0;
+    }
+    let mut rect_y = ystart;
+    let mut ty = 0;
+    if rect_y < 0 {
+        ty = -rect_y;
+        rect_y = 0;
+    }
+    let width = (xstart + mat_buff_pitch).min(grid_width) - rect_x;
+    let height = (ystart + mat_buff_pitch).min(grid_height) - rect_y;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let mut bake = SolidMaskBake {
+        x: rect_x,
+        y: rect_y,
+        width,
+        height,
+        tx,
+        ty,
+        mask_width: mask.width,
+        pixels,
+        buffer: vec![vehicle; (width * height) as usize],
+        rotated: Some(RotatedBake {
+            rotation,
+            mat_buff_pitch,
+            mask_height: mask.height,
+        }),
+    };
+    let x0 = itofix(tx - mat_buff_pitch / 2);
+    let y0 = itofix(ty - mat_buff_pitch / 2);
+    let mut ya = y0 * ma2;
+    let mut yb = y0 * mb2;
+    for cy in 0..height {
+        let mut xa = x0 * ma1;
+        let mut xb = x0 * mb1;
+        for cx in 0..width {
+            let mask_x = fixtoi(xa + ya) + mask.width / 2;
+            let mask_y = fixtoi(xb + yb) + mask.height / 2;
+            if mask_x >= 0
+                && mask_y >= 0
+                && mask_x < mask.width
+                && mask_y < mask.height
+                && bake.mask_pixel(mask_x, mask_y)
+            {
+                let lx = rect_x + cx;
+                let ly = rect_y + cy;
+                let old = landscape.grid_byte_at(lx, ly).unwrap_or(0);
+                bake.buffer[(cy * width + cx) as usize] = old;
+                landscape.grid_write_byte(lx, ly, vehicle);
+            }
+            xa += ma1;
+            xb += mb1;
+        }
+        ya += ma2;
+        yb += mb2;
+    }
+    Some(bake)
+}
+
 #[derive(Debug, Clone)]
 struct SolidMaskRect {
     object_id: ObjectId,
@@ -13978,7 +14180,7 @@ pub fn movement_hit_speed_flags(velocity: FixedVec2) -> u32 {
 }
 
 fn construction_percent(construction: i32) -> i32 {
-    construction.clamp(0, FULL_CON) * 100 / FULL_CON
+    ((i64::from(construction.max(0)) * 100) / i64::from(FULL_CON)) as i32
 }
 
 fn construction_scaled_vertices(
@@ -14007,7 +14209,7 @@ fn transformed_shape_vertices(
     rotateable: i32,
     rotation: i32,
 ) -> Vec<ObjectVertex> {
-    let scaled = if construction.clamp(0, FULL_CON) == FULL_CON {
+    let scaled = if construction == FULL_CON {
         vertices.to_vec()
     } else {
         construction_scaled_vertices(vertices, construction, stretch_growth)
@@ -14017,6 +14219,45 @@ fn transformed_shape_vertices(
     } else {
         scaled
     }
+}
+
+/// DoCon's post-callback integer-y adjustment. Straight objects retain the
+/// shape bottom captured on entry; rotated structures move upward by the
+/// positive construction-step delta and the current definition height
+/// (C4Object.cpp:1475-1502).
+pub(crate) fn docon_adjusted_position_y(
+    entry_y: i32,
+    entry_shape: Option<DefinitionRect>,
+    current_y: i32,
+    current_shape: Option<DefinitionRect>,
+    rotation: i32,
+    category: i32,
+    previous_step: i32,
+    step_diff: i32,
+    definition_height: i32,
+) -> i32 {
+    // C++ tests the raw integer `r` here (`if (!r)`), so a loaded r=360
+    // takes the rotated branch even though it has the same orientation.
+    if rotation == 0 {
+        if let (Some(previous), Some(current)) = (entry_shape, current_shape) {
+            if previous.height != current.height || previous.y != current.y {
+                let bottom = entry_y
+                    .saturating_add(previous.y)
+                    .saturating_add(previous.height);
+                return bottom
+                    .saturating_sub(current.height)
+                    .saturating_sub(current.y);
+            }
+        }
+    } else if category & CATEGORY_STRUCTURE != 0 && step_diff > 0 {
+        let previous_lift = previous_step.saturating_mul(definition_height) / 100;
+        let current_lift = previous_step
+            .saturating_add(step_diff)
+            .saturating_mul(definition_height)
+            / 100;
+        return current_y.saturating_sub(current_lift.saturating_sub(previous_lift));
+    }
+    current_y
 }
 
 /// The C4Object::DoCon(fInitial) straight-con bottom adjust
@@ -14063,7 +14304,7 @@ pub(crate) fn docon_initial_center_y_with_rotation(
     let zero = transformed_shape_rect(shape, 0, stretch_growth, rotateable, rotation);
     let grown = transformed_shape_rect(
         shape,
-        construction.clamp(0, FULL_CON),
+        construction.max(0),
         stretch_growth,
         rotateable,
         rotation,
@@ -14084,7 +14325,7 @@ fn transformed_shape_rect(
     rotation: i32,
 ) -> Option<DefinitionRect> {
     let mut rect = rect?;
-    if construction.clamp(0, FULL_CON) != FULL_CON {
+    if construction != FULL_CON {
         let percent = construction_percent(construction);
         if stretch_growth {
             rect.x = rect.x * percent / 100;
@@ -18685,6 +18926,12 @@ impl Engine {
                                 contain_blast: definition.contain_blast(),
                                 no_horizontal_move: definition.no_horizontal_move(),
                                 grab: definition.grab(),
+                                oversize: definition.oversize(),
+                                collection_rect: definition.collection_rect(),
+                                entrance_rect: definition.entrance_rect(),
+                                rotated_entrance: definition.rotated_entrance,
+                                attract_lightning: definition.attract_lightning,
+                                no_fight: definition.no_fight,
                             },
                         },
                     )
@@ -18723,6 +18970,7 @@ impl Engine {
                         HostSolidMaskMetadata::new(
                             definition.shape_rect(),
                             definition.solid_mask(),
+                            definition.rotated_solid_masks(),
                             definition.sprite_image().map(image),
                             named_images,
                         ),
@@ -18838,6 +19086,17 @@ impl Engine {
         )
         .with_needed_material_strings(Rc::clone(&self.needed_material_strings))
         .with_solid_mask_metadata(solid_mask_metadata)
+        .with_solid_mask_bakes(
+            self.objects
+                .iter()
+                .filter_map(|object| {
+                    object
+                        .solid_mask_bake
+                        .clone()
+                        .map(|bake| (object.id, bake))
+                })
+                .collect(),
+        )
         .with_scenario_values(Rc::clone(&self.scenario_values))
         .with_scenario_sections(
             self.scenario_sections
@@ -20214,6 +20473,13 @@ impl Engine {
                 .objects
                 .get(index)
                 .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?;
+            // C4Object::Call is a silent no-op once Status reaches zero
+            // (C4Object.cpp:2224-2227). The tombstone remains addressable
+            // for the rest of the current native call, but scripts cannot
+            // be re-entered through it.
+            if object.destroyed || object.state.status == ObjectStatus::Deleted {
+                return Ok(Value::Nil);
+            }
             (
                 object.id,
                 object.definition_id.clone(),
@@ -21968,7 +22234,14 @@ impl Engine {
     fn do_initial_con(&mut self, index: usize, change: i32) -> bool {
         let before = self.objects[index].state.construction;
         let was_full = before >= FULL_CON;
-        let after = before.saturating_add(change).clamp(0, FULL_CON);
+        let oversize = self
+            .definitions
+            .get(&self.objects[index].definition_id)
+            .is_some_and(Definition::oversize);
+        let mut after = before.saturating_add(change).max(0);
+        if !oversize {
+            after = after.min(FULL_CON);
+        }
         let previous_rect = self.objects[index].current_shape_rect();
         let stale_fixed_position = self.objects[index].fixed_position;
 
@@ -24283,6 +24556,8 @@ impl Engine {
             construction,
             construction_via_docon,
             construction_preserves_fixed_position,
+            resolved_docon_position,
+            resolved_docon_fixed_position,
             damage,
             magic_energy,
             magic_capacity,
@@ -24334,7 +24609,8 @@ impl Engine {
         };
 
         let mut energy_died = false;
-        let mut solid_mask_refresh = rotation.is_some() || change_def.is_some();
+        let mut solid_mask_refresh =
+            rotation.is_some() || change_def.is_some() || construction.is_some();
         // FnChangeDef swaps INLINE (C4Object.cpp:1205-1231): apply it
         // BEFORE the staged fields so an action write in the same update
         // resolves against the NEW def's ActMap.
@@ -24563,10 +24839,20 @@ impl Engine {
             }
             if let Some(construction) = construction {
                 let fixed_position = object.fixed_position;
-                object.set_construction(construction);
+                if construction_via_docon {
+                    object.set_construction_from_docon(construction);
+                } else {
+                    object.set_construction(construction);
+                }
                 if construction_via_docon && construction_preserves_fixed_position {
                     object.fixed_position = fixed_position;
                 }
+            }
+            if let Some(position) = resolved_docon_position {
+                object.state.position = position;
+            }
+            if let Some(position) = resolved_docon_fixed_position {
+                object.fixed_position = position;
             }
             if let Some(vertices) = live_vertices {
                 object.set_live_shape_vertices(vertices);
@@ -25189,12 +25475,12 @@ impl Engine {
                 object.state.status,
             )
         };
-        let solid_mask_changed = object_update
-            .as_ref()
-            .is_some_and(|update| {
+        let solid_mask_changed = destroy_object
+            || object_update.as_ref().is_some_and(|update| {
                 update.change_def.is_some()
                     || update.solid_mask_override.is_some()
                     || update.rotation.is_some()
+                    || update.construction.is_some()
             });
         let mut change_def_reinsert = object_update
             .as_ref()
@@ -25502,6 +25788,7 @@ impl Engine {
                     update.change_def.is_some()
                         || update.solid_mask_override.is_some()
                         || update.rotation.is_some()
+                        || update.construction.is_some()
                 });
             let mut change_def_reinsert = outcome
                 .update
@@ -25528,7 +25815,7 @@ impl Engine {
                 .as_ref()
                 .is_some_and(|update| update.crew_status_change);
             let mut energy_died = false;
-            let mut delayed_docon_construction = None;
+            let mut delayed_docon_state = None;
             // FnChangeDef swaps INLINE (C4Object.cpp:1205-1231): apply the
             // def change BEFORE the staged delta so a following
             // SetAction resolves against the NEW ActMap.
@@ -25551,10 +25838,14 @@ impl Engine {
                     // new construction shape. The copy-in/out scope carries
                     // both writes in one update, so delay just this ordered
                     // DoCon fold until after apply_container_change below.
-                    if update.construction_preserves_fixed_position
-                        && update.container.is_some()
-                    {
-                        delayed_docon_construction = update.construction.take();
+                    if update.construction_via_docon && update.container.is_some() {
+                        delayed_docon_state = update.construction.take().map(|construction| {
+                            (
+                                construction,
+                                update.resolved_docon_position.take(),
+                                update.resolved_docon_fixed_position.take(),
+                            )
+                        });
                         update.construction_via_docon = false;
                         update.construction_preserves_fixed_position = false;
                     }
@@ -25735,9 +26026,23 @@ impl Engine {
             if change_def_reinsert {
                 self.reinsert_change_def_contents_link(object_id)?;
             }
-            if let Some(construction) = delayed_docon_construction {
-                let change = construction - self.objects[index].state.construction;
-                self.do_con(index, change);
+            if let Some((construction, resolved_position, resolved_fixed_position)) =
+                delayed_docon_state
+            {
+                if let Some(position) = resolved_position {
+                    self.objects[index].state.construction = construction.max(0);
+                    self.objects[index].refresh_shape_geometry();
+                    self.objects[index].state.position = position;
+                    if let Some(fixed_position) = resolved_fixed_position {
+                        self.objects[index].fixed_position = fixed_position;
+                    }
+                } else {
+                    let stale_fixed = self.objects[index].fixed_position;
+                    self.objects[index].set_construction_from_docon(construction);
+                    self.objects[index].fixed_position = stale_fixed;
+                }
+                self.refresh_object_ocf(index);
+                self.update_sector_for_index(index);
             }
             if solid_mask_changed
                 || effect_solid_mask_changed
@@ -34698,10 +35003,10 @@ impl Engine {
         // Decay: DoCon(-100) every frame (C4Object.cpp:776-778); burned away
         // at zero construction (C4Object::DoCon removal)
         if !no_burn_decay {
-            self.do_con(idx, -100);
-            if self.objects[idx].state.construction == 0 {
-                let _ = self.objects[idx].mark_destroyed();
-                return stop_events;
+            if let Err(error) = self.do_con(idx, -100) {
+                if let Some(error) = self.defer_runtime_flash_boundary(error) {
+                    tracing::warn!(%error, "fire DoCon callback failed; continuing");
+                }
             }
         }
         // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:780)
@@ -34826,17 +35131,15 @@ impl Engine {
     /// after the fire effect like C++ (C4Object.cpp:1074-1080). Still open:
     /// the FXB1 bubble object (the synced `Random(5)` x-argument draw IS
     /// consumed), the DeepBreath callback's sound, and the corrosion/
-    /// C4Object::DoCon on a live object (C4Object.cpp:1414-1483),
-    /// shape/bottom subset: clamp Con into [0, FullCon] (Oversize
-    /// unmodeled), keep the shape bottom anchored when unrotated
-    /// (`strgt_con_b = y + Shape.y + Shape.Hgt` from the PRE-change
-    /// stretched shape; on a shape resize `y = strgt_con_b - Hgt - y`).
-    /// Un-ported arms: contents loss below FullCon, completion/removal
-    /// callbacks, and decay solid-mask removal.
-    fn do_con(&mut self, idx: usize, change: i32) {
-        let definition_components = self
-            .definitions
-            .get(&self.objects[idx].definition_id)
+    /// Complete non-initial `C4Object::DoCon` side effects
+    /// (C4Object.cpp:1428-1516).
+    fn do_con(&mut self, idx: usize, change: i32) -> Result<(), EngineError> {
+        let Some(object_id) = self.objects.get(idx).map(|object| object.id) else {
+            return Ok(());
+        };
+        let definition = self.definitions.get(&self.objects[idx].definition_id);
+        let oversize = definition.is_some_and(Definition::oversize);
+        let definition_components = definition
             .map(|definition| {
                 definition
                     .components()
@@ -34845,18 +35148,27 @@ impl Engine {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let object = &self.objects[idx];
-        let before = object.state.construction;
-        let after = before.saturating_add(change).clamp(0, FULL_CON);
-        let refresh = docon_refreshes_construction(before, after);
-        if after == before && !refresh {
-            return;
+        let before = self.objects[idx].state.construction;
+        let mut after = before.saturating_add(change).max(0);
+        if !oversize {
+            after = after.min(FULL_CON);
         }
-        let previous_rect = self.objects[idx].current_shape_rect();
+        let previous_step = before / (FULL_CON / 100);
+        let step_diff = after / (FULL_CON / 100) - previous_step;
+        let was_full = before >= FULL_CON;
+        let refresh = docon_refreshes_construction(before, after);
+        let entry_y = self.objects[idx].state.position.y;
+        let entry_shape = self.objects[idx].current_shape_rect();
+
         self.objects[idx].state.construction = after;
         self.refresh_object_ocf(idx);
         if !refresh {
-            return;
+            return Ok(());
+        }
+
+        // A full solid mask is removed before UpdateFace mutates the shape.
+        if was_full && after < FULL_CON {
+            self.remove_solid_mask(idx);
         }
         let components = docon_component_counts(
             &self.objects[idx].state.components,
@@ -34866,18 +35178,139 @@ impl Engine {
             change,
         );
         self.objects[idx].state.components = components;
-        // UpdateFace(true) re-derives the shape AND vertices at the new
-        // Con (C4Object::UpdateShape stretch/jolt with bUpdateVertices,
-        // C4Object.cpp:320-341 — trees grow their vertex rings too) and
-        // the straight-con bottom anchor writes the INT y only
-        // (C4Object.cpp:1476-1483; fix_y keeps its stale value until the
-        // next motion — confirmed live: bush f35 int y 309, fix 310.0).
-        // refresh_shape_after_state_change re-syncs fixed coords via
-        // set_position, so restore the stale fixed pair afterward.
-        let stale_fixed = self.objects[idx].fixed_position;
-        self.objects[idx]
-            .refresh_shape_after_state_change(before, previous_rect, true);
-        self.objects[idx].fixed_position = stale_fixed;
+        if self.objects[idx].shape_template.line == 0 {
+            // UpdateShape restores Def->Shape before applying construction;
+            // an earlier SetShape override never survives DoCon.
+            self.objects[idx].state.shape_override = None;
+        }
+        self.objects[idx].refresh_shape_geometry();
+        self.update_sector_for_index(idx);
+        self.update_solid_mask(idx);
+
+        if after < FULL_CON {
+            let incomplete_activity = self
+                .definitions
+                .get(&self.objects[idx].definition_id)
+                .is_some_and(Definition::incomplete_activity);
+            if !incomplete_activity {
+                loop {
+                    let Some(parent_index) = self.find_object_index(object_id) else {
+                        break;
+                    };
+                    let Some(child) = self.objects[parent_index].state.contents.first().copied()
+                    else {
+                        break;
+                    };
+                    let destination = self.objects[parent_index].state.container;
+                    let moved = if let Some(destination) = destination {
+                        self.try_object_enter(child, destination)?
+                    } else {
+                        self.exit_object_at_current_position(child)?
+                    };
+                    if !moved {
+                        // Exit/Enter callbacks may have removed or moved the
+                        // head even when the requested transfer reported
+                        // false. C++ re-reads Contents.GetObject() each pass.
+                        let same_head = self
+                            .find_object_index(object_id)
+                            .and_then(|parent_index| {
+                                self.objects[parent_index]
+                                    .state
+                                    .contents
+                                    .first()
+                                    .copied()
+                            }) == Some(child);
+                        if same_head {
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(parent_index) = self.find_object_index(object_id) {
+                self.objects[parent_index].state.need_energy = false;
+            }
+        }
+
+        if was_full {
+            let idle = self.find_object_index(object_id).is_some_and(|index| {
+                let object = &self.objects[index];
+                object.state.construction < FULL_CON
+                    && self
+                        .definitions
+                        .get(&object.definition_id)
+                        .is_none_or(|definition| !definition.incomplete_activity())
+            });
+            if idle {
+                if let Some(index) = self.find_object_index(object_id) {
+                    let definition_id = self.objects[index].definition_id.clone();
+                    let _ = tolerate_script_error(self.action_with_calls(
+                        index,
+                        &definition_id,
+                        "Idle",
+                    ))?;
+                }
+            }
+        }
+
+        // Ejection and action callbacks precede this position adjustment.
+        if let Some(index) = self.find_object_index(object_id) {
+            let definition_height = self
+                .definitions
+                .get(&self.objects[index].definition_id)
+                .and_then(Definition::shape_rect)
+                .map_or(0, |shape| shape.height);
+            let current_position = self.objects[index].state.position;
+            let current_shape = self.objects[index].current_shape_rect();
+            let adjusted_y = docon_adjusted_position_y(
+                entry_y,
+                entry_shape,
+                current_position.y,
+                current_shape,
+                self.objects[index].state.rotation,
+                self.objects[index].state.category,
+                previous_step,
+                step_diff,
+                definition_height,
+            );
+            if adjusted_y != current_position.y {
+                // UpdatePos changes only integer coordinates; fixed_position
+                // remains the value from before DoCon.
+                self.objects[index].state.position.y = adjusted_y;
+                self.update_sector_for_index(index);
+                self.update_solid_mask(index);
+            }
+        }
+
+        let crossed_full = !was_full
+            && self.find_object_index(object_id).is_some_and(|index| {
+                self.objects[index].state.construction >= FULL_CON
+            });
+        if crossed_full {
+            if let Some(index) = self.find_object_index(object_id) {
+                let _ = tolerate_script_error(self.call_object_function(
+                    index,
+                    "Completion",
+                    Vec::new(),
+                ))?;
+            }
+            if let Some(index) = self.find_object_index(object_id).filter(|&index| {
+                !self.objects[index].destroyed
+                    && self.objects[index].state.status != ObjectStatus::Deleted
+            }) {
+                let _ = tolerate_script_error(self.call_object_function(
+                    index,
+                    "Initialize",
+                    Vec::new(),
+                ))?;
+            }
+        }
+
+        if self.find_object_index(object_id).is_some_and(|index| {
+            self.objects[index].state.construction <= 0
+        }) {
+            let _ = self.assign_object_removal(object_id)?;
+        }
+        Ok(())
     }
 
     /// InMat-incineration/base/birthday arms (need InMat and base models).
@@ -34888,15 +35321,16 @@ impl Engine {
         if frame % 35 == 0 {
             let object = &self.objects[idx];
             let category = object.state.category;
-            let eligible = (category & CATEGORY_LIVING != 0 && object.state.alive)
-                || category & CATEGORY_STATIC_BACK != 0;
+            let eligible = !object.state.on_fire
+                && ((category & CATEGORY_LIVING != 0 && object.state.alive)
+                    || category & CATEGORY_STATIC_BACK != 0);
             let growth = self
                 .definitions
                 .get(&object.definition_id)
                 .map(|definition| definition.growth())
                 .unwrap_or(0);
             if eligible && growth != 0 && object.state.construction < FULL_CON {
-                self.do_con(idx, growth * 100);
+                self.do_con(idx, growth * 100)?;
             }
         }
         // Tick5, alive, breathing definitions only (C4Object.cpp:879-880).
@@ -36704,6 +37138,7 @@ impl Engine {
         definition.set_can_be_base(core.can_be_base);
         definition.set_construction_offset(core.con_size_off);
         definition.set_stretch_growth(core.stretch_growth);
+        definition.set_oversize(core.oversize);
         definition.set_placement(core.placement);
         definition.set_growth(core.growth);
         definition.set_basement(core.basement);
@@ -43039,6 +43474,7 @@ impl Engine {
             definition_vertex_slots,
             definition_shape_rect,
             definition_stretch_growth,
+            definition_oversize,
             definition_rotateable,
             definition_line,
             definition_blit_mode,
@@ -43058,6 +43494,7 @@ impl Engine {
                 definition_ref.shape_vertex_buffer().clone(),
                 definition_ref.shape_rect(),
                 definition_ref.stretch_growth(),
+                definition_ref.oversize(),
                 definition_ref.rotateable(),
                 definition_ref.line(),
                 definition_ref.blit_mode(),
@@ -43065,6 +43502,14 @@ impl Engine {
                 definition_ref.components().to_vec(),
                 definition_ref.contact_density(),
             )
+        };
+        // Objects.txt compiles Con/Size verbatim. Fresh non-Oversize
+        // objects retain NewObject's FullCon ceiling; Oversize definitions
+        // retain construction-scaled values above 100 percent.
+        let construction = if loaded || definition_oversize {
+            construction.max(0)
+        } else {
+            construction.clamp(0, FULL_CON)
         };
         let mut initial_action = match action {
             Some(state) => state,
@@ -43287,7 +43732,7 @@ impl Engine {
                 // (C4Object.cpp:2768 / the C4Object ctor, :97).
                 magic_energy: magic_energy.unwrap_or(0),
                 magic_capacity: 0,
-                construction: construction.clamp(0, FULL_CON),
+                construction,
                 action: initial_action,
                 direction,
                 command_direction,
