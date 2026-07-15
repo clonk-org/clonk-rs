@@ -1826,6 +1826,83 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
     }
 
     #[test]
+    fn sync_check_excludes_inactive_and_deleted_status_objects() -> Result<(), EngineError> {
+        // C4ControlSyncCheck::Set reads Game.Objects.ObjectCount and each
+        // in-bounds sector's ObjectShapes.ObjectCount. Both list counts skip
+        // Status==0 objects, while C4OS_INACTIVE objects live in the separate
+        // InactiveObjects list and have no sector links.
+        let mut definition = simple_definition("SCST");
+        definition.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        definition.set_ocf_base(ocf::GRAB);
+
+        let mut engine = Engine::with_seed(79);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.register_definition(definition)?;
+        let active = engine.spawn_object(
+            SpawnConfig::new("SCST").with_position(Vector2::new(25, 25)),
+        )?;
+        let inactive = engine.spawn_object(
+            SpawnConfig::new("SCST")
+                .with_position(Vector2::new(75, 25))
+                .with_status(ObjectStatus::Inactive),
+        )?;
+
+        let packet = engine.sync_check(0);
+        assert_eq!((packet.object_count, packet.sector_shape_sum), (1, 1));
+        let sectors = engine.sectors.as_ref().expect("sectors initialized");
+        assert!(!sectors
+            .object_ids(SectorKey::Inside { x: 1, y: 0 })
+            .contains(&inactive));
+        assert!(!sectors
+            .shape_ids(SectorKey::Inside { x: 1, y: 0 })
+            .contains(&inactive));
+        assert!(engine
+            .at_object(Vector2::new(75, 25), ocf::GRAB, None)
+            .is_none());
+
+        engine.apply_object_update(
+            active,
+            ObjectUpdate::new().with_status(ObjectStatus::Deleted),
+        )?;
+        let packet = engine.sync_check(0);
+        assert_eq!(
+            (packet.object_count, packet.sector_shape_sum),
+            (0, 0),
+            "Status-zero removal tombstones stop contributing immediately"
+        );
+        assert!(engine
+            .at_object(Vector2::new(25, 25), ocf::GRAB, None)
+            .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn sync_check_omits_outside_sector_shape_memberships() -> Result<(), EngineError> {
+        // C4LSectors::getShapeSum iterates only Sectors[0..Size); SectorOut
+        // retains its membership list but is deliberately absent from the
+        // digest.
+        let mut definition = simple_definition("SCOT");
+        definition.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        definition.set_ocf_base(ocf::GRAB);
+
+        let mut engine = Engine::with_seed(79);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.register_definition(definition)?;
+        let outside = engine.spawn_object(
+            SpawnConfig::new("SCOT").with_position(Vector2::new(150, 25)),
+        )?;
+
+        let packet = engine.sync_check(0);
+        assert_eq!(packet.object_count, 1);
+        assert_eq!(packet.sector_shape_sum, 0);
+        let sectors = engine.sectors.as_ref().expect("sectors initialized");
+        assert!(sectors
+            .shape_ids(SectorKey::Outside)
+            .contains(&outside));
+        Ok(())
+    }
+
+    #[test]
     fn sync_check_digest_and_state_machine_match_cpp() -> Result<(), EngineError> {
         // C4ControlSyncCheck::Set (C4Control.cpp:445-468): Random3 is the
         // Rnd3 ring pointer, RandomCount the synced draw count, AllCrewPosX

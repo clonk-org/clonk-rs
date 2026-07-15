@@ -17806,7 +17806,7 @@ impl Engine {
     }
 
     fn sector_record_for_object(&self, object: &Object) -> Option<SectorObject> {
-        if object.destroyed || matches!(object.state.status, ObjectStatus::Deleted) {
+        if object.destroyed || !object.state.status.is_active() {
             return None;
         }
         let position = object.state.position;
@@ -25356,7 +25356,13 @@ impl Engine {
         let pxs_count = i32::try_from(self.pxs_system.execute_count()).unwrap_or(i32::MAX);
         // MassMover.CreatePtr (C4Control.cpp:454)
         let mass_mover_index = self.mass_movers.create_ptr();
-        let object_count = i32::try_from(self.objects.len()).unwrap_or(i32::MAX);
+        let object_count = i32::try_from(
+            self.objects
+                .iter()
+                .filter(|object| !object.destroyed && object.state.status.is_active())
+                .count(),
+        )
+        .unwrap_or(i32::MAX);
         let object_enumeration_index =
             saturating_u64_to_i32(self.next_object_id.saturating_sub(1));
         let sector_shape_sum = self

@@ -309,8 +309,7 @@ impl SectorMap {
         self.sectors
             .iter()
             .map(|sector| sector.object_shapes.len())
-            .sum::<usize>()
-            + self.outside.object_shapes.len()
+            .sum()
     }
 
     fn clear_lists(&mut self) {
