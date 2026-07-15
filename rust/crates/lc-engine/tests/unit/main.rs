@@ -22092,6 +22092,7 @@ func Trigger() {
     fn reject_grabbed_test_engine() -> Engine {
         let actor_script = r#"#strict
 local order, seen_action, seen_target, finished;
+local finished_front, finished_target;
 local after_execute, after_action;
 local remove_on_jump;
 local jump_xdir, jump_ydir, jump_by_com;
@@ -22102,6 +22103,8 @@ public func ResetGrabProbe()
   seen_action = nil;
   seen_target = nil;
   finished = nil;
+  finished_front = nil;
+  finished_target = nil;
   after_execute = nil;
   after_action = nil;
   remove_on_jump = false;
@@ -22135,6 +22138,9 @@ public func RunGrab(target)
   return order;
 }
 
+public func QueueNullGrab() { return AddCommand(this(), "Grab"); }
+public func RunOneCommand() { return ExecuteCommand(); }
+
 protected func PushStart()
 {
   order = order * 10 + 2;
@@ -22157,9 +22163,11 @@ protected func OnActionJump(xdir, ydir, by_com)
   return true;
 }
 
-protected func ControlCommandFinished(command)
+protected func ControlCommandFinished(command, target)
 {
   finished = command;
+  finished_front = GetCommand(0);
+  finished_target = target;
   return true;
 }
 "#;
@@ -22329,6 +22337,110 @@ protected func RejectGrabbed(clonk)
             .push_front(CommandRequest::new(CommandId::Grab).with_target(Some(target)))
             .expect("Grab queues");
         (actor, target)
+    }
+
+    #[test]
+    fn script_add_command_null_grab_ungrabs_then_reports_finished() {
+        let mut engine = reject_grabbed_test_engine();
+        let (actor, pushed_target) = spawn_grab_probe(&mut engine, "RGPL", "Push", 0);
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index].commands.clear();
+        engine.objects[actor_index].state.action.target = Some(pushed_target);
+        engine.objects[actor_index]
+            .commands
+            .push_back(
+                CommandRequest::new(CommandId::Wait)
+                    .with_retries(1)
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("base Wait queues");
+
+        assert_eq!(
+            engine
+                .call_object_function(actor_index, "QueueNullGrab", Vec::new())
+                .expect("script AddCommand returns"),
+            Value::Bool(true),
+            "C4Object::AddCommand validates the command id, not Target"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(actor)
+                .expect("actor remains")
+                .command_stack
+                .command_names(),
+            vec!["Grab".to_string(), "Wait".to_string()]
+        );
+
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_index, "RunOneCommand", Vec::new())
+            .expect("targetless Grab executes");
+        assert_eq!(
+            engine
+                .object_snapshot(actor)
+                .expect("actor remains")
+                .command_stack
+                .command_names(),
+            vec!["UnGrab".to_string(), "Grab".to_string(), "Wait".to_string()],
+            "the pushing actor queues UnGrab before checking the null target"
+        );
+
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_index, "RunOneCommand", Vec::new())
+            .expect("UnGrab executes");
+        let after_ungrab = engine.object_snapshot(actor).expect("actor remains");
+        assert_eq!(after_ungrab.action.name, "Walk");
+        assert_eq!(
+            after_ungrab.command_stack.command_names(),
+            vec!["Grab".to_string(), "Wait".to_string()]
+        );
+        assert_eq!(
+            after_ungrab.local_vars.get("finished"),
+            Some(&Value::String("UnGrab".to_string()))
+        );
+        assert_eq!(
+            after_ungrab.local_vars.get("finished_front"),
+            Some(&Value::String("UnGrab".to_string())),
+            "ControlCommandFinished observes the finished UnGrab front"
+        );
+
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_index, "RunOneCommand", Vec::new())
+            .expect("uncovered targetless Grab fails");
+        let after_grab = engine.object_snapshot(actor).expect("actor remains");
+        assert_eq!(
+            after_grab.command_stack.command_names(),
+            vec!["Wait".to_string()]
+        );
+        assert_eq!(
+            after_grab.local_vars.get("finished"),
+            Some(&Value::String("Grab".to_string()))
+        );
+        assert_eq!(
+            after_grab.local_vars.get("finished_front"),
+            Some(&Value::String("Grab".to_string())),
+            "the failed Grab remains visible during ControlCommandFinished"
+        );
+        assert_eq!(
+            after_grab.local_vars.get("finished_target"),
+            Some(&Value::Nil)
+        );
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        let failed_base = serde_json::to_value(engine.objects[actor_index].commands.snapshot())
+            .expect("command stack serializes");
+        assert_eq!(failed_base["commands"][0]["failures"], serde_json::json!(1));
+        assert_eq!(failed_base["commands"][0]["retries"], serde_json::json!(1));
+
+        engine
+            .call_object_function(actor_index, "RunOneCommand", Vec::new())
+            .expect("base consumes the delegated failure");
+        let during_retry = engine.object_snapshot(actor).expect("actor remains");
+        assert_eq!(
+            during_retry.command_stack.command_names(),
+            vec!["Retry".to_string(), "Wait".to_string()]
+        );
     }
 
     #[test]

@@ -6384,6 +6384,66 @@ mod tests {
     }
 
     #[test]
+    fn null_target_grab_ungrabs_then_fails_into_base_retry() {
+        let actor_id = ObjectId::new(310);
+        let pushed_id = ObjectId::new(320);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Push;
+        actor.action_target = Some(pushed_id);
+
+        let pushed = snapshot_with_id(pushed_id.as_u64());
+        let mut objects = HashMap::from([(actor_id, actor), (pushed_id, pushed)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::Wait)
+                    .with_retries(1)
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("base queues");
+        stack
+            .push_front(CommandRequest::new(CommandId::Grab).with_mode(CommandMode::SilentSub))
+            .expect("C++ accepts a targetless Grab");
+
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 1);
+        let first = stack.step(&ctx).expect("targetless Grab executes");
+        assert_eq!(first.status, CommandStatus::Running);
+        assert_eq!(
+            stack.snapshot().command_names(),
+            vec!["UnGrab", "Grab", "Wait"],
+            "a pushing actor lets go before the null-target failure"
+        );
+        assert_eq!(stack.snapshot().commands[2].failures, 0);
+
+        // The live UnGrab path owns the action transition and callback. Its
+        // command is complete before the original Grab executes again.
+        stack.pop_front();
+        let actor = objects.get_mut(&actor_id).expect("actor present");
+        actor.action_procedure = ActionProcedure::Walk;
+        actor.action_target = None;
+
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 2);
+        let failed = stack.step(&ctx).expect("Grab re-executes");
+        assert_eq!(failed.status, CommandStatus::Failed);
+        let after_failure = stack.snapshot();
+        assert_eq!(after_failure.command_names(), vec!["Wait"]);
+        assert_eq!(after_failure.commands[0].failures, 1);
+        assert_eq!(after_failure.commands[0].retries, 1);
+
+        let retry = stack.step(&ctx).expect("base consumes its failure");
+        assert_eq!(retry.status, CommandStatus::Running);
+        let during_retry = stack.snapshot();
+        assert_eq!(during_retry.command_names(), vec!["Retry", "Wait"]);
+        assert_eq!(during_retry.commands[1].failures, 0);
+        assert_eq!(during_retry.commands[1].retries, 0);
+    }
+
+    #[test]
     fn grab_subcommand_rechecks_fulfilled_condition_on_next_execution() {
         let actor_id = ObjectId::new(311);
         let target_id = ObjectId::new(321);
@@ -19566,14 +19626,18 @@ struct GrabState {
 
 impl GrabState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
-        let target = request.target.ok_or(CommandError::Unsupported)?;
+        // C4Object::AddCommand accepts a null target and leaves the pointer
+        // check to C4Command::Grab. Object IDs start above zero, so retain a
+        // reserved ID internally while the request keeps the script-visible
+        // Target=nil field (C4Object.cpp:3914-3919; C4Command.cpp:667-687).
+        let target = request.target.unwrap_or_else(|| ObjectId::new(0));
         Ok(Self {
             target,
             offset_x: request.tx.unwrap_or(0),
             offset_y: request.ty.unwrap_or(0),
             update_interval: request.update_interval.max(1),
             reject_pending: false,
-            target_cleared: false,
+            target_cleared: request.target.is_none(),
         })
     }
 
@@ -19602,7 +19666,7 @@ impl GrabState {
         }
 
         if ctx.object.action_procedure == ActionProcedure::Push
-            && ctx.object.action_target != Some(self.target)
+            && ctx.object.action_target != target
         {
             let request = CommandRequest::new(CommandId::UnGrab)
                 .with_update_interval(50)
