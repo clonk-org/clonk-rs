@@ -6308,6 +6308,9 @@ impl Object {
         self.state
             .effects
             .drain(..)
+            // C4Effect::ClearAll recurses through pNext before stopping its
+            // own node, so every whole-list clear runs tail-to-head.
+            .rev()
             .map(|effect| EffectEvent::stopped(effect, reason))
             .collect()
     }
@@ -34698,11 +34701,7 @@ impl Engine {
         // AssignRemoval clears effects while Status is still normal
         // (src/C4Object.cpp:257-269); callbacks therefore observe a live
         // removal target, and cannot veto a ClearAll removal.
-        let mut events = self.objects[idx].drain_effects_with_reason(EffectStopReason::Cleared);
-        // C4Effect::ClearAll recurses into pNext first, so Stop callbacks run
-        // from the highest list entry back to the lowest
-        // (src/C4Effect.cpp:407-424).
-        events.reverse();
+        let events = self.objects[idx].drain_effects_with_reason(EffectStopReason::Cleared);
         if !events.is_empty() {
             self.dispatch_object_effect_events(idx, &definition_id, events)?;
         }

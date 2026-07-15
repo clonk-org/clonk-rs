@@ -37132,6 +37132,66 @@ func FxProbeTimer(pThis, iNumber) {
     }
 
     #[test]
+    fn effect_callback_docon_removal_clears_effects_tail_first() {
+        // Reaching zero construction inside an effect callback requests
+        // object destruction through the callback outcome. C4Object's
+        // AssignRemoval then runs C4Effect::ClearAll recursively, so the
+        // highest-priority Stop precedes the lower-priority Stop
+        // (C4Effect.cpp:407-412; C4Object.cpp:262-264).
+        let script = r#"#strict 3
+        static iStopOrder;
+
+        func Install() {
+            iStopOrder = 0;
+            AddEffect("Destroyer", this(), 1, 1, this());
+            AddEffect("Low", this(), 100, 0, this());
+            AddEffect("High", this(), 200, 0, this());
+        }
+
+        func FxDestroyerTimer() {
+            DoCon(-100);
+            return 0;
+        }
+
+        func FxLowStop(object target, int number, int reason) {
+            iStopOrder = iStopOrder * 10 + 1;
+            return 0;
+        }
+
+        func FxHighStop(object target, int number, int reason) {
+            iStopOrder = iStopOrder * 10 + 2;
+            return 0;
+        }
+        "#;
+
+        let mut definition =
+            Definition::from_script("CLR1", "Callback construction removal", script)
+                .expect("script compiles");
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("CLR1"))
+            .expect("target spawns");
+        let idx = engine.find_object_index(id).expect("target exists");
+        engine
+            .call_object_function(idx, "Install", Vec::new())
+            .expect("effects install");
+
+        engine.tick().expect("destruction timer frame succeeds");
+
+        assert!(engine.object_snapshot(id).is_none());
+        assert_eq!(
+            engine.snapshot().script_globals.named.get("iStopOrder"),
+            Some(&Value::Int(21)),
+            "ClearAll stops the highest-priority effect before the lower one"
+        );
+    }
+
+    #[test]
     fn effect_death_stop_receives_reason_four_and_can_revive_target() {
         // AssignDeath clears effects with C4FxCall_RemoveDeath (4). Like
         // C4Effect::ClearAll, a Stop callback returning C4Fx_Stop_Deny (-1)
