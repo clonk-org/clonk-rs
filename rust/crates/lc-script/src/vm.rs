@@ -4,12 +4,12 @@ use std::rc::Rc;
 
 use crate::ast::{
     AccessLevel, AssignmentTarget, BinaryOp, Expr, ForInit, Function, NavigationOperation,
-    Parameter, SafeNavigationStep, Stmt, UnaryOp, VarDecl,
+    Parameter, SafeNavigationStep, Stmt, TypeAnnotation, UnaryOp, VarDecl,
 };
 use crate::debugger::DebuggerHooks;
 use crate::engine::{HostFunction, HostReferenceFunction};
 use crate::error::RuntimeError;
-use crate::value::{Literal, Value, ValueMap};
+use crate::value::{C4VType, Literal, Value, ValueMap};
 
 /// Maximum script call-stack depth, matching C++ `MAX_CONTEXT_STACK`
 /// (C4AulExec.cpp:62). A script recursing within this bound runs; beyond it the
@@ -165,14 +165,19 @@ fn slot_cell(slots: &SlotMap, index: i32) -> ValueCell {
 #[derive(Clone)]
 pub(crate) struct ScriptCallerContext {
     var_slots: SlotMap,
+    /// `cthr->Caller->Func->Owner->Strict`, used by native compatibility
+    /// functions. Includes/appends therefore use their destination owner.
     owner_strict_level: Option<u8>,
+    /// `cthr->Caller->Func->pOrgScript->Strict` / `HasStrictNil()`, used by
+    /// source-sensitive native conversions and script-function parameter
+    /// conversion. Includes/appends retain source strictness here.
     origin_strict_level: Option<u8>,
 }
 
 thread_local! {
     /// None while a native host function has no script caller (an
-    /// engine-driven direct call). A missing strict level inside a PRESENT
-    /// frame instead means a NONSTRICT script caller.
+    /// engine-driven direct call). `owner_strict_level == None` inside a
+    /// PRESENT frame instead means a NONSTRICT script caller.
     static HOST_CALLER_CONTEXT: RefCell<Option<ScriptCallerContext>> = const {
         RefCell::new(None)
     };
@@ -1709,7 +1714,14 @@ impl<'a> Vm<'a> {
         maybe_grow(|| {
             if let Some(function) = self.engine_script_function(name) {
                 return self
-                    .invoke_script_function(name, function, args, depth, object_state)?
+                    .invoke_script_function(
+                        name,
+                        function,
+                        args,
+                        depth,
+                        object_state,
+                        caller.clone(),
+                    )?
                     .into_tracked();
             }
 
@@ -1767,7 +1779,14 @@ impl<'a> Vm<'a> {
 
         maybe_grow(|| {
             if let Some(function) = self.functions.get(name) {
-                return self.invoke_script_function(name, function, args, depth, object_state);
+                return self.invoke_script_function(
+                    name,
+                    function,
+                    args,
+                    depth,
+                    object_state,
+                    caller.clone(),
+                );
             }
 
             // Engine-global script functions (System.c4g `global func`s,
@@ -1778,7 +1797,14 @@ impl<'a> Vm<'a> {
                 .global_functions
                 .and_then(|functions| functions.get(name))
             {
-                return self.invoke_script_function(name, function, args, depth, object_state);
+                return self.invoke_script_function(
+                    name,
+                    function,
+                    args,
+                    depth,
+                    object_state,
+                    caller.clone(),
+                );
             }
 
             if let Some(function) = self.host_functions.get(name) {
@@ -1812,22 +1838,24 @@ impl<'a> Vm<'a> {
         args: Vec<CallArg>,
         depth: usize,
         object_state: ObjectState,
+        caller: Option<ScriptCallerContext>,
     ) -> Result<ReturnValue, RuntimeError> {
-        // Allow calling with MORE arguments than declared (extras ignored)
-        // This matches C++ OpenClonk behavior for action callbacks
-        // C++ pads missing arguments with nil: every call carries a full
-        // C4AulParSet (10 slots, unfilled = nil — C4Aul.h:104-121,
-        // C4AulExec.cpp:333-336), so callees legally declare more params
-        // than the caller passes.
+        // Every script call carries the full ten-slot C4AulParSet. Parameter
+        // conversion also visits the unnamed tail (whose declared type is
+        // C4V_Any), so Par(n) observes the same eager-zero normalization as a
+        // named parameter.
         let mut args = args;
-        while args.len() < function.params.len() {
+        let debug_arg_count = args.len().min(MAX_CALL_PARAMETERS);
+        args.truncate(MAX_CALL_PARAMETERS);
+        while args.len() < MAX_CALL_PARAMETERS {
             args.push(CallArg::runtime(Value::Nil));
         }
+        Self::check_convert_function_parameters(name, function, &mut args, caller.as_ref())?;
 
         let debug_args = self.call_args_to_values(&args)?;
         if let Some(debugger) = &self.debugger {
             if let Some(callback) = debugger.on_call() {
-                callback(name, &debug_args);
+                callback(name, &debug_args[..debug_arg_count]);
             }
         }
 
@@ -1886,6 +1914,111 @@ impl<'a> Vm<'a> {
         }
 
         Ok(value)
+    }
+
+    /// C++ `CheckConvertFunctionParameters` (C4AulExec.cpp:1364-1397).
+    /// This is deliberately a call-boundary operation: it runs before the
+    /// callee frame exists and mutates the copied parameter slots, not caller
+    /// lvalues (except that `&` parameters retain their references).
+    fn check_convert_function_parameters(
+        name: &str,
+        function: &Function,
+        args: &mut [CallArg],
+        caller: Option<&ScriptCallerContext>,
+    ) -> Result<(), RuntimeError> {
+        let callee_has_strict_nil = function.strict_level.unwrap_or(0) >= 3;
+        let (convert_to_any_eagerly, convert_nil_to_int_bool) = match caller {
+            Some(caller) => {
+                let caller_has_strict_nil = caller.origin_strict_level.unwrap_or(0) >= 3;
+                (
+                    !caller_has_strict_nil,
+                    !caller_has_strict_nil && callee_has_strict_nil,
+                )
+            }
+            // Engine entry points have no script caller. C4AulScriptFunc::Exec
+            // uses the callee strictness and defaults convertNilToIntBool on.
+            None => (!callee_has_strict_nil, callee_has_strict_nil),
+        };
+
+        for (index, arg) in args.iter_mut().enumerate().take(MAX_CALL_PARAMETERS) {
+            let expected = Self::function_parameter_type(function.params.get(index));
+
+            if expected == C4VType::Ref {
+                if matches!(arg, CallArg::Reference(_)) {
+                    continue;
+                }
+                let got = Self::c4v_type_name(arg.read()?.c4v_type());
+                return Err(RuntimeError::new(format!(
+                    "call to \"{name}\" parameter {}: got \"{got}\", but expected \"&\"!",
+                    index + 1
+                )));
+            }
+
+            // Non-reference parameters receive a dereferenced copy even when
+            // an engine caller supplied C4Value refs.
+            let mut tracked = arg.read_tracked()?;
+            if convert_to_any_eagerly && !tracked.value.as_bool() {
+                tracked = TrackedValue::runtime(Value::Nil);
+            }
+
+            if !tracked.value.convert_to_in_place(expected, true) {
+                return Err(RuntimeError::new(format!(
+                    "call to \"{name}\" parameter {}: got \"{}\", but expected \"{}\"!",
+                    index + 1,
+                    Self::c4v_type_name(tracked.value.c4v_type()),
+                    Self::c4v_type_name(expected)
+                )));
+            }
+
+            if convert_nil_to_int_bool && matches!(tracked.value, Value::Nil) {
+                tracked = match expected {
+                    C4VType::Int => TrackedValue::runtime(Value::Int(0)),
+                    C4VType::Bool => TrackedValue::runtime(Value::Bool(false)),
+                    _ => tracked,
+                };
+            }
+            *arg = CallArg::Value(tracked);
+        }
+        Ok(())
+    }
+
+    fn function_parameter_type(parameter: Option<&Parameter>) -> C4VType {
+        let Some(parameter) = parameter else {
+            return C4VType::Any;
+        };
+        if parameter.is_reference {
+            return C4VType::Ref;
+        }
+        match parameter.type_annotation.as_ref() {
+            None | Some(TypeAnnotation::Any) => C4VType::Any,
+            Some(TypeAnnotation::Int) => C4VType::Int,
+            Some(TypeAnnotation::Bool) => C4VType::Bool,
+            Some(TypeAnnotation::String) => C4VType::String,
+            Some(TypeAnnotation::Object) => C4VType::C4Object,
+            Some(TypeAnnotation::Id) => C4VType::C4Id,
+            Some(TypeAnnotation::Array) => C4VType::Array,
+            Some(TypeAnnotation::Proplist) => C4VType::Map,
+            // `effect`, `nil`, and union annotations are extensions beyond
+            // LegacyClonk's C4V_Type parameter grammar. Keep their prior
+            // unrestricted behavior instead of inventing a conversion tag.
+            Some(TypeAnnotation::Effect | TypeAnnotation::Nil | TypeAnnotation::Union(_)) => {
+                C4VType::Any
+            }
+        }
+    }
+
+    fn c4v_type_name(value_type: C4VType) -> &'static str {
+        match value_type {
+            C4VType::Any => "any",
+            C4VType::Int => "int",
+            C4VType::Bool => "bool",
+            C4VType::C4Id => "id",
+            C4VType::C4Object => "object",
+            C4VType::String => "string",
+            C4VType::Array => "array",
+            C4VType::Map => "map",
+            C4VType::Ref => "&",
+        }
     }
 
     fn call_args_to_values(&self, args: &[CallArg]) -> Result<Vec<Value>, RuntimeError> {
@@ -2600,6 +2733,7 @@ impl<'a> Vm<'a> {
                                 evaluated_args,
                                 depth + 1,
                                 env.object_state.clone(),
+                                Some(env.caller_context()),
                             )?
                             .as_value()
                         }

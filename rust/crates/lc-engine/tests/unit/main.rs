@@ -6214,8 +6214,8 @@ protected func OnOldAbort()
             .expect("abort callback ran");
         assert_eq!(
             abort_args.first(),
-            Some(&lc_script::Value::Int(0)),
-            "AbortCall passes the last phase as an int, got {abort_args:?}"
+            Some(&lc_script::Value::Nil),
+            "AbortCall passes phase 0, normalized to nil by the nonstrict callee, got {abort_args:?}"
         );
     }
 
@@ -12680,7 +12680,7 @@ func Trigger() {
             call(&mut engine, rule, "Seen", Vec::new()),
             Value::Array(vec![
                 Value::Bool(true),
-                Value::Bool(false),
+                Value::Nil,
                 Value::Bool(true),
             ]),
             "OnHostilityChange receives old/new state and observes the live write"
@@ -18475,6 +18475,7 @@ func Activate(inMat, inLength, inStrength)
                 .expect("water parses"),
         );
         let water = materials.id_of("Water").expect("water exists");
+        assert_eq!(water.index(), 0, "fixture exercises the falsy material id");
         let mut engine = Engine::with_seed(17);
         engine.set_materials(materials);
         engine.set_landscape(Landscape::flat(1_100, 100));
@@ -18523,7 +18524,8 @@ func Activate(inMat, inLength, inStrength)
             assert_eq!((cloud.state.action.phase, cloud.state.action.ticks), (0, 0));
             assert_eq!(
                 cloud.state.local_vars.get("iMat"),
-                Some(&Value::Int(water.index() as i32))
+                Some(&Value::Nil),
+                "material index zero is normalized at the pre-strict-3 Activate boundary"
             );
             assert_eq!(
                 cloud.state.local_vars.get("iLength"),
@@ -18855,7 +18857,7 @@ func Activate(int x, int y, int xdir, int xrange, int ydir, int yrange, bool gam
         assert_eq!(second.state.local_vars.get("seen_x"), Some(&Value::Int(1)));
         assert_eq!(
             second.state.local_vars.get("seen_gamma"),
-            Some(&Value::Bool(false))
+            Some(&Value::Nil)
         );
     }
 
@@ -33658,7 +33660,7 @@ func Probe(target) {
         let (_, stop_args) = &calls[0];
         assert_eq!(
             stop_args.get(2),
-            Some(&Value::String("temp".to_string())),
+            Some(&Value::Int(1)),
             "the temp stop's reason is C4FxCall_Temp (C4Effect.cpp:489)"
         );
         assert_eq!(
@@ -33781,8 +33783,8 @@ func Probe(target) {
         let (_, kill_stop_args) = &calls[1];
         assert_eq!(
             kill_stop_args.get(2),
-            Some(&Value::String("removed".to_string())),
-            "the victim's Stop is the real removal"
+            Some(&Value::Nil),
+            "C4Effect::Kill omits the normal-removal reason parameter"
         );
     }
 

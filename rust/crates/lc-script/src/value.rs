@@ -409,7 +409,8 @@ impl Value {
     /// C4Script truthiness, matching C++ `C4Value::operator bool` (C4Value.h:185
     /// → `C4V_Data::operator bool`, :76): raw-nonzero on the `Data` union. For
     /// strings/arrays/proplists that is a *pointer*, so a non-nil one is truthy
-    /// even when empty; only nil and integer/bool zero are falsy.
+    /// even when empty. Nil, integer/bool zero, null objects, and the raw-zero
+    /// C4IDs `NONE`/`0000` are falsy.
     pub fn as_bool(&self) -> bool {
         match self {
             Value::Bool(b) => *b,
@@ -523,6 +524,29 @@ impl Value {
             // by `c4v_type()`.
             CnvFn::Deref => false,
         }
+    }
+
+    /// The mutating half of C++ `C4Value::ConvertTo`. Most successful table
+    /// cells only validate the value, but `FnCnvInt2Id` also changes its type
+    /// tag. Function-parameter checking needs that mutation to be visible in
+    /// the callee (`GetType(1000)` on an `id` parameter observes C4V_C4ID).
+    pub(crate) fn convert_to_in_place(&mut self, to_type: C4VType, strict: bool) -> bool {
+        let conversion = cnv_fn(self.c4v_type(), to_type);
+        if !self.convert_to(to_type, strict) {
+            return false;
+        }
+        if conversion == CnvFn::Int2Id {
+            let Value::Int(i) = self else {
+                unreachable!("only int values select FnCnvInt2Id");
+            };
+            let id = if *i == 0 {
+                "NONE".to_string()
+            } else {
+                format!("{i:04}")
+            };
+            *self = Value::C4Id(id);
+        }
+        true
     }
 }
 

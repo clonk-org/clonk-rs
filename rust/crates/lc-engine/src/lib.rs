@@ -40948,19 +40948,17 @@ fn resolve_effect_dispatch_definition<'a>(
 }
 
 fn effect_stop_reason_value(reason: EffectStopReason) -> Value {
-    if matches!(reason, EffectStopReason::Death) {
-        return Value::Int(4);
+    match reason {
+        // C4Effect::Kill omits the third parameter. An explicit nil is the
+        // same ten-slot C4AulParSet value and, unlike integer zero, stays nil
+        // for pre-strict-3 callbacks after parameter conversion.
+        EffectStopReason::Removed | EffectStopReason::Replaced => Value::Nil,
+        // C4Effect::ClearAll uses C4FxCall_RemoveClear.
+        EffectStopReason::Cleared | EffectStopReason::Destroyed => Value::Int(3),
+        // C4FxCall_RemoveDeath and C4FxCall_Temp (C4Effects.h:46-50).
+        EffectStopReason::Death => Value::Int(4),
+        EffectStopReason::Temp => Value::Int(1),
     }
-    let label = match reason {
-        EffectStopReason::Removed => "removed",
-        EffectStopReason::Cleared => "cleared",
-        EffectStopReason::Death => unreachable!("death handled above"),
-        EffectStopReason::Destroyed => "destroyed",
-        EffectStopReason::Replaced => "replaced",
-        // C4FxCall_Temp (C4Effects.h:47) in the deferred string convention.
-        EffectStopReason::Temp => "temp",
-    };
-    Value::String(label.to_string())
 }
 
 /// Active effects AFTER `anchor` in the C++ effect list — the list orders

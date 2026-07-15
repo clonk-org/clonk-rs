@@ -16550,8 +16550,8 @@ public func ActualizePhase(pClonk)
                 .borrow()
                 .get("joined_player")
                 .map(|cell| cell.borrow().clone()),
-            Some(lc_script::Value::Int(0)),
-            "InitializePlayer's first argument is the player NUMBER"
+            Some(lc_script::Value::Nil),
+            "the player NUMBER is 0, which pre-strict-3 engine calls normalize to nil"
         );
     }
 

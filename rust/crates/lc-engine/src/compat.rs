@@ -10457,7 +10457,9 @@ fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
                 "direct object call: function {namespace}::{function} not found"
             )));
         }
-        return match call_world_object_function_in_scope(target, script, function, &pars) {
+        return match call_world_object_function_in_scope_from_arrow(
+            target, script, function, &pars,
+        ) {
             Some(result) => result,
             None => Ok(Value::Nil),
         };
@@ -10531,7 +10533,7 @@ fn arrow_method_reference_dispatch(
                 "direct object call: function {namespace}::{function} not found"
             )));
         }
-        return call_world_object_reference_in_scope(target, script, function, &pars)
+        return call_world_object_reference_in_scope_from_arrow(target, script, function, &pars)
             .unwrap_or_else(|| {
                 Err(RuntimeError::new(format!(
                     "function '{namespace}::{function}' does not return a reference"
@@ -10560,7 +10562,7 @@ fn call_scoped_script_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_scoped_script_function_impl(script, function, args, false, false)
+    call_scoped_script_function_impl(script, function, args, false, false, false)
 }
 
 fn call_scoped_definition_function(
@@ -10594,7 +10596,7 @@ fn call_scoped_script_function_or_global(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_scoped_script_function_impl(script, function, args, true, false)
+    call_scoped_script_function_impl(script, function, args, true, false, true)
 }
 
 /// C4Effect::DoCall's definition/global branch includes engine-native
@@ -10604,7 +10606,7 @@ fn call_scoped_effect_function_or_global(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_scoped_script_function_impl(script, function, args, true, true)
+    call_scoped_script_function_impl(script, function, args, true, true, false)
 }
 
 fn call_scoped_script_reference(
@@ -10625,7 +10627,12 @@ fn call_scoped_script_reference(
         }
     });
     let cells = lc_script::LocalCells::from_local_vars(&HashMap::new());
-    let call = script.call_reference_with_cells_and_this(function, args, &cells, Value::Nil);
+    let call = script.call_reference_with_cells_and_this_preserving_caller(
+        function,
+        args,
+        &cells,
+        Value::Nil,
+    );
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             context.object = context.dormant_scopes.pop().unwrap_or(None);
@@ -10645,6 +10652,7 @@ fn call_scoped_script_function_impl(
     args: &[Value],
     include_globals: bool,
     include_host: bool,
+    preserve_caller: bool,
 ) -> Option<Result<Value, RuntimeError>> {
     let resolvable = if include_globals {
         script.has_function_or_global(function)
@@ -10664,7 +10672,14 @@ fn call_scoped_script_function_impl(
         }
     });
     let locals = HashMap::new();
-    let call = script.call_with_locals_and_this(function, args, &locals, Value::Nil);
+    let call = if preserve_caller {
+        let cells = lc_script::LocalCells::from_local_vars(&locals);
+        script
+            .call_with_cells_and_this_preserving_caller(function, args, &cells, Value::Nil)
+            .map(|value| (value, cells.snapshot()))
+    } else {
+        script.call_with_locals_and_this(function, args, &locals, Value::Nil)
+    };
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             context.object = context.dormant_scopes.pop().unwrap_or(None);
@@ -33408,6 +33423,15 @@ pub(crate) fn call_world_object_function_in_scope(
     call_world_object_function_with(target, function, args, false, false, Some(script), false)
 }
 
+fn call_world_object_function_in_scope_from_arrow(
+    target: ObjectId,
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    call_world_object_function_with(target, function, args, false, false, Some(script), true)
+}
+
 fn call_world_object_reference_in_scope(
     target: ObjectId,
     script: Arc<ScriptEngine>,
@@ -33415,6 +33439,15 @@ fn call_world_object_reference_in_scope(
     args: &[Value],
 ) -> Option<Result<lc_script::ValueReference, RuntimeError>> {
     call_world_object_reference_with(target, function, args, false, Some(script), false)
+}
+
+fn call_world_object_reference_in_scope_from_arrow(
+    target: ObjectId,
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<lc_script::ValueReference, RuntimeError>> {
+    call_world_object_reference_with(target, function, args, false, Some(script), true)
 }
 
 fn call_world_object_reference_with(

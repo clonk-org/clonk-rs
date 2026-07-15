@@ -209,7 +209,7 @@ fn arctic_lightning_spell_launches_three_creatorless_native_bolts() {
             bolt.local_vars.get("iVarY"),
             Some(&Value::Int(expected_range))
         );
-        assert_eq!(bolt.local_vars.get("fDoGamma"), Some(&Value::Bool(false)));
+        assert_eq!(bolt.local_vars.get("fDoGamma"), Some(&Value::Nil));
     }
 }
 
@@ -1935,8 +1935,8 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw() {
     );
     assert_eq!(
         artefact.vars.get(2),
-        Some(&EffectVarValue::Int(0)),
-        "SetMode stores C++ hit activation"
+        Some(&EffectVarValue::Nil),
+        "SetMode's pre-strict-3 call normalizes hit activation 0 to nil"
     );
     assert_eq!(
         engine
@@ -4275,15 +4275,15 @@ fn gold_rush_scorching_timer_returns_kill_before_playing_sound() {
     let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
     assert!(engine.debug_global_has_function("SetScorching"));
     assert!(engine.debug_global_has_function("FxIntScorchingTimer"));
+    let mut driver = Definition::from_script(
+        "SCRH",
+        "Scorching driver",
+        "#strict\nfunc StartScorching() { return SetScorching(this()); }",
+    )
+    .expect("scorching driver compiles");
+    driver.set_c4_callback_convention(true);
     engine
-        .register_definition(
-            Definition::from_script(
-                "SCRH",
-                "Scorching driver",
-                "#strict\nfunc StartScorching() { return SetScorching(this()); }",
-            )
-            .expect("scorching driver compiles"),
-        )
+        .register_definition(driver)
         .expect("scorching driver registers");
     let target = engine
         .spawn_object(SpawnConfig::new("SCRH").with_position(Vector2::new(320, 120)))
