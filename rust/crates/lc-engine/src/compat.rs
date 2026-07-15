@@ -37087,6 +37087,9 @@ impl EffectHostContext {
                     id.clone(),
                     CommandDefinitionSnapshot {
                         value: metadata.value,
+                        collection_limit: u32::try_from(metadata.collection_limit)
+                            .ok()
+                            .filter(|limit| *limit > 0),
                         can_chop: metadata.action_library.specs().iter().any(|(_, spec)| {
                             spec.procedure
                                 .as_deref()

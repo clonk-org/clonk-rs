@@ -167,6 +167,9 @@ impl CommandPlayerSnapshot {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommandDefinitionSnapshot {
     pub value: i32,
+    /// Positive DefCore `CollectionLimit`; `None` means unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection_limit: Option<u32>,
     #[serde(default)]
     pub can_chop: bool,
     #[serde(default)]
@@ -2296,6 +2299,95 @@ mod tests {
             "reissued pursuit performs the next C++ random-offset draw"
         );
         assert_silent_child_failure_propagates(parent_request, move_to.clone(), &ctx);
+    }
+
+    #[test]
+    fn get_side_jump_preserves_count_and_collection_limit_stack_order() {
+        // C4Command::Get queues Jump, optional Drop, side MoveTo, then the
+        // unconditional random-offset MoveTo. AddCommand pushes each entry
+        // to the front, reversing that call order on the live stack
+        // (C4Command.cpp:1272-1290).
+        let actor_id = ObjectId::new(511);
+        let target_id = ObjectId::new(512);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(100, 100);
+        actor.contents = vec![ObjectId::new(513), ObjectId::new(514)];
+        let actor_definition = actor.definition_id.clone();
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(100, 60);
+        target.collectible = true;
+        target.construction = FULL_CON;
+
+        let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::from([(
+            actor_definition,
+            CommandDefinitionSnapshot {
+                collection_limit: Some(2),
+                ..CommandDefinitionSnapshot::default()
+            },
+        )]);
+        let rng = std::cell::RefCell::new(crate::LcgRng::seed_from_u64(17));
+        let (expected_side_x, expected_random_x) = {
+            let mut probe = rng.borrow().clone();
+            let side = if probe.random(2) != 0 { -1 } else { 1 };
+            (100 + side * 40, 100 + probe.random(15) - 7)
+        };
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            rng: Some(&rng),
+            landscape: None,
+            frame: 0,
+            position: actor_snapshot.position,
+            object: actor_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(CommandRequest::new(CommandId::Get).with_target(Some(target_id)))
+            .expect("Get queues");
+        let result = stack.step(&ctx).expect("Get executes");
+
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            stack.command_names(),
+            vec!["MoveTo", "MoveTo", "Drop", "Jump", "Get"]
+        );
+        let views = stack.command_views();
+        assert_eq!((views[0].tx, views[0].ty), (Some(expected_random_x), Some(60)));
+        assert_eq!((views[1].tx, views[1].ty), (Some(expected_side_x), Some(100)));
+        assert_eq!(stack.entries[0].update_interval, 25);
+        assert_eq!(stack.entries[1].update_interval, 50);
+        assert_eq!(views[2].target, None, "CollectionLimit Drop is targetless");
+        assert_eq!(
+            (views[3].tx, views[3].ty),
+            (Some(0), Some(0)),
+            "plain Get forwards its zero count/Ty instead of target coordinates"
+        );
+        assert_eq!(
+            rng.borrow().count,
+            crate::LcgRng::seed_from_u64(17).count + 2,
+            "side selection and pursuit offset consume exactly two draws"
+        );
+
+        let mut counted = GetState::from_request(
+            &CommandRequest::new(CommandId::Get)
+                .with_target(Some(target_id))
+                .with_tx(Some(3))
+                .with_ty(Some(17)),
+        )
+        .expect("counted Get state");
+        let counted_result = counted.step(&ctx);
+        let jump = pushed_request(&counted_result.operations, CommandId::Jump);
+        assert_eq!((jump.tx, jump.ty), (Some(3), Some(17)));
     }
 
     #[test]
@@ -15960,7 +16052,17 @@ struct GetState {
     definition_id: Option<DefinitionId>,
     #[serde(default)]
     menu_identification: Option<i32>,
+    /// Count-equivalent state retained for compatibility with older saves,
+    /// which normalized C4Command::Tx values <= 1 to one.
     remaining: i32,
+    /// Live raw C4Command::Tx get-count forwarded to side-move Jump. Older
+    /// serialized multi-count states reconstruct it from `remaining`.
+    #[serde(default)]
+    jump_tx: i32,
+    /// C4Command::Ty is an integer (default zero) and is copied to the
+    /// side-move Jump even though Jump itself only consumes Tx.
+    #[serde(default)]
+    jump_ty: i32,
     update_interval: u32,
     #[serde(default, skip_serializing_if = "crate::is_false")]
     enter_pending: bool,
@@ -15980,16 +16082,16 @@ impl GetState {
         if request.target.is_none() && definition_id.is_none() {
             return Err(CommandError::Unsupported);
         }
-        let mut remaining = request.tx.unwrap_or(1);
-        if remaining <= 0 {
-            remaining = 1;
-        }
+        let jump_tx = request.tx.unwrap_or(0);
+        let remaining = jump_tx.max(1);
         Ok(Self {
             target: request.target,
             fallback_container: request.target2,
             definition_id,
             menu_identification,
             remaining,
+            jump_tx,
+            jump_ty: request.ty.unwrap_or(0),
             update_interval: request.update_interval.max(1),
             enter_pending: false,
         })
@@ -16271,6 +16373,9 @@ impl GetState {
         if target_snapshot.container == Some(ctx.object.id) {
             if self.remaining > 1 {
                 self.remaining -= 1;
+                if self.jump_tx > 1 {
+                    self.jump_tx -= 1;
+                }
                 self.target = None;
                 return CommandStepResult::running(None);
             }
@@ -16343,13 +16448,25 @@ impl GetState {
                         .path_is_clear(Vector2::new(side_x, ctx.position.y), Vector2::new(tx, ty))
                 });
                 if path_clear {
+                    let jump_tx = if self.jump_tx == 0 && self.remaining > 1 {
+                        self.remaining
+                    } else {
+                        self.jump_tx
+                    };
                     result.operations.push(CommandOperation::PushFront(
                         CommandRequest::new(CommandId::Jump)
-                            .with_tx(Some(tx))
-                            .with_ty(Some(ty)),
+                            .with_tx(Some(jump_tx))
+                            .with_ty(Some(self.jump_ty)),
                     ));
-                    // (CollectionLimit drop, C4Command.cpp:1282-1284, is
-                    // unmodeled — GoldRush clonks have no CollectionLimit.)
+                    let collection_limit_reached = ctx
+                        .definition(ctx.object.definition_id.as_str())
+                        .and_then(|definition| definition.collection_limit)
+                        .is_some_and(|limit| ctx.object.contents.len() >= limit as usize);
+                    if collection_limit_reached {
+                        result.operations.push(CommandOperation::PushFront(
+                            CommandRequest::new(CommandId::Drop),
+                        ));
+                    }
                     result.operations.push(CommandOperation::PushFront(
                         CommandRequest::new(CommandId::MoveTo)
                             .with_tx(Some(side_x))

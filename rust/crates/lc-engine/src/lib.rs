@@ -23009,6 +23009,7 @@ impl Engine {
                     id.clone(),
                     CommandDefinitionSnapshot {
                         value: definition.value(),
+                        collection_limit: definition.collection_limit(),
                         can_chop: chop_action.is_some(),
                         chop_action,
                         constructable: definition.is_constructable(),
@@ -23286,6 +23287,7 @@ impl Engine {
                     id.clone(),
                     CommandDefinitionSnapshot {
                         value: definition.value(),
+                        collection_limit: definition.collection_limit(),
                         can_chop,
                         chop_action,
                         constructable: definition.is_constructable(),
