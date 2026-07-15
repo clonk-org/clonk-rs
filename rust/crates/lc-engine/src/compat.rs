@@ -9383,13 +9383,11 @@ fn set_plr_magic(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn do_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 3 {
-        return Err(RuntimeError::new(
-            "DoHomebaseMaterial expects 3 arguments: player, definition, change",
-        ));
-    }
-
-    let player_id = value_to_i32(&args[0], "DoHomebaseMaterial", "player")?;
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "DoHomebaseMaterial",
+        "player",
+    )?;
     let definition = match parse_definition_argument(args.get(1), "DoHomebaseMaterial")? {
         Some(id) => id,
         None => return Ok(Value::Bool(false)),
@@ -9440,26 +9438,22 @@ fn do_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
 
-        if change != 0 {
-            context.record_player_command(PlayerCommand::AdjustHomeBaseMaterial {
-                player_id,
-                definition_id: definition,
-                delta: change,
-            });
-        }
+        context.record_player_command(PlayerCommand::AdjustHomeBaseMaterial {
+            player_id,
+            definition_id: definition,
+            delta: change,
+        });
 
         Ok(Value::Bool(true))
     })
 }
 
 fn do_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() < 3 {
-        return Err(RuntimeError::new(
-            "DoHomebaseProduction expects 3 arguments: player, definition, change",
-        ));
-    }
-
-    let player_id = value_to_i32(&args[0], "DoHomebaseProduction", "player")?;
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "DoHomebaseProduction",
+        "player",
+    )?;
     let definition = match parse_definition_argument(args.get(1), "DoHomebaseProduction")? {
         Some(id) => id,
         None => return Ok(Value::Bool(false)),
@@ -9491,13 +9485,11 @@ fn do_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(false));
         }
 
-        if change != 0 {
-            context.record_player_command(PlayerCommand::AdjustHomeBaseProduction {
-                player_id,
-                definition_id: definition,
-                delta: change,
-            });
-        }
+        context.record_player_command(PlayerCommand::AdjustHomeBaseProduction {
+            player_id,
+            definition_id: definition,
+            delta: change,
+        });
 
         Ok(Value::Bool(true))
     })
@@ -46214,6 +46206,132 @@ func Missing() { return ComponentAll(nil, WOOD); }
             }
             other => panic!("unexpected player command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn do_homebase_hosts_keep_signed_uncapped_and_zero_entries() {
+        let player = PlayerState {
+            id: 1,
+            home_base_material_entries: vec![("MNEG".into(), 5)],
+            home_base_production_entries: vec![("PNEG".into(), 5)],
+            ..PlayerState::default()
+        };
+        let definitions = ["MNEG", "MPLUS", "MZERO", "PNEG", "PPLUS", "PZERO"]
+            .into_iter()
+            .map(|id| (id.into(), DefinitionMetadata::default()))
+            .collect();
+        let world = HostWorldContext::with_landscape(
+            Vec::new(),
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::from([(1, player)]),
+            HashMap::new(),
+            1,
+            false,
+        );
+
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            let adjust = |
+                host: fn(&[Value]) -> Result<Value, RuntimeError>,
+                definition: &str,
+                change: Option<i32>,
+            | {
+                let mut args = vec![Value::Int(1), Value::C4Id(definition.into())];
+                if let Some(change) = change {
+                    args.push(Value::Int(change));
+                }
+                host(&args)
+            };
+            assert_eq!(
+                adjust(do_homebase_material, "MPLUS", Some(100))?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                adjust(do_homebase_material, "MNEG", Some(-10))?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                adjust(do_homebase_material, "MZERO", None)?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                adjust(do_homebase_production, "PPLUS", Some(100))?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                adjust(do_homebase_production, "PNEG", Some(-10))?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                adjust(do_homebase_production, "PZERO", None)?,
+                Value::Bool(true)
+            );
+
+            let indexed = |
+                query: fn(&[Value]) -> Result<Value, RuntimeError>,
+                index: i32,
+            | {
+                query(&[
+                    Value::Int(1),
+                    Value::Nil,
+                    Value::Int(index),
+                    Value::Int(-1),
+                ])
+            };
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                get_homebase_material(&[Value::Int(1), Value::C4Id("MPLUS".into())])?,
+                get_homebase_material(&[Value::Int(1), Value::C4Id("MNEG".into())])?,
+                indexed(get_homebase_material, 0)?,
+                indexed(get_homebase_material, 2)?,
+                get_homebase_production(&[Value::Int(1), Value::C4Id("PPLUS".into())])?,
+                get_homebase_production(&[Value::Int(1), Value::C4Id("PNEG".into())])?,
+                indexed(get_homebase_production, 0)?,
+                indexed(get_homebase_production, 2)?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("home-base adjustments succeed"),
+            Value::Array(vec![
+                Value::Int(100),
+                Value::Int(-5),
+                Value::C4Id("MNEG".into()),
+                Value::C4Id("MZERO".into()),
+                Value::Int(100),
+                Value::Int(-5),
+                Value::C4Id("PNEG".into()),
+                Value::C4Id("PZERO".into()),
+            ])
+        );
+        let adjustments = outcome
+            .player_commands
+            .iter()
+            .filter_map(|command| match command {
+                PlayerCommand::AdjustHomeBaseMaterial {
+                    definition_id,
+                    delta,
+                    ..
+                } => Some(("material", definition_id.as_str(), *delta)),
+                PlayerCommand::AdjustHomeBaseProduction {
+                    definition_id,
+                    delta,
+                    ..
+                } => Some(("production", definition_id.as_str(), *delta)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            adjustments,
+            vec![
+                ("material", "MPLUS", 100),
+                ("material", "MNEG", -10),
+                ("material", "MZERO", 0),
+                ("production", "PPLUS", 100),
+                ("production", "PNEG", -10),
+                ("production", "PZERO", 0),
+            ]
+        );
     }
 
     #[test]

@@ -592,16 +592,8 @@ impl PlayerState {
     ) {
         let mut entries = self.exact_home_base_material_entries();
         let current = ordered_id_count(&entries, &definition_id, 0);
-        let updated = if delta >= 0 {
-            current
-                .max(0)
-                .saturating_add(delta)
-                .min(MAX_HOME_BASE_MATERIAL as i32)
-        } else {
-            current.saturating_add(delta).max(0)
-        };
-        let add_new = delta != 0 || entries.iter().any(|(id, _)| id == &definition_id);
-        set_ordered_id_count(&mut entries, definition_id, updated, add_new);
+        let updated = current.wrapping_add(delta);
+        set_ordered_id_count(&mut entries, definition_id, updated, true);
         self.set_home_base_material_entries(entries);
     }
 
@@ -612,12 +604,8 @@ impl PlayerState {
     ) {
         let mut entries = self.exact_home_base_production_entries();
         let current = ordered_id_count(&entries, &definition_id, 0);
-        let updated = current.max(0).saturating_add(delta).max(0);
-        if updated == 0 {
-            delete_ordered_id(&mut entries, &definition_id);
-        } else {
-            set_ordered_id_count(&mut entries, definition_id, updated, true);
-        }
+        let updated = current.wrapping_add(delta);
+        set_ordered_id_count(&mut entries, definition_id, updated, true);
         self.set_home_base_production_entries(entries);
     }
 
@@ -1980,24 +1968,12 @@ impl Player {
 
     pub fn adjust_home_base_material(&mut self, definition_id: DefinitionId, delta: i32) -> u32 {
         let current = ordered_id_count(&self.home_base_material_entries, &definition_id, 0);
-        let updated = if delta >= 0 {
-            current
-                .max(0)
-                .saturating_add(delta)
-                .min(MAX_HOME_BASE_MATERIAL as i32)
-        } else {
-            current.saturating_add(delta).max(0)
-        };
-        let add_new = delta != 0
-            || self
-                .home_base_material_entries
-                .iter()
-                .any(|(id, _)| id == &definition_id);
+        let updated = current.wrapping_add(delta);
         set_ordered_id_count(
             &mut self.home_base_material_entries,
             definition_id,
             updated,
-            add_new,
+            true,
         );
         self.home_base_material =
             unsigned_first_count_projection(&self.home_base_material_entries);
@@ -2006,17 +1982,13 @@ impl Player {
 
     pub fn adjust_home_base_production(&mut self, definition_id: DefinitionId, delta: i32) -> u32 {
         let current = ordered_id_count(&self.home_base_production_entries, &definition_id, 0);
-        let updated = current.max(0).saturating_add(delta).max(0);
-        if updated == 0 {
-            delete_ordered_id(&mut self.home_base_production_entries, &definition_id);
-        } else {
-            set_ordered_id_count(
-                &mut self.home_base_production_entries,
-                definition_id,
-                updated,
-                true,
-            );
-        }
+        let updated = current.wrapping_add(delta);
+        set_ordered_id_count(
+            &mut self.home_base_production_entries,
+            definition_id,
+            updated,
+            true,
+        );
         self.home_base_production =
             unsigned_first_count_projection(&self.home_base_production_entries);
         u32::try_from(updated).unwrap_or(0)
@@ -2398,6 +2370,37 @@ mod tests {
         player.set_hostile_towards(8, false);
         assert_eq!(player.hostility_entries().last(), Some(&(9, 0)));
         assert!(!player.is_hostile_towards(8));
+    }
+
+    #[test]
+    fn home_base_adjustments_keep_raw_counts_while_automatic_production_caps_at_25() {
+        let mut player = Player::new(1, "Player");
+
+        assert_eq!(player.adjust_home_base_material("MAT".into(), 100), 100);
+        assert_eq!(player.adjust_home_base_material("MAT".into(), -105), 0);
+        assert_eq!(player.adjust_home_base_material("MZERO".into(), 0), 0);
+        assert_eq!(
+            player.home_base_material_entries(),
+            &[("MAT".into(), -5), ("MZERO".into(), 0)]
+        );
+
+        assert_eq!(player.adjust_home_base_production("PROD".into(), 100), 100);
+        assert_eq!(player.adjust_home_base_production("PROD".into(), -105), 0);
+        assert_eq!(player.adjust_home_base_production("PZERO".into(), 0), 0);
+        assert_eq!(
+            player.home_base_production_entries(),
+            &[("PROD".into(), -5), ("PZERO".into(), 0)]
+        );
+
+        player.set_home_base_material_entries(vec![("AUTO".into(), 24)]);
+        player.set_home_base_production_entries(vec![("AUTO".into(), 10)]);
+        player.set_production_delay(59);
+        assert!(player.advance_home_base_production());
+        assert_eq!(player.home_base_material_entries(), &[("AUTO".into(), 25)]);
+
+        player.set_production_delay(59);
+        assert!(!player.advance_home_base_production());
+        assert_eq!(player.home_base_material_entries(), &[("AUTO".into(), 25)]);
     }
 
     #[test]
