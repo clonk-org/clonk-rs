@@ -11054,6 +11054,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CastBackParticles", cast_back_particles);
     script.register_host_function("PushParticles", push_particles);
     script.register_host_function("ClearParticles", clear_particles);
+    script.register_host_function("IsNewgfx", is_newgfx);
     script.register_host_function("CustomMessage", custom_message);
     script.register_host_function("Message", message);
     script.register_host_function("PlayerMessage", player_message);
@@ -28606,6 +28607,11 @@ fn clear_particles(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnIsNewgfx (C4Script.cpp:4947): the compatibility probe is always true.
+fn is_newgfx(_args: &[Value]) -> Result<Value, RuntimeError> {
+    Ok(Value::Bool(true))
+}
+
 fn contained(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
@@ -38110,6 +38116,7 @@ mod tests {
         "InsertMaterial",
         "Inside",
         "IsNetwork",
+        "IsNewgfx",
         "Jump",
         "Kill",
         "LandscapeHeight",
