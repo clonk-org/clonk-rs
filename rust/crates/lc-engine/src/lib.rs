@@ -27084,20 +27084,22 @@ impl Engine {
                 object.enqueue_commands(object_commands);
             }
 
-            if destroy_object {
-                // AssignRemoval immediately takes the object's solid mask
-                // out of the landscape in C++. The effect runner returns a
-                // refresh bit because its caller owns Rust's mask grid.
-                solid_mask_changed = true;
-                let mut generated = object.mark_destroyed();
+            if !object_effect_commands.is_empty() {
+                let mut generated = object.apply_effect_commands(&object_effect_commands);
+                state_snapshot = object.script_state_snapshot();
                 if !generated.is_empty() {
                     queue.extend(generated.drain(..));
                 }
             }
 
-            if !object_effect_commands.is_empty() {
-                let mut generated = object.apply_effect_commands(&object_effect_commands);
-                state_snapshot = object.script_state_snapshot();
+            if destroy_object {
+                // AssignRemoval already ran ClearAll synchronously inside
+                // RemoveObject. Fold its no-callback effect removals before
+                // marking the carrier destroyed, so mark_destroyed cannot
+                // enqueue duplicate RemoveClear Stops against Deleted state.
+                // This mirrors apply_callback_outcome's fold order.
+                solid_mask_changed = true;
+                let mut generated = object.mark_destroyed();
                 if !generated.is_empty() {
                     queue.extend(generated.drain(..));
                 }

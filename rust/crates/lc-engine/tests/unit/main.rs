@@ -36855,6 +36855,82 @@ func FxProbeTimer(pThis, iNumber) {
     }
 
     #[test]
+    fn effect_timer_object_removal_aborts_walk_after_inline_clear_stops() {
+        // C4Effect::Execute aborts its live-list walk as soon as the carrier
+        // loses Status (C4Effect.cpp:342-353). AssignRemoval clears effects
+        // synchronously from high to low before RemoveObject returns, so B's
+        // timer never runs and neither Stop may be replayed after A resumes.
+        let script = r#"#strict 3
+        static iOrder, iATimers, iBTimers, iAStops, iBStops;
+        static iAReason, iBReason;
+
+        func Install() {
+            iOrder = iATimers = iBTimers = iAStops = iBStops = 0;
+            iAReason = iBReason = -1;
+            AddEffect("A", this(), 100, 1, this());
+            AddEffect("B", this(), 200, 1, this());
+        }
+
+        func FxATimer() {
+            ++iATimers;
+            iOrder = iOrder * 10 + 1;
+            RemoveObject(this());
+            iOrder = iOrder * 10 + 4;
+            return 0;
+        }
+
+        func FxBTimer() {
+            ++iBTimers;
+            iOrder = iOrder * 10 + 9;
+            return 0;
+        }
+
+        func FxAStop(object target, int number, int reason) {
+            ++iAStops;
+            iAReason = reason;
+            iOrder = iOrder * 10 + 3;
+            return 0;
+        }
+
+        func FxBStop(object target, int number, int reason) {
+            ++iBStops;
+            iBReason = reason;
+            iOrder = iOrder * 10 + 2;
+            return 0;
+        }
+        "#;
+
+        let mut definition =
+            Definition::from_script("OTW5", "Object timer carrier removal", script)
+                .expect("script compiles");
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("OTW5"))
+            .expect("target spawns");
+        let idx = engine.find_object_index(id).expect("target exists");
+        engine
+            .call_object_function(idx, "Install", Vec::new())
+            .expect("effects install");
+
+        engine.tick().expect("timer frame succeeds");
+
+        assert!(engine.object_snapshot(id).is_none());
+        let globals = engine.snapshot().script_globals.named;
+        assert_eq!(globals.get("iOrder"), Some(&Value::Int(1234)));
+        assert_eq!(globals.get("iATimers"), Some(&Value::Int(1)));
+        assert_eq!(globals.get("iBTimers"), Some(&Value::Int(0)));
+        assert_eq!(globals.get("iAStops"), Some(&Value::Int(1)));
+        assert_eq!(globals.get("iBStops"), Some(&Value::Int(1)));
+        assert_eq!(globals.get("iAReason"), Some(&Value::Int(3)));
+        assert_eq!(globals.get("iBReason"), Some(&Value::Int(3)));
+    }
+
+    #[test]
     fn effect_death_stop_receives_reason_four_and_can_revive_target() {
         // AssignDeath clears effects with C4FxCall_RemoveDeath (4). Like
         // C4Effect::ClearAll, a Stop callback returning C4Fx_Stop_Deny (-1)
