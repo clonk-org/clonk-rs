@@ -8951,19 +8951,12 @@ fn get_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
     let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetHomebaseMaterial", "player")?;
     let definition = parse_definition_argument(args.get(1), "GetHomebaseMaterial")?;
     let index = match args.get(2) {
-        Some(Value::Nil) | None => None,
-        Some(value) => Some(value_to_i32(value, "GetHomebaseMaterial", "index")?),
+        Some(Value::Nil) | None => 0,
+        Some(value) => value_to_i32(value, "GetHomebaseMaterial", "index")?,
     };
     let category = match args.get(3) {
-        Some(Value::Nil) | None => None,
-        Some(value) => {
-            let mask = value_to_i32(value, "GetHomebaseMaterial", "category")?;
-            if mask <= 0 {
-                None
-            } else {
-                Some(mask)
-            }
-        }
+        Some(Value::Nil) | None => 0,
+        Some(value) => value_to_i32(value, "GetHomebaseMaterial", "category")?,
     };
 
     HOST_CONTEXT.with(|cell| {
@@ -8975,34 +8968,14 @@ fn get_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         };
 
+        let entries = player.exact_home_base_material_entries();
         if let Some(definition) = definition {
-            if context.definition_metadata(&definition).is_none()
-                && context.definition_category(&definition).is_none()
-            {
-                return Ok(Value::Nil);
-            }
-            let count = player
-                .home_base_material
-                .get(&definition)
-                .copied()
-                .unwrap_or(0);
-            return Ok(Value::Int(count as i32));
+            return Ok(Value::Int(home_base_id_count(&entries, &definition)));
         }
 
-        let Some(index) = index else {
-            return Ok(Value::Nil);
-        };
-        if index < 0 {
-            return Ok(Value::Nil);
-        }
-
-        let entries =
-            collect_home_base_entries(player.home_base_material.iter(), category, context);
-        let idx = index as usize;
-        if idx >= entries.len() {
-            return Ok(Value::Nil);
-        }
-        Ok(Value::String(entries[idx].clone()))
+        Ok(home_base_id_by_index(&entries, category, index, context)
+            .map(Value::C4Id)
+            .unwrap_or(Value::Nil))
     })
 }
 
@@ -9010,19 +8983,12 @@ fn get_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
     let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetHomebaseProduction", "player")?;
     let definition = parse_definition_argument(args.get(1), "GetHomebaseProduction")?;
     let index = match args.get(2) {
-        Some(Value::Nil) | None => None,
-        Some(value) => Some(value_to_i32(value, "GetHomebaseProduction", "index")?),
+        Some(Value::Nil) | None => 0,
+        Some(value) => value_to_i32(value, "GetHomebaseProduction", "index")?,
     };
     let category = match args.get(3) {
-        Some(Value::Nil) | None => None,
-        Some(value) => {
-            let mask = value_to_i32(value, "GetHomebaseProduction", "category")?;
-            if mask <= 0 {
-                None
-            } else {
-                Some(mask)
-            }
-        }
+        Some(Value::Nil) | None => 0,
+        Some(value) => value_to_i32(value, "GetHomebaseProduction", "category")?,
     };
 
     HOST_CONTEXT.with(|cell| {
@@ -9034,34 +9000,14 @@ fn get_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         };
 
+        let entries = player.exact_home_base_production_entries();
         if let Some(definition) = definition {
-            if context.definition_metadata(&definition).is_none()
-                && context.definition_category(&definition).is_none()
-            {
-                return Ok(Value::Nil);
-            }
-            let count = player
-                .home_base_production
-                .get(&definition)
-                .copied()
-                .unwrap_or(0);
-            return Ok(Value::Int(count as i32));
+            return Ok(Value::Int(home_base_id_count(&entries, &definition)));
         }
 
-        let Some(index) = index else {
-            return Ok(Value::Nil);
-        };
-        if index < 0 {
-            return Ok(Value::Nil);
-        }
-
-        let entries =
-            collect_home_base_entries(player.home_base_production.iter(), category, context);
-        let idx = index as usize;
-        if idx >= entries.len() {
-            return Ok(Value::Nil);
-        }
-        Ok(Value::String(entries[idx].clone()))
+        Ok(home_base_id_by_index(&entries, category, index, context)
+            .map(Value::C4Id)
+            .unwrap_or(Value::Nil))
     })
 }
 
@@ -9666,33 +9612,32 @@ fn parse_definition_argument(
     }
 }
 
-fn collect_home_base_entries<'a>(
-    entries: impl Iterator<Item = (&'a DefinitionId, &'a u32)>,
-    category: Option<i32>,
+fn home_base_id_count(entries: &[(DefinitionId, i32)], definition: &DefinitionId) -> i32 {
+    entries
+        .iter()
+        .find(|(candidate, _)| candidate == definition)
+        .map(|(_, count)| *count)
+        .unwrap_or(0)
+}
+
+fn home_base_id_by_index(
+    entries: &[(DefinitionId, i32)],
+    category: i32,
+    index: i32,
     context: &EffectHostContext,
-) -> Vec<DefinitionId> {
-    let mut filtered: Vec<DefinitionId> = entries
-        .filter_map(|(definition_id, &count)| {
-            if count == 0 {
-                return None;
-            }
-            if let Some(mask) = category {
-                let metadata = context.definition_metadata(definition_id.as_str());
-                if metadata
-                    .map(|meta| meta.category & mask != 0)
-                    .unwrap_or(false)
-                {
-                    Some(definition_id.clone())
-                } else {
-                    None
-                }
-            } else {
-                Some(definition_id.clone())
-            }
+) -> Option<DefinitionId> {
+    let index = usize::try_from(index).ok()?;
+    entries
+        .iter()
+        .filter(|(definition_id, _)| {
+            context
+                .definition_category(definition_id)
+                .is_some_and(|definition_category| {
+                    category == -1 || definition_category & category != 0
+                })
         })
-        .collect();
-    filtered.sort();
-    filtered
+        .nth(index)
+        .map(|(definition_id, _)| definition_id.clone())
 }
 
 fn adjust_id_count(
@@ -45144,6 +45089,98 @@ func Missing() { return ComponentAll(nil, WOOD); }
         let (result, _) = with_effect_context(None, &[], world, 1, || get_homebase_material(&args));
 
         assert_eq!(result.expect("GetHomebaseMaterial succeeds"), Value::Int(3));
+    }
+
+    #[test]
+    fn homebase_queries_follow_ordered_c4id_list_semantics() {
+        let player = PlayerState {
+            id: 1,
+            home_base_material_entries: vec![
+                ("ZMAT".into(), 0),
+                ("MISS".into(), -7),
+                ("AMAT".into(), 5),
+            ],
+            home_base_production_entries: vec![
+                ("ZPRD".into(), 0),
+                ("MIPR".into(), -9),
+                ("APRD".into(), 6),
+            ],
+            ..PlayerState::default()
+        };
+        let definition = |category| DefinitionMetadata {
+            category,
+            ..DefinitionMetadata::default()
+        };
+        let definitions = HashMap::from([
+            ("ZMAT".into(), definition(1)),
+            ("AMAT".into(), definition(2)),
+            ("ZPRD".into(), definition(4)),
+            ("APRD".into(), definition(8)),
+        ]);
+        let world = HostWorldContext::with_landscape(
+            Vec::new(),
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::from([(1, player)]),
+            HashMap::new(),
+            1,
+            false,
+        );
+
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            let indexed = |
+                query: fn(&[Value]) -> Result<Value, RuntimeError>,
+                index: Value,
+                category: Option<i32>,
+            | {
+                let mut args = vec![Value::Int(1), Value::Nil, index];
+                if let Some(category) = category {
+                    args.push(Value::Int(category));
+                }
+                query(&args)
+            };
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                indexed(get_homebase_material, Value::Int(0), Some(-1))?,
+                indexed(get_homebase_material, Value::Int(1), Some(-1))?,
+                indexed(get_homebase_material, Value::Int(2), Some(-1))?,
+                indexed(get_homebase_material, Value::Nil, Some(-1))?,
+                indexed(get_homebase_material, Value::Int(0), None)?,
+                indexed(get_homebase_material, Value::Int(0), Some(0))?,
+                indexed(get_homebase_material, Value::Int(0), Some(2))?,
+                get_homebase_material(&[Value::Int(1), Value::C4Id("MISS".into())])?,
+                indexed(get_homebase_production, Value::Int(0), Some(-1))?,
+                indexed(get_homebase_production, Value::Int(1), Some(-1))?,
+                indexed(get_homebase_production, Value::Int(2), Some(-1))?,
+                indexed(get_homebase_production, Value::Nil, Some(-1))?,
+                indexed(get_homebase_production, Value::Int(0), None)?,
+                indexed(get_homebase_production, Value::Int(0), Some(0))?,
+                indexed(get_homebase_production, Value::Int(0), Some(8))?,
+                get_homebase_production(&[Value::Int(1), Value::C4Id("MIPR".into())])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("home-base queries succeed"),
+            Value::Array(vec![
+                Value::C4Id("ZMAT".into()),
+                Value::C4Id("AMAT".into()),
+                Value::Nil,
+                Value::C4Id("ZMAT".into()),
+                Value::Nil,
+                Value::Nil,
+                Value::C4Id("AMAT".into()),
+                Value::Int(-7),
+                Value::C4Id("ZPRD".into()),
+                Value::C4Id("APRD".into()),
+                Value::Nil,
+                Value::C4Id("ZPRD".into()),
+                Value::Nil,
+                Value::Nil,
+                Value::C4Id("APRD".into()),
+                Value::Int(-9),
+            ])
+        );
     }
 
     #[test]
