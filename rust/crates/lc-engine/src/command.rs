@@ -12484,13 +12484,15 @@ mod tests {
             CommandOperation::PushFront(request) => {
                 assert_eq!(request.id, CommandId::Enter);
                 assert_eq!(request.target, Some(base_id));
+                assert_eq!(request.update_interval, 50);
+                assert_eq!(request.mode, CommandMode::SilentSub);
             }
             other => panic!("expected enter request, got {:?}", other),
         }
     }
 
     #[test]
-    fn sell_completes_when_inside() {
+    fn sell_emits_a_live_evaluation_when_inside() {
         let builder_id = ObjectId::new(1);
         let base_id = ObjectId::new(2);
         let item_id = ObjectId::new(3);
@@ -12573,44 +12575,24 @@ mod tests {
         .expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty());
         assert!(result.update.is_none());
-
-        assert_eq!(result.events.len(), 3);
-        match &result.events[0] {
-            CommandEvent::AdjustPlayerWealth { player_id, delta } => {
-                assert_eq!(*player_id, 11);
-                assert_eq!(*delta, 15);
-            }
-            event => panic!("unexpected event: {:?}", event),
-        }
-
-        match &result.events[1] {
-            CommandEvent::AdjustPlayerHomeBaseMaterial {
-                player_id,
-                definition_id,
-                delta,
-            } => {
-                assert_eq!(*player_id, 11);
-                assert_eq!(definition_id, "ORE1");
-                assert_eq!(*delta, 1);
-            }
-            event => panic!("unexpected event: {:?}", event),
-        }
-
-        match &result.events[2] {
-            CommandEvent::ApplyObjectUpdate { object_id, update } => {
-                assert_eq!(*object_id, item_id);
-                assert_eq!(update.status, Some(ObjectStatus::Deleted));
-                assert_eq!(update.alive, Some(false));
-                assert_eq!(update.container, Some(None));
-            }
-            event => panic!("unexpected event: {:?}", event),
-        }
+        assert_eq!(
+            result.events,
+            vec![CommandEvent::EvaluateSell {
+                actor_id: builder_id,
+                base_id,
+                definition_id: "ORE1".into(),
+                preferred: None,
+                count: 0,
+            }]
+        );
+        assert!(state.evaluation_pending);
 
         let follow_up = state.step(&ctx);
-        assert_eq!(follow_up.status, CommandStatus::Completed);
+        assert_eq!(follow_up.status, CommandStatus::Running);
+        assert!(follow_up.events.is_empty());
     }
 
     #[test]
@@ -13410,6 +13392,17 @@ pub enum CommandEvent {
         payer: i32,
         count: i32,
     },
+    /// Run SellFromBase and the complete recursive C4Player::Sell2Home
+    /// loop against live state. CalcValue/SellTo/Sale callbacks can mutate
+    /// the base, player, objects, or command stack between count iterations
+    /// (C4Command.cpp:2040-2080; C4ObjectCom.cpp:959-988).
+    EvaluateSell {
+        actor_id: ObjectId,
+        base_id: ObjectId,
+        definition_id: DefinitionId,
+        preferred: Option<ObjectId>,
+        count: i32,
+    },
     /// Run ObjectComPut as one live ordered operation. Enter rejection,
     /// collection callbacks, and helper failure must resolve against the
     /// exact Put command that emitted the attempt (C4ObjectCom.cpp:591-622;
@@ -13905,6 +13898,11 @@ pub(crate) struct GetAttemptResolution {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BuyAttemptResolution {
+    pub feedback: Option<CommandFailureFeedback>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SellAttemptResolution {
     pub feedback: Option<CommandFailureFeedback>,
 }
 
@@ -14704,6 +14702,74 @@ impl CommandStack {
             .then(|| self.record_failure_at(index))
             .flatten();
         Some(BuyAttemptResolution { feedback })
+    }
+
+    fn pending_sell_index(&self, base: ObjectId, definition_id: &str) -> Option<usize> {
+        self.entries.iter().position(|entry| {
+            matches!(
+                &entry.state,
+                CommandState::Sell(state)
+                    if state.evaluation_pending
+                        && (state.target == Some(base) || state.target.is_none())
+                        && state.definition_id == definition_id
+            )
+        })
+    }
+
+    /// C4Command::Sell normalizes Tx only after containment succeeds and
+    /// immediately before the synchronous SellFromBase loop.
+    pub(crate) fn normalize_pending_sell_count(
+        &mut self,
+        base: ObjectId,
+        definition_id: &str,
+    ) -> Option<i32> {
+        let index = self.pending_sell_index(base, definition_id)?;
+        let CommandState::Sell(state) = &mut self.entries[index].state else {
+            unreachable!("the pending-sell predicate only matches Sell commands");
+        };
+        state.remaining = state.remaining.max(1);
+        Some(state.remaining)
+    }
+
+    /// One SellFromBase iteration succeeded. Target2 is preferred once,
+    /// then C++ clears it before selecting the next item by Data.
+    pub(crate) fn record_pending_sell_success(
+        &mut self,
+        base: ObjectId,
+        definition_id: &str,
+    ) -> bool {
+        let Some(index) = self.pending_sell_index(base, definition_id) else {
+            return false;
+        };
+        let CommandState::Sell(state) = &mut self.entries[index].state else {
+            unreachable!("the pending-sell predicate only matches Sell commands");
+        };
+        state.preferred = None;
+        state.remaining = state.remaining.saturating_sub(1);
+        true
+    }
+
+    /// Finish only the Sell command which emitted EvaluateSell. Sale hooks
+    /// may have replaced the command stack while prior sales stay committed.
+    pub(crate) fn resolve_pending_sell(
+        &mut self,
+        base: ObjectId,
+        definition_id: &str,
+        succeeded: bool,
+    ) -> Option<SellAttemptResolution> {
+        let index = self.pending_sell_index(base, definition_id)?;
+        if let CommandState::Sell(state) = &mut self.entries[index].state {
+            state.evaluation_pending = false;
+        }
+        self.entries[index].finished = Some(if succeeded {
+            CommandStatus::Completed
+        } else {
+            CommandStatus::Failed
+        });
+        let feedback = (!succeeded)
+            .then(|| self.record_failure_at(index))
+            .flatten();
+        Some(SellAttemptResolution { feedback })
     }
 
     /// Resolve only the Put command which emitted ObjectComPut. Collection
@@ -19417,6 +19483,8 @@ struct SellState {
     remaining: i32,
     update_interval: u32,
     last_enter_request: Option<u64>,
+    #[serde(default)]
+    evaluation_pending: bool,
 }
 
 impl SellState {
@@ -19424,14 +19492,14 @@ impl SellState {
         // Data==0 is the internal "open C4MN_Sell" command
         // (C4Command.cpp:2052-2057); a nonzero ID performs a sale.
         let definition_id = command_data_to_definition_id(&request.data).unwrap_or_default();
-        let remaining = request.tx.unwrap_or(1).max(1);
         Ok(Self {
             definition_id,
             target: request.target,
             preferred: request.target2,
-            remaining,
+            remaining: request.tx.unwrap_or(0),
             update_interval: request.update_interval.max(1),
             last_enter_request: None,
+            evaluation_pending: false,
         })
     }
 
@@ -19443,31 +19511,18 @@ impl SellState {
         }
     }
 
-    fn is_base(snapshot: &CommandObjectSnapshot, owner: i32) -> bool {
-        snapshot.is_status_active()
-            && snapshot.base == owner
-            && (snapshot.category & CATEGORY_STRUCTURE) != 0
-            && (snapshot.ocf & ocf::ENTRANCE) != 0
-            && !snapshot.collectible
-    }
-
     fn resolve_base(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+        if let Some(target) = self.target {
+            // An explicit C4Command target bypasses FindBase. Data==0 opens
+            // the menu before Base/hostility validation.
+            return ctx.resolve(target).map(|_| target);
+        }
+
         let owner = ctx.object.owner;
-        if owner == OWNER_NONE {
-            return None;
-        }
-
-        if let Some(target_id) = self.target {
-            if let Some(snapshot) = ctx.resolve(target_id) {
-                if Self::is_base(snapshot, owner) {
-                    return Some(target_id);
-                }
-            }
-        }
-
-        ctx.objects
+        let target = ctx
+            .objects
             .values()
-            .filter(|snapshot| snapshot.id != ctx.object.id && Self::is_base(snapshot, owner))
+            .filter(|snapshot| snapshot.is_status_active() && snapshot.base == owner)
             .min_by_key(|snapshot| {
                 (
                     c4_distance(
@@ -19480,74 +19535,34 @@ impl SellState {
                     snapshot.id,
                 )
             })
-            .map(|snapshot| {
-                let id = snapshot.id;
-                self.target = Some(id);
-                id
-            })
-    }
-
-    fn resolve_candidate(
-        &mut self,
-        ctx: &CommandRuntimeContext<'_>,
-        base: &CommandObjectSnapshot,
-    ) -> Option<ObjectId> {
-        if let Some(candidate_id) = self.preferred {
-            if let Some(snapshot) = ctx.resolve(candidate_id) {
-                if snapshot.is_status_active()
-                    && snapshot.container == Some(base.id)
-                    && snapshot.definition_id == self.definition_id
-                {
-                    return Some(candidate_id);
-                }
-            }
-            self.preferred = None;
-        }
-
-        for item_id in &base.contents {
-            if let Some(snapshot) = ctx.resolve(*item_id) {
-                if snapshot.is_status_active()
-                    && snapshot.container == Some(base.id)
-                    && snapshot.definition_id == self.definition_id
-                {
-                    self.preferred = Some(*item_id);
-                    return Some(*item_id);
-                }
-            }
-        }
-
-        None
+            .map(|snapshot| snapshot.id);
+        self.target = target;
+        target
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.evaluation_pending {
+            return CommandStepResult::running(None);
+        }
+
+        // C4Command::Sell applies the global gate before target resolution
+        // and before its internal menu command.
+        if !ctx.base_sell_enabled {
+            return CommandStepResult::failed(None);
+        }
+        let Some(base_id) = self.resolve_base(ctx) else {
+            return CommandStepResult::failed(None);
+        };
+
         if self.definition_id.is_empty() {
-            if !ctx.base_sell_enabled {
-                return CommandStepResult::failed(None);
-            }
-            let Some(base) = self.resolve_base(ctx) else {
-                return CommandStepResult::failed(None);
-            };
             return CommandStepResult::completed(None).with_events(vec![
                 CommandEvent::OpenMenu(MenuRequest {
                     crew_id: ctx.object.id,
                     owner: ctx.object.owner,
-                    kind: MenuRequestKind::Sell { base },
+                    kind: MenuRequestKind::Sell { base: base_id },
                 }),
             ]);
         }
-
-        if self.remaining <= 0 {
-            return CommandStepResult::completed(None);
-        }
-
-        if !ctx.base_sell_enabled {
-            return CommandStepResult::failed(None);
-        }
-
-        let base_id = match self.resolve_base(ctx) {
-            Some(id) => id,
-            None => return CommandStepResult::failed(None),
-        };
 
         let base_snapshot = match ctx.resolve(base_id) {
             Some(snapshot) => snapshot,
@@ -19555,7 +19570,9 @@ impl SellState {
         };
 
         let base_owner = base_snapshot.base;
-        if base_owner == OWNER_NONE {
+        if ctx.player(base_owner).is_none()
+            || ctx.players_hostile(ctx.object.owner, base_owner)
+        {
             return CommandStepResult::failed(None);
         }
 
@@ -19565,7 +19582,7 @@ impl SellState {
                 self.last_enter_request = Some(ctx.frame);
                 let request = CommandRequest::new(CommandId::Enter)
                     .with_target(Some(base_id))
-                    .with_update_interval(25)
+                    .with_update_interval(50)
                     .with_mode(CommandMode::SilentSub);
                 result.operations.push(CommandOperation::PushFront(request));
             }
@@ -19573,65 +19590,14 @@ impl SellState {
         }
         self.last_enter_request = None;
 
-        let candidate_id = match self.resolve_candidate(ctx, base_snapshot) {
-            Some(id) => id,
-            None => return CommandStepResult::failed(None),
-        };
-
-        let candidate_snapshot = match ctx.resolve(candidate_id) {
-            Some(snapshot) => snapshot,
-            None => return CommandStepResult::failed(None),
-        };
-
-        if candidate_snapshot.definition_id != self.definition_id
-            || candidate_snapshot.container != Some(base_id)
-        {
-            self.preferred = None;
-            return CommandStepResult::failed(None);
-        }
-
-        if !candidate_snapshot.contents.is_empty() {
-            return CommandStepResult::failed(None);
-        }
-
-        let value = ctx
-            .definition(&self.definition_id)
-            .map(|definition| definition.value.max(0))
-            .unwrap_or(0);
-
-        let mut events = Vec::new();
-        if value != 0 {
-            events.push(CommandEvent::AdjustPlayerWealth {
-                player_id: base_owner,
-                delta: value,
-            });
-        }
-        events.push(CommandEvent::AdjustPlayerHomeBaseMaterial {
-            player_id: base_owner,
+        self.evaluation_pending = true;
+        CommandStepResult::running(None).with_events(vec![CommandEvent::EvaluateSell {
+            actor_id: ctx.object.id,
+            base_id,
             definition_id: self.definition_id.clone(),
-            delta: 1,
-        });
-
-        let mut item_update = ObjectUpdate::new();
-        item_update.container = Some(None);
-        item_update.position = Some(base_snapshot.position);
-        item_update.velocity = Some(Vector2::ZERO);
-        item_update.status = Some(ObjectStatus::Deleted);
-        item_update.alive = Some(false);
-        item_update.command_direction = Some(CommandDirection::Stop);
-        events.push(CommandEvent::ApplyObjectUpdate {
-            object_id: candidate_id,
-            update: item_update,
-        });
-
-        self.preferred = None;
-        self.remaining = self.remaining.saturating_sub(1);
-
-        if self.remaining == 0 {
-            CommandStepResult::completed(None).with_events(events)
-        } else {
-            CommandStepResult::running(None).with_events(events)
-        }
+            preferred: self.preferred,
+            count: self.remaining,
+        }])
     }
 }
 
@@ -20169,6 +20135,11 @@ impl CommandState {
             CommandState::Buy(state) => {
                 view.target = state.target;
                 view.tx = (state.remaining_count != 0).then_some(state.remaining_count);
+            }
+            CommandState::Sell(state) => {
+                view.target = state.target;
+                view.target2 = state.preferred;
+                view.tx = (state.remaining != 0).then_some(state.remaining);
             }
             _ => {}
         }

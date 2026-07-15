@@ -6125,7 +6125,7 @@ mod tests {
     use super::*;
     use crate::{
         ActionSpec, ActionState, CrewInfoLink, CrewObjectInfo, Definition, MovementProfile,
-        PhysicalInfo, PhysicsSettings, PlayerConfig, SpawnConfig,
+        PhysicalInfo, PhysicsSettings, PlayerConfig, PlayerStatus, SpawnConfig,
     };
     use std::{collections::HashMap, rc::Rc};
 
@@ -9519,6 +9519,25 @@ protected func ControlCommand(command, target, tx, ty, target2, data, seventh) {
             .expect("execute Buy command");
     }
 
+    fn execute_sell_command(
+        engine: &mut Engine,
+        crew: ObjectId,
+        base: ObjectId,
+        definition_id: &str,
+        count: i32,
+    ) {
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].apply_command_operations([CommandOperation::PushFront(
+            CommandRequest::new(CommandId::Sell)
+                .with_target(Some(base))
+                .with_tx(Some(count))
+                .with_data(CommandData::Text(definition_id.to_string())),
+        )]);
+        engine
+            .execute_object_command_now(crew)
+            .expect("execute Sell command");
+    }
+
     #[test]
     fn explicit_buy_obeys_the_global_buy_gate() {
         // C4Command::Buy checks BASEFUNC_Buy before either its implicit or
@@ -9713,6 +9732,226 @@ public func Purchase(int player, object base)
     }
 
     #[test]
+    fn sell_count_recurses_contents_and_uses_the_allied_base_transaction() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        let hut_script = r#"#strict 2
+local sale_order, sale_players;
+protected func CalcSellValue(object item, int value) { return value + 1; }
+public func RecordSale(int marker, int player)
+{
+    sale_order = sale_order * 10 + marker;
+    sale_players = sale_players * 10 + player;
+    return true;
+}
+"#;
+        engine
+            .register_definition(
+                Definition::from_script("HUT1", "Hut", hut_script).expect("hut compiles"),
+            )
+            .expect("register hut");
+        engine
+            .register_player(PlayerConfig::new(1, "Seller"))
+            .expect("register seller");
+        engine
+            .register_player(PlayerConfig::new(2, "Base owner"))
+            .expect("register base owner");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("spawn allied base");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 2;
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("seller enters allied base");
+
+        let sale_script = |marker: i32, value: i32| {
+            format!(
+                r#"#strict 2
+local sale_base;
+public func CalcValue(object base, int player)
+{{
+    sale_base = base;
+    if (!base || player != 2) return 1000;
+    return {value};
+}}
+public func SellTo(int player) {{ return RMAP; }}
+public func Sale(int player) {{ return sale_base->RecordSale({marker}, player); }}
+"#
+            )
+        };
+        engine
+            .register_definition(
+                Definition::from_script("CHLD", "Child", &sale_script(1, 3))
+                    .expect("child compiles"),
+            )
+            .expect("register child");
+        engine
+            .register_definition(
+                Definition::from_script("PARN", "Parent", &sale_script(2, 7))
+                    .expect("parent compiles"),
+            )
+            .expect("register parent");
+        let mut remapped =
+            Definition::from_script("RMAP", "Remapped", "#strict 2\n")
+                .expect("remapped definition compiles");
+        remapped.set_rebuyable(true);
+        engine
+            .register_definition(remapped)
+            .expect("register remapped stock definition");
+
+        let parent1 = engine
+            .spawn_object(SpawnConfig::new("PARN").with_container(hut))
+            .expect("spawn first parent");
+        let child1 = engine
+            .spawn_object(SpawnConfig::new("CHLD").with_container(parent1))
+            .expect("spawn first child");
+        let parent2 = engine
+            .spawn_object(SpawnConfig::new("PARN").with_container(hut))
+            .expect("spawn second parent");
+        let child2 = engine
+            .spawn_object(SpawnConfig::new("CHLD").with_container(parent2))
+            .expect("spawn second child");
+        let frame = engine.frame();
+
+        execute_sell_command(&mut engine, crew, hut, "PARN", 2);
+
+        assert_eq!(engine.frame(), frame, "both sales finish in one execution");
+        assert!(
+            engine
+                .object_snapshot(crew)
+                .expect("seller survives")
+                .command_stack
+                .is_empty(),
+            "Tx=2 completes the Sell command in one Execute"
+        );
+        assert_eq!(engine.player(1).expect("seller").wealth(), 0);
+        assert_eq!(
+            engine.player(2).expect("base owner").wealth(),
+            24,
+            "each child is valued before its parent with base CalcSellValue"
+        );
+        assert_eq!(
+            engine
+                .player(2)
+                .expect("base owner")
+                .home_base_material()
+                .get("RMAP"),
+            Some(&4),
+            "SellTo and Rebuyable run once for every recursive sale"
+        );
+        let hut_index = engine.find_object_index(hut).expect("hut survives");
+        let locals = &engine.objects[hut_index].state.local_vars;
+        assert_eq!(locals.get("sale_order"), Some(&Value::Int(1212)));
+        assert_eq!(locals.get("sale_players"), Some(&Value::Int(2222)));
+        for sold in [child1, parent1, child2, parent2] {
+            assert!(
+                engine.find_object_index(sold).is_none_or(|index| {
+                    !engine.objects[index].state.status.is_active()
+                        || engine.objects[index].destroyed
+                }),
+                "every recursive sale removes its object"
+            );
+        }
+    }
+
+    #[test]
+    fn sell_refuses_no_sell_and_crew_member_roots() {
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 1);
+        let mut no_sell =
+            Definition::from_script("NOSL", "No sell", "#strict 2\n")
+                .expect("NoSell definition compiles");
+        no_sell.set_value(20);
+        no_sell.set_rebuyable(true);
+        no_sell.set_no_sell(-2);
+        engine
+            .register_definition(no_sell)
+            .expect("register NoSell definition");
+        let mut crew_item =
+            Definition::from_script("CRIT", "Crew item", "#strict 2\n")
+                .expect("crew definition compiles");
+        crew_item.set_value(30);
+        crew_item.set_rebuyable(true);
+        crew_item.set_crew_member(true);
+        engine
+            .register_definition(crew_item)
+            .expect("register crew definition");
+        let no_sell_object = engine
+            .spawn_object(SpawnConfig::new("NOSL").with_container(hut))
+            .expect("spawn NoSell object");
+        let crew_object = engine
+            .spawn_object(
+                SpawnConfig::new("CRIT")
+                    .with_container(hut)
+                    .with_alive(true)
+                    .with_crew_member(true),
+            )
+            .expect("spawn crew object");
+
+        execute_sell_command(&mut engine, crew, hut, "NOSL", 1);
+        execute_sell_command(&mut engine, crew, hut, "CRIT", 1);
+
+        for refused in [no_sell_object, crew_object] {
+            let snapshot = engine.object_snapshot(refused).expect("object remains");
+            assert!(snapshot.status.is_active());
+            assert_eq!(snapshot.container, Some(hut));
+        }
+        assert_eq!(engine.player(1).expect("player").wealth(), 0);
+        assert!(
+            engine
+                .player(1)
+                .expect("player")
+                .home_base_material()
+                .is_empty()
+        );
+        assert!(
+            engine
+                .object_snapshot(crew)
+                .expect("seller survives")
+                .command_stack
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn auto_sell_checks_elimination_before_exiting_the_candidate() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("HUT1", "Hut", "#strict 2\n")
+                    .expect("hut compiles"),
+            )
+            .expect("register hut");
+        let mut gold =
+            Definition::from_script("GOLD", "Gold", "#strict 2\n").expect("gold compiles");
+        gold.set_base_auto_sell(true);
+        engine.register_definition(gold).expect("register gold");
+        engine
+            .register_player(
+                PlayerConfig::new(1, "Eliminated").with_status(PlayerStatus::Eliminated),
+            )
+            .expect("register eliminated player");
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 1;
+        let gold = engine
+            .spawn_object(SpawnConfig::new("GOLD").with_container(hut))
+            .expect("spawn gold");
+
+        engine
+            .auto_sell_base_contents(hut_index, 1)
+            .expect("eliminated auto-sell check succeeds");
+
+        let gold = engine.object_snapshot(gold).expect("gold remains");
+        assert!(gold.status.is_active());
+        assert_eq!(gold.container, Some(hut));
+    }
+
+    #[test]
     fn script_execute_buy_is_visible_before_later_set_command() {
         let mut engine = Engine::new();
         let clonk_script = r#"#strict 2
@@ -9778,6 +10017,83 @@ public func BuyThenReplace(object base)
                 && object.status.is_active()
                 && object.owner == 1
                 && object.container == Some(hut)
+        }));
+    }
+
+    #[test]
+    fn script_execute_sell_finishes_the_full_count_before_the_next_statement() {
+        let mut engine = Engine::new();
+        let clonk_script = r#"#strict 2
+local seen_wealth, seen_stock, seen_command;
+public func SellThenReplace(object base)
+{
+    SetCommand(this(), "Sell", base, 2, 0, nil, ITEM);
+    ExecuteCommand();
+    seen_wealth = GetWealth(2);
+    seen_stock = GetHomebaseMaterial(2, ITEM);
+    seen_command = GetCommand(this(), 0);
+    return SetCommand(this(), "Wait", nil, 37);
+}
+"#;
+        register_clonk(&mut engine, "CLNK", clonk_script);
+        engine
+            .register_definition(
+                Definition::from_script("HUT1", "Hut", "#strict 2\n")
+                    .expect("hut compiles"),
+            )
+            .expect("register hut");
+        let mut item =
+            Definition::from_script("ITEM", "Item", "#strict 2\n").expect("item compiles");
+        item.set_value(5);
+        item.set_rebuyable(true);
+        engine.register_definition(item).expect("register item");
+        engine
+            .register_player(PlayerConfig::new(1, "Seller"))
+            .expect("register seller");
+        engine
+            .register_player(PlayerConfig::new(2, "Base owner"))
+            .expect("register base owner");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("spawn hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        engine.objects[hut_index].state.base = 2;
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter allied hut");
+        let sold = [
+            engine
+                .spawn_object(SpawnConfig::new("ITEM").with_container(hut))
+                .expect("spawn first item"),
+            engine
+                .spawn_object(SpawnConfig::new("ITEM").with_container(hut))
+                .expect("spawn second item"),
+        ];
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let result = engine
+            .call_object_function(
+                crew_index,
+                "SellThenReplace",
+                vec![Value::Object(hut.as_u64())],
+            )
+            .expect("script ExecuteCommand succeeds");
+
+        assert_eq!(result, Value::Bool(true));
+        let crew_index = engine.find_object_index(crew).expect("crew survives");
+        let locals = &engine.objects[crew_index].state.local_vars;
+        assert_eq!(locals.get("seen_wealth"), Some(&Value::Int(10)));
+        assert_eq!(locals.get("seen_stock"), Some(&Value::Int(2)));
+        assert_eq!(locals.get("seen_command"), Some(&Value::Nil));
+        let stack = engine.objects[crew_index].commands.snapshot();
+        assert_eq!(stack.command_names(), ["Wait"]);
+        assert_eq!(stack.command_views()[0].tx, Some(37));
+        assert!(sold.into_iter().all(|object| {
+            engine.find_object_index(object).is_none_or(|index| {
+                !engine.objects[index].state.status.is_active()
+                    || engine.objects[index].destroyed
+            })
         }));
     }
 
@@ -9917,7 +10233,7 @@ public func BuyThenReplace(object base)
             .spawn_object(SpawnConfig::new("AARD").with_container(hut))
             .expect("spawn sale item");
         engine
-            .sell_object_to_home(sold, 1)
+            .sell_object_to_home(sold, sold, 1)
             .expect("sell rebuyable item");
         assert_eq!(
             engine
@@ -12131,7 +12447,8 @@ protected func RejectCollect(id definition, object item)
                 .expect("player")
                 .home_base_material()
                 .get("FLAG"),
-            Some(&1)
+            None,
+            "a non-Rebuyable definition does not create a missing stock row"
         );
         let menu = engine
             .debug_object_menu(crew.as_u64())

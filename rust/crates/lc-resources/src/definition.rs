@@ -428,6 +428,9 @@ pub struct DefCore {
     /// `BaseAutoSell` (C4Def.cpp:457): bases automatically sell this object
     /// when BASEFUNC_AutoSellContents is active. GOLD defaults to true.
     pub base_auto_sell: bool,
+    /// `NoSell` (C4Def.cpp:411): any nonzero value prevents this definition
+    /// from being selected by SellFromBase.
+    pub no_sell: i32,
     pub mass: i32,
     /// `MoveToRange` (C4Def.cpp:400): positive values override the command's
     /// default five-pixel arrival range for non-crew objects.
@@ -818,6 +821,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut object_value: i32 = 0;
     let mut rebuyable = false;
     let mut base_auto_sell: Option<bool> = None;
+    let mut no_sell: i32 = 0;
     let mut object_mass: i32 = 0;
     let mut move_to_range: i32 = 0;
     let mut pathfinder: i32 = 0;
@@ -953,6 +957,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "baseautosell" => {
                 base_auto_sell = Some(parse_bool(value));
+            }
+            "nosell" => {
+                no_sell = parse_i32(value).unwrap_or(0);
             }
             "mass" => {
                 object_mass = parse_i32(value).unwrap_or(0).max(0);
@@ -1269,6 +1276,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         value: object_value,
         rebuyable,
         base_auto_sell,
+        no_sell,
         mass: object_mass,
         move_to_range,
         pathfinder,
@@ -2986,6 +2994,18 @@ mod tests {
 
         let defaulted = parse_def_core(b"[DefCore]\nid=OPEN\n").expect("default DefCore parses");
         assert_eq!(defaulted.no_push_enter, 0);
+    }
+
+    #[test]
+    fn parse_def_core_no_sell_preserves_signed_value_and_default() {
+        // C4DefCore::CompileFunc stores NoSell as int32_t with zero as its
+        // default; SellFromBase treats either sign of a nonzero value as set.
+        let parsed = parse_def_core(b"[DefCore]\nid=LOCK\nnOsElL=-2\n")
+            .expect("NoSell DefCore parses");
+        assert_eq!(parsed.no_sell, -2);
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=OPEN\n").expect("default DefCore parses");
+        assert_eq!(defaulted.no_sell, 0);
     }
 
     #[test]

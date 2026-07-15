@@ -1207,6 +1207,7 @@ pub struct HostWorldContext {
     color_by_owner_definitions: Rc<HashSet<DefinitionId>>,
     base_auto_sell_definitions: Rc<HashSet<DefinitionId>>,
     rebuyable_definitions: Rc<HashSet<DefinitionId>>,
+    no_sell_definitions: Rc<HashSet<DefinitionId>>,
     /// Localized `C4Def::GetDesc` text, kept separate from simulation
     /// metadata so presentation lookup does not enlarge every fixture.
     definition_descriptions: Rc<HashMap<DefinitionId, String>>,
@@ -1340,6 +1341,7 @@ impl Default for HostWorldContext {
             color_by_owner_definitions: Rc::new(HashSet::new()),
             base_auto_sell_definitions: Rc::new(HashSet::new()),
             rebuyable_definitions: Rc::new(HashSet::new()),
+            no_sell_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_rank_names: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
@@ -1569,6 +1571,7 @@ impl HostWorldContext {
             color_by_owner_definitions: Rc::new(HashSet::new()),
             base_auto_sell_definitions: Rc::new(HashSet::new()),
             rebuyable_definitions: Rc::new(HashSet::new()),
+            no_sell_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_rank_names: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
@@ -1828,6 +1831,18 @@ impl HostWorldContext {
 
     fn definition_rebuyable(&self, id: &str) -> bool {
         self.rebuyable_definitions.contains(id)
+    }
+
+    pub(crate) fn with_no_sell_definitions<I>(mut self, definitions: I) -> Self
+    where
+        I: IntoIterator<Item = DefinitionId>,
+    {
+        self.no_sell_definitions = Rc::new(definitions.into_iter().collect());
+        self
+    }
+
+    fn definition_no_sell(&self, id: &str) -> bool {
+        self.no_sell_definitions.contains(id)
     }
 
     pub(crate) fn with_definition_order(mut self, order: Rc<Vec<DefinitionId>>) -> Self {
@@ -8251,7 +8266,10 @@ fn can_sell_object_live(target: ObjectId, player: i32) -> bool {
     })
 }
 
-fn sell_object_to_home_live(target: ObjectId, player: i32) -> Result<bool, RuntimeError> {
+pub(super) fn sell_object_to_home_live(
+    target: ObjectId,
+    player: i32,
+) -> Result<bool, RuntimeError> {
     if !can_sell_object_live(target, player) {
         return Ok(false);
     }
@@ -8270,13 +8288,10 @@ fn sell_object_to_home_live(target: ObjectId, player: i32) -> Result<bool, Runti
                 .and_then(|context| context.get_world_object(target))
                 .and_then(|object| object.container())
         });
-        let moved = match container {
+        let _ = match container {
             Some(container) => enter_object_live(child, container)?,
             None => exit_object_at_current_position(child)?,
         };
-        if !moved {
-            break;
-        }
         let _ = sell_object_to_home_live(child, player)?;
     }
 
@@ -27210,6 +27225,32 @@ fn resolve_preview_buy(
     Ok(())
 }
 
+fn resolve_preview_sell(
+    actor: ObjectId,
+    base: ObjectId,
+    definition_id: &str,
+    succeeded: bool,
+) -> Result<(), RuntimeError> {
+    let feedback = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        if !context.ensure_object_scope(actor) {
+            return None;
+        }
+        let scope = context.object_scope_mut(actor)?;
+        let resolution = scope
+            .live_commands
+            .resolve_pending_sell(base, definition_id, succeeded)?;
+        scope.command_stack_replaced = true;
+        scope.command_count = scope.live_commands.len();
+        Some(resolution.feedback)
+    });
+    if let Some(feedback) = feedback.flatten() {
+        preview_command_failure_feedback(actor, feedback)?;
+    }
+    Ok(())
+}
+
 /// Synchronous C4Command::Buy continuation for script ExecuteCommand.
 /// The definition/base pricing callbacks, Enter child insertion, repeated
 /// C4Player::Buy calls and command-finished state must all be visible to the
@@ -27347,6 +27388,114 @@ fn preview_evaluate_buy(
     resolve_preview_buy(actor, base, definition_id, true)
 }
 
+/// Synchronous C4Command::Sell continuation for script ExecuteCommand.
+/// Recursive CalcValue/CalcSellValue/SellTo/Sale effects and the complete
+/// count loop must be visible to the next instruction in the same VM call.
+fn preview_evaluate_sell(
+    actor: ObjectId,
+    base: ObjectId,
+    definition_id: &str,
+    preferred: Option<ObjectId>,
+    count: i32,
+) -> Result<(), RuntimeError> {
+    let sale_count = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return count.max(1);
+        };
+        if !context.ensure_object_scope(actor) {
+            return count.max(1);
+        }
+        let Some(scope) = context.object_scope_mut(actor) else {
+            return count.max(1);
+        };
+        let count = scope
+            .live_commands
+            .normalize_pending_sell_count(base, definition_id)
+            .unwrap_or_else(|| count.max(1));
+        scope.command_stack_replaced = true;
+        scope.command_count = scope.live_commands.len();
+        count
+    });
+    let mut preferred = preferred;
+
+    for _ in 0..sale_count {
+        let attempt = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            if !context.world.base_sell_enabled {
+                return None;
+            }
+            let seller = context
+                .object_scope(actor)
+                .map(ObjectScopeContext::owner)
+                .or_else(|| context.get_world_object(actor).map(|object| object.owner()))?;
+            let base_object = context.get_world_object(base)?;
+            let base_owner = base_object.full_state()?.base;
+            let (seller_player, base_player) = (
+                context.player_state(seller)?,
+                context.player_state(base_owner)?,
+            );
+            if base_player.status == crate::PlayerStatus::Eliminated {
+                return None;
+            }
+            let hostile = seller != base_owner
+                && (seller_player.is_hostile_towards(base_owner)
+                    || base_player.is_hostile_towards(seller));
+            if hostile {
+                return None;
+            }
+
+            let preferred_candidate = preferred.filter(|candidate| {
+                context.get_world_object(*candidate).is_some_and(|object| {
+                    object.is_present() && object.container() == Some(base)
+                })
+            });
+            let candidate = preferred_candidate.or_else(|| {
+                base_object.contents().iter().copied().find(|candidate| {
+                    context.get_world_object(*candidate).is_some_and(|object| {
+                        object.is_present()
+                            && object.container() == Some(base)
+                            && context
+                                .object_effective_definition_id(*candidate)
+                                .is_some_and(|id| id == definition_id)
+                    })
+                })
+            })?;
+            let candidate_definition = context.object_effective_definition_id(candidate)?;
+            if context.world.definition_no_sell(candidate_definition.as_str()) {
+                return None;
+            }
+            Some((base_owner, candidate))
+        });
+        let Some((base_owner, candidate)) = attempt else {
+            return resolve_preview_sell(actor, base, definition_id, false);
+        };
+        if !sell_object_to_home_live(candidate, base_owner)? {
+            return resolve_preview_sell(actor, base, definition_id, false);
+        }
+        preferred = None;
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            if !context.ensure_object_scope(actor) {
+                return;
+            }
+            let Some(scope) = context.object_scope_mut(actor) else {
+                return;
+            };
+            scope
+                .live_commands
+                .record_pending_sell_success(base, definition_id);
+            scope.command_stack_replaced = true;
+            scope.command_count = scope.live_commands.len();
+        });
+    }
+    resolve_preview_sell(actor, base, definition_id, true)
+}
+
 fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     let active = active_object_id();
     let target = match args.first() {
@@ -27373,6 +27522,7 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some((
         mut finished,
         buy_attempts,
+        sell_attempts,
         grab_attempts,
         drop_attempts,
         entrance_attempts,
@@ -27385,6 +27535,7 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     let had_live_attempt = !buy_attempts.is_empty()
+        || !sell_attempts.is_empty()
         || !grab_attempts.is_empty()
         || !drop_attempts.is_empty()
         || !entrance_attempts.is_empty()
@@ -27399,6 +27550,15 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
             &definition_id,
             buyer,
             payer,
+            count,
+        )?;
+    }
+    for (actor_id, base_id, definition_id, preferred, count) in sell_attempts {
+        preview_evaluate_sell(
+            actor_id,
+            base_id,
+            &definition_id,
+            preferred,
             count,
         )?;
     }
@@ -38177,6 +38337,7 @@ impl EffectHostContext {
     ) -> Option<(
         Option<CommandView>,
         Vec<(ObjectId, ObjectId, DefinitionId, i32, i32, i32)>,
+        Vec<(ObjectId, ObjectId, DefinitionId, Option<ObjectId>, i32)>,
         Vec<(ObjectId, ObjectId)>,
         Vec<(ObjectId, ObjectId)>,
         Vec<(ObjectId, ObjectId, Option<CallResultAction>)>,
@@ -38230,6 +38391,7 @@ impl EffectHostContext {
 
         let mut deferred_events = Vec::new();
         let mut buy_attempts = Vec::new();
+        let mut sell_attempts = Vec::new();
         let mut grab_attempts = Vec::new();
         let mut drop_attempts = Vec::new();
         let mut entrance_attempts = Vec::new();
@@ -38252,6 +38414,19 @@ impl EffectHostContext {
                     definition_id,
                     buyer,
                     payer,
+                    count,
+                )),
+                CommandEvent::EvaluateSell {
+                    actor_id,
+                    base_id,
+                    definition_id,
+                    preferred,
+                    count,
+                } => sell_attempts.push((
+                    actor_id,
+                    base_id,
+                    definition_id,
+                    preferred,
                     count,
                 )),
                 CommandEvent::SetPathFinderSettings {
@@ -38310,6 +38485,7 @@ impl EffectHostContext {
         Some((
             finished,
             buy_attempts,
+            sell_attempts,
             grab_attempts,
             drop_attempts,
             entrance_attempts,

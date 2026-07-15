@@ -8688,6 +8688,9 @@ pub struct Definition {
     graphics_scale: f32,
     ocf_base: u32,
     value: i32,
+    /// DefCore `NoSell`; any nonzero value prevents SellFromBase from
+    /// selecting this definition as the root sale object.
+    no_sell: i32,
     /// DefCore `Rebuy` (C4Def.cpp:359): permits sold objects to introduce
     /// their definition into home-base stock.
     rebuyable: bool,
@@ -8969,6 +8972,7 @@ impl Definition {
             graphics_scale: 1.0,
             ocf_base: OCF_NORMAL,
             value: 0,
+            no_sell: 0,
             rebuyable: false,
             base_auto_sell,
             mass: 0,
@@ -9278,6 +9282,7 @@ impl Definition {
         definition.set_allow_picture_stack(resource.core.allow_picture_stack);
         definition.set_graphics_scale(resource.core.graphics_scale as f32 / 100.0);
         definition.set_value(resource.core.value);
+        definition.set_no_sell(resource.core.no_sell);
         definition.set_rebuyable(resource.core.rebuyable);
         definition.set_base_auto_sell(resource.core.base_auto_sell);
         definition.set_mass(resource.core.mass);
@@ -9810,6 +9815,14 @@ impl Definition {
 
     pub fn set_value(&mut self, value: i32) {
         self.value = value.max(0);
+    }
+
+    pub fn no_sell(&self) -> i32 {
+        self.no_sell
+    }
+
+    pub fn set_no_sell(&mut self, no_sell: i32) {
+        self.no_sell = no_sell;
     }
 
     pub fn rebuyable(&self) -> bool {
@@ -11839,6 +11852,48 @@ impl Definition {
             |_script, _cells, _this| compat::buy(&args).map_err(Into::into),
         )?;
         Ok((matches!(value, Value::Object(_)), outcome, audio, rng))
+    }
+
+    /// Invoke C4Player::Sell2Home directly so a script function named Sell
+    /// cannot shadow the command's recursive native transaction.
+    #[allow(clippy::too_many_arguments)]
+    fn command_sell_item(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        sold_object: ObjectId,
+        base_owner: i32,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<
+        (bool, compat::EffectContextOutcome, AudioRegistry, LcgRng),
+        EngineError,
+    > {
+        let (value, outcome, audio, rng) = self.exec_in_object_context(
+            state,
+            object_id,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            "Sell",
+            |_script, _cells, _this| {
+                compat::sell_object_to_home_live(sold_object, base_owner)
+                    .map(Value::Bool)
+                    .map_err(Into::into)
+            },
+        )?;
+        Ok((matches!(value, Value::Bool(true)), outcome, audio, rng))
     }
 
     /// The shared object-context execution seam: installs the physics/
@@ -19673,6 +19728,12 @@ impl Engine {
                 .filter(|(_, definition)| definition.rebuyable())
                 .map(|(id, _)| id.clone()),
             self.base_auto_sell_enabled,
+        )
+        .with_no_sell_definitions(
+            self.definitions
+                .iter()
+                .filter(|(_, definition)| definition.no_sell() != 0)
+                .map(|(id, _)| id.clone()),
         )
         // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
         // execution. FindBase is one of the APIs that explicitly walks the
@@ -36041,6 +36102,64 @@ impl Engine {
         Ok(bought)
     }
 
+    fn sell_object_to_home(
+        &mut self,
+        context_object: ObjectId,
+        sold_object: ObjectId,
+        base_owner: i32,
+    ) -> Result<bool, EngineError> {
+        let idx = self
+            .find_object_index(context_object)
+            .ok_or(EngineError::UnknownObject(context_object))?;
+        let (definition_id, state_snapshot) = {
+            let object = &self.objects[idx];
+            (object.definition_id.clone(), object.script_state_snapshot())
+        };
+        let definition = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let action_library = definition.action_library().clone();
+        let call = definition.command_sell_item(
+            &state_snapshot,
+            context_object,
+            sold_object,
+            base_owner,
+            self.rng.clone(),
+            &self.global_effects.clone(),
+            self.physics,
+            self.environment,
+            self.frame,
+            self.host_world_context(),
+            self.game_over_triggered,
+            self.audio_registry.clone(),
+        );
+        let (sold, outcome, audio_state, new_rng) = match call {
+            Ok(ok) => ok,
+            Err(error) => {
+                return Err(self.apply_script_error_recovery(
+                    error,
+                    idx,
+                    &action_library,
+                    context_object,
+                    &definition_id,
+                    false,
+                ));
+            }
+        };
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        self.apply_callback_outcome(
+            idx,
+            outcome,
+            &action_library,
+            context_object,
+            &definition_id,
+            false,
+        )?;
+        Ok(sold)
+    }
+
     /// `C4Object::Incinerate` (C4Object.cpp:1257-1268): construct the
     /// priority-100, interval-1 Fire effect through the same live C4Effect
     /// path as AddEffect. That path runs the higher/equal-priority Fx*Effect
@@ -37066,6 +37185,9 @@ impl Engine {
         base_index: usize,
         base_owner: i32,
     ) -> Result<(), EngineError> {
+        if !self.player_can_sell_objects(base_owner) {
+            return Ok(());
+        }
         let contents = self.objects[base_index].state.contents.clone();
         for outer_id in contents {
             let nested = self
@@ -37073,15 +37195,27 @@ impl Engine {
                 .map(|index| self.objects[index].state.contents.clone())
                 .unwrap_or_default();
             for object_id in nested {
-                if self.object_is_base_auto_sell(object_id) {
-                    self.sell_object_to_home(object_id, base_owner)?;
+                if self.object_is_base_auto_sell(object_id)
+                    && self.player_can_sell_objects(base_owner)
+                {
+                    let _ = self.exit_object_at_current_position(object_id)?;
+                    let _ = self.sell_object_to_home(object_id, object_id, base_owner)?;
                 }
             }
-            if self.object_is_base_auto_sell(outer_id) {
-                self.sell_object_to_home(outer_id, base_owner)?;
+            if self.object_is_base_auto_sell(outer_id)
+                && self.player_can_sell_objects(base_owner)
+            {
+                let _ = self.exit_object_at_current_position(outer_id)?;
+                let _ = self.sell_object_to_home(outer_id, outer_id, base_owner)?;
             }
         }
         Ok(())
+    }
+
+    fn player_can_sell_objects(&self, player: i32) -> bool {
+        self.players
+            .get(&player)
+            .is_some_and(|player| player.status() != PlayerStatus::Eliminated)
     }
 
     fn object_is_base_auto_sell(&self, object_id: ObjectId) -> bool {
@@ -37095,149 +37229,6 @@ impl Engine {
                     .get(&object.definition_id)
                     .is_some_and(Definition::base_auto_sell)
         })
-    }
-
-    fn sell_object_to_home(
-        &mut self,
-        object_id: ObjectId,
-        base_owner: i32,
-    ) -> Result<(), EngineError> {
-        if self
-            .players
-            .get(&base_owner)
-            .is_none_or(|player| player.status() == PlayerStatus::Eliminated)
-        {
-            return Ok(());
-        }
-        let Some(index) = self.find_object_index(object_id) else {
-            return Ok(());
-        };
-        if !self.objects[index].state.status.is_active()
-            || self.objects[index].destroyed
-            || self.objects[index].state.ocf & ocf::CREW_MEMBER != 0
-        {
-            return Ok(());
-        }
-
-        // AutoSellContents explicitly exits each candidate before handing it
-        // to Sell2Home (C4Object.cpp:984-994). Thus CalcValue receives nil as
-        // pInBase, and nested contents are ejected to the world below.
-        self.apply_object_update(object_id, ObjectUpdate::new().clear_container())?;
-
-        // Sell2Home recursively sells contents before their container
-        // (C4Player.cpp:869-875).
-        let nested = self
-            .find_object_index(object_id)
-            .map(|index| self.objects[index].state.contents.clone())
-            .unwrap_or_default();
-        for nested_id in nested {
-            self.sell_object_to_home(nested_id, base_owner)?;
-        }
-
-        let Some(index) = self.find_object_index(object_id) else {
-            return Ok(());
-        };
-        let definition_id = self.objects[index].definition_id.clone();
-        let construction = self.objects[index].state.construction;
-        let (static_value, has_calc_value, has_calc_def_value, has_sell_to, has_sale) = self
-            .definitions
-            .get(&definition_id)
-            .map(|definition| {
-                (
-                    definition.value(),
-                    definition.has_function("CalcValue"),
-                    definition.has_function("CalcDefValue"),
-                    definition.has_function("SellTo"),
-                    definition.has_function("Sale"),
-                )
-            })
-            .unwrap_or_default();
-
-        // C4Object::GetValue: CalcValue wins over the definition value;
-        // CalcDefValue is the definition-level fallback. Then Con scales the
-        // result (C4Object.cpp:2118-2144; C4Def.cpp:839-856).
-        let raw_value = if has_calc_value {
-            tolerate_script_error(self.call_object_function(
-                index,
-                "CalcValue",
-                vec![Value::Nil, Value::Int(base_owner)],
-            ))?
-            .and_then(|value| value.as_c4_int())
-            .unwrap_or(0)
-        } else if has_calc_def_value {
-            tolerate_script_error(self.call_object_function(
-                index,
-                "CalcDefValue",
-                vec![Value::Nil, Value::Int(base_owner)],
-            ))?
-            .and_then(|value| value.as_c4_int())
-            .unwrap_or(0)
-        } else {
-            static_value
-        };
-        let value = saturating_i64_to_i32(
-            i64::from(raw_value) * i64::from(construction) / i64::from(FULL_CON),
-        );
-        if value != 0 {
-            self.adjust_player_wealth(base_owner, value)?;
-        }
-
-        // SellTo may remap the home-base stock ID after the wealth
-        // transaction (C4Player.cpp:880-887).
-        let stock_definition_id = if has_sell_to {
-            tolerate_script_error(self.call_object_function(
-                index,
-                "SellTo",
-                vec![Value::Int(base_owner)],
-            ))?
-            .and_then(|value| match value {
-                Value::C4Id(id) if !id.is_empty() => Some(id),
-                _ => None,
-            })
-        } else {
-            Some(definition_id)
-        };
-
-        // IncreaseIDCount's addNewID argument is exactly Rebuyable. A
-        // non-rebuyable definition may still increment an existing stock
-        // entry (C4Player.cpp:885-891; C4IDList.cpp:121-138).
-        if let Some(stock_definition_id) = stock_definition_id {
-            let rebuyable = self
-                .definitions
-                .get(&stock_definition_id)
-                .is_some_and(Definition::rebuyable);
-            let stocked = self.players.get(&base_owner).is_some_and(|player| {
-                player
-                    .home_base_material()
-                    .contains_key(&stock_definition_id)
-            });
-            if rebuyable || stocked {
-                self.adjust_player_home_base_material(base_owner, stock_definition_id, 1)?;
-            }
-        }
-
-        // Sale sees both the wealth and home-base material updates. C++ then
-        // AssignRemoval(true), even when Sale itself mutates the object
-        // (C4Player.cpp:892-897).
-        if has_sale {
-            if let Some(index) = self.find_object_index(object_id) {
-                let _ = tolerate_script_error(self.call_object_function(
-                    index,
-                    "Sale",
-                    vec![Value::Int(base_owner)],
-                ))?;
-            }
-        }
-
-        if self.find_object_index(object_id).is_some() {
-            self.apply_object_update(
-                object_id,
-                ObjectUpdate::new()
-                    .with_status(ObjectStatus::Deleted)
-                    .with_alive(false),
-            )?;
-        }
-        Ok(())
     }
 
     /// `C4Object::ExecBase` (C4Object.cpp:1000-1044): base assignment,
@@ -38806,6 +38797,7 @@ impl Engine {
         definition.set_allow_picture_stack(core.allow_picture_stack);
         definition.set_graphics_scale(core.graphics_scale as f32 / 100.0);
         definition.set_value(core.value);
+        definition.set_no_sell(core.no_sell);
         definition.set_rebuyable(core.rebuyable);
         definition.set_base_auto_sell(core.base_auto_sell);
         definition.set_mass(core.mass);
@@ -42405,6 +42397,87 @@ impl Engine {
         Ok(())
     }
 
+    fn resolve_command_sell_attempt(
+        &mut self,
+        actor_id: ObjectId,
+        base_id: ObjectId,
+        definition_id: &str,
+        succeeded: bool,
+    ) -> Result<(), EngineError> {
+        let resolution = self.find_object_index(actor_id).and_then(|index| {
+            self.objects[index]
+                .commands
+                .resolve_pending_sell(base_id, definition_id, succeeded)
+        });
+        if let Some(feedback) = resolution.and_then(|result| result.feedback) {
+            self.execute_command_failure_feedback(actor_id, feedback, None)?;
+        }
+        Ok(())
+    }
+
+    fn command_sell_candidate(
+        &self,
+        actor_id: ObjectId,
+        base_id: ObjectId,
+        definition_id: &str,
+        preferred: Option<ObjectId>,
+    ) -> Option<(i32, ObjectId)> {
+        if !self.base_sell_enabled {
+            return None;
+        }
+        let actor_index = self.find_object_index(actor_id)?;
+        let base_index = self.find_object_index(base_id)?;
+        let seller = self.objects[actor_index].state.owner;
+        let base_owner = self.objects[base_index].state.base;
+        if !self.players.contains_key(&seller)
+            || self
+                .players
+                .get(&base_owner)
+                .is_none_or(|player| player.status() == PlayerStatus::Eliminated)
+            || self.players_hostile(seller, base_owner)
+        {
+            return None;
+        }
+
+        // Target2 is preferred exactly once and need not match Data. Only a
+        // stale/noncontained target falls back to Contents.Find(Data).
+        let candidate = preferred
+            .filter(|candidate| {
+                self.find_object_index(*candidate).is_some_and(|index| {
+                    let object = &self.objects[index];
+                    object.state.status.is_active()
+                        && !object.destroyed
+                        && object.state.container == Some(base_id)
+                })
+            })
+            .or_else(|| {
+                self.objects[base_index]
+                    .state
+                    .contents
+                    .iter()
+                    .copied()
+                    .find(|candidate| {
+                        self.find_object_index(*candidate).is_some_and(|index| {
+                            let object = &self.objects[index];
+                            object.state.status.is_active()
+                                && !object.destroyed
+                                && object.definition_id == definition_id
+                                && object.state.container == Some(base_id)
+                        })
+                    })
+            })?;
+        let candidate_index = self.find_object_index(candidate)?;
+        let candidate_definition = &self.objects[candidate_index].definition_id;
+        if self
+            .definitions
+            .get(candidate_definition)
+            .is_none_or(|definition| definition.no_sell() != 0)
+        {
+            return None;
+        }
+        Some((base_owner, candidate))
+    }
+
     fn apply_command_event(&mut self, event: CommandEvent) -> Result<(), EngineError> {
         match event {
             CommandEvent::SetPathFinderSettings {
@@ -42567,6 +42640,65 @@ impl Engine {
                     }
                 }
                 self.resolve_command_buy_attempt(actor_id, base_id, &definition_id, true)?;
+            }
+            CommandEvent::EvaluateSell {
+                actor_id,
+                base_id,
+                definition_id,
+                preferred,
+                count,
+            } => {
+                let sale_count = self
+                    .find_object_index(actor_id)
+                    .and_then(|index| {
+                        self.objects[index]
+                            .commands
+                            .normalize_pending_sell_count(base_id, &definition_id)
+                    })
+                    .unwrap_or_else(|| count.max(1));
+                let mut preferred = preferred;
+
+                for _ in 0..sale_count {
+                    // SellFromBase repeats every gate and selection against
+                    // live state. Earlier successful sales are not rolled
+                    // back when a later callback makes the next one fail.
+                    let Some((base_owner, candidate)) = self.command_sell_candidate(
+                        actor_id,
+                        base_id,
+                        &definition_id,
+                        preferred,
+                    ) else {
+                        self.resolve_command_sell_attempt(
+                            actor_id,
+                            base_id,
+                            &definition_id,
+                            false,
+                        )?;
+                        return Ok(());
+                    };
+                    let sold = tolerate_script_error(self.sell_object_to_home(
+                        actor_id,
+                        candidate,
+                        base_owner,
+                    ))?
+                    .unwrap_or(false);
+                    if !sold {
+                        self.resolve_command_sell_attempt(
+                            actor_id,
+                            base_id,
+                            &definition_id,
+                            false,
+                        )?;
+                        return Ok(());
+                    }
+                    preferred = None;
+                    if let Some(actor_index) = self.find_object_index(actor_id) {
+                        self.objects[actor_index]
+                            .commands
+                            .record_pending_sell_success(base_id, &definition_id);
+                    }
+                }
+                self.resolve_command_sell_attempt(actor_id, base_id, &definition_id, true)?;
             }
             CommandEvent::ObjectComPut {
                 actor_id,
