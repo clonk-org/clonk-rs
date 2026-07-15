@@ -24606,6 +24606,155 @@ protected func GrabLost()
         (engine, pusher_id, vehicle_id)
     }
 
+    fn no_attach_fighter_definition() -> Definition {
+        let mut fighter = Definition::from_script(
+            "FGTR",
+            "Fighter",
+            r#"#strict
+local death_by;
+func Death(by) { death_by = by; return 1; }
+"#,
+        )
+        .expect("fighter compiles");
+        fighter.set_category(CATEGORY_LIVING);
+        fighter.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+        fighter.set_contact_density(50);
+        fighter.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Fight".to_string(),
+                    ActionSpec::default().with_procedure("FIGHT"),
+                ),
+                (
+                    "Jump".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+                ("Dead".to_string(), ActionSpec::default()),
+            ]),
+        );
+        fighter
+    }
+
+    #[test]
+    fn fight_no_attach_credits_opponent_controller_through_fall_death() {
+        let mut engine = Engine::with_seed(7);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(no_attach_fighter_definition())
+            .expect("fighter registers");
+        engine
+            .register_definition(simple_definition("OPPN"))
+            .expect("opponent registers");
+
+        let opponent = engine
+            .spawn_object(
+                SpawnConfig::new("OPPN")
+                    .with_owner(2)
+                    .with_controller(9)
+                    .with_position(Vector2::new(8, 5)),
+            )
+            .expect("opponent spawns");
+        let mut fight = ActionState::new("Fight");
+        fight.target = Some(opponent);
+        let fighter = engine
+            .spawn_object(
+                SpawnConfig::new("FGTR")
+                    .with_category(CATEGORY_LIVING)
+                    .with_owner(1)
+                    .with_controller(1)
+                    .with_alive(true)
+                    .with_energy(100_000)
+                    .with_position(Vector2::new(5, 5))
+                    .with_fixed_position(FixedVec2::from_ints(5, 5))
+                    .with_action(fight)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("fighter spawns");
+
+        let mut landscape = vehicle_grid_landscape(16, 16);
+        landscape.set_world_height(16);
+        landscape.grid_write_byte(5, 6, 1);
+        engine.set_landscape(landscape);
+        let fighter_idx = engine.find_object_index(fighter).expect("fighter exists");
+        engine.objects[fighter_idx].last_energy_loss_cause = 4;
+        engine.objects[fighter_idx].frame_t_attach = CNAT_BOTTOM;
+        engine.objects[fighter_idx]
+            .set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
+        let definition_id = engine.objects[fighter_idx].definition_id.clone();
+        let actions = engine
+            .definitions
+            .get(&definition_id)
+            .expect("fighter definition exists")
+            .action_library()
+            .clone();
+
+        assert!(
+            engine
+                .exec_object_movement(fighter_idx, &actions, &definition_id, &[])
+                .expect("ledge movement succeeds")
+                .alive
+        );
+        let fighter_idx = engine.find_object_index(fighter).expect("fighter remains");
+        assert_eq!(engine.objects[fighter_idx].state.action.name, "Jump");
+        assert_eq!(
+            engine.objects[fighter_idx].last_energy_loss_cause, 9,
+            "NoAttachAction uses the fight target's Controller, not Owner"
+        );
+
+        // Falling out of the world calls AssignDeath(true) before removal
+        // (C4Movement.cpp:613-614). Exercise that exact death half while the
+        // corpse is still inspectable.
+        engine
+            .assign_death(fighter_idx, true)
+            .expect("fall death assigns");
+        let fighter_idx = engine.find_object_index(fighter).expect("corpse remains");
+        assert_eq!(
+            engine.objects[fighter_idx].state.local_vars.get("death_by"),
+            Some(&Value::Int(9)),
+            "the later fall death stays credited to the fight opponent"
+        );
+    }
+
+    #[test]
+    fn non_fight_no_attach_leaves_the_kill_trace_untouched() {
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(no_attach_fighter_definition())
+            .expect("fighter registers");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("FGTR")
+                    .with_category(CATEGORY_LIVING)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("walker spawns");
+        let actor_idx = engine.find_object_index(actor).expect("walker exists");
+        engine.objects[actor_idx].last_energy_loss_cause = 7;
+        let definition_id = engine.objects[actor_idx].definition_id.clone();
+        let actions = engine
+            .definitions
+            .get(&definition_id)
+            .expect("fighter definition exists")
+            .action_library()
+            .clone();
+
+        engine
+            .apply_no_attach_action(actor_idx, &definition_id, &actions, &[])
+            .expect("no-attach transition succeeds");
+        assert_eq!(engine.objects[actor_idx].state.action.name, "Jump");
+        assert_eq!(
+            engine.objects[actor_idx].last_energy_loss_cause, 7,
+            "the NoAttachAction path only rewrites Fight kill tracing"
+        );
+    }
+
     #[test]
     fn push_no_attach_calls_grab_lost_before_jump_and_restores_push_to() {
         let (mut engine, pusher_id, vehicle_id) =

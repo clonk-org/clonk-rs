@@ -33640,6 +33640,18 @@ impl Engine {
         // (C4Object.cpp:4302-4306).
         if matches!(procedure, ActionProcedure::Push) {
             self.grab_lost(object_id)?;
+        } else if matches!(procedure, ActionProcedure::Fight) {
+            // Losing the ground during a fight records the opponent's live
+            // Controller for a later fall death. This is an unconditional
+            // direct assignment in C++ (including NO_OWNER), not the guarded
+            // DoEnergy kill-trace update (C4Object.cpp:4304-4305).
+            let opponent_controller = initial_action
+                .target
+                .and_then(|target_id| self.find_object_index(target_id))
+                .map(|target_idx| self.objects[target_idx].state.controller);
+            if let Some(controller) = opponent_controller {
+                self.objects[idx].last_energy_loss_cause = controller;
+            }
         }
 
         // GrabLost and corner-probe callbacks are synchronous. The ensuing
