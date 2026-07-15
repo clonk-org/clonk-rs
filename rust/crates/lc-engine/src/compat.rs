@@ -3230,7 +3230,17 @@ fn get_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
-        Ok(Value::Int(player.team.unwrap_or(0)))
+        let team = player.team.unwrap_or_else(|| {
+            if matches!(
+                player.status,
+                crate::PlayerStatus::TeamSelection | crate::PlayerStatus::TeamSelectionPending
+            ) {
+                -1
+            } else {
+                0
+            }
+        });
+        Ok(Value::Int(team))
     })
 }
 

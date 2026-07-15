@@ -40135,6 +40135,49 @@ func Probe() {
     }
 
     #[test]
+    fn get_player_team_distinguishes_team_selection_from_unteamed() -> Result<(), EngineError> {
+        // FnGetPlayerTeam returns an assigned roster team first, then -1 for
+        // PS_TeamSelection/PS_TeamSelectionPending, 0 for a settled teamless
+        // player, and nil for a missing player (C4Script.cpp:5716-5728).
+        let script = r#"#strict 2
+func ReadTeam(int player) { return GetPlayerTeam(player); }
+"#;
+        let mut engine = Engine::new();
+        engine.register_definition(
+            Definition::from_script("TEAM", "Team reader", script)
+                .expect("team reader compiles"),
+        )?;
+        let reader = engine.spawn_object(SpawnConfig::new("TEAM"))?;
+        engine.set_teams(vec![
+            TeamInfo::new(1, "Left", 0x00f4_0000),
+            TeamInfo::new(2, "Right", 0x0000_c800),
+        ]);
+        engine.set_runtime_join_team_choice(true);
+
+        let outcome = engine.join_player(lifecycle_join_config("Chooser", Vec::new()))?;
+        assert_eq!(
+            outcome,
+            JoinPlayerOutcome::AwaitingTeamSelection { number: 0 }
+        );
+        let number = outcome.number();
+        let read_team = |engine: &mut Engine, player| {
+            let index = engine.find_object_index(reader).expect("reader exists");
+            engine.call_object_function(index, "ReadTeam", vec![Value::Int(player)])
+        };
+
+        assert_eq!(read_team(&mut engine, number)?, Value::Int(-1));
+        engine.mark_team_selection_pending(number)?;
+        assert_eq!(read_team(&mut engine, number)?, Value::Int(-1));
+
+        engine
+            .initialize_scenario_player(number, 2)?
+            .expect("selected team is accepted");
+        assert_eq!(read_team(&mut engine, number)?, Value::Int(2));
+        assert_eq!(read_team(&mut engine, 99)?, Value::Nil);
+        Ok(())
+    }
+
+    #[test]
     fn remove_player_assigns_departing_crew_removal() -> Result<(), EngineError> {
         // C4PlayerList::Remove calls C4Player::RemoveCrewObjects before deleting
         // the player; every crew object receives AssignRemoval(true)
