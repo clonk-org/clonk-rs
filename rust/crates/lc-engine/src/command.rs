@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 pub const MAX_COMMAND_STACK: usize = 35;
 const LINEKIT_DEFINITION: &str = "LNKT";
 const POWERLINE_DEFINITION: &str = "PWRL";
+const SOURCE_PIPE_DEFINITION: &str = "SPIP";
+const DRAIN_PIPE_DEFINITION: &str = "DPIP";
+const CONNECT_ACTION: &str = "Connect";
 const CONKIT_DEFINITION: &str = "CNKT";
 const ACQUIRE_REQUEST_INTERVAL: u32 = 50;
 const COMMAND_FLAG_ENTER_PUSH_TARGET: i32 = 0b10;
@@ -29,6 +32,10 @@ const PUSH_TO_RANGE: i32 = 10;
 #[derive(Debug, Clone)]
 pub struct CommandObjectSnapshot {
     pub id: ObjectId,
+    /// Forward C++ `Game.Objects` list position. The engine stores that
+    /// master list reversed for execution, while command searches such as
+    /// Acquire use the forward order to break equal-distance ties.
+    pub master_list_order: usize,
     pub definition_id: DefinitionId,
     pub position: Vector2,
     /// Authoritative C4Object fix_x/fix_y used by fixed-point command paths.
@@ -47,7 +54,9 @@ pub struct CommandObjectSnapshot {
     pub destroyed: bool,
     pub category: i32,
     pub container: Option<ObjectId>,
+    pub action_name: String,
     pub action_target: Option<ObjectId>,
+    pub action_target2: Option<ObjectId>,
     pub action_procedure: ActionProcedure,
     pub command_direction: CommandDirection,
     pub construction: i32,
@@ -64,6 +73,8 @@ pub struct CommandObjectSnapshot {
     pub crew_member: bool,
     pub selected: bool,
     pub alive: bool,
+    /// Raw C4Object::OnFire, which Acquire reads independently of cached OCF.
+    pub on_fire: bool,
     pub contents: Vec<ObjectId>,
     pub line_connect: u32,
     pub ocf: u32,
@@ -318,6 +329,7 @@ mod tests {
             shape: DefinitionRect::new(-8, -10, 16, 20),
             entrance: None,
             id: ObjectId::new(id),
+            master_list_order: id as usize,
             definition_id: format!("DEF{id}"),
             position: Vector2::ZERO,
             fixed_position: FixedVec2::ZERO,
@@ -329,7 +341,9 @@ mod tests {
             destroyed: false,
             category: 0,
             container: None,
+            action_name: "Idle".to_string(),
             action_target: None,
+            action_target2: None,
             action_procedure: ActionProcedure::Undefined,
             command_direction: CommandDirection::Stop,
             construction: 0,
@@ -341,6 +355,7 @@ mod tests {
             crew_member: false,
             selected: false,
             alive: true,
+            on_fire: false,
             contents: Vec::new(),
             line_connect: 0,
             ocf: ocf::AVAILABLE,
@@ -6921,6 +6936,241 @@ mod tests {
     }
 
     #[test]
+    fn acquire_uses_squared_distance_and_cpp_master_list_order_for_ties() {
+        let builder_id = ObjectId::new(1);
+        let manhattan_favorite_id = ObjectId::new(2);
+        let later_tie_id = ObjectId::new(3);
+        let earlier_tie_id = ObjectId::new(99);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.collectible = false;
+
+        let item = |id: ObjectId, position: Vector2, master_list_order: usize| {
+            let mut snapshot = snapshot_with_id(id.as_u64());
+            snapshot.definition_id = "WOOD".into();
+            snapshot.position = position;
+            snapshot.master_list_order = master_list_order;
+            snapshot.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+            snapshot.collectible = true;
+            snapshot.construction = FULL_CON;
+            snapshot
+        };
+        // Manhattan prefers (0,6): 6 < 7. C++ squared distance prefers the
+        // 3-4-5 candidate: 25 < 36.
+        let manhattan_favorite = item(manhattan_favorite_id, Vector2::new(0, 6), 0);
+        let later_tie = item(later_tie_id, Vector2::new(4, 3), 2);
+        let earlier_tie = item(earlier_tie_id, Vector2::new(-4, 3), 1);
+
+        let mut objects = HashMap::new();
+        objects.insert(later_tie_id, later_tie);
+        objects.insert(manhattan_favorite_id, manhattan_favorite);
+        objects.insert(builder_id, builder.clone());
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("acquire state");
+        let choose = |objects: &HashMap<ObjectId, CommandObjectSnapshot>| {
+            let ctx = CommandRuntimeContext {
+                landscape: None,
+                frame: 0,
+                position: builder.position,
+                object: &builder,
+                objects,
+                players: &players,
+                definitions: &definitions,
+                structures_need_energy: false,
+                base_buy_enabled: true,
+                base_sell_enabled: true,
+                transfer_zones: &EMPTY_TRANSFER_ZONES,
+                rng: None,
+            };
+            state.find_candidate(&ctx)
+        };
+
+        assert_eq!(choose(&objects), Some(later_tie_id));
+
+        // Equal squared distances follow forward Game.Objects order. Swap
+        // only those ranks and require the winner to swap too, independent
+        // of HashMap iteration or object IDs.
+        objects.insert(earlier_tie_id, earlier_tie);
+        assert_eq!(choose(&objects), Some(earlier_tie_id));
+        objects
+            .get_mut(&later_tie_id)
+            .expect("later tie present")
+            .master_list_order = 1;
+        objects
+            .get_mut(&earlier_tie_id)
+            .expect("earlier tie present")
+            .master_list_order = 2;
+        assert_eq!(choose(&objects), Some(later_tie_id));
+    }
+
+    #[test]
+    fn acquire_skips_burning_and_source_or_drain_pipe_connected_candidates() {
+        let builder_id = ObjectId::new(1);
+        let burning_id = ObjectId::new(2);
+        let source_connected_id = ObjectId::new(3);
+        let drain_connected_id = ObjectId::new(4);
+        let available_id = ObjectId::new(5);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.collectible = false;
+        let item = |id: ObjectId, x: i32| {
+            let mut snapshot = snapshot_with_id(id.as_u64());
+            snapshot.definition_id = "WOOD".into();
+            snapshot.position = Vector2::new(x, 0);
+            snapshot.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+            snapshot.collectible = true;
+            snapshot.construction = FULL_CON;
+            snapshot
+        };
+        let mut burning = item(burning_id, 1);
+        burning.on_fire = true;
+        let source_connected = item(source_connected_id, 2);
+        let drain_connected = item(drain_connected_id, 3);
+        let available = item(available_id, 4);
+
+        let mut source_pipe = snapshot_with_id(10);
+        source_pipe.definition_id = SOURCE_PIPE_DEFINITION.into();
+        source_pipe.action_name = CONNECT_ACTION.into();
+        source_pipe.action_target = Some(source_connected_id);
+        let mut drain_pipe = snapshot_with_id(11);
+        drain_pipe.definition_id = DRAIN_PIPE_DEFINITION.into();
+        drain_pipe.action_name = CONNECT_ACTION.into();
+        drain_pipe.action_target2 = Some(drain_connected_id);
+        // Exact action and target matching matter: neither decoy may hide
+        // the otherwise valid fallback candidate.
+        let mut wrong_action = snapshot_with_id(12);
+        wrong_action.definition_id = SOURCE_PIPE_DEFINITION.into();
+        wrong_action.action_name = "Idle".into();
+        wrong_action.action_target = Some(available_id);
+        let mut wrong_target = snapshot_with_id(13);
+        wrong_target.definition_id = DRAIN_PIPE_DEFINITION.into();
+        wrong_target.action_name = CONNECT_ACTION.into();
+        wrong_target.action_target = Some(builder_id);
+
+        let mut objects = HashMap::new();
+        for snapshot in [
+            burning,
+            source_connected,
+            drain_connected,
+            available,
+            source_pipe,
+            drain_pipe,
+            wrong_action,
+            wrong_target,
+        ] {
+            objects.insert(snapshot.id, snapshot);
+        }
+        objects.insert(builder_id, builder.clone());
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("acquire state");
+
+        assert_eq!(state.find_candidate(&ctx), Some(available_id));
+    }
+
+    #[test]
+    fn acquire_rescans_after_get_returns_and_prefers_a_new_nearer_candidate() {
+        let builder_id = ObjectId::new(1);
+        let far_id = ObjectId::new(2);
+        let near_id = ObjectId::new(3);
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.collectible = false;
+        let make_item = |id: ObjectId, x: i32| {
+            let mut snapshot = snapshot_with_id(id.as_u64());
+            snapshot.definition_id = "WOOD".into();
+            snapshot.position = Vector2::new(x, 0);
+            snapshot.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+            snapshot.collectible = true;
+            snapshot.construction = FULL_CON;
+            snapshot
+        };
+
+        let mut initial_objects = HashMap::new();
+        initial_objects.insert(builder_id, builder.clone());
+        initial_objects.insert(far_id, make_item(far_id, 20));
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let initial_ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &initial_objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire)
+                .with_data(CommandData::Text("WOOD".into()))
+                .with_update_interval(50),
+        )
+        .expect("acquire state");
+        let _ = state.step(&initial_ctx);
+        state.script_result = Some(AcquireScriptResult::Continue);
+        let first = state.step(&initial_ctx);
+        assert!(matches!(
+            first.operations.first(),
+            Some(CommandOperation::PushFront(request))
+                if request.id == CommandId::Get && request.target == Some(far_id)
+        ));
+
+        let mut later_objects = initial_objects.clone();
+        later_objects.insert(near_id, make_item(near_id, 5));
+        let later_ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 1,
+            position: builder.position,
+            object: &builder,
+            objects: &later_objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let script = state.step(&later_ctx);
+        assert!(matches!(
+            script.events.first(),
+            Some(CommandEvent::ControlCommandAcquire { .. })
+        ));
+        state.script_result = Some(AcquireScriptResult::Continue);
+        let rescanned = state.step(&later_ctx);
+        assert!(matches!(
+            rescanned.operations.first(),
+            Some(CommandOperation::PushFront(request))
+                if request.id == CommandId::Get && request.target == Some(near_id)
+        ));
+    }
+
+    #[test]
     fn acquire_transfers_item_from_shared_container() {
         let builder_id = ObjectId::new(1);
         let container_id = ObjectId::new(2);
@@ -7784,10 +8034,10 @@ mod tests {
             })
             .expect("acquire state present");
         let acquire_state = &acquire_entry["state"]["Acquire"];
-        let candidate = acquire_state["candidate"]
-            .as_u64()
-            .expect("candidate recorded");
-        assert_eq!(candidate, item_id.as_u64());
+        assert!(
+            acquire_state.get("candidate").is_none(),
+            "Acquire rescans instead of serializing a cross-tick candidate cache"
+        );
         assert_eq!(snapshot.commands[0].failures, 0);
 
         let ctx_followup = CommandRuntimeContext {
@@ -14182,10 +14432,8 @@ struct AcquireState {
     range_x: i32,
     range_y: i32,
     update_interval: u32,
-    candidate: Option<ObjectId>,
     buy_requested: bool,
     last_buy_request: Option<u64>,
-    get_requested: bool,
     #[serde(default)]
     script_pending: bool,
     #[serde(default)]
@@ -14213,10 +14461,8 @@ impl AcquireState {
             range_x,
             range_y,
             update_interval: request.update_interval.max(1),
-            candidate: None,
             buy_requested: false,
             last_buy_request: None,
-            get_requested: false,
             script_pending: false,
             script_invoked: false,
             script_result: None,
@@ -14272,13 +14518,10 @@ impl AcquireState {
         if candidate.definition_id != self.definition_id {
             return false;
         }
-        if candidate.id == ctx.object.id {
-            return false;
-        }
         if candidate.ocf & ocf::AVAILABLE == 0 {
             return false;
         }
-        if candidate.construction < FULL_CON {
+        if candidate.ocf & ocf::FULL_CON == 0 {
             return false;
         }
         if let Some(ignore) = self.ignore_container {
@@ -14286,33 +14529,44 @@ impl AcquireState {
                 return false;
             }
         }
-        if let Some(container) = candidate.container {
-            if container == ctx.object.id {
-                return false;
-            }
-        } else if !candidate.collectible {
+        if candidate.on_fire {
+            return false;
+        }
+        if ctx.objects.values().any(|pipe| {
+            pipe.is_status_active()
+                && pipe.ocf != 0
+                && matches!(
+                    pipe.definition_id.as_str(),
+                    SOURCE_PIPE_DEFINITION | DRAIN_PIPE_DEFINITION
+                )
+                && pipe.action_name == CONNECT_ACTION
+                && (pipe.action_target == Some(candidate.id)
+                    || pipe.action_target2 == Some(candidate.id))
+        }) {
             return false;
         }
         true
     }
 
     fn find_candidate(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
-        let mut best: Option<(ObjectId, i32)> = None;
+        let mut best: Option<(ObjectId, i64, usize)> = None;
         for (id, snapshot) in ctx.objects.iter() {
             if !self.candidate_is_valid(snapshot, ctx) {
                 continue;
             }
-            let dx = snapshot.position.x - ctx.position.x;
-            let dy = snapshot.position.y - ctx.position.y;
-            if dx.abs() > self.range_x || dy.abs() > self.range_y {
+            let dx = i64::from(snapshot.position.x) - i64::from(ctx.position.x);
+            let dy = i64::from(snapshot.position.y) - i64::from(ctx.position.y);
+            if dx.abs() > i64::from(self.range_x) || dy.abs() > i64::from(self.range_y) {
                 continue;
             }
-            let distance = dx.abs() + dy.abs();
-            if best.is_none_or(|(_, best_dist)| distance < best_dist) {
-                best = Some((*id, distance));
+            let distance = dx * dx + dy * dy;
+            if best.is_none_or(|(_, best_distance, best_order)| {
+                (distance, snapshot.master_list_order) < (best_distance, best_order)
+            }) {
+                best = Some((*id, distance, snapshot.master_list_order));
             }
         }
-        best.map(|(id, _)| id)
+        best.map(|(id, _, _)| id)
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -14369,23 +14623,7 @@ impl AcquireState {
             return CommandStepResult::running(self.update_to_stop(ctx)).with_events(vec![event]);
         }
 
-        if let Some(candidate_id) = self.candidate {
-            let valid = ctx
-                .resolve(candidate_id)
-                .filter(|snapshot| self.candidate_is_valid(snapshot, ctx))
-                .is_some();
-            if !valid {
-                self.candidate = None;
-                self.get_requested = false;
-            }
-        }
-
-        if self.candidate.is_none() {
-            self.candidate = self.find_candidate(ctx);
-        }
-
-        if self.candidate.is_none() {
-            self.get_requested = false;
+        let Some(candidate_id) = self.find_candidate(ctx) else {
             self.maybe_reset_buy(ctx.frame);
             self.script_invoked = false;
             let mut result = CommandStepResult::running(self.update_to_stop(ctx));
@@ -14393,33 +14631,18 @@ impl AcquireState {
                 result.operations.push(operation);
             }
             return result;
-        }
-
-        let candidate_id = self.candidate.expect("candidate present");
-        if ctx.resolve(candidate_id).is_none() {
-            self.candidate = None;
-            self.get_requested = false;
-            self.script_invoked = false;
-            return CommandStepResult::running(self.update_to_stop(ctx));
-        }
+        };
 
         self.buy_requested = false;
         self.last_buy_request = None;
-
-        if !self.get_requested {
-            self.get_requested = true;
-            self.script_invoked = false;
-            let mut result = CommandStepResult::running(self.update_to_stop(ctx));
-            let request = CommandRequest::new(CommandId::Get)
-                .with_target(Some(candidate_id))
-                .with_update_interval(40)
-                .with_mode(CommandMode::SilentSub);
-            result.operations.push(CommandOperation::PushFront(request));
-            return result;
-        }
-
         self.script_invoked = false;
-        CommandStepResult::running(self.update_to_stop(ctx))
+        let mut result = CommandStepResult::running(self.update_to_stop(ctx));
+        let request = CommandRequest::new(CommandId::Get)
+            .with_target(Some(candidate_id))
+            .with_update_interval(40)
+            .with_mode(CommandMode::SilentSub);
+        result.operations.push(CommandOperation::PushFront(request));
+        result
     }
 }
 
@@ -15375,7 +15598,6 @@ impl CommandState {
             CommandState::Acquire(state) => {
                 denumerate_object_reference(&mut state.target, object_numbers);
                 denumerate_object_reference(&mut state.ignore_container, object_numbers);
-                denumerate_object_reference(&mut state.candidate, object_numbers);
             }
             CommandState::Sell(state) => {
                 denumerate_object_reference(&mut state.target, object_numbers);
@@ -15424,9 +15646,7 @@ impl CommandState {
             CommandState::Throw(state) => clear(&mut state.target),
             CommandState::Call(state) => clear(&mut state.target2),
             CommandState::Acquire(state) => {
-                clear(&mut state.target)
-                    | clear(&mut state.ignore_container)
-                    | clear(&mut state.candidate)
+                clear(&mut state.target) | clear(&mut state.ignore_container)
             }
             CommandState::Sell(state) => {
                 clear(&mut state.target) | clear(&mut state.preferred)

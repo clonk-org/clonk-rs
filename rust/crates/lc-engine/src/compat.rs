@@ -34790,18 +34790,29 @@ impl EffectHostContext {
         HashMap<DefinitionId, CommandDefinitionSnapshot>,
         TransferZoneTable,
     ) {
-        let mut ids = self.world.order.as_ref().clone();
-        let pending_ids = self
-            .pending_order
+        // Command FindObject-style scans use forward `Game.Objects` order,
+        // not the host snapshot's storage order. Keep every storage object
+        // in the map for direct-target resolution, including inactive ones
+        // omitted from the master list; only the scan tie rank comes from
+        // the retained master list.
+        let master_ids = self.master_object_ids();
+        let master_list_indices = master_ids
             .iter()
             .copied()
-            .filter(|id| !ids.contains(id))
-            .collect::<Vec<_>>();
-        ids.extend(pending_ids);
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect::<HashMap<_, _>>();
+        let fallback_master_list_order = master_ids.len();
+        let ids = self.world_object_ids();
         let objects = ids
             .into_iter()
-            .filter_map(|id| {
+            .enumerate()
+            .filter_map(|(storage_order, id)| {
                 let object = self.get_world_object(id)?;
+                let master_list_order = master_list_indices
+                    .get(&id)
+                    .copied()
+                    .unwrap_or_else(|| fallback_master_list_order.saturating_add(storage_order));
                 let scope = self.object_scope(id);
                 let metadata = self.world.definition_metadata(object.definition_id());
                 let position = scope
@@ -34835,6 +34846,7 @@ impl EffectHostContext {
                 let selected = object.selected;
                 let snapshot = CommandObjectSnapshot {
                     id,
+                    master_list_order,
                     definition_id: object.definition_id.clone(),
                     position,
                     fixed_position: scope
@@ -34854,9 +34866,15 @@ impl EffectHostContext {
                     container: scope
                         .map(ObjectScopeContext::container)
                         .unwrap_or(object.container),
+                    action_name: scope
+                        .map(|scope| scope.effective_action_name().to_string())
+                        .unwrap_or_else(|| object.action_name.clone()),
                     action_target: scope
-                        .and_then(|scope| scope.effective_action_target(0))
-                        .or(object.action_target),
+                        .map(|scope| scope.effective_action_target(0))
+                        .unwrap_or(object.action_target),
+                    action_target2: scope
+                        .map(|scope| scope.effective_action_target(1))
+                        .unwrap_or(object.action_target2),
                     action_procedure: scope
                         .map(ObjectScopeContext::effective_action_procedure)
                         .unwrap_or_else(|| {
@@ -34897,6 +34915,10 @@ impl EffectHostContext {
                         .unwrap_or(false),
                     selected,
                     alive: scope.map(ObjectScopeContext::alive).unwrap_or(object.alive),
+                    on_fire: scope
+                        .and_then(|scope| scope.pending_update.staged_on_fire())
+                        .or_else(|| object.full_state().map(|state| state.on_fire))
+                        .unwrap_or(false),
                     contents: object.contents.clone(),
                     line_connect: metadata.map(|metadata| metadata.line_connect).unwrap_or(0),
                     ocf: scope
@@ -57795,6 +57817,31 @@ protected func Construction()
             Some(ObjectId::new(12)),
             "first MASTER-order match wins, not the sector-walk first"
         );
+    }
+
+    #[test]
+    fn command_runtime_data_ranks_objects_in_cpp_master_list_order() {
+        let mut inactive = find_world_object(13, "WOOD", 0, 0, 1);
+        inactive.status = ObjectStatus::Inactive;
+        let world = HostWorldContext::from_objects(vec![
+            find_world_object(11, "WOOD", 3, 4, 1),
+            find_world_object(12, "WOOD", -3, 4, 1),
+            inactive,
+        ])
+        .with_master_order([ObjectId::new(12), ObjectId::new(11)]);
+
+        let (result, _) = with_object_host_context_with_world(world, || {
+            HOST_CONTEXT.with(|cell| {
+                let borrow = cell.borrow();
+                let context = borrow.as_ref().expect("host context installed");
+                let (objects, _, _, _) = context.command_runtime_data();
+                assert_eq!(objects[&ObjectId::new(12)].master_list_order, 0);
+                assert_eq!(objects[&ObjectId::new(11)].master_list_order, 1);
+                assert_eq!(objects[&ObjectId::new(13)].status, ObjectStatus::Inactive);
+            });
+            Ok(())
+        });
+        result.expect("command runtime rank probe succeeds");
     }
 
     #[test]

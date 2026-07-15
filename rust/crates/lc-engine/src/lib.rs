@@ -12850,6 +12850,10 @@ pub struct Engine {
     /// semantics) on spawn and pruned of removed ids each tick. Enter/Exit
     /// never touch it (C4Object.cpp:1513-1615 only move Contents).
     #[doc(hidden)] pub exec_list: Vec<ObjectId>,
+    /// Bumped whenever `insert_exec_link` adds or re-adds a main-list link.
+    /// Such insertions can happen during the live object walk, so command
+    /// snapshots use this to refresh their forward-list tie-break ranks.
+    exec_list_insert_generation: u64,
     /// `C4GameObjects::InactiveObjects`, also stored in reverse C++ list
     /// order so the same stMain insertion rules as `exec_list` apply.
     /// Unlike the retained execution ledger above, this list is updated on
@@ -14699,6 +14703,7 @@ impl Engine {
             local_players: None,
             active_message_board_input: None,
             exec_list: Vec::new(),
+            exec_list_insert_generation: 0,
             inactive_exec_list: Vec::new(),
             pending_object_order_commands: Vec::new(),
             exec_cursor: None,
@@ -21684,11 +21689,31 @@ impl Engine {
             .collect()
     }
 
+    fn refresh_command_master_list_order(
+        exec_list: &[ObjectId],
+        command_snapshots: &mut HashMap<ObjectId, CommandObjectSnapshot>,
+    ) {
+        for snapshot in command_snapshots.values_mut() {
+            snapshot.master_list_order = usize::MAX;
+        }
+        for (master_list_order, &id) in exec_list.iter().rev().enumerate() {
+            if let Some(snapshot) = command_snapshots.get_mut(&id) {
+                snapshot.master_list_order = master_list_order;
+            }
+        }
+    }
+
     /// Build the live command view for an object inserted after the frame's
     /// bulk command snapshot. C++'s live ExecObjects iterator still runs
     /// ExecuteCommand for such newborn objects in the same frame.
     fn live_command_snapshot(&self, index: usize) -> CommandObjectSnapshot {
         let object = &self.objects[index];
+        let master_list_order = self
+            .exec_list
+            .iter()
+            .rev()
+            .position(|&id| id == object.id)
+            .unwrap_or_else(|| self.exec_list.len().saturating_add(index));
         let (procedure, line_connect, collectible, move_to_range, pathfinder, no_transfer_zones) =
             self.definitions
                 .get(&object.definition_id)
@@ -21707,6 +21732,7 @@ impl Engine {
                 .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false, 0, 0, 0));
         CommandObjectSnapshot {
             id: object.id,
+            master_list_order,
             definition_id: object.definition_id.clone(),
             position: object.state.position,
             fixed_position: object.fixed_position,
@@ -21722,7 +21748,9 @@ impl Engine {
             destroyed: object.destroyed,
             category: object.state.category,
             container: object.state.container,
+            action_name: object.state.action.name.clone(),
             action_target: object.state.action.target,
+            action_target2: object.state.action.target2,
             action_procedure: procedure,
             action_time: object.state.action.time,
             command_direction: object.state.command_direction,
@@ -21735,6 +21763,7 @@ impl Engine {
             crew_member: object.state.crew_member,
             selected: object.state.selected,
             alive: object.state.alive,
+            on_fire: object.state.on_fire,
             contents: object.state.contents.clone(),
             line_connect,
             ocf: object.state.ocf,
@@ -21927,9 +21956,17 @@ impl Engine {
             .collect();
         let solid_mask_indices = self.active_solid_mask_indices();
 
+        let master_list_indices = self
+            .exec_list
+            .iter()
+            .rev()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect::<HashMap<_, _>>();
         let mut command_snapshots: HashMap<ObjectId, CommandObjectSnapshot> =
             HashMap::with_capacity(self.objects.len());
-        for object in &self.objects {
+        for (fallback_order, object) in self.objects.iter().enumerate() {
             let (
                 procedure,
                 line_connect,
@@ -21961,6 +21998,12 @@ impl Engine {
                 object.id,
                 CommandObjectSnapshot {
                     id: object.id,
+                    master_list_order: master_list_indices
+                        .get(&object.id)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            self.exec_list.len().saturating_add(fallback_order)
+                        }),
                     definition_id: object.definition_id.clone(),
                     position: object.state.position,
                     fixed_position: object.fixed_position,
@@ -21978,7 +22021,9 @@ impl Engine {
                     destroyed: object.destroyed,
                     category: object.state.category,
                     container: object.state.container,
+                    action_name: object.state.action.name.clone(),
                     action_target: object.state.action.target,
+                    action_target2: object.state.action.target2,
                     action_procedure: procedure,
                     command_direction: object.state.command_direction,
                     construction: object.state.construction,
@@ -21999,6 +22044,7 @@ impl Engine {
                     crew_member: object.state.crew_member,
                     selected: selected_objects.contains(&object.id),
                     alive: object.state.alive,
+                    on_fire: object.state.on_fire,
                     contents: object.state.contents.clone(),
                     line_connect,
                     ocf,
@@ -22094,6 +22140,12 @@ impl Engine {
                 }
             }
         }
+        // Command scans walk `Game.Objects` from First to Next, while
+        // `exec_list` is that master list reversed. Refresh the ephemeral
+        // rank after pruning/fixing/appending so HashMap iteration can never
+        // decide an equal-distance command target.
+        Self::refresh_command_master_list_order(&self.exec_list, &mut command_snapshots);
+        let mut command_snapshot_exec_insert_generation = self.exec_list_insert_generation;
         if let Some(traced) = coach_debug_id().filter(|_| (1..=300).contains(&frame)) {
             if let Some(idx) = self.find_object_index(ObjectId::new(traced)) {
                 let object = &self.objects[idx];
@@ -22146,6 +22198,10 @@ impl Engine {
             .exec_cursor
             .is_some_and(|cursor| cursor < self.exec_list.len())
         {
+            if command_snapshot_exec_insert_generation != self.exec_list_insert_generation {
+                Self::refresh_command_master_list_order(&self.exec_list, &mut command_snapshots);
+                command_snapshot_exec_insert_generation = self.exec_list_insert_generation;
+            }
             let cursor = self.exec_cursor.unwrap_or_default();
             let current_id = self.exec_list[cursor];
             self.exec_cursor = Some(cursor + 1);
@@ -23123,10 +23179,17 @@ impl Engine {
             // ExecuteCommand reads the CACHED obj->OCF (refreshed at this
             // object's Execute-start, C4Object.cpp:1058).
             let ocf = self.objects[idx].state.ocf;
+            let master_list_order = self
+                .exec_list
+                .iter()
+                .rev()
+                .position(|&id| id == object_id)
+                .unwrap_or_else(|| self.exec_list.len().saturating_add(idx));
             command_snapshots.insert(
                 object_id,
                 CommandObjectSnapshot {
                     id: object_id,
+                    master_list_order,
                     definition_id: self.objects[idx].definition_id.clone(),
                     position: self.objects[idx].state.position,
                     fixed_position: self.objects[idx].fixed_position,
@@ -23146,7 +23209,9 @@ impl Engine {
                     destroyed: self.objects[idx].destroyed,
                     category: self.objects[idx].state.category,
                     container: self.objects[idx].state.container,
+                    action_name: self.objects[idx].state.action.name.clone(),
                     action_target: self.objects[idx].state.action.target,
+                    action_target2: self.objects[idx].state.action.target2,
                     action_procedure: procedure,
                     command_direction: self.objects[idx].state.command_direction,
                     construction: self.objects[idx].state.construction,
@@ -23158,6 +23223,7 @@ impl Engine {
                     crew_member: self.objects[idx].state.crew_member,
                     selected: self.objects[idx].state.selected,
                     alive: self.objects[idx].state.alive,
+                    on_fire: self.objects[idx].state.on_fire,
                     contents: self.objects[idx].state.contents.clone(),
                     line_connect,
                     ocf,
@@ -35207,6 +35273,7 @@ impl Engine {
 
     fn insert_exec_link(&mut self, position: usize, id: ObjectId) {
         self.exec_list.insert(position, id);
+        self.exec_list_insert_generation = self.exec_list_insert_generation.wrapping_add(1);
         let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
         if let Some(sectors) = self.sectors.as_mut() {
             sectors.set_master_order(master_order);
