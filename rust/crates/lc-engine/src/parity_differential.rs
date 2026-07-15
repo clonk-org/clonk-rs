@@ -10,7 +10,7 @@
 //! `src/C4SolidMaskBitmap.h`, plus complete `C4Object::DigOutMaterialCast`,
 //! `C4Game::ShakeObjects`, `C4Object::Fling`, `C4Landscape::ClearPix`,
 //! `BlastFreePix`, `BlastFree`, `ExecuteScan`, and `DoScan` bodies and the
-//! bottom-flight `C4Object::ContactAction` arm) by
+//! bottom/top/side-flight `C4Object::ContactAction` arms) by
 //! `parity/oracle/gen_golden.sh` — so this is a genuine differential against
 //! the C++ oracle, not a Rust-vs-Rust regression.
 //!
@@ -35,10 +35,10 @@ use crate::math::{
 use crate::rng::LcgRng;
 use crate::scenario::MapPixelClassifier;
 use crate::{
-    ActionSpec, ActionState, CommandDirection, Definition, DefinitionRect, DefinitionSpriteImage,
-    DefinitionTargetRect, Direction, Engine, ObjectBaseGraphics, ObjectStatus, ObjectUpdate,
-    PhysicalInfo, PhysicsSettings, PlayerConfig, ShapeAttachRecord, SpawnConfig, CATEGORY_LIVING,
-    CATEGORY_OBJECT, OWNER_NONE,
+    contact_action_wall_tumble_x, ActionSpec, ActionState, CommandDirection, Definition,
+    DefinitionRect, DefinitionSpriteImage, DefinitionTargetRect, Direction, Engine,
+    ObjectBaseGraphics, ObjectStatus, ObjectUpdate, PhysicalInfo, PhysicsSettings, PlayerConfig,
+    ShapeAttachRecord, SpawnConfig, CATEGORY_LIVING, CATEGORY_OBJECT, OWNER_NONE,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1502,6 +1502,115 @@ fn parity_differential_matches_cpp_golden() {
             i(case, "ydir_after"),
             i64::from(object.fixed_velocity.y.val()),
         );
+    }
+
+    // 6f. C4Object::ContactAction's ceiling and wall DFA_FLIGHT arms
+    // (C4Object.cpp:4400-4500), including the common unresolved-flight tail.
+    // The enabled controls take Hangle/Scale. At the same low speed, a
+    // disabled action must take Tumble instead; the tail then slides it free
+    // and zeroes the transient +/-FIXED100(150) wall velocity.
+    for (index, case) in golden["contact_action_top_side_flight"]
+        .as_array()
+        .expect("contact_action_top_side_flight is an array")
+        .iter()
+        .enumerate()
+    {
+        let mut definition = Definition::from_script("CFTS", "Contact top/side oracle", "#strict\n")
+            .expect("contact top/side oracle compiles");
+        definition.configure_actions(
+            Some("Flight".to_string()),
+            HashMap::from([
+                (
+                    "Flight".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_disabled(i(case, "disabled") != 0),
+                ),
+                (
+                    "Tumble".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+                (
+                    "Scale".to_string(),
+                    ActionSpec::default().with_procedure("SCALE"),
+                ),
+                (
+                    "Hangle".to_string(),
+                    ActionSpec::default().with_procedure("HANGLE"),
+                ),
+            ]),
+        );
+        definition.set_physical(PhysicalInfo {
+            can_scale: i(case, "can_scale") as i32,
+            can_hangle: i(case, "can_hangle") as i32,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("contact top/side oracle registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("CFTS")
+                    .with_position(crate::Vector2::new(
+                        i(case, "x_before") as i32,
+                        i(case, "y_before") as i32,
+                    ))
+                    .with_action(ActionState::new("Flight"))
+                    .with_direction(Direction::Right)
+                    .with_fixed_velocity(FixedVec2::new(
+                        C4Fixed::from_raw(i(case, "xdir_before") as i32),
+                        C4Fixed::from_raw(i(case, "ydir_before") as i32),
+                    ))
+                    .with_category(CATEGORY_OBJECT)
+                    .with_loaded(true),
+            )
+            .expect("contact top/side oracle object spawns");
+        let object_index = engine
+            .find_object_index(id)
+            .expect("contact top/side oracle object exists");
+        engine.objects[object_index].state.ocf = i(case, "ocf") as u32;
+        let definition_id = engine.objects[object_index].definition_id.clone();
+        let contact = i(case, "contact") as u32;
+        engine
+            .exec_contact_action(object_index, contact, &definition_id, &[])
+            .expect("top/side flight ContactAction executes");
+
+        let object = &engine.objects[object_index];
+        let action_after = match object.state.action.name.as_str() {
+            "Flight" => 0,
+            "Tumble" => 4,
+            "Scale" => 5,
+            "Hangle" => 6,
+            action => panic!("unexpected top/side contact action `{action}`"),
+        };
+        let xdir_before_flight_stuck = if i(case, "disabled") != 0 {
+            i64::from(contact_action_wall_tumble_x(contact).val())
+        } else {
+            0
+        };
+        for (field, actual) in [
+            ("action_after", action_after),
+            (
+                "direction_after",
+                i64::from(object.state.direction.to_script_value()),
+            ),
+            ("xdir_before_flight_stuck", xdir_before_flight_stuck),
+            ("ydir_before_flight_stuck", 0),
+            ("x_after", i64::from(object.state.position.x)),
+            ("y_after", i64::from(object.state.position.y)),
+            ("xdir_after", i64::from(object.fixed_velocity.x.val())),
+            ("ydir_after", i64::from(object.fixed_velocity.y.val())),
+        ] {
+            expect_eq(
+                "contact_action_top_side_flight",
+                index,
+                field,
+                i(case, field),
+                actual,
+            );
+        }
     }
 
     // 7. Material corrosion execution RNG ordering.

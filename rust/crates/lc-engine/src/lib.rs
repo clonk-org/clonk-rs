@@ -14178,6 +14178,14 @@ fn contact_callback_name(cnat: u32) -> Option<&'static str> {
     }
 }
 
+fn contact_action_wall_tumble_x(cnat: u32) -> C4Fixed {
+    match cnat {
+        CNAT_LEFT => math::fixed100(150),
+        CNAT_RIGHT => -math::fixed100(150),
+        _ => C4Fixed::ZERO,
+    }
+}
+
 #[doc(hidden)]
 pub fn movement_hit_speed_flags(velocity: FixedVec2) -> u32 {
     let speed = i64::from(velocity.x.val()).abs() + i64::from(velocity.y.val()).abs();
@@ -32488,7 +32496,7 @@ impl Engine {
                     }
                 }
                 ActionProcedure::Flight => {
-                    if ocf & crate::ocf::HIT_SPEED3 != 0 {
+                    if ocf & crate::ocf::HIT_SPEED3 != 0 || action_disabled {
                         self.object_action_tumble(
                             idx,
                             definition_id,
@@ -32513,13 +32521,14 @@ impl Engine {
         }
 
         // Hit Left / Right Walls (C4Object.cpp:4406-4520)
-        for (cnat, wall_direction, tumble_x) in [
-            (CNAT_LEFT, Direction::Left, math::fixed100(150)),
-            (CNAT_RIGHT, Direction::Right, -math::fixed100(150)),
+        for (cnat, wall_direction) in [
+            (CNAT_LEFT, Direction::Left),
+            (CNAT_RIGHT, Direction::Right),
         ] {
             if t_contact & cnat == 0 {
                 continue;
             }
+            let tumble_x = contact_action_wall_tumble_x(cnat);
             let toward = if wall_direction == Direction::Left {
                 CommandDirection::Left
             } else {
@@ -32532,7 +32541,7 @@ impl Engine {
             };
             match procedure {
                 ActionProcedure::Flight => {
-                    if ocf & crate::ocf::HIT_SPEED3 != 0 {
+                    if ocf & crate::ocf::HIT_SPEED3 != 0 || action_disabled {
                         self.object_action_tumble(
                             idx,
                             definition_id,

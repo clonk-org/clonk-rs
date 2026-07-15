@@ -36,13 +36,14 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `shake_objects` | complete `C4Game::ShakeObjects` + `C4Object::Fling` bodies | master-order gates, `Random(3)`/`Rnd3()` consumption, attachment material identity, and raw Fling fallback |
 | `blast_free` | complete `C4Landscape::ClearPix`, `BlastFreePix`, and `BlastFree` bodies | exact circle scan, pre-mutation material counts, duplicate-slot BlastShiftTo/DefaultMatTex byte selection, IFT preservation, and RNG order |
 | `contact_action_bottom_flight` | complete bottom `DFA_FLIGHT` arm of `C4Object::ContactAction` + action helpers | the `(OCF_HitSpeed4 \|\| fDisabled)` FlatUp gate, including low-speed disabled actions |
+| `contact_action_top_side_flight` | complete top/left/right `DFA_FLIGHT` arms + action helpers + unresolved-flight tail | the `(OCF_HitSpeed3 \|\| fDisabled)` Tumble gates, exact transient wall kicks, enabled Hangle/Scale controls, and final slide-free state |
 | `movement` | `src/C4Movement.cpp:260,627` accumulation | the Theme-C core: `fix += dir`, `ydir += gravity` |
 
 **Out of scope (Phase 2):** the C++ per-pixel collision/contact *detection* loop
 (`C4Movement.cpp` `while (x != ctcox)` with `ContactCheck`/friction/redirection,
 item 4) and evolving landscape/material state beyond the isolated `_PathFree`
-and `BlastFree` fixtures above. The isolated bottom-flight `ContactAction`
-transition after detection is covered. Validating the remaining loop requires
+and `BlastFree` fixtures above. The isolated flight `ContactAction`
+transitions after detection are covered. Validating the remaining loop requires
 running the full C++ engine on a content scenario via the `RustEngineBridge`
 live shadow-diff — see "Phase 2" below.
 
@@ -123,6 +124,12 @@ live shadow-diff — see "Phase 2" below.
   FlatUp exactly like `OCF_HitSpeed4`, while enabled low-speed flight walks.
   Rust drives the matching ActMaps through `Engine::exec_contact_action` and
   compares action, direction, and raw fixed velocities.
+- `contact_action_top_side_flight` mechanically extracts the ceiling and both
+  wall `DFA_FLIGHT` arms, `ObjectActionTumble`/`Scale`/`Hangle`, and the shared
+  unresolved-flight tail. Enabled controls enter Hangle/Scale; matching
+  low-speed disabled cases enter Tumble, bypass those fallbacks, and compare
+  the pre-tail raw Tumble velocity plus final action, direction, position, and
+  raw fixed velocity after slide-free.
 
 If a divergence is ever a *bug in the golden* rather than the Rust port, fix the
 C++ source and regenerate.

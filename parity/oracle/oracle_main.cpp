@@ -32,9 +32,10 @@
 //   * `C4Landscape::ExecuteScan` and `DoScan` are mechanically extracted in
 //     full; a 6x8 Water/Ice Surface8 fixture records the exact conversion
 //     cadence and ScanX cursor advancement.
-//   * The complete bottom-contact DFA_FLIGHT arm of `C4Object::ContactAction`
-//     and its Walk/Kneel/Flat helpers are mechanically extracted; a minimal
-//     object scaffold records the low-speed `Disabled` transition to FlatUp.
+//   * The complete bottom/top/side DFA_FLIGHT arms of
+//     `C4Object::ContactAction`, their action helpers, and the shared
+//     unresolved-flight tail are mechanically extracted; a minimal object
+//     scaffold records low-speed `Disabled` contact transitions.
 //   * `Randomize3`/`Rnd3` are reproduced verbatim from `src/C4Random.cpp`
 //     (10 trivial lines around the real `Random()`); kept in sync via the
 //     provenance comment below.
@@ -413,10 +414,15 @@ static void printLandscapeScanCase()
 inline constexpr int32_t C4D_Living_Oracle = 1 << 3;
 inline constexpr int32_t C4D_Object_Oracle = 1 << 4;
 inline constexpr int32_t MNone_Oracle = -1;
+inline constexpr int32_t DIR_Left = 0;
+inline constexpr int32_t DIR_Right = 1;
 inline constexpr int32_t ContactActionFlight_Oracle = 0;
 inline constexpr int32_t ContactActionFlatUp_Oracle = 1;
 inline constexpr int32_t ContactActionKneelDown_Oracle = 2;
 inline constexpr int32_t ContactActionWalk_Oracle = 3;
+inline constexpr int32_t ContactActionTumble_Oracle = 4;
+inline constexpr int32_t ContactActionScale_Oracle = 5;
+inline constexpr int32_t ContactActionHangle_Oracle = 6;
 int32_t MVehic = 1;
 
 inline bool MatVehicle(int32_t material) { return material == MVehic; }
@@ -432,6 +438,12 @@ struct C4ObjectLink
 struct C4ObjectListOracle
 {
     C4ObjectLink *First{};
+};
+
+struct C4PhysicalInfo
+{
+    int32_t CanScale{};
+    int32_t CanHangle{};
 };
 
 struct C4Object
@@ -461,6 +473,8 @@ struct C4Object
     C4Fixed ydir{Fix0};
     int32_t Mobile{};
     int32_t ContactAction{ContactActionFlight_Oracle};
+    int32_t ContactActionXdirBeforeFlightStuck{};
+    int32_t ContactActionYdirBeforeFlightStuck{};
 
     void UpdatLastEnergyLossCause(int32_t cause)
     {
@@ -477,12 +491,19 @@ struct C4Object
         if (action == "FlatUp") ContactAction = ContactActionFlatUp_Oracle;
         else if (action == "KneelDown") ContactAction = ContactActionKneelDown_Oracle;
         else if (action == "Walk") ContactAction = ContactActionWalk_Oracle;
+        else if (action == "Tumble") ContactAction = ContactActionTumble_Oracle;
+        else if (action == "Scale") ContactAction = ContactActionScale_Oracle;
+        else if (action == "Hangle") ContactAction = ContactActionHangle_Oracle;
         else return false;
         return true;
     }
 
     void SetDir(int32_t dir) { Action.Dir = dir; }
+    void ForcePosition(int32_t new_x, int32_t new_y) { x = new_x; y = new_y; }
     void ContactActionBottomFlight(int32_t fDisabled);
+    void ContactActionTopFlight(int32_t fDisabled, C4PhysicalInfo *pPhysical);
+    void ContactActionLeftFlight(int32_t fDisabled, C4PhysicalInfo *pPhysical);
+    void ContactActionRightFlight(int32_t fDisabled, C4PhysicalInfo *pPhysical);
 };
 
 // Exact source text generated from C4ObjectCom.cpp. Keeping the helpers exact
@@ -490,11 +511,17 @@ struct C4Object
 #include "object_action_walk.inc"
 #include "object_action_kneel.inc"
 #include "object_action_flat.inc"
+#define ObjectActionTumble ObjectActionTumbleContactOracle
+#include "object_action_tumble.inc"
+#undef ObjectActionTumble
+#include "object_action_scale.inc"
+#include "object_action_hangle.inc"
 
 // Exact first DFA_FLIGHT arm from C4Object::ContactAction. The scaffold fixes
 // iProcedure to flight and supplies only the locals surrounding the extracted
 // switch arm; the production OR condition itself is compiled verbatim.
 #define DFA_FLIGHT 1
+#define ObjectActionTumble ObjectActionTumbleContactOracle
 void C4Object::ContactActionBottomFlight(int32_t fDisabled)
 {
     C4Fixed last_xdir;
@@ -505,6 +532,49 @@ void C4Object::ContactActionBottomFlight(int32_t fDisabled)
     default: return;
     }
 }
+
+void C4Object::ContactActionTopFlight(int32_t fDisabled, C4PhysicalInfo *pPhysical)
+{
+    int32_t iProcedure = DFA_FLIGHT;
+    uint32_t t_contact = CNAT_Top;
+    switch (iProcedure)
+    {
+#include "contact_action_top_flight.inc"
+    default: return;
+    }
+    ContactActionXdirBeforeFlightStuck = xdir.val;
+    ContactActionYdirBeforeFlightStuck = ydir.val;
+#include "contact_action_flight_stuck.inc"
+}
+
+void C4Object::ContactActionLeftFlight(int32_t fDisabled, C4PhysicalInfo *pPhysical)
+{
+    int32_t iProcedure = DFA_FLIGHT;
+    uint32_t t_contact = CNAT_Left;
+    switch (iProcedure)
+    {
+#include "contact_action_left_flight.inc"
+    default: return;
+    }
+    ContactActionXdirBeforeFlightStuck = xdir.val;
+    ContactActionYdirBeforeFlightStuck = ydir.val;
+#include "contact_action_flight_stuck.inc"
+}
+
+void C4Object::ContactActionRightFlight(int32_t fDisabled, C4PhysicalInfo *pPhysical)
+{
+    int32_t iProcedure = DFA_FLIGHT;
+    uint32_t t_contact = CNAT_Right;
+    switch (iProcedure)
+    {
+#include "contact_action_right_flight.inc"
+    default: return;
+    }
+    ContactActionXdirBeforeFlightStuck = xdir.val;
+    ContactActionYdirBeforeFlightStuck = ydir.val;
+#include "contact_action_flight_stuck.inc"
+}
+#undef ObjectActionTumble
 #undef DFA_FLIGHT
 
 inline bool ObjectActionTumble(C4Object *, int32_t, C4Fixed, C4Fixed) { return false; }
@@ -721,6 +791,61 @@ static void printContactActionBottomFlightCases()
                "\"xdir_after\":%d,\"ydir_after\":%d}",
                rows[index].Name, rows[index].Ocf, rows[index].Disabled,
                object.ContactAction, object.Action.Dir, object.xdir.val, object.ydir.val);
+    }
+    printf("]");
+}
+
+static void printContactActionTopSideFlightCases()
+{
+    struct Row
+    {
+        const char *Name;
+        uint32_t Contact;
+        int32_t Disabled;
+        int32_t CanScale;
+        int32_t CanHangle;
+    };
+    const Row rows[] = {
+        {"top_enabled", CNAT_Top, 0, 0, 1},
+        {"top_disabled", CNAT_Top, 1, 0, 1},
+        {"left_enabled", CNAT_Left, 0, 1, 0},
+        {"left_disabled", CNAT_Left, 1, 1, 0},
+        {"right_enabled", CNAT_Right, 0, 1, 0},
+        {"right_disabled", CNAT_Right, 1, 1, 0},
+    };
+
+    printf("\"contact_action_top_side_flight\":[");
+    for (std::size_t index = 0; index < sizeof(rows) / sizeof(rows[0]); ++index)
+    {
+        C4Object object;
+        object.Action.Dir = DIR_Right;
+        object.OCF = 0;
+        object.x = 10;
+        object.y = 10;
+        object.xdir.val = 32768;
+        object.ydir.val = 6553;
+        C4PhysicalInfo physical{rows[index].CanScale, rows[index].CanHangle};
+        switch (rows[index].Contact)
+        {
+        case CNAT_Top: object.ContactActionTopFlight(rows[index].Disabled, &physical); break;
+        case CNAT_Left: object.ContactActionLeftFlight(rows[index].Disabled, &physical); break;
+        case CNAT_Right: object.ContactActionRightFlight(rows[index].Disabled, &physical); break;
+        }
+        if (index) printf(",");
+        printf("{\"name\":\"%s\",\"contact\":%u,\"ocf\":0,\"disabled\":%d,"
+               "\"can_scale\":%d,\"can_hangle\":%d,"
+               "\"x_before\":10,\"y_before\":10,"
+               "\"xdir_before\":32768,\"ydir_before\":6553,"
+               "\"action_after\":%d,\"direction_after\":%d,"
+               "\"xdir_before_flight_stuck\":%d,\"ydir_before_flight_stuck\":%d,"
+               "\"x_after\":%d,\"y_after\":%d,"
+               "\"xdir_after\":%d,\"ydir_after\":%d}",
+               rows[index].Name, rows[index].Contact, rows[index].Disabled,
+               rows[index].CanScale, rows[index].CanHangle,
+               object.ContactAction, object.Action.Dir,
+               object.ContactActionXdirBeforeFlightStuck,
+               object.ContactActionYdirBeforeFlightStuck, object.x, object.y,
+               object.xdir.val, object.ydir.val);
     }
     printf("]");
 }
@@ -1561,9 +1686,11 @@ int main()
     printLandscapeScanCase();
     printf(",\n");
 
-    // 20. Exact bottom DFA_FLIGHT ContactAction arm, especially the
-    //     low-speed `fDisabled` path into ObjectActionFlat / FlatUp.
+    // 20. Exact DFA_FLIGHT ContactAction arms, especially the low-speed
+    //     `fDisabled` paths into FlatUp/Tumble instead of Hangle/Scale.
     printContactActionBottomFlightCases();
+    printf(",\n");
+    printContactActionTopSideFlightCases();
     printf(",\n");
 
     // 21. movement: per-frame sub-pixel accumulation (the Theme-C core).

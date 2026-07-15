@@ -52391,6 +52391,110 @@ public func Probe(object target) {
     }
 
     #[test]
+    fn disabled_tumble_reenters_on_top_and_side_contacts() {
+        // C4Object::ContactAction's top/left/right FLIGHT arms use
+        // `(OCF_HitSpeed3 || fDisabled)`: a low-speed disabled Tumble must
+        // re-enter Tumble instead of taking the available Hangle/Scale paths
+        // (C4Object.cpp:4400-4500). The later flight-stuck tail erases the
+        // wall helper's transient +/-FIXED100(150) velocity.
+        for (contact, expected_direction, expected_position) in [
+            (CNAT_TOP, Direction::Right, Vector2::new(10, 11)),
+            (CNAT_LEFT, Direction::Left, Vector2::new(11, 11)),
+            (CNAT_RIGHT, Direction::Right, Vector2::new(9, 11)),
+        ] {
+            let mut definition = Definition::from_script(
+                "TMBL",
+                "Tumble callback probe",
+                r#"#strict
+local callback_order;
+protected func TumbleStart() { callback_order = callback_order * 10 + 1; return(1); }
+protected func TumbleAbort(int old_phase) { callback_order = callback_order * 10 + 2; return(1); }
+protected func ScaleStart() { callback_order = callback_order * 10 + 3; return(1); }
+protected func HangleStart() { callback_order = callback_order * 10 + 4; return(1); }
+"#,
+            )
+            .expect("tumble callback probe compiles");
+            definition.set_c4_callback_convention(true);
+            definition.configure_actions(
+                Some("Tumble".to_string()),
+                HashMap::from([
+                    (
+                        "Tumble".to_string(),
+                        ActionSpec::default()
+                            .with_procedure("FLIGHT")
+                            .with_disabled(true)
+                            .with_start_call("TumbleStart")
+                            .with_abort_call("TumbleAbort"),
+                    ),
+                    (
+                        "Scale".to_string(),
+                        ActionSpec::default()
+                            .with_procedure("SCALE")
+                            .with_start_call("ScaleStart"),
+                    ),
+                    (
+                        "Hangle".to_string(),
+                        ActionSpec::default()
+                            .with_procedure("HANGLE")
+                            .with_start_call("HangleStart"),
+                    ),
+                ]),
+            );
+            definition.set_physical(PhysicalInfo {
+                can_scale: 1,
+                can_hangle: 1,
+                ..PhysicalInfo::default()
+            });
+
+            let mut engine = Engine::with_seed(0);
+            engine
+                .register_definition(definition)
+                .expect("tumble definition registers");
+            let id = engine
+                .spawn_object(
+                    SpawnConfig::new("TMBL")
+                        .with_position(Vector2::new(10, 10))
+                        .with_fixed_position(FixedVec2::from_ints(10, 10))
+                        .with_action(ActionState::new("Tumble"))
+                        .with_direction(Direction::Right)
+                        .with_local_vars(HashMap::from([(
+                            "callback_order".to_string(),
+                            Value::Int(0),
+                        )]))
+                        .with_fixed_velocity(FixedVec2::new(
+                            C4Fixed::from_raw(32_768),
+                            C4Fixed::from_raw(6_553),
+                        ))
+                        .with_loaded(true),
+                )
+                .expect("tumbling object spawns");
+            let idx = engine.find_object_index(id).expect("tumbling object exists");
+            assert_eq!(engine.objects[idx].state.ocf & ocf::HIT_SPEED3, 0);
+            let definition_id = engine.objects[idx].definition_id.clone();
+
+            engine
+                .exec_contact_action(idx, contact, &definition_id, &[])
+                .expect("contact action applies");
+
+            let object = &engine.objects[idx];
+            assert_eq!(object.state.action.name, "Tumble");
+            assert_eq!(
+                object.state.local_vars.get("callback_order"),
+                Some(&Value::Int(12)),
+                "Tumble Start/Abort must run without a Scale/Hangle StartCall"
+            );
+            assert_eq!(object.state.direction, expected_direction);
+            assert_eq!(object.state.position, expected_position);
+            assert_eq!(
+                object.fixed_position,
+                FixedVec2::from_ints(expected_position.x, expected_position.y,)
+            );
+            assert_eq!(object.fixed_velocity, FixedVec2::ZERO);
+            assert_eq!(object.state.velocity, Vector2::ZERO);
+        }
+    }
+
+    #[test]
     fn flight_slide_free_uses_live_position_for_each_contact() {
         // C4Object::ContactAction applies Right, Left, then Top corrections
         // through ForcePosition using the live x/y after every move

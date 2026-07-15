@@ -7,8 +7,8 @@
 # traversal (src/C4LandscapePath.h), action-direction decisions
 # (src/C4ActionDirection.h), and active solid-mask bitmap sampling
 # (src/C4SolidMaskBitmap.h), complete C4Object::DigOutMaterialCast and
-# landscape BlastFree methods, and the bottom-flight C4Object::ContactAction
-# arm. The Rust side
+# landscape BlastFree methods, and the bottom/top/side-flight
+# C4Object::ContactAction arms. The Rust side
 # (rust/crates/lc-engine/src/parity_differential.rs) diffs against the committed
 # JSON, so this script only needs to run when the C++ primitives or oracle
 # coverage change.
@@ -91,7 +91,45 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Object.cpp" > "$gen/contact_action_bottom_flight.inc"
 
-for helper_spec in "Walk walk" "Kneel kneel" "Flat flat"; do
+# The ceiling and wall DFA_FLIGHT arms contain the independent
+# `(OCF_HitSpeed3 || fDisabled)` gates. Extract each complete arm, plus the
+# shared unresolved-flight tail that runs after a tumble's switch `break`.
+awk '
+  /^void C4Object::ContactAction\(\)/ { in_contact_action = 1 }
+  in_contact_action && /^[[:space:]]*\/\/ Hit Ceiling/ { in_section = 1 }
+  in_section && /^[[:space:]]*case DFA_FLIGHT:/ && !p { p = 1 }
+  p && /^[[:space:]]*case DFA_DIG:/ { found = 1; exit }
+  p { print }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/contact_action_top_flight.inc"
+
+awk '
+  /^void C4Object::ContactAction\(\)/ { in_contact_action = 1 }
+  in_contact_action && /^[[:space:]]*\/\/ Hit Left Wall/ { in_section = 1 }
+  in_section && /^[[:space:]]*case DFA_FLIGHT:/ && !p { p = 1 }
+  p && /^[[:space:]]*case DFA_WALK:/ { found = 1; exit }
+  p { print }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/contact_action_left_flight.inc"
+
+awk '
+  /^void C4Object::ContactAction\(\)/ { in_contact_action = 1 }
+  in_contact_action && /^[[:space:]]*\/\/ Hit Right Wall/ { in_section = 1 }
+  in_section && /^[[:space:]]*case DFA_FLIGHT:/ && !p { p = 1 }
+  p && /^[[:space:]]*case DFA_WALK:/ { found = 1; exit }
+  p { print }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/contact_action_right_flight.inc"
+
+awk '
+  /^void C4Object::ContactAction\(\)/ { in_contact_action = 1 }
+  in_contact_action && /^[[:space:]]*\/\/ Flight stuck/ { p = 1 }
+  p && /^}$/ { found = 1; exit }
+  p { print }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/contact_action_flight_stuck.inc"
+
+for helper_spec in "Walk walk" "Kneel kneel" "Flat flat" "Tumble tumble" "Scale scale" "Hangle hangle"; do
   set -- $helper_spec
   helper="$1"
   helper_lower="$2"
