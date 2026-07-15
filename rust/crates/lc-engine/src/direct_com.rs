@@ -6,7 +6,7 @@
 //! with the COM_Single/COM_Double/release modifiers.
 
 use crate::action::ActionProcedure;
-use crate::command::{CommandId, CommandMode, CommandOperation, CommandRequest};
+use crate::command::{CommandData, CommandId, CommandMode, CommandOperation, CommandRequest};
 use crate::compat;
 use crate::control::{
     COM_CLEAR_PRESSED_COMS, COM_CONTENTS, COM_CURSOR_FIRST, COM_CURSOR_LAST, COM_CURSOR_LEFT,
@@ -33,10 +33,16 @@ pub const C4_DOUBLE_CLICK: i32 = 10;
 
 #[derive(Clone, Copy)]
 enum PlayerObjectCommandMode {
+    None,
     Set,
     Add,
     Append,
 }
+
+const C4P_COMMAND_SET: i32 = 1;
+const C4P_COMMAND_ADD: i32 = 2;
+const C4P_COMMAND_APPEND: i32 = 4;
+const C4P_COMMAND_RANGE: i32 = 8;
 
 /// `ComName(byCom)` (C4ObjectCom.cpp:800-852) for raw com bytes; feeds the
 /// `Control{}`/`Contained{}` script callback names.
@@ -189,6 +195,70 @@ impl Engine {
             self.count_player_control(owner, CountedControlType::DirectCom, id, 1);
         }
         self.player_in_com(owner, command as u8, data)
+    }
+
+    /// `C4ControlPlayerCommand::Execute` (C4Control.cpp:413-426): count the
+    /// raw packet checksum once, resolve both tolerant object-number pointers,
+    /// then route through `C4Player::ObjectCommand` add-mode semantics.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_player_command(
+        &mut self,
+        owner: i32,
+        command: i32,
+        x: i32,
+        y: i32,
+        target: i32,
+        target2: i32,
+        data: i32,
+        add_mode: i32,
+    ) -> Result<(), EngineError> {
+        if !self.players.contains_key(&owner) {
+            return Ok(());
+        }
+
+        let checksum = command
+            .wrapping_add(x)
+            .wrapping_add(y)
+            .wrapping_add(target)
+            .wrapping_add(target2);
+        self.count_player_control(owner, CountedControlType::Command, checksum, 1);
+
+        let Some(command) = CommandId::from_raw(command) else {
+            return Ok(());
+        };
+        // C4GameObjects::ObjectPointer searches the active and inactive lists
+        // without a Status check. The Rust object vector likewise retains
+        // status-zero objects until detach; only an absent/nonpositive number
+        // becomes nil here.
+        let resolve = |engine: &Self, number: i32| {
+            (number > 0)
+                .then(|| ObjectId::new(number as u64))
+                .filter(|id| engine.find_object_index(*id).is_some())
+        };
+        let target = resolve(self, target);
+        let target2 = resolve(self, target2);
+        let mode = if add_mode & C4P_COMMAND_APPEND != 0 {
+            PlayerObjectCommandMode::Append
+        } else if add_mode & C4P_COMMAND_ADD != 0 {
+            PlayerObjectCommandMode::Add
+        } else if add_mode & C4P_COMMAND_SET != 0 {
+            PlayerObjectCommandMode::Set
+        } else {
+            PlayerObjectCommandMode::None
+        };
+        self.player_crew_object_command(
+            owner,
+            command,
+            target,
+            target2,
+            x,
+            y,
+            data,
+            mode,
+            add_mode & C4P_COMMAND_RANGE != 0,
+        )?;
+        Ok(())
     }
 
     pub(crate) fn count_player_control(
@@ -1991,6 +2061,7 @@ impl Engine {
                 Some(container),
                 None,
                 count,
+                0,
                 0,
                 PlayerObjectCommandMode::Set,
                 true,
@@ -4619,7 +4690,7 @@ impl Engine {
         } else {
             PlayerObjectCommandMode::Set
         };
-        self.player_crew_object_command(owner, command, target, None, tx, ty, mode, ranged)
+        self.player_crew_object_command(owner, command, target, None, tx, ty, 0, mode, ranged)
     }
 
     /// `C4MouseControl::ButtonUpDragMoving`: issue one independent carryable
@@ -4658,6 +4729,7 @@ impl Engine {
                 None,
                 position.x,
                 position.y,
+                0,
                 mode,
                 false,
             )?;
@@ -4708,6 +4780,7 @@ impl Engine {
                 CommandId::Put,
                 Some(container),
                 Some(object),
+                0,
                 0,
                 0,
                 mode,
@@ -4769,6 +4842,7 @@ impl Engine {
                 put_target,
                 position.x,
                 position.y,
+                0,
                 mode,
                 false,
             )?;
@@ -4797,6 +4871,7 @@ impl Engine {
             Some(target),
             0,
             0,
+            0,
             PlayerObjectCommandMode::Add,
             false,
         )
@@ -4813,6 +4888,7 @@ impl Engine {
         target2: Option<ObjectId>,
         tx: i32,
         ty: i32,
+        data: i32,
         mode: PlayerObjectCommandMode,
         ranged: bool,
     ) -> Result<bool, EngineError> {
@@ -4856,7 +4932,9 @@ impl Engine {
                     continue;
                 }
             }
-            self.object_command_to_obj(index, command, target, target2, tx, ty, mode, true)?;
+            self.object_command_to_obj(
+                index, command, target, target2, tx, ty, data, mode, true,
+            )?;
         }
         // Always apply to cursor, even if it's not selected (:1436-1439).
         if let Some(cursor_id) = cursor {
@@ -4864,7 +4942,7 @@ impl Engine {
                 if let Some(index) = self.find_object_index(cursor_id) {
                     if self.objects[index].state.status.is_active() {
                         self.object_command_to_obj(
-                            index, command, target, target2, tx, ty, mode, true,
+                            index, command, target, target2, tx, ty, data, mode, true,
                         )?;
                     }
                 }
@@ -4886,6 +4964,7 @@ impl Engine {
         target2: Option<ObjectId>,
         tx: i32,
         ty: i32,
+        data: i32,
         mode: PlayerObjectCommandMode,
         f_control: bool,
     ) -> Result<(), EngineError> {
@@ -4894,8 +4973,10 @@ impl Engine {
             .with_target2(target2)
             .with_tx((tx != 0).then_some(tx))
             .with_ty((ty != 0).then_some(ty))
+            .with_data(CommandData::Integer(data))
             .with_mode(CommandMode::Base);
         match mode {
+            PlayerObjectCommandMode::None => return Ok(()),
             PlayerObjectCommandMode::Add => {
                 // C4P_Command_Add → AddCommand(..., fAppend=false): push front
                 // without clearing (C4Command.cpp AddCommand semantics).
@@ -4943,7 +5024,7 @@ impl Engine {
             target2
                 .map(compat::object_reference_value)
                 .unwrap_or(Value::Nil),
-            Value::Int(0),
+            Value::Int(data),
         ];
         if f_control {
             let overloaded = self
@@ -5020,6 +5101,7 @@ impl Engine {
             CommandId::Exit,
             None,
             None,
+            0,
             0,
             0,
             PlayerObjectCommandMode::Set,
@@ -5262,6 +5344,33 @@ mod tests {
         let player = engine.player(0).expect("player exists");
         assert_eq!((player.control_count(), player.action_count()), (1, 1));
         assert_eq!(engine.crew_info_control_count(first), Some(1));
+    }
+
+    #[test]
+    fn player_command_count_uses_the_raw_five_field_checksum_once_per_packet() {
+        let (mut engine, first, _) = engine_with_counted_crew();
+        engine.count_player_control(0, CountedControlType::DirectCom, 961, 1);
+
+        let packets = [
+            (CommandId::Wait as i32, 20, 30, 400, 500, 1),
+            (CommandId::Wait as i32, 19, 30, 401, 500, 2),
+            (CommandId::Wait as i32, 18, 30, 401, 501, 3),
+            (CommandId::Wait as i32, 17, 31, 401, 501, 4),
+            (CommandId::MoveTo as i32, 26, 31, 401, 501, 5),
+        ];
+        for (command, x, y, target, target2, data) in packets {
+            engine
+                .execute_player_command(0, command, x, y, target, target2, data, 0)
+                .expect("player command packet executes");
+        }
+
+        let player = engine.player(0).expect("player exists");
+        assert_eq!(
+            (player.control_count(), player.action_count()),
+            (6, 2),
+            "five packets count once each; equal Command checksums deduplicate independently of DirectCom and Data"
+        );
+        assert_eq!(engine.crew_info_control_count(first), Some(2));
     }
 
     #[test]
@@ -8900,6 +9009,178 @@ protected func ControlContents(idTarget) { return(1); }
         assert_eq!(commands[0].ty, Some(30));
         assert_eq!(commands[1].name, "Drop");
         assert_eq!(commands[1].target, Some(first));
+    }
+
+    #[test]
+    fn player_command_packets_resolve_pointers_data_and_stack_modes() {
+        let mut engine = Engine::new();
+        let (crew, live_target) = drop_window_fixture(&mut engine);
+        let inactive_target = engine
+            .spawn_object(SpawnConfig::new("GOLD"))
+            .expect("spawn inactive target");
+        engine
+            .apply_object_update(
+                inactive_target,
+                crate::ObjectUpdate::new().with_status(crate::ObjectStatus::Inactive),
+            )
+            .expect("inactive target transitions through StatusDeactivate semantics");
+        assert_eq!(
+            engine
+                .object_snapshot(inactive_target)
+                .expect("inactive target remains addressable")
+                .status,
+            crate::ObjectStatus::Inactive
+        );
+
+        engine
+            .player_object_command(1, CommandId::Wait, None, 0, 0)
+            .expect("seed stack");
+        engine
+            .execute_player_command(
+                1,
+                CommandId::Get as i32,
+                10,
+                20,
+                live_target.as_u64() as i32,
+                inactive_target.as_u64() as i32,
+                41,
+                C4P_COMMAND_ADD,
+            )
+            .expect("Add packet executes");
+        let commands = engine
+            .object_snapshot(crew)
+            .expect("crew exists")
+            .command_stack
+            .command_views();
+        assert_eq!(
+            commands.iter().map(|command| command.name.as_str()).collect::<Vec<_>>(),
+            ["Get", "Wait"]
+        );
+        assert_eq!(commands[0].target, Some(live_target));
+        assert_eq!(commands[0].target2, Some(inactive_target));
+        assert_eq!(commands[0].data, CommandData::Integer(41));
+
+        engine
+            .execute_player_command(
+                1,
+                CommandId::Drop as i32,
+                30,
+                40,
+                999_999,
+                0,
+                42,
+                C4P_COMMAND_APPEND,
+            )
+            .expect("Append packet with missing target executes");
+        let commands = engine
+            .object_snapshot(crew)
+            .expect("crew exists")
+            .command_stack
+            .command_views();
+        assert_eq!(
+            commands.iter().map(|command| command.name.as_str()).collect::<Vec<_>>(),
+            ["Get", "Wait", "Drop"]
+        );
+        assert_eq!(commands[2].target, None, "a missing object number resolves to nil");
+        assert_eq!(commands[2].data, CommandData::Integer(42));
+
+        engine
+            .execute_player_command(
+                1,
+                CommandId::MoveTo as i32,
+                50,
+                60,
+                999_999,
+                inactive_target.as_u64() as i32,
+                43,
+                C4P_COMMAND_SET,
+            )
+            .expect("Set packet executes");
+        engine
+            .execute_player_command(
+                1,
+                CommandId::Get as i32,
+                0,
+                0,
+                live_target.as_u64() as i32,
+                0,
+                44,
+                C4P_COMMAND_SET | C4P_COMMAND_APPEND,
+            )
+            .expect("combined Shift-append packet executes");
+        let commands = engine
+            .object_snapshot(crew)
+            .expect("crew exists")
+            .command_stack
+            .command_views();
+        assert_eq!(
+            commands.iter().map(|command| command.name.as_str()).collect::<Vec<_>>(),
+            ["MoveTo", "Get"],
+            "Set replaces while combined Set|Append follows Append priority"
+        );
+        assert_eq!(commands[0].target, None);
+        assert_eq!(commands[0].target2, Some(inactive_target));
+        assert_eq!(commands[0].data, CommandData::Integer(43));
+        assert_eq!(commands[1].target, Some(live_target));
+        assert_eq!(commands[1].data, CommandData::Integer(44));
+
+        let player = engine.player(1).expect("player exists");
+        assert_eq!((player.control_count(), player.action_count()), (4, 4));
+    }
+
+    #[test]
+    fn player_command_range_filters_selected_crew_relative_to_the_cursor() {
+        let mut engine = Engine::new();
+        let [cursor, distant, _] = crew_trio(&mut engine);
+        engine
+            .select_crew(1, [cursor, distant])
+            .expect("select both crew");
+        engine
+            .set_crew_cursor(1, Some(cursor))
+            .expect("set range origin cursor");
+        engine
+            .apply_object_update(
+                cursor,
+                crate::ObjectUpdate::new().with_position(Vector2::new(100, 100)),
+            )
+            .expect("position cursor");
+        engine
+            .apply_object_update(
+                distant,
+                crate::ObjectUpdate::new().with_position(Vector2::new(116, 100)),
+            )
+            .expect("position distant crew outside the inclusive range");
+
+        engine
+            .execute_player_command(
+                1,
+                CommandId::Wait as i32,
+                0,
+                0,
+                0,
+                0,
+                0,
+                C4P_COMMAND_SET | C4P_COMMAND_RANGE,
+            )
+            .expect("ranged player command executes");
+
+        assert_eq!(
+            engine
+                .object_snapshot(cursor)
+                .expect("cursor survives")
+                .command_stack
+                .command_names(),
+            ["Wait"],
+            "the cursor is always within its own ±15 range"
+        );
+        assert!(
+            engine
+                .object_snapshot(distant)
+                .expect("distant crew survives")
+                .command_stack
+                .is_empty(),
+            "a selected crew member sixteen pixels from the cursor is filtered"
+        );
     }
 
     #[test]

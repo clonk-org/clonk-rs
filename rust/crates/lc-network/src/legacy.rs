@@ -4,8 +4,9 @@ use lc_engine::{
     ClientCoreControlData, ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
     ControlPacket as EngineControlPacket, ControlPacketId, ControlPlayerInfoEntry,
     InitScenarioPlayerControlData, JoinPlayerControlData, JoinPlayerSource, LegacyCString,
-    NetworkResourceCore, PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest,
-    SurrenderPlayerControlData, SyncCheckPacket, SynchronizeControlData, VoteControlData,
+    NetworkResourceCore, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
+    PlayerInfoUpdateRequest, SurrenderPlayerControlData, SyncCheckPacket, SynchronizeControlData,
+    VoteControlData,
     CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
@@ -32,6 +33,7 @@ const CID_VOTE_END: u8 = 0x80 | 0x04;
 const CID_PLR_INFO: u8 = 0x80 | 0x10;
 const CID_JOIN_PLR: u8 = 0x80 | 0x11;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
+const CID_PLR_COMMAND: u8 = 0x80 | 0x22;
 const CID_INIT_SCENARIO_PLAYER: u8 = 0x80 | 0x52;
 const CID_SURRENDER_PLAYER: u8 = 0x80 | 0x55;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
@@ -623,6 +625,7 @@ fn decode_control(
         CID_PLR_INFO => decode_player_info(reader),
         CID_JOIN_PLR => decode_join_player(reader),
         CID_PLR_CONTROL => decode_player_control(reader),
+        CID_PLR_COMMAND => decode_player_command(reader),
         CID_INIT_SCENARIO_PLAYER => decode_init_scenario_player(reader),
         CID_SURRENDER_PLAYER => decode_surrender_player(reader),
         CID_SYNC_CHECK => decode_sync_check(reader),
@@ -836,6 +839,22 @@ fn decode_player_control(
         command,
         data,
         by_client,
+    }))
+}
+
+fn decode_player_command(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::PlayerCommand(PlayerCommandControlData {
+        player: reader.read_int32()?,
+        command: reader.read_int32()?,
+        x: reader.read_raw_i32()?,
+        y: reader.read_raw_i32()?,
+        target: reader.read_raw_i32()?,
+        target2: reader.read_raw_i32()?,
+        data: reader.read_raw_i32()?,
+        add_mode: reader.read_int32()?,
+        by_client: reader.read_int32()?,
     }))
 }
 
@@ -1369,6 +1388,19 @@ fn encode_player_control(buffer: &mut Vec<u8>, data: &PlayerControlData) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_player_command(buffer: &mut Vec<u8>, data: &PlayerCommandControlData) {
+    buffer.push(CID_PLR_COMMAND);
+    append_int32(buffer, data.player);
+    append_int32(buffer, data.command);
+    append_raw_i32(buffer, data.x);
+    append_raw_i32(buffer, data.y);
+    append_raw_i32(buffer, data.target);
+    append_raw_i32(buffer, data.target2);
+    append_raw_i32(buffer, data.data);
+    append_int32(buffer, data.add_mode);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_init_scenario_player(buffer: &mut Vec<u8>, data: &InitScenarioPlayerControlData) {
     buffer.push(CID_INIT_SCENARIO_PLAYER);
     append_int32(buffer, data.team);
@@ -1495,6 +1527,10 @@ fn encode_control(
         EngineControlPacket::JoinPlayer(data) => encode_join_player(buffer, data),
         EngineControlPacket::PlayerControl(data) => {
             encode_player_control(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::PlayerCommand(data) => {
+            encode_player_command(buffer, data);
             Ok(())
         }
         EngineControlPacket::InitScenarioPlayer(data) => {
@@ -1697,6 +1733,31 @@ mod tests {
 
         assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected));
+    }
+
+    #[test]
+    fn player_command_entry_matches_cpp_mixed_packed_and_raw_layout() {
+        // C4ControlPlayerCommand::CompileFunc uses packed Plr/Cmd/AddMode and
+        // inherited ByClient, but native int32 for X/Y/Target/Target2/Data
+        // (src/C4Control.cpp:428-438,53-57).
+        let expected = EngineControlPacket::PlayerCommand(PlayerCommandControlData {
+            player: -4,
+            command: 130,
+            x: 0x1122_3344,
+            y: -2,
+            target: 0x0102_0304,
+            target2: -1,
+            data: 0x5566_7788,
+            add_mode: 4,
+            by_client: 7,
+        });
+        let encoded = [
+            0xa2, 0xfc, 0x82, 0x01, 0x44, 0x33, 0x22, 0x11, 0xfe, 0xff, 0xff, 0xff, 0x04,
+            0x03, 0x02, 0x01, 0xff, 0xff, 0xff, 0xff, 0x88, 0x77, 0x66, 0x55, 0x04, 0x07,
+        ];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
     }
 
     #[test]
@@ -2199,7 +2260,9 @@ mod tests {
             .len()
             .checked_sub(1)
             .expect("payload includes terminator");
-        payload.insert(insert_at, CID_PLR_CONTROL + 1);
+        // CID_PlrCommand (0xa2) is supported; CID_Message (0xa3) remains the
+        // next genuinely unsupported legacy control entry.
+        payload.insert(insert_at, CID_PLR_COMMAND + 1);
         let error = decode_control_payload(&payload).unwrap_err();
         assert!(matches!(error, LegacyControlError::UnsupportedPacket(_)));
     }

@@ -81,9 +81,10 @@ use lc_engine::{
     ControlCommand, ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError,
     EngineState, EnvironmentSettings, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet,
     MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MouseDragSource,
-    MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerConfig, Recorder, Recording,
-    RgbColor, Scenario, ScenarioError, ScoreboardPresentationRequest, SimulationSnapshot,
-    SkyConfig, SpawnConfig, SyncCheckPacket, TeamConfiguration, Vector2, FLAG_ALIGN_CENTER,
+    MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData, PlayerConfig,
+    Recorder, Recording, RgbColor, Scenario, ScenarioError, ScoreboardPresentationRequest,
+    SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, TeamConfiguration, Vector2,
+    FLAG_ALIGN_CENTER,
     FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK,
     FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
@@ -16414,6 +16415,47 @@ impl GameApp {
         Ok(())
     }
 
+    fn submit_or_execute_player_command(
+        &mut self,
+        command: PlayerCommandControlData,
+    ) -> Result<(), EngineError> {
+        if self.network.is_some() {
+            let tick = self.local_control_submission_tick();
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_player_command(tick, command))
+            {
+                tracing::warn!(player = command.player, %error, "failed to queue player command");
+                self.status_text = "Failed to queue mouse command".to_string();
+            }
+            return Ok(());
+        }
+
+        self.execute_player_command_failsafe(command)
+    }
+
+    fn execute_player_command_failsafe(
+        &mut self,
+        command: PlayerCommandControlData,
+    ) -> Result<(), EngineError> {
+        if let Err(err) = self.engine.execute_player_command(
+            command.player,
+            command.command,
+            command.x,
+            command.y,
+            command.target,
+            command.target2,
+            command.data,
+            command.add_mode,
+        ) {
+            let status = control_script_error_to_status(err)?;
+            tracing::error!(status, "player-command script error (non-fatal like C++)");
+            self.status_text = status;
+        }
+        Ok(())
+    }
+
     /// Menu commands on the key-input path share the control fail-safe:
     /// a script error inside a menu action logs, becomes a status line and
     /// counts as menu-consumed — C++ shows the error and keeps the session
@@ -20449,23 +20491,38 @@ impl GameApp {
         if self.ingame_viewport_region(pointer.screen).is_some() {
             return Ok(());
         }
-        // CID_PlrCommand is not in the Rust network packet model yet. Keep
-        // this first self-context slice offline rather than mutating one peer
-        // outside lockstep.
-        if self.network.is_some() {
-            self.status_text = "Mouse context commands are not networked yet".to_string();
-            return Ok(());
-        }
-
         if let Some(target) =
             self.graphics
                 .object_at_point(&self.snapshot, self.local_owner, pointer.screen)
         {
             self.show_startup_hint = false;
-            self.engine
-                .player_context_command(self.local_owner, target)?;
+            let add_mode = 2 | if self.keyboard_modifiers.shift() { 4 } else { 0 };
+            let (x, y) = self
+                .graphics
+                .active_viewport_projections()
+                .into_iter()
+                .find(|viewport| viewport.owner == self.local_owner)
+                .map(|viewport| ingame_pointer_viewport_pixel(pointer, viewport))
+                .unwrap_or((pointer.world.x as i32, pointer.world.y as i32));
+            self.submit_or_execute_player_command(PlayerCommandControlData {
+                player: self.local_owner,
+                command: CommandId::Context as i32,
+                x,
+                y,
+                target: 0,
+                target2: target.as_u64() as i32,
+                data: 0,
+                add_mode,
+                by_client: -1,
+            })?;
         } else {
             // C4MouseControl::RightUpDragNone cycles crew on a free click.
+            // That is CID_PlrSelect, not CID_PlrCommand; keep it local-disabled
+            // until the separate selection packet is modeled.
+            if self.network.is_some() {
+                self.status_text = "Mouse selection commands are not networked yet".to_string();
+                return Ok(());
+            }
             self.engine.player_mouse_select_next(self.local_owner)?;
             self.snapshot = self.engine.snapshot();
             self.refresh_focus();
@@ -20513,24 +20570,41 @@ impl GameApp {
         if put_target.is_none() && command.is_none() {
             return Ok(());
         }
-        // CID_PlrCommand has not entered the Rust network packet model. Keep
-        // the local selection behavior but never execute a one-peer command.
-        if self.network.is_some() {
-            self.status_text = "Mouse object commands are not networked yet".to_string();
-            return Ok(());
-        }
-
         self.show_startup_hint = false;
-        if let Some(container) = put_target {
-            self.engine.player_mouse_drag_put(
-                self.local_owner,
-                selected,
-                container,
-                self.keyboard_modifiers.shift(),
-            )?;
-        } else if let Some(command) = command {
-            self.engine
-                .player_mouse_drag_objects(self.local_owner, command, selected, position)?;
+        let mut add_mode = 1;
+        let shift_append = self.keyboard_modifiers.shift();
+        for object in selected {
+            let (command, x, y, target, target2) = if let Some(container) = put_target {
+                (
+                    CommandId::Put,
+                    0,
+                    0,
+                    container.as_u64() as i32,
+                    object.as_u64() as i32,
+                )
+            } else if let Some(command) = command {
+                (
+                    command,
+                    position.x,
+                    position.y,
+                    object.as_u64() as i32,
+                    0,
+                )
+            } else {
+                continue;
+            };
+            self.submit_or_execute_player_command(PlayerCommandControlData {
+                player: self.local_owner,
+                command: command as i32,
+                x,
+                y,
+                target,
+                target2,
+                data: 0,
+                add_mode: add_mode | if shift_append { 4 } else { 0 },
+                by_client: -1,
+            })?;
+            add_mode = 4;
         }
         self.snapshot = self.engine.snapshot();
         self.refresh_object_menu();
@@ -20562,21 +20636,23 @@ impl GameApp {
                 )
             })
             .flatten();
-        // CID_PlrCommand has not entered the Rust network packet model. Keep
-        // the local drag state but never execute a one-peer PushTo.
-        if self.network.is_some() {
-            self.status_text = "Mouse vehicle commands are not networked yet".to_string();
-            return Ok(());
-        }
-
         self.show_startup_hint = false;
-        self.engine.player_mouse_drag_vehicles(
-            self.local_owner,
-            selected,
-            position,
-            put_target,
-            self.keyboard_modifiers.shift(),
-        )?;
+        let mut add_mode = 1;
+        let shift_append = self.keyboard_modifiers.shift();
+        for vehicle in selected {
+            self.submit_or_execute_player_command(PlayerCommandControlData {
+                player: self.local_owner,
+                command: CommandId::PushTo as i32,
+                x: position.x,
+                y: position.y,
+                target: vehicle.as_u64() as i32,
+                target2: put_target.map_or(0, |target| target.as_u64() as i32),
+                data: 0,
+                add_mode: add_mode | if shift_append { 4 } else { 0 },
+                by_client: -1,
+            })?;
+            add_mode = 4;
+        }
         self.snapshot = self.engine.snapshot();
         self.refresh_object_menu();
         self.refresh_focus();
@@ -20750,19 +20826,18 @@ impl GameApp {
         {
             return Ok(());
         }
-        if self.network.is_some() {
-            self.status_text = "Mouse commands are not networked yet".to_string();
-            return Ok(());
-        }
-
         self.show_startup_hint = false;
-        self.engine.player_object_command(
-            pointer.owner,
-            CommandId::MoveTo,
-            None,
-            pointer.world.x as i32,
-            pointer.world.y as i32,
-        )?;
+        self.submit_or_execute_player_command(PlayerCommandControlData {
+            player: pointer.owner,
+            command: CommandId::MoveTo as i32,
+            x: pointer.world.x as i32,
+            y: pointer.world.y as i32,
+            target: 0,
+            target2: 0,
+            data: 0,
+            add_mode: 1,
+            by_client: -1,
+        })?;
         Ok(())
     }
 
@@ -20774,10 +20849,6 @@ impl GameApp {
             return Ok(());
         };
         if pointer.owner != self.local_owner {
-            return Ok(());
-        }
-        if self.network.is_some() {
-            self.status_text = "Mouse commands are not networked yet".to_string();
             return Ok(());
         }
         let Some(target) =
@@ -20795,8 +20866,17 @@ impl GameApp {
         }
 
         self.show_startup_hint = false;
-        self.engine
-            .player_object_command(self.local_owner, CommandId::Get, Some(target), 0, 0)?;
+        self.submit_or_execute_player_command(PlayerCommandControlData {
+            player: self.local_owner,
+            command: CommandId::Get as i32,
+            x: 0,
+            y: 0,
+            target: target.as_u64() as i32,
+            target2: 0,
+            data: 0,
+            add_mode: 1,
+            by_client: -1,
+        })?;
         Ok(())
     }
 
@@ -24994,6 +25074,9 @@ impl GameApp {
                 }
                 NetworkControl::PlayerControl(data) => {
                     self.execute_player_control_failsafe(data.player, data.command, data.data)
+                }
+                NetworkControl::PlayerCommand(data) => {
+                    self.execute_player_command_failsafe(data)
                 }
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
@@ -33054,6 +33137,16 @@ fn ingame_pointer_world_pixel(pointer: ViewportPointer) -> Vector2 {
     Vector2::new(pointer.world.x as i32, pointer.world.y as i32)
 }
 
+fn ingame_pointer_viewport_pixel(
+    pointer: ViewportPointer,
+    viewport: ActiveViewportProjection,
+) -> (i32, i32) {
+    (
+        (pointer.world.x - viewport.content_origin_x) as i32,
+        (pointer.world.y - viewport.content_origin_y) as i32,
+    )
+}
+
 fn drag_direction_buttons(delta: FloatVector2) -> Vec<ControlButton> {
     let mut buttons = Vec::new();
     if delta.x.abs() >= MIN_THROW_DRAG_DISTANCE {
@@ -34086,6 +34179,34 @@ mod tests {
         assert!(!state.moved, "five pixels is still below the strict > gate");
         state.update(pointer(16.0));
         assert!(state.moved, "six pixels enters C4MC_Drag_Moving");
+    }
+
+    #[test]
+    fn context_command_coordinates_are_unscaled_viewport_pixels() {
+        let viewport = ActiveViewportProjection {
+            index: 0,
+            owner: 1,
+            rect: Rect::new(10, 20, 160, 100),
+            content_rect: Rect::new(30, 40, 120, 60),
+            target_x: 0,
+            target_y: 0,
+            logical_width: 80,
+            logical_height: 50,
+            content_origin_x: 100.0,
+            content_origin_y: -20.0,
+            zoom: 2.0,
+        };
+        let pointer = ViewportPointer {
+            owner: 1,
+            screen: GuiPoint::new(71.0, 65.0),
+            world: FloatVector2::new(120.5, -7.5),
+        };
+
+        assert_eq!(
+            ingame_pointer_viewport_pixel(pointer, viewport),
+            (20, 12),
+            "C++ sends VpX/VpY after scale removal, not raw screen-minus-layout coordinates"
+        );
     }
 
     #[test]
@@ -57280,6 +57401,45 @@ mod tests {
     }
 
     #[test]
+    fn synchronized_player_command_executes_stack_data_and_count() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let crew = app.engine.crew_cursor(owner).expect("sandbox cursor");
+
+        app.apply_ready_controls(
+            12,
+            vec![NetworkControl::PlayerCommand(PlayerCommandControlData {
+                player: owner,
+                command: CommandId::Wait as i32,
+                x: 12,
+                y: -7,
+                target: 999_999,
+                target2: 0,
+                data: 23,
+                add_mode: 1,
+                by_client: 0,
+            })],
+        )
+        .expect("synchronized player command executes");
+
+        let commands = app
+            .engine
+            .object_snapshot(crew)
+            .expect("cursor remains")
+            .command_stack
+            .command_views();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "Wait");
+        assert_eq!(commands[0].target, None);
+        assert_eq!(commands[0].tx, Some(12));
+        assert_eq!(commands[0].ty, Some(-7));
+        assert_eq!(commands[0].data, CommandData::Integer(23));
+        let player = app.engine.player(owner).expect("local player remains");
+        assert_eq!((player.control_count(), player.action_count()), (1, 1));
+        assert_eq!(app.executing_ready_tick, None);
+    }
+
+    #[test]
     fn host_control_rate_and_fair_crew_sets_fail_before_batch_mutation() {
         for (value_type, producer_name) in [(0, "ControlRate"), (5, "FairCrew")] {
             let mut app = new_running_sandbox_app();
@@ -58806,6 +58966,56 @@ mod tests {
             commands.take_submitted_local(),
             vec![(app.local_owner, ControlEvent::ClearPressed, tick)],
             "one user-driven close queues one clear for the still-open tick"
+        );
+    }
+
+    #[test]
+    fn player_command_submission_queues_the_open_tick_without_local_execution() {
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+        let crew = app.engine.crew_cursor(app.local_owner).expect("sandbox cursor");
+        let before = app
+            .engine
+            .object_snapshot(crew)
+            .expect("cursor exists")
+            .command_stack
+            .command_names();
+        let command = PlayerCommandControlData {
+            player: app.local_owner,
+            command: CommandId::MoveTo as i32,
+            x: 120,
+            y: 80,
+            target: 0,
+            target2: 0,
+            data: 0,
+            add_mode: 1,
+            by_client: -1,
+        };
+
+        app.submit_or_execute_player_command(command)
+            .expect("queue player command");
+
+        assert_eq!(
+            commands.take_submitted_player_commands(),
+            vec![(
+                tick,
+                PlayerCommandControlData {
+                    by_client: 7,
+                    ..command
+                }
+            )]
+        );
+        assert_eq!(
+            app.engine
+                .object_snapshot(crew)
+                .expect("cursor survives")
+                .command_stack
+                .command_names(),
+            before,
+            "the command executes only when the synchronized tick returns"
         );
     }
 

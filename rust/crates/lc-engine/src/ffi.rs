@@ -3,7 +3,7 @@ use crate::rng::LcgRng;
 use crate::{
     control::{
         parse_control_ini, ControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData,
-        JoinPlayerSource, LegacyCString, PlayerControlData,
+        JoinPlayerSource, LegacyCString, PlayerCommandControlData, PlayerControlData,
     },
     ActionState, CommandDirection, CommandStackSnapshot, CrewRole, CrewSelectionState, Direction,
     DrawTransform, EffectState, Engine, EngineState, EnvironmentFrame, FloatVector2,
@@ -429,6 +429,10 @@ impl RuntimeHandle {
                     self.apply_player_control(&data)
                         .map_err(|error| format!("{error} (player {})", data.player))?;
                 }
+                ControlPacket::PlayerCommand(data) => {
+                    self.apply_player_command(&data)
+                        .map_err(|error| format!("{error} (player {})", data.player))?;
+                }
                 ControlPacket::PlayerInfo(info) => {
                     // C4ControlPlayerInfo::Execute adds the infos to
                     // Game.PlayerInfos (C4Control.cpp:1264-1282).
@@ -587,6 +591,21 @@ impl RuntimeHandle {
         // (C4Control.cpp:386-395).
         self.engine
             .execute_player_control(data.player, data.command, data.data)
+            .map_err(|error| error.to_string())
+    }
+
+    fn apply_player_command(&mut self, data: &PlayerCommandControlData) -> Result<(), String> {
+        self.engine
+            .execute_player_command(
+                data.player,
+                data.command,
+                data.x,
+                data.y,
+                data.target,
+                data.target2,
+                data.data,
+                data.add_mode,
+            )
             .map_err(|error| error.to_string())
     }
 
@@ -2071,6 +2090,7 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                     .iter()
                     .map(|packet| match packet {
                         ControlPacket::PlayerControl(_) => "PlayerControl",
+                        ControlPacket::PlayerCommand(_) => "PlayerCommand",
                         ControlPacket::InitScenarioPlayer(_) => "InitScenarioPlayer",
                         ControlPacket::SurrenderPlayer(_) => "SurrenderPlayer",
                         ControlPacket::SyncCheck(_) => "SyncCheck",
@@ -4736,6 +4756,44 @@ global func Step(state, frame, random)
             .apply_control_packets_for_frame(1)
             .expect("control applies");
 
+        let player = runtime.engine.player(0).expect("player exists");
+        assert_eq!((player.control_count(), player.action_count()), (1, 1));
+    }
+
+    #[test]
+    fn player_command_ffi_packet_reaches_the_object_command_seam() {
+        let (mut runtime, crew) = runtime_with_cursor_menu();
+        runtime.control_packets.insert(
+            1,
+            vec![ControlPacket::PlayerCommand(PlayerCommandControlData {
+                player: 0,
+                command: crate::command::CommandId::Wait as i32,
+                x: 12,
+                y: -7,
+                target: 999_999,
+                target2: 0,
+                data: 23,
+                add_mode: 1,
+                by_client: 0,
+            })],
+        );
+
+        runtime
+            .apply_control_packets_for_frame(1)
+            .expect("player command applies");
+
+        let commands = runtime
+            .engine
+            .object_snapshot(crew)
+            .expect("crew exists")
+            .command_stack
+            .command_views();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "Wait");
+        assert_eq!(commands[0].target, None);
+        assert_eq!(commands[0].tx, Some(12));
+        assert_eq!(commands[0].ty, Some(-7));
+        assert_eq!(commands[0].data, crate::command::CommandData::Integer(23));
         let player = runtime.engine.player(0).expect("player exists");
         assert_eq!((player.control_count(), player.action_count()), (1, 1));
     }

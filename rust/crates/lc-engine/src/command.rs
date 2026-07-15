@@ -213,6 +213,42 @@ pub enum CommandId {
 }
 
 impl CommandId {
+    pub const fn from_raw(value: i32) -> Option<Self> {
+        match value {
+            1 => Some(Self::Follow),
+            2 => Some(Self::MoveTo),
+            3 => Some(Self::Enter),
+            4 => Some(Self::Exit),
+            5 => Some(Self::Grab),
+            6 => Some(Self::Build),
+            7 => Some(Self::Throw),
+            8 => Some(Self::Chop),
+            9 => Some(Self::UnGrab),
+            10 => Some(Self::Jump),
+            11 => Some(Self::Wait),
+            12 => Some(Self::Get),
+            13 => Some(Self::Put),
+            14 => Some(Self::Drop),
+            15 => Some(Self::Dig),
+            16 => Some(Self::Activate),
+            17 => Some(Self::PushTo),
+            18 => Some(Self::Construct),
+            19 => Some(Self::Transfer),
+            20 => Some(Self::Attack),
+            21 => Some(Self::Context),
+            22 => Some(Self::Buy),
+            23 => Some(Self::Sell),
+            24 => Some(Self::Acquire),
+            25 => Some(Self::Energy),
+            26 => Some(Self::Retry),
+            27 => Some(Self::Home),
+            28 => Some(Self::Call),
+            29 => Some(Self::Take),
+            30 => Some(Self::Take2),
+            _ => None,
+        }
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "Follow" => Some(Self::Follow),

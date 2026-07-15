@@ -7,7 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use lc_engine::{
     CommandKind, ControlButton, ControlCommand, ControlEvent,
-    JoinPlayerControlData, PlayerControlData, PlayerInfoControlData, SyncCheckPacket,
+    JoinPlayerControlData, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
+    SyncCheckPacket,
     COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG,
     COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER,
     COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT, COM_MENU_SHOW_TEXT,
@@ -413,6 +414,18 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_player_commands(
+        &mut self,
+    ) -> Vec<(Tick, PlayerCommandControlData)> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitPlayerCommand { tick, command } = command {
+                submitted.push((tick, command));
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn take_player_info_updates(&mut self) -> Vec<lc_network::PlayerInfoUpdateRequest> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -697,6 +710,7 @@ pub enum NetworkControl {
     Vote(lc_engine::VoteControlData),
     VoteEnd(lc_engine::VoteControlData),
     PlayerControl(PlayerControlData),
+    PlayerCommand(PlayerCommandControlData),
     Player { owner: i32, event: ControlEvent },
     InitScenarioPlayer(lc_engine::InitScenarioPlayerControlData),
     Synchronize(lc_engine::SynchronizeControlData),
@@ -738,6 +752,10 @@ enum NetworkCommand {
         owner: i32,
         event: ControlEvent,
         tick: Tick,
+    },
+    SubmitPlayerCommand {
+        tick: Tick,
+        command: PlayerCommandControlData,
     },
     SubmitSyncCheck {
         tick: Tick,
@@ -900,6 +918,18 @@ impl NetworkManager {
     pub fn submit_local_control(&self, owner: i32, event: ControlEvent, tick: Tick) {
         let command = NetworkCommand::SubmitLocal { owner, event, tick };
         let _ = self.command_tx.blocking_send(command);
+    }
+
+    pub fn submit_player_command(
+        &self,
+        tick: Tick,
+        mut command: PlayerCommandControlData,
+    ) -> Result<()> {
+        command.by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the player-command wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitPlayerCommand { tick, command })
+            .map_err(|_| anyhow!("network worker is not accepting player commands"))
     }
 
     pub fn broadcast_lobby_countdown(
@@ -1599,6 +1629,13 @@ async fn run_host_worker(
                             frame_builder.record_control(tick, control, current_millis());
                         }
                     }
+                    NetworkCommand::SubmitPlayerCommand { tick, command } => {
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::PlayerCommand(command),
+                            current_millis(),
+                        );
+                    }
                     NetworkCommand::SubmitSyncCheck { tick, check } => {
                         frame_builder.record_control(
                             tick,
@@ -1947,6 +1984,14 @@ async fn run_client_worker(
                         if let Some(control) = control_packet_for_event(owner, event, client_id) {
                             frame_builder.record_control(tick, control, current_millis());
                         }
+                    }
+                    NetworkCommand::SubmitPlayerCommand { tick, command } => {
+                        client_activation.refresh_frame(frame_tick_to_i32(tick));
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::PlayerCommand(command),
+                            current_millis(),
+                        );
                     }
                     NetworkCommand::SubmitSyncCheck { tick, check } => {
                         client_activation.refresh_frame(frame_tick_to_i32(tick));
@@ -2324,6 +2369,7 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         // Keep the original signed fields through ordered execution. The
         // C++ packet layer counts them before InCom narrows Command to a byte.
         lc_engine::ControlPacket::PlayerControl(data) => Some(NetworkControl::PlayerControl(data)),
+        lc_engine::ControlPacket::PlayerCommand(data) => Some(NetworkControl::PlayerCommand(data)),
         lc_engine::ControlPacket::Synchronize(data) => Some(NetworkControl::Synchronize(data)),
         lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
         lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
@@ -2654,6 +2700,38 @@ mod tests {
             .expect("queue PlayerInfo update request");
 
         assert_eq!(commands.take_player_info_updates(), vec![request]);
+    }
+
+    #[test]
+    fn manager_queues_player_command_with_authenticated_local_author() {
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let command = PlayerCommandControlData {
+            player: 3,
+            command: 2,
+            x: 100,
+            y: 200,
+            target: 0,
+            target2: 91,
+            data: 4,
+            add_mode: 5,
+            by_client: -1,
+        };
+
+        manager
+            .submit_player_command(12, command)
+            .expect("queue player command");
+
+        assert_eq!(
+            commands.take_submitted_player_commands(),
+            vec![(
+                12,
+                PlayerCommandControlData {
+                    by_client: 7,
+                    ..command
+                }
+            )]
+        );
     }
 
     #[test]
@@ -4235,6 +4313,59 @@ mod tests {
             network_control_for_packet(lc_engine::ControlPacket::PlayerControl(raw.clone())),
             Some(NetworkControl::PlayerControl(raw)),
             "decoded replay keeps the original signed command for CountControl"
+        );
+    }
+
+    #[test]
+    fn decoded_player_command_is_retained_for_scheduled_execution() {
+        let command = PlayerCommandControlData {
+            player: 7,
+            command: 2,
+            x: 120,
+            y: 45,
+            target: 0,
+            target2: 91,
+            data: 3,
+            add_mode: 5,
+            by_client: 4,
+        };
+        assert_eq!(
+            network_control_for_packet(lc_engine::ControlPacket::PlayerCommand(command)),
+            Some(NetworkControl::PlayerCommand(command))
+        );
+    }
+
+    #[test]
+    fn player_command_frame_roundtrips_through_the_tick_accumulator() {
+        let command = PlayerCommandControlData {
+            player: 3,
+            command: 14,
+            x: -25,
+            y: 40,
+            target: 91,
+            target2: 0,
+            data: 7,
+            add_mode: 5,
+            by_client: 4,
+        };
+        let mut accumulator = ControlFrameAccumulator::new(4);
+        accumulator.record_control(
+            12,
+            lc_engine::ControlPacket::PlayerCommand(command),
+            100,
+        );
+        let frame = accumulator
+            .finalize_tick(12)
+            .expect("player command produces a control frame");
+
+        let encoded = encode_control_packet(&frame).expect("encode accumulated frame");
+        assert_eq!(
+            decode_control_packet(&encoded).expect("decode accumulated frame"),
+            frame
+        );
+        assert_eq!(
+            frame.controls,
+            vec![lc_engine::ControlPacket::PlayerCommand(command)]
         );
     }
 

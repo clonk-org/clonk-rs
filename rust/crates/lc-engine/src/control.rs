@@ -36,6 +36,8 @@ pub enum ControlPacket {
     VoteEnd(VoteControlData),
     /// Player control command (`CID_PlrControl`).
     PlayerControl(PlayerControlData),
+    /// Mouse/object command (`CID_PlrCommand`, C4Control.cpp:405-439).
+    PlayerCommand(PlayerCommandControlData),
     /// Queued team choice that resumes a player waiting in
     /// `PS_TeamSelectionPending` (`CID_InitScenarioPlayer`).
     InitScenarioPlayer(InitScenarioPlayerControlData),
@@ -129,6 +131,23 @@ pub struct PlayerControlData {
     pub player: i32,
     pub command: i32,
     pub data: i32,
+    pub by_client: i32,
+}
+
+/// Body of `C4ControlPlayerCommand` (`CID_PlrCommand`).
+///
+/// Object numbers and command/add-mode values remain raw until execution so
+/// unknown values survive network and replay round trips exactly like C++.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerCommandControlData {
+    pub player: i32,
+    pub command: i32,
+    pub x: i32,
+    pub y: i32,
+    pub target: i32,
+    pub target2: i32,
+    pub data: i32,
+    pub add_mode: i32,
     pub by_client: i32,
 }
 
@@ -716,6 +735,7 @@ impl RawPacket {
         // C4PacketType::PID_None (src/C4PacketBase.h).
         const PID_NONE: u8 = 0xff;
         const CID_PLR_CONTROL: u8 = 0xA1;
+        const CID_PLR_COMMAND: u8 = 0xA2;
 
         if id == PID_NONE {
             return Ok(None);
@@ -831,19 +851,44 @@ impl RawPacket {
             let command = parse_int_field_or(&self.fields, "Com", 0)?;
             let data = parse_int_field_or(&self.fields, "Data", 0)?;
             let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
-            Ok(Some(ControlPacket::PlayerControl(PlayerControlData {
+            return Ok(Some(ControlPacket::PlayerControl(PlayerControlData {
                 player,
                 command,
                 data,
                 by_client,
-            })))
-        } else {
-            Ok(Some(ControlPacket::Unknown {
-                id: ControlPacketId::new(id),
-                name: self.name,
-                fields: self.fields,
-            }))
+            })));
         }
+
+        if id == CID_PLR_COMMAND {
+            // C4ControlPlayerCommand::CompileFunc writes these names in this
+            // order; the INI compiler may omit every default-valued field.
+            let player = parse_int_field_or(&self.fields, "Player", -1)?;
+            let command = parse_int_field_or(&self.fields, "Cmd", 0)?;
+            let x = parse_int_field_or(&self.fields, "X", 0)?;
+            let y = parse_int_field_or(&self.fields, "Y", 0)?;
+            let target = parse_int_field_or(&self.fields, "Target", 0)?;
+            let target2 = parse_int_field_or(&self.fields, "Target2", 0)?;
+            let data = parse_int_field_or(&self.fields, "Data", 0)?;
+            let add_mode = parse_int_field_or(&self.fields, "AddMode", 0)?;
+            let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
+            return Ok(Some(ControlPacket::PlayerCommand(PlayerCommandControlData {
+                player,
+                command,
+                x,
+                y,
+                target,
+                target2,
+                data,
+                add_mode,
+                by_client,
+            })));
+        }
+
+        Ok(Some(ControlPacket::Unknown {
+            id: ControlPacketId::new(id),
+            name: self.name,
+            fields: self.fields,
+        }))
     }
 }
 
@@ -1252,6 +1297,41 @@ mod tests {
                 command: 24,
                 data: 0,
                 by_client: -1,
+            })]
+        );
+    }
+
+    #[test]
+    fn parses_player_command_packet_and_omitted_defaults() {
+        // C4ControlPlayerCommand::CompileFunc (C4Control.cpp:428-438) names
+        // the eight body fields below and delegates inherited ByClient last.
+        // StdCompilerINIWrite may omit zero/default fields, so Target2 and
+        // Data deliberately exercise their C++ defaults here.
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=162\n\
+    [Player Command]\n\
+      Player=3\n\
+      Cmd=14\n\
+      X=-25\n\
+      Y=40\n\
+      Target=91\n\
+      AddMode=5\n\
+      ByClient=7\n";
+
+        assert_eq!(
+            parse_control_ini(input).expect("parse player command"),
+            vec![ControlPacket::PlayerCommand(PlayerCommandControlData {
+                player: 3,
+                command: 14,
+                x: -25,
+                y: 40,
+                target: 91,
+                target2: 0,
+                data: 0,
+                add_mode: 5,
+                by_client: 7,
             })]
         );
     }
