@@ -1222,6 +1222,10 @@ pub struct HostWorldContext {
     /// in the object count.
     sectors: RefCell<Option<Rc<SectorMap>>>,
     transfer_zones: Rc<Vec<TransferZoneState>>,
+    /// Last values written to the game-global C4PathFinder by an obstructed
+    /// MoveTo search. FnGetPath reuses them instead of resetting defaults.
+    pathfinder_level: i32,
+    pathfinder_transfer_zones_enabled: bool,
     players: Rc<HashMap<i32, PlayerState>>,
     /// IDs present in `Game.PlayerInfos`, including retained infos whose
     /// runtime C4Player has already retired. ID zero is the global-results
@@ -1341,6 +1345,8 @@ impl Default for HostWorldContext {
             definition_order: Rc::new(Vec::new()),
             sectors: RefCell::new(None),
             transfer_zones: Rc::new(Vec::new()),
+            pathfinder_level: 1,
+            pathfinder_transfer_zones_enabled: true,
             players: Rc::new(HashMap::new()),
             player_info_ids: Rc::new(HashSet::new()),
             player_order: Rc::new(Vec::new()),
@@ -1568,6 +1574,8 @@ impl HostWorldContext {
             definition_order: Rc::new(Vec::new()),
             sectors,
             transfer_zones: Rc::new(transfer_zones),
+            pathfinder_level: 1,
+            pathfinder_transfer_zones_enabled: true,
             local_players: Rc::new(player_ids.iter().copied().collect()),
             active_message_board_input: None,
             player_order: Rc::new(player_ids),
@@ -2078,6 +2086,27 @@ impl HostWorldContext {
 
     pub(crate) fn transfer_zones(&self) -> &[TransferZoneState] {
         self.transfer_zones.as_ref()
+    }
+
+    pub(crate) fn with_pathfinder_settings(
+        mut self,
+        level: i32,
+        transfer_zones_enabled: bool,
+    ) -> Self {
+        self.set_pathfinder_settings(level, transfer_zones_enabled);
+        self
+    }
+
+    fn set_pathfinder_settings(&mut self, level: i32, transfer_zones_enabled: bool) {
+        self.pathfinder_level = level.clamp(1, 10);
+        self.pathfinder_transfer_zones_enabled = transfer_zones_enabled;
+    }
+
+    pub(crate) fn pathfinder_settings(&self) -> (i32, bool) {
+        (
+            self.pathfinder_level,
+            self.pathfinder_transfer_zones_enabled,
+        )
     }
 
     pub(crate) fn next_object_id(&self) -> u64 {
@@ -23149,6 +23178,9 @@ fn get_path(args: &[Value]) -> Result<Value, RuntimeError> {
             None => return Ok(Value::Nil),
         };
         let mut finder = PathFinder::new(landscape, context.world.transfer_zones());
+        let (level, transfer_zones_enabled) = context.world.pathfinder_settings();
+        finder.set_level(level);
+        finder.enable_transfer_zones(transfer_zones_enabled);
         let path = match finder.find(Vector2::new(from_x, from_y), Vector2::new(to_x, to_y)) {
             Some(path) => path,
             None => return Ok(Value::Nil),
@@ -38222,6 +38254,21 @@ impl EffectHostContext {
                     payer,
                     count,
                 )),
+                CommandEvent::SetPathFinderSettings {
+                    level,
+                    transfer_zones_enabled,
+                } => {
+                    // FnExecuteCommand is synchronous. A later GetPath in
+                    // this same VM call must see the just-written global
+                    // settings before the copied context folds back into
+                    // Engine; retain the event for that eventual fold too.
+                    self.world
+                        .set_pathfinder_settings(level, transfer_zones_enabled);
+                    deferred_events.push(CommandEvent::SetPathFinderSettings {
+                        level,
+                        transfer_zones_enabled,
+                    });
+                }
                 CommandEvent::AttemptGrab {
                     actor_id,
                     target_id,

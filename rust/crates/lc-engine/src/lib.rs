@@ -13909,6 +13909,10 @@ pub struct Engine {
     known_crew_owners: HashSet<i32>,
     eliminated_crew_owners: HashSet<i32>,
     transfer_zones: TransferZoneTable,
+    /// Runtime-only settings on `Game.PathFinder`. MoveTo overwrites both
+    /// before an obstructed search; script GetPath reuses the last pair.
+    pathfinder_level: i32,
+    pathfinder_transfer_zones_enabled: bool,
     audio_registry: AudioRegistry,
     #[doc(hidden)] pub pending_audio: Vec<AudioCommand>,
     #[doc(hidden)] pub pending_menu_requests: Vec<MenuRequest>,
@@ -15877,6 +15881,8 @@ impl Engine {
             known_crew_owners: HashSet::new(),
             eliminated_crew_owners: HashSet::new(),
             transfer_zones: TransferZoneTable::default(),
+            pathfinder_level: 1,
+            pathfinder_transfer_zones_enabled: true,
             audio_registry: AudioRegistry::new(),
             pending_audio: Vec::new(),
             pending_menu_requests: Vec::new(),
@@ -19739,6 +19745,10 @@ impl Engine {
         .with_scoreboard(Rc::clone(&self.scoreboard))
         .with_scoreboard_presentations(Rc::clone(&self.scoreboard_presentations))
         .with_scenario_script_counter(self.scenario_script_counter)
+        .with_pathfinder_settings(
+            self.pathfinder_level,
+            self.pathfinder_transfer_zones_enabled,
+        )
         .with_command_settings(
             self.frame,
             self.base_buy_enabled,
@@ -42397,6 +42407,13 @@ impl Engine {
 
     fn apply_command_event(&mut self, event: CommandEvent) -> Result<(), EngineError> {
         match event {
+            CommandEvent::SetPathFinderSettings {
+                level,
+                transfer_zones_enabled,
+            } => {
+                self.pathfinder_level = level.clamp(1, 10);
+                self.pathfinder_transfer_zones_enabled = transfer_zones_enabled;
+            }
             CommandEvent::ApplyObjectUpdate { object_id, update } => {
                 self.apply_object_update(object_id, update)?;
             }
@@ -51079,5 +51096,296 @@ mod scenario_section_random_regression {
             engine.rng, expected,
             "post-landscape FixRandom restores hold, count, FRndBuf3, and FRndPtr3"
         );
+    }
+}
+
+#[cfg(test)]
+mod pathfinder_host_state_regression {
+    use super::*;
+    use crate::landscape::PixelGrid;
+
+    fn pixel_landscape(width: u32, height: u32, pixels: Vec<u8>) -> Landscape {
+        let mut landscape =
+            Landscape::with_default_material(width, vec![height as i32; width as usize], None)
+                .expect("pathfinder landscape");
+        landscape.set_world_height(height as i32);
+        landscape.set_pixel_grid(PixelGrid::new(
+            width,
+            height,
+            pixels,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+        landscape
+    }
+
+    fn script_get_path(engine: &mut Engine, from: Vector2, to: Vector2) -> Value {
+        engine
+            .call_engine_global_function(
+                "GetPath",
+                &[
+                    Value::Int(from.x),
+                    Value::Int(from.y),
+                    Value::Int(to.x),
+                    Value::Int(to.y),
+                ],
+            )
+            .expect("GetPath host call succeeds")
+    }
+
+    fn unpack_path(value: &Value) -> (i32, Vec<(i32, i32, Option<u64>)>) {
+        let Value::Proplist(path) = value else {
+            panic!("expected GetPath proplist, got {value:?}");
+        };
+        let length = match path.get("Length") {
+            Some(Value::Int(length)) => *length,
+            other => panic!("expected integer Length, got {other:?}"),
+        };
+        let waypoints = match path.get("Waypoints") {
+            Some(Value::Array(waypoints)) => waypoints,
+            other => panic!("expected Waypoints array, got {other:?}"),
+        };
+        let points = waypoints
+            .iter()
+            .map(|waypoint| {
+                let Value::Proplist(waypoint) = waypoint else {
+                    panic!("expected waypoint proplist, got {waypoint:?}");
+                };
+                let x = match waypoint.get("X") {
+                    Some(Value::Int(x)) => *x,
+                    other => panic!("expected waypoint X, got {other:?}"),
+                };
+                let y = match waypoint.get("Y") {
+                    Some(Value::Int(y)) => *y,
+                    other => panic!("expected waypoint Y, got {other:?}"),
+                };
+                let transfer_target = match waypoint.get("TransferTarget") {
+                    Some(Value::Object(id)) => Some(*id),
+                    Some(other) => panic!("expected object TransferTarget, got {other:?}"),
+                    None => None,
+                };
+                (x, y, transfer_target)
+            })
+            .collect();
+        (length, points)
+    }
+
+    fn run_obstructed_move_to(engine: &mut Engine, object_id: ObjectId, target: Vector2) {
+        let index = engine
+            .find_object_index(object_id)
+            .expect("pathfinder object exists");
+        engine.objects[index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(target.x))
+                    .with_ty(Some(target.y))
+                    // C4CMD_MoveTo_NoPosAdjust keeps the test coordinate
+                    // fixed across the command's evaluation-only Execute.
+                    .with_data(CommandData::Integer(1)),
+            )
+            .expect("MoveTo queues");
+        engine
+            .execute_object_command_now(object_id)
+            .expect("MoveTo evaluates");
+        engine
+            .execute_object_command_now(object_id)
+            .expect("MoveTo pathfind executes");
+    }
+
+    #[test]
+    fn get_path_reuses_last_move_to_pathfinder_level_like_cpp() {
+        // Both exits require more than the level-1 MAX_CRAWL=800. Level 5
+        // reaches one with only six rays, isolating the persistent Level
+        // knob from the fixed MAX_RAY cap (C4PathFinder.cpp:213-217).
+        const WIDTH: u32 = 100;
+        const HEIGHT: u32 = 2_000;
+        let mut pixels = vec![0; WIDTH as usize * HEIGHT as usize];
+        for y in 100..=1_900usize {
+            for x in 49..=50usize {
+                pixels[y * WIDTH as usize + x] = 1;
+            }
+        }
+        let from = Vector2::new(10, 1_000);
+        let to = Vector2::new(90, 1_000);
+        let mut engine = Engine::with_seed(1);
+        engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
+
+        let mut definition =
+            Definition::from_script("PF05", "Level five mover", "").expect("definition compiles");
+        definition.set_pathfinder(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let mover = engine
+            .spawn_object(SpawnConfig::new("PF05").with_position(from))
+            .expect("mover spawns");
+
+        assert!(engine.find_path(from, to, 1, true).is_none());
+        assert!(engine.find_path(from, to, 5, true).is_some());
+        assert_eq!(
+            script_get_path(&mut engine, from, to),
+            Value::Nil,
+            "a fresh game uses C4PathFinder's default level 1"
+        );
+
+        run_obstructed_move_to(&mut engine, mover, to);
+
+        let path = script_get_path(&mut engine, from, to);
+        let (length, points) = unpack_path(&path);
+        assert!(length > 80, "the route must detour around the tall wall");
+        assert_eq!(points.first(), Some(&(from.x, from.y, None)));
+        assert_eq!(points.last(), Some(&(to.x, to.y, None)));
+        assert!(points.len() > 2);
+        assert!(
+            points
+                .iter()
+                .any(|(_, y, _)| *y < 100 || *y > 1_900),
+            "the level-5 route must reach a wall exit"
+        );
+    }
+
+    #[test]
+    fn get_path_reuses_last_move_to_transfer_zone_toggle_like_cpp() {
+        const WIDTH: u32 = 100;
+        const HEIGHT: u32 = 100;
+        let mut pixels = vec![0; WIDTH as usize * HEIGHT as usize];
+        for y in 0..HEIGHT as usize {
+            pixels[y * WIDTH as usize + 49] = 1;
+            pixels[y * WIDTH as usize + 50] = 1;
+        }
+        let from = Vector2::new(10, 50);
+        let to = Vector2::new(90, 50);
+        let mut engine = Engine::with_seed(1);
+        engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
+
+        let mut enabled =
+            Definition::from_script("PFTZ", "Zone mover", "").expect("definition compiles");
+        enabled.set_pathfinder(1);
+        engine
+            .register_definition(enabled)
+            .expect("enabled definition registers");
+        let mut disabled = Definition::from_script("PFNZ", "No-zone mover", "")
+            .expect("definition compiles");
+        disabled.set_pathfinder(1);
+        disabled.set_no_transfer_zones(1);
+        engine
+            .register_definition(disabled)
+            .expect("disabled definition registers");
+        let zone_owner = engine
+            .spawn_object(SpawnConfig::new("PFTZ").with_position(from))
+            .expect("zone owner spawns");
+        let no_zone_mover = engine
+            .spawn_object(SpawnConfig::new("PFNZ").with_position(from))
+            .expect("no-zone mover spawns");
+        engine
+            .set_transfer_zone(
+                zone_owner,
+                TransferZoneRect {
+                    x: 45,
+                    y: 40,
+                    width: 10,
+                    height: 20,
+                },
+            )
+            .expect("transfer zone registers");
+
+        assert!(engine.find_path(from, to, 1, false).is_none());
+        assert!(engine.find_path(from, to, 1, true).is_some());
+        let fresh = script_get_path(&mut engine, from, to);
+        let (_, fresh_points) = unpack_path(&fresh);
+        assert_eq!(fresh_points.first(), Some(&(from.x, from.y, None)));
+        assert_eq!(fresh_points.last(), Some(&(to.x, to.y, None)));
+        assert_eq!(
+            fresh_points
+                .iter()
+                .filter(|(_, _, target)| *target == Some(zone_owner.as_u64()))
+                .count(),
+            1,
+            "fresh C4PathFinder state has transfer zones enabled"
+        );
+
+        run_obstructed_move_to(&mut engine, no_zone_mover, to);
+        assert_eq!(
+            script_get_path(&mut engine, from, to),
+            Value::Nil,
+            "NoTransferZones persists after a failed MoveTo pathfind"
+        );
+
+        run_obstructed_move_to(&mut engine, zone_owner, to);
+        assert_eq!(
+            script_get_path(&mut engine, from, to),
+            fresh,
+            "the next MoveTo pathfind re-enables zones for GetPath"
+        );
+    }
+
+    #[test]
+    fn execute_command_updates_get_path_settings_within_the_same_script_call() {
+        // FnExecuteCommand runs C4Command::MoveTo synchronously. The
+        // following GetPath therefore sees the disabled global-zone knob
+        // before the outer script call returns and its copied host state is
+        // folded back into Engine (C4Script.cpp:922-929,5040).
+        const WIDTH: u32 = 100;
+        const HEIGHT: u32 = 100;
+        let mut pixels = vec![0; WIDTH as usize * HEIGHT as usize];
+        for y in 0..HEIGHT as usize {
+            pixels[y * WIDTH as usize + 49] = 1;
+            pixels[y * WIDTH as usize + 50] = 1;
+        }
+        let from = Vector2::new(10, 50);
+        let to = Vector2::new(90, 50);
+        let mut engine = Engine::with_seed(1);
+        engine.set_landscape(pixel_landscape(WIDTH, HEIGHT, pixels));
+
+        let mut definition = Definition::from_script(
+            "PFSY",
+            "Synchronous no-zone mover",
+            r#"
+                #strict 2
+                func Probe()
+                {
+                    SetCommand(this(), "MoveTo", 0, 90, 50, 0, 1);
+                    ExecuteCommand();
+                    ExecuteCommand();
+                    return GetPath(10, 50, 90, 50);
+                }
+            "#,
+        )
+        .expect("definition compiles");
+        definition.set_pathfinder(1);
+        definition.set_no_transfer_zones(1);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let mover = engine
+            .spawn_object(SpawnConfig::new("PFSY").with_position(from))
+            .expect("mover spawns");
+        engine
+            .set_transfer_zone(
+                mover,
+                TransferZoneRect {
+                    x: 45,
+                    y: 40,
+                    width: 10,
+                    height: 20,
+                },
+            )
+            .expect("transfer zone registers");
+        assert!(engine.find_path(from, to, 1, true).is_some());
+        assert!(engine.find_path(from, to, 1, false).is_none());
+
+        let index = engine.find_object_index(mover).expect("mover exists");
+        let value = engine
+            .call_object_function(index, "Probe", Vec::new())
+            .expect("Probe executes");
+
+        assert_eq!(
+            value,
+            Value::Nil,
+            "same-call GetPath observes ExecuteCommand's disabled-zone write"
+        );
+        assert_eq!(script_get_path(&mut engine, from, to), Value::Nil);
     }
 }

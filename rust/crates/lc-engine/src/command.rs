@@ -13372,6 +13372,14 @@ pub struct MenuRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CommandEvent {
+    /// `C4Command::MoveTo` writes both knobs on the game-global pathfinder
+    /// immediately before every obstructed-path Find. Later script GetPath
+    /// calls reuse the pair, even when this Find fails (C4Command.cpp:
+    /// 239-244; C4Script.cpp:5040).
+    SetPathFinderSettings {
+        level: i32,
+        transfer_zones_enabled: bool,
+    },
     ApplyObjectUpdate {
         object_id: ObjectId,
         update: ObjectUpdate,
@@ -15157,6 +15165,10 @@ struct MoveToState {
     /// ObjectComStop (Idle then Walk with callbacks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stop_continuation: Option<MoveToStopContinuation>,
+    /// Runtime handoff to the engine-owned `Game.PathFinder` settings.
+    /// The event is consumed in the same Execute and is not save state.
+    #[serde(skip)]
+    pathfinder_settings_update: Option<(i32, bool)>,
 }
 
 impl MoveToState {
@@ -15175,6 +15187,7 @@ impl MoveToState {
             tolerance: 5,
             last_direction: CommandDirection::Stop,
             stop_continuation: None,
+            pathfinder_settings_update: None,
         }
     }
 
@@ -15264,10 +15277,13 @@ impl MoveToState {
                 if direct_free {
                     self.path_checked = true;
                 } else {
+                    let level = ctx.object.pathfinder.clamp(1, 10);
+                    let transfer_zones_enabled = ctx.object.no_transfer_zones == 0;
+                    self.pathfinder_settings_update = Some((level, transfer_zones_enabled));
                     let transfer_zones = ctx.transfer_zones.states();
                     let mut finder = PathFinder::new(landscape, &transfer_zones);
-                    finder.set_level(ctx.object.pathfinder);
-                    finder.enable_transfer_zones(ctx.object.no_transfer_zones == 0);
+                    finder.set_level(level);
+                    finder.enable_transfer_zones(transfer_zones_enabled);
                     match finder.find(ctx.position, target) {
                         Some(path) if path.waypoints.len() > 2 => {
                             let waypoint_count = path.waypoints.len();
@@ -20460,7 +20476,21 @@ impl ActiveCommand {
 
         match &mut self.state {
             CommandState::Follow(state) => state.step(ctx),
-            CommandState::MoveTo(state) => state.step_with_waypoint(ctx, next_is_move_to),
+            CommandState::MoveTo(state) => {
+                let mut result = state.step_with_waypoint(ctx, next_is_move_to);
+                if let Some((level, transfer_zones_enabled)) =
+                    state.pathfinder_settings_update.take()
+                {
+                    result.events.insert(
+                        0,
+                        CommandEvent::SetPathFinderSettings {
+                            level,
+                            transfer_zones_enabled,
+                        },
+                    );
+                }
+                result
+            }
             CommandState::Enter(state) => state.step(ctx),
             CommandState::Exit(state) => state.step(ctx),
             CommandState::Build(state) => state.step(ctx),
