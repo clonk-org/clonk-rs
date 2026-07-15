@@ -1866,9 +1866,12 @@ impl<'a> Vm<'a> {
                             .cloned()
                             .map(|value| (value, None))
                             .collect(),
-                        // Preserve the existing array-foreach behavior here;
-                        // its non-array diagnostics are tracked separately.
-                        _ => Vec::new(),
+                        other => {
+                            return Err(RuntimeError::new(format!(
+                                "for: array expected, but got {}!",
+                                other.type_name()
+                            )))
+                        }
                     }
                 };
 
