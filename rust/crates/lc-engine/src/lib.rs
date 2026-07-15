@@ -52749,9 +52749,23 @@ protected func Departure(pContainer)
     }
 
     #[test]
-    fn object_com_put_without_grab_put_uses_any_nonzero_down_double_as_drop() {
+    fn object_com_put_without_grab_put_drops_with_full_physics_only_when_down_double_is_armed() {
         for (down_double, should_drop) in [(0, false), (-3, true)] {
             let mut engine = put_fixture_engine();
+            let actor_definition = engine
+                .definitions
+                .get_mut("ACTR")
+                .expect("actor definition remains");
+            actor_definition.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+            actor_definition.set_physical(PhysicalInfo {
+                throw: 50_000,
+                ..PhysicalInfo::default()
+            });
+            engine
+                .definitions
+                .get_mut("ITEM")
+                .expect("item definition remains")
+                .set_shape_rect(Some(DefinitionRect::new(0, 0, 4, 4)));
             engine
                 .register_definition(
                     Definition::from_script("NOPU", "No put", "#strict")
@@ -52775,32 +52789,64 @@ protected func Departure(pContainer)
                 .spawn_object(
                     SpawnConfig::new("ACTR")
                         .with_owner(1)
+                        .with_position(Vector2::new(20, 40))
+                        .with_velocity(Vector2::new(-2, 0))
+                        .with_command_direction(CommandDirection::Right)
                         .with_action(push),
                 )
                 .expect("pushing actor spawns");
             let item = engine
                 .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
                 .expect("carried item spawns");
-            let actor_index = engine.find_object_index(actor).expect("actor exists");
-            engine.objects[actor_index]
-                .commands
-                .push_front(
-                    CommandRequest::new(CommandId::Throw).with_target(Some(item)),
-                )
-                .expect("Throw queues");
-
-            engine
-                .execute_object_command_now(actor)
-                .expect("PutTake attempt executes");
-
             assert_eq!(
                 engine
-                    .object_snapshot(item)
-                    .expect("item remains")
-                    .container,
-                if should_drop { None } else { Some(actor) },
+                    .try_object_com_put(actor, target, item)
+                    .expect("ObjectComPut attempt executes"),
+                should_drop,
                 "LastComDownDouble={down_double}"
             );
+
+            let actor_index = engine.find_object_index(actor).expect("actor remains");
+            let item_index = engine.find_object_index(item).expect("item remains");
+            if should_drop {
+                let force = math::val_by_physical(400, 50_000);
+                assert_eq!(engine.objects[item_index].state.container, None);
+                assert_eq!(
+                    engine.objects[item_index].state.position,
+                    Vector2::new(
+                        engine.objects[actor_index].state.position.x + 8,
+                        engine.objects[actor_index].state.position.y + 6,
+                    ),
+                    "drop uses the live actor/item shapes for its exit position"
+                );
+                assert_eq!(
+                    engine.objects[item_index].fixed_velocity,
+                    FixedVec2::new(force, C4Fixed::ZERO),
+                    "rightward drop applies the physical throw force"
+                );
+                assert_eq!(engine.objects[actor_index].state.no_collect_delay, 2);
+                assert_eq!(engine.objects[actor_index].state.action.name, "Walk");
+                assert_eq!(
+                    engine.objects[actor_index]
+                        .state
+                        .local_vars
+                        .get("departure_seen"),
+                    Some(&Value::Int(1)),
+                    "the drop runs the item's Departure callback"
+                );
+            } else {
+                assert_eq!(engine.objects[item_index].state.container, Some(actor));
+                assert_eq!(engine.objects[actor_index].state.no_collect_delay, 0);
+                assert_eq!(engine.objects[actor_index].state.action.name, "Push");
+                assert_eq!(
+                    engine.objects[actor_index]
+                        .state
+                        .local_vars
+                        .get("departure_seen"),
+                    None,
+                    "a disarmed failed put must not begin the drop callback sequence"
+                );
+            }
         }
     }
 
