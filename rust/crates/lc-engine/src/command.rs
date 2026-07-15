@@ -491,6 +491,7 @@ mod tests {
                         .with_ty(Some(46))
                         .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET))
                         .with_update_interval(25)
+                        .with_evaluated(true)
                         .with_mode(CommandMode::SilentSub),
                 ),
                 CommandOperation::PushFront(
@@ -499,10 +500,70 @@ mod tests {
                         .with_ty(Some(44))
                         .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET))
                         .with_update_interval(25)
+                        .with_evaluated(true)
                         .with_mode(CommandMode::SilentSub),
                 ),
             ],
             "ObjectAddWaypoint applies the shape offset and pushes each deterministic intermediate waypoint with Data and interval 25 (C4Command.cpp:189-208; C4PathFinder.cpp:383-400)"
+        );
+
+        let CommandOperation::PushFront(nearest_waypoint) = &result.operations[1] else {
+            panic!("nearest pathfinder operation must push MoveTo");
+        };
+        let mut waypoint_state = MoveToState::from_request(nearest_waypoint);
+        let first = waypoint_state.step(&ctx);
+        assert_eq!(
+            first.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Right),
+            "an evaluated pathfinder waypoint steers on its first Execute"
+        );
+        assert_eq!(waypoint_state.update_interval, 24);
+    }
+
+    #[test]
+    fn pathfinder_waypoint_skips_regrounding_after_solid_offset() {
+        // ObjectAddWaypoint first nudges this point left from the ledge via
+        // AdjustSolidOffset, then creates an already-evaluated MoveTo. The
+        // waypoint must remain mid-air instead of AdjustMoveToTarget dropping
+        // it onto the lower surface (C4Command.cpp:189-208,1628-1643).
+        let mut surface = vec![110i32; 300];
+        for column in surface.iter_mut().take(190).skip(150) {
+            *column = 75;
+        }
+        let landscape =
+            crate::Landscape::with_default_material(300, surface, None).expect("landscape");
+        let mut walker = walking_jumper(Vector2::new(100, 100));
+        walker.shape = DefinitionRect::new(-8, -10, 16, 20);
+        let (mut x, mut y) = (149, 75);
+        assert!(adjust_solid_offset(
+            &landscape,
+            &mut x,
+            &mut y,
+            walker.shape.width / 2,
+            walker.shape.height / 2,
+        ));
+        assert_eq!((x, y), (142, 75));
+
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
+        let request = CommandRequest::new(CommandId::MoveTo)
+            .with_tx(Some(x))
+            .with_ty(Some(y))
+            .with_data(CommandData::Integer(0))
+            .with_update_interval(25)
+            .with_evaluated(true)
+            .with_mode(CommandMode::SilentSub);
+        let mut state = MoveToState::from_request(&request);
+
+        let first = state.step(&ctx);
+
+        assert_eq!((state.tx, state.ty), (Some(142), Some(75)));
+        assert_eq!(
+            first.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Right),
+            "the post-AdjustSolidOffset coordinate steers without an evaluation-only frame"
         );
     }
 
@@ -630,6 +691,7 @@ mod tests {
                         .with_ty(Some(89))
                         .with_data(CommandData::Integer(0))
                         .with_update_interval(25)
+                        .with_evaluated(true)
                         .with_mode(CommandMode::SilentSub),
                 ),
                 CommandOperation::PushFront(
@@ -637,6 +699,7 @@ mod tests {
                         .with_target(Some(zone_owner))
                         .with_tx(Some(55))
                         .with_ty(Some(89))
+                        .with_evaluated(true)
                         .with_mode(CommandMode::SilentSub),
                 ),
             ],
@@ -1059,6 +1122,10 @@ mod tests {
         let request = CommandRequest::new(CommandId::MoveTo)
             .with_tx(Some(100))
             .with_ty(Some(50));
+        assert!(
+            !request.evaluated,
+            "ordinary Enter/JumpControl/script MoveTos retain fInitEvaluation=true"
+        );
         let mut state = MoveToState::from_request(&request); // unevaluated
         let first = state.step(&ctx);
         assert_eq!(first.status, CommandStatus::Running);
@@ -8776,6 +8843,11 @@ pub struct CommandRequest {
     pub ty: Option<i32>,
     pub data: CommandData,
     pub update_interval: u32,
+    /// C4Command::Evaluated as initialized by C4Object::AddCommand's
+    /// fInitEvaluation parameter. Pathfinder waypoints are the only
+    /// commands created with evaluation already complete.
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    pub evaluated: bool,
     pub retries: i32,
     pub mode: CommandMode,
 }
@@ -8791,6 +8863,7 @@ impl CommandRequest {
             ty: None,
             data: CommandData::None,
             update_interval: 0,
+            evaluated: false,
             retries: 0,
             mode: CommandMode::Base,
         }
@@ -8830,6 +8903,11 @@ impl CommandRequest {
 
     pub fn with_update_interval(mut self, interval: u32) -> Self {
         self.update_interval = interval;
+        self
+    }
+
+    pub fn with_evaluated(mut self, evaluated: bool) -> Self {
+        self.evaluated = evaluated;
         self
     }
 
@@ -9960,8 +10038,9 @@ struct MoveToState {
     /// C4Command.h:68-69).
     #[serde(default)]
     data: i32,
-    /// C4Command::Evaluated — false until the InitEvaluation Execute
-    /// (C4Command.cpp:1625-1643) has absorbed Target and adjusted Tx/Ty.
+    /// C4Command::Evaluated — false until the InitEvaluation Execute has
+    /// absorbed Target and adjusted Tx/Ty, except for pathfinder waypoints
+    /// created with fInitEvaluation=false (C4Command.cpp:189-209,1625-1643).
     #[serde(default)]
     evaluated: bool,
     /// C4Command::PathChecked suppresses repeated path searches until the
@@ -9983,7 +10062,7 @@ impl MoveToState {
                 CommandData::Integer(value) => value,
                 _ => 0,
             },
-            evaluated: false,
+            evaluated: request.evaluated,
             path_checked: false,
             update_interval: request.update_interval,
             tolerance: 5,
@@ -10102,6 +10181,7 @@ impl MoveToState {
                                             .with_target(Some(transfer_target))
                                             .with_tx(Some(waypoint.x))
                                             .with_ty(Some(waypoint.y))
+                                            .with_evaluated(true)
                                             .with_mode(CommandMode::SilentSub)
                                     } else {
                                         let (mut x, mut y) = (waypoint.x, waypoint.y);
@@ -10117,6 +10197,7 @@ impl MoveToState {
                                             .with_ty(Some(y))
                                             .with_data(CommandData::Integer(self.data))
                                             .with_update_interval(25)
+                                            .with_evaluated(true)
                                             .with_mode(CommandMode::SilentSub)
                                     };
                                 operations.push(CommandOperation::PushFront(request));
