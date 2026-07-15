@@ -5440,7 +5440,7 @@ impl Engine {
     fn object_com_dig(&mut self, index: usize) -> Result<bool, EngineError> {
         let physical = self.object_physical(index);
         let definition_id = self.objects[index].definition_id.clone();
-        if physical.can_dig == 0 || !self.force_action_with_calls(index, &definition_id, "Dig")? {
+        if physical.can_dig == 0 || !self.action_with_calls(index, &definition_id, "Dig")? {
             return Ok(false);
         }
         // ObjectActionDig resets the Dig2Object request (:143).
@@ -8509,6 +8509,89 @@ protected func OnActionJump()
         assert_eq!(snapshot.action.name, "Locked");
         assert_eq!(snapshot.velocity, Vector2::ZERO);
         assert!(snapshot.command_stack.command_names().is_empty());
+    }
+
+    fn no_other_action_object() -> (Engine, ObjectId) {
+        let mut engine = Engine::new();
+        let mut definition =
+            Definition::from_script("LOCK", "Locked actor", "#strict\n")
+                .expect("locked actor compiles");
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Dead".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_no_other_action(true),
+                ),
+                (
+                    "Tumble".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+            ]),
+        );
+        engine
+            .register_definition(definition)
+            .expect("locked actor registers");
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new("LOCK")
+                    .with_action(ActionState::new("Dead"))
+                    .with_direction(Direction::Right)
+                    .with_command_direction(CommandDirection::Right)
+                    .with_fixed_velocity(FixedVec2::new(itofix(3), itofix(-4))),
+            )
+            .expect("locked actor spawns");
+        (engine, object)
+    }
+
+    #[test]
+    fn object_com_stop_rejects_no_other_action_and_only_stops_command_direction() {
+        let (mut engine, object) = no_other_action_object();
+        let index = engine.find_object_index(object).expect("actor exists");
+        let action_before = engine.objects[index].state.action.clone();
+        let velocity_before = engine.objects[index].fixed_velocity;
+
+        assert!(!engine.object_com_stop(index).expect("ObjectComStop runs"));
+
+        let index = engine.find_object_index(object).expect("actor remains");
+        assert_eq!(engine.objects[index].state.action, action_before);
+        assert_eq!(engine.objects[index].fixed_velocity, velocity_before);
+        assert_eq!(
+            engine.objects[index].state.command_direction,
+            CommandDirection::Stop,
+            "ObjectActionStand writes ComDir before its rejected Walk transition"
+        );
+    }
+
+    #[test]
+    fn object_action_tumble_rejects_dead_no_other_action() {
+        let (mut engine, object) = no_other_action_object();
+        let index = engine.find_object_index(object).expect("actor exists");
+        let action_before = engine.objects[index].state.action.clone();
+        let direction_before = engine.objects[index].state.direction;
+        let velocity_before = engine.objects[index].fixed_velocity;
+        let definition_id = engine.objects[index].definition_id.clone();
+
+        assert!(!engine
+            .object_action_tumble(
+                index,
+                &definition_id,
+                Direction::Left,
+                itofix(9),
+                itofix(-8),
+            )
+            .expect("ObjectActionTumble runs"));
+
+        let index = engine.find_object_index(object).expect("actor remains");
+        assert_eq!(engine.objects[index].state.action, action_before);
+        assert_eq!(engine.objects[index].state.direction, direction_before);
+        assert_eq!(engine.objects[index].fixed_velocity, velocity_before);
     }
 
     #[test]

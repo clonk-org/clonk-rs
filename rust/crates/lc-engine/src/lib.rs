@@ -31217,7 +31217,7 @@ impl Engine {
                 });
             if let Some(target) = switch {
                 let definition_id = self.objects[idx].definition_id.clone();
-                self.force_action_with_calls(idx, &definition_id, &target)?;
+                self.action_with_calls(idx, &definition_id, &target)?;
                 return Ok(true);
             }
         }
@@ -31895,11 +31895,12 @@ impl Engine {
         // `return`s so the phase advance is skipped this frame
         // (C4Object.cpp:4956).
         if swim_walk_transition {
-            self.force_action_with_calls(idx, &definition_id, "Walk")?;
-            let object = &mut self.objects[idx];
-            object.fixed_velocity = FixedVec2::ZERO;
-            object.state.velocity = Vector2::ZERO;
-            object.swim_exit_this_frame = true;
+            if self.action_with_calls(idx, &definition_id, "Walk")? {
+                let object = &mut self.objects[idx];
+                object.fixed_velocity = FixedVec2::ZERO;
+                object.state.velocity = Vector2::ZERO;
+            }
+            self.objects[idx].swim_exit_this_frame = true;
             return Ok(true);
         }
         Ok(false)
@@ -33463,7 +33464,7 @@ impl Engine {
         };
         if direction != current_direction {
             if let Some(turn_action) = turn_action {
-                self.force_action_with_calls(idx, definition_id, &turn_action)?;
+                self.action_with_calls(idx, definition_id, &turn_action)?;
             }
         }
         self.objects[idx].state.direction = direction;
@@ -33509,11 +33510,11 @@ impl Engine {
         Ok(())
     }
 
-    /// SetActionByName-style forced transition from an engine path
-    /// (ObjectActionWalk et al., C4ObjectCom.cpp:34-39): applies the named
-    /// action when the def has it, refreshes OCF, resyncs the fixed coords,
-    /// then synchronously runs StartCall followed by AbortCall
-    /// (C4Object.cpp:4142-4198).
+    /// Explicit `SetActionByName(..., fForce=true)` transition: applies the
+    /// named action even through NoOtherAction, refreshes OCF, resyncs the
+    /// fixed coords, then synchronously runs StartCall followed by AbortCall
+    /// (C4Object.cpp:4142-4198). C++ ObjectAction helpers use the ordinary
+    /// non-forced twin below.
     #[doc(hidden)]
     pub fn force_action_with_calls(
         &mut self,
@@ -33533,16 +33534,6 @@ impl Engine {
         name: &str,
     ) -> Result<bool, EngineError> {
         self.action_with_optional_target_and_calls(idx, definition_id, name, None, false)
-    }
-
-    fn force_action_with_target_and_calls(
-        &mut self,
-        idx: usize,
-        definition_id: &DefinitionId,
-        name: &str,
-        target: ObjectId,
-    ) -> Result<bool, EngineError> {
-        self.action_with_optional_target_and_calls(idx, definition_id, name, Some(target), true)
     }
 
     /// Ordinary target-bearing `SetActionByName`, used by ObjectActionPush
@@ -33699,7 +33690,7 @@ impl Engine {
                             return Ok(());
                         }
                         if ocf & crate::ocf::HIT_SPEED3 != 0
-                            && self.force_action_with_calls(idx, definition_id, "KneelDown")?
+                            && self.action_with_calls(idx, definition_id, "KneelDown")?
                         {
                             let object = &mut self.objects[idx];
                             object.fixed_velocity = FixedVec2::ZERO;
@@ -33709,10 +33700,11 @@ impl Engine {
                         // Walk keeping horizontal momentum
                         // (C4Object.cpp:4330-4338).
                         let last_xdir = self.objects[idx].fixed_velocity.x;
-                        self.force_action_with_calls(idx, definition_id, "Walk")?;
-                        let object = &mut self.objects[idx];
-                        object.fixed_velocity = FixedVec2::new(last_xdir, C4Fixed::ZERO);
-                        object.state.velocity = object.velocity_pixels();
+                        if self.action_with_calls(idx, definition_id, "Walk")? {
+                            let object = &mut self.objects[idx];
+                            object.fixed_velocity = FixedVec2::new(last_xdir, C4Fixed::ZERO);
+                            object.state.velocity = object.velocity_pixels();
+                        }
                         return Ok(());
                     }
                 }
@@ -33969,7 +33961,7 @@ impl Engine {
         definition_id: &DefinitionId,
     ) -> Result<bool, EngineError> {
         self.objects[idx].state.command_direction = CommandDirection::Stop;
-        if self.force_action_with_calls(idx, definition_id, "Walk")? {
+        if self.action_with_calls(idx, definition_id, "Walk")? {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
@@ -34025,7 +34017,7 @@ impl Engine {
         idx: usize,
         definition_id: &DefinitionId,
     ) -> Result<bool, EngineError> {
-        self.force_action_with_calls(idx, definition_id, "Idle")?;
+        self.action_with_calls(idx, definition_id, "Idle")?;
         self.object_action_stand(idx, definition_id)
     }
 
@@ -34036,7 +34028,7 @@ impl Engine {
         definition_id: &DefinitionId,
         direction: Direction,
     ) -> Result<bool, EngineError> {
-        if self.force_action_with_calls(idx, definition_id, "FlatUp")? {
+        if self.action_with_calls(idx, definition_id, "FlatUp")? {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
@@ -34053,7 +34045,7 @@ impl Engine {
         definition_id: &DefinitionId,
         direction: Direction,
     ) -> Result<bool, EngineError> {
-        if self.force_action_with_calls(idx, definition_id, "Scale")? {
+        if self.action_with_calls(idx, definition_id, "Scale")? {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
@@ -34070,7 +34062,7 @@ impl Engine {
         definition_id: &DefinitionId,
         direction: Direction,
     ) -> Result<bool, EngineError> {
-        if self.force_action_with_calls(idx, definition_id, "Hangle")? {
+        if self.action_with_calls(idx, definition_id, "Hangle")? {
             let object = &mut self.objects[idx];
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
@@ -34089,7 +34081,7 @@ impl Engine {
         xdir: C4Fixed,
         ydir: C4Fixed,
     ) -> Result<bool, EngineError> {
-        if self.force_action_with_calls(idx, definition_id, "Tumble")? {
+        if self.action_with_calls(idx, definition_id, "Tumble")? {
             let object = &mut self.objects[idx];
             object.state.direction = direction;
             object.fixed_velocity = FixedVec2::new(xdir, ydir);
@@ -34275,8 +34267,8 @@ impl Engine {
             }
             (range, range)
         };
-        if !self.force_action_with_calls(idx, definition_id, "KneelUp")? {
-            self.force_action_with_calls(idx, definition_id, "Walk")?;
+        if !self.action_with_calls(idx, definition_id, "KneelUp")? {
+            self.action_with_calls(idx, definition_id, "Walk")?;
         }
         let object = &mut self.objects[idx];
         object.fixed_velocity = FixedVec2::ZERO;
@@ -35840,7 +35832,7 @@ impl Engine {
             name: Some("Fight".to_string()),
             phase: Some(0),
             ticks: Some(0),
-            force: true,
+            force: false,
             data: None,
             target: Some(Some(target_id)),
             target2: Some(None),
@@ -37406,7 +37398,7 @@ impl Engine {
                         self.apply_object_update(flag_id, ObjectUpdate::new().clear_container())?;
                         if let Some(flag_index) = self.find_object_index(flag_id) {
                             let flag_definition = self.objects[flag_index].definition_id.clone();
-                            self.force_action_with_target_and_calls(
+                            self.action_with_target_and_calls(
                                 flag_index,
                                 &flag_definition,
                                 "FlyBase",
@@ -38514,7 +38506,7 @@ impl Engine {
                     name: Some(action.to_string()),
                     phase: Some(0),
                     ticks: Some(0),
-                    force: true,
+                    force: false,
                     data: None,
                     // SetAction assigns targets only when given
                     // (C4Object.cpp:4122-4123).
@@ -51533,6 +51525,49 @@ mod script_control_execution_tests {
                 .position,
             Vector2::new(12, 34)
         );
+    }
+}
+
+#[cfg(test)]
+mod object_action_no_other_regression {
+    use super::*;
+
+    #[test]
+    fn object_action_fight_respects_no_other_action() {
+        let mut engine = Engine::new();
+        let mut definition =
+            Definition::from_script("FLOK", "Fight-locked actor", "#strict\n")
+                .expect("fight actor compiles");
+        definition.configure_actions(
+            Some("Fight".to_string()),
+            HashMap::from([
+                (
+                    "Fight".to_string(),
+                    ActionSpec::default().with_procedure("FIGHT"),
+                ),
+                (
+                    "Dead".to_string(),
+                    ActionSpec::default().with_no_other_action(true),
+                ),
+            ]),
+        );
+        engine
+            .register_definition(definition)
+            .expect("fight actor registers");
+        let locked = engine
+            .spawn_object(SpawnConfig::new("FLOK").with_action(ActionState::new("Dead")))
+            .expect("locked actor spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("FLOK"))
+            .expect("fight target spawns");
+
+        engine.object_action_fight(locked, target);
+
+        let locked = engine
+            .object_snapshot(locked)
+            .expect("locked actor remains");
+        assert_eq!(locked.action.name, "Dead");
+        assert_eq!(locked.action.target, None);
     }
 }
 

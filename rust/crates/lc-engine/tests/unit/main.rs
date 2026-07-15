@@ -1369,6 +1369,96 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
     }
 
     #[test]
+    fn fling_respects_dead_no_other_action_and_uses_raw_velocity_fallback() {
+        let mut definition =
+            Definition::from_script("FLCK", "Fling-locked actor", "#strict\n")
+                .expect("fling actor compiles");
+        definition.set_category(CATEGORY_LIVING);
+        definition.set_mass(100);
+        definition.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Dead".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_no_other_action(true),
+                ),
+                (
+                    "Tumble".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+                (
+                    "Jump".to_string(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(43);
+        engine
+            .register_definition(definition)
+            .expect("fling actor registers");
+        let mut rock = simple_definition("FLRK");
+        rock.set_category(CATEGORY_OBJECT);
+        rock.set_mass(50);
+        engine
+            .register_definition(rock)
+            .expect("fling rock registers");
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new("FLCK")
+                    .with_position(Vector2::new(50, 50))
+                    .with_alive(true)
+                    .with_energy(100_000)
+                    .with_action(ActionState::new("Dead"))
+                    .with_direction(Direction::Right)
+                    .with_mobile(false),
+            )
+            .expect("fling actor spawns");
+        engine
+            .spawn_object(
+                SpawnConfig::new("FLRK")
+                    .with_position(Vector2::new(50, 50))
+                    .with_velocity(Vector2::new(5, 0))
+                    .with_controller(9),
+            )
+            .expect("fling rock spawns");
+        let index = engine.find_object_index(object).expect("actor exists");
+        let attach = CNAT_LEFT | CNAT_BOTTOM;
+        engine.objects[index].state.t_attach = attach;
+        engine.objects[index].frame_t_attach = attach;
+
+        engine
+            .cross_check(3)
+            .expect("Tick3 cross-check flings a flight-procedure victim");
+
+        let index = engine.find_object_index(object).expect("actor remains");
+        let object = &engine.objects[index];
+        assert_eq!(object.state.energy, 84_000, "the hit reached Fling");
+        assert_eq!(object.state.action.name, "Dead");
+        assert_eq!(object.state.direction, Direction::Right);
+        assert_eq!(
+            object.fixed_velocity,
+            FixedVec2::new(
+                C4Fixed::from_raw(itofix(5).val() * 50 / 100),
+                C4Fixed::ZERO,
+            )
+        );
+        assert!(object.state.mobile);
+        assert_eq!(object.state.t_attach, CNAT_LEFT);
+        assert_eq!(object.frame_t_attach, CNAT_LEFT);
+    }
+
+    #[test]
     fn cross_check_dead_raw_fling_sets_controller_and_clears_bottom_attach(
     ) -> Result<(), EngineError> {
         // A lethal DoEnergy refreshes OCF before CrossCheck calls Fling.
@@ -21247,6 +21337,10 @@ func Trigger() {
         actions.insert("Idle".to_string(), ActionSpec::default());
         actions.insert("GetPunched".to_string(), ActionSpec::default());
         actions.insert("Tumble".to_string(), ActionSpec::default());
+        actions.insert(
+            "Dead".to_string(),
+            ActionSpec::default().with_no_other_action(true),
+        );
         victim_def.configure_actions(Some("Idle".to_string()), actions);
         victim_def.set_physical(PhysicalInfo {
             fight: 25_000,
@@ -21285,6 +21379,22 @@ func Trigger() {
         let v_hard = spawn_victim(&mut engine);
         let v_catcher = spawn_victim(&mut engine);
         let v_derived = spawn_victim(&mut engine);
+        let dead_velocity = FixedVec2::new(fixed100(37), itofix(-3));
+        let spawn_dead_victim = |engine: &mut Engine| {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("CLNK")
+                        .with_position(Vector2::new(52, 50))
+                        .with_alive(true)
+                        .with_energy(50_000)
+                        .with_action(ActionState::new("Dead"))
+                        .with_command_direction(CommandDirection::Right)
+                        .with_fixed_velocity(dead_velocity),
+                )
+                .expect("dead victim spawns")
+        };
+        let v_dead_regular = spawn_dead_victim(&mut engine);
+        let v_dead_hard = spawn_dead_victim(&mut engine);
         let pillow = engine
             .spawn_object(
                 SpawnConfig::new("PILW")
@@ -21336,6 +21446,51 @@ func Trigger() {
         assert_eq!(victim.state.action.name, "Tumble");
         assert_eq!(victim.fixed_velocity.x, fixed100(150));
         assert_eq!(victim.fixed_velocity.y, itofix(-2));
+
+        // A NoOtherAction Dead victim takes damage and stops its ComDir, but
+        // ordinary ObjectActionGetPunched/ObjectActionTumble transitions
+        // fail without changing action or motion (C4Object.cpp:4111-4115).
+        assert_eq!(
+            bite(&mut engine, v_dead_regular, Some(8)),
+            Value::Bool(false)
+        );
+        let idx = engine
+            .find_object_index(v_dead_regular)
+            .expect("dead victim exists");
+        let victim = &engine.objects[idx];
+        assert_eq!(victim.state.energy, 42_000);
+        assert_eq!(victim.state.action.name, "Dead");
+        assert_eq!(victim.fixed_velocity, dead_velocity);
+        assert_eq!(victim.state.command_direction, CommandDirection::Stop);
+        assert!(
+            !victim
+                .state
+                .local_vars
+                .get("catchBlow")
+                .is_some_and(Value::as_bool),
+            "failed GetPunched does not fire CatchBlow"
+        );
+
+        assert_eq!(
+            bite(&mut engine, v_dead_hard, Some(12)),
+            Value::Bool(false)
+        );
+        let idx = engine
+            .find_object_index(v_dead_hard)
+            .expect("dead victim exists");
+        let victim = &engine.objects[idx];
+        assert_eq!(victim.state.energy, 38_000);
+        assert_eq!(victim.state.action.name, "Dead");
+        assert_eq!(victim.fixed_velocity, dead_velocity);
+        assert_eq!(victim.state.command_direction, CommandDirection::Stop);
+        assert!(
+            !victim
+                .state
+                .local_vars
+                .get("catchBlow")
+                .is_some_and(Value::as_bool),
+            "failed Tumble and GetPunched do not fire CatchBlow"
+        );
 
         // Caught blow: halved damage, no tumble, Punch returns false.
         let idx = engine.find_object_index(v_catcher).expect("victim exists");
