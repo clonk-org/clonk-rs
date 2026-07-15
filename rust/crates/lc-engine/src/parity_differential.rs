@@ -616,6 +616,25 @@ fn parity_differential_matches_cpp_golden() {
         );
     }
 
+    // 5b. Stateless SeededRandom, including zero range and u32 overflow.
+    for (idx, entry) in golden["rng_seeded_random"]
+        .as_array()
+        .expect("rng_seeded_random is an array")
+        .iter()
+        .enumerate()
+    {
+        expect_eq_u64(
+            "rng_seeded_random",
+            idx,
+            "val",
+            u(entry, "val"),
+            u64::from(LcgRng::seeded_random(
+                u(entry, "seed") as u32,
+                u(entry, "range") as u32,
+            )),
+        );
+    }
+
     // 6. Randomize3 buffer values + the Rnd3 circular-buffer sequence.
     {
         let rr = &golden["rng_randomize3"];

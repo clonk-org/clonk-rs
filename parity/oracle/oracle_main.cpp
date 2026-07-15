@@ -1454,6 +1454,27 @@ int main()
         printf(",\n");
     }
 
+    // 5b. Stateless SeededRandom used by C4Sky::Init for SkyDef list
+    // selection. Pin zero-range and wrapping-u32 behavior directly from the
+    // production inline in C4Random.h.
+    arr_begin("rng_seeded_random");
+    struct SeededRandomCase { uint32_t seed, range; };
+    const SeededRandomCase seeded_random_cases[] = {
+        {0u, 0u},
+        {0u, 3u},
+        {7u, 3u},
+        {12345u, 100u},
+        {0xffffffffu, 100u},
+    };
+    for (auto c : seeded_random_cases)
+    {
+        sep();
+        printf("{\"seed\":%u,\"range\":%u,\"val\":%u}",
+               c.seed, c.range, SeededRandom(c.seed, c.range));
+    }
+    arr_end();
+    printf(",\n");
+
     // 6. Randomize3 / Rnd3: the 500-entry circular buffer (mass-mover, etc.).
     {
         const uint32_t seed = 9876;

@@ -1401,12 +1401,29 @@ pub trait LegacyDefinitionResolver {
             Err(error) => Err(error),
         }
     }
+
+    /// Ordered external graphics resources used by C4Sky's SkyDef fallback.
+    /// A missing Graphics.c4g is an ordinary no-surface result, just like a
+    /// missing Material.c4g is an ordinary empty material overload chain.
+    fn resolve_graphics_groups(&self, scenario: &Group) -> Result<Vec<Group>, ScenarioError> {
+        match self.resolve_definition_groups(scenario, "Graphics.c4g") {
+            Ok(groups) => Ok(groups),
+            Err(ScenarioError::LegacyDefinitionNotFound { .. }) => Ok(Vec::new()),
+            Err(ScenarioError::Resources(
+                GroupError::Missing(_)
+                | GroupError::EntryNotFound(_)
+                | GroupError::NotDirectory(_),
+            )) => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 struct AuthoritativeNetworkResourceResolver<'a> {
     definition_modules: &'a [String],
     definition_groups: &'a [Group],
     material_groups: &'a [Group],
+    graphics_groups: &'a [Group],
 }
 
 impl LegacyDefinitionResolver for AuthoritativeNetworkResourceResolver<'_> {
@@ -1427,6 +1444,10 @@ impl LegacyDefinitionResolver for AuthoritativeNetworkResourceResolver<'_> {
             .ok_or_else(|| ScenarioError::LegacyDefinitionNotFound {
                 path: identifier.to_string(),
             })
+    }
+
+    fn resolve_graphics_groups(&self, _scenario: &Group) -> Result<Vec<Group>, ScenarioError> {
+        Ok(self.graphics_groups.to_vec())
     }
 }
 
@@ -1724,12 +1745,15 @@ impl Scenario {
     /// Loads a network client's combined scenario from the exact resolved
     /// `C4GameRes` groups. Definitions use the synchronized list rather than
     /// the scenario preset or local folder scan; materials retain C++'s
-    /// scenario-local-first, then synchronized-list order
-    /// (C4GameParameters.cpp:73-79,255-271; C4Game.cpp:80-101,876-952).
+    /// scenario-local-first, then synchronized-list order. Graphics are the
+    /// client's local C4GraphicsResource group chain and are not synchronized
+    /// game resources (C4GraphicsResource.cpp:351-380;
+    /// C4GameParameters.cpp:73-79,255-271; C4Game.cpp:80-101,876-952).
     pub fn load_network_from_path_with_languages_and_seed<S>(
         path: impl AsRef<Path>,
         definition_groups: &[Group],
         material_groups: &[Group],
+        graphics_groups: &[Group],
         languages: &[S],
         random_seed: u64,
     ) -> Result<Self, ScenarioError>
@@ -1744,6 +1768,7 @@ impl Scenario {
             definition_modules: &definition_modules,
             definition_groups,
             material_groups,
+            graphics_groups,
         };
         Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
             &group,
@@ -2037,8 +2062,7 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
     {
-        let manifest = parse_legacy_scenario_manifest(group)?;
-        let legacy_core = manifest.core.clone();
+        let mut manifest = parse_legacy_scenario_manifest(group)?;
         // Exact old saves replace the normal definition vector from Game.txt.
         // Discover that boundary before trying to resolve Scenario.txt modules:
         // those modules may intentionally no longer exist.
@@ -2210,7 +2234,11 @@ impl Scenario {
         let weather_init = derive_legacy_weather_init(&manifest)?;
         // C4Sky always initializes for a running game (C4Sky::Init,
         // C4Sky.cpp:71-152): bitmap sky or fade gradient.
-        let sky = derive_legacy_sky(group, &manifest);
+        let sky = derive_legacy_sky(group, resolver, &mut manifest, random_seed)?;
+        // C4Sky::Init mutates the stored SkyDef's comma separators whenever
+        // the direct scenario `Sky` bitmap misses. Retain that post-init core
+        // for script reflection and save/network serialization.
+        let legacy_core = manifest.core.clone();
         let scenario_sections = load_legacy_scenario_sections(
             group,
             &manifest,
@@ -8724,21 +8752,54 @@ const LEGACY_SKY_EXTENSIONS: [&str; 4] = ["png", "bmp", "jpeg", "jpg"];
 const LEGACY_SKY_FADE_TOP_DEFAULT: RgbColor = RgbColor::new(28, 64, 152);
 const LEGACY_SKY_FADE_BOTTOM_DEFAULT: RgbColor = RgbColor::new(192, 196, 252);
 
-/// Mirrors C4Sky::Init for legacy scenario loads (C4Sky.cpp:71-152): the
-/// scenario's `Sky` bitmap becomes the sky surface — white fade
-/// (C4Sky.cpp:109), tiled up to 128x128 (SurfaceEnsureSize,
-/// C4Sky.cpp:28-52,110-111), SkyScrollMode parallax mapping
-/// (C4Sky.cpp:114-125). Without one the sky is the `SkyDefFade` gradient
-/// (SetFadePalette, C4Sky.cpp:54-68).
-///
-/// Gap (presentation only): the `SkyDef` tile list — one entry picked by
-/// SeededRandom and loaded from the scenario or Graphics.c4g
-/// (C4Sky.cpp:88-105) — is not evaluated; such scenarios fall back to the
-/// fade gradient here.
-fn derive_legacy_sky(group: &Group, manifest: &LegacyScenarioManifest) -> SkyConfig {
+/// Mirrors C4Sky::Init for legacy scenario loads (C4Sky.cpp:71-152): first
+/// try the scenario's implicit `Sky` bitmap, then pick one entry from SkyDef
+/// with stateless SeededRandom and search the scenario before Graphics.c4g
+/// (C4Sky.cpp:82-105). A loaded bitmap gets white fade, is tiled up to
+/// 128x128 (SurfaceEnsureSize, C4Sky.cpp:28-52,109-111), and applies the
+/// SkyScrollMode parallax mapping (C4Sky.cpp:114-125). Without one the sky is
+/// the `SkyDefFade` gradient (SetFadePalette, C4Sky.cpp:54-68).
+fn derive_legacy_sky<R: LegacyDefinitionResolver>(
+    group: &Group,
+    resolver: &R,
+    manifest: &mut LegacyScenarioManifest,
+    random_seed: u64,
+) -> Result<SkyConfig, ScenarioError> {
     let mut settings = SkySettings::default();
+    let mut surface = load_legacy_sky_surface(group, "Sky");
 
-    if let Some((width, height, pixels)) = load_legacy_sky_surface(group) {
+    if surface.is_none() {
+        // C4Sky::Init mutates the stored SkyDef before section selection, so
+        // scripts observe semicolons even when the selected bitmap loads.
+        if let Some(sky_def) = manifest.core.landscape.sky.as_mut() {
+            *sky_def = sky_def.replace(',', ";");
+        }
+
+        let sky_def = manifest.core.landscape.sky.as_deref().unwrap_or_default();
+        // split() preserves leading, consecutive, and trailing empty slots;
+        // C++ counts all of them with SCharCount(';') + 1.
+        let section_count = sky_def.split(';').count();
+        let selected_index = crate::rng::LcgRng::seeded_random(
+            random_seed as u32,
+            section_count as u32,
+        ) as usize;
+        let selected = sky_def
+            .split(';')
+            .nth(selected_index)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        if !selected.is_empty() && selected != "Default" {
+            surface = load_legacy_sky_surface(group, &selected);
+            if surface.is_none() {
+                let graphics_groups = resolver.resolve_graphics_groups(group)?;
+                surface = load_legacy_sky_surface_from_groups(&graphics_groups, &selected);
+            }
+        }
+    }
+
+    if let Some((width, height, pixels)) = surface {
         settings.fade_top = RgbColor::new(255, 255, 255);
         settings.fade_bottom = RgbColor::new(255, 255, 255);
         // SkyScrollMode (C4Sky.cpp:114-125): 1 = wind-driven xdir with
@@ -8757,10 +8818,10 @@ fn derive_legacy_sky(group: &Group, manifest: &LegacyScenarioManifest) -> SkyCon
         }
         let (width, height, pixels) = ensure_sky_surface_size(width, height, pixels, 128, 128);
         settings = settings.with_surface(width, height);
-        return SkyConfig {
+        return Ok(SkyConfig {
             settings,
             surface: Some(Arc::new(GraphicsImage::new(width, height, pixels))),
-        };
+        });
     }
 
     // No sky surface: fade gradient (C4Sky.cpp:129-134). All-zero
@@ -8774,26 +8835,128 @@ fn derive_legacy_sky(group: &Group, manifest: &LegacyScenarioManifest) -> SkyCon
         settings.fade_top = RgbColor::new(channel(fade[0]), channel(fade[1]), channel(fade[2]));
         settings.fade_bottom = RgbColor::new(channel(fade[3]), channel(fade[4]), channel(fade[5]));
     }
-    SkyConfig {
+    Ok(SkyConfig {
         settings,
         surface: None,
+    })
+}
+
+/// C4Surface::LoadAny filename candidates. An explicit extension suppresses
+/// extension probing; otherwise png/bmp/jpeg/jpg are tried in this order
+/// (C4Surface.cpp:846-865).
+fn legacy_sky_filename_patterns(name: &str) -> Vec<String> {
+    if Path::new(name)
+        .extension()
+        .is_some_and(|extension| !extension.is_empty())
+    {
+        vec![name.to_string()]
+    } else {
+        LEGACY_SKY_EXTENSIONS
+            .iter()
+            .map(|extension| format!("{name}.{extension}"))
+            .collect()
     }
 }
 
-/// Load `Sky.{png,bmp,jpeg,jpg}` from the scenario group (C4Sky.cpp:84 via
-/// C4Surface::LoadAny, C4Surface.cpp:846-865). Like C++, a missing or
-/// undecodable bitmap yields `None` (the sky falls back to the fade
-/// gradient) instead of an error.
-fn load_legacy_sky_surface(group: &Group) -> Option<(u32, u32, Vec<u8>)> {
-    LEGACY_SKY_EXTENSIONS
-        .iter()
-        .filter_map(|extension| group.read_file(format!("Sky.{extension}")).ok())
-        .find_map(|bytes| load_from_memory(&bytes).ok())
-        .map(|decoded| {
-            let rgba = decoded.to_rgba8();
-            let (width, height) = rgba.dimensions();
-            (width, height, rgba.into_raw())
-        })
+/// Byte-for-byte equivalent of StdFile's ASCII-insensitive `WildcardMatch`,
+/// used by C4Group::FindEntry for SkyDef names such as `Pyroclastic*`.
+fn legacy_group_wildcard_match(pattern: &[u8], value: &[u8]) -> bool {
+    let (mut pattern_index, mut value_index) = (0, 0);
+    let (mut backtrack_pattern, mut backtrack_value) = (None, None);
+    while pattern_index < pattern.len() || backtrack_pattern.is_some() {
+        if pattern.get(pattern_index) == Some(&b'*') {
+            pattern_index += 1;
+            backtrack_pattern = Some(pattern_index);
+            backtrack_value = Some(value_index);
+        } else if value_index >= value.len() {
+            break;
+        } else if pattern.get(pattern_index) == Some(&b'?')
+            || pattern
+                .get(pattern_index)
+                .is_some_and(|byte| byte.eq_ignore_ascii_case(&value[value_index]))
+        {
+            pattern_index += 1;
+            value_index += 1;
+        } else if let (Some(saved_pattern), Some(saved_value)) =
+            (backtrack_pattern, backtrack_value)
+        {
+            let next_value = saved_value + 1;
+            pattern_index = saved_pattern;
+            value_index = next_value;
+            backtrack_value = Some(next_value);
+        } else {
+            return false;
+        }
+    }
+    pattern_index == pattern.len() && value_index == value.len()
+}
+
+enum LegacySkyEntryMatch {
+    Missing,
+    Found(Option<Vec<u8>>),
+}
+
+fn read_legacy_group_wildcard(group: &Group, pattern: &str) -> LegacySkyEntryMatch {
+    let Ok(entries) = group.entries() else {
+        return LegacySkyEntryMatch::Missing;
+    };
+    let Some(entry) = entries.into_iter().find(|entry| {
+        legacy_group_wildcard_match(pattern.as_bytes(), entry.name_bytes.as_slice())
+    }) else {
+        return LegacySkyEntryMatch::Missing;
+    };
+    LegacySkyEntryMatch::Found(group.read_entry_bytes_exact(&entry).ok())
+}
+
+fn decode_legacy_sky_surface(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    load_from_memory(bytes).ok().map(|decoded| {
+        let rgba = decoded.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        (width, height, rgba.into_raw())
+    })
+}
+
+/// Load a named surface from one scenario group. The first existing extension
+/// is decoded once; a broken higher-priority file does not fall through to a
+/// lower-priority extension (C4Surface.cpp:846-865).
+fn load_legacy_sky_surface(group: &Group, name: &str) -> Option<(u32, u32, Vec<u8>)> {
+    for pattern in legacy_sky_filename_patterns(name) {
+        match read_legacy_group_wildcard(group, &pattern) {
+            LegacySkyEntryMatch::Missing => {}
+            LegacySkyEntryMatch::Found(bytes) => {
+                return bytes.as_deref().and_then(decode_legacy_sky_surface);
+            }
+        }
+    }
+    None
+}
+
+/// Load an extensionless SkyDef name from the ordered GraphicsResource group
+/// set. C4Surface's group-set overload searches extension before group and,
+/// due to its exact control flow, returns false for already-extended names
+/// (C4Surface.cpp:867-890).
+fn load_legacy_sky_surface_from_groups(
+    groups: &[Group],
+    name: &str,
+) -> Option<(u32, u32, Vec<u8>)> {
+    if Path::new(name)
+        .extension()
+        .is_some_and(|extension| !extension.is_empty())
+    {
+        return None;
+    }
+    for extension in LEGACY_SKY_EXTENSIONS {
+        let pattern = format!("{name}.{extension}");
+        for group in groups {
+            match read_legacy_group_wildcard(group, &pattern) {
+                LegacySkyEntryMatch::Missing => {}
+                LegacySkyEntryMatch::Found(bytes) => {
+                    return bytes.as_deref().and_then(decode_legacy_sky_surface);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// SurfaceEnsureSize (C4Sky.cpp:28-52): enlarge to at least
@@ -19048,7 +19211,7 @@ public func ActualizePhase(pClonk)
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Authoritative resources\nNetworkGame=true\n\n\
              [Definitions]\nDefinition1=MissingInstalled.c4d\n\n\
-             [Landscape]\nMapZoom=10\n",
+             [Landscape]\nMapZoom=10\nSky=ClientSky\n",
         )
         .expect("write scenario core");
         std::fs::write(
@@ -19114,6 +19277,17 @@ public func ActualizePhase(pClonk)
         )
         .expect("write water material");
 
+        let graphics = network.join("Graphics.c4g");
+        std::fs::create_dir_all(&graphics).expect("graphics group");
+        let mut sky_png = Vec::new();
+        {
+            use image::ImageEncoder as _;
+            image::codecs::png::PngEncoder::new(&mut sky_png)
+                .write_image(&[11, 22, 33, 255], 1, 1, ColorType::Rgba8)
+                .expect("encode client sky");
+        }
+        std::fs::write(graphics.join("ClientSky.png"), sky_png).expect("write client sky");
+
         let definition_groups = [
             Group::open(&host_definitions).expect("open host definitions"),
             Group::open(&folder_definitions).expect("open folder definitions"),
@@ -19122,10 +19296,12 @@ public func ActualizePhase(pClonk)
             Group::open(&map_materials).expect("open map materials"),
             Group::open(&global_materials).expect("open global materials"),
         ];
+        let graphics_groups = [Group::open(&graphics).expect("open graphics")];
         let scenario = Scenario::load_network_from_path_with_languages_and_seed(
             &scenario_dir,
             &definition_groups,
             &material_groups,
+            &graphics_groups,
             &["US"],
             0,
         )
@@ -19140,6 +19316,9 @@ public func ActualizePhase(pClonk)
         assert!(engine.definition_ids().any(|id| id == "HOST"));
         assert!(engine.definition_ids().any(|id| id == "FOLD"));
         assert!(!engine.definition_ids().any(|id| id == "LOCL"));
+        let sky = scenario.sky().expect("network sky config");
+        let surface = sky.surface.as_ref().expect("client sky surface");
+        assert_eq!(&surface.pixels()[..4], &[11, 22, 33, 255]);
         assert!(
             engine
                 .landscape()
@@ -19643,10 +19822,15 @@ public func ActualizePhase(pClonk)
     }
 
     fn load_legacy_sky(dir: &Path, scenario_dir: &Path) -> Scenario {
+        load_legacy_sky_with_seed(dir, scenario_dir, 0)
+    }
+
+    fn load_legacy_sky_with_seed(dir: &Path, scenario_dir: &Path, random_seed: u64) -> Scenario {
         let resolver = FileSystemResolver {
             roots: vec![dir.to_path_buf()],
         };
-        Scenario::load_from_path_with(scenario_dir, &resolver).expect("legacy scenario loads")
+        Scenario::load_from_path_with_seed(scenario_dir, &resolver, random_seed)
+            .expect("legacy scenario loads")
     }
 
     #[test]
@@ -19677,6 +19861,68 @@ public func ActualizePhase(pClonk)
         assert_eq!(sky.settings.parallax_x, 20);
         assert_eq!(sky.settings.parallax_y, 20);
         assert_eq!(sky.settings.parallax_mode, SkyParallaxMode::Fixed);
+    }
+
+    #[test]
+    fn legacy_sky_load_stops_after_an_unreadable_first_extension() {
+        // LoadAny picks the first matching extension before decoding it. A
+        // matching child/unreadable entry therefore cannot fall through to a
+        // valid lower-priority extension (C4Surface.cpp:846-865).
+        let dir = tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("Sky.png")).expect("unreadable png entry");
+        std::fs::write(
+            dir.path().join("Sky.bmp"),
+            encode_indexed_bmp(&[&[0x83]]),
+        )
+        .expect("lower-priority bmp");
+        let group = Group::open(dir.path()).expect("sky group");
+
+        assert!(load_legacy_sky_surface(&group, "Sky").is_none());
+    }
+
+    #[test]
+    fn legacy_sky_def_list_uses_seeded_random_and_lookup_order() {
+        // C4Sky::Init selects exactly one SkyDef section with the stateless
+        // C4Random.h formula, searches the scenario before Graphics.c4g, and
+        // does not consume the synchronized Random() ledger (C4Sky.cpp:88-105).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_legacy_sky_fixture(dir.path(), "Sky=A;B;C\n");
+        let graphics_dir = dir.path().join("Graphics.c4g");
+        std::fs::create_dir_all(&graphics_dir).expect("graphics group");
+
+        let write_png = |path: &Path, pixel: [u8; 4]| {
+            use image::ImageEncoder as _;
+            let mut png = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut png)
+                .write_image(&pixel, 1, 1, ColorType::Rgba8)
+                .expect("encode named sky png");
+            std::fs::write(path, png).expect("write named sky png");
+        };
+        write_png(&scenario_dir.join("A.png"), [1, 2, 3, 255]);
+        write_png(&scenario_dir.join("B.png"), [20, 40, 60, 255]);
+        write_png(&graphics_dir.join("B.png"), [200, 210, 220, 255]);
+        write_png(&graphics_dir.join("C.png"), [70, 80, 90, 255]);
+
+        let independent_index = |seed: u32| {
+            let stepped = seed.wrapping_mul(214_013).wrapping_add(2_531_011);
+            ((stepped >> 16) % 3) as usize
+        };
+
+        assert_eq!(independent_index(7), 1);
+        let scenario = load_legacy_sky_with_seed(dir.path(), &scenario_dir, 7);
+        let surface = scenario
+            .sky()
+            .and_then(|sky| sky.surface.as_ref())
+            .expect("seed 7 selects scenario B sky");
+        assert_eq!(&surface.pixels()[..4], &[20, 40, 60, 255]);
+
+        assert_eq!(independent_index(0), 2);
+        let scenario = load_legacy_sky_with_seed(dir.path(), &scenario_dir, 0);
+        let surface = scenario
+            .sky()
+            .and_then(|sky| sky.surface.as_ref())
+            .expect("seed 0 selects Graphics.c4g C sky");
+        assert_eq!(&surface.pixels()[..4], &[70, 80, 90, 255]);
     }
 
     #[test]

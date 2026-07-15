@@ -10484,6 +10484,19 @@ impl InstallDefinitionResolver {
         Ok(())
     }
 
+    fn push_graphics_child(
+        parent: &Group,
+        groups: &mut Vec<Group>,
+        seen: &mut HashSet<PathBuf>,
+    ) -> Result<(), ScenarioError> {
+        if let Some(graphics) = open_child_flexible(parent, Path::new("Graphics.c4g"))
+            .map_err(ScenarioError::Resources)?
+        {
+            Self::push_group(groups, seen, graphics);
+        }
+        Ok(())
+    }
+
     fn app_definition_bases(&self) -> Vec<PathBuf> {
         let Some(paths) = &self.app_paths else {
             return Vec::new();
@@ -10644,6 +10657,73 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
         if let Some(paths) = self.app_paths.as_deref() {
             if let Some(global) = candidate_material_paths(paths).into_iter().next() {
                 groups.push(Group::open(global).map_err(ScenarioError::Resources)?);
+            }
+        }
+        Ok(groups)
+    }
+
+    fn resolve_graphics_groups(&self, scenario: &Group) -> Result<Vec<Group>, ScenarioError> {
+        // RegisterMainGroups mirrors the active Game.GroupSet priority:
+        // scenario-local Graphics.c4g, inner-to-outer scenario/origin folders,
+        // Extra.c4g's graphics, and finally the base Graphics.c4g
+        // (C4GraphicsResource.cpp:351-380; C4GroupSet.cpp:238-318).
+        let mut groups = Vec::new();
+        let mut seen = HashSet::new();
+        Self::push_graphics_child(scenario, &mut groups, &mut seen)?;
+
+        let mut registrations = Vec::new();
+        for (registration_order, path) in [
+            Some(scenario.root().to_path_buf()),
+            self.scenario_origin(scenario),
+        ]
+        .into_iter()
+        .flatten()
+        .enumerate()
+        {
+            if registration_order != 0
+                && scenario_root_key(&path) == scenario_root_key(scenario.root())
+            {
+                continue;
+            }
+            for (folder_priority, parent) in Self::c4f_parent_paths(&path).into_iter().enumerate() {
+                registrations.push((folder_priority, registration_order, parent));
+            }
+        }
+        registrations
+            .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+        for (_, _, parent_path) in registrations {
+            let parent = Group::open(&parent_path).map_err(ScenarioError::Resources)?;
+            Self::push_graphics_child(&parent, &mut groups, &mut seen)?;
+        }
+
+        for base in self.executable_data_bases() {
+            let extra_path = base.join("Extra.c4g");
+            match Group::open(&extra_path) {
+                Ok(extra) => {
+                    Self::push_graphics_child(&extra, &mut groups, &mut seen)?;
+                    break;
+                }
+                Err(error) if Self::should_ignore_error(&error) => {}
+                Err(error) => return Err(ScenarioError::Resources(error)),
+            }
+        }
+
+        if let Some(paths) = self.app_paths.as_deref() {
+            let global_path = paths.planet_dir().join("Graphics.c4g");
+            match Group::open(&global_path) {
+                Ok(global) => Self::push_group(&mut groups, &mut seen, global),
+                Err(error) if Self::should_ignore_error(&error) => {}
+                Err(error) => return Err(ScenarioError::Resources(error)),
+            }
+        } else {
+            match self.resolve_definition_groups_ordered(scenario, "Graphics.c4g", true) {
+                Ok(fallbacks) => {
+                    for fallback in fallbacks {
+                        Self::push_group(&mut groups, &mut seen, fallback);
+                    }
+                }
+                Err(ScenarioError::LegacyDefinitionNotFound { .. }) => {}
+                Err(error) => return Err(error),
             }
         }
         Ok(groups)
@@ -18210,12 +18290,22 @@ impl GameApp {
             })?);
         }
         let resolver_paths = cached_app_paths().ok();
+        let scenario_group = Group::open(&combined_path).map_err(|error| {
+            format!(
+                "failed to open combined scenario {} for graphics lookup: {error}",
+                combined_path.display()
+            )
+        })?;
+        let graphics_groups = InstallDefinitionResolver::new(resolver_paths.clone())
+            .resolve_graphics_groups(&scenario_group)
+            .map_err(|error| format!("failed to resolve client graphics resources: {error}"))?;
         let languages = startup_language_sequence(resolver_paths.as_deref());
         let random_seed = u64::from(join_data.parameters.random_seed as u32);
         let scenario_data = Scenario::load_network_from_path_with_languages_and_seed(
             &combined_path,
             &definition_groups,
             &material_groups,
+            &graphics_groups,
             &languages,
             random_seed,
         )
@@ -76524,6 +76614,33 @@ protected func InputCallback(string answer, int player)
             engine.definition_value("SAME"),
             Some(2),
             "the later folder-local pass overloads the explicit global pack"
+        );
+    }
+
+    #[test]
+    fn install_definition_resolver_prioritizes_scenario_graphics_over_folder() {
+        let dir = tempdir().expect("tempdir");
+        let family = dir.path().join("Tutorial.c4f");
+        let scenario = family.join("Tutorial01.c4s");
+        let scenario_graphics = scenario.join("Graphics.c4g");
+        let folder_graphics = family.join("Graphics.c4g");
+        fs::create_dir_all(&scenario_graphics).expect("scenario graphics");
+        fs::create_dir_all(&folder_graphics).expect("folder graphics");
+        fs::write(scenario_graphics.join("Shared.png"), b"scenario")
+            .expect("scenario graphic");
+        fs::write(folder_graphics.join("Shared.png"), b"folder").expect("folder graphic");
+
+        let scenario_group = Group::open(&scenario).expect("scenario group");
+        let graphics = InstallDefinitionResolver::new(None)
+            .resolve_graphics_groups(&scenario_group)
+            .expect("graphics chain resolves");
+
+        assert_eq!(graphics.len(), 2);
+        assert_eq!(graphics[0].root(), scenario_graphics.as_path());
+        assert_eq!(graphics[1].root(), folder_graphics.as_path());
+        assert_eq!(
+            graphics[0].read_file("Shared.png").expect("local graphic"),
+            b"scenario"
         );
     }
 
