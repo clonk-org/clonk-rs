@@ -1609,6 +1609,177 @@ func Ejection(object item)
     }
 
     #[test]
+    fn assign_death_permanently_unlinks_owner_crew_across_ticks_and_cursor_controls(
+    ) -> Result<(), EngineError> {
+        // AssignDeath removes the corpse through the owning player's
+        // ClearPointers(this, true). GetCrew/GetCrewCount and CursorLeft/
+        // CursorRight all consume that authoritative list; no later player
+        // execution may reconstruct it from the object's legacy CrewMember
+        // bit (C4Object.cpp:1194-1196; C4Player.cpp:57-69).
+        let script = r#"#strict 2
+func Probe(object corpse)
+{
+    return [GetCrewCount(0), GetCrew(0, 0) == this(),
+            GetCrew(0, 1), GetCrew(0, 0) == corpse];
+}
+func Share() { return SetCrewStatus(1, true); }
+func Recruit() { return MakeCrewMember(this(), 0); }
+"#;
+        let mut definition = Definition::from_script("DCRW", "Death crew", script)?;
+        definition.set_crew_member(true);
+        definition.set_category(CATEGORY_OBJECT | CATEGORY_LIVING);
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                ("Dead".to_string(), ActionSpec::default()),
+            ]),
+        );
+
+        let crew_info = |name: &str| player_file::CrewInfo {
+            id: "DCRW".to_string(),
+            name: name.to_string(),
+            rank: 0,
+            experience: 0,
+            death_count: 0,
+            total_playing_time: 0,
+            participation: 1,
+            in_action: false,
+            in_action_time: 0,
+            has_died: false,
+        };
+        let mut engine = Engine::with_seed(155);
+        engine.register_definition(definition)?;
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("DCRW".to_string(), 2)];
+        engine.set_player_starts(vec![start]);
+        engine.join_player(lifecycle_join_config(
+            "Death-list owner",
+            vec![crew_info("First"), crew_info("Second")],
+        ))?;
+        engine.register_player(PlayerConfig::new(1, "Foreign roster"))?;
+
+        let crew = engine.player(0).expect("player joins").crew().to_vec();
+        assert_eq!(crew.len(), 2);
+        let corpse = crew[0];
+        let survivor = crew[1];
+        let corpse_link = engine.capture_state().crew_info_links[&corpse];
+        engine.set_crew_cursor(0, Some(corpse))?;
+        let corpse_index = engine.find_object_index(corpse).expect("crew exists");
+        assert_eq!(
+            engine.call_object_function(corpse_index, "Share", Vec::new())?,
+            Value::Int(1)
+        );
+        engine.set_crew_cursor(1, Some(corpse))?;
+        engine.game_time = 17;
+
+        engine.assign_death(corpse_index, false)?;
+
+        let corpse_state = engine.object_snapshot(corpse).expect("body persists");
+        assert!(!corpse_state.alive);
+        assert!(
+            corpse_state.crew_member,
+            "the compatibility union bit stays set for a foreign Crew link"
+        );
+        assert_eq!(engine.player(0).expect("player exists").crew(), &[survivor]);
+        assert_eq!(engine.crew_cursor(0), Some(survivor));
+        assert_eq!(engine.player(1).expect("foreign player").crew(), &[corpse]);
+        assert_eq!(engine.crew_cursor(1), Some(corpse));
+        let survivor_index = engine
+            .find_object_index(survivor)
+            .expect("survivor exists");
+        assert_eq!(
+            engine.call_object_function(
+                survivor_index,
+                "Probe",
+                vec![Value::Object(corpse.as_u64())],
+            )?,
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Bool(true),
+                Value::Nil,
+                Value::Bool(false),
+            ])
+        );
+
+        for _ in 0..3 {
+            engine.tick()?;
+            assert_eq!(
+                engine.player(0).expect("player exists").crew(),
+                &[survivor],
+                "the corpse must not re-enter during player execution"
+            );
+            assert_eq!(engine.player(1).expect("foreign player").crew(), &[corpse]);
+            assert_eq!(engine.crew_cursor(1), Some(corpse));
+        }
+        assert_eq!(
+            engine.call_object_function(
+                survivor_index,
+                "Probe",
+                vec![Value::Object(corpse.as_u64())],
+            )?,
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Bool(true),
+                Value::Nil,
+                Value::Bool(false),
+            ]),
+            "GetCrew/GetCrewCount stay pruned after later frames"
+        );
+        for command in [COM_CURSOR_RIGHT, COM_CURSOR_LEFT] {
+            engine.player_direct_com(0, command, 0)?;
+            assert_eq!(engine.crew_cursor(0), Some(survivor));
+        }
+
+        let state = engine.capture_state();
+        assert_eq!(
+            state
+                .players
+                .iter()
+                .find(|player| player.id == 0)
+                .expect("owner state")
+                .crew,
+            vec![survivor]
+        );
+        assert_eq!(
+            state
+                .players
+                .iter()
+                .find(|player| player.id == 1)
+                .expect("foreign state")
+                .crew,
+            vec![corpse]
+        );
+        let dead_info = &state.crew_info_rosters[&0][corpse_link.roster_index];
+        assert!(dead_info.has_died);
+        assert_eq!(dead_info.death_count, 1);
+        assert!(!dead_info.in_action);
+        assert_eq!(dead_info.total_playing_time, 17);
+
+        let replacement = engine.spawn_object(
+            SpawnConfig::new("DCRW")
+                .with_owner(0)
+                .with_alive(true)
+                .with_crew_member(false)
+                .with_action(ActionState::new("Idle")),
+        )?;
+        let replacement_index = engine
+            .find_object_index(replacement)
+            .expect("replacement exists");
+        assert_eq!(
+            engine.call_object_function(replacement_index, "Recruit", Vec::new())?,
+            Value::Bool(true)
+        );
+        let replacement_link = engine.capture_state().crew_info_links[&replacement];
+        assert_ne!(
+            replacement_link, corpse_link,
+            "GetIdle must never recycle an info whose HasDied flag is set"
+        );
+        assert!(!engine.player(0).expect("player exists").crew().contains(&corpse));
+        Ok(())
+    }
+
+    #[test]
     fn assign_death_refreshes_ocf_before_dead_action_callbacks() -> Result<(), EngineError> {
         // SetAction("Dead") refreshes OCF before the new StartCall and old
         // AbortCall (C4Object.cpp:4141,4173). AssignDeath has already cleared
