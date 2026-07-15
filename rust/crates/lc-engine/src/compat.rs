@@ -6861,12 +6861,22 @@ fn object_is_present(target: ObjectId) -> bool {
         let Some(context) = borrow.as_ref() else {
             return false;
         };
-        context
-            .object_scope(target)
-            .is_some_and(|scope| !scope.destroy && scope.status().is_active())
-            || context
+        match context.object_scope(target) {
+            Some(scope) => !scope.destroy && scope.status().is_active(),
+            None => context
                 .get_world_object(target)
-                .is_some_and(|object| object.is_present())
+                .is_some_and(|object| object.is_present()),
+        }
+    })
+}
+
+/// C++ truthiness of a raw object Status. Inactive objects still receive
+/// callbacks; only Deleted/status-zero objects are suppressed.
+fn object_has_status(target: ObjectId) -> bool {
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|context| context.object_status_present(target))
     })
 }
 
@@ -6951,7 +6961,11 @@ fn refresh_live_object_ocf(context: &mut EffectHostContext, target: ObjectId) ->
 fn refresh_container_collection_ocf(context: &mut EffectHostContext, container: ObjectId) {
     let available = context.get_world_object(container).is_some_and(|object| {
         object.collection_enabled
-            && object.no_collect_delay == 0
+            && context
+                .object_scope(container)
+                .map(ObjectScopeContext::no_collect_delay)
+                .unwrap_or(object.no_collect_delay)
+                == 0
             && object
                 .collection_limit
                 .is_none_or(|limit| object.contents().len() < limit as usize)
@@ -7075,8 +7089,9 @@ fn run_live_exit_bound_contact(target: ObjectId, cnat: u32) {
                 VelocityComponent::Y
             };
             scope.set_fixed_velocity_component(component, C4Fixed::ZERO);
+            return calls_enabled && scope.status() != ObjectStatus::Deleted;
         }
-        calls_enabled
+        false
     });
     if calls_enabled {
         if let Some(function) = crate::contact_callback_name(cnat) {
@@ -7214,7 +7229,23 @@ fn bounds_check_live_exit(target: ObjectId, position: &mut Vector2) {
 
 fn exit_object_at_position_with_calls(
     target: ObjectId,
+    position: Vector2,
+    f_calls: bool,
+) -> Result<bool, RuntimeError> {
+    exit_object_at_position_with_motion_and_calls(
+        target,
+        position,
+        FixedVec2::ZERO,
+        C4Fixed::ZERO,
+        f_calls,
+    )
+}
+
+fn exit_object_at_position_with_motion_and_calls(
+    target: ObjectId,
     mut position: Vector2,
+    velocity: FixedVec2,
+    rotation_velocity: C4Fixed,
     f_calls: bool,
 ) -> Result<bool, RuntimeError> {
     let previous = HOST_CONTEXT.with(|cell| {
@@ -7261,9 +7292,10 @@ fn exit_object_at_position_with_calls(
         scope.pending_update.position = Some(position);
         scope.pending_update.construction_preserves_fixed_position = false;
         scope.current_rotation = 0;
+        scope.current_fixed_rotation = C4Fixed::ZERO;
         scope.pending_update.rotation = Some(0);
-        scope.set_fixed_velocity(FixedVec2::ZERO);
-        scope.set_rotation_velocity(C4Fixed::ZERO);
+        scope.set_fixed_velocity(velocity);
+        scope.set_rotation_velocity(rotation_velocity);
         scope.set_mobile(true);
         scope.current_in_liquid = false;
         // Bounds callbacks may have opened a menu; Exit closes it afterward.
@@ -7282,14 +7314,14 @@ fn exit_object_at_position_with_calls(
         }
     });
 
-    if f_calls && object_is_present(previous) {
+    if f_calls && object_has_status(previous) {
         call_object_own_fail_safe(
             previous,
             "Ejection",
             &[object_reference_value(target)],
         );
     }
-    if f_calls && object_is_present(target) {
+    if f_calls && object_has_status(target) {
         call_object_own_fail_safe(
             target,
             "Departure",
@@ -25411,6 +25443,189 @@ fn preview_object_action_jump(
     Ok(true)
 }
 
+/// Synchronous host twin of ObjectComUnGrab. ObjectComDrop invokes this
+/// after its Exit callbacks and NoCollectDelay update, before ExecuteCommand
+/// may run ControlCommandFinished (C4ObjectCom.cpp:261-278,640-676).
+fn preview_object_com_ungrab(
+    actor: ObjectId,
+    restore_fight_ready: bool,
+) -> Result<bool, RuntimeError> {
+    let target = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        if !context.ensure_object_scope(actor) {
+            return None;
+        }
+        let scope = context.object_scope_mut(actor)?;
+        if scope.effective_action_procedure() != ActionProcedure::Push {
+            return None;
+        }
+        let target = scope.effective_action_target(0);
+        scope.set_command_direction(CommandDirection::Stop);
+        Some(target)
+    });
+    let Some(target) = target else {
+        return Ok(false);
+    };
+
+    // SetActionByName("Walk") performs a full SetOCF before its action
+    // callbacks. Preserve the pre-Drop FightReady capability underneath a
+    // callback-installed ObjectDisabled Push action so changing to Walk can
+    // expose it again; NoCollectDelay still keeps Collection disabled.
+    HOST_CONTEXT.with(|cell| {
+        if let Some(scope) = cell
+            .borrow_mut()
+            .as_mut()
+            .and_then(|context| context.object_scope_mut(actor))
+        {
+            if restore_fight_ready && scope.ocf() & ocf::ALIVE != 0 {
+                let cached = scope.cached_ocf.unwrap_or_else(|| scope.ocf());
+                scope.cached_ocf = Some(cached | ocf::FIGHT_READY);
+            }
+        }
+    });
+    if !native_set_action_by_name(actor, "Walk")? {
+        return Ok(false);
+    }
+    HOST_CONTEXT.with(|cell| {
+        if let Some(scope) = cell
+            .borrow_mut()
+            .as_mut()
+            .and_then(|context| context.object_scope_mut(actor))
+        {
+            scope.set_fixed_velocity(FixedVec2::ZERO);
+        }
+    });
+    let target_value = target.map(object_reference_value).unwrap_or(Value::Nil);
+    let _ = call_object_own_fail_safe(actor, "Grab", &[target_value, Value::Bool(false)]);
+    if let Some(target) = target.filter(|target| object_is_present(*target)) {
+        let _ = call_object_own_fail_safe(
+            target,
+            "Grabbed",
+            &[object_reference_value(actor), Value::Bool(false)],
+        );
+    }
+    Ok(true)
+}
+
+/// Synchronous host preview of ObjectComDrop for script ExecuteCommand.
+/// Item/actor state, callbacks, delay and cached OCF are staged here in C++
+/// order before the outer script call folds back into the engine.
+fn preview_object_com_drop(actor: ObjectId, object: ObjectId) -> Result<bool, RuntimeError> {
+    let prepared = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        if !context.ensure_object_scope(actor) || !context.ensure_object_scope(object) {
+            return None;
+        }
+        let actor_scope = context.object_scope(actor)?;
+        let throw_force = crate::math::val_by_physical(
+            400,
+            actor_scope.resolved_physical(false).throw,
+        );
+        let procedure = actor_scope.effective_action_procedure();
+        let command_direction = actor_scope.command_direction();
+        let actor_xdir = actor_scope.fixed_velocity().x;
+        let actor_position = actor_scope.effective_position();
+        let actor_shape = live_object_shape(context, actor).unwrap_or_default();
+        let object_shape = live_object_shape(context, object).unwrap_or_default();
+        let restore_fight_ready = actor_scope.ocf() & ocf::FIGHT_READY != 0;
+        Some((
+            throw_force,
+            procedure,
+            command_direction,
+            actor_xdir,
+            actor_position,
+            actor_shape,
+            object_shape,
+            restore_fight_ready,
+        ))
+    });
+    let Some((
+        throw_force,
+        procedure,
+        command_direction,
+        actor_xdir,
+        actor_position,
+        actor_shape,
+        object_shape,
+        restore_fight_ready,
+    )) = prepared
+    else {
+        return Ok(false);
+    };
+
+    let com_dir_like = |sample: CommandDirection| {
+        let com = command_direction.to_script_value();
+        let sample = sample.to_script_value();
+        com == sample || com % 8 + 1 == sample || com == sample % 8 + 1
+    };
+    let hangling_or_swimming = matches!(procedure, ActionProcedure::Hang | ActionProcedure::Swim);
+    let mut throw_direction = 0;
+    let mut right = 0;
+    let mut outpos_reduction = 1;
+    if procedure != ActionProcedure::Scale {
+        if com_dir_like(CommandDirection::Left) {
+            throw_direction = -1;
+            if actor_xdir < fixed10(15) && !hangling_or_swimming {
+                outpos_reduction -= 1;
+            }
+        }
+        if com_dir_like(CommandDirection::Right) {
+            throw_direction = 1;
+            right = 1;
+            if actor_xdir > -fixed10(15) && !hangling_or_swimming {
+                outpos_reduction -= 1;
+            }
+        }
+    }
+    let edge = actor_shape
+        .x
+        .wrapping_add(actor_shape.width.wrapping_mul(right));
+    let exit_position = Vector2::new(
+        actor_position.x.wrapping_add(
+            edge.wrapping_mul(i32::from(throw_direction != 0))
+                .wrapping_mul(outpos_reduction),
+        ),
+        actor_position
+            .y
+            .wrapping_add(actor_shape.y)
+            .wrapping_add(actor_shape.height)
+            .wrapping_sub(object_shape.y.wrapping_add(object_shape.height)),
+    );
+    let velocity = FixedVec2::new(throw_force * throw_direction, C4Fixed::ZERO);
+    let _ = exit_object_at_position_with_motion_and_calls(
+        object,
+        exit_position,
+        velocity,
+        C4Fixed::ZERO,
+        true,
+    )?;
+
+    // The first SetOCF happened in Exit before Ejection. This explicit
+    // ObjectComDrop update happens after Departure and before UnGrab.
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        if !context.ensure_object_scope(actor) {
+            return;
+        }
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.set_no_collect_delay(2);
+        }
+        let _ = refresh_live_object_ocf(context, actor);
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.cached_ocf = Some(scope.ocf() & !ocf::COLLECTION);
+            scope.record_no_collect_delay_assignment();
+            scope.persist_final_ocf = true;
+        }
+    });
+    let _ = preview_object_com_ungrab(actor, restore_fight_ready)?;
+    Ok(true)
+}
+
 /// Synchronous host preview for CommandEvent::AttemptGrab. The regular
 /// engine applies the same event before its command-finished tail; this
 /// form preserves that ordering inside script-level ExecuteCommand too.
@@ -25507,15 +25722,24 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
             context.execute_command_preview(target, random.as_ref().map(|rng| &rng.rng))
         })
     });
-    let Some((mut finished, grab_attempts)) = preview else {
+    let Some((mut finished, grab_attempts, drop_attempts)) = preview else {
         return Ok(Value::Bool(false));
     };
 
-    let had_grab_attempt = !grab_attempts.is_empty();
+    let had_live_attempt = !grab_attempts.is_empty() || !drop_attempts.is_empty();
     for (actor_id, target_id) in grab_attempts {
         preview_grab_attempt(actor_id, target_id)?;
     }
-    if had_grab_attempt {
+    for (actor_id, object_id) in drop_attempts {
+        let _ = preview_object_com_drop(actor_id, object_id)?;
+        HOST_CONTEXT.with(|cell| {
+            cell.borrow_mut()
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(actor_id))
+                .map(|scope| scope.live_commands.finish_pending_drop())
+        });
+    }
+    if had_live_attempt {
         finished = HOST_CONTEXT.with(|cell| {
             cell.borrow()
                 .as_ref()
@@ -25543,15 +25767,17 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
                 .unwrap_or(Value::Nil),
             command_data_value(&command.data),
         ];
-        if let Some(Err(error)) = call_world_object_function(
-            target,
-            "ControlCommandFinished",
-            &callback_args,
-        ) {
-            tracing::warn!(
-                %error,
-                "script error in ControlCommandFinished; continuing like the C++ fail-safe exec"
-            );
+        if object_has_status(target) {
+            if let Some(Err(error)) = call_world_object_function(
+                target,
+                "ControlCommandFinished",
+                &callback_args,
+            ) {
+                tracing::warn!(
+                    %error,
+                    "script error in ControlCommandFinished; continuing like the C++ fail-safe exec"
+                );
+            }
         }
         HOST_CONTEXT.with(|cell| {
             if let Some(context) = cell.borrow_mut().as_mut() {
@@ -31274,8 +31500,9 @@ fn reflect_object_values(
     reflection.push(
         &object_path("NoCollectDelay"),
         Value::Int(
-            state
-                .map(|state| state.no_collect_delay)
+            scope
+                .map(ObjectScopeContext::no_collect_delay)
+                .or_else(|| state.map(|state| state.no_collect_delay))
                 .or_else(|| world_object.as_ref().map(|object| object.no_collect_delay))
                 .unwrap_or(0),
         ),
@@ -34860,6 +35087,10 @@ impl EffectHostContext {
                 scope.current_selected = world
                     .get(scope.id())
                     .is_some_and(|object| object.selected);
+                scope.current_no_collect_delay = world
+                    .get(scope.id())
+                    .map(|object| object.no_collect_delay)
+                    .unwrap_or(0);
                 if let Some(position) = script_fixed_position {
                     scope.current_fixed_position = position;
                 }
@@ -35576,7 +35807,11 @@ impl EffectHostContext {
         &mut self,
         target: ObjectId,
         rng: Option<&RefCell<LcgRng>>,
-    ) -> Option<(Option<CommandView>, Vec<(ObjectId, ObjectId)>)> {
+    ) -> Option<(
+        Option<CommandView>,
+        Vec<(ObjectId, ObjectId)>,
+        Vec<(ObjectId, ObjectId)>,
+    )> {
         let (objects, players, definitions, transfers) = self.command_runtime_data();
         let object_snapshot = objects.get(&target)?;
         let landscape = self.world.landscape.clone();
@@ -35614,12 +35849,17 @@ impl EffectHostContext {
 
         let mut deferred_events = Vec::new();
         let mut grab_attempts = Vec::new();
+        let mut drop_attempts = Vec::new();
         for event in events.drain(..) {
             match event {
                 CommandEvent::AttemptGrab {
                     actor_id,
                     target_id,
                 } => grab_attempts.push((actor_id, target_id)),
+                CommandEvent::ObjectComDrop {
+                    actor_id,
+                    object_id,
+                } => drop_attempts.push((actor_id, object_id)),
                 CommandEvent::OpenMenu(request) => self.pending_menu_requests.push(request),
                 other => deferred_events.push(other),
             }
@@ -35631,7 +35871,7 @@ impl EffectHostContext {
             );
             self.pending_command_events.extend(deferred_events);
         }
-        Some((finished, grab_attempts))
+        Some((finished, grab_attempts, drop_attempts))
     }
 
     fn clear_finished_command_fronts(&mut self, target: ObjectId) {
@@ -36059,6 +36299,7 @@ impl EffectHostContext {
         scope.current_breath = state.breath;
         scope.current_need_energy = state.need_energy;
         scope.current_selected = state.selected;
+        scope.current_no_collect_delay = state.no_collect_delay;
         // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358) —
         // nested scopes carry the snapshot mask like outer scopes do, not
         // the preview-grade recompute.
@@ -36268,15 +36509,14 @@ impl EffectHostContext {
     /// in any scope wins over the world snapshot (C++ mutates the live
     /// C4Object::Menu).
     fn object_menu(&self, target: ObjectId) -> Option<crate::ObjectMenuState> {
-        match self
+        if let Some(menu) = self
             .object_scope(target)
-            .and_then(|scope| scope.pending_update.menu.clone())
+            .and_then(|scope| scope.pending_update.menu.as_ref())
         {
-            Some(menu) => menu,
-            None => self
-                .get_world_object(target)
-                .and_then(|object| object.full_state().and_then(|state| state.menu.clone())),
+            return menu.clone();
         }
+        self.get_world_object(target)
+            .and_then(|object| object.full_state().and_then(|state| state.menu.clone()))
     }
 
     /// Records a menu write for `target` (Some = open/replace, None =
@@ -36991,6 +37231,7 @@ impl EffectHostContext {
                 local_vars.extend(cells);
             }
             self.clear_removed_references_in_locals(&mut local_vars);
+            scope.finalize_persisted_ocf();
             let command_operations = scope.final_command_operations();
             let mut update = scope.pending_update;
             // Mirror the outer call's unconditional local-vars store
@@ -37048,6 +37289,7 @@ impl EffectHostContext {
                 let active_assign_death = object
                     .assign_death
                     .map(|forced| (object.id(), forced));
+                object.finalize_persisted_ocf();
                 let command_operations = object.final_command_operations();
                 let update = if object.pending_update.is_empty() {
                     None
@@ -37498,6 +37740,8 @@ struct ObjectScopeContext {
     /// This frame's live C4Action::t_attach bitset.
     current_t_attach: u32,
     current_in_liquid: bool,
+    /// Live C4Object::NoCollectDelay for same-call ordered reads/writes.
+    current_no_collect_delay: i32,
     /// Same-call transition into C4Object::fOwnVertices via SetVertex's
     /// nonzero own-vertex mode.
     staged_own_vertices: bool,
@@ -37514,6 +37758,9 @@ struct ObjectScopeContext {
     /// verbatim (C4Script.cpp:1354-1358). None for bare fixture scopes,
     /// which fall back to the preview-grade recompute.
     cached_ocf: Option<u32>,
+    /// ObjectComDrop needs the final live cache after ExecuteCommand's
+    /// ControlCommandFinished callback and all later same-call statements.
+    persist_final_ocf: bool,
     crew_member: bool,
     current_plr_view_range: i32,
     current_direction: Direction,
@@ -37629,6 +37876,7 @@ impl ObjectScopeContext {
             current_mobile: false,
             current_t_attach: 0,
             current_in_liquid: in_liquid,
+            current_no_collect_delay: 0,
             staged_own_vertices: false,
             current_own_mass: own_mass,
             current_owner: owner,
@@ -37637,6 +37885,7 @@ impl ObjectScopeContext {
             current_category: category,
             ocf_base,
             cached_ocf: None,
+            persist_final_ocf: false,
             crew_member,
             current_plr_view_range: plr_view_range,
             current_direction: direction,
@@ -38064,6 +38313,48 @@ impl ObjectScopeContext {
         self.current_in_liquid
     }
 
+    fn no_collect_delay(&self) -> i32 {
+        self.current_no_collect_delay
+    }
+
+    fn set_no_collect_delay(&mut self, delay: i32) {
+        self.current_no_collect_delay = delay;
+    }
+
+    /// Record ObjectComDrop's adjacent NoCollectDelay assignment and
+    /// SetOCF result after the live cache has been refreshed.
+    fn record_no_collect_delay_assignment(&mut self) {
+        let ocf = self.ocf();
+        self.command_operations
+            .push(CommandOperation::SetNoCollectDelay {
+                value: self.current_no_collect_delay,
+                ocf,
+            });
+    }
+
+    /// Copy-out applies command operations before the final OCF override.
+    /// Keep the ordered delay assignment's cache payload synchronized with
+    /// any later UnGrab/Grab SetOCF calls as well.
+    fn update_recorded_no_collect_delay_ocf(&mut self, final_ocf: u32) {
+        if let Some(CommandOperation::SetNoCollectDelay { ocf, .. }) = self
+            .command_operations
+            .iter_mut()
+            .rev()
+            .find(|operation| matches!(operation, CommandOperation::SetNoCollectDelay { .. }))
+        {
+            *ocf = final_ocf;
+        }
+    }
+
+    fn finalize_persisted_ocf(&mut self) {
+        if !self.persist_final_ocf {
+            return;
+        }
+        let final_ocf = self.ocf();
+        self.update_recorded_no_collect_delay_ocf(final_ocf);
+        self.pending_update.ocf_override = Some(final_ocf);
+    }
+
     fn own_mass(&self) -> i32 {
         self.current_own_mass
     }
@@ -38109,6 +38400,9 @@ impl ObjectScopeContext {
     /// C4Object::SetCommand's NoCollectDelay entry decrement
     /// (C4Object.cpp:3941-3942), staged in command-op order.
     fn decrement_no_collect_delay(&mut self) {
+        if self.current_no_collect_delay > 0 {
+            self.current_no_collect_delay -= 1;
+        }
         self.command_operations
             .push(CommandOperation::DecrementNoCollectDelay);
     }
@@ -38146,7 +38440,11 @@ impl ObjectScopeContext {
         let mut operations = mem::take(&mut self.command_operations)
             .into_iter()
             .filter(|operation| {
-                matches!(operation, CommandOperation::DecrementNoCollectDelay)
+                matches!(
+                    operation,
+                    CommandOperation::DecrementNoCollectDelay
+                        | CommandOperation::SetNoCollectDelay { .. }
+                )
             })
             .collect::<Vec<_>>();
         operations.push(CommandOperation::Restore(self.live_commands.snapshot()));

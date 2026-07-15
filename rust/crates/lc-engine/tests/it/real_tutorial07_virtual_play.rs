@@ -762,6 +762,10 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
             })
         })
         .expect("the first Tutorial07 FLNT is ready to throw");
+    // Releasing ELEC used COM_DOWN double-click handling. Let that window
+    // expire so the following COM_THROW remains Throw instead of C++'s
+    // intentional down-double Throw-to-Drop conversion.
+    player.wait_out_double_click()?;
     player.tap(COM_THROW)?;
     player.wait_until(
         "the first FLNT leaves the Clonk's inventory",
@@ -1126,11 +1130,15 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     player.release(COM_UP)?;
     player.tap(COM_DOWN)?;
     player.ticks(11)?;
+    // BALN/CLNK stop at x=565 against the near face of the crystal cliff;
+    // requiring the object anchor to cross x=570 made arrival depend on a
+    // favorable wind impulse rather than the physical collision milestone.
+    const CRYSTAL_CLIFF_X: i32 = 565;
     player.wait_until("the BALN reaches the opposite cliff", 900, |engine| {
         engine.object_snapshot(clonk).is_some_and(|object| {
             object.action.name == "Push"
                 && object.action.target == Some(balloon)
-                && object.position.x >= 570
+                && object.position.x >= CRYSTAL_CLIFF_X
         })
     })?;
     let crystal = object_with_definition(player.engine(), "CRYS")
@@ -1143,7 +1151,7 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
             engine.object_snapshot(clonk).is_some_and(|object| {
                 object.action.name == "Walk"
                     && object.container.is_none()
-                    && object.position.x >= 570
+                    && object.position.x >= CRYSTAL_CLIFF_X
             })
         },
     )?;

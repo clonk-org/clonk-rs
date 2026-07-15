@@ -2672,13 +2672,14 @@ mod tests {
     }
 
     #[test]
-    fn drop_transfers_item_to_ground() {
+    fn drop_queues_live_object_com_drop_without_stopping_plain_comdir() {
         let actor_id = ObjectId::new(630);
         let item_id = ObjectId::new(631);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.position = Vector2::new(10, 10);
         actor.contents = vec![item_id];
+        actor.command_direction = CommandDirection::Right;
 
         let mut item = snapshot_with_id(item_id.as_u64());
         item.container = Some(actor_id);
@@ -2709,25 +2710,238 @@ mod tests {
 
         let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty());
-        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.update, None, "plain Drop preserves Action.ComDir");
+        assert_eq!(result.events.len(), 1);
         match &result.events[0] {
-            CommandEvent::ApplyObjectUpdate { object_id, update } => {
+            CommandEvent::ObjectComDrop {
+                actor_id: event_actor,
+                object_id,
+            } => {
+                assert_eq!(*event_actor, actor_id);
                 assert_eq!(*object_id, item_id);
-                assert_eq!(update.container, Some(None));
-                assert_eq!(update.position, Some(actor.position));
             }
             other => panic!("unexpected event: {:?}", other),
         }
-        // ObjectComDrop arms the DROPPER's NoCollectDelay after the exit
-        // (C4ObjectCom.cpp:668-671).
-        match &result.events[1] {
-            CommandEvent::ArmNoCollectDelay { object_id } => {
-                assert_eq!(*object_id, actor_id);
-            }
-            other => panic!("unexpected event: {:?}", other),
-        }
+    }
+
+    #[test]
+    fn pending_drop_finishes_only_after_callback_commands_clear() {
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::Drop))
+            .expect("Drop queues");
+        let Some(ActiveCommand {
+            state: CommandState::Drop(state),
+            ..
+        }) = stack.entries.front_mut()
+        else {
+            panic!("front command should be Drop");
+        };
+        state.completion_pending = true;
+
+        // An Exit callback may AddCommand before C4Command::Drop calls
+        // Finish(true). The Drop is then finished below that new front and
+        // must not report ControlCommandFinished until it is uncovered.
+        stack
+            .push_front(CommandRequest::new(CommandId::Wait))
+            .expect("callback command queues");
+        assert!(stack.finish_pending_drop());
+        assert_eq!(stack.finished_front_view(), None);
+        assert!(!stack.finish_pending_drop(), "pending marker is one-shot");
+
+        stack.pop_front();
+        assert_eq!(
+            stack
+                .finished_front_view()
+                .expect("finished Drop is now visible")
+                .name,
+            "Drop"
+        );
+    }
+
+    #[test]
+    fn targeted_drop_stops_comdir_but_keeps_coordinates_out_of_the_exit_event() {
+        // Tx/Ty are only the C4Command::Drop move-to goal. Once in range,
+        // C++ writes COMD_Stop and ObjectComDrop computes the exit from the
+        // actor/item shapes (C4Command.cpp:1015-1033).
+        let actor_id = ObjectId::new(632);
+        let item_id = ObjectId::new(633);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(10, 10);
+        actor.command_direction = CommandDirection::Right;
+        actor.contents = vec![item_id];
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+        let objects = HashMap::from([(actor_id, actor), (item_id, item)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(
+            objects.get(&actor_id).expect("actor present"),
+            &objects,
+            &players,
+            &definitions,
+            0,
+        );
+        let mut state = DropState::from_request(
+            &CommandRequest::new(CommandId::Drop)
+                .with_tx(Some(11))
+                .with_ty(Some(10)),
+        );
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Stop)
+        );
+        assert_eq!(
+            result.events,
+            vec![CommandEvent::ObjectComDrop {
+                actor_id,
+                object_id: item_id,
+            }]
+        );
+    }
+
+    #[test]
+    fn targeted_drop_ungrabs_before_contained_or_push_put_branches() {
+        let actor_id = ObjectId::new(634);
+        let item_id = ObjectId::new(635);
+        let container_id = ObjectId::new(636);
+        let pushed_id = ObjectId::new(637);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(10, 10);
+        actor.container = Some(container_id);
+        actor.action_procedure = ActionProcedure::Push;
+        actor.action_target = Some(pushed_id);
+        actor.contents = vec![item_id];
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+        let mut objects = HashMap::from([
+            (actor_id, actor),
+            (item_id, item),
+            (container_id, snapshot_with_id(container_id.as_u64())),
+            (pushed_id, snapshot_with_id(pushed_id.as_u64())),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let request = CommandRequest::new(CommandId::Drop)
+            .with_tx(Some(11))
+            .with_ty(Some(10));
+        let mut state = DropState::from_request(&request);
+        let ctx = move_to_ctx_at_frame(
+            objects.get(&actor_id).expect("actor present"),
+            &objects,
+            &players,
+            &definitions,
+            0,
+        );
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.events.is_empty());
+        assert!(matches!(
+            result.operations.as_slice(),
+            [CommandOperation::PushFront(CommandRequest {
+                id: CommandId::UnGrab,
+                ..
+            })]
+        ));
+
+        // Once UnGrab returns, the still-contained actor takes the targeted
+        // drop branch rather than the later contained Put branch.
+        objects
+            .get_mut(&actor_id)
+            .expect("actor present")
+            .action_procedure = ActionProcedure::Walk;
+        let ctx = move_to_ctx_at_frame(
+            objects.get(&actor_id).expect("actor present"),
+            &objects,
+            &players,
+            &definitions,
+            1,
+        );
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            result.events,
+            vec![CommandEvent::ObjectComDrop {
+                actor_id,
+                object_id: item_id,
+            }]
+        );
+    }
+
+    #[test]
+    fn targeted_drop_uses_cpp_five_pixel_default_range() {
+        let actor_id = ObjectId::new(638);
+        let item_id = ObjectId::new(639);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(10, 10);
+        actor.contents = vec![item_id];
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+        let objects = HashMap::from([(actor_id, actor), (item_id, item)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(
+            objects.get(&actor_id).expect("actor present"),
+            &objects,
+            &players,
+            &definitions,
+            0,
+        );
+        let mut state = DropState::from_request(
+            &CommandRequest::new(CommandId::Drop)
+                .with_tx(Some(16))
+                .with_ty(Some(10)),
+        );
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.events.is_empty());
+        assert!(matches!(
+            result.operations.as_slice(),
+            [CommandOperation::PushFront(CommandRequest {
+                id: CommandId::MoveTo,
+                ..
+            })]
+        ));
+    }
+
+    #[test]
+    fn drop_gets_an_explicit_outside_item_before_dropping_it() {
+        let actor_id = ObjectId::new(644);
+        let item_id = ObjectId::new(645);
+        let actor = snapshot_with_id(actor_id.as_u64());
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.position = Vector2::new(20, 10);
+        let objects = HashMap::from([(actor_id, actor), (item_id, item)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(
+            objects.get(&actor_id).expect("actor present"),
+            &objects,
+            &players,
+            &definitions,
+            0,
+        );
+        let mut state = DropState::from_request(
+            &CommandRequest::new(CommandId::Drop).with_target(Some(item_id)),
+        );
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(matches!(
+            result.operations.as_slice(),
+            [CommandOperation::PushFront(CommandRequest {
+                id: CommandId::Get,
+                target: Some(target),
+                ..
+            })] if *target == item_id
+        ));
     }
 
     #[test]
@@ -2833,7 +3047,13 @@ mod tests {
             rng: None,
         };
 
-        let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
+        // Explicit 0/0 is C++'s untargeted sentinel and must still reach the
+        // later contained Put branch.
+        let mut state = DropState::from_request(
+            &CommandRequest::new(CommandId::Drop)
+                .with_tx(Some(0))
+                .with_ty(Some(0)),
+        );
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert_eq!(result.operations.len(), 1);
@@ -10198,6 +10418,10 @@ pub enum CommandOperation {
     /// travels with the command ops so its order against Clear/Push is
     /// preserved through the staged script outcomes.
     DecrementNoCollectDelay,
+    /// ObjectComDrop's post-Exit assignment. This is an ordered command
+    /// operation because a synchronous ExecuteCommand may run after an
+    /// earlier SetCommand decrement in the same script call.
+    SetNoCollectDelay { value: i32, ocf: u32 },
     /// Replace the staged command stack after a synchronous
     /// `ExecuteCommand` host call. The command's mutable evaluation state
     /// must cross the copy-in/copy-out script boundary with the stack.
@@ -10282,6 +10506,13 @@ pub enum CommandEvent {
         actor_id: ObjectId,
         object_id: ObjectId,
         complete_command_on_success: bool,
+    },
+    /// Run ObjectComDrop as one live ordered operation. Exit callbacks must
+    /// observe the final fixed motion before the dropper's NoCollectDelay
+    /// and trailing ObjectComUnGrab (C4ObjectCom.cpp:640-676).
+    ObjectComDrop {
+        actor_id: ObjectId,
+        object_id: ObjectId,
     },
     /// Execute C4Command::Jump against the live object. ObjectComJump may run
     /// the object's OnActionJump hook synchronously, so it cannot be reduced
@@ -10873,6 +11104,7 @@ impl CommandStack {
                     self.finish_entry(index, success);
                 }
                 CommandOperation::DecrementNoCollectDelay => {}
+                CommandOperation::SetNoCollectDelay { .. } => {}
                 CommandOperation::Restore(snapshot) => self.restore_from_snapshot(&snapshot),
             }
         }
@@ -10950,6 +11182,26 @@ impl CommandStack {
             }
         }
         false
+    }
+
+    /// Finish the exact Drop whose live ObjectComDrop helper just returned.
+    /// AddCommand may have pushed entries above it; SetCommand may have
+    /// removed it entirely.
+    pub fn finish_pending_drop(&mut self) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|entry| {
+            matches!(
+                &entry.state,
+                CommandState::Drop(state) if state.completion_pending
+            )
+        }) else {
+            return false;
+        };
+        let CommandState::Drop(state) = &mut entry.state else {
+            unreachable!("the pending-drop predicate only matches Drop commands");
+        };
+        state.completion_pending = false;
+        entry.finished = Some(CommandStatus::Completed);
+        true
     }
 
     pub fn fail_front_if(&mut self, id: CommandId) -> bool {
@@ -13888,19 +14140,17 @@ struct DropState {
     update_interval: u32,
     delegated_put: bool,
     delegated_container: Option<ObjectId>,
+    /// ObjectComDrop is running between the helper call and Finish(true).
+    /// This identifies the exact command if callbacks push new entries.
+    #[serde(default)]
+    completion_pending: bool,
 }
 
 impl DropState {
     fn from_request(request: &CommandRequest) -> Self {
-        let has_coordinates = request.tx.is_some() || request.ty.is_some();
-        let target_position = if has_coordinates {
-            Some(Vector2::new(
-                request.tx.unwrap_or(0),
-                request.ty.unwrap_or(0),
-            ))
-        } else {
-            None
-        };
+        let tx = request.tx.unwrap_or(0);
+        let ty = request.ty.unwrap_or(0);
+        let target_position = (tx != 0 || ty != 0).then_some(Vector2::new(tx, ty));
         Self {
             requested_item: request.target,
             definition_id: command_data_to_definition_id(&request.data),
@@ -13908,14 +14158,7 @@ impl DropState {
             update_interval: request.update_interval.max(1),
             delegated_put: false,
             delegated_container: None,
-        }
-    }
-
-    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
-        if ctx.object.command_direction != CommandDirection::Stop {
-            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
-        } else {
-            None
+            completion_pending: false,
         }
     }
 
@@ -13979,7 +14222,13 @@ impl DropState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let update = self.update_to_stop(ctx);
+        // Plain outside Drop preserves Action.ComDir. Only the targeted
+        // at-position branch stops it before ObjectComDrop
+        // (C4Command.cpp:998-1049). Keep the old Dig stop approximation
+        // until the dedicated ObjectComStop parity slice owns that action.
+        let mut update = (ctx.object.action_procedure == ActionProcedure::Dig
+            && ctx.object.command_direction != CommandDirection::Stop)
+            .then(|| ObjectUpdate::new().with_command_direction(CommandDirection::Stop));
 
         let (item_id, item_snapshot) = match self.resolve_item(ctx) {
             Some(value) => value,
@@ -13999,9 +14248,6 @@ impl DropState {
         }
 
         if item_snapshot.container != Some(ctx.object.id) {
-            if item_snapshot.container.is_none() {
-                return CommandStepResult::completed(update);
-            }
             let mut result = CommandStepResult::running(update.clone());
             let request = CommandRequest::new(CommandId::Get)
                 .with_target(Some(item_id))
@@ -14011,32 +14257,30 @@ impl DropState {
             return result;
         }
 
-        if let Some(container_id) = ctx.object.container {
-            return self.delegate_put(item_id, container_id, update);
-        }
-
-        if ctx.object.action_procedure == ActionProcedure::Push {
-            if let Some(container_id) = ctx.object.action_target {
-                return self.delegate_put(item_id, container_id, update);
-            }
-        }
-
         if let Some(position) = self.target_position {
-            const DROP_RANGE_HORIZONTAL: i32 = 12;
+            // C4Command::Drop handles target coordinates before the
+            // contained/pushing Put branches. A pusher always lets go first,
+            // even when already inside the target range.
+            if ctx.object.action_procedure == ActionProcedure::Push {
+                let mut result = CommandStepResult::running(update.clone());
+                let request = CommandRequest::new(CommandId::UnGrab)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::SilentSub);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
+
+            const DROP_RANGE_DEFAULT: i32 = 5;
             const DROP_RANGE_VERTICAL: i32 = 15;
+            let drop_range = if ctx.object.move_to_range > 0 {
+                ctx.object.move_to_range
+            } else {
+                DROP_RANGE_DEFAULT
+            };
             let dx = position.x - ctx.position.x;
             let dy = position.y - ctx.position.y;
 
-            if dx.abs() > DROP_RANGE_HORIZONTAL || dy.abs() > DROP_RANGE_VERTICAL {
-                if ctx.object.action_procedure == ActionProcedure::Push {
-                    let mut result = CommandStepResult::running(update.clone());
-                    let request = CommandRequest::new(CommandId::UnGrab)
-                        .with_update_interval(50)
-                        .with_mode(CommandMode::SilentSub);
-                    result.operations.push(CommandOperation::PushFront(request));
-                    return result;
-                }
-
+            if dx.abs() > drop_range || dy.abs() > DROP_RANGE_VERTICAL {
                 let mut result = CommandStepResult::running(update.clone());
                 let request = CommandRequest::new(CommandId::MoveTo)
                     .with_tx(Some(position.x))
@@ -14046,33 +14290,30 @@ impl DropState {
                 result.operations.push(CommandOperation::PushFront(request));
                 return result;
             }
-        } else if ctx.object.action_procedure == ActionProcedure::Push {
-            let mut result = CommandStepResult::running(update.clone());
-            let request = CommandRequest::new(CommandId::UnGrab)
-                .with_update_interval(50)
-                .with_mode(CommandMode::SilentSub);
-            result.operations.push(CommandOperation::PushFront(request));
-            return result;
+            if ctx.object.command_direction != CommandDirection::Stop {
+                update = Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop));
+            }
+        } else {
+            if let Some(container_id) = ctx.object.container {
+                return self.delegate_put(item_id, container_id, update);
+            }
+
+            if ctx.object.action_procedure == ActionProcedure::Push {
+                if let Some(container_id) = ctx.object.action_target {
+                    return self.delegate_put(item_id, container_id, update);
+                }
+                return CommandStepResult::completed(update);
+            }
         }
 
-        let drop_position = self.target_position.unwrap_or(ctx.position);
-        let mut item_update = ObjectUpdate::new();
-        item_update.container = Some(None);
-        item_update.position = Some(drop_position);
-        item_update.velocity = Some(Vector2::ZERO);
-
-        // ObjectComDrop (C4ObjectCom.cpp:640-676): after the item's Exit
-        // the dropper arms NoCollectDelay = 2 and refreshes its OCF so the
-        // Collection bit is off before the next cross check.
-        CommandStepResult::completed(update).with_events(vec![
-            CommandEvent::ApplyObjectUpdate {
-                object_id: item_id,
-                update: item_update,
-            },
-            CommandEvent::ArmNoCollectDelay {
-                object_id: ctx.object.id,
-            },
-        ])
+        // C++ calls Finish(true) only after ObjectComDrop (including all
+        // Exit/UnGrab callbacks) returns. The live event marks this Drop
+        // finished afterward if callbacks left that exact command alive.
+        self.completion_pending = true;
+        CommandStepResult::running(update).with_events(vec![CommandEvent::ObjectComDrop {
+            actor_id: ctx.object.id,
+            object_id: item_id,
+        }])
     }
 }
 

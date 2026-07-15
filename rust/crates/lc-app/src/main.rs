@@ -66105,16 +66105,32 @@ mod tests {
                 .object_snapshot(clonk)
                 .is_some_and(|object| object.action.name == "Walk")
         });
+        // Releasing ELEC used COM_DOWN double-click handling. Let that
+        // window expire before approaching the wall so the following
+        // physical COM_THROW remains Throw and the Clonk does not idle into
+        // Scale while waiting at the blast pocket.
+        for _ in 0..11 {
+            app.update().expect("wait out first FLNT throw buffer");
+        }
         hold_app_key_until(
             &mut app,
             VirtualKeyCode::Z,
-            "CLNK approaches Tutorial07 marked GOLD seam",
+            "CLNK reaches Tutorial07 first GOLD-side blast pocket",
             80,
             |app| {
-                app.engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.position.x <= 92)
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.action.name == "Walk"
+                        && object.position.x <= 120
+                        && object.position.y >= 300
+                })
             },
+        );
+        assert_eq!(
+            AppVirtualKeyboard::new(&mut app)
+                .player_control()
+                .last_com_down_double,
+            0,
+            "first FLNT throw starts after the C++ down-double latch expires"
         );
 
         let first_flint = app
@@ -66131,24 +66147,19 @@ mod tests {
         AppVirtualKeyboard::new(&mut app)
             .tap(VirtualKeyCode::A)
             .expect("physical A throws the first FLNT");
-        advance_app_until(&mut app, "first FLNT leaves CLNK inventory", 60, |app| {
-            app.engine
-                .object_snapshot(first_flint)
-                .is_none_or(|flint| flint.container != Some(clonk))
-        });
-
-        AppVirtualKeyboard::new(&mut app)
-            .press(VirtualKeyCode::C)
-            .expect("hold physical C to retreat from the first FLNT");
+        // Execute Throw before the retreat control can clear its command.
+        // The same update may also run the first contact explosion, so keep
+        // the pre-update landscape instead of hiding this transition behind
+        // a generic inventory wait.
         let mut detonation = None;
-        for _ in 0..180 {
+        for _ in 0..60 {
             let before = app.engine.object_snapshot(first_flint).and_then(|flint| {
                 app.engine
                     .landscape()
                     .cloned()
                     .map(|landscape| (flint.position, landscape))
             });
-            app.update().expect("advance first Tutorial07 FLNT fuse");
+            app.update().expect("execute the first Tutorial07 FLNT throw");
             if let Some((center, before)) = before {
                 if app.engine.object_snapshot(first_flint).is_none() {
                     detonation = app
@@ -66159,12 +66170,55 @@ mod tests {
                     break;
                 }
             }
+            if app
+                .engine
+                .object_snapshot(first_flint)
+                .is_none_or(|flint| flint.container != Some(clonk))
+            {
+                break;
+            }
+        }
+        assert!(
+            app.engine
+                .object_snapshot(first_flint)
+                .is_none_or(|flint| flint.container != Some(clonk)),
+            "physical A executes Throw before retreat"
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .press(VirtualKeyCode::C)
+            .expect("hold physical C to retreat from the first FLNT");
+        if detonation.is_none() {
+            for _ in 0..180 {
+                let before = app.engine.object_snapshot(first_flint).and_then(|flint| {
+                    app.engine
+                        .landscape()
+                        .cloned()
+                        .map(|landscape| (flint.position, landscape))
+                });
+                app.update().expect("advance first Tutorial07 FLNT fuse");
+                if let Some((center, before)) = before {
+                    if app.engine.object_snapshot(first_flint).is_none() {
+                        detonation = app
+                            .engine
+                            .landscape()
+                            .cloned()
+                            .map(|after| (center, before, after));
+                        break;
+                    }
+                }
+            }
         }
         AppVirtualKeyboard::new(&mut app)
             .release(VirtualKeyCode::C)
             .expect("release physical C after the first FLNT");
-        let (center, before, after) =
-            detonation.expect("physical app route observes first FLNT detonation");
+        let (center, before, after) = detonation.unwrap_or_else(|| {
+            panic!(
+                "physical app route observes first FLNT detonation; flint={:?}; clonk={:?}; control={:?}",
+                app.engine.object_snapshot(first_flint),
+                app.engine.object_snapshot(clonk),
+                AppVirtualKeyboard::new(&mut app).player_control(),
+            )
+        });
         assert!(
             app.engine.object_snapshot(first_flint).is_none(),
             "the real first FLNT is consumed by its explosion"
@@ -66632,11 +66686,15 @@ mod tests {
         for _ in 0..11 {
             app.update().expect("wait out BALN vertical-control buffer");
         }
+        // BALN/CLNK stop at x=565 against the near face of the crystal
+        // cliff. Requiring the object anchor to cross x=570 makes arrival
+        // depend on a favorable wind impulse instead of physical contact.
+        const CRYSTAL_CLIFF_X: i32 = 565;
         for coast_frame in 0..900 {
             if app.engine.object_snapshot(clonk).is_some_and(|object| {
                 object.action.name == "Push"
                     && object.action.target == Some(balloon)
-                    && object.position.x >= 570
+                    && object.position.x >= CRYSTAL_CLIFF_X
             }) {
                 break;
             }
@@ -66700,7 +66758,7 @@ mod tests {
             app.engine.object_snapshot(clonk).is_some_and(|object| {
                 object.action.name == "Push"
                     && object.action.target == Some(balloon)
-                    && object.position.x >= 570
+                    && object.position.x >= CRYSTAL_CLIFF_X
             }),
             "BALN reaches opposite CRYS cliff; clonk={:?}; balloon={:?}; control={:?}",
             app.engine.object_snapshot(clonk),
@@ -66728,7 +66786,7 @@ mod tests {
             app.engine.object_snapshot(clonk).is_some_and(|object| {
                 object.action.name == "Walk"
                     && object.container.is_none()
-                    && object.position.x >= 570
+                    && object.position.x >= CRYSTAL_CLIFF_X
             })
         });
         hold_app_key_until(

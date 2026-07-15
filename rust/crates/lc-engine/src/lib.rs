@@ -6031,6 +6031,10 @@ impl Object {
                         self.state.no_collect_delay -= 1;
                     }
                 }
+                CommandOperation::SetNoCollectDelay { value, ocf } => {
+                    self.state.no_collect_delay = value;
+                    self.state.ocf = ocf;
+                }
                 CommandOperation::Restore(snapshot) => {
                     self.commands.restore_from_snapshot(&snapshot);
                 }
@@ -20176,31 +20180,13 @@ impl Engine {
             Some(index) => index,
             None => return Err(EngineError::UnknownObject(crew_id)),
         };
-        let crew_state = &self.objects[crew_index].state;
-        if !crew_state.status.is_active() {
+        if !self.objects[crew_index].state.status.is_active() {
             return Ok(false);
         }
-        let Some(item_id) = crew_state.contents.first().copied() else {
+        let Some(item_id) = self.objects[crew_index].state.contents.first().copied() else {
             return Ok(false);
         };
-        let offset = match crew_state.direction {
-            Direction::Left => -8,
-            Direction::Right => 8,
-            _ => 0,
-        };
-        let drop_position = Vector2::new(crew_state.position.x + offset, crew_state.position.y);
-        let update = ObjectUpdate::new()
-            .clear_container()
-            .with_position(drop_position)
-            .with_velocity(Vector2::ZERO);
-        self.apply_object_update(item_id, update)?;
-        // ObjectComDrop arms the dropper's NoCollectDelay and refreshes its
-        // OCF after the exit (C4ObjectCom.cpp:668-671).
-        if let Some(crew_index) = self.find_object_index(crew_id) {
-            self.objects[crew_index].state.no_collect_delay = 2;
-            self.refresh_object_ocf(crew_index);
-        }
-        Ok(true)
+        self.object_com_drop(crew_id, item_id)
     }
 
     pub fn try_enter_nearby(&mut self, owner: i32) -> Result<bool, EngineError> {
@@ -24863,6 +24849,10 @@ impl Engine {
                 .update
                 .as_ref()
                 .is_some_and(ObjectUpdate::refreshes_ocf_like_cpp);
+            let ocf_override = outcome
+                .update
+                .as_ref()
+                .and_then(|update| update.ocf_override);
             let info_rank_update = outcome
                 .update
                 .as_ref()
@@ -25099,6 +25089,11 @@ impl Engine {
             if refresh_ocf || energy_died {
                 if let Some(refresh_index) = self.find_object_index(object_id) {
                     self.refresh_object_ocf(refresh_index);
+                }
+            }
+            if let Some(ocf) = ocf_override {
+                if let Some(override_index) = self.find_object_index(object_id) {
+                    self.objects[override_index].state.ocf = ocf;
                 }
             }
             if let Some(status_index) = self.find_object_index(object_id) {
@@ -31417,6 +31412,13 @@ impl Engine {
         contact_cnat: u32,
     ) -> Result<(), EngineError> {
         for cnat in [CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, CNAT_BOTTOM] {
+            if self
+                .objects
+                .get(idx)
+                .is_none_or(|object| object.state.status == ObjectStatus::Deleted)
+            {
+                break;
+            }
             if contact_cnat & cnat == 0 {
                 continue;
             }
@@ -38113,15 +38115,7 @@ impl Engine {
             return Ok(false);
         }
 
-        if let Some(actor_index) = self.find_object_index(actor_id) {
-            self.objects[actor_index].apply_command_operations([CommandOperation::PushFront(
-                CommandRequest::new(CommandId::Drop)
-                    .with_target(Some(unused))
-                    .with_mode(CommandMode::SilentSub),
-            )]);
-            return Ok(true);
-        }
-        Ok(false)
+        self.object_com_drop(actor_id, unused)
     }
 
     /// C4Command::GetTryEnter's outcome-sensitive wrapper. RejectCollect
@@ -38423,6 +38417,15 @@ impl Engine {
                     self.complete_command(actor_id, CommandId::Throw)?;
                 }
             }
+            CommandEvent::ObjectComDrop {
+                actor_id,
+                object_id,
+            } => {
+                let _ = self.object_com_drop(actor_id, object_id)?;
+                if let Some(actor_index) = self.find_object_index(actor_id) {
+                    self.objects[actor_index].commands.finish_pending_drop();
+                }
+            }
             CommandEvent::ObjectComJump { object_id, tx } => {
                 self.execute_jump_command(object_id, tx)?;
             }
@@ -38637,40 +38640,51 @@ impl Engine {
         Ok(())
     }
 
+    fn dispatch_control_command_finished(
+        &mut self,
+        object_id: ObjectId,
+        command: command::CommandView,
+    ) -> Result<(), EngineError> {
+        let args = vec![
+            Value::String(command.name),
+            command
+                .target
+                .map(object_reference_value)
+                .unwrap_or(Value::Nil),
+            command
+                .tx_definition
+                .map(Value::C4Id)
+                .or_else(|| command.tx.map(Value::Int))
+                .unwrap_or(Value::Nil),
+            Value::Int(command.ty.unwrap_or(0)),
+            command
+                .target2
+                .map(object_reference_value)
+                .unwrap_or(Value::Nil),
+            match command.data {
+                CommandData::Integer(value) => Value::Int(value),
+                CommandData::Text(value) => Value::String(value),
+                CommandData::None => Value::Nil,
+            },
+        ];
+        if let Some(index) = self.find_object_index(object_id).filter(|&index| {
+            self.objects[index].state.status != ObjectStatus::Deleted
+        }) {
+            let _ = tolerate_script_error(self.call_object_function(
+                index,
+                "ControlCommandFinished",
+                args,
+            ))?;
+        }
+        Ok(())
+    }
+
     fn finish_object_command_execution(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
         let finished = self
             .find_object_index(object_id)
             .and_then(|index| self.objects[index].commands.finished_front_view());
         if let Some(command) = finished {
-            let args = vec![
-                Value::String(command.name),
-                command
-                    .target
-                    .map(object_reference_value)
-                    .unwrap_or(Value::Nil),
-                command
-                    .tx_definition
-                    .map(Value::C4Id)
-                    .or_else(|| command.tx.map(Value::Int))
-                    .unwrap_or(Value::Nil),
-                Value::Int(command.ty.unwrap_or(0)),
-                command
-                    .target2
-                    .map(object_reference_value)
-                    .unwrap_or(Value::Nil),
-                match command.data {
-                    CommandData::Integer(value) => Value::Int(value),
-                    CommandData::Text(value) => Value::String(value),
-                    CommandData::None => Value::Nil,
-                },
-            ];
-            if let Some(index) = self.find_object_index(object_id) {
-                let _ = tolerate_script_error(self.call_object_function(
-                    index,
-                    "ControlCommandFinished",
-                    args,
-                ))?;
-            }
+            self.dispatch_control_command_finished(object_id, command)?;
         }
         if let Some(index) = self.find_object_index(object_id) {
             self.objects[index].commands.clear_finished_fronts();

@@ -49159,7 +49159,7 @@ func ReadRestoredSky() {
     }
 
     #[test]
-    fn try_drop_held_object_places_item_next_to_crew() -> Result<(), EngineError> {
+    fn try_drop_held_object_uses_object_com_drop_for_stop_direction() -> Result<(), EngineError> {
         let mut engine = Engine::new();
         let mut crew_definition = Definition::from_script("Crew", "Crew", BASIC_OBJECT_SCRIPT)?;
         crew_definition.set_crew_member(true);
@@ -49192,15 +49192,653 @@ func ReadRestoredSky() {
             item_snapshot.container.is_none(),
             "item should be released from inventory"
         );
-        assert_ne!(
+        assert_eq!(
             item_snapshot.position, crew_before_drop.position,
-            "item should be positioned away from crew after drop"
+            "COMD_Stop has tdir=0 and equal shape bottoms keep the same anchor"
         );
+        let item_index = engine.find_object_index(item).expect("item exists");
+        assert_eq!(engine.objects[item_index].fixed_velocity, FixedVec2::ZERO);
         // Every ObjectComDrop-shaped drop arms the dropper's NoCollectDelay
         // (C4ObjectCom.cpp:668-669) — the helper must not leave the crew
         // instantly recollecting what it just dropped.
         let crew_index = engine.find_object_index(crew).expect("crew exists");
         assert_eq!(engine.objects[crew_index].state.no_collect_delay, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn object_com_drop_matches_cpp_exit_physics_callback_order_and_ungrab(
+    ) -> Result<(), EngineError> {
+        // ObjectComDrop computes its fixed throw velocity and shape-relative
+        // exit point before C4Object::Exit, then Exit dispatches Ejection and
+        // Departure before NoCollectDelay/SetOCF and ObjectComUnGrab
+        // (C4ObjectCom.cpp:640-676; C4Object.cpp:1513-1563).
+        let actor_script = r#"#strict 2
+local callback_order, ejected, departed, ungrab_target, target_ungrabbed;
+local ejection_had_collection, ejection_item_container;
+local ejection_x, ejection_y, ejection_xdir, ejection_ydir, ejection_r, ejection_rdir;
+local ejection_no_collect, departure_no_collect, departure_had_collection;
+local grab_had_collection, grabbed_had_collection;
+
+protected func Ejection(pObject)
+{
+  callback_order = callback_order * 10 + 1;
+  ejected = pObject;
+  ejection_had_collection = !!(GetOCF() & OCF_Collection);
+  ejection_item_container = pObject->Contained();
+  ejection_x = GetX(pObject);
+  ejection_y = GetY(pObject);
+  ejection_xdir = GetXDir(pObject, 100);
+  ejection_ydir = GetYDir(pObject, 100);
+  ejection_r = GetR(pObject);
+  ejection_rdir = GetRDir(pObject, 100);
+  ejection_no_collect = GetObjectVal("NoCollectDelay");
+  return(1);
+}
+
+public func NoteDeparture(pObject)
+{
+  callback_order = callback_order * 10 + 2;
+  departed = pObject;
+  departure_no_collect = GetObjectVal("NoCollectDelay");
+  departure_had_collection = !!(GetOCF() & OCF_Collection);
+  return(1);
+}
+
+protected func Grab(pTarget, fGrab)
+{
+  if (!fGrab)
+  {
+    callback_order = callback_order * 10 + 3;
+    ungrab_target = pTarget;
+    grab_had_collection = !!(GetOCF() & OCF_Collection);
+  }
+  return(1);
+}
+
+public func NoteGrabbed(pTarget)
+{
+  callback_order = callback_order * 10 + 4;
+  target_ungrabbed = pTarget;
+  grabbed_had_collection = !!(GetOCF() & OCF_Collection);
+  return(1);
+}
+"#;
+        let item_script = r#"#strict 2
+protected func Departure(pContainer)
+{
+  pContainer->NoteDeparture(this());
+  return(1);
+}
+"#;
+        let target_script = r#"#strict 2
+protected func Grabbed(pClonk, fGrab)
+{
+  if (!fGrab) pClonk->NoteGrabbed(this());
+  return(1);
+}
+"#;
+
+        let mut actor = Definition::from_script("DPAC", "Drop actor", actor_script)?;
+        actor.set_c4_callback_convention(true);
+        actor.set_crew_member(true);
+        actor.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        actor.set_collection_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        actor.set_physical(PhysicalInfo {
+            throw: 50_001,
+            ..PhysicalInfo::default()
+        });
+        actor.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Push".to_string(),
+                    ActionSpec::default().with_procedure("PUSH"),
+                ),
+            ]),
+        );
+        let mut item = Definition::from_script("DPIT", "Drop item", item_script)?;
+        item.set_c4_callback_convention(true);
+        item.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
+        let mut target = Definition::from_script("DPTG", "Push target", target_script)?;
+        target.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(175);
+        engine.register_definition(actor)?;
+        engine.register_definition(item)?;
+        engine.register_definition(target)?;
+        engine.register_player(PlayerConfig::new(1, "Dropper"))?;
+        let target_id = engine.spawn_object(
+            SpawnConfig::new("DPTG")
+                .with_category(CATEGORY_VEHICLE)
+                .with_construction(FULL_CON)
+                .with_position(Vector2::new(120, 200)),
+        )?;
+        let mut push_action = ActionState::new("Push");
+        push_action.target = Some(target_id);
+        let actor_id = engine.spawn_object(
+            SpawnConfig::new("DPAC")
+                .with_owner(1)
+                .with_alive(true)
+                .with_crew_member(true)
+                .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                .with_construction(FULL_CON)
+                .with_position(Vector2::new(100, 200))
+                .with_velocity(Vector2::new(-2, 0))
+                .with_command_direction(CommandDirection::Right)
+                .with_action(push_action),
+        )?;
+        let item_id = engine.spawn_object(
+            SpawnConfig::new("DPIT")
+                .with_construction(FULL_CON)
+                .with_container(actor_id),
+        )?;
+        engine.select_crew(1, [actor_id])?;
+        engine.set_crew_cursor(1, Some(actor_id))?;
+
+        let actor_index = engine.find_object_index(actor_id).expect("actor exists");
+        engine.refresh_object_ocf(actor_index);
+        assert_ne!(
+            engine.objects[actor_index].state.ocf & ocf::COLLECTION,
+            0,
+            "the Ejection callback must begin with collection still enabled"
+        );
+        let actor_position = engine.objects[actor_index].state.position;
+        let actor_shape = engine.objects[actor_index]
+            .current_shape_rect()
+            .expect("actor shape");
+        let item_index = engine.find_object_index(item_id).expect("item exists");
+        let item_shape = engine.objects[item_index]
+            .current_shape_rect()
+            .expect("item shape");
+        engine.objects[item_index].fixed_velocity =
+            FixedVec2::new(math::itofix(9), -math::itofix(7));
+        engine.objects[item_index].state.velocity = Vector2::new(9, -7);
+        engine.objects[item_index].state.rotation = 37;
+        engine.objects[item_index].fixed_rotation = math::itofix(37);
+        engine.objects[item_index].rotation_velocity = math::itofix(5);
+        engine.objects[item_index].state.in_liquid = true;
+        engine.objects[item_index].state.mobile = false;
+        let expected_position = Vector2::new(
+            actor_position.x + actor_shape.x + actor_shape.width,
+            actor_position.y + actor_shape.y + actor_shape.height
+                - (item_shape.y + item_shape.height),
+        );
+        let expected_force = math::val_by_physical(400, 50_001);
+
+        assert!(engine.try_drop_held_object(1)?);
+
+        let item_index = engine.find_object_index(item_id).expect("item remains");
+        assert_eq!(engine.objects[item_index].state.container, None);
+        assert_eq!(engine.objects[item_index].state.position, expected_position);
+        assert_eq!(
+            engine.objects[item_index].fixed_velocity,
+            FixedVec2::new(expected_force, C4Fixed::ZERO)
+        );
+        assert_eq!(engine.objects[item_index].state.rotation, 0);
+        assert_eq!(engine.objects[item_index].fixed_rotation, C4Fixed::ZERO);
+        assert_eq!(engine.objects[item_index].rotation_velocity, C4Fixed::ZERO);
+        assert_eq!(engine.objects[item_index].state.velocity.y, 0);
+        assert!(engine.objects[item_index].state.mobile);
+        assert!(!engine.objects[item_index].state.in_liquid);
+
+        let actor_index = engine.find_object_index(actor_id).expect("actor remains");
+        let actor_state = &engine.objects[actor_index].state;
+        assert_eq!(actor_state.local_vars.get("callback_order"), Some(&Value::Int(1234)));
+        assert_eq!(
+            actor_state.local_vars.get("ejected"),
+            Some(&object_reference_value(item_id))
+        );
+        assert_eq!(
+            actor_state.local_vars.get("departed"),
+            Some(&object_reference_value(item_id))
+        );
+        assert_eq!(
+            actor_state.local_vars.get("ungrab_target"),
+            Some(&object_reference_value(target_id))
+        );
+        assert_eq!(
+            actor_state.local_vars.get("target_ungrabbed"),
+            Some(&object_reference_value(target_id))
+        );
+        assert_eq!(
+            actor_state.local_vars.get("ejection_had_collection"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            actor_state.local_vars.get("ejection_item_container"),
+            Some(&Value::Nil)
+        );
+        assert_eq!(
+            actor_state.local_vars.get("ejection_x"),
+            Some(&Value::Int(expected_position.x))
+        );
+        assert_eq!(
+            actor_state.local_vars.get("ejection_y"),
+            Some(&Value::Int(expected_position.y))
+        );
+        assert_eq!(
+            actor_state.local_vars.get("ejection_xdir"),
+            Some(&Value::Int(math::fixtoi_prec(expected_force, 100)))
+        );
+        for local in [
+            "ejection_ydir",
+            "ejection_r",
+            "ejection_rdir",
+            "ejection_no_collect",
+            "departure_no_collect",
+        ] {
+            assert_eq!(
+                actor_state.local_vars.get(local),
+                Some(&Value::Int(0)),
+                "{local} observes the pre-delay zeroed Exit state"
+            );
+        }
+        assert_eq!(
+            actor_state.local_vars.get("departure_had_collection"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            actor_state.local_vars.get("grab_had_collection"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            actor_state.local_vars.get("grabbed_had_collection"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(actor_state.no_collect_delay, 2);
+        assert_eq!(actor_state.ocf & ocf::COLLECTION, 0);
+        assert_eq!(actor_state.action.name, "Walk");
+        assert_eq!(actor_state.command_direction, CommandDirection::Stop);
+        assert_eq!(engine.objects[actor_index].fixed_velocity, FixedVec2::ZERO);
+        Ok(())
+    }
+
+    #[test]
+    fn object_com_drop_matches_cpp_reduction_thresholds_and_procedure_exceptions(
+    ) -> Result<(), EngineError> {
+        // C4ObjectCom.cpp:650-667 uses strict one-sided FIXED10(15)
+        // comparisons. Hangle/Swim retain the full edge offset; Scale forces
+        // tdir=0 even with a directional ComDir.
+        let mut actor = Definition::from_script("DPKM", "Drop kinematics", "#strict 2\n")?;
+        actor.set_shape_rect(Some(DefinitionRect::new(-7, -11, 18, 27)));
+        actor.set_physical(PhysicalInfo {
+            throw: 50_001,
+            ..PhysicalInfo::default()
+        });
+        actor.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Hangle".to_string(),
+                    ActionSpec::default().with_procedure("HANGLE"),
+                ),
+                (
+                    "Swim".to_string(),
+                    ActionSpec::default().with_procedure("SWIM"),
+                ),
+                (
+                    "Scale".to_string(),
+                    ActionSpec::default().with_procedure("SCALE"),
+                ),
+            ]),
+        );
+        let mut item = Definition::from_script("DPKI", "Drop matrix item", "#strict 2\n")?;
+        item.set_shape_rect(Some(DefinitionRect::new(-2, -3, 5, 7)));
+
+        let mut engine = Engine::with_seed(176);
+        engine.register_definition(actor)?;
+        engine.register_definition(item)?;
+        let threshold = math::fixed10(15);
+        let force = math::val_by_physical(400, 50_001);
+        assert_eq!(threshold.val(), 98_304);
+        assert_eq!(force.val(), 131_074);
+
+        let cases = [
+            ("Walk", CommandDirection::Left, 98_304, -7, -force),
+            ("Walk", CommandDirection::Left, 98_303, 0, -force),
+            ("Walk", CommandDirection::Right, -98_304, 11, force),
+            ("Walk", CommandDirection::Right, -98_303, 0, force),
+            ("Hangle", CommandDirection::UpRight, 0, 11, force),
+            ("Swim", CommandDirection::DownLeft, 0, -7, -force),
+            ("Scale", CommandDirection::Right, 0, 0, C4Fixed::ZERO),
+        ];
+
+        for (case, (action, com_dir, xdir_raw, expected_dx, expected_xdir)) in
+            cases.into_iter().enumerate()
+        {
+            let owner = case as i32 + 1;
+            engine.register_player(PlayerConfig::new(owner, format!("Dropper {owner}")))?;
+            let actor_id = engine.spawn_object(
+                SpawnConfig::new("DPKM")
+                    .with_owner(owner)
+                    .with_alive(true)
+                    .with_crew_member(true)
+                    .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                    .with_construction(FULL_CON)
+                    .with_position(Vector2::new(100 + case as i32 * 40, 200))
+                    .with_direction(Direction::Left)
+                    .with_command_direction(com_dir)
+                    .with_action(ActionState::new(action)),
+            )?;
+            let item_id = engine.spawn_object(
+                SpawnConfig::new("DPKI")
+                    .with_construction(FULL_CON)
+                    .with_container(actor_id),
+            )?;
+            engine.select_crew(owner, [actor_id])?;
+            engine.set_crew_cursor(owner, Some(actor_id))?;
+            let actor_index = engine.find_object_index(actor_id).expect("actor exists");
+            engine.objects[actor_index].fixed_velocity.x = C4Fixed::from_raw(xdir_raw);
+            engine.objects[actor_index].state.velocity =
+                Vector2::new(math::fixtoi(C4Fixed::from_raw(xdir_raw)), 0);
+            let actor_position = engine.objects[actor_index].state.position;
+
+            assert!(engine.try_drop_held_object(owner)?);
+
+            let item_index = engine.find_object_index(item_id).expect("item remains");
+            let expected_position = Vector2::new(
+                actor_position.x + expected_dx,
+                actor_position.y + 12,
+            );
+            assert_eq!(
+                engine.objects[item_index].state.position,
+                expected_position,
+                "case {case}: {action} {com_dir:?} raw xdir {xdir_raw}"
+            );
+            assert_eq!(
+                engine.objects[item_index].fixed_position,
+                FixedVec2::from_ints(expected_position.x, expected_position.y),
+                "case {case}: fixed position"
+            );
+            assert_eq!(
+                engine.objects[item_index].fixed_velocity,
+                FixedVec2::new(expected_xdir, C4Fixed::ZERO),
+                "case {case}: fixed launch"
+            );
+            assert_eq!(engine.objects[item_index].fixed_rotation, C4Fixed::ZERO);
+            assert_eq!(engine.objects[item_index].rotation_velocity, C4Fixed::ZERO);
+            assert!(engine.objects[item_index].state.mobile);
+            assert!(!engine.objects[item_index].state.in_liquid);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn execute_command_drop_preserves_plain_comdir_and_runs_live_exit(
+    ) -> Result<(), EngineError> {
+        // Untargeted C4Command::Drop calls ObjectComDrop without first
+        // writing COMD_Stop (C4Command.cpp:998-1049). ExecuteCommand must
+        // therefore preserve the live ComDir through the atomic drop event.
+        let actor_script = r#"#strict 2
+local callback_order, remove_on_ejection, finished_calls;
+local push_on_ejection, preserve_walk, grab_fight_ready, grab_collection;
+
+public func RunDrop()
+{
+  SetCommand(this(), "Drop");
+  ExecuteCommand();
+  return(1);
+}
+
+public func RunDeletingDrop()
+{
+  remove_on_ejection = 1;
+  SetCommand(this(), "Drop");
+  ExecuteCommand();
+  return(1);
+}
+
+public func RunReenabledDrop()
+{
+  push_on_ejection = 1;
+  preserve_walk = 1;
+  SetCommand(this(), "Drop");
+  ExecuteCommand();
+  return(1);
+}
+
+protected func Ejection(pObject)
+{
+  callback_order = callback_order * 10 + 1;
+  if (push_on_ejection) SetAction("DisabledPush", this());
+  if (remove_on_ejection) RemoveObject();
+  return(1);
+}
+
+public func NoteDeparture()
+{
+  callback_order = callback_order * 10 + 2;
+  return(1);
+}
+
+protected func Grab(pTarget, fGrab)
+{
+  if (!fGrab)
+  {
+    grab_fight_ready = !!(GetOCF() & OCF_FightReady);
+    grab_collection = !!(GetOCF() & OCF_Collection);
+  }
+  return(1);
+}
+
+protected func ControlCommandFinished()
+{
+  finished_calls++;
+  if (!preserve_walk) SetAction("Disabled");
+  return(1);
+}
+"#;
+        let item_script = r#"#strict 2
+protected func Departure(pContainer)
+{
+  pContainer->NoteDeparture();
+  return(1);
+}
+"#;
+        let mut actor = Definition::from_script("DPCM", "Command dropper", actor_script)?;
+        actor.set_c4_callback_convention(true);
+        actor.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        actor.set_collection_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
+        actor.set_physical(PhysicalInfo {
+            throw: 50_000,
+            ..PhysicalInfo::default()
+        });
+        actor.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Disabled".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_disabled(true),
+                ),
+                (
+                    "DisabledPush".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("PUSH")
+                        .with_disabled(true),
+                ),
+            ]),
+        );
+        let mut item = Definition::from_script("DPCI", "Command item", item_script)?;
+        item.set_c4_callback_convention(true);
+        item.set_shape_rect(Some(DefinitionRect::new(-3, -3, 6, 6)));
+
+        let mut engine = Engine::with_seed(177);
+        engine.register_definition(actor)?;
+        engine.register_definition(item)?;
+        let actor_id = engine.spawn_object(
+            SpawnConfig::new("DPCM")
+                .with_alive(true)
+                .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                .with_construction(FULL_CON)
+                .with_position(Vector2::new(100, 200))
+                .with_direction(Direction::Left)
+                .with_command_direction(CommandDirection::Right)
+                .with_action(ActionState::new("Walk")),
+        )?;
+        let item_id = engine.spawn_object(
+            SpawnConfig::new("DPCI")
+                .with_construction(FULL_CON)
+                .with_container(actor_id),
+        )?;
+        let actor_index = engine.find_object_index(actor_id).expect("actor exists");
+        engine.objects[actor_index].fixed_velocity.x = C4Fixed::from_raw(-98_304);
+        engine.objects[actor_index].state.velocity = Vector2::new(-2, 0);
+        engine.refresh_object_ocf(actor_index);
+        assert_ne!(
+            engine.objects[actor_index].state.ocf & ocf::COLLECTION,
+            0,
+            "the command preview starts with Collection enabled"
+        );
+        assert_ne!(
+            engine.objects[actor_index].state.ocf & ocf::FIGHT_READY,
+            0,
+            "the pre-command Walk actor starts fight-ready"
+        );
+        let actor_position = engine.objects[actor_index].state.position;
+        let item_index = engine.find_object_index(item_id).expect("item exists");
+        engine.objects[item_index].fixed_velocity =
+            FixedVec2::new(math::itofix(6), -math::itofix(4));
+        engine.objects[item_index].state.velocity = Vector2::new(6, -4);
+        engine.objects[item_index].state.rotation = 29;
+        engine.objects[item_index].fixed_rotation = math::itofix(29);
+        engine.objects[item_index].rotation_velocity = math::itofix(3);
+        engine.objects[item_index].state.in_liquid = true;
+
+        assert_eq!(
+            engine.call_object_function(actor_index, "RunDrop", Vec::new())?,
+            Value::Int(1)
+        );
+
+        let actor_index = engine.find_object_index(actor_id).expect("actor remains");
+        assert_eq!(
+            engine.objects[actor_index].state.command_direction,
+            CommandDirection::Right
+        );
+        assert_eq!(
+            engine.objects[actor_index].state.local_vars.get("callback_order"),
+            Some(&Value::Int(12))
+        );
+        assert_eq!(engine.objects[actor_index].state.no_collect_delay, 2);
+        assert_eq!(engine.objects[actor_index].state.ocf & ocf::COLLECTION, 0);
+        assert_eq!(engine.objects[actor_index].state.action.name, "Disabled");
+        assert_eq!(
+            engine.objects[actor_index].state.ocf & ocf::FIGHT_READY,
+            0,
+            "final OCF includes ControlCommandFinished's disabled action"
+        );
+        let item_index = engine.find_object_index(item_id).expect("item remains");
+        assert_eq!(engine.objects[item_index].state.container, None);
+        assert_eq!(
+            engine.objects[item_index].state.position,
+            Vector2::new(actor_position.x + 8, actor_position.y + 7)
+        );
+        assert_eq!(
+            engine.objects[item_index].fixed_velocity,
+            FixedVec2::new(math::val_by_physical(400, 50_000), C4Fixed::ZERO)
+        );
+        assert_eq!(engine.objects[item_index].state.rotation, 0);
+        assert_eq!(engine.objects[item_index].fixed_rotation, C4Fixed::ZERO);
+        assert_eq!(engine.objects[item_index].rotation_velocity, C4Fixed::ZERO);
+        assert_eq!(engine.objects[item_index].state.velocity.y, 0);
+        assert!(!engine.objects[item_index].state.in_liquid);
+
+        // Removing the dropper during Ejection gives it raw Status zero;
+        // C4Object::Call must suppress the later ControlCommandFinished.
+        let deleted_actor = engine.spawn_object(
+            SpawnConfig::new("DPCM")
+                .with_alive(true)
+                .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                .with_construction(FULL_CON)
+                .with_position(Vector2::new(300, 200))
+                .with_command_direction(CommandDirection::Right)
+                .with_action(ActionState::new("Walk")),
+        )?;
+        let deleted_item = engine.spawn_object(
+            SpawnConfig::new("DPCI")
+                .with_construction(FULL_CON)
+                .with_container(deleted_actor),
+        )?;
+        let deleted_index = engine
+            .find_object_index(deleted_actor)
+            .expect("deleting actor exists");
+        assert_eq!(
+            engine.call_object_function(deleted_index, "RunDeletingDrop", Vec::new())?,
+            Value::Int(1)
+        );
+        let deleted_index = engine
+            .find_object_index(deleted_actor)
+            .expect("deleted actor slot remains");
+        assert_eq!(
+            engine.objects[deleted_index].state.status,
+            ObjectStatus::Deleted
+        );
+        assert_ne!(
+            engine.objects[deleted_index]
+                .state
+                .local_vars
+                .get("finished_calls"),
+            Some(&Value::Int(1)),
+            "deleted actors receive no ControlCommandFinished callback"
+        );
+        let deleted_item_index = engine
+            .find_object_index(deleted_item)
+            .expect("dropped item remains");
+        assert_eq!(engine.objects[deleted_item_index].state.container, None);
+
+        // SetActionByName("Walk") inside ObjectComUnGrab runs SetOCF before
+        // Grab(false). It must restore FightReady after an Ejection callback
+        // temporarily installs an ObjectDisabled Push action, while the
+        // adjacent delay=2 assignment keeps Collection off.
+        let reenabled_actor = engine.spawn_object(
+            SpawnConfig::new("DPCM")
+                .with_alive(true)
+                .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                .with_construction(FULL_CON)
+                .with_position(Vector2::new(500, 200))
+                .with_action(ActionState::new("Walk")),
+        )?;
+        let _reenabled_item = engine.spawn_object(
+            SpawnConfig::new("DPCI")
+                .with_construction(FULL_CON)
+                .with_container(reenabled_actor),
+        )?;
+        let reenabled_index = engine
+            .find_object_index(reenabled_actor)
+            .expect("reenabled actor exists");
+        engine.refresh_object_ocf(reenabled_index);
+        assert_ne!(
+            engine.objects[reenabled_index].state.ocf & ocf::FIGHT_READY,
+            0
+        );
+        assert_eq!(
+            engine.call_object_function(reenabled_index, "RunReenabledDrop", Vec::new())?,
+            Value::Int(1)
+        );
+        let reenabled_index = engine
+            .find_object_index(reenabled_actor)
+            .expect("reenabled actor remains");
+        let reenabled = &engine.objects[reenabled_index].state;
+        assert_eq!(reenabled.local_vars.get("grab_fight_ready"), Some(&Value::Bool(true)));
+        assert_eq!(reenabled.local_vars.get("grab_collection"), Some(&Value::Bool(false)));
+        assert_eq!(reenabled.action.name, "Walk");
+        assert_eq!(reenabled.no_collect_delay, 2);
+        assert_ne!(reenabled.ocf & ocf::FIGHT_READY, 0);
+        assert_eq!(reenabled.ocf & ocf::COLLECTION, 0);
         Ok(())
     }
 

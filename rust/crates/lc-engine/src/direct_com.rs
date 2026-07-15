@@ -4309,9 +4309,169 @@ impl Engine {
         Ok(false)
     }
 
+    /// `ObjectComDrop` (C4ObjectCom.cpp:640-676): calculate the live shape-
+    /// relative exit and fixed launch, run the full Exit callback sequence,
+    /// then arm collection delay and release any current Push action.
+    pub(crate) fn object_com_drop(
+        &mut self,
+        actor_id: ObjectId,
+        object_id: ObjectId,
+    ) -> Result<bool, EngineError> {
+        let Some(actor_index) = self.find_object_index(actor_id) else {
+            return Ok(false);
+        };
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+
+        let throw_force = math::val_by_physical(400, self.object_physical(actor_index).throw);
+        let procedure = self.object_procedure(actor_index);
+        let command_direction = self.objects[actor_index].state.command_direction;
+        let actor_xdir = self.objects[actor_index].fixed_velocity.x;
+        let actor_position = self.objects[actor_index].state.position;
+        let actor_shape = self.objects[actor_index]
+            .current_shape_rect()
+            .unwrap_or_default();
+        let object_shape = self.objects[object_index]
+            .current_shape_rect()
+            .unwrap_or_default();
+
+        let com_dir_like = |sample: CommandDirection| {
+            let com = command_direction.to_script_value();
+            let sample = sample.to_script_value();
+            com == sample || com % 8 + 1 == sample || com == sample % 8 + 1
+        };
+        let hangling_or_swimming = matches!(procedure, ActionProcedure::Hang | ActionProcedure::Swim);
+        let mut throw_direction = 0;
+        let mut right = 0;
+        let mut outpos_reduction = 1;
+        if procedure != ActionProcedure::Scale {
+            if com_dir_like(CommandDirection::Left) {
+                throw_direction = -1;
+                if actor_xdir < math::fixed10(15) && !hangling_or_swimming {
+                    outpos_reduction -= 1;
+                }
+            }
+            if com_dir_like(CommandDirection::Right) {
+                throw_direction = 1;
+                right = 1;
+                if actor_xdir > -math::fixed10(15) && !hangling_or_swimming {
+                    outpos_reduction -= 1;
+                }
+            }
+        }
+
+        let edge = actor_shape
+            .x
+            .wrapping_add(actor_shape.width.wrapping_mul(right));
+        let exit_position = Vector2::new(
+            actor_position.x.wrapping_add(
+                edge.wrapping_mul(i32::from(throw_direction != 0))
+                    .wrapping_mul(outpos_reduction),
+            ),
+            actor_position
+                .y
+                .wrapping_add(actor_shape.y)
+                .wrapping_add(actor_shape.height)
+                .wrapping_sub(object_shape.y.wrapping_add(object_shape.height)),
+        );
+        let exit_velocity = FixedVec2::new(throw_force * throw_direction, C4Fixed::ZERO);
+
+        // ObjectComDrop intentionally ignores Exit's boolean: callback
+        // re-entry still proceeds to NoCollectDelay and ObjectComUnGrab.
+        let _ = self.exit_object_for_drop(object_id, exit_position, exit_velocity)?;
+
+        if let Some(actor_index) = self.find_object_index(actor_id) {
+            self.objects[actor_index].state.no_collect_delay = 2;
+            self.refresh_object_ocf(actor_index);
+        }
+        if let Some(actor_index) = self.find_object_index(actor_id) {
+            let _ = self.object_com_ungrab(actor_index)?;
+        }
+        Ok(true)
+    }
+
+    /// The `C4Object::Exit` slice used by ObjectComDrop. The old parent is
+    /// refreshed before BoundsCheck while the moving object's own OCF/menu
+    /// remain stale; requested motion is installed before Ejection and
+    /// Departure (C4Object.cpp:1513-1563).
+    fn exit_object_for_drop(
+        &mut self,
+        object_id: ObjectId,
+        mut target: Vector2,
+        velocity: FixedVec2,
+    ) -> Result<bool, EngineError> {
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        let Some(previous) = self.objects[object_index].state.container else {
+            return Ok(false);
+        };
+
+        if let Some(previous_index) = self.find_object_index(previous) {
+            self.objects[previous_index]
+                .state
+                .contents
+                .retain(|&child| child != object_id);
+            self.refresh_object_ocf(previous_index);
+        }
+        if let Some(object_index) = self.find_object_index(object_id) {
+            self.objects[object_index].state.container = None;
+        }
+
+        self.bounds_check_for_change_def_exit(object_id, &mut target)?;
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        {
+            let object = &mut self.objects[object_index];
+            let previous_rect = object.current_shape_rect();
+            let previous_construction = object.state.construction;
+            object.set_position(target);
+            object.state.rotation = 0;
+            object.fixed_rotation = C4Fixed::ZERO;
+            object.fixed_velocity = velocity;
+            object.state.velocity = object.velocity_pixels();
+            object.rotation_velocity = C4Fixed::ZERO;
+            object.state.mobile = true;
+            object.state.in_liquid = false;
+            object.state.menu = None;
+            if object.shape_template.line == 0 {
+                object.state.shape_override = None;
+            }
+            object.refresh_shape_after_state_change(previous_construction, previous_rect, false);
+        }
+        self.update_solid_mask(object_index);
+        self.update_sector_for_index(object_index);
+        self.refresh_object_ocf(object_index);
+
+        if let Some(previous_index) = self.find_object_index(previous).filter(|&index| {
+            self.objects[index].state.status != crate::ObjectStatus::Deleted
+        }) {
+            let _ = tolerate_script_error(self.call_object_function(
+                previous_index,
+                "Ejection",
+                vec![compat::object_reference_value(object_id)],
+            ))?;
+        }
+        if let Some(object_index) = self.find_object_index(object_id).filter(|&index| {
+            self.objects[index].state.status != crate::ObjectStatus::Deleted
+        }) {
+            let _ = tolerate_script_error(self.call_object_function(
+                object_index,
+                "Departure",
+                vec![compat::object_reference_value(previous)],
+            ))?;
+        }
+
+        Ok(self
+            .find_object_index(object_id)
+            .is_some_and(|index| self.objects[index].state.container.is_none()))
+    }
+
     /// `ObjectComUnGrab` (C4ObjectCom.cpp:261-278): stand up and release the
     /// grab with the Grab/Grabbed script notifications.
-    fn object_com_ungrab(&mut self, index: usize) -> Result<bool, EngineError> {
+    pub(crate) fn object_com_ungrab(&mut self, index: usize) -> Result<bool, EngineError> {
         if self.object_procedure(index) != ActionProcedure::Push {
             return Ok(false);
         }
@@ -4320,7 +4480,6 @@ impl Engine {
         if !self.object_action_stand(index, &definition_id)? {
             return Ok(false);
         }
-        // CloseMenu (:269) is app-side.
         let target_ref = target
             .map(compat::object_reference_value)
             .unwrap_or(Value::Nil);
@@ -5249,6 +5408,111 @@ mod tests {
             engine.objects[crew_index].state.ocf & ocf::COLLECTION,
             0,
             "the post-drop SetOCF clears OCF_Collection (C4ObjectCom.cpp:671)"
+        );
+    }
+
+    #[test]
+    fn object_com_drop_suppresses_departure_after_ejection_deletes_item() {
+        // C4Object::Call checks raw Status before each callback. Ejection
+        // may delete the dropped item, in which case its later Departure
+        // call is a silent miss.
+        let actor_script = r#"#strict 2
+local callback_order;
+protected func Ejection(item)
+{
+  callback_order = callback_order * 10 + 1;
+  RemoveObject(item);
+  return(1);
+}
+public func NoteDeparture()
+{
+  callback_order = callback_order * 10 + 2;
+  return(1);
+}
+"#;
+        let item_script = r#"#strict 2
+protected func Departure(parent)
+{
+  parent->NoteDeparture();
+  return(1);
+}
+"#;
+        let mut actor = Definition::from_script("DDAC", "Deleting dropper", actor_script)
+            .expect("actor compiles");
+        actor.set_c4_callback_convention(true);
+        actor.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([(
+                "Walk".to_string(),
+                ActionSpec::default().with_procedure("WALK"),
+            )]),
+        );
+        let mut item = Definition::from_script("DDIT", "Deleted item", item_script)
+            .expect("item compiles");
+        item.set_c4_callback_convention(true);
+        let mut engine = Engine::new();
+        engine.register_definition(actor).expect("register actor");
+        engine.register_definition(item).expect("register item");
+        let actor_id = engine
+            .spawn_object(
+                SpawnConfig::new("DDAC")
+                    .with_command_direction(CommandDirection::Right)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("spawn actor");
+        let item_id = engine
+            .spawn_object(SpawnConfig::new("DDIT").with_container(actor_id))
+            .expect("spawn item");
+
+        assert!(engine
+            .object_com_drop(actor_id, item_id)
+            .expect("drop succeeds"));
+
+        let actor_index = engine.find_object_index(actor_id).expect("actor remains");
+        assert_eq!(
+            engine.objects[actor_index]
+                .state
+                .local_vars
+                .get("callback_order"),
+            Some(&Value::Int(1))
+        );
+        let item_index = engine.find_object_index(item_id).expect("deleted slot remains");
+        assert_eq!(
+            engine.objects[item_index].state.status,
+            crate::ObjectStatus::Deleted
+        );
+    }
+
+    #[test]
+    fn put_away_unused_object_drops_immediately_when_push_put_fails() {
+        let mut engine = Engine::new();
+        let (crew, item) = drop_window_fixture(&mut engine);
+        let target = Definition::from_script("PAUT", "No-put target", "#strict 2\n")
+            .expect("target compiles");
+        engine.register_definition(target).expect("register target");
+        let target = engine
+            .spawn_object(SpawnConfig::new("PAUT"))
+            .expect("spawn target");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.action = ActionState::new("Push");
+        engine.objects[crew_index].state.action.target = Some(target);
+
+        assert!(engine
+            .put_away_unused_object(crew, None)
+            .expect("put-away succeeds"));
+
+        let item_index = engine.find_object_index(item).expect("item remains");
+        assert_eq!(engine.objects[item_index].state.container, None);
+        let crew_index = engine.find_object_index(crew).expect("crew remains");
+        assert_eq!(engine.objects[crew_index].state.no_collect_delay, 2);
+        assert_eq!(engine.objects[crew_index].state.action.name, "Walk");
+        assert!(
+            engine.objects[crew_index]
+                .commands
+                .snapshot()
+                .command_names()
+                .is_empty(),
+            "the uncontained fallback is a live drop, not a queued Drop command"
         );
     }
 
