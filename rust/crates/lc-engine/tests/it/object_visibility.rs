@@ -91,3 +91,61 @@ public func Stop(object target)
     );
     assert!(restored.object_visible_for_player(mage, observer, false));
 }
+
+#[test]
+fn shipped_invisibility_recast_carries_remaining_time_into_reset_timer() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Invisibility owner");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with its MCLK cursor");
+
+    let cast = |engine: &mut lc_engine::Engine| {
+        let spell = engine
+            .spawn_object(SpawnConfig::new("MINV").with_owner(owner))
+            .expect("the shipped MINV spell spawns");
+        engine
+            .call_object_function(
+                engine.find_object_index(spell).expect("MINV index"),
+                "Activate",
+                vec![Value::Object(mage.as_u64()), Value::Nil],
+            )
+            .expect("the shipped invisibility spell activates");
+    };
+
+    cast(&mut engine);
+    for _ in 0..7 {
+        engine.tick().expect("the invisibility timer advances");
+    }
+    let before = engine
+        .object_snapshot(mage)
+        .expect("mage remains after first cast")
+        .effects
+        .into_iter()
+        .find(|effect| effect.name == "InvisPSpell")
+        .expect("first invisibility effect exists");
+    assert!(before.timer > 0, "the first spell has consumed some time");
+
+    cast(&mut engine);
+    let effects = engine
+        .object_snapshot(mage)
+        .expect("mage remains after recast")
+        .effects
+        .into_iter()
+        .filter(|effect| effect.name == "InvisPSpell")
+        .collect::<Vec<_>>();
+    assert_eq!(effects.len(), 1, "FxInvisPSpellEffect merges the recast");
+    assert_eq!(
+        effects[0].number, before.number,
+        "the recast extends the existing effect identity"
+    );
+    assert_eq!(
+        effects[0].interval,
+        before.interval - before.timer + 1_400,
+        "FxInvisPSpellAdd carries the old remaining duration into ChangeEffect"
+    );
+    assert_eq!(
+        effects[0].timer, 0,
+        "ChangeEffect restarts the merged invisibility clock"
+    );
+}
