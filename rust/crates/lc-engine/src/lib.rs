@@ -65,7 +65,8 @@ pub use control::{
     ClientRemoveControlData, ClientUpdateControlData, CommandKind, ControlButton, ControlCommand,
     ControlEvent, ControlPacket, ControlPacketId, ControlPlayerInfoEntry,
     InitScenarioPlayerControlData,
-    JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore,
+    JoinPlayerControlData, JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData,
+    NetworkResourceCore,
     PlayerCommandControlData, PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest,
     ScriptControlData, ScriptStrictness, SurrenderPlayerControlData, SyncCheckPacket,
     SynchronizeControlData, VoteControlData,
@@ -18280,6 +18281,100 @@ impl Engine {
         if league_game {
             self.team_configuration.allow_team_switch = false;
         }
+    }
+
+    /// Close the process-local query input and build its synchronized answer
+    /// packet. This is the `MarkMessageBoardQueryAnswered` step performed by
+    /// C4ChatInputDialog before the queued control executes.
+    pub fn prepare_message_board_answer_control(
+        &mut self,
+        answer: LegacyCString,
+        by_client: i32,
+    ) -> Option<MessageBoardAnswerControlData> {
+        let input = self.active_message_board_input.take()?;
+        let marked = self
+            .players
+            .get_mut(&input.player)?
+            .mark_message_board_query_answered(input.target);
+        if !marked {
+            return None;
+        }
+
+        let answer = if input.uppercase {
+            let bytes = answer
+                .as_bytes()
+                .iter()
+                .map(|&byte| match byte {
+                    b'a'..=b'z' => byte - b'a' + b'A',
+                    0xe4 => 0xc4,
+                    0xf6 => 0xd6,
+                    0xfc => 0xdc,
+                    other => other,
+                })
+                .collect();
+            LegacyCString::from_bytes(bytes)
+                .expect("capitalizing a NUL-free message-board answer cannot add NUL")
+        } else {
+            answer
+        };
+        let object = match input.target {
+            Some(target) => i32::try_from(target.as_u64()).ok()?,
+            None => 0,
+        };
+        Some(MessageBoardAnswerControlData {
+            object,
+            answer,
+            player: input.player,
+            by_client,
+        })
+    }
+
+    /// Execute one synchronized `CID_MessageBoardAnswer` packet. The packet
+    /// is accepted only for the client that owns the addressed player;
+    /// `NO_OWNER` remains the C++ control's explicit ownerless exception.
+    ///
+    /// C++ formats and parses a strict-3 internal
+    /// `OnMessageBoardAnswer(Object(...), ...)` script. Keeping that source
+    /// path preserves its quote/backslash escaping as well as parse failures
+    /// for line breaks and overlong string literals.
+    pub fn execute_message_board_answer_control(
+        &mut self,
+        control: &MessageBoardAnswerControlData,
+    ) -> Result<bool, EngineError> {
+        const NO_OWNER: i32 = -1;
+        let allowed = control.player == NO_OWNER
+            || self.player(control.player).is_some_and(|player| {
+                player.at_client() == PlayerAtClient::new(control.by_client)
+            });
+        if !allowed {
+            return Ok(false);
+        }
+
+        let source = if control.answer.is_empty() {
+            format!(
+                "OnMessageBoardAnswer(Object({}),{},)",
+                control.object, control.player
+            )
+        } else {
+            // C4AUL_MAX_String is 1024 bytes. EscapeString does not replace
+            // CR/LF, so either condition makes DirectExec fail before the
+            // native function can consume the query.
+            if control.answer.as_bytes().len() > 1024
+                || control.answer.as_bytes().contains(&b'\n')
+                || control.answer.as_bytes().contains(&b'\r')
+            {
+                return Ok(true);
+            }
+            let answer = lc_resources::decode_legacy_script_text(control.answer.as_bytes());
+            let escaped = answer.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(
+                "OnMessageBoardAnswer(Object({}),{},\"{}\")",
+                control.object, control.player, escaped
+            )
+        };
+
+        let _ = self.direct_exec_script_control_global(&source, Some(3))?;
+        Ok(true)
     }
 
     /// Execute one synchronized `CID_Script` packet. `Ok(None)` denotes a

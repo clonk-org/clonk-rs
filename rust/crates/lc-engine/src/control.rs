@@ -37,6 +37,9 @@ pub enum ControlPacket {
     /// Synchronized console/global/object-scoped script execution
     /// (`CID_Script`, C4Control.cpp:258-326).
     Script(ScriptControlData),
+    /// Synchronized answer to a script-created message-board query
+    /// (`CID_MessageBoardAnswer`, C4Control.cpp:1546-1594).
+    MessageBoardAnswer(MessageBoardAnswerControlData),
     /// Player control command (`CID_PlrControl`).
     PlayerControl(PlayerControlData),
     /// Mouse/object command (`CID_PlrCommand`, C4Control.cpp:405-439).
@@ -210,6 +213,30 @@ impl Default for ScriptControlData {
             target_object: SCRIPT_SCOPE_GLOBAL,
             strictness: ScriptStrictness::Strict3,
             script: LegacyCString::default(),
+            by_client: -1,
+        }
+    }
+}
+
+/// Body of `C4ControlMessageBoardAnswer` (`CID_MessageBoardAnswer`).
+///
+/// The object number and both inherited author fields use the packed signed
+/// integer codec. Answer bytes remain NUL-free legacy bytes so the binary
+/// control can round-trip without assuming UTF-8.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageBoardAnswerControlData {
+    pub object: i32,
+    pub answer: LegacyCString,
+    pub player: i32,
+    pub by_client: i32,
+}
+
+impl Default for MessageBoardAnswerControlData {
+    fn default() -> Self {
+        Self {
+            object: 0,
+            answer: LegacyCString::default(),
+            player: -1,
             by_client: -1,
         }
     }
@@ -825,6 +852,7 @@ impl RawPacket {
         // C4PacketType::PID_None (src/C4PacketBase.h).
         const PID_NONE: u8 = 0xff;
         const CID_SCRIPT: u8 = 0x88;
+        const CID_MESSAGE_BOARD_ANSWER: u8 = 0xd0;
         const CID_PLR_CONTROL: u8 = 0xA1;
         const CID_PLR_COMMAND: u8 = 0xA2;
 
@@ -862,6 +890,29 @@ impl RawPacket {
                 script,
                 by_client,
             })));
+        }
+
+        if id == CID_MESSAGE_BOARD_ANSWER {
+            // C4ControlMessageBoardAnswer writes packed Object, Answer,
+            // inherited packed Plr, then inherited packed ByClient. The INI
+            // writer may omit every field at its CompileFunc default.
+            let object = parse_int_field_or(&self.fields, "Object", 0)?;
+            let answer = self.fields.get("Answer").cloned().unwrap_or_default();
+            let answer = LegacyCString::from_bytes(answer.into_bytes()).ok_or(
+                ControlParseError::InteriorNulString {
+                    field: "Answer".to_string(),
+                },
+            )?;
+            let player = parse_int_field_or(&self.fields, "Plr", -1)?;
+            let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
+            return Ok(Some(ControlPacket::MessageBoardAnswer(
+                MessageBoardAnswerControlData {
+                    object,
+                    answer,
+                    player,
+                    by_client,
+                },
+            )));
         }
 
         if id == CID_JOIN_PLR {
@@ -1469,6 +1520,39 @@ mod tests {
             parse_control_ini(input),
             Err(ControlParseError::InvalidScriptStrictness { value: 4 })
         ));
+    }
+
+    #[test]
+    fn parses_message_board_answer_packet_and_omitted_defaults() {
+        // C4ControlMessageBoardAnswer::CompileFunc writes Object/Answer,
+        // inherited Plr, then inherited ByClient. StdCompilerINIWrite omits
+        // their defaults 0, empty, -1, and -1 respectively.
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=208\n\
+    [Message Board Answer]\n\
+      Object=130\n\
+      Answer=\"typed answer\"\n\
+      Plr=-4\n\
+      ByClient=7\n\
+  [IDPacket]\n\
+    ID=208\n\
+    [Message Board Answer]\n";
+
+        assert_eq!(
+            parse_control_ini(input).expect("parse message-board answers"),
+            vec![
+                ControlPacket::MessageBoardAnswer(MessageBoardAnswerControlData {
+                    object: 130,
+                    answer: LegacyCString::from_bytes(b"typed answer".to_vec())
+                        .expect("fixture is NUL-free"),
+                    player: -4,
+                    by_client: 7,
+                }),
+                ControlPacket::MessageBoardAnswer(MessageBoardAnswerControlData::default()),
+            ]
+        );
     }
 
     #[test]

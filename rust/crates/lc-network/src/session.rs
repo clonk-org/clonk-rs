@@ -3261,6 +3261,9 @@ fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String>
     for control in &frame.controls {
         let (name, author) = match control {
             lc_engine::ControlPacket::Script(script) => ("CID_Script", script.by_client),
+            lc_engine::ControlPacket::MessageBoardAnswer(answer) => {
+                ("CID_MessageBoardAnswer", answer.by_client)
+            }
             control => {
                 let Some(set) = crate::LegacyControlSet::from_control_packet(control) else {
                     continue;
@@ -3501,6 +3504,7 @@ fn authenticated_single_control(
         lc_engine::ControlPacket::PlayerControl(data) => data.by_client,
         lc_engine::ControlPacket::PlayerCommand(data) => data.by_client,
         lc_engine::ControlPacket::Script(data) => data.by_client,
+        lc_engine::ControlPacket::MessageBoardAnswer(data) => data.by_client,
         lc_engine::ControlPacket::InitScenarioPlayer(data) => data.by_client,
         lc_engine::ControlPacket::SurrenderPlayer(data) => data.by_client,
         lc_engine::ControlPacket::Synchronize(data) => data.by_client,
@@ -7126,6 +7130,58 @@ mod tests {
         let error = validate_queued_control_authors(&packet(0))
             .expect_err("queued client may not forge host CID_Script");
         assert!(error.contains("queued CID_Script"));
+        assert!(error.contains("claimed author 0"));
+        assert!(error.contains("authenticated author is 7"));
+    }
+
+    #[test]
+    fn single_message_board_answer_authenticates_embedded_author() {
+        let control = EngineControlPacket::MessageBoardAnswer(
+            lc_engine::MessageBoardAnswerControlData {
+                object: 42,
+                answer: lc_engine::LegacyCString::from_bytes(b"answer".to_vec())
+                    .expect("fixture is NUL-free"),
+                player: 3,
+                by_client: 7,
+            },
+        );
+        let payload =
+            encode_control_entry_payload(&control).expect("encode CID_MessageBoardAnswer");
+
+        assert_eq!(
+            authenticated_single_control(&payload, 7).expect("matching author"),
+            control
+        );
+        let error = authenticated_single_control(&payload, 8)
+            .expect_err("reject spoofed message-board answer author");
+        assert!(error.contains("claimed author 7"));
+        assert!(error.contains("authenticated author is 8"));
+    }
+
+    #[test]
+    fn queued_message_board_answer_cannot_forge_host_author() {
+        let packet = |by_client| {
+            encode_control_packet(&LegacyControlFrame {
+                client_id: 7,
+                tick: 12,
+                timestamp_ms: 0,
+                controls: vec![EngineControlPacket::MessageBoardAnswer(
+                    lc_engine::MessageBoardAnswerControlData {
+                        object: 42,
+                        answer: lc_engine::LegacyCString::from_bytes(b"answer".to_vec())
+                            .expect("fixture is NUL-free"),
+                        player: 3,
+                        by_client,
+                    },
+                )],
+            })
+            .expect("encode queued CID_MessageBoardAnswer")
+        };
+
+        validate_queued_control_authors(&packet(7)).expect("matching queued author");
+        let error = validate_queued_control_authors(&packet(0))
+            .expect_err("queued client may not forge host CID_MessageBoardAnswer");
+        assert!(error.contains("queued CID_MessageBoardAnswer"));
         assert!(error.contains("claimed author 0"));
         assert!(error.contains("authenticated author is 7"));
     }

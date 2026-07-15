@@ -438,6 +438,11 @@ impl RuntimeHandle {
                         .execute_script_control(&data, ScriptControlPolicy::replay(false))
                         .map_err(|error| error.to_string())?;
                 }
+                ControlPacket::MessageBoardAnswer(data) => {
+                    self.engine
+                        .execute_message_board_answer_control(&data)
+                        .map_err(|error| error.to_string())?;
+                }
                 ControlPacket::PlayerInfo(info) => {
                     // C4ControlPlayerInfo::Execute adds the infos to
                     // Game.PlayerInfos (C4Control.cpp:1264-1282).
@@ -2097,6 +2102,7 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                         ControlPacket::PlayerControl(_) => "PlayerControl",
                         ControlPacket::PlayerCommand(_) => "PlayerCommand",
                         ControlPacket::Script(_) => "Script",
+                        ControlPacket::MessageBoardAnswer(_) => "MessageBoardAnswer",
                         ControlPacket::InitScenarioPlayer(_) => "InitScenarioPlayer",
                         ControlPacket::SurrenderPlayer(_) => "SurrenderPlayer",
                         ControlPacket::SyncCheck(_) => "SyncCheck",

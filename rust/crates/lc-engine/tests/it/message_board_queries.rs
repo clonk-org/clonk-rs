@@ -1,12 +1,13 @@
 use lc_engine::{
-    Definition, Engine, ObjectId, ObjectStatus, ObjectUpdate, PlayerConfig, SpawnConfig,
+    Definition, Engine, LegacyCString, MessageBoardAnswerControlData, ObjectId, ObjectStatus,
+    ObjectUpdate, PlayerAtClient, PlayerConfig, SpawnConfig,
 };
 use lc_script::Value;
 
 const PLAYER: i32 = 1;
 
 const QUERY_PROBE_SCRIPT: &str = r#"#strict 2
-local callback_answer, callback_player, callback_count;
+local callback_answer, callback_player, callback_count, callback_frame;
 
 public func Open(bool uppercase, string prompt, int player)
 {
@@ -34,6 +35,7 @@ protected func InputCallback(string answer, int player)
     callback_answer = answer;
     callback_player = player;
     callback_count = callback_count + 1;
+    callback_frame = FrameCounter();
     return 1;
 }
 "#;
@@ -111,6 +113,10 @@ fn open(
             Value::Int(player),
         ],
     )
+}
+
+fn object_number(object: ObjectId) -> i32 {
+    i32::try_from(object.as_u64()).expect("fixture object number fits the signed control field")
 }
 
 #[test]
@@ -390,4 +396,266 @@ fn message_board_answer_reaches_the_target_input_callback_exactly_once() {
         Some(&Value::Int(1)),
         "the rejected doubled answer must not invoke InputCallback again"
     );
+}
+
+#[test]
+fn message_board_answer_control_requires_the_players_exact_client() {
+    let (mut engine, target, _) = fixture();
+    engine
+        .player_mut(PLAYER)
+        .expect("message-board player remains")
+        .set_at_client(PlayerAtClient::new(7));
+    assert_eq!(
+        open(&mut engine, target, false, "authenticated answer", PLAYER),
+        Value::Bool(true)
+    );
+
+    let forged = MessageBoardAnswerControlData {
+        object: object_number(target),
+        answer: LegacyCString::from_bytes(b"forged".to_vec()).expect("answer is NUL-free"),
+        player: PLAYER,
+        by_client: 8,
+    };
+    assert!(!engine
+        .execute_message_board_answer_control(&forged)
+        .expect("rejected control is not an engine error"));
+    assert_eq!(
+        engine
+            .player(PLAYER)
+            .expect("message-board player remains")
+            .message_board_queries()
+            .len(),
+        1,
+        "an unauthorized answer must not consume the query"
+    );
+    assert_ne!(
+        engine
+            .object_snapshot(target)
+            .expect("callback target remains")
+            .local_vars
+            .get("callback_count"),
+        Some(&Value::Int(1)),
+        "an unauthorized answer must not invoke InputCallback"
+    );
+
+    let ownerless = MessageBoardAnswerControlData {
+        object: object_number(target),
+        answer: LegacyCString::default(),
+        player: -1,
+        by_client: 999,
+    };
+    assert!(engine
+        .execute_message_board_answer_control(&ownerless)
+        .expect("NO_OWNER is explicitly allowed"));
+    assert_eq!(
+        engine
+            .player(PLAYER)
+            .expect("message-board player remains")
+            .message_board_queries()
+            .len(),
+        1,
+        "the ownerless no-player call has no unrelated player query to consume"
+    );
+}
+
+#[test]
+fn message_board_answer_control_preserves_escaped_and_cp1252_text_in_the_same_frame() {
+    let (mut engine, target, _) = fixture();
+    engine
+        .player_mut(PLAYER)
+        .expect("message-board player remains")
+        .set_at_client(PlayerAtClient::new(7));
+    assert_eq!(
+        open(&mut engine, target, false, "escaped answer", PLAYER),
+        Value::Bool(true)
+    );
+    engine.tick().expect("advance to a nonzero control frame");
+    let frame = i32::try_from(engine.frame()).expect("fixture frame fits i32");
+
+    let gravity = engine.physics().gravity;
+    let answer = b"say \" ); SetGravity(99); // \\ \x80".to_vec();
+    let control = MessageBoardAnswerControlData {
+        object: object_number(target),
+        answer: LegacyCString::from_bytes(answer).expect("answer is NUL-free"),
+        player: PLAYER,
+        by_client: 7,
+    };
+    assert!(engine
+        .execute_message_board_answer_control(&control)
+        .expect("authenticated answer executes"));
+    assert_eq!(
+        i32::try_from(engine.frame()).expect("fixture frame fits i32"),
+        frame,
+        "the callback executes in the control frame without advancing simulation"
+    );
+
+    let target_state = engine
+        .object_snapshot(target)
+        .expect("callback target remains");
+    assert_eq!(
+        target_state.local_vars.get("callback_answer"),
+        Some(&Value::String(
+            "say \" ); SetGravity(99); // \\ €".to_string()
+        )),
+        "quote/backslash source escaping must be transparent and CP1252 must decode once"
+    );
+    assert_eq!(
+        engine.physics().gravity,
+        gravity,
+        "answer text must not escape its string argument and execute injected script"
+    );
+    assert_eq!(
+        target_state.local_vars.get("callback_player"),
+        Some(&Value::Int(PLAYER))
+    );
+    assert_eq!(
+        target_state.local_vars.get("callback_count"),
+        Some(&Value::Int(1))
+    );
+    assert_eq!(
+        target_state.local_vars.get("callback_frame"),
+        Some(&Value::Int(frame))
+    );
+    assert!(engine
+        .player(PLAYER)
+        .expect("message-board player remains")
+        .message_board_queries()
+        .is_empty());
+}
+
+#[test]
+fn empty_message_board_answer_control_closes_input_and_only_consumes_the_query() {
+    let (mut engine, target, _) = fixture();
+    engine
+        .player_mut(PLAYER)
+        .expect("message-board player remains")
+        .set_at_client(PlayerAtClient::new(7));
+    assert_eq!(
+        open(&mut engine, target, false, "cancel this query", PLAYER),
+        Value::Bool(true)
+    );
+    for frame in 1..=35 {
+        engine
+            .tick()
+            .unwrap_or_else(|error| panic!("query activation tick {frame} succeeds: {error}"));
+    }
+    assert!(engine.active_message_board_input().is_some());
+
+    let control = engine
+        .prepare_message_board_answer_control(LegacyCString::default(), 7)
+        .expect("active input produces its synchronized answer");
+    assert_eq!(control.object, object_number(target));
+    assert_eq!(control.player, PLAYER);
+    assert_eq!(control.by_client, 7);
+    assert!(
+        engine.active_message_board_input().is_none(),
+        "local submission closes the process-local type-in before execution"
+    );
+    let pending = engine
+        .player(PLAYER)
+        .expect("message-board player remains")
+        .message_board_queries();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].answered, "submission marks the query answered");
+    assert_ne!(
+        engine
+            .object_snapshot(target)
+            .expect("callback target remains")
+            .local_vars
+            .get("callback_count"),
+        Some(&Value::Int(1)),
+        "queuing the answer must not run the synchronized callback early"
+    );
+
+    assert!(engine
+        .execute_message_board_answer_control(&control)
+        .expect("authenticated empty answer executes"));
+    assert!(engine
+        .player(PLAYER)
+        .expect("message-board player remains")
+        .message_board_queries()
+        .is_empty());
+    assert_ne!(
+        engine
+            .object_snapshot(target)
+            .expect("callback target remains")
+            .local_vars
+            .get("callback_count"),
+        Some(&Value::Int(1)),
+        "an omitted/empty third argument must not invoke InputCallback"
+    );
+}
+
+#[test]
+fn message_board_answer_submission_applies_cpp_uppercase_bytes_before_queueing() {
+    let (mut engine, target, _) = fixture();
+    engine
+        .player_mut(PLAYER)
+        .expect("message-board player remains")
+        .set_at_client(PlayerAtClient::new(7));
+    assert_eq!(
+        open(&mut engine, target, true, "uppercase answer", PLAYER),
+        Value::Bool(true)
+    );
+    for frame in 1..=35 {
+        engine
+            .tick()
+            .unwrap_or_else(|error| panic!("query activation tick {frame} succeeds: {error}"));
+    }
+
+    let control = engine
+        .prepare_message_board_answer_control(
+            LegacyCString::from_bytes(vec![b'a', 0xe4, 0xf6, 0xfc])
+                .expect("answer is NUL-free"),
+            7,
+        )
+        .expect("uppercase input produces a control");
+    assert_eq!(control.answer.as_bytes(), &[b'A', 0xc4, 0xd6, 0xdc]);
+}
+
+#[test]
+fn message_board_answer_control_preserves_cpp_internal_script_parse_failures() {
+    for answer in [
+        b"line\nbreak".to_vec(),
+        b"line\rbreak".to_vec(),
+        vec![b'x'; 1025],
+    ] {
+        let (mut engine, target, _) = fixture();
+        engine
+            .player_mut(PLAYER)
+            .expect("message-board player remains")
+            .set_at_client(PlayerAtClient::new(7));
+        assert_eq!(
+            open(&mut engine, target, false, "invalid internal source", PLAYER),
+            Value::Bool(true)
+        );
+
+        let control = MessageBoardAnswerControlData {
+            object: object_number(target),
+            answer: LegacyCString::from_bytes(answer).expect("answer is NUL-free"),
+            player: PLAYER,
+            by_client: 7,
+        };
+        assert!(engine
+            .execute_message_board_answer_control(&control)
+            .expect("the fail-safe DirectExec parse failure is non-fatal"));
+        assert_eq!(
+            engine
+                .player(PLAYER)
+                .expect("message-board player remains")
+                .message_board_queries()
+                .len(),
+            1,
+            "a strict-3 parse failure occurs before OnMessageBoardAnswer consumes the query"
+        );
+        assert_ne!(
+            engine
+                .object_snapshot(target)
+                .expect("callback target remains")
+                .local_vars
+                .get("callback_count"),
+            Some(&Value::Int(1)),
+            "a malformed internal script must not invoke InputCallback"
+        );
+    }
 }

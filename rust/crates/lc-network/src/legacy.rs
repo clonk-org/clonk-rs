@@ -4,9 +4,10 @@ use lc_engine::{
     ClientCoreControlData, ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
     ControlPacket as EngineControlPacket, ControlPacketId, ControlPlayerInfoEntry,
     InitScenarioPlayerControlData, JoinPlayerControlData, JoinPlayerSource, LegacyCString,
-    NetworkResourceCore, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
-    PlayerInfoUpdateRequest, ScriptControlData, ScriptStrictness, SurrenderPlayerControlData,
-    SyncCheckPacket, SynchronizeControlData, VoteControlData,
+    MessageBoardAnswerControlData, NetworkResourceCore, PlayerCommandControlData,
+    PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest, ScriptControlData,
+    ScriptStrictness, SurrenderPlayerControlData, SyncCheckPacket, SynchronizeControlData,
+    VoteControlData,
     CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
@@ -40,6 +41,7 @@ const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
 const CID_SYNCHRONIZE: u8 = 0x80 | 0x06;
 const CID_SET: u8 = 0x80 | 0x07;
 const CID_SCRIPT: u8 = 0x80 | 0x08;
+const CID_MESSAGE_BOARD_ANSWER: u8 = 0x80 | 0x50;
 const MAX_VARINT_BYTES: usize = 5;
 const MAX_PLAYER_INFO_COUNT: i32 = 5_000;
 const PLAYER_INFO_SYNC_FLAGS: u16 = 0x7fcd;
@@ -635,6 +637,7 @@ fn decode_control(
         CID_SYNCHRONIZE => decode_synchronize(reader),
         CID_SET => decode_control_set(reader),
         CID_SCRIPT => decode_script(reader),
+        CID_MESSAGE_BOARD_ANSWER => decode_message_board_answer(reader),
         other => Err(LegacyControlError::UnsupportedPacket(other)),
     }
 }
@@ -681,6 +684,23 @@ fn decode_script(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyC
         script,
         by_client,
     }))
+}
+
+fn decode_message_board_answer(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    let object = reader.read_int32()?;
+    let answer = reader.read_c_string()?;
+    let player = reader.read_int32()?;
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::MessageBoardAnswer(
+        MessageBoardAnswerControlData {
+            object,
+            answer,
+            player,
+            by_client,
+        },
+    ))
 }
 
 fn decode_client_remove(
@@ -1516,6 +1536,14 @@ fn encode_script(buffer: &mut Vec<u8>, data: &ScriptControlData) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_message_board_answer(buffer: &mut Vec<u8>, data: &MessageBoardAnswerControlData) {
+    buffer.push(CID_MESSAGE_BOARD_ANSWER);
+    append_int32(buffer, data.object);
+    append_c_string(buffer, &data.answer);
+    append_int32(buffer, data.player);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_controls(
     controls: &[EngineControlPacket],
     buffer: &mut Vec<u8>,
@@ -1588,6 +1616,10 @@ fn encode_control(
         }
         EngineControlPacket::Script(data) => {
             encode_script(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::MessageBoardAnswer(data) => {
+            encode_message_board_answer(buffer, data);
             Ok(())
         }
         EngineControlPacket::Unknown { .. } => {
@@ -1831,6 +1863,61 @@ mod tests {
             decode_control_entry_payload(&encoded),
             Err(LegacyControlError::UnexpectedEof)
         );
+    }
+
+    #[test]
+    fn message_board_answer_entry_matches_cpp_packed_field_order() {
+        // C4ControlMessageBoardAnswer writes packed Object, a NUL-terminated
+        // Answer, inherited packed Plr, then inherited packed ByClient.
+        let expected = EngineControlPacket::MessageBoardAnswer(
+            MessageBoardAnswerControlData {
+                object: 130,
+                answer: LegacyCString::from_bytes(b"a\"\\b".to_vec())
+                    .expect("fixture is NUL-free"),
+                player: -4,
+                by_client: 7,
+            },
+        );
+        let encoded = [
+            0xd0, 0x82, 0x01, b'a', b'"', b'\\', b'b', 0x00, 0xfc, 0x07,
+        ];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+    }
+
+    #[test]
+    fn message_board_answer_preserves_non_utf8_answer_bytes() {
+        let expected = EngineControlPacket::MessageBoardAnswer(
+            MessageBoardAnswerControlData {
+                object: 0,
+                answer: LegacyCString::from_bytes(vec![0x80, 0xff])
+                    .expect("fixture is NUL-free"),
+                player: -1,
+                by_client: 130,
+            },
+        );
+        let encoded = [0xd0, 0x00, 0x80, 0xff, 0x00, 0xff, 0x82, 0x01];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+    }
+
+    #[test]
+    fn message_board_answer_rejects_each_truncated_field() {
+        for encoded in [
+            &[0xd0][..],
+            &[0xd0, 0x80][..],
+            &[0xd0, 0x00, b'a'][..],
+            &[0xd0, 0x00, 0x00][..],
+            &[0xd0, 0x00, 0x00, 0x00][..],
+        ] {
+            assert_eq!(
+                decode_control_entry_payload(encoded),
+                Err(LegacyControlError::UnexpectedEof),
+                "unexpected result for {encoded:02x?}"
+            );
+        }
     }
 
     #[test]

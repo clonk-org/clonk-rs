@@ -1029,6 +1029,21 @@ impl Player {
         true
     }
 
+    pub(crate) fn mark_message_board_query_answered(
+        &mut self,
+        target: Option<ObjectId>,
+    ) -> bool {
+        let Some(query) = self
+            .message_board_queries
+            .iter_mut()
+            .find(|query| query.target == target && !query.answered)
+        else {
+            return false;
+        };
+        query.answered = true;
+        true
+    }
+
     pub fn view_wealth(&self) -> i32 {
         self.view_wealth
     }

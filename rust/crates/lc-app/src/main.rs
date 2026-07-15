@@ -25082,6 +25082,10 @@ impl GameApp {
                     .engine
                     .execute_script_control(&data, ScriptControlPolicy::live(false))
                     .map(|_| ()),
+                NetworkControl::MessageBoardAnswer(data) => self
+                    .engine
+                    .execute_message_board_answer_control(&data)
+                    .map(|_| ()),
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
@@ -57461,6 +57465,127 @@ mod tests {
         .expect("host-authored script control executes");
 
         assert_eq!(app.engine.physics().gravity, 77);
+        assert_eq!(app.executing_ready_tick, None);
+    }
+
+    #[test]
+    fn synchronized_message_board_answer_executes_only_for_the_owning_client() {
+        let mut app = new_running_sandbox_app();
+        let player = app.local_owner;
+        app.engine
+            .player_mut(player)
+            .expect("local player remains")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        app.engine
+            .register_definition(
+                Definition::from_script(
+                    "MBAT",
+                    "Message-board answer target",
+                    r#"#strict 2
+local callback_answer, callback_count;
+public func Open(int player) { return CallMessageBoard(this(), false, "answer", player); }
+protected func InputCallback(string answer, int player)
+{
+    callback_answer = answer;
+    callback_count = callback_count + 1;
+    return 1;
+}
+"#,
+                )
+                .expect("message-board target compiles"),
+            )
+            .expect("message-board target registers");
+        let target = app
+            .engine
+            .spawn_object(SpawnConfig::new("MBAT"))
+            .expect("message-board target spawns");
+        let target_index = app
+            .engine
+            .find_object_index(target)
+            .expect("message-board target is live");
+        assert_eq!(
+            app.engine
+                .call_object_function(target_index, "Open", vec![Value::Int(player)])
+                .expect("query opens"),
+            Value::Bool(true)
+        );
+        for frame in 1..=35 {
+            app.engine
+                .tick()
+                .unwrap_or_else(|error| panic!("query activation tick {frame} succeeds: {error}"));
+        }
+        assert!(app.engine.active_message_board_input().is_some());
+        let object = i32::try_from(target.as_u64()).expect("object number fits the wire field");
+
+        app.apply_ready_controls(
+            11,
+            vec![NetworkControl::MessageBoardAnswer(
+                lc_engine::MessageBoardAnswerControlData {
+                    object,
+                    answer: lc_engine::LegacyCString::from_bytes(b"forged".to_vec())
+                        .expect("answer is NUL-free"),
+                    player,
+                    by_client: 7,
+                },
+            )],
+        )
+        .expect("spoofed answer is ignored without aborting the tick");
+        assert_ne!(
+            app.engine
+                .object_snapshot(target)
+                .expect("target remains live")
+                .local_vars
+                .get("callback_count"),
+            Some(&Value::Int(1)),
+            "the forged answer must not invoke InputCallback"
+        );
+        assert!(
+            app.engine.active_message_board_input().is_some(),
+            "synchronized execution does not own local dialog closure"
+        );
+
+        let answer = app
+            .engine
+            .prepare_message_board_answer_control(
+                lc_engine::LegacyCString::from_bytes(b"q\"\\z".to_vec())
+                    .expect("answer is NUL-free"),
+                -1,
+            )
+            .expect("active query produces a queued answer");
+        assert!(app.engine.active_message_board_input().is_none());
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network
+            .as_ref()
+            .expect("network manager installed")
+            .submit_message_board_answer(12, answer)
+            .expect("queue message-board answer");
+        assert_ne!(
+            app.engine
+                .object_snapshot(target)
+                .expect("target remains live")
+                .local_vars
+                .get("callback_count"),
+            Some(&Value::Int(1)),
+            "submission closes the input but does not run the callback"
+        );
+        let (_, answer) = commands
+            .take_submitted_message_board_answers()
+            .pop()
+            .expect("worker receives the queued answer");
+        assert_eq!(answer.by_client, 0, "manager stamps the local client ID");
+
+        app.apply_ready_controls(12, vec![NetworkControl::MessageBoardAnswer(answer)])
+            .expect("owner-authored answer executes at its ready tick");
+        let target = app
+            .engine
+            .object_snapshot(target)
+            .expect("target remains live");
+        assert_eq!(
+            target.local_vars.get("callback_answer"),
+            Some(&Value::String("q\"\\z".to_string()))
+        );
+        assert_eq!(target.local_vars.get("callback_count"), Some(&Value::Int(1)));
         assert_eq!(app.executing_ready_tick, None);
     }
 

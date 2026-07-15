@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use lc_engine::{
     CommandKind, ControlButton, ControlCommand, ControlEvent,
     JoinPlayerControlData, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
-    ScriptControlData, SyncCheckPacket,
+    MessageBoardAnswerControlData, ScriptControlData, SyncCheckPacket,
     COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG,
     COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER,
     COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT, COM_MENU_SHOW_TEXT,
@@ -436,6 +436,18 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_message_board_answers(
+        &mut self,
+    ) -> Vec<(Tick, MessageBoardAnswerControlData)> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitMessageBoardAnswer { tick, answer } = command {
+                submitted.push((tick, answer));
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn take_player_info_updates(&mut self) -> Vec<lc_network::PlayerInfoUpdateRequest> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -722,6 +734,7 @@ pub enum NetworkControl {
     PlayerControl(PlayerControlData),
     PlayerCommand(PlayerCommandControlData),
     Script(ScriptControlData),
+    MessageBoardAnswer(MessageBoardAnswerControlData),
     Player { owner: i32, event: ControlEvent },
     InitScenarioPlayer(lc_engine::InitScenarioPlayerControlData),
     Synchronize(lc_engine::SynchronizeControlData),
@@ -771,6 +784,10 @@ enum NetworkCommand {
     SubmitScript {
         tick: Tick,
         script: ScriptControlData,
+    },
+    SubmitMessageBoardAnswer {
+        tick: Tick,
+        answer: MessageBoardAnswerControlData,
     },
     SubmitSyncCheck {
         tick: Tick,
@@ -953,6 +970,18 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitScript { tick, script })
             .map_err(|_| anyhow!("network worker is not accepting script controls"))
+    }
+
+    pub fn submit_message_board_answer(
+        &self,
+        tick: Tick,
+        mut answer: MessageBoardAnswerControlData,
+    ) -> Result<()> {
+        answer.by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the message-board answer wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitMessageBoardAnswer { tick, answer })
+            .map_err(|_| anyhow!("network worker is not accepting message-board answers"))
     }
 
     pub fn broadcast_lobby_countdown(
@@ -1666,6 +1695,13 @@ async fn run_host_worker(
                             current_millis(),
                         );
                     }
+                    NetworkCommand::SubmitMessageBoardAnswer { tick, answer } => {
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::MessageBoardAnswer(answer),
+                            current_millis(),
+                        );
+                    }
                     NetworkCommand::SubmitSyncCheck { tick, check } => {
                         frame_builder.record_control(
                             tick,
@@ -2028,6 +2064,14 @@ async fn run_client_worker(
                         frame_builder.record_control(
                             tick,
                             lc_engine::ControlPacket::Script(script),
+                            current_millis(),
+                        );
+                    }
+                    NetworkCommand::SubmitMessageBoardAnswer { tick, answer } => {
+                        client_activation.refresh_frame(frame_tick_to_i32(tick));
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::MessageBoardAnswer(answer),
                             current_millis(),
                         );
                     }
@@ -2409,6 +2453,9 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::PlayerControl(data) => Some(NetworkControl::PlayerControl(data)),
         lc_engine::ControlPacket::PlayerCommand(data) => Some(NetworkControl::PlayerCommand(data)),
         lc_engine::ControlPacket::Script(data) => Some(NetworkControl::Script(data)),
+        lc_engine::ControlPacket::MessageBoardAnswer(data) => {
+            Some(NetworkControl::MessageBoardAnswer(data))
+        }
         lc_engine::ControlPacket::Synchronize(data) => Some(NetworkControl::Synchronize(data)),
         lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
         lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
@@ -2796,6 +2843,34 @@ mod tests {
                 ScriptControlData {
                     by_client: 7,
                     ..script
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn manager_queues_message_board_answer_with_authenticated_local_author() {
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let answer = MessageBoardAnswerControlData {
+            object: 42,
+            answer: lc_engine::LegacyCString::from_bytes(b"q\"\\z".to_vec())
+                .expect("answer is NUL-free"),
+            player: 3,
+            by_client: -1,
+        };
+
+        manager
+            .submit_message_board_answer(12, answer.clone())
+            .expect("queue message-board answer");
+
+        assert_eq!(
+            commands.take_submitted_message_board_answers(),
+            vec![(
+                12,
+                MessageBoardAnswerControlData {
+                    by_client: 7,
+                    ..answer
                 }
             )]
         );
@@ -4414,6 +4489,53 @@ mod tests {
         assert_eq!(
             network_control_for_packet(lc_engine::ControlPacket::Script(script.clone())),
             Some(NetworkControl::Script(script))
+        );
+    }
+
+    #[test]
+    fn decoded_message_board_answer_is_retained_for_scheduled_execution() {
+        let answer = MessageBoardAnswerControlData {
+            object: 42,
+            answer: lc_engine::LegacyCString::from_bytes(b"typed answer".to_vec())
+                .expect("answer is NUL-free"),
+            player: 3,
+            by_client: 4,
+        };
+        assert_eq!(
+            network_control_for_packet(lc_engine::ControlPacket::MessageBoardAnswer(
+                answer.clone(),
+            )),
+            Some(NetworkControl::MessageBoardAnswer(answer))
+        );
+    }
+
+    #[test]
+    fn message_board_answer_frame_roundtrips_through_the_tick_accumulator() {
+        let answer = MessageBoardAnswerControlData {
+            object: 42,
+            answer: lc_engine::LegacyCString::from_bytes(b"typed answer".to_vec())
+                .expect("answer is NUL-free"),
+            player: 3,
+            by_client: 4,
+        };
+        let mut accumulator = ControlFrameAccumulator::new(4);
+        accumulator.record_control(
+            12,
+            lc_engine::ControlPacket::MessageBoardAnswer(answer.clone()),
+            100,
+        );
+        let frame = accumulator
+            .finalize_tick(12)
+            .expect("message-board answer produces a control frame");
+
+        let encoded = encode_control_packet(&frame).expect("encode accumulated frame");
+        assert_eq!(
+            decode_control_packet(&encoded).expect("decode accumulated frame"),
+            frame
+        );
+        assert_eq!(
+            frame.controls,
+            vec![lc_engine::ControlPacket::MessageBoardAnswer(answer)]
         );
     }
 
