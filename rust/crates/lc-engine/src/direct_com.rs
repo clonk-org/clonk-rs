@@ -12031,16 +12031,59 @@ protected func ControlCommand(command, target, tx, ty, target2, data, seventh) {
     }
 
     #[test]
+    fn buy_refuses_hostile_and_eliminated_base_owners_without_economic_side_effects() {
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 2);
+        let mut item =
+            Definition::from_script("ITEM", "Item", "#strict 2\n").expect("item compiles");
+        item.set_value(20);
+        engine.register_definition(item).expect("register item");
+        engine.set_player_wealth(2, 100).expect("base wealth");
+        engine
+            .set_player_home_base_material(2, HashMap::from([("ITEM".to_string(), 2)]))
+            .expect("base stock");
+        let initial_objects = engine.snapshot().objects.len();
+
+        let assert_unchanged = |engine: &Engine| {
+            let owner = engine.player(2).expect("base owner remains");
+            assert_eq!(owner.wealth(), 100);
+            assert_eq!(owner.home_base_material().get("ITEM"), Some(&2));
+            assert_eq!(engine.snapshot().objects.len(), initial_objects);
+            assert!(engine.snapshot().objects.iter().all(|object| {
+                object.definition_id != "ITEM" || !object.status.is_active()
+            }));
+        };
+
+        engine.set_hostility(1, 2, true).expect("set hostility");
+        execute_buy_command(&mut engine, crew, hut, "ITEM", 1);
+        assert_unchanged(&engine);
+
+        engine
+            .set_hostility(1, 2, false)
+            .expect("clear hostility");
+        engine
+            .set_player_status(2, PlayerStatus::Eliminated)
+            .expect("eliminate base owner");
+        execute_buy_command(&mut engine, crew, hut, "ITEM", 1);
+        assert_unchanged(&engine);
+    }
+
+    #[test]
     fn buy_count_purchases_every_item_in_one_execute_command() {
         let mut engine = Engine::new();
         let (crew, hut) = contained_base_fixture(&mut engine, 2);
         let lorry_script = r#"#strict 2
-local purchase_player, purchase_base;
-public func CalcDefValue(object base, int player) { return 25; }
+local purchase_player, purchase_base, purchase_container;
+public func CalcDefValue(object base, int player)
+{
+    if (!base) return 1000;
+    return 5 + 10 * player;
+}
 public func Purchase(int player, object base)
 {
     purchase_player = player;
     purchase_base = base;
+    purchase_container = Contained();
     return 1;
 }
 "#;
@@ -12105,6 +12148,7 @@ public func Purchase(int player, object base)
             object.local_vars.get("purchase_player") == Some(&Value::Int(2))
                 && object.local_vars.get("purchase_base")
                     == Some(&Value::Object(hut.as_u64()))
+                && object.local_vars.get("purchase_container") == Some(&Value::Nil)
         }), "each fresh object receives its Purchase callback");
     }
 
