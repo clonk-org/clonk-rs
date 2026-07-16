@@ -22573,6 +22573,13 @@ impl Engine {
             // C4AulScript::ResolveIncludes marks the recursive edge failed
             // and lets its caller skip that include (C4AulLink.cpp:72-97).
             if !resolving.insert(child_id.to_string()) {
+                tracing::warn!(
+                    definition = %child_id,
+                    "Circular include chain detected - ignoring all includes!"
+                );
+                if let Some(definition) = engine.definitions.get_mut(child_id) {
+                    definition.includes_resolved = true;
+                }
                 return Ok(false);
             }
             let includes = engine
@@ -51261,6 +51268,24 @@ mod missing_include_regression {
         }
     }
 
+    fn capture_warnings(run: impl FnOnce()) -> Vec<String> {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(WarningLayer {
+            messages: Arc::clone(&messages),
+        });
+        subscriber::with_default(subscriber, run);
+        let captured = messages.lock().unwrap().clone();
+        captured
+    }
+
+    fn register(engine: &mut Engine, id: &str, source: &str) {
+        engine
+            .register_definition(
+                Definition::from_script(id, id, source).expect("fixture script compiles"),
+            )
+            .expect("fixture definition registers");
+    }
+
     #[test]
     fn missing_include_warns_and_known_siblings_still_merge() {
         let mut engine = Engine::new();
@@ -51285,19 +51310,12 @@ mod missing_include_regression {
             )
             .expect("child registers");
 
-        let messages = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = Registry::default().with(WarningLayer {
-            messages: Arc::clone(&messages),
-        });
-        subscriber::with_default(subscriber, || {
+        let messages = capture_warnings(|| {
             engine
                 .resolve_includes()
                 .expect("missing include is warning-only");
         });
-        assert_eq!(
-            *messages.lock().unwrap(),
-            ["script to #include not found"]
-        );
+        assert_eq!(messages, ["script to #include not found"]);
 
         let object = engine
             .spawn_object(SpawnConfig::new("CHLD"))
@@ -51315,6 +51333,98 @@ mod missing_include_regression {
                 .expect("known include still merged"),
             Value::Int(7)
         );
+    }
+
+    #[test]
+    fn circular_includes_follow_definition_load_order_and_warn_once() {
+        for order in [["CYCA", "CYCB"], ["CYCB", "CYCA"]] {
+            let mut engine = Engine::new();
+            for id in order {
+                let source = match id {
+                    "CYCA" => "#include CYCB\npublic func AOnly() { return 1; }",
+                    "CYCB" => "#include CYCA\npublic func BOnly() { return 2; }",
+                    _ => unreachable!(),
+                };
+                register(&mut engine, id, source);
+            }
+
+            let messages = capture_warnings(|| {
+                engine.resolve_includes().expect("cycle resolves");
+                engine.resolve_includes().expect("repeat resolve is stable");
+            });
+            assert_eq!(
+                messages,
+                ["Circular include chain detected - ignoring all includes!"],
+                "registration order: {order:?}",
+            );
+
+            let first_function = if order[0] == "CYCA" {
+                "AOnly"
+            } else {
+                "BOnly"
+            };
+            let second_function = if order[1] == "CYCA" {
+                "AOnly"
+            } else {
+                "BOnly"
+            };
+            assert!(engine.definition_script_has_function(order[0], first_function));
+            assert!(engine.definition_script_has_function(order[0], second_function));
+            assert!(engine.definition_script_has_function(order[1], second_function));
+            assert!(
+                !engine.definition_script_has_function(order[1], first_function),
+                "the later definition must skip its edge back to the DFS root"
+            );
+        }
+    }
+
+    #[test]
+    fn longer_cycle_marks_the_root_resolved_for_later_backedges() {
+        let mut engine = Engine::new();
+        register(
+            &mut engine,
+            "CYCA",
+            "#include CYCD\n#include CYCB\npublic func AOnly() { return 1; }",
+        );
+        register(
+            &mut engine,
+            "CYCB",
+            "#include CYCC\npublic func BOnly() { return 2; }",
+        );
+        register(
+            &mut engine,
+            "CYCC",
+            "#include CYCA\npublic func COnly() { return 3; }",
+        );
+        register(
+            &mut engine,
+            "CYCD",
+            "#include CYCA\npublic func DOnly() { return 4; }",
+        );
+
+        let messages = capture_warnings(|| {
+            engine.resolve_includes().expect("long cycle resolves");
+            engine.resolve_includes().expect("repeat resolve is stable");
+        });
+        assert_eq!(
+            messages,
+            ["Circular include chain detected - ignoring all includes!"]
+        );
+
+        for function in ["AOnly", "BOnly", "COnly", "DOnly"] {
+            assert!(engine.definition_script_has_function("CYCA", function));
+        }
+        assert!(engine.definition_script_has_function("CYCB", "BOnly"));
+        assert!(engine.definition_script_has_function("CYCB", "COnly"));
+        assert!(!engine.definition_script_has_function("CYCB", "AOnly"));
+        assert!(engine.definition_script_has_function("CYCC", "COnly"));
+        assert!(!engine.definition_script_has_function("CYCC", "AOnly"));
+        for function in ["AOnly", "BOnly", "COnly", "DOnly"] {
+            assert!(
+                engine.definition_script_has_function("CYCD", function),
+                "the later backedge sees the root's partially resolved function set"
+            );
+        }
     }
 }
 
