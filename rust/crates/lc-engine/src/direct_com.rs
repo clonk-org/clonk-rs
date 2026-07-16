@@ -1135,8 +1135,12 @@ impl InternalObjectMenuSource for EngineInternalObjectMenuSource<'_> {
             return Ok(0);
         };
         self.0.objects[command_index].state.menu = Some(menu_before_value.clone());
-        self.0
-            .object_value_in_container_for_menu(command_index, object, container)
+        self.0.object_value_in_container_for_menu(
+            command_object,
+            object,
+            container,
+            -1,
+        )
     }
 
     fn reject_collection(
@@ -4654,42 +4658,53 @@ impl Engine {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let items = material
-            .into_iter()
-            .filter_map(|(definition_id, count)| {
-                let definition = self.definitions.get(&definition_id)?;
-                let command = format!(
-                    "AppendCommand(this,\"Buy\",Object({}),1,0,,0,{})&&ExecuteCommand()",
-                    base_id.as_u64(),
-                    definition_id
-                );
-                let command2 = format!(
-                    "AppendCommand(this,\"Buy\",Object({}),{},0,,0,{})&&ExecuteCommand()",
-                    base_id.as_u64(),
-                    count,
-                    definition_id
-                );
-                Some(crate::ObjectMenuItem {
-                    caption: format!("Buy {}", definition.name()),
-                    info_caption: crate::normalize_menu_info_caption(
-                        definition.description().unwrap_or_default(),
-                    ),
-                    command,
-                    command2,
-                    count,
-                    item_id: definition_id,
-                    symbol: crate::ObjectMenuSymbol::default(),
-                    image: crate::ObjectMenuImage::default(),
-                    presentation_definition_id: None,
-                    picture_snapshot: None,
-                    picture_object: None,
-                    components: Vec::new(),
-                    selectable: true,
-                    value: Some(definition.value()),
-                    text_display_progress: -1,
+        let mut items = Vec::new();
+        for (definition_id, count) in material {
+            let Some((definition_name, definition_description)) =
+                self.definitions.get(&definition_id).map(|definition| {
+                    (
+                        definition.name().to_string(),
+                        definition.description().unwrap_or_default().to_string(),
+                    )
                 })
-            })
-            .collect::<Vec<_>>();
+            else {
+                continue;
+            };
+            let command = format!(
+                "AppendCommand(this,\"Buy\",Object({}),1,0,,0,{})&&ExecuteCommand()",
+                base_id.as_u64(),
+                definition_id
+            );
+            let command2 = format!(
+                "AppendCommand(this,\"Buy\",Object({}),{},0,,0,{})&&ExecuteCommand()",
+                base_id.as_u64(),
+                count,
+                definition_id
+            );
+            let value = self.definition_value_in_container_for_menu(
+                crew_id,
+                &definition_id,
+                base_id,
+                base_player,
+            )?;
+            items.push(crate::ObjectMenuItem {
+                caption: format!("Buy {definition_name}"),
+                info_caption: crate::normalize_menu_info_caption(&definition_description),
+                command,
+                command2,
+                count,
+                item_id: definition_id,
+                symbol: crate::ObjectMenuSymbol::default(),
+                image: crate::ObjectMenuImage::default(),
+                presentation_definition_id: None,
+                picture_snapshot: None,
+                picture_object: None,
+                components: Vec::new(),
+                selectable: true,
+                value: Some(value),
+                text_display_progress: -1,
+            });
+        }
         // C4ObjectMenu rebuilds Buy rows with ClearItems(false), preserving
         // the numeric slot. C4Menu::AdjustSelection keeps it when valid and
         // otherwise walks backward to the final selectable row
@@ -4702,6 +4717,9 @@ impl Engine {
         };
 
         if continue_existing {
+            let Some(crew_index) = self.find_object_index(crew_id) else {
+                return Ok(());
+            };
             if let Some(menu) = self.objects[crew_index].state.menu.as_mut().filter(|menu| {
                 menu.identification == Value::Int(4) && menu.refill_object == Some(base_id)
             }) {
@@ -4789,25 +4807,59 @@ impl Engine {
         i32::try_from(count).unwrap_or(i32::MAX)
     }
 
-    /// `C4Object::GetValue(pInBase, NO_OWNER)` for the value cached on an
-    /// Activate-menu row (C4ObjectMenu.cpp:190-201). Running the public
-    /// host expression preserves CalcValue/CalcDefValue, construction
-    /// scaling, CalcSellValue, side effects, and fail-safe script errors.
+    /// `C4Object::GetValue(pInBase, iForPlr)` for the value cached on an
+    /// Activate/Sell-menu row. Running the public host expression preserves
+    /// CalcValue/CalcDefValue, construction scaling, CalcSellValue, side
+    /// effects, and fail-safe script errors (C4ObjectMenu.cpp:190-201,
+    /// 268-271).
     fn object_value_in_container_for_menu(
         &mut self,
-        command_index: usize,
+        command_object: ObjectId,
         object_id: ObjectId,
         container_id: ObjectId,
+        for_player: i32,
     ) -> Result<i32, EngineError> {
         let expression = format!(
-            "GetValue(Object({}),0,Object({}),-1)",
+            "GetValue(Object({}),0,Object({}),{})",
             object_id.as_u64(),
-            container_id.as_u64()
+            container_id.as_u64(),
+            for_player
         );
+        let Some(command_index) = self.find_object_index(command_object) else {
+            return Ok(0);
+        };
         Ok(crate::tolerate_script_error(self.direct_exec_on_object(
             command_index,
             &expression,
-            "ActivateMenuValue",
+            "ObjectMenuValue",
+        ))?
+        .and_then(|value| value.as_c4_int())
+        .unwrap_or(0))
+    }
+
+    /// `C4Def::GetValue(pInBase, iForPlr)` for a Buy-menu row
+    /// (C4ObjectMenu.cpp:230-233). The definition and base hooks execute on
+    /// every refill before the row is appended.
+    fn definition_value_in_container_for_menu(
+        &mut self,
+        command_object: ObjectId,
+        definition_id: &str,
+        container_id: ObjectId,
+        for_player: i32,
+    ) -> Result<i32, EngineError> {
+        let expression = format!(
+            "GetValue(0,{},Object({}),{})",
+            definition_id,
+            container_id.as_u64(),
+            for_player
+        );
+        let Some(command_index) = self.find_object_index(command_object) else {
+            return Ok(0);
+        };
+        Ok(crate::tolerate_script_error(self.direct_exec_on_object(
+            command_index,
+            &expression,
+            "BuyMenuValue",
         ))?
         .and_then(|value| value.as_c4_int())
         .unwrap_or(0))
@@ -4902,12 +4954,24 @@ impl Engine {
             let Some(item_index) = self.find_object_index(item_id) else {
                 continue;
             };
-            let item = &self.objects[item_index];
-            let definition_id = item.definition_id.clone();
-            let all_count = self.live_contents_definition_count(&contents, &definition_id);
-            let Some(definition) = self.definitions.get(&definition_id) else {
+            let definition_id = self.objects[item_index].definition_id.clone();
+            let Some((definition_name, definition_description, no_sell)) = self
+                .definitions
+                .get(&definition_id)
+                .map(|definition| {
+                    (
+                        definition.name().to_string(),
+                        definition.description().unwrap_or_default().to_string(),
+                        definition.no_sell(),
+                    )
+                })
+            else {
                 continue;
             };
+            if no_sell != 0 {
+                continue;
+            }
+            let all_count = self.live_contents_definition_count(&contents, &definition_id);
             let command = format!(
                 "AppendCommand(this,\"Sell\",Object({}),1,0,Object({}),0,{})&&ExecuteCommand()",
                 base_id.as_u64(),
@@ -4920,11 +4984,19 @@ impl Engine {
                 all_count,
                 definition_id
             );
+            let for_player = self
+                .find_object_index(crew_id)
+                .map(|index| self.objects[index].state.owner)
+                .unwrap_or(-1);
+            let value = self.object_value_in_container_for_menu(
+                crew_id,
+                item_id,
+                base_id,
+                for_player,
+            )?;
             items.push(crate::ObjectMenuItem {
-                caption: format!("Sell {}", definition.name()),
-                info_caption: crate::normalize_menu_info_caption(
-                    definition.description().unwrap_or_default(),
-                ),
+                caption: format!("Sell {definition_name}"),
+                info_caption: crate::normalize_menu_info_caption(&definition_description),
                 command,
                 command2,
                 count,
@@ -4936,7 +5008,7 @@ impl Engine {
                 picture_object: Some(item_id),
                 components: Vec::new(),
                 selectable: true,
-                value: Some(definition.value()),
+                value: Some(value),
                 text_display_progress: -1,
             });
         }
@@ -4957,6 +5029,9 @@ impl Engine {
             .map(|definition| definition.name().to_string())
             .unwrap_or_else(|| base_definition.clone());
         if continue_existing {
+            let Some(crew_index) = self.find_object_index(crew_id) else {
+                return Ok(());
+            };
             if let Some(menu) = self.objects[crew_index].state.menu.as_mut().filter(|menu| {
                 menu.identification == Value::Int(5) && menu.refill_object == Some(base_id)
             }) {
@@ -13031,6 +13106,73 @@ public func SellThenReplace(object base)
     }
 
     #[test]
+    fn buy_menu_row_value_runs_definition_and_base_hooks_on_every_refill() {
+        let mut engine = Engine::new();
+        let base_script = r#"#strict 2
+local buy_value_calls;
+protected func CalcBuyValue(id definition, int value)
+{
+    if (definition != ITEM) return value;
+    buy_value_calls = buy_value_calls + 1;
+    return value + buy_value_calls;
+}
+"#;
+        let (crew, hut) = contained_base_fixture_with_script(&mut engine, 2, base_script);
+        let item_script = r#"#strict 2
+protected func CalcDefValue(object base, int player)
+{
+    if (!base || player != 2) return 900;
+    return 20;
+}
+"#;
+        let mut item =
+            Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
+        item.set_value(99);
+        engine.register_definition(item).expect("register item");
+        engine
+            .set_player_home_base_material(2, HashMap::from([("ITEM".to_string(), 1)]))
+            .expect("home-base material");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+
+        engine
+            .open_base_buy_menu(crew_index, hut_index)
+            .expect("open buy menu");
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("buy menu opens")
+                .items[0]
+                .value,
+            Some(21),
+            "CalcDefValue sees the base player, then CalcBuyValue runs"
+        );
+
+        engine
+            .refill_base_buy_menu(crew_index, hut_index)
+            .expect("refill buy menu");
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("buy menu remains")
+                .items[0]
+                .value,
+            Some(22),
+            "both hooks rerun on every refill"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(hut)
+                .expect("base survives")
+                .local_vars
+                .get("buy_value_calls"),
+            Some(&Value::Int(2))
+        );
+    }
+
+    #[test]
     fn periodic_refill_updates_buy_material_on_tick_35() {
         // HomeBaseMaterial is not part of RefillObject's contents count, so
         // C4Menu's common tick-35 pass is what makes an already-open Buy menu
@@ -15696,6 +15838,114 @@ protected func RejectCollect(id definition, object item)
                 .map(|item| (item.item_id.as_str(), item.count))
                 .collect::<Vec<_>>(),
             vec![("FLAG", 1), ("LORY", 1)]
+        );
+    }
+
+    #[test]
+    fn sell_menu_row_value_uses_object_get_value_and_skips_no_sell() {
+        let mut engine = Engine::new();
+        let base_script = r#"#strict 2
+local sell_value_calls, no_sell_value_calls;
+protected func CalcSellValue(object item, int value)
+{
+    sell_value_calls = sell_value_calls + 1;
+    return value + 3;
+}
+public func MarkNoSellValue()
+{
+    no_sell_value_calls = no_sell_value_calls + 1;
+    return true;
+}
+"#;
+        let (crew, hut) = contained_base_fixture_with_script(&mut engine, 2, base_script);
+        let item_script = r#"#strict 2
+local value_calls;
+protected func CalcValue(object base, int player)
+{
+    value_calls = value_calls + 1;
+    if (!base || player != 1) return 900;
+    return 41;
+}
+"#;
+        let mut item =
+            Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
+        item.set_category(crate::CATEGORY_OBJECT);
+        item.set_value(99);
+        engine.register_definition(item).expect("register item");
+        let no_sell_script = r#"#strict 2
+protected func CalcValue(object base, int player)
+{
+    base->MarkNoSellValue();
+    return 500;
+}
+"#;
+        let mut no_sell = Definition::from_script("NOSL", "No sell", no_sell_script)
+            .expect("NoSell item compiles");
+        no_sell.set_category(crate::CATEGORY_OBJECT);
+        no_sell.set_no_sell(-2);
+        engine
+            .register_definition(no_sell)
+            .expect("register NoSell item");
+        let item = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_construction(crate::FULL_CON / 2)
+                    .with_container(hut),
+            )
+            .expect("spawn half-built item");
+        engine
+            .spawn_object(SpawnConfig::new("NOSL").with_container(hut))
+            .expect("spawn NoSell item");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.category = 0;
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+
+        engine
+            .open_base_sell_menu(crew_index, hut_index)
+            .expect("open sell menu");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("sell menu opens");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|row| (row.item_id.as_str(), row.value))
+                .collect::<Vec<_>>(),
+            vec![("ITEM", Some(23))],
+            "41 is construction-scaled to 20 before CalcSellValue adds 3"
+        );
+
+        engine
+            .refill_base_sell_menu(crew_index, hut_index)
+            .expect("refill sell menu");
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("sell menu remains")
+                .items[0]
+                .value,
+            Some(23)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(item)
+                .expect("item survives")
+                .local_vars
+                .get("value_calls"),
+            Some(&Value::Int(2)),
+            "CalcValue reruns on every refill"
+        );
+        let base = engine.object_snapshot(hut).expect("base survives");
+        assert_eq!(
+            base.local_vars.get("sell_value_calls"),
+            Some(&Value::Int(2))
+        );
+        assert_eq!(
+            base.local_vars.get("no_sell_value_calls"),
+            Some(&Value::Nil),
+            "NoSell skips the row before invoking CalcValue"
         );
     }
 
