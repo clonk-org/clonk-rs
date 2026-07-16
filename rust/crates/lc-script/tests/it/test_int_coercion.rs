@@ -68,6 +68,22 @@ fn addition_rejects_string_operands_instead_of_concatenating() {
 }
 
 #[test]
+fn strict_two_string_addition_errors_without_affecting_int_add_or_concat() {
+    assert_eq!(
+        runtime_error("#strict 2\nfunc Test() { return \"a\" + 1; }"),
+        "cannot apply '+' to operands of type string and int"
+    );
+    assert_eq!(
+        eval("#strict 2\nfunc Test() { var empty; return [true + 1, empty + 2, \"a\" .. 1]; }"),
+        Value::Array(vec![
+            Value::Int(2),
+            Value::Int(2),
+            Value::String("a1".into()),
+        ])
+    );
+}
+
+#[test]
 fn comparison_result_flows_into_arithmetic() {
     // (3 > 2) is bool true == 1  =>  +10 == 11
     assert_eq!(eval("func Test() { return (3 > 2) + 10; }"), Value::Int(11));
