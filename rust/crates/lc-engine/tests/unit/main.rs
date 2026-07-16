@@ -57448,6 +57448,58 @@ func ReadTeam(int player) { return GetPlayerTeam(player); }
     }
 
     #[test]
+    fn surrender_player_builtin_rejects_eliminated_players_and_retires_valid_player(
+    ) -> Result<(), EngineError> {
+        // FnSurrenderPlayer rejects missing/already-eliminated players, sets
+        // Surrendered and Eliminated synchronously, and starts the same
+        // 60-frame retirement path as C4ControlSurrenderPlayer
+        // (C4Script.cpp:2843-2850; C4Player.cpp:971-979).
+        let script = r#"#strict 2
+func Probe(int player, int eliminated)
+{
+    return [SurrenderPlayer(99), SurrenderPlayer(eliminated),
+            SurrenderPlayer(player), SurrenderPlayer(player)];
+}
+"#;
+        let mut engine = Engine::new();
+        engine.register_definition(
+            Definition::from_script("SURR", "Surrender probe", script)
+                .expect("surrender probe compiles"),
+        )?;
+        let caller = engine.spawn_object(SpawnConfig::new("SURR"))?;
+        engine.register_player(PlayerConfig::new(7, "Surrendering"))?;
+        engine.register_player(
+            PlayerConfig::new(8, "Eliminated").with_status(PlayerStatus::Eliminated),
+        )?;
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine.call_object_function(
+                caller_index,
+                "Probe",
+                vec![Value::Int(7), Value::Int(8)],
+            )?,
+            Value::Array(vec![
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Bool(false),
+            ])
+        );
+        let surrendered = engine.player(7).expect("surrendered player remains");
+        assert_eq!(surrendered.status(), PlayerStatus::Surrendered);
+        assert!(surrendered.surrendered());
+
+        for _ in 0..59 {
+            engine.tick_player_systems()?;
+        }
+        assert!(engine.player(7).is_some(), "retirement waits for frame 60");
+        engine.tick_player_systems()?;
+        assert!(engine.player(7).is_none(), "player retires on frame 60");
+        Ok(())
+    }
+
+    #[test]
     fn script_set_owner_runs_the_full_native_owner_change_sequence() -> Result<(), EngineError> {
         // C4Object::SetOwner validates first, refreshes the CURRENT graphics'
         // ColorByOwner surface, then writes Owner/Controller, transfers a

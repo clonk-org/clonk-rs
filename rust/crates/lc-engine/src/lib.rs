@@ -30262,6 +30262,11 @@ impl Engine {
                         self.eliminated_crew_owners.insert(player_id);
                     }
                 }
+                PlayerCommand::Surrender { player_id } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.set_surrendered(true);
+                    }
+                }
                 PlayerCommand::Remove { player_id } => {
                     self.pending_remove_player_controls
                         .push(RemovePlayerControlData {

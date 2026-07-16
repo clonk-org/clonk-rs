@@ -661,6 +661,9 @@ pub enum PlayerCommand {
     /// `FnEliminatePlayer`'s regular path: mark the player eliminated and
     /// start C4RetireDelay before C4PlayerList retires them.
     Eliminate { player_id: i32 },
+    /// `FnSurrenderPlayer`: mark the player surrendered/eliminated and start
+    /// the same C4RetireDelay used by the synchronized surrender control.
+    Surrender { player_id: i32 },
     /// `FnEliminatePlayer(..., true)` asks the control host to remove the
     /// player directly, without the regular elimination fate.
     Remove { player_id: i32 },
@@ -3487,6 +3490,47 @@ fn eliminate_player(args: &[Value]) -> Result<Value, RuntimeError> {
         }
         context.record_player_command(PlayerCommand::Eliminate { player_id });
         Ok(Value::Int(1))
+    })
+}
+
+/// `FnSurrenderPlayer` (C4Script.cpp:2843-2850): resolve any live player,
+/// reject one whose eliminated flag is already set, then run the ordinary
+/// surrender transition without the network control's client authorization.
+fn surrender_player(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "SurrenderPlayer expects at most 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SurrenderPlayer",
+        "player",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let can_surrender = context.player_state(player_id).is_some_and(|player| {
+            !matches!(
+                player.status,
+                crate::PlayerStatus::Eliminated | crate::PlayerStatus::Surrendered
+            ) && !player.surrendered
+        });
+        if !can_surrender {
+            return Ok(Value::Bool(false));
+        }
+
+        // C++ changes both flags synchronously. Mirror that in the copied
+        // host state so another call in this same VM invocation sees the
+        // player as eliminated before the deferred command is folded back.
+        if let Some(player) = context.player_state_mut(player_id) {
+            player.status = crate::PlayerStatus::Surrendered;
+            player.surrendered = true;
+        }
+        context.record_player_command(PlayerCommand::Surrender { player_id });
+        Ok(Value::Bool(true))
     })
 }
 
@@ -12362,6 +12406,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CreateScriptPlayer", create_script_player);
     script.register_host_function("InitScenarioPlayer", init_scenario_player);
     script.register_host_function("EliminatePlayer", eliminate_player);
+    script.register_host_function("SurrenderPlayer", surrender_player);
     script.register_host_function("GetPlayerName", get_player_name);
     script.register_host_function("GetTaggedPlayerName", get_tagged_player_name);
     script.register_host_function("GetPlayerVal", get_player_val);
@@ -44583,6 +44628,7 @@ mod tests {
         "Stuck",
         "Sub",
         "Sum",
+        "SurrenderPlayer",
         "TrainPhysical",
         "UnselectCrew",
         "Value",
