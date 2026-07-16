@@ -2212,6 +2212,11 @@ impl HostWorldContext {
                 let _ = landscape.replace_runtime_texmap_state(texmap.clone());
                 let _ = landscape.replace_runtime_map_creator_state(map_creator.0.clone());
             }
+            LandscapeOperation::MatAdjust { modulation } => {
+                if let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) {
+                    landscape.set_modulation(*modulation);
+                }
+            }
             _ => {}
         }
     }
@@ -12738,6 +12743,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetSkyColor", set_sky_color);
     script.register_host_function("SetSkyFade", set_sky_fade);
     script.register_host_function("SetMatAdjust", set_mat_adjust);
+    script.register_host_function("GetMatAdjust", get_mat_adjust);
     script.register_host_function("SetLandscapePixel", set_landscape_pixel);
     script.register_host_function("SetTextureIndex", set_texture_index);
     script.register_host_function(
@@ -25211,6 +25217,23 @@ fn set_mat_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
         }
         context.register_landscape_operation(LandscapeOperation::MatAdjust { modulation });
         Ok(Value::Nil)
+    })
+}
+
+/// FnGetMatAdjust (C4Script.cpp:4638-4642): return the raw landscape blit
+/// modulation. C4Landscape::Default initializes this to zero.
+fn get_mat_adjust(_args: &[Value]) -> Result<Value, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("GetMatAdjust requires an active engine context"))?;
+        let modulation = context
+            .world
+            .landscape
+            .as_ref()
+            .map_or(0, |landscape| landscape.modulation());
+        Ok(Value::Int(modulation as i32))
     })
 }
 
@@ -44962,6 +44985,7 @@ mod tests {
         "GetLength",
         "GetMagicEnergy",
         "GetMass",
+        "GetMatAdjust",
         "GetMaterial",
         "GetMaterialCount",
         "GetMaterialVal",

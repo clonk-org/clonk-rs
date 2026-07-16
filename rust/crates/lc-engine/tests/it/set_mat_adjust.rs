@@ -1,10 +1,10 @@
-use lc_engine::{Definition, SpawnConfig};
+use lc_engine::{Definition, EffectVarValue, SpawnConfig};
 use lc_script::Value;
 
 use crate::support::real_scenario::load_installed_scenario;
 
 #[test]
-fn set_mat_adjust_accepts_rgb_and_the_calling_script_continues() {
+fn get_mat_adjust_tracks_default_and_same_call_set_value() {
     // RGB is supplied by the installed System.c4g layer, just as it is for
     // the shipped Western scripts which call SetMatAdjust(RGB(...)).
     let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
@@ -14,12 +14,14 @@ fn set_mat_adjust_accepts_rgb_and_the_calling_script_continues() {
                 "MADJ",
                 "SetMatAdjust probe",
                 r#"#strict
-local iBefore, iAfter;
+local iBefore, iDefault, iCurrent, iAfter;
 
 public func Probe()
 {
     iBefore = 1;
+    iDefault = GetMatAdjust();
     SetMatAdjust(RGB(50, 50, 50));
+    iCurrent = GetMatAdjust();
     iAfter = 2;
     return(iAfter);
 }
@@ -45,6 +47,12 @@ public func Probe()
         .local_vars;
     assert_eq!(locals.get("iBefore"), Some(&Value::Int(1)));
     assert_eq!(
+        locals.get("iDefault"),
+        Some(&Value::Int(0)),
+        "C4Landscape::Default uses zero for normal, unmodulated drawing"
+    );
+    assert_eq!(locals.get("iCurrent"), Some(&Value::Int(0x0032_3232)));
+    assert_eq!(
         locals.get("iAfter"),
         Some(&Value::Int(2)),
         "SetMatAdjust must not abort the calling script"
@@ -58,6 +66,82 @@ public func Probe()
         0x0032_3232,
         "RGB(50, 50, 50) becomes the live C4Landscape modulation dword"
     );
+}
+
+#[test]
+fn western_global_fade_restores_pre_fade_material_modulation() {
+    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+    engine
+        .register_definition(
+            Definition::from_script(
+                "FADR",
+                "Western material-fade restoration probe",
+                r#"#strict
+local iBefore, iDuring, iAfter;
+
+public func StartFade()
+{
+    SetMatAdjust(RGB(17, 34, 51));
+    iBefore = GetMatAdjust();
+    GlobalFadeTo(245, 5);
+    iDuring = GetMatAdjust();
+    return(iDuring);
+}
+
+public func StopFade()
+{
+    RemoveEffect("IntGlobalClrMod");
+    iAfter = GetMatAdjust();
+    return(iAfter);
+}
+"#,
+            )
+            .expect("the Western fade restoration probe compiles"),
+        )
+        .expect("the Western fade restoration probe registers");
+    let probe = engine
+        .spawn_object(SpawnConfig::new("FADR"))
+        .expect("the Western fade restoration probe spawns");
+    let index = engine.find_object_index(probe).expect("the probe exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "StartFade", Vec::new())
+            .expect("the shipped Western fade starts"),
+        Value::Int(0x0010_2131)
+    );
+    let locals = &engine
+        .object_snapshot(probe)
+        .expect("the fade probe remains active")
+        .local_vars;
+    assert_eq!(locals.get("iBefore"), Some(&Value::Int(0x0011_2233)));
+    assert_eq!(locals.get("iDuring"), Some(&Value::Int(0x0010_2131)));
+
+    let fade = engine
+        .global_effects()
+        .iter()
+        .find(|effect| effect.name == "IntGlobalClrMod" && effect.priority != 0)
+        .expect("GlobalFadeTo installs its landscape/sky effect");
+    assert_eq!(fade.var(3), EffectVarValue::Int(0x0011_2233));
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "StopFade", Vec::new())
+            .expect("the shipped Western fade stop restores modulation"),
+        Value::Int(0x0011_2233)
+    );
+    assert_eq!(
+        engine
+            .snapshot()
+            .landscape
+            .expect("the probe landscape remains installed")
+            .modulation(),
+        0x0011_2233
+    );
+    assert!(engine
+        .global_effects()
+        .iter()
+        .all(|effect| effect.name != "IntGlobalClrMod" || effect.priority == 0));
 }
 
 #[test]
