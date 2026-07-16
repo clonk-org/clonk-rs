@@ -64,6 +64,7 @@ fn concat_type_name(value: &Value) -> &'static str {
 pub type ValueCell = Rc<RefCell<Value>>;
 type SlotMap = Rc<RefCell<HashMap<i32, ValueCell>>>;
 type NamedLocalMap = Rc<RefCell<HashMap<String, ValueCell>>>;
+type FunctionVarMap = Rc<RefCell<HashMap<String, Binding>>>;
 
 pub fn value_cell(value: Value) -> ValueCell {
     Rc::new(RefCell::new(value))
@@ -183,6 +184,9 @@ fn slot_cell(slots: &SlotMap, index: i32) -> ValueCell {
 #[derive(Clone)]
 pub(crate) struct ScriptCallerContext {
     var_slots: SlotMap,
+    /// `cthr->Caller->Vars`, keyed by the caller function's `VarNamed`
+    /// table. Parameters and object locals deliberately do not appear here.
+    function_vars: FunctionVarMap,
     /// Caller-local lookup host: `Func->Owner` for an ordinary function and
     /// the declaring `Func->LinkedTo` host for an engine-global function.
     /// This is intentionally independent from `this`, whose definition may
@@ -2198,6 +2202,10 @@ impl<'a> Vm<'a> {
                 );
             }
 
+            if name == "VarN" && !self.has_host_function(name) {
+                return self.invoke_varn_raw(&args, caller.as_ref());
+            }
+
             if let Some(function) = self.host_functions.get(name) {
                 let values = self.call_args_to_values(&args)?;
                 let _guard = CallerContextGuard::enter(caller);
@@ -2255,6 +2263,10 @@ impl<'a> Vm<'a> {
                     ObjectState::default(),
                     caller.clone(),
                 );
+            }
+
+            if name == "VarN" && !self.has_host_function(name) {
+                return self.invoke_varn_raw(&args, caller.as_ref());
             }
 
             if let Some(function) = self.host_functions.get(name) {
@@ -2390,6 +2402,10 @@ impl<'a> Vm<'a> {
                     object_state,
                     caller.clone(),
                 );
+            }
+
+            if name == "VarN" && !self.has_host_function(name) {
+                return self.invoke_varn_raw(&args, caller.as_ref());
             }
 
             if let Some(function) = self.host_functions.get(name) {
@@ -2730,10 +2746,10 @@ impl<'a> Vm<'a> {
                 };
                 // Vars are FUNCTION-scoped in C4Aul: the hoisted slot
                 // (declared at function entry) receives the value — a
-                // `var` inside a block must not shadow it.
-                if env.assign_tracked(name, tracked.clone()).is_err() {
-                    env.define_tracked(name, tracked);
-                }
+                // `var` inside a block must not shadow it. Address the
+                // function-var table directly because a same-name parameter
+                // remains the bare-name binding but has a distinct slot.
+                env.assign_function_var_tracked(name, tracked)?;
                 Ok(ControlFlow::Normal)
             }
             Stmt::Assignment { target, value } => {
@@ -2802,9 +2818,7 @@ impl<'a> Vm<'a> {
                                     Some(expr) => self.evaluate_tracked(expr, env, depth)?,
                                     None => TrackedValue::runtime(Value::Nil),
                                 };
-                                if env.assign_tracked(name, tracked.clone()).is_err() {
-                                    env.define_tracked(name, tracked);
-                                }
+                                env.assign_function_var_tracked(name, tracked)?;
                             }
                         }
                         ForInit::Expr(expr) => {
@@ -2886,11 +2900,17 @@ impl<'a> Vm<'a> {
                 for (key_or_item, map_value) in items {
                     // Both header spellings use the function-scoped named-var
                     // slots populated by the pre-parser/hoisting pass.
-                    env.assign(variable, key_or_item)?;
+                    env.assign_function_var_tracked(
+                        variable,
+                        TrackedValue::runtime(key_or_item),
+                    )?;
                     if let (Some(value_variable), Some(map_value)) =
                         (value_variable, map_value)
                     {
-                        env.assign(value_variable, map_value)?;
+                        env.assign_function_var_tracked(
+                            value_variable,
+                            TrackedValue::runtime(map_value),
+                        )?;
                     }
 
                     match self.execute_block(body, env, depth, returns_reference)? {
@@ -4698,6 +4718,7 @@ impl<'a> Vm<'a> {
             name,
             "this"
                 | "Var"
+                | "VarN"
                 | "Local"
                 | "SetLocal"
                 | "LocalN"
@@ -4716,7 +4737,7 @@ impl<'a> Vm<'a> {
                     || !self.has_host_function(name)
                         && matches!(
                             name,
-                            "Var" | "Local" | "LocalN" | "Global" | "GlobalN"
+                            "Var" | "VarN" | "Local" | "LocalN" | "Global" | "GlobalN"
                         )
             })
     }
@@ -4777,6 +4798,28 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// FnVarN resolves only the immediate script caller's `Func->VarNamed`
+    /// storage and preserves the cell as a live reference. A direct host
+    /// dispatch has no suspended script caller and therefore yields nil.
+    fn invoke_varn_raw(
+        &self,
+        args: &[CallArg],
+        caller: Option<&ScriptCallerContext>,
+    ) -> Result<ReturnValue, RuntimeError> {
+        let strict_level = caller.and_then(|caller| caller.origin_strict_level);
+        let name = self.global_builtin_string_arg("VarN", args, 0, strict_level)?;
+        Ok(match caller.and_then(|caller| {
+            caller
+                .function_vars
+                .borrow()
+                .get(&name)
+                .map(Binding::lvalue)
+        }) {
+            Some(reference) => ReturnValue::Reference(reference),
+            None => ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
+        })
+    }
+
     fn invoke_global_builtin_raw(
         &self,
         name: &str,
@@ -4792,6 +4835,13 @@ impl<'a> Vm<'a> {
                 Ok(ReturnValue::Reference(
                     self.tracked_cell(slot_cell(&env.var_slots, index)),
                 ))
+            }
+            "VarN" => {
+                let name = self.global_builtin_string_arg(name, args, 0, env.strict_level)?;
+                match env.function_var_lvalue(&name) {
+                    Some(reference) => Ok(ReturnValue::Reference(reference)),
+                    None => Ok(value(Value::Nil)),
+                }
             }
             "Global" => {
                 let index = self.global_builtin_int_arg(name, args, 0)?;
@@ -5285,7 +5335,13 @@ impl<'a> Vm<'a> {
                 Expr::Variable(name) => {
                     matches!(
                         name.as_str(),
-                        "Local" | "LocalN" | "Var" | "EffectVar" | "Global" | "GlobalN"
+                        "Local"
+                            | "LocalN"
+                            | "Var"
+                            | "VarN"
+                            | "EffectVar"
+                            | "Global"
+                            | "GlobalN"
                     ) || self
                         .functions
                         .get(name)
@@ -6035,6 +6091,15 @@ impl<'a> Vm<'a> {
                 None => ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
             }));
         }
+        if name == "VarN" {
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                values.push(CallArg::Value(self.evaluate_tracked(arg, env, depth + 1)?));
+            }
+            return self
+                .invoke_varn_raw(&values, Some(&env.caller_context()))
+                .map(Some);
+        }
         if matches!(name.as_str(), "Local" | "Var") && args.len() <= 1 {
             if name == "Local" && self.retain_global_call_context_for_host_paths {
                 return Ok(Some(ReturnValue::Value(TrackedValue::runtime(
@@ -6114,6 +6179,7 @@ impl<'a> Vm<'a> {
                         && (matches!(name.as_str(), "Var" | "Local")
                             && args.len() <= 2
                             || name == "Par" && args.len() <= 1
+                            || name == "VarN"
                             || name == "LocalN" && (1..=2).contains(&args.len())
                             || name == "Global"
                             || name == "GlobalN" && args.len() == 1)
@@ -6658,6 +6724,10 @@ fn hoist_function_vars(body: &[Stmt], env: &mut Environment) {
 
 struct Environment {
     scopes: Vec<HashMap<String, Binding>>,
+    /// Per-invocation storage for `Func->VarNamed`/`cthr->Vars`. A separate
+    /// table is required because parameters win bare-name lookup while VarN
+    /// can still address a same-name function variable.
+    function_vars: FunctionVarMap,
     /// `#strict` level of the executing function, for level-correct `==`/`!=`.
     strict_level: Option<u8>,
     /// `cthr->Caller->Func->Owner->Strict` for native calls. Linked function
@@ -6730,6 +6800,7 @@ impl Environment {
         }
         Ok(Self {
             scopes,
+            function_vars: Rc::new(RefCell::new(HashMap::new())),
             strict_level,
             caller_owner_strict_level: strict_level,
             // invoke_script_function stamps the owning VM before executing the
@@ -6750,6 +6821,7 @@ impl Environment {
     fn caller_context(&self) -> ScriptCallerContext {
         ScriptCallerContext {
             var_slots: self.var_slots.clone(),
+            function_vars: self.function_vars.clone(),
             owner_host: self.caller_host_identity,
             engine_scope: self.engine_scope,
             owner_strict_level: self.caller_owner_strict_level,
@@ -6792,26 +6864,38 @@ impl Environment {
         }
     }
 
-    /// Pre-declare a hoisted `var` slot (nil) unless the name already
-    /// exists — parameters share the C4Aul var table and keep their value.
+    /// Pre-declare a hoisted `Func->VarNamed` slot. Bare-name lookup reuses
+    /// that binding unless a parameter already owns the name; VarN still sees
+    /// the distinct function-var slot in the collision case.
     fn declare_hoisted(&mut self, name: &str) {
-        let exists = self.scopes.iter().any(|scope| scope.contains_key(name));
-        if !exists {
-            self.define(name, Value::Nil);
+        let binding = self
+            .function_vars
+            .borrow_mut()
+            .entry(name.to_string())
+            .or_insert_with(|| Binding::direct(Value::Nil))
+            .clone();
+        if !self.scopes.iter().any(|scope| scope.contains_key(name)) {
+            self.scopes
+                .first_mut()
+                .expect("environment has a base scope")
+                .insert(name.to_string(), binding);
         }
     }
 
-    fn assign(&mut self, name: &str, value: Value) -> Result<(), RuntimeError> {
-        self.assign_tracked(name, TrackedValue::runtime(value))
+    fn assign_function_var_tracked(
+        &self,
+        name: &str,
+        tracked: TrackedValue,
+    ) -> Result<(), RuntimeError> {
+        self.function_vars
+            .borrow()
+            .get(name)
+            .ok_or_else(|| RuntimeError::new(format!("undefined function variable '{name}'")))?
+            .write_tracked(tracked)
     }
 
-    fn assign_tracked(&mut self, name: &str, tracked: TrackedValue) -> Result<(), RuntimeError> {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(binding) = scope.get(name) {
-                return binding.write_tracked(tracked);
-            }
-        }
-        Err(RuntimeError::new(format!("undefined variable '{name}'")))
+    fn function_var_lvalue(&self, name: &str) -> Option<LValueRef> {
+        self.function_vars.borrow().get(name).map(Binding::lvalue)
     }
 
     fn get(&self, name: &str) -> Result<Option<Value>, RuntimeError> {
@@ -7003,6 +7087,58 @@ mod tests {
             cells.snapshot().get("pClonk"),
             Some(&Value::Object(574)),
             "the call-scoped var must not alias the persistent object local"
+        );
+    }
+
+    #[test]
+    fn varn_reads_and_writes_only_named_function_vars() {
+        let script = Parser::new(
+            r#"
+                local persisted;
+                func Probe(x, only_param) {
+                    persisted = 9;
+                    var x = 5;
+                    var dynamic_name = "x";
+                    var before = VarN(dynamic_name);
+                    VarN(dynamic_name) = 7;
+                    return [before, x, VarN("x"), VarN("only_param"), VarN("persisted"), VarN("missing")];
+                }
+            "#,
+        )
+        .parse_script()
+        .expect("script parses");
+        let var_decls = script.var_decls.clone();
+        let functions: HashMap<String, Function> = script
+            .functions
+            .into_iter()
+            .map(|function| (function.name.clone(), function))
+            .collect();
+        let host_functions = HashMap::new();
+        let vm = Vm::new(&functions, &host_functions, &var_decls, None);
+
+        assert_eq!(
+            vm.call("Probe", &[Value::Int(42), Value::Int(84)])
+                .expect("VarN reads and writes the live function-var cell"),
+            Value::Array(vec![
+                Value::Int(5),
+                Value::Int(42),
+                Value::Int(7),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+            ])
+        );
+    }
+
+    #[test]
+    fn varn_without_a_script_caller_returns_nil() {
+        let engine = crate::engine::Engine::new();
+
+        assert_eq!(
+            engine
+                .call("VarN", &[Value::String("x".to_string())])
+                .expect("a direct VarN dispatch is not an unknown-function error"),
+            Value::Nil
         );
     }
 
