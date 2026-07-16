@@ -3270,6 +3270,9 @@ fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String>
             lc_engine::ControlPacket::EmMoveObject(control) => {
                 ("CID_EMMoveObj", control.by_client)
             }
+            lc_engine::ControlPacket::EmDrawTool(control) => {
+                ("CID_EMDrawTool", control.by_client)
+            }
             lc_engine::ControlPacket::ActivateGameGoalMenu(control) => {
                 ("CID_ActivateGameGoalMenu", control.by_client)
             }
@@ -3532,6 +3535,7 @@ fn authenticated_single_control(
         lc_engine::ControlPacket::MessageBoardAnswer(data) => data.by_client,
         lc_engine::ControlPacket::CustomCommand(data) => data.by_client,
         lc_engine::ControlPacket::EmMoveObject(data) => data.by_client,
+        lc_engine::ControlPacket::EmDrawTool(data) => data.by_client,
         lc_engine::ControlPacket::ActivateGameGoalMenu(data) => data.by_client,
         lc_engine::ControlPacket::ToggleHostility(data) => data.by_client,
         lc_engine::ControlPacket::ActivateGameGoalRule(data) => data.by_client,
@@ -7348,6 +7352,60 @@ mod tests {
         let queued_error = validate_queued_control_authors(&forged_packet)
             .expect_err("queued editor control may not forge the host author");
         assert!(queued_error.contains("queued CID_EMMoveObj"));
+        assert!(queued_error.contains("claimed author 0"));
+        assert!(queued_error.contains("authenticated author is 7"));
+    }
+
+    #[test]
+    fn em_draw_tool_control_authenticates_direct_and_queued_authors() {
+        let control = |by_client| {
+            EngineControlPacket::EmDrawTool(lc_engine::EmDrawToolControlData {
+                action: lc_engine::EMDT_LINE,
+                mode: 3,
+                x: -12,
+                y: 34,
+                x2: 56,
+                y2: -78,
+                grade: 9,
+                ift: true,
+                material: lc_engine::LegacyCString::from_bytes(b"Earth".to_vec())
+                    .expect("fixture is NUL-free"),
+                texture: lc_engine::LegacyCString::from_bytes(b"Rough".to_vec())
+                    .expect("fixture is NUL-free"),
+                by_client,
+            })
+        };
+
+        let direct = control(7);
+        let payload = encode_control_entry_payload(&direct).expect("encode CID_EMDrawTool");
+        assert_eq!(
+            authenticated_single_control(&payload, 7).expect("matching direct author"),
+            direct
+        );
+        let direct_error = authenticated_single_control(&payload, 8)
+            .expect_err("direct editor draw control may not spoof its author");
+        assert!(direct_error.contains("claimed author 7"));
+        assert!(direct_error.contains("authenticated author is 8"));
+
+        let packet = encode_control_packet(&LegacyControlFrame {
+            client_id: 7,
+            tick: 12,
+            timestamp_ms: 0,
+            controls: vec![control(7)],
+        })
+        .expect("encode queued CID_EMDrawTool");
+        validate_queued_control_authors(&packet).expect("matching queued author");
+
+        let forged_packet = encode_control_packet(&LegacyControlFrame {
+            client_id: 7,
+            tick: 12,
+            timestamp_ms: 0,
+            controls: vec![control(0)],
+        })
+        .expect("encode forged queued CID_EMDrawTool");
+        let queued_error = validate_queued_control_authors(&forged_packet)
+            .expect_err("queued editor draw control may not forge the host author");
+        assert!(queued_error.contains("queued CID_EMDrawTool"));
         assert!(queued_error.contains("claimed author 0"));
         assert!(queued_error.contains("authenticated author is 7"));
     }

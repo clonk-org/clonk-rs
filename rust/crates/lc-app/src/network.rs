@@ -818,6 +818,7 @@ pub enum NetworkControl {
     MessageBoardAnswer(MessageBoardAnswerControlData),
     CustomCommand(lc_engine::CustomCommandControlData),
     EmMoveObject(lc_engine::EmMoveObjectControlData),
+    EmDrawTool(lc_engine::EmDrawToolControlData),
     Player { owner: i32, event: ControlEvent },
     InitScenarioPlayer(lc_engine::InitScenarioPlayerControlData),
     Synchronize(lc_engine::SynchronizeControlData),
@@ -2729,6 +2730,7 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
             Some(NetworkControl::CustomCommand(data))
         }
         lc_engine::ControlPacket::EmMoveObject(data) => Some(NetworkControl::EmMoveObject(data)),
+        lc_engine::ControlPacket::EmDrawTool(data) => Some(NetworkControl::EmDrawTool(data)),
         lc_engine::ControlPacket::Synchronize(data) => Some(NetworkControl::Synchronize(data)),
         lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
         lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
@@ -4917,6 +4919,31 @@ mod tests {
                 control.clone(),
             )),
             Some(NetworkControl::EmMoveObject(control))
+        );
+    }
+
+    #[test]
+    fn decoded_em_draw_tool_is_retained_for_ordered_execution() {
+        let control = lc_engine::EmDrawToolControlData {
+            action: lc_engine::EMDT_LINE,
+            mode: lc_engine::LANDSCAPE_MODE_EXACT,
+            x: -12,
+            y: 34,
+            x2: 56,
+            y2: -78,
+            grade: 9,
+            ift: true,
+            material: lc_engine::LegacyCString::from_bytes(b"Earth".to_vec())
+                .expect("material is NUL-free"),
+            texture: lc_engine::LegacyCString::from_bytes(b"Smooth".to_vec())
+                .expect("texture is NUL-free"),
+            by_client: 4,
+        };
+        assert_eq!(
+            network_control_for_packet(lc_engine::ControlPacket::EmDrawTool(
+                control.clone(),
+            )),
+            Some(NetworkControl::EmDrawTool(control))
         );
     }
 

@@ -56,6 +56,9 @@ pub enum ControlPacket {
     /// Synchronized editor object manipulation (`CID_EMMoveObj`,
     /// C4Control.cpp:865-992).
     EmMoveObject(EmMoveObjectControlData),
+    /// Synchronized editor landscape drawing (`CID_EMDrawTool`,
+    /// C4Control.cpp:994-1054).
+    EmDrawTool(EmDrawToolControlData),
     /// Queued team choice that resumes a player waiting in
     /// `PS_TeamSelectionPending` (`CID_InitScenarioPlayer`).
     InitScenarioPlayer(InitScenarioPlayerControlData),
@@ -393,6 +396,55 @@ impl Default for EmMoveObjectControlData {
             objects: Vec::new(),
             strictness: ScriptStrictness::Strict3,
             script: LegacyCString::default(),
+            by_client: -1,
+        }
+    }
+}
+
+/// Raw `C4ControlEMDrawAction` values serialized by
+/// `C4ControlEMDrawTool` (`src/C4Control.h:367-373`).
+///
+/// The C++ enum adaptor carries an unvalidated `uint8_t`, so unknown action
+/// bytes must survive network and replay round trips.
+pub const EMDT_SET_MODE: u8 = 0;
+pub const EMDT_BRUSH: u8 = 1;
+pub const EMDT_FILL: u8 = 2;
+pub const EMDT_LINE: u8 = 3;
+pub const EMDT_RECT: u8 = 4;
+
+/// Body of `C4ControlEMDrawTool` (`CID_EMDrawTool`).
+///
+/// C++ writes the action byte, packed landscape mode, four fixed-width
+/// coordinates, packed grade, native bool, two legacy strings, and inherited
+/// packed `ByClient` in that order (`src/C4Control.cpp:1056-1068`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmDrawToolControlData {
+    pub action: u8,
+    pub mode: i32,
+    pub x: i32,
+    pub y: i32,
+    pub x2: i32,
+    pub y2: i32,
+    pub grade: i32,
+    pub ift: bool,
+    pub material: LegacyCString,
+    pub texture: LegacyCString,
+    pub by_client: i32,
+}
+
+impl Default for EmDrawToolControlData {
+    fn default() -> Self {
+        Self {
+            action: EMDT_SET_MODE,
+            mode: 0,
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 0,
+            grade: 0,
+            ift: false,
+            material: LegacyCString::default(),
+            texture: LegacyCString::default(),
             by_client: -1,
         }
     }
@@ -1114,6 +1166,7 @@ impl RawPacket {
         const CID_PLR_CONTROL: u8 = 0xA1;
         const CID_PLR_COMMAND: u8 = 0xA2;
         const CID_EM_MOVE_OBJECT: u8 = 0xB0;
+        const CID_EM_DRAW_TOOL: u8 = 0xB1;
 
         if id == PID_NONE {
             return Ok(None);
@@ -1374,6 +1427,46 @@ impl RawPacket {
                 strictness,
                 script,
                 by_client,
+            })));
+        }
+
+        if id == CID_EM_DRAW_TOOL {
+            // Action has no naming default. The enum travels through a raw
+            // uint8 adaptor, while every remaining field uses the defaults
+            // named by C4ControlEMDrawTool::CompileFunc.
+            let action_raw =
+                self.fields
+                    .get("Action")
+                    .ok_or_else(|| ControlParseError::MissingField {
+                        field: "Action".to_string(),
+                    })?;
+            let action =
+                action_raw
+                    .parse::<u8>()
+                    .map_err(|_| ControlParseError::InvalidIntegerField {
+                        field: "Action".to_string(),
+                        value: action_raw.clone(),
+                    })?;
+            let legacy_string = |field: &'static str| {
+                let value = self.fields.get(field).cloned().unwrap_or_default();
+                LegacyCString::from_bytes(legacy_string_bytes(&value)).ok_or(
+                    ControlParseError::InteriorNulString {
+                        field: field.to_string(),
+                    },
+                )
+            };
+            return Ok(Some(ControlPacket::EmDrawTool(EmDrawToolControlData {
+                action,
+                mode: parse_int_field_or(&self.fields, "Mode", 0)?,
+                x: parse_int_field_or(&self.fields, "X", 0)?,
+                y: parse_int_field_or(&self.fields, "Y", 0)?,
+                x2: parse_int_field_or(&self.fields, "X2", 0)?,
+                y2: parse_int_field_or(&self.fields, "Y2", 0)?,
+                grade: parse_int_field_or(&self.fields, "Grade", 0)?,
+                ift: parse_bool_field_or(&self.fields, "IFT", false)?,
+                material: legacy_string("Material")?,
+                texture: legacy_string("Texture")?,
+                by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
             })));
         }
 
@@ -2622,6 +2715,74 @@ mod tests {
             (
                 "[Control]\n[IDPacket]\nID=176\n[EM Move Obj]\nAction=0\nStrict=4\n",
                 ControlParseError::InvalidScriptStrictness { value: 4 },
+            ),
+        ] {
+            assert_eq!(parse_control_ini(input).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    fn parses_em_draw_tool_fields_unknown_action_and_cpp_defaults() {
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=177\n\
+    [EM Draw Tool]\n\
+      Action=4\n\
+      Mode=3\n\
+      X=-25\n\
+      Y=40\n\
+      X2=91\n\
+      Y2=-7\n\
+      Grade=12\n\
+      IFT=true\n\
+      Material=Earth\n\
+      Texture=Rough\n\
+      ByClient=7\n\
+  [IDPacket]\n\
+    ID=177\n\
+    [EM Draw Tool]\n\
+      Action=255\n";
+
+        assert_eq!(
+            parse_control_ini(input).expect("parse editor landscape controls"),
+            vec![
+                ControlPacket::EmDrawTool(EmDrawToolControlData {
+                    action: EMDT_RECT,
+                    mode: 3,
+                    x: -25,
+                    y: 40,
+                    x2: 91,
+                    y2: -7,
+                    grade: 12,
+                    ift: true,
+                    material: LegacyCString::from_bytes(b"Earth".to_vec()).unwrap(),
+                    texture: LegacyCString::from_bytes(b"Rough".to_vec()).unwrap(),
+                    by_client: 7,
+                }),
+                ControlPacket::EmDrawTool(EmDrawToolControlData {
+                    action: u8::MAX,
+                    ..EmDrawToolControlData::default()
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn em_draw_tool_ini_requires_a_raw_byte_action() {
+        for (input, expected) in [
+            (
+                "[Control]\n[IDPacket]\nID=177\n[EM Draw Tool]\n",
+                ControlParseError::MissingField {
+                    field: "Action".to_string(),
+                },
+            ),
+            (
+                "[Control]\n[IDPacket]\nID=177\n[EM Draw Tool]\nAction=256\n",
+                ControlParseError::InvalidIntegerField {
+                    field: "Action".to_string(),
+                    value: "256".to_string(),
+                },
             ),
         ] {
             assert_eq!(parse_control_ini(input).unwrap_err(), expected);

@@ -26703,6 +26703,10 @@ impl GameApp {
                         ScriptControlPolicy::live(false),
                     )
                     .map(|_| ()),
+                NetworkControl::EmDrawTool(control) => {
+                    self.engine.execute_em_draw_tool_control(&control);
+                    Ok(())
+                }
                 NetworkControl::ActivateGameGoalMenu(control) => {
                     self.engine
                         .execute_activate_game_goal_menu_control(&control)?;
@@ -60322,6 +60326,47 @@ mod tests {
         .expect("host-authored script control executes");
 
         assert_eq!(app.engine.physics().gravity, 77);
+        assert_eq!(app.executing_ready_tick, None);
+    }
+
+    #[test]
+    fn synchronized_em_draw_tool_executes_at_the_ready_tick() {
+        let mut app = new_running_sandbox_app();
+        assert_ne!(
+            app.engine
+                .landscape()
+                .expect("sandbox landscape exists")
+                .mode(),
+            lc_engine::LANDSCAPE_MODE_EXACT
+        );
+
+        app.apply_ready_controls(
+            12,
+            vec![NetworkControl::EmDrawTool(
+                lc_engine::EmDrawToolControlData {
+                    action: lc_engine::EMDT_SET_MODE,
+                    mode: lc_engine::LANDSCAPE_MODE_EXACT,
+                    x: 0,
+                    y: 0,
+                    x2: 0,
+                    y2: 0,
+                    grade: 0,
+                    ift: false,
+                    material: lc_engine::LegacyCString::default(),
+                    texture: lc_engine::LegacyCString::default(),
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("synchronized editor draw control executes");
+
+        assert_eq!(
+            app.engine
+                .landscape()
+                .expect("sandbox landscape remains")
+                .mode(),
+            lc_engine::LANDSCAPE_MODE_EXACT
+        );
         assert_eq!(app.executing_ready_tick, None);
     }
 

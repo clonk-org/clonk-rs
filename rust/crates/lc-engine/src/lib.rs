@@ -65,7 +65,8 @@ pub use control::{
     ActivateGameGoalRuleControlData, ClientCoreControlData, ClientJoinControlData,
     ClientRemoveControlData, ClientUpdateControlData, CommandKind, ControlButton, ControlCommand,
     ControlEvent, ControlPacket, ControlPacketId, ControlPlayerInfoEntry, CustomCommandControlData,
-    EliminatePlayerControlData, EmMoveObjectControlData, InitScenarioPlayerControlData,
+    EliminatePlayerControlData, EmDrawToolControlData, EmMoveObjectControlData,
+    InitScenarioPlayerControlData,
     JoinPlayerControlData,
     JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData, NetworkResourceCore,
     PlayerCommandControlData, PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest,
@@ -80,8 +81,8 @@ pub use control::{
     COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT,
     COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_PLAYER_MENU, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE,
     COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP, COM_WHEEL_DOWN, COM_WHEEL_UP,
-    C4MN_ADJUST_POSITION, EMMO_DUPLICATE, EMMO_ENTER, EMMO_EXIT, EMMO_MOVE, EMMO_REMOVE,
-    EMMO_SCRIPT,
+    C4MN_ADJUST_POSITION, EMDT_BRUSH, EMDT_FILL, EMDT_LINE, EMDT_RECT, EMDT_SET_MODE,
+    EMMO_DUPLICATE, EMMO_ENTER, EMMO_EXIT, EMMO_MOVE, EMMO_REMOVE, EMMO_SCRIPT,
     NETWORK_RESOURCE_TYPE_NULL,
     PLAYER_INFO_FLAG_ATTRIBUTES_FIXED, PLAYER_INFO_FLAG_DISCONNECTED, PLAYER_INFO_FLAG_HAS_RESOURCE,
     PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_IN_SCENARIO_FILE, PLAYER_INFO_FLAG_JOINED,
@@ -102,7 +103,8 @@ pub use effect::{EffectState, EffectVarValue};
 pub use input::PlayerInputState;
 pub use landscape::{
     BlastResult, CollisionResolution, Landscape, LandscapeCommand, LandscapeError, LiquidColumn,
-    LiquidSegment,
+    LiquidSegment, LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC,
+    LANDSCAPE_MODE_UNDEFINED,
 };
 pub use material::{Material, MaterialId, MaterialSet};
 pub use message::{
@@ -20074,6 +20076,65 @@ impl Engine {
             _ => {}
         }
         Ok(true)
+    }
+
+    /// Execute one synchronized `CID_EMDrawTool` packet. The process-local
+    /// tools dialog is intentionally absent; landscape mode, raster writes,
+    /// and Fill's synchronized RNG/InsertMaterial sequence are authoritative.
+    pub fn execute_em_draw_tool_control(&mut self, control: &EmDrawToolControlData) -> bool {
+        if self.league_game {
+            return false;
+        }
+        if control.action == EMDT_SET_MODE {
+            self.set_editor_landscape_mode(control.mode);
+            return true;
+        }
+        if self.landscape.as_ref().map(Landscape::mode) != Some(control.mode)
+            || control.material.is_empty()
+        {
+            return false;
+        }
+
+        let material = lc_script::c4_string_from_bytes(control.material.as_bytes());
+        match control.action {
+            EMDT_BRUSH | EMDT_LINE | EMDT_RECT => {
+                if control.texture.is_empty() {
+                    return false;
+                }
+                let texture = lc_script::c4_string_from_bytes(control.texture.as_bytes());
+                self.draw_editor_landscape(
+                    control.action,
+                    control.x,
+                    control.y,
+                    control.x2,
+                    control.y2,
+                    control.grade,
+                    &material,
+                    &texture,
+                    control.ift,
+                )
+            }
+            EMDT_FILL => {
+                let Some(material) = self.materials.id_of(&material) else {
+                    return false;
+                };
+                for _ in 0..control.grade {
+                    // C++ pins evaluation order explicitly: the Y draw is
+                    // first, then X, before each InsertMaterial call.
+                    let r2 = control
+                        .y
+                        .wrapping_add(self.rng.random(control.grade))
+                        .wrapping_sub(control.grade / 2);
+                    let r1 = control
+                        .x
+                        .wrapping_add(self.rng.random(control.grade))
+                        .wrapping_sub(control.grade / 2);
+                    let _ = self.insert_material(material, r1, r2, 0, 0);
+                }
+                true
+            }
+            _ => true,
+        }
     }
 
     /// Execute one synchronized `CID_CustomCommand` packet. Player ownership
@@ -53960,6 +54021,272 @@ mod em_move_object_control_parity {
                 .expect("suppressed marks read"),
             Value::Int(2)
         );
+    }
+}
+
+#[cfg(test)]
+mod em_draw_tool_control_parity {
+    use super::*;
+    use crate::chunky::ChunkShape;
+    use crate::landscape::{
+        LandscapeRasterState, PixelGrid, RuntimeTexMapMaterial, RuntimeTexMapState,
+    };
+
+    fn bytes(value: &str) -> LegacyCString {
+        LegacyCString::from_bytes(value.as_bytes().to_vec()).expect("fixture is NUL-free")
+    }
+
+    fn control(action: u8) -> EmDrawToolControlData {
+        EmDrawToolControlData {
+            action,
+            mode: LANDSCAPE_MODE_EXACT,
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 0,
+            grade: 1,
+            ift: false,
+            material: bytes("Earth"),
+            texture: bytes("Rough"),
+            by_client: 7,
+        }
+    }
+
+    fn editor_engine(seed: u64) -> Engine {
+        const WIDTH: u32 = 32;
+        const HEIGHT: u32 = 32;
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=80\nMaxSlide=0\nTextureOverlay=Rough\n",
+        )
+        .expect("material fixture parses");
+        let materials = MaterialSet::from_resource_library(&library);
+
+        let mut densities = vec![0; 128];
+        densities[1] = 80;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Earth".to_string());
+        let mut texture_names = vec![None; 128];
+        texture_names[1] = Some("Rough".to_string());
+        let mut shapes = vec![None; 128];
+        shapes[1] = Some(ChunkShape::from_shape(0));
+        let texmap = RuntimeTexMapState {
+            densities: densities.clone(),
+            material_names: material_names.clone(),
+            texture_names: texture_names.clone(),
+            match_texture_names: texture_names.clone(),
+            shapes,
+            materials: vec![RuntimeTexMapMaterial {
+                name: "Earth".to_string(),
+                density: 80,
+                shape: ChunkShape::from_shape(0),
+            }],
+            texture_inventory: vec!["Rough".to_string()],
+            default_material_entries: vec![("Earth".to_string(), 1)],
+            material_crossmap_entries: Vec::new(),
+        };
+        let map = lc_resources::bitmap::IndexedBitmap {
+            width: WIDTH,
+            height: HEIGHT,
+            indices: vec![0; (WIDTH * HEIGHT) as usize],
+        };
+        let mut raster = LandscapeRasterState::new(1, 0, texmap);
+        raster.set_map(&map);
+        let grid = PixelGrid::new(
+            WIDTH,
+            HEIGHT,
+            map.indices.clone(),
+            densities,
+            material_names,
+            texture_names,
+        );
+        let mut landscape = Landscape::new(WIDTH, vec![HEIGHT as i32; WIDTH as usize])
+            .expect("landscape fixture builds");
+        landscape.set_world_height(HEIGHT as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_raster_state(raster);
+
+        let mut engine = Engine::with_seed(seed);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        engine
+    }
+
+    #[test]
+    fn set_mode_and_exact_primitives_match_surface8_geometry_and_ift() {
+        let mut engine = editor_engine(11);
+        assert_eq!(engine.landscape().unwrap().mode(), LANDSCAPE_MODE_UNDEFINED);
+        assert!(engine.execute_em_draw_tool_control(&EmDrawToolControlData {
+            action: EMDT_SET_MODE,
+            mode: LANDSCAPE_MODE_EXACT,
+            ..EmDrawToolControlData::default()
+        }));
+
+        let mut brush = control(EMDT_BRUSH);
+        brush.x = 5;
+        brush.y = 5;
+        brush.ift = true;
+        assert!(engine.execute_em_draw_tool_control(&brush));
+        assert_eq!(engine.debug_landscape_byte(4, 5), Some(0x81));
+        assert_eq!(engine.debug_landscape_byte(5, 5), Some(0x81));
+        assert_eq!(engine.debug_landscape_byte(5, 4), Some(0));
+
+        let mut line = control(EMDT_LINE);
+        line.x = 8;
+        line.y = 8;
+        line.x2 = 10;
+        line.y2 = 8;
+        assert!(engine.execute_em_draw_tool_control(&line));
+        for x in 7..=10 {
+            assert_eq!(engine.debug_landscape_byte(x, 8), Some(1));
+        }
+
+        let mut rect = control(EMDT_RECT);
+        rect.x = 14;
+        rect.y = 14;
+        rect.x2 = 12;
+        rect.y2 = 12;
+        rect.grade = -99;
+        rect.ift = true;
+        assert!(engine.execute_em_draw_tool_control(&rect));
+        for y in 12..=14 {
+            for x in 12..=14 {
+                assert_eq!(engine.debug_landscape_byte(x, y), Some(0x81));
+            }
+        }
+
+        brush.material = bytes("Sky");
+        brush.texture = bytes("ignored-but-required");
+        assert!(engine.execute_em_draw_tool_control(&brush));
+        assert_eq!(engine.debug_landscape_byte(4, 5), Some(0));
+        assert_eq!(engine.debug_landscape_byte(5, 5), Some(0));
+    }
+
+    #[test]
+    fn fill_uses_y_then_x_draws_and_exactly_two_draws_per_grade() {
+        let mut engine = editor_engine(23);
+        let _ = engine.landscape.as_mut().unwrap().set_mode(LANDSCAPE_MODE_EXACT);
+        let mut fill = control(EMDT_FILL);
+        fill.x = 14;
+        fill.y = 12;
+        fill.grade = 5;
+        fill.texture = LegacyCString::default();
+
+        let before_count = engine.rng.count;
+        let mut mirror = engine.rng.clone();
+        let mut expected = Vec::new();
+        for _ in 0..fill.grade {
+            let r2 = fill.y + mirror.random(fill.grade) - fill.grade / 2;
+            let r1 = fill.x + mirror.random(fill.grade) - fill.grade / 2;
+            expected.push((r1, r2 + 1));
+        }
+        assert!(expected.iter().any(|(x, y)| *x - fill.x != *y - 1 - fill.y));
+
+        assert!(engine.execute_em_draw_tool_control(&fill));
+        assert_eq!(engine.rng, mirror);
+        assert_eq!(engine.rng.count - before_count, 2 * fill.grade);
+        let actual = engine
+            .pxs_system
+            .iter_slots()
+            .map(|(_, _, pxs)| (fixtoi(pxs.x), fixtoi(pxs.y)))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "each PXS keeps the y-first coordinate pair");
+    }
+
+    #[test]
+    fn league_mode_mismatch_and_invalid_fill_inputs_are_rng_free_noops() {
+        let mut undefined = editor_engine(28);
+        let mut undefined_brush = control(EMDT_BRUSH);
+        undefined_brush.mode = LANDSCAPE_MODE_UNDEFINED;
+        undefined_brush.material = bytes("Missing");
+        undefined_brush.texture = bytes("Missing");
+        assert!(undefined.execute_em_draw_tool_control(&undefined_brush));
+        assert_eq!(undefined.debug_landscape_byte(0, 0), Some(0));
+
+        let mut engine = editor_engine(29);
+        let _ = engine.landscape.as_mut().unwrap().set_mode(LANDSCAPE_MODE_EXACT);
+        let mut fill = control(EMDT_FILL);
+        fill.grade = 3;
+        fill.x = 10;
+        fill.y = 10;
+        let before = engine.rng.clone();
+
+        engine.set_league_game(true);
+        assert!(!engine.execute_em_draw_tool_control(&fill));
+        assert_eq!(engine.rng, before);
+        engine.set_league_game(false);
+
+        fill.mode = LANDSCAPE_MODE_STATIC;
+        assert!(!engine.execute_em_draw_tool_control(&fill));
+        assert_eq!(engine.rng, before);
+        fill.mode = LANDSCAPE_MODE_EXACT;
+
+        fill.material = LegacyCString::default();
+        assert!(!engine.execute_em_draw_tool_control(&fill));
+        assert_eq!(engine.rng, before);
+        fill.material = bytes("Sky");
+        assert!(!engine.execute_em_draw_tool_control(&fill));
+        assert_eq!(engine.rng, before);
+        fill.material = bytes("Earth");
+        fill.grade = 0;
+        assert!(engine.execute_em_draw_tool_control(&fill));
+        assert_eq!(engine.rng, before);
+    }
+
+    #[test]
+    fn static_rect_updates_the_retained_map_and_exact_to_static_restores_it() {
+        let mut engine = editor_engine(31);
+        let _ = engine.landscape.as_mut().unwrap().set_mode(LANDSCAPE_MODE_STATIC);
+
+        // A static radius-one brush uses Map::SetPix, not the asymmetric
+        // two-pixel CSurface8 circle used in Exact mode.
+        let mut brush = control(EMDT_BRUSH);
+        brush.mode = LANDSCAPE_MODE_STATIC;
+        brush.x = 8;
+        brush.y = 8;
+        brush.grade = 0;
+        assert!(engine.execute_em_draw_tool_control(&brush));
+        let retained = engine
+            .landscape
+            .as_ref()
+            .and_then(Landscape::raster_state)
+            .and_then(LandscapeRasterState::map)
+            .expect("static editor map is retained");
+        assert_eq!(retained.index_at(8, 8), Some(1));
+        assert_eq!(retained.index_at(7, 8), Some(0));
+
+        // MapToLandscape redraws only the primitive's affected rectangle;
+        // unrelated runtime Surface8 changes outside it must survive.
+        engine
+            .landscape
+            .as_mut()
+            .unwrap()
+            .grid_write_byte(25, 25, 0x81);
+        let mut rect = control(EMDT_RECT);
+        rect.mode = LANDSCAPE_MODE_STATIC;
+        rect.x = 2;
+        rect.y = 2;
+        rect.x2 = 4;
+        rect.y2 = 4;
+        assert!(engine.execute_em_draw_tool_control(&rect));
+        assert_ne!(engine.debug_landscape_byte(3, 3), Some(0));
+        assert_eq!(engine.debug_landscape_byte(25, 25), Some(0x81));
+
+        let _ = engine.landscape.as_mut().unwrap().set_mode(LANDSCAPE_MODE_EXACT);
+        let mut sky = control(EMDT_RECT);
+        sky.material = bytes("Sky");
+        sky.x = 3;
+        sky.y = 3;
+        sky.x2 = 3;
+        sky.y2 = 3;
+        assert!(engine.execute_em_draw_tool_control(&sky));
+        assert_eq!(engine.debug_landscape_byte(3, 3), Some(0));
+
+        assert!(engine.execute_em_draw_tool_control(&EmDrawToolControlData {
+            action: EMDT_SET_MODE,
+            mode: LANDSCAPE_MODE_STATIC,
+            ..EmDrawToolControlData::default()
+        }));
+        assert_ne!(engine.debug_landscape_byte(3, 3), Some(0));
     }
 }
 

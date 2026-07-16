@@ -5,7 +5,8 @@ use lc_engine::{
     ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
     ControlPacket as EngineControlPacket, ControlPacketId, ControlPlayerInfoEntry,
     EmMoveObjectControlData,
-    CustomCommandControlData, EliminatePlayerControlData, InitScenarioPlayerControlData,
+    CustomCommandControlData, EliminatePlayerControlData, EmDrawToolControlData,
+    InitScenarioPlayerControlData,
     JoinPlayerControlData, JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData,
     NetworkResourceCore, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
     PlayerInfoUpdateRequest, PlayerSelectControlData, RemovePlayerControlData, ScriptControlData,
@@ -42,6 +43,7 @@ const CID_PLR_SELECT: u8 = 0x80 | 0x20;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
 const CID_PLR_COMMAND: u8 = 0x80 | 0x22;
 const CID_EM_MOVE_OBJECT: u8 = 0x80 | 0x30;
+const CID_EM_DRAW_TOOL: u8 = 0x80 | 0x31;
 const CID_INIT_SCENARIO_PLAYER: u8 = 0x80 | 0x52;
 const CID_SURRENDER_PLAYER: u8 = 0x80 | 0x55;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
@@ -655,6 +657,7 @@ fn decode_control(
         CID_PLR_CONTROL => decode_player_control(reader),
         CID_PLR_COMMAND => decode_player_command(reader),
         CID_EM_MOVE_OBJECT => decode_em_move_object(reader),
+        CID_EM_DRAW_TOOL => decode_em_draw_tool(reader),
         CID_INIT_SCENARIO_PLAYER => decode_init_scenario_player(reader),
         CID_SURRENDER_PLAYER => decode_surrender_player(reader),
         CID_SYNC_CHECK => decode_sync_check(reader),
@@ -1074,6 +1077,24 @@ fn decode_em_move_object(
         strictness,
         script,
         by_client,
+    }))
+}
+
+fn decode_em_draw_tool(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::EmDrawTool(EmDrawToolControlData {
+        action: reader.read_u8()?,
+        mode: reader.read_int32()?,
+        x: reader.read_raw_i32()?,
+        y: reader.read_raw_i32()?,
+        x2: reader.read_raw_i32()?,
+        y2: reader.read_raw_i32()?,
+        grade: reader.read_int32()?,
+        ift: reader.read_u8()? != 0,
+        material: reader.read_c_string()?,
+        texture: reader.read_c_string()?,
+        by_client: reader.read_int32()?,
     }))
 }
 
@@ -1660,6 +1681,21 @@ fn encode_em_move_object(
     Ok(())
 }
 
+fn encode_em_draw_tool(buffer: &mut Vec<u8>, data: &EmDrawToolControlData) {
+    buffer.push(CID_EM_DRAW_TOOL);
+    buffer.push(data.action);
+    append_int32(buffer, data.mode);
+    append_raw_i32(buffer, data.x);
+    append_raw_i32(buffer, data.y);
+    append_raw_i32(buffer, data.x2);
+    append_raw_i32(buffer, data.y2);
+    append_int32(buffer, data.grade);
+    buffer.push(u8::from(data.ift));
+    append_c_string(buffer, &data.material);
+    append_c_string(buffer, &data.texture);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_init_scenario_player(buffer: &mut Vec<u8>, data: &InitScenarioPlayerControlData) {
     buffer.push(CID_INIT_SCENARIO_PLAYER);
     append_int32(buffer, data.team);
@@ -1868,6 +1904,10 @@ fn encode_control(
             Ok(())
         }
         EngineControlPacket::EmMoveObject(data) => encode_em_move_object(buffer, data),
+        EngineControlPacket::EmDrawTool(data) => {
+            encode_em_draw_tool(buffer, data);
+            Ok(())
+        }
         EngineControlPacket::InitScenarioPlayer(data) => {
             encode_init_scenario_player(buffer, data);
             Ok(())
@@ -2202,6 +2242,64 @@ mod tests {
             encode_control_entry_payload(&expected),
             Ok(encoded.to_vec())
         );
+    }
+
+    #[test]
+    fn em_draw_tool_entry_matches_cpp_mixed_raw_packed_and_string_order() {
+        // C4ControlEMDrawTool writes raw Action, packed Mode, four raw
+        // coordinates, packed Grade, native bool IFT, two NUL-terminated
+        // strings, then inherited packed ByClient (src/C4Control.cpp:
+        // 1056-1069,53-57).
+        let expected = EngineControlPacket::EmDrawTool(EmDrawToolControlData {
+            action: lc_engine::EMDT_RECT,
+            mode: 130,
+            x: 0x1122_3344,
+            y: -2,
+            x2: 0x0102_0304,
+            y2: -4,
+            grade: 130,
+            ift: true,
+            material: LegacyCString::from_bytes(b"Earth\x80".to_vec())
+                .expect("fixture is NUL-free"),
+            texture: LegacyCString::from_bytes(b"Rough".to_vec())
+                .expect("fixture is NUL-free"),
+            by_client: -4,
+        });
+        let encoded = [
+            0xb1, 0x04, 0x82, 0x01, 0x44, 0x33, 0x22, 0x11, 0xfe, 0xff, 0xff, 0xff, 0x04,
+            0x03, 0x02, 0x01, 0xfc, 0xff, 0xff, 0xff, 0x82, 0x01, 0x01, b'E', b'a', b'r',
+            b't', b'h', 0x80, 0x00, b'R', b'o', b'u', b'g', b'h', 0x00, 0xfc,
+        ];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+
+        let EngineControlPacket::EmDrawTool(mut unknown) = expected else {
+            unreachable!("fixture variant is known")
+        };
+        unknown.action = u8::MAX;
+        let unknown = EngineControlPacket::EmDrawTool(unknown);
+        let encoded_unknown = encode_control_entry_payload(&unknown).expect("unknown action encodes");
+        assert_eq!(encoded_unknown[1], u8::MAX);
+        assert_eq!(decode_control_entry_payload(&encoded_unknown), Ok(unknown));
+    }
+
+    #[test]
+    fn em_draw_tool_entry_rejects_every_truncated_body() {
+        let complete = [
+            0xb1, 0x04, 0x82, 0x01, 0x44, 0x33, 0x22, 0x11, 0xfe, 0xff, 0xff, 0xff, 0x04,
+            0x03, 0x02, 0x01, 0xfc, 0xff, 0xff, 0xff, 0x82, 0x01, 0x01, b'E', b'a', b'r',
+            b't', b'h', 0x80, 0x00, b'R', b'o', b'u', b'g', b'h', 0x00, 0xfc,
+        ];
+
+        for end in 1..complete.len() {
+            assert_eq!(
+                decode_control_entry_payload(&complete[..end]),
+                Err(LegacyControlError::UnexpectedEof),
+                "unexpected result for {:02x?}",
+                &complete[..end]
+            );
+        }
     }
 
     #[test]

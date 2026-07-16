@@ -347,6 +347,99 @@ impl PixelGrid {
         self.set_byte_impl(x, y, byte, false);
     }
 
+    /// `CSurface8::Circle` (`src/StdSurface8.cpp:231-239`). Its bottom and
+    /// right edges are deliberately exclusive: radius one writes exactly
+    /// `(x-1,y)` and `(x,y)`.
+    fn draw_editor_circle(&mut self, x: i32, y: i32, radius: i32, byte: u8) {
+        if radius <= 0 {
+            return;
+        }
+        for y_offset in -radius..radius {
+            let radius_squared = i64::from(radius) * i64::from(radius);
+            let y_squared = i64::from(y_offset) * i64::from(y_offset);
+            let half_width = ((radius_squared - y_squared) as f32).sqrt() as i32;
+            for x_counter in (0..half_width.saturating_mul(2)).rev() {
+                self.write_byte(
+                    x.wrapping_sub(half_width).wrapping_add(x_counter),
+                    y.wrapping_add(y_offset),
+                    byte,
+                );
+            }
+        }
+    }
+
+    /// The exact `ForLine` major-axis walk used by C4Landscape::DrawLine;
+    /// every visited center receives the asymmetric Surface8 circle above.
+    fn draw_editor_line(
+        &mut self,
+        mut x1: i32,
+        mut y1: i32,
+        mut x2: i32,
+        mut y2: i32,
+        radius: i32,
+        byte: u8,
+    ) {
+        if x2.wrapping_sub(x1).abs() < y2.wrapping_sub(y1).abs() {
+            if y1 > y2 {
+                std::mem::swap(&mut x1, &mut x2);
+                std::mem::swap(&mut y1, &mut y2);
+            }
+            let x_increment = if x2 > x1 { 1 } else { -1 };
+            let dy = y2.wrapping_sub(y1);
+            let dx = x2.wrapping_sub(x1).abs();
+            let mut decision = dx.wrapping_mul(2).wrapping_sub(dy);
+            let advance_both = dx.wrapping_sub(dy).wrapping_mul(2);
+            let advance_major = dx.wrapping_mul(2);
+            let mut x = x1;
+            self.draw_editor_circle(x, y1, radius, byte);
+            let mut y = y1.wrapping_add(1);
+            while y <= y2 {
+                if decision >= 0 {
+                    x = x.wrapping_add(x_increment);
+                    decision = decision.wrapping_add(advance_both);
+                } else {
+                    decision = decision.wrapping_add(advance_major);
+                }
+                self.draw_editor_circle(x, y, radius, byte);
+                y = y.wrapping_add(1);
+            }
+        } else {
+            if x1 > x2 {
+                std::mem::swap(&mut x1, &mut x2);
+                std::mem::swap(&mut y1, &mut y2);
+            }
+            let y_increment = if y2 > y1 { 1 } else { -1 };
+            let dx = x2.wrapping_sub(x1);
+            let dy = y2.wrapping_sub(y1).abs();
+            let mut decision = dy.wrapping_mul(2).wrapping_sub(dx);
+            let advance_both = dy.wrapping_sub(dx).wrapping_mul(2);
+            let advance_major = dy.wrapping_mul(2);
+            let mut y = y1;
+            self.draw_editor_circle(x1, y, radius, byte);
+            let mut x = x1.wrapping_add(1);
+            while x <= x2 {
+                if decision >= 0 {
+                    y = y.wrapping_add(y_increment);
+                    decision = decision.wrapping_add(advance_both);
+                } else {
+                    decision = decision.wrapping_add(advance_major);
+                }
+                self.draw_editor_circle(x, y, radius, byte);
+                x = x.wrapping_add(1);
+            }
+        }
+    }
+
+    fn draw_editor_box(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, byte: u8) {
+        let (left, right) = (x1.min(x2), x1.max(x2));
+        let (top, bottom) = (y1.min(y2), y1.max(y2));
+        for y in top..=bottom {
+            for x in left..=right {
+                self.write_byte(x, y, byte);
+            }
+        }
+    }
+
     pub fn material_names(&self) -> &[Option<String>] {
         &self.material_names
     }
@@ -1411,6 +1504,15 @@ pub(crate) struct LandscapeRasterState {
     map_zoom: i32,
     map_seed: i32,
     texmap: RuntimeTexMapState,
+    /// The authoritative indexed `C4Landscape::Map`. Static editor tools
+    /// mutate this plane before MapToLandscape; exact-mode edits intentionally
+    /// leave it untouched so switching back to Static restores the map.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    map_indices: Vec<u8>,
+    #[serde(default, skip_serializing_if = "crate::u32_is_zero")]
+    map_width: u32,
+    #[serde(default, skip_serializing_if = "crate::u32_is_zero")]
+    map_height: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     map_creator: Option<crate::map_creator_s2::MapCreatorS2State>,
 }
@@ -1421,6 +1523,9 @@ impl LandscapeRasterState {
             map_zoom,
             map_seed,
             texmap,
+            map_indices: Vec::new(),
+            map_width: 0,
+            map_height: 0,
             map_creator: None,
         }
     }
@@ -1439,6 +1544,31 @@ impl LandscapeRasterState {
 
     pub(crate) fn texmap_mut(&mut self) -> &mut RuntimeTexMapState {
         &mut self.texmap
+    }
+
+    pub(crate) fn set_map(&mut self, bitmap: &lc_resources::bitmap::IndexedBitmap) {
+        self.map_width = bitmap.width;
+        self.map_height = bitmap.height;
+        self.map_indices.clone_from(&bitmap.indices);
+    }
+
+    pub(crate) fn map(&self) -> Option<lc_resources::bitmap::IndexedBitmap> {
+        let expected = (self.map_width as usize).checked_mul(self.map_height as usize)?;
+        (self.map_width > 0 && self.map_height > 0 && self.map_indices.len() == expected).then(|| {
+            lc_resources::bitmap::IndexedBitmap {
+                width: self.map_width,
+                height: self.map_height,
+                indices: self.map_indices.clone(),
+            }
+        })
+    }
+
+    fn map_mut(&mut self) -> Option<(u32, u32, &mut [u8])> {
+        let expected = (self.map_width as usize).checked_mul(self.map_height as usize)?;
+        if self.map_width == 0 || self.map_height == 0 || self.map_indices.len() != expected {
+            return None;
+        }
+        Some((self.map_width, self.map_height, &mut self.map_indices))
     }
 
     pub(crate) fn map_creator(&self) -> Option<&crate::map_creator_s2::MapCreatorS2State> {
@@ -1588,10 +1718,19 @@ pub struct LiquidSegment {
     pub material: Option<MaterialId>,
 }
 
+pub const LANDSCAPE_MODE_UNDEFINED: i32 = 0;
+pub const LANDSCAPE_MODE_DYNAMIC: i32 = 1;
+pub const LANDSCAPE_MODE_STATIC: i32 = 2;
+pub const LANDSCAPE_MODE_EXACT: i32 = 3;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Landscape {
     width: u32,
     surface: Vec<i32>,
+    /// C4Landscape::Mode. Synthetic/old snapshots default to the native
+    /// pre-initialization value; scenario loading assigns the actual mode.
+    #[serde(default, skip_serializing_if = "landscape_mode_is_undefined")]
+    mode: i32,
     /// C4Landscape::Modulation: raw landscape blit modulation. Zero keeps
     /// normal drawing; any other value is applied during presentation.
     #[serde(default, skip_serializing_if = "crate::u32_is_zero")]
@@ -1654,6 +1793,10 @@ pub struct Landscape {
 
 fn default_top_open() -> bool {
     true
+}
+
+fn landscape_mode_is_undefined(mode: &i32) -> bool {
+    *mode == LANDSCAPE_MODE_UNDEFINED
 }
 
 fn bool_is_false(value: &bool) -> bool {
@@ -1838,6 +1981,7 @@ impl Landscape {
         Ok(Self {
             width,
             surface,
+            mode: LANDSCAPE_MODE_UNDEFINED,
             modulation: 0,
             liquids: vec![LiquidColumn::default(); size],
             solid_materials: vec![default_material; size],
@@ -1859,6 +2003,18 @@ impl Landscape {
 
     pub fn width(&self) -> u32 {
         self.width
+    }
+
+    pub fn mode(&self) -> i32 {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: i32) -> bool {
+        if !(LANDSCAPE_MODE_DYNAMIC..=LANDSCAPE_MODE_EXACT).contains(&mode) {
+            return false;
+        }
+        self.mode = mode;
+        true
     }
 
     pub fn modulation(&self) -> u32 {
@@ -2251,6 +2407,31 @@ impl Landscape {
             }
         }
         slot
+    }
+
+    /// C4Landscape::GetMapColorIndex for editor Brush/Line/Rect. `Sky` is a
+    /// case-sensitive special material that always paints byte zero; every
+    /// other pair goes through TextureMap.GetIndex and may allocate a slot.
+    fn resolve_editor_color(&mut self, material: &str, texture: &str, ift: bool) -> Option<u8> {
+        if material == "Sky" {
+            return Some(0);
+        }
+        let Self {
+            pixels,
+            raster_state,
+            ..
+        } = self;
+        let state = raster_state.as_mut()?;
+        let slot = state
+            .texmap_mut()
+            .get_index(material, Some(texture), true);
+        if slot == 0 {
+            return None;
+        }
+        if let Some(pixels) = pixels {
+            pixels.sync_runtime_texmap(state.texmap());
+        }
+        Some(slot | if ift { 0x80 } else { 0 })
     }
 
     /// Resolve the grid's Pix2Mat table once the engine materials exist
@@ -4542,6 +4723,119 @@ impl Landscape {
     }
 }
 
+struct EditorMapSurface<'a> {
+    width: i32,
+    height: i32,
+    bytes: &'a mut [u8],
+}
+
+impl EditorMapSurface<'_> {
+    fn write(&mut self, x: i32, y: i32, byte: u8) {
+        if x < 0 || y < 0 || x >= self.width || y >= self.height {
+            return;
+        }
+        self.bytes[(y * self.width + x) as usize] = byte;
+    }
+
+    fn circle(&mut self, x: i32, y: i32, radius: i32, byte: u8) {
+        if radius <= 0 {
+            return;
+        }
+        for y_offset in -radius..radius {
+            let remaining = i64::from(radius) * i64::from(radius)
+                - i64::from(y_offset) * i64::from(y_offset);
+            let half_width = (remaining as f32).sqrt() as i32;
+            for x_counter in (0..half_width.saturating_mul(2)).rev() {
+                self.write(
+                    x.wrapping_sub(half_width).wrapping_add(x_counter),
+                    y.wrapping_add(y_offset),
+                    byte,
+                );
+            }
+        }
+    }
+
+    fn stamp(&mut self, x: i32, y: i32, radius: i32, byte: u8) {
+        // DrawLineMap/DrawBrush bypass CSurface8::Circle at radius one and
+        // write exactly the center map pixel.
+        if radius == 1 {
+            self.write(x, y, byte);
+        } else {
+            self.circle(x, y, radius, byte);
+        }
+    }
+
+    fn line(
+        &mut self,
+        mut x1: i32,
+        mut y1: i32,
+        mut x2: i32,
+        mut y2: i32,
+        radius: i32,
+        byte: u8,
+    ) {
+        if x2.wrapping_sub(x1).abs() < y2.wrapping_sub(y1).abs() {
+            if y1 > y2 {
+                std::mem::swap(&mut x1, &mut x2);
+                std::mem::swap(&mut y1, &mut y2);
+            }
+            let x_increment = if x2 > x1 { 1 } else { -1 };
+            let dy = y2.wrapping_sub(y1);
+            let dx = x2.wrapping_sub(x1).abs();
+            let mut decision = dx.wrapping_mul(2).wrapping_sub(dy);
+            let advance_both = dx.wrapping_sub(dy).wrapping_mul(2);
+            let advance_major = dx.wrapping_mul(2);
+            let mut x = x1;
+            self.stamp(x, y1, radius, byte);
+            let mut y = y1.wrapping_add(1);
+            while y <= y2 {
+                if decision >= 0 {
+                    x = x.wrapping_add(x_increment);
+                    decision = decision.wrapping_add(advance_both);
+                } else {
+                    decision = decision.wrapping_add(advance_major);
+                }
+                self.stamp(x, y, radius, byte);
+                y = y.wrapping_add(1);
+            }
+        } else {
+            if x1 > x2 {
+                std::mem::swap(&mut x1, &mut x2);
+                std::mem::swap(&mut y1, &mut y2);
+            }
+            let y_increment = if y2 > y1 { 1 } else { -1 };
+            let dx = x2.wrapping_sub(x1);
+            let dy = y2.wrapping_sub(y1).abs();
+            let mut decision = dy.wrapping_mul(2).wrapping_sub(dx);
+            let advance_both = dy.wrapping_sub(dx).wrapping_mul(2);
+            let advance_major = dy.wrapping_mul(2);
+            let mut y = y1;
+            self.stamp(x1, y, radius, byte);
+            let mut x = x1.wrapping_add(1);
+            while x <= x2 {
+                if decision >= 0 {
+                    y = y.wrapping_add(y_increment);
+                    decision = decision.wrapping_add(advance_both);
+                } else {
+                    decision = decision.wrapping_add(advance_major);
+                }
+                self.stamp(x, y, radius, byte);
+                x = x.wrapping_add(1);
+            }
+        }
+    }
+
+    fn box_fill(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, byte: u8) {
+        let (left, right) = (x1.min(x2), x1.max(x2));
+        let (top, bottom) = (y1.min(y2), y1.max(y2));
+        for y in top..=bottom {
+            for x in left..=right {
+                self.write(x, y, byte);
+            }
+        }
+    }
+}
+
 impl crate::Engine {
     /// Engine-level half of a raster change: temporarily expose the saved
     /// background under intersecting solid masks, run the landscape change,
@@ -4640,6 +4934,218 @@ impl crate::Engine {
             }
         }
         result
+    }
+
+    pub(crate) fn set_editor_landscape_mode(&mut self, mode: i32) {
+        let previous = self
+            .landscape
+            .as_ref()
+            .map(Landscape::mode)
+            .unwrap_or(LANDSCAPE_MODE_UNDEFINED);
+        let changed = self
+            .landscape
+            .as_mut()
+            .is_some_and(|landscape| landscape.set_mode(mode));
+        if !changed || previous != LANDSCAPE_MODE_EXACT || mode != LANDSCAPE_MODE_STATIC {
+            return;
+        }
+        let redraw = self.landscape.as_ref().and_then(|landscape| {
+            let state = landscape.raster_state()?;
+            Some((state.map()?, state.texmap().clone()))
+        });
+        if let Some((map, texmap)) = redraw {
+            let _ = self.redraw_retained_map_segment(
+                &map,
+                0,
+                0,
+                map.width as i32,
+                map.height as i32,
+                texmap,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_editor_landscape(
+        &mut self,
+        action: u8,
+        x: i32,
+        y: i32,
+        x2: i32,
+        y2: i32,
+        grade: i32,
+        material: &str,
+        texture: &str,
+        ift: bool,
+    ) -> bool {
+        let mode = self
+            .landscape
+            .as_ref()
+            .map(Landscape::mode)
+            .unwrap_or(LANDSCAPE_MODE_UNDEFINED);
+        if mode != LANDSCAPE_MODE_STATIC && mode != LANDSCAPE_MODE_EXACT {
+            // The native primitive switches on mode before texture lookup;
+            // Dynamic, Undefined, and corrupted unknown modes all fall
+            // through as successful no-ops without allocating a texmap slot.
+            return true;
+        }
+        let Some(byte) = self
+            .landscape
+            .as_mut()
+            .and_then(|landscape| landscape.resolve_editor_color(material, texture, ift))
+        else {
+            return false;
+        };
+
+        if mode == LANDSCAPE_MODE_STATIC {
+            let redraw = {
+                let Some(landscape) = self.landscape.as_mut() else {
+                    return false;
+                };
+                let Some(state) = landscape.raster_state_mut() else {
+                    return false;
+                };
+                let zoom = state.map_zoom();
+                if zoom <= 0 {
+                    return false;
+                }
+                let Some((width, height, indices)) = state.map_mut() else {
+                    return false;
+                };
+                let mut map = EditorMapSurface {
+                    width: width as i32,
+                    height: height as i32,
+                    bytes: indices,
+                };
+                let segment = match action {
+                    crate::control::EMDT_BRUSH => {
+                        let radius = grade.wrapping_mul(2).wrapping_div(zoom).max(1);
+                        let map_x = x / zoom;
+                        let map_y = y / zoom;
+                        map.stamp(map_x, map_y, radius, byte);
+                        (
+                            map_x.wrapping_sub(radius).wrapping_sub(1),
+                            map_y.wrapping_sub(radius).wrapping_sub(1),
+                            radius.wrapping_mul(2).wrapping_add(2),
+                            radius.wrapping_mul(2).wrapping_add(2),
+                        )
+                    }
+                    crate::control::EMDT_LINE => {
+                        let radius = grade.wrapping_mul(2).wrapping_div(zoom).max(1);
+                        let (map_x, map_y, map_x2, map_y2) =
+                            (x / zoom, y / zoom, x2 / zoom, y2 / zoom);
+                        map.line(
+                            map_x,
+                            map_y,
+                            map_x2,
+                            map_y2,
+                            radius,
+                            byte,
+                        );
+                        (
+                            map_x.min(map_x2).wrapping_sub(radius).wrapping_sub(1),
+                            map_y.min(map_y2).wrapping_sub(radius).wrapping_sub(1),
+                            map_x
+                                .wrapping_sub(map_x2)
+                                .abs()
+                                .wrapping_add(radius.wrapping_mul(2))
+                                .wrapping_add(2),
+                            map_y
+                                .wrapping_sub(map_y2)
+                                .abs()
+                                .wrapping_add(radius.wrapping_mul(2))
+                                .wrapping_add(2),
+                        )
+                    }
+                    crate::control::EMDT_RECT => {
+                        let (map_x, map_y, map_x2, map_y2) =
+                            (x / zoom, y / zoom, x2 / zoom, y2 / zoom);
+                        map.box_fill(map_x, map_y, map_x2, map_y2, byte);
+                        let left = map_x.min(map_x2);
+                        let top = map_y.min(map_y2);
+                        (
+                            left.wrapping_sub(1),
+                            top.wrapping_sub(1),
+                            map_x
+                                .wrapping_sub(map_x2)
+                                .abs()
+                                .wrapping_add(3),
+                            map_y
+                                .wrapping_sub(map_y2)
+                                .abs()
+                                .wrapping_add(3),
+                        )
+                    }
+                    _ => return true,
+                };
+                drop(map);
+                state
+                    .map()
+                    .map(|map| (map, state.texmap().clone(), segment))
+            };
+            let Some((map, texmap, (map_x, map_y, map_width, map_height))) = redraw else {
+                return false;
+            };
+            return self.redraw_retained_map_segment(
+                &map,
+                map_x,
+                map_y,
+                map_width,
+                map_height,
+                texmap,
+            );
+        }
+
+        if mode != LANDSCAPE_MODE_EXACT {
+            return false;
+        }
+        match action {
+            crate::control::EMDT_BRUSH => {
+                let bounds = RasterChangeRect::new(
+                    x.saturating_sub(grade).saturating_sub(1),
+                    y.saturating_sub(grade).saturating_sub(1),
+                    grade.saturating_mul(2).saturating_add(2),
+                    grade.saturating_mul(2).saturating_add(2),
+                );
+                self.landscape_raster_transaction(bounds, |grid, _| {
+                    grid.draw_editor_circle(x, y, grade, byte);
+                })
+                .is_some()
+            }
+            crate::control::EMDT_LINE => {
+                let left = x.min(x2).saturating_sub(grade);
+                let top = y.min(y2).saturating_sub(grade);
+                let right = x.max(x2).saturating_add(grade);
+                let bottom = y.max(y2).saturating_add(grade);
+                let bounds = RasterChangeRect::new(
+                    left,
+                    top,
+                    right.saturating_sub(left).saturating_add(1),
+                    bottom.saturating_sub(top).saturating_add(1),
+                );
+                self.landscape_raster_transaction(bounds, |grid, _| {
+                    grid.draw_editor_line(x, y, x2, y2, grade, byte);
+                })
+                .is_some()
+            }
+            crate::control::EMDT_RECT => {
+                let left = x.min(x2);
+                let top = y.min(y2);
+                let right = x.max(x2);
+                let bottom = y.max(y2);
+                let bounds = RasterChangeRect::new(
+                    left,
+                    top,
+                    right.saturating_sub(left).saturating_add(1),
+                    bottom.saturating_sub(top).saturating_add(1),
+                );
+                self.landscape_raster_transaction(bounds, |grid, _| {
+                    grid.draw_editor_box(x, y, x2, y2, byte);
+                })
+                .is_some()
+            }
+            _ => true,
+        }
     }
 
     /// FnDrawMaterialQuad/C4Landscape::DrawQuad
@@ -4827,6 +5333,89 @@ impl crate::Engine {
                 for local_x in 0..target_width {
                     let index = (local_y * synthesized_width + local_x) as usize;
                     grid.write_byte(origin.x + local_x, origin.y + local_y, bytes[index]);
+                }
+            }
+        })
+        .is_some()
+    }
+
+    /// C4Landscape::MapToLandscape for a segment of the retained editor map.
+    /// Chunk synthesis uses the full map so two-cell rim/smoother reads see
+    /// their real neighbors, while PrepareChange/SkyToLandscape and the
+    /// actual copy remain clipped to the native affected rectangle.
+    fn redraw_retained_map_segment(
+        &mut self,
+        bitmap: &lc_resources::bitmap::IndexedBitmap,
+        map_x: i32,
+        map_y: i32,
+        map_width: i32,
+        map_height: i32,
+        texmap: RuntimeTexMapState,
+    ) -> bool {
+        let Some((map_zoom, map_seed)) = self
+            .landscape
+            .as_ref()
+            .and_then(Landscape::raster_state)
+            .map(|state| (state.map_zoom(), state.map_seed()))
+        else {
+            return false;
+        };
+        let (Ok(full_width), Ok(full_height)) =
+            (i32::try_from(bitmap.width), i32::try_from(bitmap.height))
+        else {
+            return false;
+        };
+        let Some(expected_len) =
+            (full_width as usize).checked_mul(full_height as usize)
+        else {
+            return false;
+        };
+        if map_zoom <= 0
+            || full_width <= 0
+            || full_height <= 0
+            || bitmap.indices.len() != expected_len
+        {
+            return false;
+        }
+
+        // BoundBy parameters from MapToLandscape: start coordinates clamp to
+        // the final map cell, then size clamps against the remaining extent.
+        let map_x = map_x.clamp(0, full_width - 1);
+        let map_y = map_y.clamp(0, full_height - 1);
+        let map_width = map_width.clamp(0, full_width - map_x);
+        let map_height = map_height.clamp(0, full_height - map_y);
+        if map_width == 0 || map_height == 0 {
+            return true;
+        }
+        let (Some(target_x), Some(target_y), Some(target_width), Some(target_height)) = (
+            map_x.checked_mul(map_zoom),
+            map_y.checked_mul(map_zoom),
+            map_width.checked_mul(map_zoom),
+            map_height.checked_mul(map_zoom),
+        ) else {
+            return false;
+        };
+        let Some(synthesized_width) = full_width.checked_mul(map_zoom) else {
+            return false;
+        };
+        let surface = crate::chunky::synthesize_landscape(
+            &bitmap.indices,
+            full_width,
+            full_height,
+            map_zoom,
+            map_seed,
+            &texmap.shapes,
+        );
+        let bytes = surface.into_bytes();
+        let bounds = RasterChangeRect::new(target_x, target_y, target_width, target_height);
+        self.landscape_raster_transaction(bounds, move |grid, state| {
+            *state.texmap_mut() = texmap;
+            for target_local_y in 0..target_height {
+                for target_local_x in 0..target_width {
+                    let source_x = target_x + target_local_x;
+                    let source_y = target_y + target_local_y;
+                    let index = (source_y * synthesized_width + source_x) as usize;
+                    grid.write_byte(source_x, source_y, bytes[index]);
                 }
             }
         })
@@ -5144,6 +5733,8 @@ impl<'de> Deserialize<'de> for Landscape {
             width: u32,
             surface: Vec<i32>,
             #[serde(default)]
+            mode: i32,
+            #[serde(default)]
             modulation: u32,
             #[serde(default)]
             liquids: Vec<LiquidColumn>,
@@ -5205,6 +5796,7 @@ impl<'de> Deserialize<'de> for Landscape {
             Landscape::with_default_material(data.width, data.surface, data.default_solid_material)
                 .map_err(|error| D::Error::custom(error.to_string()))?;
         landscape.modulation = data.modulation;
+        landscape.mode = data.mode;
         landscape.liquids = data.liquids;
         landscape.solid_materials = data.solid_materials;
         landscape.default_liquid_material = data.default_liquid_material;
@@ -5289,7 +5881,14 @@ mod tests {
         texmap.set_default_material_entry("Earth", 7);
 
         let mut landscape = Landscape::flat(2, 4);
-        landscape.set_raster_state(LandscapeRasterState::new(10, 31337, texmap));
+        let map = lc_resources::bitmap::IndexedBitmap {
+            width: 2,
+            height: 2,
+            indices: vec![0, 7, 7 | 0x80, 0],
+        };
+        let mut raster_state = LandscapeRasterState::new(10, 31337, texmap);
+        raster_state.set_map(&map);
+        landscape.set_raster_state(raster_state);
         let serialized = serde_json::to_string(&landscape).expect("landscape serializes");
         let restored: Landscape = serde_json::from_str(&serialized).expect("state restores");
 
@@ -5297,6 +5896,7 @@ mod tests {
         let state = restored.raster_state().expect("raster state survives");
         assert_eq!(state.map_zoom(), 10);
         assert_eq!(state.map_seed(), 31337);
+        assert_eq!(state.map(), Some(map));
         assert_eq!(state.texmap().default_material_entry("earth"), Some(7));
         assert!(state.map_creator().is_none());
     }

@@ -455,6 +455,9 @@ impl RuntimeHandle {
                         )
                         .map_err(|error| error.to_string())?;
                 }
+                ControlPacket::EmDrawTool(data) => {
+                    self.engine.execute_em_draw_tool_control(&data);
+                }
                 ControlPacket::Script(data) => {
                     self.engine
                         .execute_script_control(&data, ScriptControlPolicy::replay(false))
@@ -2283,6 +2286,7 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                         ControlPacket::PlayerCommand(_) => "PlayerCommand",
                         ControlPacket::PlayerSelect(_) => "PlayerSelect",
                         ControlPacket::EmMoveObject(_) => "EMMoveObject",
+                        ControlPacket::EmDrawTool(_) => "EMDrawTool",
                         ControlPacket::Script(_) => "Script",
                         ControlPacket::MessageBoardAnswer(_) => "MessageBoardAnswer",
                         ControlPacket::CustomCommand(_) => "CustomCommand",
@@ -5009,6 +5013,36 @@ global func Step(state, frame, random)
         assert_eq!(object.state.position, crate::Vector2::new(10, 9));
         assert_eq!(object.state.velocity, crate::Vector2::ZERO);
         assert!(!object.state.mobile);
+    }
+
+    #[test]
+    fn replay_executes_em_draw_tool_before_the_frame_tick() {
+        let mut runtime = RuntimeHandle::new();
+        runtime.engine.set_landscape(crate::Landscape::flat(8, 8));
+        let controls = "[Control]\n\
+                        [IDPacket]\n\
+                        ID=177\n\
+                        [EM Draw Tool]\n\
+                        Action=0\n\
+                        Mode=3\n\
+                        ByClient=0\n";
+        runtime.control_packets.insert(
+            0,
+            parse_control_ini(controls).expect("editor draw control parses"),
+        );
+
+        runtime
+            .apply_control_packets_for_frame(0)
+            .expect("editor draw control replays");
+
+        assert_eq!(
+            runtime
+                .engine
+                .landscape()
+                .expect("fixture landscape remains")
+                .mode(),
+            crate::LANDSCAPE_MODE_EXACT
+        );
     }
 
     #[test]

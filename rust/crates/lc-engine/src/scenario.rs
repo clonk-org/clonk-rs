@@ -27,6 +27,7 @@ use crate::{
     DefinitionSpriteImage, Direction, EffectState, Engine, EngineError, EnvironmentSettings,
     FULL_CON, Landscape, LegacyCString, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings,
     RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, TeamInfo, Vector2, action::ActionSpec,
+    LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -8529,11 +8530,10 @@ fn classified_landscape(
         classifier.state.texture_names.clone(),
     ));
     landscape.refresh_all_raster_columns();
-    landscape.set_raster_state(LandscapeRasterState::new(
-        zoom,
-        map_seed,
-        classifier.state.clone(),
-    ));
+    let mut raster_state =
+        LandscapeRasterState::new(zoom, map_seed, classifier.state.clone());
+    raster_state.set_map(bitmap);
+    landscape.set_raster_state(raster_state);
 
     // Loaded water is at rest: C4MassMoverSet starts empty and movers are
     // created only by landscape CHANGES via CheckInstability, never at
@@ -8631,13 +8631,18 @@ fn load_legacy_landscape_body(
         // below stands in.
         if let Some(classifier) = classifier.take() {
             if let Ok(bitmap) = lc_resources::bitmap::IndexedBitmap::decode(&bytes) {
-                return classified_landscape(
+                let mut landscape = classified_landscape(
                     &bitmap,
                     classifier,
                     map_zoom_u32 as i32,
                     legacy_map_seed(random_seed),
-                )
-                .map(Some);
+                )?;
+                let _ = landscape.set_mode(if exact_landscape {
+                    LANDSCAPE_MODE_EXACT
+                } else {
+                    LANDSCAPE_MODE_STATIC
+                });
+                return Ok(Some(landscape));
             }
         }
         let dynamic =
@@ -8686,6 +8691,11 @@ fn load_legacy_landscape_body(
         // GBackHgt is known exactly here (map height × zoom); placement
         // searches and `Random(GBackHgt - 32)` draws bound on it.
         landscape.set_world_height(world_height);
+        let _ = landscape.set_mode(if exact_landscape {
+            LANDSCAPE_MODE_EXACT
+        } else {
+            LANDSCAPE_MODE_STATIC
+        });
         return Ok(Some(landscape));
     }
 
@@ -8738,6 +8748,7 @@ fn load_legacy_landscape_body(
             .raster_state_mut()
             .expect("classified landscapes carry raster state")
             .set_map_creator(retained_creator);
+        let _ = landscape.set_mode(LANDSCAPE_MODE_DYNAMIC);
         return Ok(Some(landscape));
     }
 
@@ -8753,6 +8764,7 @@ fn load_legacy_landscape_body(
         .max(1);
     let mut landscape = Landscape::flat(width_u32, fallback_height);
     landscape.set_world_height(fallback_height);
+    let _ = landscape.set_mode(LANDSCAPE_MODE_DYNAMIC);
     Ok(Some(landscape))
 }
 
