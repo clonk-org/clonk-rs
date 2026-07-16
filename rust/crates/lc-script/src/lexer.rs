@@ -269,6 +269,14 @@ impl<'a> Lexer<'a> {
                 '*' => {
                     if self.peek_char() == Some('*') {
                         self.bump_char();
+                        if self.peek_char() == Some('=') {
+                            self.bump_char();
+                            return Ok(Token::new(
+                                TokenKind::Symbol(Symbol::StarStarEqual),
+                                line,
+                                column,
+                            ));
+                        }
                         return Ok(Token::new(
                             TokenKind::Symbol(Symbol::StarStar),
                             line,

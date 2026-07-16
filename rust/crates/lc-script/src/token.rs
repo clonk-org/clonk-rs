@@ -170,6 +170,7 @@ pub enum Symbol {
     // Compound assignment operators
     PlusEqual,
     MinusEqual,
+    StarStarEqual,
     StarEqual,
     SlashEqual,
     PercentEqual,

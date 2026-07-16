@@ -108,6 +108,26 @@ fn exponentiation_edge_semantics_match_cpp() {
 }
 
 #[test]
+fn exponentiation_compound_assignment_updates_the_retained_reference() {
+    let mut engine = Engine::new();
+    engine
+        .load_script(
+            r#"#strict 3
+func Test() {
+    var values = [2], index = 0;
+    var result = (values[index++] **= 3);
+    return [values[0], index, result];
+}
+"#,
+        )
+        .expect("power-assignment script loads");
+    assert_eq!(
+        engine.call("Test", &[]).expect("power assignment runs"),
+        Value::Array(vec![Value::Int(8), Value::Int(1), Value::Int(8)])
+    );
+}
+
+#[test]
 fn shift_counts_are_masked_like_cpp() {
     assert_eq!(
         eval("[1 << 32, 64 >> 32, 1 << -1, 64 >> -1, -8 >> 33]"),
