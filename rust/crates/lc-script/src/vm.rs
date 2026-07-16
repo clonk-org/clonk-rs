@@ -35,12 +35,24 @@ fn maybe_grow<R>(f: impl FnOnce() -> R) -> R {
     stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, f)
 }
 
-/// String form of a value for `..` concatenation: the raw text for strings (the
-/// `Display` form quotes them), and the `Display` form for everything else.
-fn concat_string(value: &Value) -> String {
+/// C4Value::toString for `..`/`..=` (C4Value.cpp:47-65). Only strings,
+/// integers, booleans and C4IDs have a string representation here.
+fn concat_string(value: &Value) -> Option<String> {
     match value {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
+        Value::String(s) => Some(s.clone()),
+        Value::Int(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(i32::from(*value).to_string()),
+        Value::C4Id(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn concat_type_name(value: &Value) -> &'static str {
+    // C4Value's zero-data nil slot has C4V_Any type at this conversion site.
+    if matches!(value, Value::Nil) {
+        "any"
+    } else {
+        value.type_name()
     }
 }
 
@@ -3379,7 +3391,7 @@ impl<'a> Vm<'a> {
             Expr::Binary(left, BinaryOp::Concat, right) => {
                 let left = self.evaluate_tracked(left, env, depth)?;
                 let right = self.evaluate_tracked(right, env, depth)?;
-                self.eval_concat_tracked(left, right)
+                self.eval_concat_tracked(left, right, env.strict_level, "..")
             }
             Expr::Binary(left, BinaryOp::NilCoalescing, right) => {
                 let left = self.evaluate_tracked(left, env, depth)?;
@@ -3678,7 +3690,7 @@ impl<'a> Vm<'a> {
             let right = self.evaluate_tracked(value, env, depth)?;
             let left = reference.read_tracked()?;
             if matches!(operation, BinaryOp::Concat) {
-                self.eval_concat_tracked(left, right)?
+                self.eval_concat_tracked(left, right, env.strict_level, operator)?
             } else {
                 TrackedValue::runtime(self.eval_binary(
                     left.value,
@@ -3907,7 +3919,12 @@ impl<'a> Vm<'a> {
 
         match op {
             Add => self.eval_add(left, right),
-            Concat => self.eval_concat(left, right),
+            Concat => self.eval_concat(
+                left,
+                right,
+                strict,
+                display_symbol.unwrap_or(".."),
+            ),
             // Reached only via non-short-circuit paths (the Binary arm in
             // `evaluate` handles `??` before both sides run); keep the same
             // nil-only semantics.
@@ -4022,6 +4039,8 @@ impl<'a> Vm<'a> {
         &self,
         left: TrackedValue,
         right: TrackedValue,
+        strict: Option<u8>,
+        operator: &str,
     ) -> Result<TrackedValue, RuntimeError> {
         match (&left.value, &right.value) {
             (Value::Array(_), Value::Array(_)) => {
@@ -4046,7 +4065,7 @@ impl<'a> Vm<'a> {
                     },
                 };
                 identities.extend(right_identities);
-                let value = self.eval_concat(left.value, right.value)?;
+                let value = self.eval_concat(left.value, right.value, strict, operator)?;
                 Ok(TrackedValue {
                     value,
                     identity: Some(RawIdentity::Heap(Rc::new(HeapIdentity::Array(
@@ -4089,7 +4108,7 @@ impl<'a> Vm<'a> {
                         );
                     }
                 }
-                let value = self.eval_concat(left.value, right.value)?;
+                let value = self.eval_concat(left.value, right.value, strict, operator)?;
                 Ok(TrackedValue {
                     value,
                     identity: Some(RawIdentity::Heap(Rc::new(HeapIdentity::Proplist(
@@ -4098,12 +4117,46 @@ impl<'a> Vm<'a> {
                 })
             }
             _ => self
-                .eval_concat(left.value, right.value)
+                .eval_concat(left.value, right.value, strict, operator)
                 .map(TrackedValue::runtime),
         }
     }
 
-    fn eval_concat(&self, left: Value, right: Value) -> Result<Value, RuntimeError> {
+    fn eval_concat(
+        &self,
+        mut left: Value,
+        mut right: Value,
+        strict: Option<u8>,
+        operator: &str,
+    ) -> Result<Value, RuntimeError> {
+        // Below STRICT3, CheckOpPar rewrites falsey value operands to the
+        // zero-data C4V_Any slot. `..=` keeps its left reference intact, but
+        // its ordinary RHS still receives this normalization.
+        if strict.unwrap_or(0) < 3 {
+            if operator != "..=" && !left.as_bool() {
+                left = Value::Nil;
+            }
+            if !right.as_bool() {
+                right = Value::Nil;
+            }
+        }
+
+        // CheckOpPars<Any, Any, false, false> rejects nil before AB_Concat at
+        // STRICT3. For `..=` the left stack value is still a reference here,
+        // so only its RHS participates in this early check.
+        if strict.unwrap_or(0) >= 3 {
+            if operator != "..=" && matches!(left, Value::Nil) {
+                return Err(RuntimeError::new(format!(
+                    "operator \"{operator}\" left side: got nil, but expected \"any\"!"
+                )));
+            }
+            if matches!(right, Value::Nil) {
+                return Err(RuntimeError::new(format!(
+                    "operator \"{operator}\" right side: got nil, but expected \"any\"!"
+                )));
+            }
+        }
+
         match left {
             Value::Array(mut a) => match right {
                 Value::Array(b) => {
@@ -4111,8 +4164,8 @@ impl<'a> Vm<'a> {
                     Ok(Value::Array(a))
                 }
                 other => Err(RuntimeError::new(format!(
-                    "operator '..' right side: cannot concatenate array with {}",
-                    other.type_name()
+                    "operator \"{operator}\" right side: got \"{}\", but expected \"array\"!",
+                    concat_type_name(&other)
                 ))),
             },
             Value::Proplist(mut a) => match right {
@@ -4123,13 +4176,24 @@ impl<'a> Vm<'a> {
                     Ok(Value::Proplist(a))
                 }
                 other => Err(RuntimeError::new(format!(
-                    "operator '..' right side: cannot concatenate proplist with {}",
-                    other.type_name()
+                    "operator \"{operator}\" right side: got \"{}\", but expected \"map\"!",
+                    concat_type_name(&other)
                 ))),
             },
             left => {
-                let mut s = concat_string(&left);
-                s.push_str(&concat_string(&right));
+                let mut s = concat_string(&left).ok_or_else(|| {
+                    RuntimeError::new(format!(
+                        "operator \"{operator}\" left side: can not convert \"{}\" to \"string\", \"array\" or \"map\"!",
+                        concat_type_name(&left)
+                    ))
+                })?;
+                let right = concat_string(&right).ok_or_else(|| {
+                    RuntimeError::new(format!(
+                        "operator \"{operator}\" right side: can not convert \"{}\" to \"string\"!",
+                        concat_type_name(&right)
+                    ))
+                })?;
+                s.push_str(&right);
                 Ok(Value::String(s))
             }
         }
