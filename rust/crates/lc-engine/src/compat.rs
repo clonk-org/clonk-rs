@@ -2062,10 +2062,11 @@ impl HostWorldContext {
     }
 
     /// Thread state-bearing landscape operations across effect callbacks
-    /// that execute before the authoritative Engine fold. DrawMatChunks is
-    /// synchronously visible to native pixel reads; DrawMap keeps its older
-    /// deferred-pixel boundary. Texture-map allocations and DrawDefMap's
-    /// retained creator mutation are live state in both cases.
+    /// that execute before the authoritative Engine fold. DrawMatChunks and
+    /// DrawVolcanoBranch are synchronously visible to native pixel reads;
+    /// DrawMap keeps its older deferred-pixel boundary. Texture-map
+    /// allocations and DrawDefMap's retained creator mutation are live state
+    /// in both cases.
     pub(crate) fn preview_runtime_landscape_operation(&mut self, operation: &LandscapeOperation) {
         match operation {
             LandscapeOperation::DrawMap { texmap, .. }
@@ -2104,6 +2105,17 @@ impl HostWorldContext {
                     random_offsets,
                     texmap.clone(),
                 );
+            }
+            LandscapeOperation::DrawVolcanoBranch {
+                from,
+                to,
+                size,
+                material_byte,
+            } => {
+                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                    return;
+                };
+                let _ = landscape.draw_volcano_branch(*from, *to, *size, *material_byte);
             }
             LandscapeOperation::DrawDefMap {
                 texmap,
@@ -12416,6 +12428,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("DrawMap", draw_map);
     script.register_host_function("DrawMatChunks", draw_mat_chunks);
     script.register_host_function("DrawMaterialQuad", draw_material_quad);
+    script.register_host_function("DrawVolcanoBranch", draw_volcano_branch);
     script.register_host_function("ScriptGo", script_go);
     script.register_host_function("ScriptCounter", script_counter);
     script.register_host_function("goto", script_goto);
@@ -14877,6 +14890,15 @@ pub enum LandscapeOperation {
         map_seed: i32,
         random_offsets: Vec<i32>,
         texmap: crate::landscape::RuntimeTexMapState,
+    },
+    /// FnDrawVolcanoBranch's direct SetPix column interpolation
+    /// (C4Script.cpp:2500-2509). This is intentionally a raw per-pixel
+    /// writer, not a PrepareChange/FinishChange raster transaction.
+    DrawVolcanoBranch {
+        from: Vector2,
+        to: Vector2,
+        size: i32,
+        material_byte: u8,
     },
     /// FnDrawMap -> C4Landscape::DrawMap/MapToLandscape
     /// (C4Script.cpp:4851-4855; C4Landscape.cpp:2636-2668,482-510).
@@ -24858,6 +24880,69 @@ fn draw_mat_chunks(args: &[Value]) -> Result<Value, RuntimeError> {
         context.preview_draw_mat_chunks(&operation);
         context.register_landscape_operation(operation);
         Ok(Value::Int(1))
+    })
+}
+
+/// FnDrawVolcanoBranch (C4Script.cpp:2500-2509): draw the numeric material's
+/// DefaultMatTex through raw, GLOBAL SetPix calls. The callback captures the
+/// live default byte and previews the synchronous Surface8 mutation; the
+/// authoritative fold repeats only the deterministic pixel loop.
+fn draw_volcano_branch(args: &[Value]) -> Result<Value, RuntimeError> {
+    let material = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "DrawVolcanoBranch",
+        "material",
+    )?;
+    let from_x = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "DrawVolcanoBranch",
+        "from-x",
+    )?;
+    let from_y = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "DrawVolcanoBranch",
+        "from-y",
+    )?;
+    let to_x = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "DrawVolcanoBranch",
+        "to-x",
+    )?;
+    let to_y = value_to_i32(
+        args.get(4).unwrap_or(&Value::Nil),
+        "DrawVolcanoBranch",
+        "to-y",
+    )?;
+    let size = value_to_i32(
+        args.get(5).unwrap_or(&Value::Nil),
+        "DrawVolcanoBranch",
+        "size",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        let Some(material_byte) = context
+            .runtime_texmap
+            .as_ref()
+            .and_then(|texmap| texmap.default_material_entry_by_index(material))
+        else {
+            // C++'s direct material-map indexing is undefined for an invalid
+            // index. Keep script execution safe without inventing a success
+            // or failure value: the native is void in every case.
+            return Ok(Value::Nil);
+        };
+        let operation = LandscapeOperation::DrawVolcanoBranch {
+            from: Vector2::new(from_x, from_y),
+            to: Vector2::new(to_x, to_y),
+            size,
+            material_byte,
+        };
+        context.preview_draw_volcano_branch(&operation);
+        context.register_landscape_operation(operation);
+        Ok(Value::Nil)
     })
 }
 
@@ -39377,6 +39462,26 @@ impl EffectHostContext {
         self.world.solid_mask_bakes = Rc::new(self.solid_mask_bakes.clone());
     }
 
+    /// FnDrawVolcanoBranch mutates Surface8 before returning to script, so
+    /// later GBack*/GetTexture calls in the same callback must see it. The
+    /// helper intentionally leaves solid-mask bakes alone because C++ uses
+    /// raw SetPix rather than PrepareChange/FinishChange here.
+    fn preview_draw_volcano_branch(&mut self, operation: &LandscapeOperation) {
+        let LandscapeOperation::DrawVolcanoBranch {
+            from,
+            to,
+            size,
+            material_byte,
+        } = operation
+        else {
+            return;
+        };
+        let Some(landscape) = self.world.landscape.as_mut().map(Rc::make_mut) else {
+            return;
+        };
+        let _ = landscape.draw_volcano_branch(*from, *to, *size, *material_byte);
+    }
+
     /// Run FnFreeRect against this callback's private COW landscape before
     /// returning to script. C++ mutates Surface8 synchronously, so later
     /// GBack*/GetMaterial calls in the same callback must see the clear. The
@@ -44031,6 +44136,7 @@ mod tests {
         "DrawMap",
         "DrawMatChunks",
         "DrawMaterialQuad",
+        "DrawVolcanoBranch",
         "EffectCall",
         "EffectVar",
         "EliminatePlayer",
@@ -49189,6 +49295,60 @@ public func RejectConstruction(x, y, builder)
         )])
     }
 
+    fn draw_volcano_branch_world() -> HostWorldContext {
+        let mut densities = vec![0; 128];
+        densities[1] = 100;
+        densities[5] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[1] = Some("Earth".to_string());
+        material_names[5] = Some("Earth".to_string());
+        let mut texture_names = vec![None; 128];
+        texture_names[1] = Some("Rough".to_string());
+        texture_names[5] = Some("Smooth".to_string());
+        let mut texmap = crate::landscape::RuntimeTexMapState {
+            densities: densities.clone(),
+            material_names: material_names.clone(),
+            texture_names: texture_names.clone(),
+            match_texture_names: texture_names.clone(),
+            shapes: vec![None; 128],
+            materials: vec![crate::landscape::RuntimeTexMapMaterial {
+                name: "Earth".to_string(),
+                density: 100,
+                shape: crate::chunky::ChunkShape::Flat,
+            }],
+            texture_inventory: vec!["Rough".to_string(), "Smooth".to_string()],
+            default_material_entries: Vec::new(),
+        };
+        // Deliberately differ from the first Earth slot: Mat2PixColDefault
+        // must use DefaultMatTex, not a material-name scan.
+        texmap.set_default_material_entry("Earth", 5);
+        let bytes = (0..10)
+            .flat_map(|y| (0..12).map(move |x| if (x + y) % 2 == 0 { 0x80 } else { 0 }))
+            .collect::<Vec<_>>();
+        let mut landscape = Landscape::new(12, vec![10; 12]).expect("landscape builds");
+        landscape.set_world_height(10);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            12,
+            10,
+            bytes,
+            densities,
+            material_names,
+            texture_names,
+        ));
+        landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
+        landscape.refresh_all_raster_columns();
+        HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        )
+    }
+
     fn draw_map_world(
         width: u32,
         height: u32,
@@ -50068,6 +50228,190 @@ public func RejectConstruction(x, y, builder)
             }
             other => panic!("unexpected landscape operation: {other:?}"),
         }
+    }
+
+    #[test]
+    fn draw_volcano_branch_matches_cpp_pixels_ift_and_rng_order() {
+        // The C++ loop starts at (tx,ty), excludes fy, truncates interpolation
+        // toward zero, and draws [cx-size/2,cx+size/2). With these endpoints
+        // the row centers are exactly 8,6,5,4,3. The default Earth byte is 5
+        // even though slot 1 also carries Earth, and each destination's IFT
+        // bit must survive independently.
+        let args = [
+            Value::Int(0),
+            Value::Int(2),
+            Value::Int(7),
+            Value::Int(8),
+            Value::Int(2),
+            Value::Int(5),
+        ];
+        let mut world = draw_volcano_branch_world();
+        assert!(
+            world
+                .landscape
+                .as_mut()
+                .map(Rc::make_mut)
+                .is_some_and(|landscape| {
+                    landscape.set_surface32_pixel(6, 2, 0x0011_2233)
+                })
+        );
+        let initial_landscape = world.landscape_ref().expect("landscape exists").clone();
+        let object_context = HostObjectContext::new(
+            ObjectId::new(91),
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::new(30, 40),
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+        let seed = 73;
+        let mut expected_rng = LcgRng::new(seed);
+        let expected_after = expected_rng.random(1_000);
+        let guard = enter_random_context(LcgRng::new(seed));
+        let (result, outcome) = with_effect_context(
+            Some(object_context),
+            &[],
+            world,
+            92,
+            || {
+                let drew = draw_volcano_branch(&args)?;
+                let texture = get_texture(&[Value::Int(6), Value::Int(2)])?;
+                // GBackSky is caller-relative, unlike both natives above.
+                let ift_pixel = g_back_sky(&[Value::Int(6 - 30), Value::Int(2 - 40)])?;
+                let plain_pixel = g_back_sky(&[Value::Int(7 - 30), Value::Int(2 - 40)])?;
+                let after = random(&[Value::Int(1_000)])?;
+                Ok::<_, RuntimeError>((drew, texture, ift_pixel, plain_pixel, after))
+            },
+        );
+        let final_rng = guard.finish();
+
+        assert_eq!(
+            result.expect("DrawVolcanoBranch and queries succeed"),
+            (
+                Value::Nil,
+                Value::String("Smooth".to_string()),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Int(expected_after),
+            )
+        );
+        assert_eq!(final_rng, expected_rng, "the native consumes no RNG");
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::DrawVolcanoBranch {
+                from,
+                to,
+                size,
+                material_byte,
+            } => {
+                assert_eq!(*from, Vector2::new(2, 7));
+                assert_eq!(*to, Vector2::new(8, 2));
+                assert_eq!(*size, 5);
+                assert_eq!(*material_byte, 5);
+            }
+            other => panic!("unexpected landscape operation: {other:?}"),
+        }
+
+        // Effect batches replay state-bearing operations between callbacks.
+        let mut replay_world = draw_volcano_branch_world();
+        replay_world.preview_runtime_landscape_operation(&outcome.landscape[0]);
+        let (replayed, _) = with_effect_context(None, &[], replay_world, 1, || {
+            Ok::<_, RuntimeError>((
+                get_texture(&[Value::Int(6), Value::Int(2)])?,
+                g_back_sky(&[Value::Int(6), Value::Int(2)])?,
+            ))
+        });
+        assert_eq!(
+            replayed.expect("replayed callback reads landscape"),
+            (Value::String("Smooth".to_string()), Value::Bool(false))
+        );
+
+        let mut engine = crate::Engine::new();
+        engine.set_landscape(initial_landscape);
+        engine.apply_landscape_operations(outcome.landscape);
+        let landscape = engine.landscape().expect("folded landscape exists");
+        let centers = [(2, 8), (3, 6), (4, 5), (5, 4), (6, 3)];
+        for y in 0..10 {
+            for x in 0..12 {
+                let initial = if (x + y) % 2 == 0 { 0x80 } else { 0 };
+                let drawn = centers
+                    .iter()
+                    .any(|&(row, center)| row == y && x >= center - 2 && x < center + 2);
+                let expected = if drawn { 5 | (initial & 0x80) } else { initial };
+                assert_eq!(
+                    landscape.grid_byte_at(x, y),
+                    Some(expected),
+                    "C++ branch pixel ({x},{y})"
+                );
+            }
+        }
+        assert_eq!(
+            landscape.surface32_pixel_at(6, 2),
+            None,
+            "raw SetPix queues a relight over the old Surface32 override"
+        );
+    }
+
+    #[test]
+    fn draw_volcano_branch_empty_ranges_and_invalid_material_are_safe_noops() {
+        // C++ enters no inner iteration for these shapes. In particular,
+        // ty==fy must not divide by zero, and odd size 1 paints zero pixels.
+        for (from_y, to_y, size) in [(4, 4, 6), (3, 7, 6), (7, 2, 1), (7, 2, -3)] {
+            let world = draw_volcano_branch_world();
+            let initial = world.landscape_ref().expect("landscape exists").clone();
+            let args = [
+                Value::Int(0),
+                Value::Int(2),
+                Value::Int(from_y),
+                Value::Int(8),
+                Value::Int(to_y),
+                Value::Int(size),
+            ];
+            let (result, outcome) =
+                with_effect_context(None, &[], world, 1, || draw_volcano_branch(&args));
+            assert_eq!(result.expect("empty branch succeeds"), Value::Nil);
+            assert_eq!(outcome.landscape.len(), 1);
+            let mut engine = crate::Engine::new();
+            engine.set_landscape(initial.clone());
+            engine.apply_landscape_operations(outcome.landscape);
+            let actual = engine.landscape().expect("landscape exists");
+            for y in 0..10 {
+                for x in 0..12 {
+                    assert_eq!(actual.grid_byte_at(x, y), initial.grid_byte_at(x, y));
+                }
+            }
+        }
+
+        let args = [
+            Value::Int(99),
+            Value::Int(2),
+            Value::Int(7),
+            Value::Int(8),
+            Value::Int(2),
+            Value::Int(5),
+        ];
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            draw_volcano_branch_world(),
+            1,
+            || draw_volcano_branch(&args),
+        );
+        assert_eq!(result.expect("invalid material is contained"), Value::Nil);
+        assert!(outcome.landscape.is_empty());
     }
 
     #[test]

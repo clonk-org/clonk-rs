@@ -44739,6 +44739,21 @@ impl Engine {
                         texmap,
                     );
                 }
+                LandscapeOperation::DrawVolcanoBranch {
+                    from,
+                    to,
+                    size,
+                    material_byte,
+                } => {
+                    if let Some(landscape) = &mut self.landscape {
+                        let _ = landscape.draw_volcano_branch(
+                            from,
+                            to,
+                            size,
+                            material_byte,
+                        );
+                    }
+                }
                 LandscapeOperation::DrawMap {
                     origin,
                     bitmap,

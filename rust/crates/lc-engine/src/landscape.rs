@@ -933,6 +933,49 @@ impl PixelGrid {
         self.set_byte_impl(x, y, byte, true);
     }
 
+    /// FnDrawVolcanoBranch's raw C4Landscape::SetPix loop
+    /// (C4Script.cpp:2500-2509). This deliberately does not use the
+    /// PrepareChange/FinishChange transaction: each changed pixel queues its
+    /// own deferred relight, preserves the pixel's current IFT bit, and may
+    /// overwrite an active solid-mask marker exactly like SetPix.
+    fn draw_volcano_branch(
+        &mut self,
+        from: Vector2,
+        to: Vector2,
+        size: i32,
+        material_byte: u8,
+    ) -> Option<Range<usize>> {
+        let half_size = size / 2;
+        if to.y >= from.y || half_size <= 0 {
+            return None;
+        }
+
+        let denominator = to.y.wrapping_sub(from.y);
+        let mut first_column = self.width as i32;
+        let mut last_column = -1;
+        for y in to.y..from.y {
+            let center_x = from.x.wrapping_add(
+                to.x
+                    .wrapping_sub(from.x)
+                    .wrapping_mul(y.wrapping_sub(from.y))
+                    .wrapping_div(denominator),
+            );
+            let start_x = center_x.wrapping_sub(half_size);
+            let end_x = center_x.wrapping_add(half_size);
+            for x in start_x..end_x {
+                let Some(current) = self.byte_at(x, y) else {
+                    continue;
+                };
+                self.set_byte(x, y, material_byte | (current & 0x80));
+                first_column = first_column.min(x);
+                last_column = last_column.max(x);
+            }
+        }
+
+        (last_column >= first_column)
+            .then_some(first_column as usize..last_column.saturating_add(1) as usize)
+    }
+
     fn set_byte_impl(&mut self, x: i32, y: i32, byte: u8, schedule_relight: bool) {
         if let Some(slot) = self.slot(x, y) {
             let old = self.bytes[slot];
@@ -1254,6 +1297,14 @@ impl RuntimeTexMapState {
             .iter()
             .find(|(material, _)| material.eq_ignore_ascii_case(name))
             .map(|(_, slot)| *slot)
+    }
+
+    /// `Game.Material.Map[index].DefaultMatTex` for the retained material-map
+    /// order. Callers validate the index even though the original helper's
+    /// direct array access is undefined for invalid script input.
+    pub(crate) fn default_material_entry_by_index(&self, index: i32) -> Option<u8> {
+        let material = self.materials.get(usize::try_from(index).ok()?)?;
+        self.default_material_entry(&material.name)
     }
 }
 
@@ -2177,6 +2228,26 @@ impl Landscape {
             return false;
         };
         grid.set_byte(x, y, byte | (current & 0x80));
+        true
+    }
+
+    /// Apply FnDrawVolcanoBranch to the callback or authoritative Surface8.
+    /// The byte was captured from `DefaultMatTex` at script-call time so a
+    /// deferred engine fold cannot observe later texture-map mutations.
+    pub(crate) fn draw_volcano_branch(
+        &mut self,
+        from: Vector2,
+        to: Vector2,
+        size: i32,
+        material_byte: u8,
+    ) -> bool {
+        let Some(grid) = self.pixels.as_mut() else {
+            return false;
+        };
+        let changed_columns = grid.draw_volcano_branch(from, to, size, material_byte);
+        if let Some(columns) = changed_columns {
+            self.refresh_raster_columns(columns);
+        }
         true
     }
 
