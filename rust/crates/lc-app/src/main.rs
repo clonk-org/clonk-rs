@@ -6664,6 +6664,7 @@ fn seed_engine_player_info_parameters(
 ) {
     engine.set_league_name(league_name.to_vec());
     engine.replace_player_info_league_progress_data(player_infos.league_progress_data_snapshot());
+    engine.replace_player_info_league_scores(player_infos.league_scores_snapshot());
 }
 
 fn game_over_host_reference(
@@ -41050,6 +41051,7 @@ mod tests {
             round_results: Default::default(),
             league_name: Vec::new(),
             player_info_league_progress_data: Default::default(),
+            player_info_league_scores: Default::default(),
             physics: None,
             objects,
             render_order: Vec::new(),
@@ -42725,6 +42727,7 @@ mod tests {
             round_results: Default::default(),
             league_name: Vec::new(),
             player_info_league_progress_data: Default::default(),
+            player_info_league_scores: Default::default(),
             physics: None,
             objects,
             render_order: Vec::new(),
@@ -59773,6 +59776,7 @@ mod tests {
                 client_id: 0,
                 players: vec![lc_engine::ControlPlayerInfoEntry {
                     id: 41,
+                    league_score: 321,
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -59790,11 +59794,16 @@ mod tests {
                 global func WriteProgress() { return SetLeagueProgressData("data", 41); }
                 global func EmptyProgress() { return SetLeagueProgressData("", 41); }
                 global func ClearProgress() { return SetLeagueProgressData(nil, 41); }
+                global func ReadLeagueScore() { return SetMaxPlayer(GetLeagueScore(41)); }
                 global func SetLimit() { return SetMaxPlayer(5); }
                 "#,
                 true,
             )
             .expect("fixture script installs");
+        app.engine
+            .call_scenario_script_function("ReadLeagueScore", Vec::new())
+            .expect("retained PlayerInfo league score is visible");
+        assert_eq!(app.engine.max_players(), Some(321));
 
         app.engine
             .call_scenario_script_function("WriteProgress", Vec::new())

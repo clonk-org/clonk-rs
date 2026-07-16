@@ -1300,6 +1300,23 @@ impl ControlPlayerInfoRegistry {
         entries.into_iter().collect()
     }
 
+    /// Deterministic script-visible projection of every retained
+    /// `C4PlayerInfo` row's league score.
+    ///
+    /// `GetPlayerInfoByID` returns the first matching row in packet storage
+    /// order. Preserve that rule for duplicate IDs and sort the projection by
+    /// ID for deterministic engine bootstrap. A score of zero is a retained
+    /// value, not an absent entry.
+    pub fn league_scores_snapshot(&self) -> Vec<(i32, i32)> {
+        let mut entries = BTreeMap::new();
+        for player in self.clients.iter().flat_map(|client| &client.players) {
+            if player.id != 0 {
+                entries.entry(player.id).or_insert(player.league_score);
+            }
+        }
+        entries.into_iter().collect()
+    }
+
     pub fn client_id_for_info(&self, info_id: i32) -> Option<i32> {
         self.clients.iter().find_map(|client| {
             client
@@ -2059,6 +2076,34 @@ mod tests {
         assert!(registry.set_league_progress_data(3, None));
         assert_eq!(registry.league_progress_data_snapshot()[1], (3, None));
         assert!(!registry.set_league_progress_data(99, Some(b"missing".to_vec())));
+    }
+
+    #[test]
+    fn league_scores_snapshot_is_sorted_and_keeps_first_duplicate_and_zero() {
+        let mut first_nine = player(9);
+        first_nine.league_score = 90;
+        let five_with_zero = player(5);
+        let mut duplicate_nine = player(9);
+        duplicate_nine.league_score = 900;
+        let mut two = player(2);
+        two.league_score = -20;
+
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![first_nine, five_with_zero],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 4,
+            players: vec![duplicate_nine, two],
+            ..Default::default()
+        });
+
+        assert_eq!(
+            registry.league_scores_snapshot(),
+            vec![(2, -20), (5, 0), (9, 90)]
+        );
     }
 
     #[test]

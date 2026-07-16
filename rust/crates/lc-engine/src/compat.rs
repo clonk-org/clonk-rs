@@ -1279,6 +1279,9 @@ pub struct HostWorldContext {
     /// A missing key is an unknown info, `None` is a null StdStrBuf, and
     /// `Some([])` is its distinct allocated-empty state.
     player_info_league_progress_data: Rc<BTreeMap<i32, Option<Vec<u8>>>>,
+    /// Sparse C4PlayerInfo::iLeagueScore overrides keyed by player-info ID.
+    /// Known infos absent from this map retain the native default score zero.
+    player_info_league_scores: Rc<BTreeMap<i32, i32>>,
     /// Complete live `Game.Teams` configuration. Empty team lists cannot be
     /// used to infer these flags because present-empty and missing Teams.txt
     /// take different C++ paths.
@@ -1411,6 +1414,7 @@ impl Default for HostWorldContext {
             game_tick_delay_revision: Rc::new(Cell::new(0)),
             league_name: Rc::new(Vec::new()),
             player_info_league_progress_data: Rc::new(BTreeMap::new()),
+            player_info_league_scores: Rc::new(BTreeMap::new()),
             team_configuration: TeamConfiguration::default(),
             network_game: false,
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
@@ -1651,6 +1655,7 @@ impl HostWorldContext {
             game_tick_delay_revision: Rc::new(Cell::new(0)),
             league_name: Rc::new(Vec::new()),
             player_info_league_progress_data: Rc::new(BTreeMap::new()),
+            player_info_league_scores: Rc::new(BTreeMap::new()),
             team_configuration: TeamConfiguration::default(),
             network_game: false,
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
@@ -1798,6 +1803,24 @@ impl HostWorldContext {
         }
         Rc::make_mut(&mut self.player_info_league_progress_data).insert(id, data);
         true
+    }
+
+    pub(crate) fn with_league_scores(mut self, scores: Rc<BTreeMap<i32, i32>>) -> Self {
+        let mut known = self.player_info_ids.as_ref().clone();
+        known.extend(scores.keys().copied().filter(|id| *id > 0));
+        self.player_info_ids = Rc::new(known);
+        self.player_info_league_scores = Rc::new(
+            scores
+                .iter()
+                .filter_map(|(&id, &score)| (id > 0 && score != 0).then_some((id, score)))
+                .collect(),
+        );
+        self
+    }
+
+    fn player_info_league_score(&self, id: i32) -> Option<i32> {
+        (id >= 1 && self.player_info_ids.contains(&id))
+            .then(|| self.player_info_league_scores.get(&id).copied().unwrap_or(0))
     }
 
     pub(crate) fn with_teams(mut self, teams: Rc<Vec<TeamInfo>>) -> Self {
@@ -10350,6 +10373,30 @@ fn get_league(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetLeagueScore (C4Script.cpp:5926-5935): return the exact signed score
+/// stored on a persistent C4PlayerInfo. This lookup is independent of both
+/// the display league name and `C4GameParameters::isLeague`.
+fn get_league_score(args: &[Value]) -> Result<Value, RuntimeError> {
+    // Typed C4Aul parameter conversion precedes context and ID validation.
+    let player_info_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetLeagueScore",
+        "player info ID",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        Ok(context
+            .world
+            .player_info_league_score(player_info_id)
+            .map(Value::Int)
+            .unwrap_or(Value::Nil))
+    })
+}
+
 /// FnGetLeagueProgressData (C4Script.cpp:2869-2875): resolve the exact
 /// persistent C4PlayerInfo row, but only when Game.Parameters.League is set.
 fn get_league_progress_data(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -12646,6 +12693,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("LoadScenarioSection", load_scenario_section);
     script.register_host_function("GetLeague", get_league);
     script.register_host_function("GetLeagueProgressData", get_league_progress_data);
+    script.register_host_function("GetLeagueScore", get_league_score);
     script.register_host_function("SetLeagueProgressData", set_league_progress_data);
     script.register_host_function("SetLeaguePerformance", set_league_performance);
     script.register_host_function("DoScore", do_score);
@@ -44680,6 +44728,7 @@ mod tests {
         "GetKiller",
         "GetLeague",
         "GetLeagueProgressData",
+        "GetLeagueScore",
         "GetLength",
         "GetMagicEnergy",
         "GetMass",
@@ -45775,6 +45824,121 @@ public func Apply(int active, int zero_score, int retired, int runtime_number)
     }
 
     #[test]
+    fn get_league_score_matches_typed_id_lookup_and_signed_score_semantics() {
+        let error = get_league_score(&[Value::String("not an int".into())])
+            .expect_err("typed ID conversion precedes context and lookup gates");
+        assert!(error.message().contains("GetLeagueScore"));
+        assert!(error.message().contains("expected integer"));
+        assert_eq!(
+            get_league_score(&[Value::Int(43)]).expect("missing context returns nil"),
+            Value::Nil
+        );
+
+        let world = HostWorldContext::default().with_league_scores(Rc::new(BTreeMap::from([
+            (-1, 700),
+            (0, 600),
+            (1, 17),
+            (41, 0),
+            (43, 238),
+            (57, -19),
+        ])));
+        assert!(
+            !world.league_name_configured() && !world.league_game,
+            "GetLeagueScore must not require either league gate"
+        );
+        assert_eq!(
+            world.player_info_league_scores.as_ref(),
+            &BTreeMap::from([(1, 17), (43, 238), (57, -19)]),
+            "zero is represented by a known ID without a score override"
+        );
+
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                get_league_score(&[])?,
+                get_league_score(&[Value::Int(-1)])?,
+                get_league_score(&[Value::Int(0)])?,
+                get_league_score(&[Value::Int(99)])?,
+                get_league_score(&[Value::Int(41)])?,
+                get_league_score(&[Value::Int(43)])?,
+                get_league_score(&[Value::Int(57)])?,
+                get_league_score(&[Value::Bool(true)])?,
+            ]))
+        });
+        assert_eq!(
+            result.expect("league-score lookups succeed"),
+            Value::Array(vec![
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Int(0),
+                Value::Int(238),
+                Value::Int(-19),
+                Value::Int(17),
+            ])
+        );
+        assert!(outcome.player_commands.is_empty(), "getter emits no controls");
+    }
+
+    #[test]
+    fn get_league_score_uses_engine_projection_and_survives_exact_save_boundaries() {
+        let mut engine = crate::Engine::with_seed(0);
+        for (number, player_info_id) in [(7, 41), (8, 43)] {
+            engine
+                .register_player(
+                    crate::PlayerConfig::new(number, format!("Player {number}"))
+                        .with_player_info_id(player_info_id),
+                )
+                .expect("player registers");
+        }
+        engine.replace_player_info_league_progress_data([
+            (41, None),
+            (43, None),
+            (57, None),
+        ]);
+        engine.replace_player_info_league_scores([(41, 238), (43, 0), (57, -19)]);
+
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.player_info_league_scores,
+            BTreeMap::from([(41, 238), (57, -19)]),
+            "score zero remains the sparse serialized default"
+        );
+        let (live, _) = with_effect_context(None, &[], engine.host_world_context(), 1, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                get_league_score(&[Value::Int(41)])?,
+                get_league_score(&[Value::Int(43)])?,
+                get_league_score(&[Value::Int(57)])?,
+            ]))
+        });
+        assert_eq!(
+            live.expect("live engine projection is queryable"),
+            Value::Array(vec![Value::Int(238), Value::Int(0), Value::Int(-19)])
+        );
+
+        let state = crate::EngineState::from_snapshot(&snapshot);
+        assert_eq!(
+            state.player_info_league_scores.as_ref(),
+            Some(&BTreeMap::from([(41, 238)])),
+            "exact saves retain joined infos and discard unjoined retained rows"
+        );
+        let mut restored = crate::Engine::with_seed(1);
+        restored.restore_state(&state).expect("state restores");
+        let (after_restore, _) =
+            with_effect_context(None, &[], restored.host_world_context(), 1, || {
+                Ok::<_, RuntimeError>(Value::Array(vec![
+                    get_league_score(&[Value::Int(41)])?,
+                    get_league_score(&[Value::Int(43)])?,
+                    get_league_score(&[Value::Int(57)])?,
+                ]))
+            });
+        assert_eq!(
+            after_restore.expect("restored engine projection is queryable"),
+            Value::Array(vec![Value::Int(238), Value::Int(0), Value::Nil])
+        );
+    }
+
+    #[test]
     fn set_league_progress_data_preserves_native_types_bytes_and_lifecycle() {
         let strict_script = r#"#strict 3
 public func RoundTrip(int id, string data)
@@ -46163,7 +46327,7 @@ public func Probe()
         let scenario = r#"
 global func PreInitializePlayer(int player)
 {
-    CreateObject(MARK, GetLength(GetLeagueProgressData(41)), 0, player);
+    CreateObject(MARK, GetLength(GetLeagueProgressData(41)), GetLeagueScore(41), player);
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
@@ -46181,6 +46345,7 @@ global func PreInitializePlayer(int player)
         let info = crate::ControlPlayerInfoEntry {
             name: crate::LegacyCString::from_bytes(b"Player".to_vec()).expect("valid name"),
             id: 41,
+            league_score: 123,
             league_progress_data: crate::LegacyCString::from_bytes(b"join-data".to_vec())
                 .expect("valid progress data"),
             ..Default::default()
@@ -46209,6 +46374,7 @@ global func PreInitializePlayer(int player)
             snapshot.player_info_league_progress_data.get(&41),
             Some(&Some(b"join-data".to_vec()))
         );
+        assert_eq!(snapshot.player_info_league_scores.get(&41), Some(&123));
         let marker = snapshot
             .objects
             .iter()
@@ -46217,6 +46383,10 @@ global func PreInitializePlayer(int player)
         assert_eq!(
             marker.position.x, 9,
             "getter is visible before ScenarioInit"
+        );
+        assert_eq!(
+            marker.position.y, 123,
+            "league score from the joined PlayerInfo is visible before ScenarioInit"
         );
     }
 

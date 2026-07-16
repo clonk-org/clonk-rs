@@ -1460,6 +1460,9 @@ struct ControlJoinPlayerSemantics {
     scenario_init: bool,
     no_elimination_check: bool,
     extra_id: Option<DefinitionId>,
+    /// Authoritative C4PlayerInfo league score. Generic/synthetic joins use
+    /// None so they do not overwrite a preseeded retained PlayerInfo row.
+    league_score: Option<i32>,
     league_progress_data: Option<Vec<u8>>,
 }
 
@@ -1470,6 +1473,7 @@ impl Default for ControlJoinPlayerSemantics {
             scenario_init: true,
             no_elimination_check: false,
             extra_id: None,
+            league_score: None,
             league_progress_data: None,
         }
     }
@@ -1485,6 +1489,7 @@ impl From<&ControlPlayerInfoEntry> for ControlJoinPlayerSemantics {
             scenario_init: !info.no_scenario_init(),
             no_elimination_check: info.no_elimination_check(),
             extra_id,
+            league_score: Some(info.league_score),
             league_progress_data: (!info.league_progress_data_is_null
                 || !info.league_progress_data.is_empty())
             .then(|| info.league_progress_data.as_bytes().to_vec()),
@@ -7971,6 +7976,10 @@ pub struct SimulationSnapshot {
     /// empty and must remain distinguishable for script return values.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub player_info_league_progress_data: BTreeMap<i32, Option<Vec<u8>>>,
+    /// Nonzero C4PlayerInfo league-score overrides keyed by exact info ID.
+    /// Known rows absent from this map have the serialized/default score 0.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub player_info_league_scores: BTreeMap<i32, i32>,
     #[serde(default)]
     pub physics: Option<PhysicsSettings>,
     pub objects: Vec<ObjectSnapshot>,
@@ -8182,6 +8191,10 @@ pub struct EngineState {
     /// the app/control registry projection for older Rust state files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub player_info_league_progress_data: Option<BTreeMap<i32, Option<Vec<u8>>>>,
+    /// Saved nonzero C4PlayerInfo league-score overrides. None preserves the
+    /// app/control-registry projection when restoring older Rust states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_info_league_scores: Option<BTreeMap<i32, i32>>,
     /// Saved `Game.Parameters.UseFairCrew`. Older Rust states predate this
     /// field and resume with the standalone engine's enabled default.
     #[serde(default = "default_use_fair_crew")]
@@ -8400,6 +8413,12 @@ impl EngineState {
             .filter(|(id, _)| joined_player_info_ids.contains(id))
             .map(|(&id, data)| (id, Some(data.clone().unwrap_or_default())))
             .collect();
+        let saved_player_info_league_scores = snapshot
+            .player_info_league_scores
+            .iter()
+            .filter(|(id, score)| joined_player_info_ids.contains(id) && **score != 0)
+            .map(|(&id, &score)| (id, score))
+            .collect();
         let mut round_results = snapshot.round_results.clone();
         round_results.prepare_for_save();
 
@@ -8409,6 +8428,7 @@ impl EngineState {
             max_players: None,
             league_name: Some(snapshot.league_name.clone()),
             player_info_league_progress_data: Some(saved_player_info_league_progress_data),
+            player_info_league_scores: Some(saved_player_info_league_scores),
             use_fair_crew: default_use_fair_crew(),
             fair_crew_strength: default_fair_crew_strength(),
             fair_crew_forced: None,
@@ -14123,6 +14143,9 @@ pub struct Engine {
     league_name: Rc<Vec<u8>>,
     /// All retained C4PlayerInfo progress buffers, keyed by persistent ID.
     player_info_league_progress_data: Rc<BTreeMap<i32, Option<Vec<u8>>>>,
+    /// Sparse nonzero C4PlayerInfo league scores. Known IDs are tracked by
+    /// the progress projection/player list; an absent score is exactly 0.
+    player_info_league_scores: Rc<BTreeMap<i32, i32>>,
     /// Whether this process owns authoritative control input. Offline games
     /// and network hosts do; clients and replay consumers do not.
     control_host: bool,
@@ -16196,6 +16219,7 @@ impl Engine {
             league_game: false,
             league_name: Rc::new(Vec::new()),
             player_info_league_progress_data: Rc::new(BTreeMap::new()),
+            player_info_league_scores: Rc::new(BTreeMap::new()),
             control_host: true,
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             player_info_league_progress_updates: Vec::new(),
@@ -16732,6 +16756,7 @@ impl Engine {
                 at_client_name,
                 runtime_control,
                 semantics.no_elimination_check,
+                semantics.league_score,
                 semantics.league_progress_data.as_deref(),
             )?;
             return Ok(JoinPlayerOutcome::AwaitingTeamSelection { number });
@@ -16742,6 +16767,7 @@ impl Engine {
             &at_client_name,
             runtime_control,
             semantics.no_elimination_check,
+            semantics.league_score,
             semantics.league_progress_data.as_deref(),
         );
         if let Some(player) = self.players.get_mut(&number) {
@@ -16792,6 +16818,7 @@ impl Engine {
             PlayerRuntimeControl::NONE,
             false,
             None,
+            None,
         )
     }
 
@@ -16802,6 +16829,7 @@ impl Engine {
         at_client_name: String,
         runtime_control: PlayerRuntimeControl,
         no_elimination_check: bool,
+        league_score: Option<i32>,
         league_progress_data: Option<&[u8]>,
     ) -> Result<i32, EngineError> {
         let number = self.register_joining_player(
@@ -16810,6 +16838,7 @@ impl Engine {
             &at_client_name,
             runtime_control,
             no_elimination_check,
+            league_score,
             league_progress_data,
         );
         self.player_mut(number)?
@@ -16948,6 +16977,7 @@ impl Engine {
         at_client_name: &str,
         runtime_control: PlayerRuntimeControl,
         no_elimination_check: bool,
+        league_score: Option<i32>,
         league_progress_data: Option<&[u8]>,
     ) -> i32 {
         // C4PlayerList::GetFreeNumber: lowest unused player number.
@@ -16960,6 +16990,14 @@ impl Engine {
         );
         let player_info_id = self.assign_player_info_id(config.player_info_id);
         if player_info_id != 0 {
+            if let Some(score) = league_score {
+                let scores = Rc::make_mut(&mut self.player_info_league_scores);
+                if score == 0 {
+                    scores.remove(&player_info_id);
+                } else {
+                    scores.insert(player_info_id, score);
+                }
+            }
             let progress_data = Rc::make_mut(&mut self.player_info_league_progress_data);
             if let Some(bytes) = league_progress_data {
                 progress_data.insert(player_info_id, Some(bytes.to_vec()));
@@ -19570,6 +19608,26 @@ impl Engine {
         self.player_info_league_progress_data = Rc::new(progress_data);
     }
 
+    /// Replace the retained `C4PlayerInfo::iLeagueScore` projection. Score
+    /// zero is the serialized default and is stored sparsely; PlayerInfo row
+    /// existence remains authoritative in the progress/active-player maps.
+    pub fn replace_player_info_league_scores(
+        &mut self,
+        entries: impl IntoIterator<Item = (i32, i32)>,
+    ) {
+        let mut scores = BTreeMap::new();
+        for (id, score) in entries.into_iter().filter(|(id, _)| *id != 0) {
+            // GetPlayerInfoByID resolves the first row when malformed input
+            // contains duplicate IDs; preserve that storage-order rule.
+            scores.entry(id).or_insert(score);
+        }
+        if let Some(maximum_id) = scores.keys().next_back().copied() {
+            self.last_player_info_id = self.last_player_info_id.max(maximum_id);
+        }
+        scores.retain(|_, score| *score != 0);
+        self.player_info_league_scores = Rc::new(scores);
+    }
+
     /// Close the process-local query input and build its synchronized answer
     /// packet. This is the `MarkMessageBoardQueryAnswered` step performed by
     /// C4ChatInputDialog before the queued control executes.
@@ -20282,6 +20340,7 @@ impl Engine {
             Rc::clone(&self.league_name),
             Rc::clone(&self.player_info_league_progress_data),
         )
+        .with_league_scores(Rc::clone(&self.player_info_league_scores))
         .with_movement_solid_masks(self.ocf_solid_mask_overlay())
         .with_definition_order(Rc::clone(&self.runtime_definition_order))
         .with_color_by_owner_definitions(
@@ -27835,6 +27894,7 @@ impl Engine {
                 .player_info_league_progress_data
                 .as_ref()
                 .clone(),
+            player_info_league_scores: self.player_info_league_scores.as_ref().clone(),
             physics: Some(self.physics),
             objects,
             render_order: self.exec_list.clone(),
@@ -28108,6 +28168,12 @@ impl Engine {
             .filter(|(id, _)| joined_player_info_ids.contains(id))
             .map(|(&id, data)| (id, Some(data.clone().unwrap_or_default())))
             .collect();
+        let saved_player_info_league_scores = self
+            .player_info_league_scores
+            .iter()
+            .filter(|(id, score)| joined_player_info_ids.contains(id) && **score != 0)
+            .map(|(&id, &score)| (id, score))
+            .collect();
         let mut round_results = self.round_results.clone();
         round_results.prepare_for_save();
 
@@ -28117,6 +28183,7 @@ impl Engine {
             max_players: self.max_players,
             league_name: Some(self.league_name.as_ref().clone()),
             player_info_league_progress_data: Some(saved_player_info_league_progress_data),
+            player_info_league_scores: Some(saved_player_info_league_scores),
             use_fair_crew: self.use_fair_crew,
             fair_crew_strength: self.fair_crew_strength,
             fair_crew_forced: Some(self.fair_crew_forced),
@@ -28202,6 +28269,15 @@ impl Engine {
                             Some(legacy_c_string_bytes(data.clone().unwrap_or_default())),
                         )
                     })
+                    .collect(),
+            );
+        }
+        if let Some(scores) = &state.player_info_league_scores {
+            self.player_info_league_scores = Rc::new(
+                scores
+                    .iter()
+                    .filter(|(id, score)| **id != 0 && **score != 0)
+                    .map(|(&id, &score)| (id, score))
                     .collect(),
             );
         }
@@ -28748,6 +28824,13 @@ impl Engine {
             )
             .max(
                 self.player_info_league_progress_data
+                    .keys()
+                    .next_back()
+                    .copied()
+                    .unwrap_or(0),
+            )
+            .max(
+                self.player_info_league_scores
                     .keys()
                     .next_back()
                     .copied()
@@ -49085,6 +49168,14 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 .collect(),
         ),
     )
+    .with_league_scores(Rc::new(
+        snapshot
+            .player_info_league_scores
+            .iter()
+            .filter(|(id, score)| **id != 0 && **score != 0)
+            .map(|(&id, &score)| (id, score))
+            .collect(),
+    ))
 }
 
 fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {

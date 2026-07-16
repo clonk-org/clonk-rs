@@ -732,6 +732,7 @@ mod tests {
             round_results: Default::default(),
             league_name: Vec::new(),
             player_info_league_progress_data: Default::default(),
+            player_info_league_scores: Default::default(),
             physics: None,
             objects,
             render_order: Vec::new(),
