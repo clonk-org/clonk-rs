@@ -13,10 +13,16 @@ fn evaluate(strict_level: u8, body: &str) -> Value {
 }
 
 #[test]
-fn get_type_of_zero_literals_matches_cpp_strictness_vectors() {
-    let body = "var x = 0; var y = false; return [GetType(0), GetType(false), GetType(x), GetType(y)];";
+fn get_type_of_falsy_values_matches_cpp_strictness_vectors() {
+    // The first four values are already nil below strict 3 because of C++
+    // literal handling. The computed Int(0)/Bool(false) pair stays concrete
+    // until FnGetType applies its caller-strictness rule.
+    let body = "var x = 0; var y = false; return [GetType(0), GetType(false), GetType(x), GetType(y), GetType(1 - 1), GetType(1 == 2), GetType(nil)];";
 
     let legacy = Value::Array(vec![
+        Value::Int(0),
+        Value::Int(0),
+        Value::Int(0),
         Value::Int(0),
         Value::Int(0),
         Value::Int(0),
@@ -31,6 +37,9 @@ fn get_type_of_zero_literals_matches_cpp_strictness_vectors() {
             Value::Int(2),
             Value::Int(1),
             Value::Int(2),
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(0),
         ])
     );
 }

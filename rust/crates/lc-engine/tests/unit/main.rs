@@ -48202,8 +48202,8 @@ func Probe(target) {
                 .snapshot()
                 .object(target)
                 .map(|object| object.plr_view_range),
-            Some(66),
-            "a global call without an object returns integer 0 before the explicit-target write"
+            Some(77),
+            "strict-2 GetType reports C4V_Any for the falsy integer result"
         );
         Ok(())
     }

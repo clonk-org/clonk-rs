@@ -14961,7 +14961,21 @@ fn get_type(args: &[Value]) -> Result<Value, RuntimeError> {
         return Err(RuntimeError::new("GetType expects 1 argument: value"));
     }
 
-    let type_code = match &args[0] {
+    // FnGetType (C4Script.cpp:3795-3799): a falsy value reports C4V_Any
+    // only when there is a script caller below #strict 3. The caller's
+    // declaring script supplies CalledWithStrictNil; direct native entry
+    // has no Caller and therefore keeps the concrete type.
+    let legacy_script_caller = match lc_script::caller_origin_strictness() {
+        lc_script::HostCallerStrictness::NoCaller => false,
+        lc_script::HostCallerStrictness::NonStrict => true,
+        lc_script::HostCallerStrictness::Strict(level) => level < 3,
+    };
+    let value = &args[0];
+    if legacy_script_caller && !value.as_bool() {
+        return Ok(Value::Int(C4V_ANY));
+    }
+
+    let type_code = match value {
         Value::Int(_) => C4V_INT,
         Value::Bool(_) => C4V_BOOL,
         Value::String(_) => C4V_STRING,
@@ -51550,8 +51564,18 @@ public func Open()
             Value::Int(C4V_INT)
         );
         assert_eq!(
+            get_type(&[Value::Int(0)]).expect("direct GetType succeeds"),
+            Value::Int(C4V_INT),
+            "without cthr->Caller, falsy values retain their concrete type"
+        );
+        assert_eq!(
             get_type(&[Value::Bool(true)]).expect("GetType succeeds"),
             Value::Int(C4V_BOOL)
+        );
+        assert_eq!(
+            get_type(&[Value::Bool(false)]).expect("direct GetType succeeds"),
+            Value::Int(C4V_BOOL),
+            "without cthr->Caller, falsy values retain their concrete type"
         );
         assert_eq!(
             get_type(&[Value::String("Hi".into())]).expect("GetType succeeds"),
