@@ -27,6 +27,25 @@ func Ok() { return 1; }
 }
 
 #[test]
+fn c4_comment_whitespace_edges_raw_newline_is_confined_to_its_function() {
+    let source = "func Broken() { return \"a\nb\"; }\nfunc Ok() { return 7; }";
+    let script = Script::compile(source).expect("raw string newline is recoverable");
+    assert_eq!(script.parse_diagnostics().len(), 1);
+    assert_eq!(script.parse_diagnostics()[0].message(), "string not closed");
+
+    let mut engine = Engine::new();
+    engine.add_script(script);
+    assert_eq!(
+        engine.call("Ok", &[]).expect("later function survives"),
+        Value::Int(7)
+    );
+    let error = engine
+        .call("Broken", &[])
+        .expect_err("broken function retains its parse-error sentinel");
+    assert!(error.to_string().contains("string not closed"), "{error}");
+}
+
+#[test]
 fn unknown_escape_warns_without_quarantining_the_function() {
     let script = Script::compile(
         r#"

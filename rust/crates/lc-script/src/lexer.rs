@@ -543,11 +543,9 @@ impl<'a> Lexer<'a> {
                 self.bump_char();
             }
         }
-        Err(ParseError::new(
-            "unterminated block comment",
-            self.line,
-            self.column,
-        ))
+        // C4Aul's AdvanceSpaces reaches the source NUL while still in a
+        // block comment and reports ordinary EOF, not a lexer error.
+        Ok(())
     }
 
     fn lex_identifier(
@@ -798,8 +796,12 @@ impl<'a> Lexer<'a> {
                     self.handle_string_overflow(&mut warned_too_long, char_line, char_column)?;
                 }
                 '\r' | '\n' => {
+                    // Leave recovery after the dangling closing quote. If it
+                    // were tokenized as a new opener, it could swallow this
+                    // function's brace and the next top-level declaration.
+                    self.skip_string_remainder();
                     return Err(ParseError::new(
-                        "newline in string literal",
+                        "string not closed",
                         char_line,
                         char_column,
                     ));
@@ -885,7 +887,7 @@ impl<'a> Lexer<'a> {
         if self.strict_level >= 3 {
             // Once the C++ buffer is full, escape handling is bypassed: the
             // first following quote closes the token even after a backslash.
-            self.skip_overlong_string_remainder();
+            self.skip_string_remainder();
             return Err(error);
         }
         if !*warned {
@@ -895,7 +897,7 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
-    fn skip_overlong_string_remainder(&mut self) {
+    fn skip_string_remainder(&mut self) {
         while let Some((_, ch, _, _)) = self.bump_char() {
             if ch == '"' {
                 break;
@@ -1227,6 +1229,23 @@ mod tests {
     }
 
     #[test]
+    fn c4_comment_whitespace_edges_cr_ends_line_comment() {
+        let kinds = lex_all("// comment\rvar x;\n")
+            .expect("carriage return ends the line comment")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Keyword(Keyword::Var),
+                TokenKind::Identifier("x".to_string()),
+                TokenKind::Symbol(Symbol::Semicolon),
+            ]
+        );
+    }
+
+    #[test]
     fn skips_block_comments() {
         let source = "var x = 1; /* this is\na block comment */ var y = 2;";
         let tokens = lex_all(source).unwrap();
@@ -1235,6 +1254,46 @@ mod tests {
             .filter(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Var)))
             .count();
         assert_eq!(var_count, 2);
+    }
+
+    #[test]
+    fn c4_comment_whitespace_edges_unterminated_block_comment_is_eof() {
+        let kinds = lex_all("var x; /* open")
+            .expect("an open block comment at EOF is tolerated")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Keyword(Keyword::Var),
+                TokenKind::Identifier("x".to_string()),
+                TokenKind::Symbol(Symbol::Semicolon),
+            ]
+        );
+    }
+
+    #[test]
+    fn c4_comment_whitespace_edges_raw_newline_in_string_errors() {
+        let error = lex_all("\"a\nb\"").expect_err("raw newline must not extend a string");
+        assert_eq!(error.message(), "string not closed");
+    }
+
+    #[test]
+    fn c4_comment_whitespace_edges_control_byte_is_whitespace() {
+        let kinds = lex_all("var\u{7}x;")
+            .expect("C0 control bytes are C4Aul whitespace")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Keyword(Keyword::Var),
+                TokenKind::Identifier("x".to_string()),
+                TokenKind::Symbol(Symbol::Semicolon),
+            ]
+        );
     }
 
     #[test]
