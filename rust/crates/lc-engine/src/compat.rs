@@ -14240,7 +14240,10 @@ pub(crate) fn enter_random_context(rng: LcgRng) -> RandomContextGuard {
 
 const LEGACY_DEFAULT_MESSAGE_COLOR: u32 = 0x00ff_ffff;
 
-fn value_to_data_string(value: &Value) -> String {
+fn value_to_data_string_with_context(
+    value: &Value,
+    context: Option<&EffectHostContext>,
+) -> String {
     match value {
         Value::Nil => "nil".to_string(),
         Value::Int(i) => i.to_string(),
@@ -14248,11 +14251,28 @@ fn value_to_data_string(value: &Value) -> String {
         Value::Bool(false) => "false".to_string(),
         Value::String(text) => format!("\"{text}\""),
         Value::C4Id(id) => lc_script::c4_id_text(id),
-        Value::Object(id) => format!("<object {id}>"),
+        Value::Object(id) => {
+            let target = ObjectId::new(*id);
+            let Some((context, object)) = context
+                .and_then(|context| context.get_world_object(target).map(|object| (context, object)))
+                .filter(|(_, object)| object.status() != ObjectStatus::Deleted)
+            else {
+                return id.to_string();
+            };
+            let name = context
+                .object_effective_name(target)
+                .unwrap_or_else(|| object.definition_id().to_string());
+            let rendered = format!("{name} #{id}");
+            if object.status() == ObjectStatus::Normal {
+                rendered
+            } else {
+                format!("{{{rendered}}}")
+            }
+        }
         Value::Array(values) => {
             let inner = values
                 .iter()
-                .map(value_to_data_string)
+                .map(|value| value_to_data_string_with_context(value, context))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("[{inner}]")
@@ -14266,8 +14286,8 @@ fn value_to_data_string(value: &Value) -> String {
                     .map(|(key, value)| {
                         format!(
                             "{} = {}",
-                            value_to_data_string(key),
-                            value_to_data_string(value)
+                            value_to_data_string_with_context(key, context),
+                            value_to_data_string_with_context(value, context)
                         )
                     })
                     .collect::<Vec<_>>()
@@ -14276,6 +14296,13 @@ fn value_to_data_string(value: &Value) -> String {
             }
         }
     }
+}
+
+fn value_to_data_string(value: &Value) -> String {
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        value_to_data_string_with_context(value, borrow.as_ref())
+    })
 }
 
 fn format_int_value(value: &Value, function: &str) -> Result<i32, RuntimeError> {
@@ -14422,14 +14449,19 @@ fn pad_left(text: &str, width: Option<usize>) -> String {
     }
 }
 
-fn format_script_string(
+fn format_script_string_with_context(
     function: &str,
     format_str: &str,
     params: &[Value],
+    context: Option<&EffectHostContext>,
 ) -> Result<String, RuntimeError> {
     let mut output = String::new();
     let mut chars = format_str.chars().peekable();
     let mut arg_index = 0usize;
+    let called_with_strict_nil = matches!(
+        lc_script::caller_origin_strictness(),
+        lc_script::HostCallerStrictness::Strict(level) if level >= 3
+    );
 
     while let Some(ch) = chars.next() {
         if ch != '%' {
@@ -14550,13 +14582,13 @@ fn format_script_string(
                 let param = params.get(arg_index).ok_or_else(|| {
                     RuntimeError::new(format!("{function}: format placeholder without parameter"))
                 })?;
-                arg_index += 1;
-                let text = if matches!(param, Value::Nil) {
+                let text = if !param.as_bool() && !called_with_strict_nil {
                     "0".to_string()
                 } else {
-                    value_to_data_string(param)
+                    arg_index += 1;
+                    value_to_data_string_with_context(param, context)
                 };
-                output.push_str(&pad_left(&text, width_value));
+                output.push_str(&text);
             }
             '%' => output.push('%'),
             other => {
@@ -14571,6 +14603,17 @@ fn format_script_string(
         Some(nul) => Ok(lc_script::c4_string_from_bytes(&bytes[..nul])),
         None => Ok(lc_script::c4_string_from_bytes(&bytes)),
     }
+}
+
+fn format_script_string(
+    function: &str,
+    format_str: &str,
+    params: &[Value],
+) -> Result<String, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        format_script_string_with_context(function, format_str, params, borrow.as_ref())
+    })
 }
 
 fn extract_speech_segment(raw: &str) -> Option<String> {
@@ -15509,7 +15552,12 @@ fn message(args: &[Value]) -> Result<Value, RuntimeError> {
         if !played_speech {
             // C++ formats only the fallback path. A successful speech sound
             // therefore also bypasses invalid or missing format arguments.
-            let formatted = format_script_string("Message", &raw_message, format_args)?;
+            let formatted = format_script_string_with_context(
+                "Message",
+                &raw_message,
+                format_args,
+                Some(context),
+            )?;
             let text = extract_message_text(&formatted);
             let spec = MessageSpec {
                 kind: if target_raw.is_some() {
@@ -15683,8 +15731,12 @@ fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
         });
 
         if !played_speech {
-            let formatted =
-                format_script_string("PlayerMessage", &raw_message, format_args)?;
+            let formatted = format_script_string_with_context(
+                "PlayerMessage",
+                &raw_message,
+                format_args,
+                Some(context),
+            )?;
             let text = extract_message_text(&formatted);
             // FnPlayerMessage carries iPlayer into C4GM_*Player verbatim;
             // unlike FnPlrMessage, it never gates the message through
@@ -15804,7 +15856,12 @@ fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
         });
 
         if !played_speech {
-            let formatted = format_script_string("PlrMessage", &raw_message, format_args)?;
+            let formatted = format_script_string_with_context(
+                "PlrMessage",
+                &raw_message,
+                format_args,
+                Some(context),
+            )?;
             let text = extract_message_text(&formatted);
             let kind = if resolved_player.is_some() {
                 MessageKind::GlobalPlayer
@@ -20656,24 +20713,9 @@ fn get_name(args: &[Value]) -> Result<Value, RuntimeError> {
         else {
             return Ok(Value::Nil);
         };
-        if let Some(custom_name) = context.object_custom_name(target) {
-            return Ok(Value::String(custom_name));
-        }
-        let info_name = match context.object_scope(target) {
-            Some(scope) => scope.info_core().map(|info| info.name.clone()),
-            None => context
-                .world
-                .crew_infos
-                .get(&target)
-                .map(|info| info.name.clone()),
-        };
-        if let Some(info_name) = info_name {
-            return Ok(Value::String(info_name));
-        }
-        let definition = context.object_effective_definition_id(target);
-        Ok(definition
-            .and_then(|id| context.definition_metadata(&id))
-            .map(|metadata| Value::String(metadata.name.clone()))
+        Ok(context
+            .object_effective_name(target)
+            .map(Value::String)
             .unwrap_or(Value::Nil))
     })
 }
@@ -43494,6 +43536,28 @@ impl EffectHostContext {
             .filter(|name| !name.is_empty())
     }
 
+    /// C4Object::GetName: pending/live CustomName, crew Info name, then the
+    /// effective definition name. GetDataString uses this same chain.
+    fn object_effective_name(&self, target: ObjectId) -> Option<String> {
+        if let Some(custom_name) = self.object_custom_name(target) {
+            return Some(custom_name);
+        }
+        let info_name = match self.object_scope(target) {
+            Some(scope) => scope.info_core().map(|info| info.name.clone()),
+            None => self
+                .world
+                .crew_infos
+                .get(&target)
+                .map(|info| info.name.clone()),
+        };
+        if info_name.is_some() {
+            return info_name;
+        }
+        self.object_effective_definition_id(target)
+            .and_then(|id| self.definition_metadata(&id))
+            .map(|metadata| metadata.name.clone())
+    }
+
     /// Stage an ordinary-object SetName write through the normal scope fold.
     fn set_object_custom_name(&mut self, target: ObjectId, custom_name: Option<String>) -> bool {
         if !self.ensure_object_scope(target) {
@@ -49325,12 +49389,13 @@ global func PreInitializePlayer(int player)
     #[test]
     fn map_data_string_uses_typed_keys_in_insertion_order() {
         let mut map = ValueMap::new();
-        map.insert("beta".into(), Value::Int(2));
+        map.insert("b".into(), Value::Int(2));
+        map.insert("a".into(), Value::Int(1));
         map.insert_key(Value::Int(7), Value::String("seven".into()));
 
         assert_eq!(
             value_to_data_string(&Value::Proplist(map)),
-            r#"{ "beta" = 2, 7 = "seven" }"#
+            r#"{ "b" = 2, "a" = 1, 7 = "seven" }"#
         );
     }
 
@@ -52392,6 +52457,81 @@ public func CheckGoals()
         ];
         let result = format_string(&args).expect("Format succeeds");
         assert_eq!(result, Value::String("Crew 007 CLNK Ready 5 %".into()));
+    }
+
+    #[test]
+    fn format_v_observes_strict_nil_and_legacy_parameter_reuse() {
+        assert_eq!(
+            format_string(&[
+                Value::String("%v %v".into()),
+                Value::Bool(false),
+                Value::Int(5),
+            ])
+            .expect("direct Format succeeds"),
+            Value::String("0 0".into()),
+            "without a script caller, CalledWithStrictNil is false"
+        );
+
+        for (strict, expected) in [
+            (
+                2,
+                Value::Array(vec![
+                    Value::String("0 0".into()),
+                    Value::String("0".into()),
+                    Value::String("0".into()),
+                    Value::String("7".into()),
+                ]),
+            ),
+            (
+                3,
+                Value::Array(vec![
+                    Value::String("0 5".into()),
+                    Value::String("false".into()),
+                    Value::String("nil".into()),
+                    Value::String("7".into()),
+                ]),
+            ),
+        ] {
+            let mut script = ScriptEngine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(&format!(
+                    "#strict {strict}\nfunc Probe() {{ return [Format(\"%v %v\", 0, 5), Format(\"%v\", false), Format(\"%v\", nil), Format(\"%5v\", 7)]; }}"
+                ))
+                .expect("Format strictness probe compiles");
+
+            assert_eq!(
+                script.call("Probe", &[]).expect("Format probe runs"),
+                expected,
+                "#strict {strict}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_v_renders_live_object_name_and_number() {
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(
+                crate::Definition::from_script(
+                    "ACTR",
+                    "Actor",
+                    "#strict 3\npublic func Render() { return Format(\"%v\", this()); }",
+                )
+                .expect("actor definition compiles"),
+            )
+            .expect("actor definition registers");
+        let actor = engine
+            .spawn_object(crate::SpawnConfig::new("ACTR"))
+            .expect("actor spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(actor_index, "Render", Vec::new())
+                .expect("object Format probe runs"),
+            Value::String(format!("Actor #{}", actor.as_u64()))
+        );
     }
 
     #[test]
