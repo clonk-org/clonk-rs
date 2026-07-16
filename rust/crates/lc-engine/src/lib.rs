@@ -54933,6 +54933,39 @@ mod internal_player_script_control_parity {
     }
 
     #[test]
+    fn activate_game_goal_menu_builtin_rejects_missing_player_and_queues_valid_local_menu() {
+        let mut engine = Engine::new();
+        assert_eq!(
+            engine
+                .direct_exec_script_control_global(
+                    "ActivateGameGoalMenu(99)",
+                    "L004 missing player",
+                    Some(3),
+                )
+                .expect("missing player call executes"),
+            Value::Int(0)
+        );
+        assert!(engine.take_game_goal_menu_requests().is_empty());
+
+        register_player(&mut engine, 3, 7);
+        engine.set_local_players([3]);
+        assert_eq!(
+            engine
+                .direct_exec_script_control_global(
+                    "ActivateGameGoalMenu(3)",
+                    "L004 valid player",
+                    Some(3),
+                )
+                .expect("valid player call executes"),
+            Value::Int(1)
+        );
+        let requests = engine.take_game_goal_menu_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].player, 3);
+        assert!(requests[0].open_menu);
+    }
+
+    #[test]
     fn goal_menu_control_evaluates_every_peer_but_marks_only_local_ui() {
         let mut engine = Engine::new();
         register_player(&mut engine, 3, 7);
