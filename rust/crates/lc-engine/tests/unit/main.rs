@@ -1463,11 +1463,19 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
     ) -> Result<(), EngineError> {
         // A lethal DoEnergy refreshes OCF before CrossCheck calls Fling.
         // C4Object::Fling therefore takes its non-alive/uncontained arm and
-        // assigns the striker's Controller. With no Tumble or Jump action,
-        // the raw fallback mobilizes and clears only CNAT_Bottom from
-        // Action.t_attach (C4Object.cpp:1641-1650).
+        // assigns the striker's Controller. DoEnergy must already have made
+        // that Controller (not Owner) visible through GetKiller in Death.
+        // With no Tumble or Jump action, the raw fallback mobilizes and
+        // clears only CNAT_Bottom from Action.t_attach
+        // (C4Object.cpp:1641-1650).
         let mut engine = Engine::with_seed(43);
-        let mut victim_def = simple_definition("CLNK");
+        engine.register_player(PlayerConfig::new(1, "Rock owner"))?;
+        engine.register_player(PlayerConfig::new(2, "Rock controller"))?;
+        let mut victim_def = Definition::from_script(
+            "CLNK",
+            "Clonk",
+            "#strict\nlocal death_killer;\nfunc Death() { death_killer = GetKiller(); return 1; }\n",
+        )?;
         victim_def.set_category(CATEGORY_LIVING);
         victim_def.set_mass(100);
         victim_def.set_physical(PhysicalInfo {
@@ -1491,7 +1499,8 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
             SpawnConfig::new("ROCK")
                 .with_position(Vector2::new(50, 50))
                 .with_velocity(Vector2::new(5, 0))
-                .with_controller(9),
+                .with_owner(1)
+                .with_controller(2),
         )?;
         let victim_idx = engine.find_object_index(victim).expect("victim exists");
         let attach = CNAT_LEFT | CNAT_BOTTOM;
@@ -1504,7 +1513,16 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
         let victim = &engine.objects[victim_idx];
         assert!(!victim.state.alive, "the hit is lethal before Fling");
         assert_eq!(
-            victim.state.controller, 9,
+            victim.last_energy_loss_cause, 2,
+            "DoEnergy attributes the lethal hit to the striker's Controller"
+        );
+        assert_eq!(
+            victim.state.local_vars.get("death_killer"),
+            Some(&Value::Int(2)),
+            "GetKiller exposes the Controller during the Death callback"
+        );
+        assert_eq!(
+            victim.state.controller, 2,
             "non-alive uncontained Fling takes the striker's Controller"
         );
         assert!(victim.state.mobile, "the raw fallback mobilizes");
