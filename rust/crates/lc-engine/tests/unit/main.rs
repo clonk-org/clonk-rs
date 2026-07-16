@@ -48207,6 +48207,61 @@ func FxProbeTimer(pThis, iNumber) {
     }
 
     #[test]
+    fn negative_effect_interval_fires_on_magnitude_multiples_like_cpp() {
+        // C4Effect stores iIntervall verbatim, increments iTime, then uses
+        // signed modulo (C4Effect.cpp:67,339-345). Thus -3 fires at the same
+        // positive elapsed times as +3: exactly 3, 6, and 9 here.
+        let script = r#"#strict 3
+local iTimes;
+public func Arm()
+{
+  iTimes = 0;
+  return AddEffect("Negative", this(), 100, -3, this());
+}
+func FxNegativeTimer(pThis, iNumber, iTime)
+{
+  iTimes = iTimes * 10 + iTime;
+  return 0;
+}
+"#;
+        let mut engine = Engine::with_seed(143);
+        engine
+            .register_definition(
+                Definition::from_script("NEG", "Negative interval", script)
+                    .expect("definition compiles"),
+            )
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("NEG").with_category(CATEGORY_OBJECT))
+            .expect("object spawns");
+        let index = engine.find_object_index(id).expect("object exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Arm", Vec::new())
+                .expect("negative AddEffect interval succeeds"),
+            Value::Int(1)
+        );
+        assert_eq!(engine.objects[index].state.effects[0].interval, -3);
+
+        for (frame, expected) in [0, 0, 3, 3, 3, 36, 36, 36, 369]
+            .into_iter()
+            .enumerate()
+        {
+            engine.tick().expect("tick succeeds");
+            let index = engine.find_object_index(id).expect("object exists");
+            assert_eq!(
+                engine.objects[index].state.local_vars.get("iTimes"),
+                Some(&Value::Int(expected)),
+                "timer callback history after frame {}",
+                frame + 1
+            );
+        }
+        let index = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[index].state.effects[0].timer, 9);
+    }
+
+    #[test]
     fn effect_timer_kill_semantics_follow_cpp() {
         // C4Effect::Execute (C4Effect.cpp:342-360): an FxTimer returning
         // C4Fx_Execute_Kill (-1, C4Effects.h:40) kills the effect; an

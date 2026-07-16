@@ -129,7 +129,7 @@ impl EffectState {
     /// `iIntervall` is stored verbatim (C4Effect.cpp:67) — zero means the
     /// timer never fires.
     pub fn with_interval(mut self, interval: i32) -> Self {
-        self.interval = interval.max(0);
+        self.interval = interval;
         self
     }
 
@@ -164,7 +164,7 @@ impl EffectState {
     /// `iTime % iIntervall == 0` — a zero interval never fires.
     pub fn advance_tick(&mut self) -> bool {
         self.timer = self.timer.saturating_add(1);
-        self.interval > 0 && self.timer % self.interval == 0
+        self.interval != 0 && i64::from(self.timer) % i64::from(self.interval) == 0
     }
 
     pub fn set_var(&mut self, index: usize, value: EffectVarValue) {
@@ -417,5 +417,14 @@ mod tests {
         let fired: Vec<bool> = (0..5).map(|_| inert.advance_tick()).collect();
         assert_eq!(fired, vec![false; 5], "iIntervall == 0 never fires");
         assert_eq!(inert.timer, 5, "time still elapses");
+
+        let mut negative = EffectState::new("Negative").with_interval(-3);
+        let fired: Vec<bool> = (0..9).map(|_| negative.advance_tick()).collect();
+        assert_eq!(
+            fired,
+            vec![false, false, true, false, false, true, false, false, true],
+            "negative intervals fire on multiples of their magnitude"
+        );
+        assert_eq!(negative.interval, -3, "iIntervall retains its sign");
     }
 }

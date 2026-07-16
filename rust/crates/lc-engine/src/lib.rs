@@ -7123,9 +7123,6 @@ impl Object {
     /// A carried nonzero number matching an existing effect is an UPDATE
     /// (EffectVar writes fold back through the add command).
     fn insert_effect(&mut self, mut effect: EffectState) -> (EffectState, Option<EffectState>) {
-        if effect.interval < 0 {
-            effect.interval = 0;
-        }
         if effect.timer < 0 {
             effect.timer = 0;
         }
@@ -51431,9 +51428,6 @@ fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[Eff
 }
 
 fn insert_effect_into_stack(stack: &mut Vec<EffectState>, mut effect: EffectState) {
-    if effect.interval < 0 {
-        effect.interval = 0;
-    }
     if effect.timer < 0 {
         effect.timer = 0;
     }
@@ -52182,20 +52176,10 @@ fn value_to_effect_commands(
                     None => 100,
                 };
 
-                // A zero interval is valid in C++ (no timer callbacks,
-                // C4Effect.cpp:342).
+                // C4Effect stores signed intervals verbatim; zero alone
+                // disables callbacks (C4Effect.cpp:67,342).
                 let interval = match map.shift_remove("interval") {
-                    Some(value) => {
-                        let interval = value_to_int(definition, function, value)?;
-                        if interval < 0 {
-                            return Err(EngineError::InvalidScriptOutput {
-                                definition: definition.to_string(),
-                                function: function.to_string(),
-                                detail: "effect interval must be >= 0".into(),
-                            });
-                        }
-                        interval
-                    }
+                    Some(value) => value_to_int(definition, function, value)?,
                     None => 0,
                 };
 

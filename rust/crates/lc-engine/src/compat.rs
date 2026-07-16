@@ -17982,12 +17982,7 @@ fn add_effect_constructor(
     // C++ FnAddEffect: unpassed iTimerIntervall is 0 - no timer callbacks
     // (C4Effect.cpp:342).
     let interval = match args.get(3) {
-        Some(Value::Int(value)) if *value >= 0 => *value,
-        Some(Value::Int(_)) => {
-            return Err(RuntimeError::new(
-                "AddEffect: interval must be >= 0 when provided",
-            ));
-        }
+        Some(Value::Int(value)) => *value,
         Some(Value::Nil) | None => 0,
         Some(other) => {
             return Err(RuntimeError::new(format!(
@@ -40461,7 +40456,7 @@ fn extract_effects_from_state(state: &Value) -> Result<Vec<EffectState>, Runtime
                 };
 
                 let interval = match props.get("interval") {
-                    Some(Value::Int(value)) if *value > 0 => *value,
+                    Some(Value::Int(value)) => *value,
                     _ => 1,
                 };
 
@@ -44983,9 +44978,6 @@ impl EffectScopeContext {
 
     // iIntervall/iTime stored verbatim (C4Effect.cpp:66-67).
     fn add_effect(&mut self, mut effect: EffectState) -> i32 {
-        if effect.interval < 0 {
-            effect.interval = 0;
-        }
         if effect.timer < 0 {
             effect.timer = 0;
         }
@@ -45020,9 +45012,6 @@ impl EffectScopeContext {
     /// Add carries the requested priority so the final fold preserves the
     /// C++ insertion position. A later Update validates or removes it.
     fn reserve_effect(&mut self, mut effect: EffectState) -> i32 {
-        if effect.interval < 0 {
-            effect.interval = 0;
-        }
         if effect.timer < 0 {
             effect.timer = 0;
         }
