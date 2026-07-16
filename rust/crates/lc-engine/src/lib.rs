@@ -31060,10 +31060,7 @@ impl Engine {
                 let should_splash =
                     state.ocf & crate::ocf::HIT_SPEED2 != 0 && object_mass > 3;
                 let (splash_x, splash_y, splash_amt) = {
-                    let shape = self
-                        .definitions
-                        .get(&self.objects[idx].definition_id)
-                        .and_then(|definition| definition.shape_rect());
+                    let shape = self.objects[idx].current_shape_rect();
                     let area = shape
                         .map(|rect| rect.width * rect.height / 10)
                         .unwrap_or(0)

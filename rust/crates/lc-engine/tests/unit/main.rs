@@ -51797,6 +51797,164 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
     }
 
+    #[test]
+    fn l125_liquid_entry_splash_amount_uses_live_shape_area_like_cpp() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Instable=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+
+        for (
+            label,
+            definition_rect,
+            construction,
+            stretch_growth,
+            rotateable,
+            rotation,
+            expected_rect,
+            expected_amount,
+        ) in [
+            (
+                "half-built stretch-growth object",
+                DefinitionRect::new(-5, -5, 10, 10),
+                FULL_CON / 2,
+                true,
+                0,
+                0,
+                DefinitionRect::new(-2, -2, 5, 5),
+                2,
+            ),
+            (
+                "rotated small object",
+                DefinitionRect::new(-3, -3, 6, 6),
+                FULL_CON,
+                false,
+                1,
+                45,
+                DefinitionRect::new(-6, -6, 12, 12),
+                14,
+            ),
+            (
+                "full-con unrotated object",
+                DefinitionRect::new(-3, -3, 6, 6),
+                FULL_CON,
+                false,
+                1,
+                0,
+                DefinitionRect::new(-3, -3, 6, 6),
+                3,
+            ),
+        ] {
+            let mut definition =
+                Definition::from_script("L125", "Splash mover", "").expect("mover compiles");
+            definition.set_shape_rect(Some(definition_rect));
+            definition.set_stretch_growth(stretch_growth);
+            definition.set_rotateable(rotateable);
+            definition.set_float_line(1);
+            definition.set_mass(20);
+
+            let mut engine = Engine::with_seed(125);
+            engine.set_materials(materials.clone());
+            let mut bytes = vec![0_u8; 40 * 40];
+            // The solid cap makes Splash's surface probe semi-solid, so the
+            // PXS extraction arm is skipped and each amount unit consumes
+            // exactly its two unconditional BubbleOut coordinate draws.
+            bytes[19 * 40..20 * 40].fill(30);
+            for y in 20..40 {
+                bytes[y * 40..y * 40 + 40].fill(20);
+            }
+            let mut densities = vec![0_i32; 128];
+            densities[20] = 25;
+            densities[30] = 100;
+            let mut names = vec![None; 128];
+            names[20] = Some("Water".to_string());
+            names[30] = Some("Earth".to_string());
+            let grid = landscape::PixelGrid::new(
+                40,
+                40,
+                bytes,
+                densities,
+                names,
+                vec![None; 128],
+            );
+            let mut landscape = Landscape::new(40, vec![0; 40]).expect("landscape builds");
+            landscape.set_world_height(40);
+            landscape.set_pixel_grid(grid);
+            engine.set_landscape(landscape);
+            engine.set_physics(PhysicsSettings::new(0, 20, -20));
+            engine
+                .register_definition(definition)
+                .expect("mover definition registers");
+
+            let mover = engine
+                .spawn_object(
+                    SpawnConfig::new("L125")
+                        .with_loaded(true)
+                        .with_category(CATEGORY_OBJECT)
+                        .with_position(Vector2::new(20, 5))
+                        .with_fixed_position(FixedVec2::from_ints(20, 5))
+                        .with_construction(construction)
+                        .with_rotation(rotation),
+                )
+                .expect("mover spawns");
+            assert_eq!(
+                engine.object_current_shape_rect(mover),
+                Some(expected_rect),
+                "{label}"
+            );
+            let mover_idx = engine.find_object_index(mover).expect("mover exists");
+            engine.objects[mover_idx]
+                .set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(18)));
+            engine.refresh_object_ocf(mover_idx);
+            assert_ne!(
+                engine.objects[mover_idx].state.ocf & lc_engine::ocf::HIT_SPEED2,
+                0,
+                "{label}"
+            );
+            let definition_id = engine.objects[mover_idx].definition_id.clone();
+            let actions = engine
+                .definitions
+                .get(&definition_id)
+                .expect("mover definition exists")
+                .action_library()
+                .clone();
+            let rng_before = engine.rng.count;
+            let pxs_before = engine.pxs_system.count();
+
+            assert!(
+                engine
+                    .exec_object_movement(mover_idx, &actions, &definition_id, &[])
+                    .expect("movement succeeds")
+                    .alive,
+                "{label}"
+            );
+
+            let mover_idx = engine.find_object_index(mover).expect("mover survives");
+            assert_eq!(
+                engine.objects[mover_idx].state.position,
+                Vector2::new(20, 23),
+                "{label}"
+            );
+            assert!(engine.objects[mover_idx].state.in_liquid, "{label}");
+            assert_eq!(
+                engine.rng.count - rng_before,
+                expected_amount * 2,
+                "two synced BubbleOut draws per splash iteration: {label}"
+            );
+            assert_eq!(
+                engine.pxs_system.count() - pxs_before,
+                0,
+                "the solid surface cap disables liquid extraction: {label}"
+            );
+        }
+    }
+
     fn assert_contact_callback_preserves_liquid_entry_splash_like_cpp(
         script: &str,
         callback_present: bool,
