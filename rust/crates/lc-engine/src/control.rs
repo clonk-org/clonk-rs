@@ -42,6 +42,9 @@ pub enum ControlPacket {
     /// Synchronized answer to a script-created message-board query
     /// (`CID_MessageBoardAnswer`, C4Control.cpp:1546-1594).
     MessageBoardAnswer(MessageBoardAnswerControlData),
+    /// Synchronized execution of a scenario-registered message-board command
+    /// (`CID_CustomCommand`, C4Control.cpp:1596-1682).
+    CustomCommand(CustomCommandControlData),
     /// Synchronized mouse/object selection (`CID_PlrSelect`,
     /// C4Control.cpp:329-380).
     PlayerSelect(PlayerSelectControlData),
@@ -265,6 +268,30 @@ impl Default for MessageBoardAnswerControlData {
         Self {
             object: 0,
             answer: LegacyCString::default(),
+            player: -1,
+            by_client: -1,
+        }
+    }
+}
+
+/// Body of `C4ControlCustomCommand` (`CID_CustomCommand`).
+///
+/// Both strings remain NUL-free legacy bytes. C++ writes them before the
+/// inherited packed `Plr` and `ByClient` fields
+/// (`src/C4Control.cpp:1596-1600,1566-1570,53-57`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomCommandControlData {
+    pub command: LegacyCString,
+    pub argument: LegacyCString,
+    pub player: i32,
+    pub by_client: i32,
+}
+
+impl Default for CustomCommandControlData {
+    fn default() -> Self {
+        Self {
+            command: LegacyCString::default(),
+            argument: LegacyCString::default(),
             player: -1,
             by_client: -1,
         }
@@ -923,6 +950,7 @@ impl RawPacket {
         const CID_SYNCHRONIZE: u8 = 0x86;
         const CID_SCRIPT: u8 = 0x88;
         const CID_MESSAGE_BOARD_ANSWER: u8 = 0xd0;
+        const CID_CUSTOM_COMMAND: u8 = 0xd1;
         const CID_PLR_SELECT: u8 = 0xA0;
         const CID_PLR_CONTROL: u8 = 0xA1;
         const CID_PLR_COMMAND: u8 = 0xA2;
@@ -1019,6 +1047,34 @@ impl RawPacket {
                 MessageBoardAnswerControlData {
                     object,
                     answer,
+                    player,
+                    by_client,
+                },
+            )));
+        }
+
+        if id == CID_CUSTOM_COMMAND {
+            // C4ControlCustomCommand writes Command/Argument, inherited Plr,
+            // then inherited ByClient. The INI compiler may omit all four
+            // default-valued fields.
+            let command = self.fields.get("Command").cloned().unwrap_or_default();
+            let command = LegacyCString::from_bytes(legacy_string_bytes(&command)).ok_or(
+                ControlParseError::InteriorNulString {
+                    field: "Command".to_string(),
+                },
+            )?;
+            let argument = self.fields.get("Argument").cloned().unwrap_or_default();
+            let argument = LegacyCString::from_bytes(legacy_string_bytes(&argument)).ok_or(
+                ControlParseError::InteriorNulString {
+                    field: "Argument".to_string(),
+                },
+            )?;
+            let player = parse_int_field_or(&self.fields, "Plr", -1)?;
+            let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
+            return Ok(Some(ControlPacket::CustomCommand(
+                CustomCommandControlData {
+                    command,
+                    argument,
                     player,
                     by_client,
                 },
@@ -2240,6 +2296,51 @@ mod tests {
                 ControlPacket::MessageBoardAnswer(MessageBoardAnswerControlData::default()),
             ]
         );
+    }
+
+    #[test]
+    fn parses_custom_command_packet_and_omitted_defaults() {
+        // C4ControlCustomCommand::CompileFunc writes Command/Argument,
+        // inherited Plr, then inherited ByClient. StdCompilerINIWrite omits
+        // their defaults empty, empty, -1, and -1 respectively.
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=209\n\
+    [Custom Command]\n\
+      Command=push\n\
+      Argument=\"+130tail\"\n\
+      Plr=-4\n\
+      ByClient=7\n\
+  [IDPacket]\n\
+    ID=209\n\
+    [Custom Command]\n";
+
+        assert_eq!(
+            parse_control_ini(input).expect("parse custom commands"),
+            vec![
+                ControlPacket::CustomCommand(CustomCommandControlData {
+                    command: LegacyCString::from_bytes(b"push".to_vec())
+                        .expect("fixture is NUL-free"),
+                    argument: LegacyCString::from_bytes(b"+130tail".to_vec())
+                        .expect("fixture is NUL-free"),
+                    player: -4,
+                    by_client: 7,
+                }),
+                ControlPacket::CustomCommand(CustomCommandControlData::default()),
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_command_ini_preserves_non_utf8_legacy_bytes() {
+        let input = "[Control]\n[IDPacket]\nID=209\n[Custom Command]\nCommand=\"\\200\"\nArgument=\"\\377\"\n";
+        let packets = parse_control_ini(input).expect("parse custom command bytes");
+        let ControlPacket::CustomCommand(command) = &packets[0] else {
+            panic!("expected CustomCommand, got {:?}", packets[0]);
+        };
+        assert_eq!(command.command.as_bytes(), &[0x80]);
+        assert_eq!(command.argument.as_bytes(), &[0xff]);
     }
 
     #[test]

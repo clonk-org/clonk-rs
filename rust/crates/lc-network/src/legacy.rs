@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use lc_engine::{
     ClientCoreControlData, ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
     ControlPacket as EngineControlPacket, ControlPacketId, ControlPlayerInfoEntry,
+    CustomCommandControlData,
     InitScenarioPlayerControlData, JoinPlayerControlData, JoinPlayerSource, LegacyCString,
     MessageBoardAnswerControlData, NetworkResourceCore, PlayerCommandControlData,
     PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest, PlayerSelectControlData,
@@ -44,6 +45,7 @@ const CID_SYNCHRONIZE: u8 = 0x80 | 0x06;
 const CID_SET: u8 = 0x80 | 0x07;
 const CID_SCRIPT: u8 = 0x80 | 0x08;
 const CID_MESSAGE_BOARD_ANSWER: u8 = 0x80 | 0x50;
+const CID_CUSTOM_COMMAND: u8 = 0x80 | 0x51;
 const MAX_VARINT_BYTES: usize = 5;
 const MAX_PLAYER_INFO_COUNT: i32 = 5_000;
 const PLAYER_INFO_SYNC_FLAGS: u16 = 0x7fcd;
@@ -646,6 +648,7 @@ fn decode_control(
         CID_SET => decode_control_set(reader),
         CID_SCRIPT => decode_script(reader),
         CID_MESSAGE_BOARD_ANSWER => decode_message_board_answer(reader),
+        CID_CUSTOM_COMMAND => decode_custom_command(reader),
         other => Err(LegacyControlError::UnsupportedPacket(other)),
     }
 }
@@ -715,6 +718,23 @@ fn decode_message_board_answer(
         MessageBoardAnswerControlData {
             object,
             answer,
+            player,
+            by_client,
+        },
+    ))
+}
+
+fn decode_custom_command(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    let command = reader.read_c_string()?;
+    let argument = reader.read_c_string()?;
+    let player = reader.read_int32()?;
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::CustomCommand(
+        CustomCommandControlData {
+            command,
+            argument,
             player,
             by_client,
         },
@@ -1610,6 +1630,14 @@ fn encode_message_board_answer(buffer: &mut Vec<u8>, data: &MessageBoardAnswerCo
     append_int32(buffer, data.by_client);
 }
 
+fn encode_custom_command(buffer: &mut Vec<u8>, data: &CustomCommandControlData) {
+    buffer.push(CID_CUSTOM_COMMAND);
+    append_c_string(buffer, &data.command);
+    append_c_string(buffer, &data.argument);
+    append_int32(buffer, data.player);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_controls(
     controls: &[EngineControlPacket],
     buffer: &mut Vec<u8>,
@@ -1691,6 +1719,10 @@ fn encode_control(
         }
         EngineControlPacket::MessageBoardAnswer(data) => {
             encode_message_board_answer(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::CustomCommand(data) => {
+            encode_custom_command(buffer, data);
             Ok(())
         }
         EngineControlPacket::Unknown { .. } => {
@@ -2021,6 +2053,61 @@ mod tests {
             &[0xd0, 0x00, b'a'][..],
             &[0xd0, 0x00, 0x00][..],
             &[0xd0, 0x00, 0x00, 0x00][..],
+        ] {
+            assert_eq!(
+                decode_control_entry_payload(encoded),
+                Err(LegacyControlError::UnexpectedEof),
+                "unexpected result for {encoded:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_command_entry_matches_cpp_packed_field_order() {
+        // C4ControlCustomCommand writes NUL-terminated Command and Argument,
+        // inherited packed Plr, then inherited packed ByClient.
+        let expected = EngineControlPacket::CustomCommand(CustomCommandControlData {
+            command: LegacyCString::from_bytes(b"push".to_vec())
+                .expect("fixture is NUL-free"),
+            argument: LegacyCString::from_bytes(b"+130".to_vec())
+                .expect("fixture is NUL-free"),
+            player: -4,
+            by_client: 7,
+        });
+        let encoded = [
+            0xd1, b'p', b'u', b's', b'h', 0x00, b'+', b'1', b'3', b'0', 0x00, 0xfc, 0x07,
+        ];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+    }
+
+    #[test]
+    fn custom_command_preserves_non_utf8_string_bytes() {
+        let expected = EngineControlPacket::CustomCommand(CustomCommandControlData {
+            command: LegacyCString::from_bytes(vec![0x80, 0xff])
+                .expect("fixture is NUL-free"),
+            argument: LegacyCString::from_bytes(vec![0xfe, 0x81])
+                .expect("fixture is NUL-free"),
+            player: -1,
+            by_client: 130,
+        });
+        let encoded = [0xd1, 0x80, 0xff, 0x00, 0xfe, 0x81, 0x00, 0xff, 0x82, 0x01];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+    }
+
+    #[test]
+    fn custom_command_rejects_each_truncated_field() {
+        for encoded in [
+            &[0xd1][..],
+            &[0xd1, b'p'][..],
+            &[0xd1, b'p', 0x00][..],
+            &[0xd1, b'p', 0x00, b'a'][..],
+            &[0xd1, b'p', 0x00, b'a', 0x00][..],
+            &[0xd1, b'p', 0x00, b'a', 0x00, 0x80][..],
+            &[0xd1, b'p', 0x00, b'a', 0x00, 0x00][..],
         ] {
             assert_eq!(
                 decode_control_entry_payload(encoded),

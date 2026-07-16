@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{Engine, EnvironmentSettings, GammaControlState, NextMissionState};
@@ -153,7 +154,7 @@ impl InitialNetworkGameData {
             music_enabled: false,
             music_level: 100,
             next_mission: engine.next_mission.clone(),
-            message_board_commands: vec![InitialNetworkMessageBoardCommand::speed()],
+            message_board_commands: engine.message_board_commands.clone(),
             script_go: engine.scenario_script_go,
             script_counter: engine.scenario_script_counter,
             environment: engine.environment,
@@ -162,7 +163,7 @@ impl InitialNetworkGameData {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialNetworkMessageBoardCommand {
     pub name: String,
     pub script: String,
@@ -179,7 +180,7 @@ impl InitialNetworkMessageBoardCommand {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageBoardCommandRestriction {
     Escaped,
     Plain,
@@ -316,15 +317,18 @@ fn game_lines(data: &InitialNetworkGameData) -> Result<Vec<String>, InitialNetwo
         let mut names = HashSet::with_capacity(data.message_board_commands.len());
         let mut encoded = data.message_board_commands.len().to_string();
         for command in &data.message_board_commands {
-            if !names.insert(command.name.as_str()) {
+            let name = c4_legacy_string_bytes(&command.name);
+            if !names.insert(name.clone()) {
                 return Err(InitialNetworkGameError::DuplicateMessageBoardCommand {
                     name: command.name.clone(),
                 });
             }
             encoded.push(';');
-            encoded.push_str(&quote_legacy_text(&command.name));
+            encoded.push_str(&quote_legacy_bytes(&name));
             encoded.push('=');
-            encoded.push_str(&quote_legacy_text(&command.script));
+            encoded.push_str(&quote_legacy_bytes(&c4_legacy_string_bytes(
+                &command.script,
+            )));
             encoded.push(',');
             encoded.push_str(command.restriction.as_cpp_name());
         }
@@ -405,7 +409,10 @@ fn push_raw_string(lines: &mut Vec<String>, name: &str, value: &str, default: &s
 }
 
 fn quote_legacy_text(value: &str) -> String {
-    let bytes = legacy_c_string_bytes(value);
+    quote_legacy_bytes(legacy_c_string_bytes(value))
+}
+
+fn quote_legacy_bytes(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(bytes.len() + 2);
     output.push('"');
     let mut last_was_numeric_escape = false;
@@ -440,6 +447,14 @@ fn quote_legacy_text(value: &str) -> String {
     }
     output.push('"');
     output
+}
+
+fn c4_legacy_string_bytes(value: &str) -> Vec<u8> {
+    let mut bytes = lc_script::c4_string_bytes(value);
+    if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
+        bytes.truncate(nul);
+    }
+    bytes
 }
 
 fn legacy_c_string_bytes(value: &str) -> &[u8] {
@@ -661,6 +676,24 @@ mod tests {
             Err(InitialNetworkGameError::DuplicateMessageBoardCommand {
                 name: "same".to_owned()
             })
+        );
+    }
+
+    #[test]
+    fn message_commands_serialize_c4_projected_bytes_not_private_use_utf8() {
+        let mut data = InitialNetworkGameData::default();
+        data.message_board_commands = vec![InitialNetworkMessageBoardCommand {
+            name: lc_script::c4_string_from_bytes(&[0xff]),
+            script: lc_script::c4_string_from_bytes(&[0xfe]),
+            restriction: MessageBoardCommandRestriction::Identifier,
+        }];
+
+        assert_eq!(
+            serialize_initial_network_game(&data, None),
+            Ok(Some(
+                b"[Game]\r\nMessageBoardCommands=1;\"\\377\"=\"\\376\",Identifier\r\n\r\n[Weather]\r\nNoGamma=true\r\n"
+                    .to_vec()
+            ))
         );
     }
 

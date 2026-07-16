@@ -26639,6 +26639,12 @@ impl GameApp {
                     .engine
                     .execute_message_board_answer_control(&data)
                     .map(|_| ()),
+                NetworkControl::CustomCommand(data) => {
+                    let game_running = matches!(self.mode, AppMode::Running);
+                    self.engine
+                        .execute_custom_command_control(&data, game_running)
+                        .map(|_| ())
+                }
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
@@ -60200,6 +60206,58 @@ mod tests {
         .expect("host-authored script control executes");
 
         assert_eq!(app.engine.physics().gravity, 77);
+        assert_eq!(app.executing_ready_tick, None);
+    }
+
+    #[test]
+    fn synchronized_custom_command_executes_only_while_game_is_running() {
+        let mut app = new_running_sandbox_app();
+        let command = NetworkControl::CustomCommand(lc_engine::CustomCommandControlData {
+            command: lc_engine::LegacyCString::from_bytes(b"speed".to_vec())
+                .expect("command is NUL-free"),
+            argument: lc_engine::LegacyCString::from_bytes(b"100".to_vec())
+                .expect("argument is NUL-free"),
+            player: -1,
+            by_client: 91,
+        });
+        let initial_delay = app.engine.game_tick_delay_ms();
+
+        app.mode = AppMode::Loading;
+        app.apply_ready_controls(11, vec![command.clone()])
+            .expect("non-running custom command is rejected without aborting the tick");
+        assert_eq!(app.engine.game_tick_delay_ms(), initial_delay);
+
+        app.mode = AppMode::Running;
+        app.apply_ready_controls(12, vec![command])
+            .expect("running custom command executes at its ready tick");
+        assert_eq!(app.engine.game_tick_delay_ms(), 10);
+
+        app.engine.set_debug_mode(true);
+        let disabled_speed = NetworkControl::CustomCommand(lc_engine::CustomCommandControlData {
+            command: lc_engine::LegacyCString::from_bytes(b"speed".to_vec())
+                .expect("command is NUL-free"),
+            argument: lc_engine::LegacyCString::from_bytes(b"50".to_vec())
+                .expect("argument is NUL-free"),
+            player: -1,
+            by_client: 91,
+        });
+        app.apply_ready_controls(
+            13,
+            vec![
+                NetworkControl::Set(lc_network::LegacyControlSet {
+                    value_type: 1,
+                    data: 0,
+                    by_client: 7,
+                }),
+                disabled_speed,
+            ],
+        )
+        .expect("DisableDebug precedes the later custom command in the same batch");
+        assert_eq!(
+            app.engine.game_tick_delay_ms(),
+            10,
+            "DisableDebug removes /speed before the following packet executes"
+        );
         assert_eq!(app.executing_ready_tick, None);
     }
 

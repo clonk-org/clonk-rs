@@ -3264,6 +3264,9 @@ fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String>
             lc_engine::ControlPacket::MessageBoardAnswer(answer) => {
                 ("CID_MessageBoardAnswer", answer.by_client)
             }
+            lc_engine::ControlPacket::CustomCommand(command) => {
+                ("CID_CustomCommand", command.by_client)
+            }
             lc_engine::ControlPacket::RemovePlayer(remove) => {
                 ("CID_RemovePlr", remove.by_client)
             }
@@ -3509,6 +3512,7 @@ fn authenticated_single_control(
         lc_engine::ControlPacket::PlayerCommand(data) => data.by_client,
         lc_engine::ControlPacket::Script(data) => data.by_client,
         lc_engine::ControlPacket::MessageBoardAnswer(data) => data.by_client,
+        lc_engine::ControlPacket::CustomCommand(data) => data.by_client,
         lc_engine::ControlPacket::InitScenarioPlayer(data) => data.by_client,
         lc_engine::ControlPacket::SurrenderPlayer(data) => data.by_client,
         lc_engine::ControlPacket::Synchronize(data) => data.by_client,
@@ -7219,6 +7223,57 @@ mod tests {
         let error = validate_queued_control_authors(&packet(0))
             .expect_err("queued client may not forge host CID_MessageBoardAnswer");
         assert!(error.contains("queued CID_MessageBoardAnswer"));
+        assert!(error.contains("claimed author 0"));
+        assert!(error.contains("authenticated author is 7"));
+    }
+
+    #[test]
+    fn single_custom_command_authenticates_embedded_author() {
+        let control = EngineControlPacket::CustomCommand(lc_engine::CustomCommandControlData {
+            command: lc_engine::LegacyCString::from_bytes(b"push".to_vec())
+                .expect("fixture is NUL-free"),
+            argument: lc_engine::LegacyCString::from_bytes(b"argument".to_vec())
+                .expect("fixture is NUL-free"),
+            player: 3,
+            by_client: 7,
+        });
+        let payload = encode_control_entry_payload(&control).expect("encode CID_CustomCommand");
+
+        assert_eq!(
+            authenticated_single_control(&payload, 7).expect("matching author"),
+            control
+        );
+        let error = authenticated_single_control(&payload, 8)
+            .expect_err("reject spoofed custom-command author");
+        assert!(error.contains("claimed author 7"));
+        assert!(error.contains("authenticated author is 8"));
+    }
+
+    #[test]
+    fn queued_custom_command_cannot_forge_host_author() {
+        let packet = |by_client| {
+            encode_control_packet(&LegacyControlFrame {
+                client_id: 7,
+                tick: 12,
+                timestamp_ms: 0,
+                controls: vec![EngineControlPacket::CustomCommand(
+                    lc_engine::CustomCommandControlData {
+                        command: lc_engine::LegacyCString::from_bytes(b"push".to_vec())
+                            .expect("fixture is NUL-free"),
+                        argument: lc_engine::LegacyCString::from_bytes(b"argument".to_vec())
+                            .expect("fixture is NUL-free"),
+                        player: 3,
+                        by_client,
+                    },
+                )],
+            })
+            .expect("encode queued CID_CustomCommand")
+        };
+
+        validate_queued_control_authors(&packet(7)).expect("matching queued author");
+        let error = validate_queued_control_authors(&packet(0))
+            .expect_err("queued client may not forge host CID_CustomCommand");
+        assert!(error.contains("queued CID_CustomCommand"));
         assert!(error.contains("claimed author 0"));
         assert!(error.contains("authenticated author is 7"));
     }

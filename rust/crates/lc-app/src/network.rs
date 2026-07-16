@@ -799,6 +799,7 @@ pub enum NetworkControl {
     PlayerSelect(PlayerSelectControlData),
     Script(ScriptControlData),
     MessageBoardAnswer(MessageBoardAnswerControlData),
+    CustomCommand(lc_engine::CustomCommandControlData),
     Player { owner: i32, event: ControlEvent },
     InitScenarioPlayer(lc_engine::InitScenarioPlayerControlData),
     Synchronize(lc_engine::SynchronizeControlData),
@@ -2610,6 +2611,9 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::Script(data) => Some(NetworkControl::Script(data)),
         lc_engine::ControlPacket::MessageBoardAnswer(data) => {
             Some(NetworkControl::MessageBoardAnswer(data))
+        }
+        lc_engine::ControlPacket::CustomCommand(data) => {
+            Some(NetworkControl::CustomCommand(data))
         }
         lc_engine::ControlPacket::Synchronize(data) => Some(NetworkControl::Synchronize(data)),
         lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
@@ -4745,6 +4749,55 @@ mod tests {
                 answer.clone(),
             )),
             Some(NetworkControl::MessageBoardAnswer(answer))
+        );
+    }
+
+    #[test]
+    fn decoded_custom_command_is_retained_for_scheduled_execution() {
+        let command = lc_engine::CustomCommandControlData {
+            command: lc_engine::LegacyCString::from_bytes(b"push".to_vec())
+                .expect("command is NUL-free"),
+            argument: lc_engine::LegacyCString::from_bytes(b"arg".to_vec())
+                .expect("argument is NUL-free"),
+            player: 3,
+            by_client: 4,
+        };
+        assert_eq!(
+            network_control_for_packet(lc_engine::ControlPacket::CustomCommand(
+                command.clone(),
+            )),
+            Some(NetworkControl::CustomCommand(command))
+        );
+    }
+
+    #[test]
+    fn custom_command_frame_roundtrips_through_the_tick_accumulator() {
+        let command = lc_engine::CustomCommandControlData {
+            command: lc_engine::LegacyCString::from_bytes(b"push".to_vec())
+                .expect("command is NUL-free"),
+            argument: lc_engine::LegacyCString::from_bytes(b"arg".to_vec())
+                .expect("argument is NUL-free"),
+            player: 3,
+            by_client: 4,
+        };
+        let mut accumulator = ControlFrameAccumulator::new(4);
+        accumulator.record_control(
+            12,
+            lc_engine::ControlPacket::CustomCommand(command.clone()),
+            100,
+        );
+        let frame = accumulator
+            .finalize_tick(12)
+            .expect("custom command produces a control frame");
+
+        let encoded = encode_control_packet(&frame).expect("encode accumulated frame");
+        assert_eq!(
+            decode_control_packet(&encoded).expect("decode accumulated frame"),
+            frame
+        );
+        assert_eq!(
+            frame.controls,
+            vec![lc_engine::ControlPacket::CustomCommand(command)]
         );
     }
 

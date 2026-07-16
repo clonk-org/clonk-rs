@@ -64,6 +64,7 @@ pub use control::{
     interpret_player_control_command, ClientCoreControlData, ClientJoinControlData,
     ClientRemoveControlData, ClientUpdateControlData, CommandKind, ControlButton, ControlCommand,
     ControlEvent, ControlPacket, ControlPacketId, ControlPlayerInfoEntry,
+    CustomCommandControlData,
     InitScenarioPlayerControlData,
     JoinPlayerControlData, JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData,
     NetworkResourceCore,
@@ -3479,6 +3480,14 @@ fn default_use_fair_crew() -> bool {
 
 fn default_fair_crew_strength() -> i32 {
     1_000
+}
+
+fn default_message_board_commands() -> Vec<InitialNetworkMessageBoardCommand> {
+    vec![InitialNetworkMessageBoardCommand::speed()]
+}
+
+fn message_board_commands_are_default(commands: &[InitialNetworkMessageBoardCommand]) -> bool {
+    commands == [InitialNetworkMessageBoardCommand::speed()]
 }
 
 fn i32_is_minus_one(value: &i32) -> bool {
@@ -8215,6 +8224,13 @@ pub struct EngineState {
     /// by the scenario/network bootstrap for older Rust states.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_rate: Option<i32>,
+    /// Saved `Game.MessageInput::Commands`. Older Rust states predate this
+    /// field and resume with the stock `/speed` registration.
+    #[serde(
+        default = "default_message_board_commands",
+        skip_serializing_if = "message_board_commands_are_default"
+    )]
+    pub message_board_commands: Vec<InitialNetworkMessageBoardCommand>,
     pub physics: PhysicsSettings,
     pub environment: EnvironmentSettings,
     /// C4Weather::CompileFunc persists Game.GraphicsSystem.dwGamma under
@@ -8434,6 +8450,7 @@ impl EngineState {
             fair_crew_forced: None,
             allow_debug: None,
             control_rate: None,
+            message_board_commands: default_message_board_commands(),
             physics,
             environment: snapshot.environment.settings,
             gamma: snapshot.environment.gamma,
@@ -14218,6 +14235,10 @@ pub struct Engine {
     /// registration is synchronized and saved; this presentation state is
     /// deliberately runtime-only like C++ `Game.MessageInput`.
     active_message_board_input: Option<ActiveMessageBoardInput>,
+    /// Live `C4MessageInput::Commands` registry. Entries retain insertion
+    /// order for Game.txt/JoinData serialization; lookup is exact and the
+    /// first registration of a name wins.
+    message_board_commands: Vec<InitialNetworkMessageBoardCommand>,
     /// The C++ master object list (`::Objects`) kept in EXEC order:
     /// C4Game::ExecObjects walks the list from the BACK (C4Game.cpp:1582),
     /// so this vec is the C4ObjectList REVERSED — index 0 executes first.
@@ -16276,6 +16297,7 @@ impl Engine {
             pending_remove_player_controls: Vec::new(),
             local_players: None,
             active_message_board_input: None,
+            message_board_commands: vec![InitialNetworkMessageBoardCommand::speed()],
             exec_list: Vec::new(),
             exec_list_insert_generation: 0,
             inactive_exec_list: Vec::new(),
@@ -19577,6 +19599,11 @@ impl Engine {
     /// `C4ControlSet::Execute(C4CVT_DisableDebug)`: unlike every other
     /// mutating Set type, this is intentionally not restricted to the host.
     pub fn disable_debug(&mut self) {
+        if self.debug_mode {
+            self.message_board_commands.retain(|command| {
+                lc_script::c4_string_bytes(&command.name) != b"speed"
+            });
+        }
         self.debug_mode = false;
         self.allow_debug = false;
     }
@@ -19722,6 +19749,156 @@ impl Engine {
             player: input.player,
             by_client,
         })
+    }
+
+    fn custom_command_integer(argument: &[u8]) -> i32 {
+        // std::from_chars accepts a leading '-' but not '+'. The oracle
+        // strips exactly one '+' itself, ignores the returned end pointer,
+        // and leaves the initialized result at zero on invalid/overflow.
+        let argument = argument.strip_prefix(b"+").unwrap_or(argument);
+        let (negative, digits) = match argument.split_first() {
+            Some((b'-', rest)) => (true, rest),
+            _ => (false, argument),
+        };
+        let digit_count = digits
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digit_count == 0 {
+            return 0;
+        }
+        let mut magnitude = 0_u64;
+        for byte in &digits[..digit_count] {
+            let Some(value) = magnitude
+                .checked_mul(10)
+                .and_then(|value| value.checked_add(u64::from(byte - b'0')))
+            else {
+                return 0;
+            };
+            magnitude = value;
+        }
+        if negative {
+            if magnitude == i32::MAX as u64 + 1 {
+                i32::MIN
+            } else {
+                i32::try_from(magnitude).map_or(0, |value| -value)
+            }
+        } else {
+            i32::try_from(magnitude).unwrap_or(0)
+        }
+    }
+
+    fn sprintf_custom_command(
+        format: &str,
+        argument: &str,
+        specifier: char,
+    ) -> Option<String> {
+        // The registered command supplies one printf argument. Preserve %%
+        // and consume exactly one literal matching %d/%s. Fail closed for
+        // other, repeated, mixed, or malformed conversions instead of
+        // DirectExecing a source C++ would not have composed this way.
+        let mut argument = Some(argument);
+        let mut output = String::with_capacity(format.len() + argument.unwrap_or("").len());
+        let mut chars = format.chars().peekable();
+        while let Some(current) = chars.next() {
+            if current != '%' {
+                output.push(current);
+                continue;
+            }
+            match chars.peek().copied() {
+                Some('%') => {
+                    chars.next();
+                    output.push('%');
+                }
+                Some(next) if next == specifier && argument.is_some() => {
+                    chars.next();
+                    output.push_str(argument.take().expect("argument was checked above"));
+                }
+                _ => return None,
+            }
+        }
+        Some(output)
+    }
+
+    fn format_custom_command_script(
+        command: &InitialNetworkMessageBoardCommand,
+        argument: &[u8],
+        player: i32,
+    ) -> Option<String> {
+        let script = command.script.replace("%player%", &player.to_string());
+        if script.contains("%d") {
+            let value = Self::custom_command_integer(argument).to_string();
+            return Self::sprintf_custom_command(&script, &value, 'd');
+        }
+        if !script.contains("%s") {
+            return Some(script);
+        }
+
+        let argument = match command.restriction {
+            MessageBoardCommandRestriction::Escaped => {
+                let mut escaped = Vec::with_capacity(argument.len());
+                for byte in argument {
+                    if matches!(*byte, b'\\' | b'"') {
+                        escaped.push(b'\\');
+                    }
+                    escaped.push(*byte);
+                }
+                escaped
+            }
+            MessageBoardCommandRestriction::Plain => argument.to_vec(),
+            MessageBoardCommandRestriction::Identifier => argument
+                .iter()
+                .copied()
+                .take_while(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(*byte, b'_' | b'~' | b'+' | b'-')
+                        || byte.is_ascii_whitespace()
+                })
+                .collect(),
+        };
+        let argument = lc_script::c4_string_from_bytes(&argument);
+        Self::sprintf_custom_command(&script, &argument, 's')
+    }
+
+    /// Execute one synchronized `CID_CustomCommand` packet. Player ownership
+    /// is checked first, followed by the running/registration gates; accepted
+    /// packets execute the currently registered template in global scope.
+    pub fn execute_custom_command_control(
+        &mut self,
+        control: &CustomCommandControlData,
+        game_running: bool,
+    ) -> Result<bool, EngineError> {
+        const NO_OWNER: i32 = -1;
+        if control.player != NO_OWNER
+            && !self.player(control.player).is_some_and(|player| {
+                player.at_client() == PlayerAtClient::new(control.by_client)
+            })
+        {
+            return Ok(false);
+        }
+        if !game_running {
+            return Ok(false);
+        }
+        let Some(command) = self
+            .message_board_commands
+            .iter()
+            .find(|command| {
+                lc_script::c4_string_bytes(&command.name) == control.command.as_bytes()
+            })
+            .cloned()
+        else {
+            return Ok(false);
+        };
+
+        let Some(source) = Self::format_custom_command_script(
+            &command,
+            control.argument.as_bytes(),
+            control.player,
+        ) else {
+            return Ok(true);
+        };
+        let _ = self.direct_exec_script_control_global(&source, "internal script", Some(3))?;
+        Ok(true)
     }
 
     /// Execute one synchronized `CID_MessageBoardAnswer` packet. The packet
@@ -20051,6 +20228,30 @@ impl Engine {
 
     pub fn active_message_board_input(&self) -> Option<&ActiveMessageBoardInput> {
         self.active_message_board_input.as_ref()
+    }
+
+    /// Register one `C4MessageInput` custom command. Matching is exact and a
+    /// duplicate name leaves the first entry untouched, like C++ AddCommand.
+    pub fn add_message_board_command(
+        &mut self,
+        command: InitialNetworkMessageBoardCommand,
+    ) -> bool {
+        if self
+            .message_board_commands
+            .iter()
+            .any(|registered| {
+                lc_script::c4_string_bytes(&registered.name)
+                    == lc_script::c4_string_bytes(&command.name)
+            })
+        {
+            return false;
+        }
+        self.message_board_commands.push(command);
+        true
+    }
+
+    pub fn message_board_commands(&self) -> &[InitialNetworkMessageBoardCommand] {
+        &self.message_board_commands
     }
 
     pub fn environment(&self) -> EnvironmentSettings {
@@ -28242,6 +28443,7 @@ impl Engine {
             fair_crew_forced: Some(self.fair_crew_forced),
             allow_debug: Some(self.allow_debug),
             control_rate: Some(self.control_rate),
+            message_board_commands: self.message_board_commands.clone(),
             physics: self.physics,
             environment: self.environment,
             gamma: self.gamma,
@@ -28345,6 +28547,7 @@ impl Engine {
         if let Some(control_rate) = state.control_rate {
             self.set_control_rate(control_rate);
         }
+        self.message_board_commands = state.message_board_commands.clone();
         self.debug_mode = false;
         self.time_go = false;
         self.physics = state.physics;
@@ -51122,6 +51325,296 @@ func EvalSpeed() { return eval("SetGameSpeed(76)"); }
             Value::Bool(true)
         );
         assert_eq!(engine.game_tick_delay_ms(), 13);
+    }
+}
+
+#[cfg(test)]
+mod custom_command_control_parity {
+    use super::*;
+
+    fn command(
+        name: &[u8],
+        argument: &[u8],
+        player: i32,
+        by_client: i32,
+    ) -> CustomCommandControlData {
+        CustomCommandControlData {
+            command: LegacyCString::from_bytes(name.to_vec()).expect("name is NUL-free"),
+            argument: LegacyCString::from_bytes(argument.to_vec()).expect("argument is NUL-free"),
+            player,
+            by_client,
+        }
+    }
+
+    fn registered(
+        name: &str,
+        script: &str,
+        restriction: MessageBoardCommandRestriction,
+    ) -> InitialNetworkMessageBoardCommand {
+        InitialNetworkMessageBoardCommand {
+            name: name.to_string(),
+            script: script.to_string(),
+            restriction,
+        }
+    }
+
+    fn probe_engine() -> Engine {
+        let mut engine = Engine::new();
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "CustomCommandProbe.c".to_string(),
+                "static CustomCommandProbe;\n\
+                 global func Capture(value) { CustomCommandProbe = value; return true; }"
+                    .to_string(),
+            )]),
+            1
+        );
+        engine
+    }
+
+    fn probe(engine: &Engine) -> Value {
+        let cell = engine
+            .script_globals
+            .borrow()
+            .get("CustomCommandProbe")
+            .cloned()
+            .expect("probe global is linked");
+        let value = cell.borrow().clone();
+        value
+    }
+
+    fn execute(
+        engine: &mut Engine,
+        control: &CustomCommandControlData,
+        game_running: bool,
+    ) -> bool {
+        engine
+            .execute_custom_command_control(control, game_running)
+            .expect("custom-command execution is not a fatal engine error")
+    }
+
+    #[test]
+    fn custom_command_registry_is_first_wins_and_enters_join_data() {
+        let mut already_disabled = Engine::new();
+        already_disabled.disable_debug();
+        assert_eq!(
+            already_disabled.message_board_commands(),
+            &[InitialNetworkMessageBoardCommand::speed()],
+            "C++ removes /speed only when DebugMode was active"
+        );
+
+        let mut engine = Engine::new();
+        assert_eq!(engine.message_board_commands(), &[InitialNetworkMessageBoardCommand::speed()]);
+        assert!(engine.add_message_board_command(registered(
+            "probe",
+            "Capture(1)",
+            MessageBoardCommandRestriction::Plain,
+        )));
+        assert!(!engine.add_message_board_command(registered(
+            "probe",
+            "Capture(2)",
+            MessageBoardCommandRestriction::Identifier,
+        )));
+
+        let snapshot = InitialNetworkGameData::from_engine(&engine)
+            .expect("command-only engine is representable in JoinData");
+        assert_eq!(snapshot.message_board_commands, engine.message_board_commands());
+        assert_eq!(snapshot.message_board_commands[1].script, "Capture(1)");
+
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("command registry serializes");
+        let state = EngineState::from_json_str(&encoded).expect("command registry deserializes");
+        let mut restored = Engine::new();
+        restored
+            .restore_state(&state)
+            .expect("command registry restores");
+        assert_eq!(restored.message_board_commands(), engine.message_board_commands());
+
+        engine.set_debug_mode(true);
+        engine.disable_debug();
+        assert!(engine
+            .message_board_commands()
+            .iter()
+            .all(|command| command.name != "speed"));
+        assert!(engine
+            .message_board_commands()
+            .iter()
+            .any(|command| command.name == "probe"));
+    }
+
+    #[test]
+    fn custom_command_checks_player_running_and_exact_registration_before_execution() {
+        let mut engine = probe_engine();
+        engine
+            .register_player(PlayerConfig::new(3, "Owner"))
+            .expect("host player registers");
+        engine
+            .player_mut(3)
+            .expect("player remains registered")
+            .set_at_client(PlayerAtClient::HOST);
+        assert!(engine.add_message_board_command(registered(
+            "who",
+            "Capture(\"%player%/%player%\")",
+            MessageBoardCommandRestriction::Escaped,
+        )));
+
+        let matching = command(b"who", b"ignored", 3, 0);
+        assert!(execute(&mut engine, &matching, true));
+        assert_eq!(probe(&engine), Value::String("3/3".to_string()));
+
+        for rejected in [
+            command(b"who", b"ignored", 3, 7),
+            command(b"who", b"ignored", 99, 0),
+            command(b"WHO", b"ignored", 3, 0),
+            command(b"missing", b"ignored", 3, 0),
+        ] {
+            assert!(!execute(&mut engine, &rejected, true));
+            assert_eq!(probe(&engine), Value::String("3/3".to_string()));
+        }
+        assert!(!execute(&mut engine, &matching, false));
+
+        let ownerless = command(b"who", b"ignored", -1, 91);
+        assert!(execute(&mut engine, &ownerless, true));
+        assert_eq!(probe(&engine), Value::String("-1/-1".to_string()));
+    }
+
+    #[test]
+    fn custom_command_numeric_format_matches_from_chars_prefix_rules() {
+        let mut engine = probe_engine();
+        assert!(engine.add_message_board_command(registered(
+            "number",
+            "Capture(%d)",
+            MessageBoardCommandRestriction::Identifier,
+        )));
+
+        for (argument, expected) in [
+            (&b"+17tail"[..], 17),
+            (&b"-8junk"[..], -8),
+            (&b"12.bad"[..], 12),
+            (&b"junk"[..], 0),
+            (&b" 12"[..], 0),
+            (&b"+"[..], 0),
+            (&b"++12"[..], 0),
+            (&b"2147483648"[..], 0),
+        ] {
+            assert!(
+                execute(
+                    &mut engine,
+                    &command(b"number", argument, -1, 55),
+                    true,
+                ),
+                "argument {argument:?}"
+            );
+            assert_eq!(probe(&engine), Value::Int(expected), "argument {argument:?}");
+        }
+        assert_eq!(
+            Engine::custom_command_integer(b"-2147483648tail"),
+            i32::MIN
+        );
+
+        assert!(engine.add_message_board_command(registered(
+            "percent",
+            "Capture(\"%d/%%\")",
+            MessageBoardCommandRestriction::Plain,
+        )));
+        assert!(execute(
+            &mut engine,
+            &command(b"percent", b"17", -1, 55),
+            true,
+        ));
+        assert_eq!(probe(&engine), Value::String("17/%".to_string()));
+
+        for (name, script) in [
+            ("repeated", "Capture(%d); Capture(%d)"),
+            ("malformed", "Capture(%d) %q"),
+            ("mixed", "Capture(%s); Capture(%d)"),
+        ] {
+            assert!(engine.add_message_board_command(registered(
+                name,
+                script,
+                MessageBoardCommandRestriction::Plain,
+            )));
+            assert!(execute(
+                &mut engine,
+                &command(name.as_bytes(), b"91", -1, 55),
+                true,
+            ));
+            assert_eq!(
+                probe(&engine),
+                Value::String("17/%".to_string()),
+                "invalid fmt template {script:?} must not reach DirectExec"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_command_string_restrictions_match_cpp_escaping_and_prefix_filter() {
+        let mut engine = probe_engine();
+        for entry in [
+            registered(
+                "escaped",
+                "Capture(\"%s\")",
+                MessageBoardCommandRestriction::Escaped,
+            ),
+            registered(
+                "plain",
+                "Capture(%s)",
+                MessageBoardCommandRestriction::Plain,
+            ),
+            registered(
+                "identifier",
+                "Capture(\"%s\")",
+                MessageBoardCommandRestriction::Identifier,
+            ),
+        ] {
+            assert!(engine.add_message_board_command(entry));
+        }
+
+        assert!(execute(
+            &mut engine,
+            &command(b"escaped", b"a\\\"b", -1, 4),
+            true,
+        ));
+        assert_eq!(probe(&engine), Value::String("a\\\"b".to_string()));
+
+        assert!(execute(
+            &mut engine,
+            &command(b"plain", b"37", -1, 4),
+            true,
+        ));
+        assert_eq!(probe(&engine), Value::Int(37));
+
+        assert!(execute(
+            &mut engine,
+            &command(b"identifier", b"AZaz09_~+- space\t.bad", -1, 4),
+            true,
+        ));
+        assert_eq!(
+            probe(&engine),
+            Value::String("AZaz09_~+- space\t".to_string())
+        );
+
+        assert!(execute(
+            &mut engine,
+            &command(b"identifier", b".discarded", -1, 4),
+            true,
+        ));
+        assert_eq!(probe(&engine), Value::String(String::new()));
+
+        let legacy_name = lc_script::c4_string_from_bytes(&[0xff]);
+        assert!(engine.add_message_board_command(registered(
+            &legacy_name,
+            "Capture(73)",
+            MessageBoardCommandRestriction::Plain,
+        )));
+        assert!(execute(
+            &mut engine,
+            &command(&[0xff], b"", -1, 4),
+            true,
+        ));
+        assert_eq!(probe(&engine), Value::Int(73));
     }
 }
 

@@ -456,6 +456,11 @@ impl RuntimeHandle {
                         .execute_message_board_answer_control(&data)
                         .map_err(|error| error.to_string())?;
                 }
+                ControlPacket::CustomCommand(data) => {
+                    self.engine
+                        .execute_custom_command_control(&data, true)
+                        .map_err(|error| error.to_string())?;
+                }
                 ControlPacket::Synchronize(data) => {
                     // C4Control::Execute preserves packet order. Execute the
                     // re-fix inline so later packets in this same recorded
@@ -2242,6 +2247,7 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                         ControlPacket::PlayerSelect(_) => "PlayerSelect",
                         ControlPacket::Script(_) => "Script",
                         ControlPacket::MessageBoardAnswer(_) => "MessageBoardAnswer",
+                        ControlPacket::CustomCommand(_) => "CustomCommand",
                         ControlPacket::InitScenarioPlayer(_) => "InitScenarioPlayer",
                         ControlPacket::SurrenderPlayer(_) => "SurrenderPlayer",
                         ControlPacket::SyncCheck(_) => "SyncCheck",
