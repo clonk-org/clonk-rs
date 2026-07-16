@@ -3048,6 +3048,32 @@ impl HostWorldContext {
         cache.clone()
     }
 
+    /// Callback-local C4GameObjects::UpdatePos preview used by
+    /// StatusActivate/StatusDeactivate. The HostWorldContext is a copied
+    /// call snapshot, so copy-on-write keeps this synchronous list/sector
+    /// mutation private until the authoritative ObjectUpdate folds.
+    fn preview_object_status_sector(
+        &self,
+        object: &HostWorldObject,
+        master_order: &[ObjectId],
+    ) {
+        if self.sector_map().is_none() {
+            return;
+        }
+        let mut cache = self.sectors.borrow_mut();
+        let Some(sectors) = cache.as_mut() else {
+            return;
+        };
+        let sectors = Rc::make_mut(sectors);
+        sectors.remove(object.id);
+        sectors.set_master_order(master_order.to_vec());
+        if object.status().is_active() {
+            if let Some(record) = host_sector_record(object, self.definitions.as_ref()) {
+                sectors.add(record);
+            }
+        }
+    }
+
     fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
         self.sector_map().map(|sectors| {
             let area = sectors.area(rect);
@@ -11487,7 +11513,7 @@ fn load_scenario_section(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Int(0));
         }
         let preserve_ids = context
-            .world_object_ids()
+            .all_world_object_ids()
             .into_iter()
             .filter(|id| {
                 context
@@ -40075,19 +40101,19 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
-    let (success, clear_target) = HOST_CONTEXT.with(|cell| {
+    let (success, clear_target, activate_target) = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow.as_mut().ok_or_else(|| {
             RuntimeError::new("SetObjectStatus requires an active engine context")
         })?;
         let object_id = match context.object_context() {
             Some(object) => object.id(),
-            None => return Ok((false, None)),
+            None => return Ok((false, None, None)),
         };
 
         if let Some(target) = target_id {
             if target != object_id {
-                return Ok((false, None));
+                return Ok((false, None, None));
             }
         }
         let current = context
@@ -40095,13 +40121,20 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
             .map(ObjectScopeContext::status)
             .unwrap_or(ObjectStatus::Deleted);
         if current == ObjectStatus::Deleted {
-            return Ok((false, None));
+            return Ok((false, None, None));
         }
         if current == status {
-            return Ok((true, None));
+            return Ok((true, None, None));
         }
         if let Some(object) = context.object_scope_mut(object_id) {
             object.set_status(status);
+        }
+        context.preview_object_status_change(object_id, status);
+        if status == ObjectStatus::Inactive {
+            // Both C++ StatusDeactivate branches clear transfer zones:
+            // true via Game.ClearPointers, false via the explicit
+            // TransferZones.ClearPointers call (C4Object.cpp:5987-6012).
+            context.register_transfer_zone_command(TransferZoneCommand::clear(object_id));
         }
         if status == ObjectStatus::Inactive && clear_pointers {
             context.clear_object_action_and_command_pointers(object_id);
@@ -40109,6 +40142,7 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
         Ok((
             true,
             (status == ObjectStatus::Inactive && clear_pointers).then_some(object_id),
+            (status == ObjectStatus::Normal).then_some(object_id),
         ))
     })?;
     if !success {
@@ -40127,6 +40161,11 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
             }
             context.record_crew_rosters();
         });
+    }
+    if let Some(object_id) = activate_target {
+        // StatusActivate's final operation is the fail-safe own-script
+        // UpdateTransferZone callback, after re-listing and UpdatePos.
+        let _ = call_inflight_object_own_fail_safe(object_id, "UpdateTransferZone", &[]);
     }
     Ok(Value::Bool(true))
 }
@@ -41866,6 +41905,7 @@ impl EffectHostContext {
     }
 
     fn register_transfer_zone_command(&mut self, command: TransferZoneCommand) {
+        self.world.preview_transfer_zone_command(&command);
         self.transfer_zone_commands.push(command);
     }
 
@@ -42230,7 +42270,7 @@ impl EffectHostContext {
             .collect::<HashMap<_, _>>();
         let fallback_master_list_order = master_ids.len();
         let pending_masks = self.pending_solid_masks();
-        let ids = self.world_object_ids();
+        let ids = self.all_world_object_ids();
         let objects = ids
             .into_iter()
             .enumerate()
@@ -43015,7 +43055,6 @@ impl EffectHostContext {
         // when the copied host outcome folds back (C4Game.cpp:1020-1031;
         // C4TransferZone.cpp:68-76).
         let command = TransferZoneCommand::clear(target);
-        self.world.preview_transfer_zone_command(&command);
         self.register_transfer_zone_command(command);
     }
 
@@ -43988,6 +44027,12 @@ impl EffectHostContext {
         if let Some(order) = &self.master_order_preview {
             return order.clone();
         }
+        self.all_world_object_ids()
+    }
+
+    /// Storage-order objects, including inactive entries omitted from the
+    /// active master-list preview and same-call pending creations.
+    fn all_world_object_ids(&self) -> Vec<ObjectId> {
         let mut ids = self.world.object_ids().to_vec();
         ids.extend(self.pending_order.iter().copied());
         ids
@@ -44000,6 +44045,91 @@ impl EffectHostContext {
         let mut ids = self.world.master_object_ids().to_vec();
         ids.extend(self.pending_order.iter().copied());
         ids
+    }
+
+    fn commit_object_status_preview(&mut self, target: ObjectId, ids: Vec<ObjectId>) {
+        if let Some(object) = self.get_world_object(target) {
+            self.world.preview_object_status_sector(&object, &ids);
+        }
+        self.master_order_preview = Some(ids);
+    }
+
+    /// Preview C4Object::StatusDeactivate/StatusActivate's synchronous list
+    /// transition for callbacks nested before the host outcome folds into
+    /// Engine. Activation uses the same stMain insertion rules as the
+    /// authoritative exec-list fold: same category/definition cluster first,
+    /// then the category bracket; lines and Unsorted objects append.
+    fn preview_object_status_change(&mut self, target: ObjectId, status: ObjectStatus) {
+        let mut ids = self
+            .master_order_preview
+            .clone()
+            .unwrap_or_else(|| self.world.master_object_ids().to_vec());
+        ids.retain(|id| *id != target);
+        if status != ObjectStatus::Normal {
+            self.commit_object_status_preview(target, ids);
+            return;
+        }
+
+        let Some((category, definition_id)) = self.contents_sort_key(target) else {
+            ids.push(target);
+            self.commit_object_status_preview(target, ids);
+            return;
+        };
+        let is_line = self
+            .definition_metadata(&definition_id)
+            .is_some_and(|metadata| metadata.line != 0);
+        if is_line || self.contents_object_unsorted(target) {
+            ids.push(target);
+            self.commit_object_status_preview(target, ids);
+            return;
+        }
+
+        let sort_category = category & CATEGORY_SORT_LIMIT;
+        let mut predecessor = None;
+        let mut found_cluster = false;
+        if category & crate::CATEGORY_STATIC_BACK == 0 {
+            for (position, other) in ids.iter().copied().enumerate() {
+                let live_sorted = self
+                    .get_world_object(other)
+                    .is_some_and(|object| object.status().is_active())
+                    && !self.contents_object_unsorted(other);
+                if !live_sorted {
+                    continue;
+                }
+                let Some((other_category, other_definition)) = self.contents_sort_key(other)
+                else {
+                    continue;
+                };
+                if other_category & CATEGORY_SORT_LIMIT == sort_category
+                    && other_definition == definition_id
+                {
+                    found_cluster = true;
+                    break;
+                }
+                predecessor = Some(position);
+            }
+        }
+        if !found_cluster {
+            predecessor = None;
+            for (position, other) in ids.iter().copied().enumerate() {
+                let live_sorted = self
+                    .get_world_object(other)
+                    .is_some_and(|object| object.status().is_active())
+                    && !self.contents_object_unsorted(other);
+                if !live_sorted {
+                    continue;
+                }
+                let Some((other_category, _)) = self.contents_sort_key(other) else {
+                    continue;
+                };
+                if other_category & CATEGORY_SORT_LIMIT <= sort_category {
+                    break;
+                }
+                predecessor = Some(position);
+            }
+        }
+        ids.insert(predecessor.map_or(0, |position| position + 1), target);
+        self.commit_object_status_preview(target, ids);
     }
 
     fn preview_sort_master_by_category(&mut self) {

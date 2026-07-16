@@ -35361,6 +35361,173 @@ func Initialize() { SetTransferZone(-4, -38, 37, 82); return(1); }
     }
 
     #[test]
+    fn set_object_status_deactivation_clears_transfer_zones_for_both_pointer_modes() {
+        let controller_script = r#"#strict 2
+func Deactivate(object target, bool clear_pointers)
+{
+    return SetObjectStatus(2, target, clear_pointers);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("CTRL", "Controller", controller_script)
+                    .expect("controller compiles"),
+            )
+            .expect("controller registers");
+        engine
+            .register_definition(
+                Definition::from_script("ZONE", "Zone owner", "#strict 2\n")
+                    .expect("zone owner compiles"),
+            )
+            .expect("zone owner registers");
+        let controller = engine
+            .spawn_object(SpawnConfig::new("CTRL"))
+            .expect("controller spawns");
+
+        for (offset, clear_pointers) in [(0, false), (20, true)] {
+            let target = engine
+                .spawn_object(
+                    SpawnConfig::new("ZONE").with_position(Vector2::new(50 + offset, 50)),
+                )
+                .expect("zone owner spawns");
+            engine
+                .set_transfer_zone(
+                    target,
+                    TransferZoneRect {
+                        x: 45 + offset,
+                        y: 40,
+                        width: 10,
+                        height: 20,
+                    },
+                )
+                .expect("zone registers");
+
+            let controller_index = engine
+                .find_object_index(controller)
+                .expect("controller remains");
+            assert_eq!(
+                engine
+                    .call_object_function(
+                        controller_index,
+                        "Deactivate",
+                        vec![object_reference_value(target), Value::Bool(clear_pointers)],
+                    )
+                    .expect("deactivation runs"),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                engine.object_snapshot(target).expect("target remains").status,
+                ObjectStatus::Inactive
+            );
+            assert!(
+                engine
+                    .snapshot()
+                    .transfer_zones
+                    .iter()
+                    .all(|zone| zone.owner != target),
+                "StatusDeactivate({clear_pointers}) clears its zone before returning"
+            );
+        }
+    }
+
+    #[test]
+    fn status_activate_relists_and_updates_position_before_update_transfer_zone() {
+        let zone_script = r#"#strict 2
+local callback_status, callback_master, callback_sector;
+
+func UpdateTransferZone()
+{
+    callback_status = GetObjectStatus();
+    callback_master = FindObject2(Find_ID(ZONE)) == this();
+    callback_sector = FindObject2(Find_ID(ZONE), Find_AtPoint(0, 0)) == this();
+    SetTransferZone(-4, -3, 8, 6);
+}
+"#;
+        let controller_script = r#"#strict 2
+func SetStatus(object target, int status)
+{
+    return SetObjectStatus(status, target, false);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(200, 200));
+        let mut zone = Definition::from_script("ZONE", "Zone owner", zone_script)
+            .expect("zone owner compiles");
+        zone.set_category(CATEGORY_OBJECT);
+        zone.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        engine.register_definition(zone).expect("zone owner registers");
+        engine
+            .register_definition(
+                Definition::from_script("CTRL", "Controller", controller_script)
+                    .expect("controller compiles"),
+            )
+            .expect("controller registers");
+
+        let target = engine
+            .spawn_object(SpawnConfig::new("ZONE").with_position(Vector2::new(50, 50)))
+            .expect("target spawns first");
+        let _peer = engine
+            .spawn_object(SpawnConfig::new("ZONE").with_position(Vector2::new(150, 150)))
+            .expect("same-definition peer spawns second");
+        let controller = engine
+            .spawn_object(SpawnConfig::new("CTRL"))
+            .expect("controller spawns");
+        let call_status = |engine: &mut Engine, status| {
+            let index = engine
+                .find_object_index(controller)
+                .expect("controller remains");
+            engine
+                .call_object_function(
+                    index,
+                    "SetStatus",
+                    vec![object_reference_value(target), Value::Int(status)],
+                )
+                .expect("status call runs")
+        };
+
+        assert_eq!(call_status(&mut engine, 2), Value::Bool(true));
+        assert_eq!(
+            engine.object_snapshot(target).expect("target remains").status,
+            ObjectStatus::Inactive
+        );
+        assert_eq!(call_status(&mut engine, 1), Value::Bool(true));
+
+        let target_state = engine.object_snapshot(target).expect("target reactivates");
+        assert_eq!(target_state.status, ObjectStatus::Normal);
+        assert_eq!(
+            target_state.local_vars.get("callback_status"),
+            Some(&Value::Int(1)),
+            "the callback runs after Status becomes normal"
+        );
+        assert_eq!(
+            target_state.local_vars.get("callback_master"),
+            Some(&Value::Bool(true)),
+            "the callback runs after stMain re-listing"
+        );
+        assert_eq!(
+            target_state.local_vars.get("callback_sector"),
+            Some(&Value::Bool(true)),
+            "the callback runs after UpdatePos restores the sector link"
+        );
+        let zone = engine
+            .snapshot()
+            .transfer_zones
+            .into_iter()
+            .find(|zone| zone.owner == target)
+            .expect("UpdateTransferZone re-registers the zone");
+        assert_eq!(
+            (zone.x, zone.y, zone.width, zone.height),
+            (
+                target_state.position.x - 4,
+                target_state.position.y - 3,
+                8,
+                6,
+            )
+        );
+    }
+
+    #[test]
     fn failed_initialize_keeps_pre_error_creations_and_burned_ids_like_cpp() {
         // C4AulExec errors abort the call but roll NOTHING back
         // (C4AulExec.cpp:1318-1342): a CreateObject before the error has
