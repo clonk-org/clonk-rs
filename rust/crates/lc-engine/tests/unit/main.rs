@@ -42342,6 +42342,81 @@ func ReadRank() { return GetRank(); }
     }
 
     #[test]
+    fn make_crew_member_requires_an_explicit_object_and_preserves_owner() {
+        let script = r#"#strict 2
+func DirectNil() { return MakeCrewMember(nil, 1); }
+func ArrowZero(object target) { return target->MakeCrewMember(0); }
+func Explicit(object target) {
+    return [MakeCrewMember(target, 1), GetOwner(target), GetController(target)];
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Original owner"))
+            .expect("player zero registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Recruiting player"))
+            .expect("player one registers");
+        let mut crew = Definition::from_script("CREW", "Crew", script)
+            .expect("MakeCrewMember probe compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+
+        let caller = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("caller spawns outside every crew");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_owner(0)
+                    .with_crew_member(false),
+            )
+            .expect("target spawns outside every crew");
+        let caller_index = engine.find_object_index(caller).expect("caller index");
+
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "DirectNil", Vec::new())
+                .expect("direct nil call completes"),
+            Value::Bool(false)
+        );
+        assert!(engine.player(1).expect("player one").crew().is_empty());
+        assert_eq!(engine.object_controller(caller), Some(0));
+
+        // AB_CALL changes cthr->Obj but forwards native arguments unchanged:
+        // the zero is a nil pObj and must not recruit the arrow receiver.
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "ArrowZero",
+                    vec![Value::Object(target.as_u64())],
+                )
+                .expect("arrow nil call completes"),
+            Value::Bool(false)
+        );
+        assert!(engine.player(0).expect("player zero").crew().is_empty());
+        assert_eq!(engine.object_controller(target), Some(0));
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Explicit",
+                    vec![Value::Object(target.as_u64())],
+                )
+                .expect("explicit recruitment completes"),
+            Value::Array(vec![Value::Bool(true), Value::Int(0), Value::Int(1)])
+        );
+        assert_eq!(engine.player(1).expect("player one").crew(), &[target]);
+        assert_eq!(engine.object_controller(target), Some(1));
+    }
+
+    #[test]
     fn set_crew_status_keeps_cpp_rosters_owner_info_and_callback_order() {
         let script = r#"#strict 2
 local recruitments;

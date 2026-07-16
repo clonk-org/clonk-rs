@@ -19828,12 +19828,10 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         "obj",
     )?;
     let player = parse_optional_i32(args.get(1), "MakeCrewMember", "player")?.unwrap_or(0);
-    let active = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_context().map(|object| object.id()))
-    });
-    let Some(target) = explicit.or(active) else {
+    // FnMakeCrewMember passes pObj through unchanged; unlike several local
+    // natives it never substitutes cthr->Obj for nil. AB_CALL only changes
+    // the call context and likewise does not inject its receiver into pObj.
+    let Some(target) = explicit else {
         return Ok(Value::Bool(false));
     };
     Ok(Value::Bool(make_crew_member_live(target, player)?))
