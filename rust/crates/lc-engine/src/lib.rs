@@ -8015,6 +8015,18 @@ pub struct EngineState {
     /// LegacyClonk's configured default strength.
     #[serde(default = "default_fair_crew_strength")]
     pub fair_crew_strength: i32,
+    /// Saved `Game.Parameters.FairCrewForced`. `None` keeps the synchronized
+    /// scenario value when restoring states written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fair_crew_forced: Option<bool>,
+    /// Saved `Game.Parameters.AllowDebug`. `None` keeps the synchronized
+    /// scenario value when restoring older states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_debug: Option<bool>,
+    /// Saved `Game.Control.ControlRate`. `None` preserves the timing installed
+    /// by the scenario/network bootstrap for older Rust states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_rate: Option<i32>,
     pub physics: PhysicsSettings,
     pub environment: EnvironmentSettings,
     /// C4Weather::CompileFunc persists Game.GraphicsSystem.dwGamma under
@@ -8209,6 +8221,9 @@ impl EngineState {
             max_players: None,
             use_fair_crew: default_use_fair_crew(),
             fair_crew_strength: default_fair_crew_strength(),
+            fair_crew_forced: None,
+            allow_debug: None,
+            control_rate: None,
             physics,
             environment: snapshot.environment.settings,
             gamma: snapshot.environment.gamma,
@@ -13866,6 +13881,15 @@ pub struct Engine {
     /// `Game.Parameters.FairCrewStrength`, interpreted through the active
     /// rank system when deriving fair-crew physicals.
     fair_crew_strength: i32,
+    /// `Game.Parameters.FairCrewForced`: CID_Set(FairCrew) is a no-op while
+    /// this synchronized scenario lock is active.
+    fair_crew_forced: bool,
+    /// `Game.Parameters.AllowDebug`, cleared by CID_Set(DisableDebug)
+    /// regardless of packet author.
+    allow_debug: bool,
+    /// Process-local `Game.DebugMode`. This is deliberately distinct from
+    /// the synchronized AllowDebug parameter, but DisableDebug clears both.
+    debug_mode: bool,
     /// `Game.Parameters.IsNetworkGame`, derived from the app's active
     /// network session just as C++ copies `Game.NetworkActive` during
     /// parameter setup (C4GameParameters.cpp:429-434).
@@ -15931,6 +15955,9 @@ impl Engine {
             max_players: None,
             use_fair_crew: true,
             fair_crew_strength: 1_000,
+            fair_crew_forced: false,
+            allow_debug: true,
+            debug_mode: false,
             network_game: false,
             league_game: false,
             control_host: true,
@@ -16189,6 +16216,25 @@ impl Engine {
     #[doc(hidden)]
     pub fn set_team_colors(&mut self, enabled: bool) {
         self.team_configuration.team_colors = enabled;
+    }
+
+    pub fn team_colors(&self) -> bool {
+        self.team_configuration.team_colors
+    }
+
+    /// Assign C4TeamList::eTeamDist from a CID_Set packet. Native debug
+    /// builds assert on values outside the five defined variants; release
+    /// builds leave the current distribution unchanged.
+    pub fn set_team_distribution(&mut self, distribution: i32) -> bool {
+        if !(0..=4).contains(&distribution) {
+            return false;
+        }
+        self.team_configuration.distribution = distribution;
+        true
+    }
+
+    pub fn team_distribution(&self) -> i32 {
+        self.team_configuration.distribution
     }
 
     #[doc(hidden)]
@@ -19100,6 +19146,51 @@ impl Engine {
 
     pub fn fair_crew_strength(&self) -> i32 {
         self.fair_crew_strength
+    }
+
+    pub fn set_fair_crew_forced(&mut self, fair_crew_forced: bool) {
+        self.fair_crew_forced = fair_crew_forced;
+    }
+
+    pub fn fair_crew_forced(&self) -> bool {
+        self.fair_crew_forced
+    }
+
+    pub fn set_allow_debug(&mut self, allow_debug: bool) {
+        self.allow_debug = allow_debug;
+    }
+
+    pub fn allow_debug(&self) -> bool {
+        self.allow_debug
+    }
+
+    #[doc(hidden)]
+    pub fn set_debug_mode(&mut self, debug_mode: bool) {
+        self.debug_mode = debug_mode;
+    }
+
+    pub fn debug_mode(&self) -> bool {
+        self.debug_mode
+    }
+
+    /// `C4ControlSet::Execute(C4CVT_DisableDebug)`: unlike every other
+    /// mutating Set type, this is intentionally not restricted to the host.
+    pub fn disable_debug(&mut self) {
+        self.debug_mode = false;
+        self.allow_debug = false;
+    }
+
+    /// Install the live C4GameControl rate without disturbing ControlTick or
+    /// the absolute FrameCounter phase.
+    pub fn set_control_rate(&mut self, control_rate: i32) {
+        self.control_rate = control_rate.clamp(
+            NetworkControlTiming::MIN_CONTROL_RATE,
+            NetworkControlTiming::MAX_CONTROL_RATE,
+        );
+    }
+
+    pub fn control_rate(&self) -> i32 {
+        self.control_rate
     }
 
     pub fn set_league_game(&mut self, league_game: bool) {
@@ -27548,6 +27639,9 @@ impl Engine {
             max_players: self.max_players,
             use_fair_crew: self.use_fair_crew,
             fair_crew_strength: self.fair_crew_strength,
+            fair_crew_forced: Some(self.fair_crew_forced),
+            allow_debug: Some(self.allow_debug),
+            control_rate: Some(self.control_rate),
             physics: self.physics,
             environment: self.environment,
             gamma: self.gamma,
@@ -27612,6 +27706,16 @@ impl Engine {
         }
         self.use_fair_crew = state.use_fair_crew;
         self.fair_crew_strength = state.fair_crew_strength;
+        if let Some(fair_crew_forced) = state.fair_crew_forced {
+            self.fair_crew_forced = fair_crew_forced;
+        }
+        if let Some(allow_debug) = state.allow_debug {
+            self.allow_debug = allow_debug;
+        }
+        if let Some(control_rate) = state.control_rate {
+            self.set_control_rate(control_rate);
+        }
+        self.debug_mode = false;
         self.time_go = false;
         self.physics = state.physics;
         self.environment = state.environment;

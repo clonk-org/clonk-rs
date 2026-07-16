@@ -74,6 +74,19 @@ impl HostGameReference {
         &self.metadata
     }
 
+    /// Rebuild the exact reference after a live C4GameParameters mutation.
+    /// The display projection duplicates title and MaxPlayers and therefore
+    /// must advance atomically with the serialized parameters.
+    pub fn replacing_parameters(
+        &self,
+        parameters: JoinGameParametersEnvelope,
+    ) -> Result<Self, HostGameReferenceError> {
+        let mut summary = self.summary.clone();
+        summary.title = parameters.title.to_string_lossy().into_owned();
+        summary.max_players = parameters.max_players;
+        Self::new(summary, self.metadata.clone(), parameters)
+    }
+
     pub(crate) fn validate(&self) -> Result<(), HostGameReferenceError> {
         validate_metadata(&self.metadata)?;
         validate_summary(&self.summary, &self.metadata, &self.parameters)?;

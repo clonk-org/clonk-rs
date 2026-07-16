@@ -416,6 +416,8 @@ struct PreparedGoLoadingState {
     random_seed: u64,
     use_fair_crew: bool,
     fair_crew_strength: i32,
+    fair_crew_forced: bool,
+    allow_debug: bool,
     team_configuration: TeamConfiguration,
 }
 
@@ -477,6 +479,8 @@ impl ScenarioLoadingState {
         random_seed: u64,
         use_fair_crew: bool,
         fair_crew_strength: i32,
+        fair_crew_forced: bool,
+        allow_debug: bool,
         team_configuration: TeamConfiguration,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
@@ -494,6 +498,8 @@ impl ScenarioLoadingState {
                 random_seed,
                 use_fair_crew,
                 fair_crew_strength,
+                fair_crew_forced,
+                allow_debug,
                 team_configuration,
             }),
             offline_startup_players: None,
@@ -6550,6 +6556,18 @@ fn initial_network_control_clock(
     }
 }
 
+fn initial_host_join_snapshot(
+    network_mode: Option<&NetworkMode>,
+) -> Option<lc_network::HostJoinSnapshot> {
+    network_mode.and_then(|mode| match mode {
+        NetworkMode::Host(HostSettings {
+            prepared: Some(prepared),
+            ..
+        }) => prepared.host_config().initial_join_snapshot.clone(),
+        NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+    })
+}
+
 fn initial_network_max_players(network_mode: Option<&NetworkMode>) -> usize {
     network_mode
         .and_then(|mode| match mode {
@@ -6792,6 +6810,10 @@ struct GameApp {
     control_player_infos: ControlPlayerInfoRegistry,
     network_team_assignment: Option<NetworkTeamAssignmentState>,
     admission_resources: AdmissionResourceStore,
+    /// Mutable host-owned JoinData used for lobby Set changes, GO
+    /// activation, and later client admission. PreparedHostBootstrap remains
+    /// the immutable resource proof from before the socket opened.
+    host_join_snapshot: Option<lc_network::HostJoinSnapshot>,
     pending_network_join_data: Option<lc_network::JoinDataEnvelope>,
     initial_lobby_status_ack_pending: bool,
     client_start_barrier: ClientStartBarrier,
@@ -7891,10 +7913,6 @@ enum ClassicParityBoundary {
         action: &'static str,
     },
     RuntimeFlashProducer(RuntimeFlashProducerBoundary),
-    RuntimeControlSet {
-        value_type: i32,
-        data: i32,
-    },
     RuntimeClientListToggle(RuntimeNetworkRole),
     RuntimePause(RuntimePauseBoundary),
     Scoreboard {
@@ -8064,10 +8082,6 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic timed flash producer {producer:?} is unavailable because its authoritative runtime state is not modeled; refusing the producer action and partial flash mutation"
             ),
-            Self::RuntimeControlSet { value_type, data } => write!(
-                f,
-                "host-authored classic C4ControlSet type {value_type} with data {data} is not implemented; refusing the synchronized control before mutation"
-            ),
             Self::RuntimeClientListToggle(role) => write!(
                 f,
                 "classic runtime C4Network2ClientListDlg toggle is unavailable for {role:?} network role; refusing generic client pane"
@@ -8226,22 +8240,6 @@ fn classic_parity_engine_error(error: ClassicParityBoundary) -> EngineError {
     EngineError::ClassicMenuParityBoundary {
         detail: error.to_string(),
     }
-}
-
-fn runtime_control_set_boundary(
-    set: lc_network::LegacyControlSet,
-) -> Option<ClassicParityBoundary> {
-    if set.by_client != 0 && matches!(set.value_type, 0 | 2 | 3 | 4 | 5) {
-        return None;
-    }
-    Some(match set.value_type {
-        0 => ClassicParityBoundary::RuntimeFlashProducer(RuntimeFlashProducerBoundary::ControlRate),
-        5 => ClassicParityBoundary::RuntimeFlashProducer(RuntimeFlashProducerBoundary::FairCrew),
-        value_type => ClassicParityBoundary::RuntimeControlSet {
-            value_type,
-            data: set.data,
-        },
-    })
 }
 
 fn map_runtime_flash_producer_engine_error(error: EngineError) -> EngineError {
@@ -13162,6 +13160,7 @@ impl GameApp {
         let control_clients = initial_control_clients(network.as_ref(), network_mode.as_ref());
         let network_control_running = network.is_none();
         let network_control_clock = initial_network_control_clock(network_mode.as_ref());
+        let host_join_snapshot = initial_host_join_snapshot(network_mode.as_ref());
         let network_max_players = initial_network_max_players(network_mode.as_ref());
         let network_is_league = initial_network_is_league(network_mode.as_ref());
         // Scenario discovery only walks directories and reads scenario
@@ -13213,6 +13212,16 @@ impl GameApp {
         engine.set_control_host(!matches!(network_mode.as_ref(), Some(NetworkMode::Client(_))));
         engine.set_local_players([runtime.player_owner]);
         engine.set_max_players(i32::try_from(network_max_players).unwrap_or(i32::MAX));
+        if let Some(snapshot) = host_join_snapshot.as_ref() {
+            engine.set_use_fair_crew(snapshot.parameters.use_fair_crew);
+            engine.set_fair_crew_strength(snapshot.parameters.fair_crew_strength);
+            engine.set_fair_crew_forced(snapshot.parameters.fair_crew_forced);
+            engine.set_allow_debug(snapshot.parameters.allow_debug);
+            engine.set_team_distribution(i32::from(
+                snapshot.parameters.teams.team_distribution,
+            ));
+            engine.set_team_colors(snapshot.parameters.teams.team_colors != 0);
+        }
         let snapshot = engine.snapshot();
 
         let scenarios = scenario_discovery
@@ -13379,6 +13388,7 @@ impl GameApp {
             control_player_infos: ControlPlayerInfoRegistry::default(),
             network_team_assignment: None,
             admission_resources: AdmissionResourceStore::default(),
+            host_join_snapshot,
             pending_network_join_data: None,
             initial_lobby_status_ack_pending: false,
             client_start_barrier: ClientStartBarrier::default(),
@@ -18400,6 +18410,8 @@ impl GameApp {
             random_seed,
             join_data.parameters.use_fair_crew,
             join_data.parameters.fair_crew_strength,
+            join_data.parameters.fair_crew_forced,
+            join_data.parameters.allow_debug,
             synchronized_team_configuration(&join_data.parameters),
         ));
         self.pending_network_join_data = None;
@@ -18690,6 +18702,14 @@ impl GameApp {
                             usize::try_from(join_data.parameters.max_players).unwrap_or(0);
                         self.engine
                             .set_max_players(join_data.parameters.max_players);
+                        self.engine
+                            .set_use_fair_crew(join_data.parameters.use_fair_crew);
+                        self.engine
+                            .set_fair_crew_strength(join_data.parameters.fair_crew_strength);
+                        self.engine
+                            .set_fair_crew_forced(join_data.parameters.fair_crew_forced);
+                        self.engine
+                            .set_allow_debug(join_data.parameters.allow_debug);
                         self.network_is_league =
                             synchronized_parameters_are_league(&join_data.parameters);
                         self.network_control_clock = Some(NetworkControlClock::new(
@@ -18868,13 +18888,7 @@ impl GameApp {
                             }
                         }
                         NetworkControl::Vote(vote) => self.execute_league_vote(vote)?,
-                        NetworkControl::Set(set) => {
-                            if let Some(boundary) = runtime_control_set_boundary(set) {
-                                return Err(classic_parity_engine_error(
-                                    report_classic_parity_boundary(boundary),
-                                ));
-                            }
-                        }
+                        NetworkControl::Set(set) => self.execute_control_set(set),
                         control => {
                             tracing::warn!(?control, "ignoring unsupported direct control");
                         }
@@ -22870,6 +22884,7 @@ impl GameApp {
                                 i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
                             );
                             self.control_clients = control_clients;
+                            self.host_join_snapshot = initial_host_join_snapshot(Some(&mode));
                             self.network_mode = Some(mode);
                             self.network = Some(manager);
                             self.network_control_running = false;
@@ -22902,6 +22917,7 @@ impl GameApp {
                                 i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
                             );
                             self.control_clients = control_clients;
+                            self.host_join_snapshot = initial_host_join_snapshot(Some(&mode));
                             self.network_mode = Some(mode);
                             self.network = Some(manager);
                             self.network_control_running = false;
@@ -22946,6 +22962,7 @@ impl GameApp {
                     self.network_is_league = initial_network_is_league(Some(&mode));
                     self.network_control_clock = initial_network_control_clock(Some(&mode));
                     self.control_clients = initial_control_clients(Some(&manager), Some(&mode));
+                    self.host_join_snapshot = initial_host_join_snapshot(Some(&mode));
                     self.network_mode = Some(mode);
                     self.network = Some(manager);
                     self.network_control_running = false;
@@ -22960,6 +22977,7 @@ impl GameApp {
                 self.classic_host_lobby = None;
                 self.network = None;
                 self.network_mode = None;
+                self.host_join_snapshot = None;
                 self.network_control_running = true;
                 self.control_clients = initial_control_clients(None, None);
                 self.startup_view = StartupView::NetworkGame;
@@ -22976,6 +22994,7 @@ impl GameApp {
             self.loader_screen = None;
             self.network = None;
             self.network_mode = None;
+            self.host_join_snapshot = None;
             self.network_control_running = true;
             self.control_clients = initial_control_clients(None, None);
             self.startup_view = StartupView::NetworkGame;
@@ -23745,15 +23764,25 @@ impl GameApp {
             NetworkMode::Host(_) | NetworkMode::Client(_) => None,
         });
         if let Some(prepared) = prepared {
-            let Some((random_seed, use_fair_crew, fair_crew_strength)) = prepared
-                .host_config()
-                .initial_join_snapshot
+            let Some((
+                random_seed,
+                use_fair_crew,
+                fair_crew_strength,
+                fair_crew_forced,
+                allow_debug,
+                team_configuration,
+            )) = self
+                .host_join_snapshot
                 .as_ref()
+                .or_else(|| prepared.host_config().initial_join_snapshot.as_ref())
                 .map(|snapshot| {
                     (
                         u64::from(snapshot.parameters.random_seed as u32),
                         snapshot.parameters.use_fair_crew,
                         snapshot.parameters.fair_crew_strength,
+                        snapshot.parameters.fair_crew_forced,
+                        snapshot.parameters.allow_debug,
+                        synchronized_team_configuration(&snapshot.parameters),
                     )
                 })
             else {
@@ -23816,7 +23845,9 @@ impl GameApp {
                 random_seed,
                 use_fair_crew,
                 fair_crew_strength,
-                TeamConfiguration::from(prepared.runtime_team_metadata()),
+                fair_crew_forced,
+                allow_debug,
+                team_configuration,
             ));
             self.mode = AppMode::Loading;
             return Ok(());
@@ -25086,6 +25117,7 @@ impl GameApp {
             self.loader_screen = None;
             self.network = None;
             self.network_mode = None;
+            self.host_join_snapshot = None;
             self.network_ticks.clear();
             self.network_sync.clear();
             self.sync_checks.clear();
@@ -25220,6 +25252,7 @@ impl GameApp {
         }
         self.network = None;
         self.network_mode = None;
+        self.host_join_snapshot = None;
         self.network_lobby = None;
         self.host_lobby_countdown = None;
         self.network_control_clock = None;
@@ -25240,19 +25273,192 @@ impl GameApp {
         self.engine.set_control_host(true);
     }
 
+    /// Execute the six C4ControlSet value types in packet order. Native
+    /// `HostControl` means exactly author 0; DisableDebug is the deliberate
+    /// exception and may be sent by any client.
+    fn execute_control_set(&mut self, set: lc_network::LegacyControlSet) {
+        if set.by_client != 0 && set.value_type != 1 {
+            return;
+        }
+
+        let mut host_snapshot_changed = false;
+        match set.value_type {
+            // C4CVT_ControlRate
+            0 => {
+                let control_rate = self.network_control_clock.as_mut().map_or_else(
+                    || {
+                        self.engine
+                            .control_rate()
+                            .saturating_add(set.data)
+                            .clamp(1, 20)
+                    },
+                    |clock| clock.adjust_control_rate(set.data),
+                );
+                self.engine.set_control_rate(control_rate);
+                if let Some(join_data) = self.pending_network_join_data.as_mut() {
+                    join_data.parameters.control_rate = control_rate;
+                }
+                if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+                    snapshot.parameters.control_rate = control_rate;
+                    host_snapshot_changed = true;
+                }
+            }
+            // C4CVT_DisableDebug has no HostControl gate.
+            1 => {
+                self.engine.disable_debug();
+                if let Some(prepared) = self
+                    .loading_state
+                    .as_mut()
+                    .and_then(|loading| loading.prepared_go.as_mut())
+                {
+                    prepared.allow_debug = false;
+                }
+                if let Some(join_data) = self.pending_network_join_data.as_mut() {
+                    join_data.parameters.allow_debug = false;
+                }
+                if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+                    snapshot.parameters.allow_debug = false;
+                    host_snapshot_changed = true;
+                }
+            }
+            // C4CVT_MaxPlayer
+            2 => {
+                if self.network_is_league {
+                    return;
+                }
+                self.network_max_players = usize::try_from(set.data).unwrap_or(0);
+                self.engine.set_max_players(set.data);
+                if let Some(join_data) = self.pending_network_join_data.as_mut() {
+                    join_data.parameters.max_players = set.data;
+                }
+                if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+                    snapshot.parameters.max_players = set.data;
+                    host_snapshot_changed = true;
+                }
+            }
+            // C4CVT_TeamDistribution
+            3 => {
+                if !self.engine.set_team_distribution(set.data) {
+                    return;
+                }
+                if let Some(prepared) = self
+                    .loading_state
+                    .as_mut()
+                    .and_then(|loading| loading.prepared_go.as_mut())
+                {
+                    prepared.team_configuration.distribution = set.data;
+                }
+                if let Some(join_data) = self.pending_network_join_data.as_mut() {
+                    join_data.parameters.teams.team_distribution = set.data as u8;
+                }
+                if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+                    snapshot.parameters.teams.team_distribution = set.data as u8;
+                    host_snapshot_changed = true;
+                }
+            }
+            // C4CVT_TeamColors
+            4 => {
+                let enabled = set.data != 0;
+                self.engine.set_team_colors(enabled);
+                if let Some(prepared) = self
+                    .loading_state
+                    .as_mut()
+                    .and_then(|loading| loading.prepared_go.as_mut())
+                {
+                    prepared.team_configuration.team_colors = enabled;
+                }
+                if let Some(join_data) = self.pending_network_join_data.as_mut() {
+                    join_data.parameters.teams.team_colors = u8::from(enabled);
+                }
+                if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+                    snapshot.parameters.teams.team_colors = u8::from(enabled);
+                    host_snapshot_changed = true;
+                }
+            }
+            // C4CVT_FairCrew. Rust resolves fair-crew physicals live rather
+            // than caching them per definition, so changing these parameters
+            // inherently performs C4Def::ClearFairCrewPhysicals.
+            5 => {
+                let prepared_forced = self
+                    .loading_state
+                    .as_ref()
+                    .and_then(|loading| loading.prepared_go.as_ref())
+                    .is_some_and(|prepared| prepared.fair_crew_forced);
+                let pending_forced = self
+                    .pending_network_join_data
+                    .as_ref()
+                    .is_some_and(|join_data| join_data.parameters.fair_crew_forced);
+                let host_forced = self
+                    .host_join_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.parameters.fair_crew_forced);
+                if self.engine.fair_crew_forced()
+                    || prepared_forced
+                    || pending_forced
+                    || host_forced
+                {
+                    return;
+                }
+                let (use_fair_crew, fair_crew_strength) = if set.data < 0 {
+                    (false, 0)
+                } else {
+                    (true, set.data)
+                };
+                self.engine.set_use_fair_crew(use_fair_crew);
+                self.engine.set_fair_crew_strength(fair_crew_strength);
+                if let Some(prepared) = self
+                    .loading_state
+                    .as_mut()
+                    .and_then(|loading| loading.prepared_go.as_mut())
+                {
+                    prepared.use_fair_crew = use_fair_crew;
+                    prepared.fair_crew_strength = fair_crew_strength;
+                }
+                if let Some(join_data) = self.pending_network_join_data.as_mut() {
+                    join_data.parameters.use_fair_crew = use_fair_crew;
+                    join_data.parameters.fair_crew_strength = fair_crew_strength;
+                }
+                if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+                    snapshot.parameters.use_fair_crew = use_fair_crew;
+                    snapshot.parameters.fair_crew_strength = fair_crew_strength;
+                    host_snapshot_changed = true;
+                }
+            }
+            // C4CVT_None and unknown raw values are release-build no-ops.
+            _ => {}
+        }
+
+        if host_snapshot_changed {
+            if let Some(snapshot) = self.host_join_snapshot.clone() {
+                if let Some(network) = self.network.as_ref() {
+                    if let Err(error) = network.publish_join_snapshot(snapshot.clone()) {
+                        tracing::error!(%error, "failed to publish updated host JoinData");
+                    }
+                }
+                if let Some(reference) = self.advertised_game_reference.as_ref() {
+                    match reference.replacing_parameters(snapshot.parameters) {
+                        Ok(updated) => {
+                            if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+                                if let Err(error) = advertiser.update_exact(&updated) {
+                                    tracing::error!(%error, "failed to publish updated host reference");
+                                }
+                            }
+                            self.advertised_game_reference = Some(updated);
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "failed to rebuild updated host reference");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn apply_ready_controls(
         &mut self,
         tick: Tick,
         controls: Vec<NetworkControl>,
     ) -> Result<(), EngineError> {
-        if let Some(boundary) = controls.iter().find_map(|control| match control {
-            NetworkControl::Set(set) => runtime_control_set_boundary(*set),
-            _ => None,
-        }) {
-            return Err(classic_parity_engine_error(report_classic_parity_boundary(
-                boundary,
-            )));
-        }
         debug_assert!(self.executing_ready_tick.is_none());
         self.executing_ready_tick = Some(tick);
         let stop_if_running_mode_exits = matches!(self.mode, AppMode::Running);
@@ -25314,7 +25520,7 @@ impl GameApp {
                     Ok(())
                 }
                 NetworkControl::Set(set) => {
-                    debug_assert_ne!(set.by_client, 0, "host Set passed preflight");
+                    self.execute_control_set(set);
                     Ok(())
                 }
                 NetworkControl::ClientUpdate(update) => {
@@ -25923,7 +26129,7 @@ impl GameApp {
                             return Ok(());
                         }
                         if let Some(clock) = self.network_control_clock.as_mut() {
-                            clock.complete_frame(frame);
+                            clock.complete_control_frame();
                         }
                     }
                 }
@@ -30039,7 +30245,14 @@ impl GameApp {
             .loading_state
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
-            .map(|prepared| (prepared.use_fair_crew, prepared.fair_crew_strength));
+            .map(|prepared| {
+                (
+                    prepared.use_fair_crew,
+                    prepared.fair_crew_strength,
+                    prepared.fair_crew_forced,
+                    prepared.allow_debug,
+                )
+            });
         let offline_startup_players = self
             .loading_state
             .as_mut()
@@ -30057,22 +30270,38 @@ impl GameApp {
             }
         }
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
-        let (use_fair_crew, fair_crew_strength) = prepared_fair_crew.unwrap_or_else(|| {
-            if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
-                // A client reaches activation only after JoinData installed
-                // prepared_go above. Keep standalone defaults for malformed
-                // transitional state rather than consulting local options.
-                (true, 1_000)
-            } else {
-                let options = self.scenario_game_options.values();
-                scenario_data.lobby_metadata().map_or(
-                    (options.fair_crew, options.fair_crew_strength),
-                    |metadata| resolve_scenario_fair_crew_parameters(metadata, options),
-                )
-            }
-        });
+        let (use_fair_crew, fair_crew_strength, fair_crew_forced, allow_debug) =
+            prepared_fair_crew.unwrap_or_else(|| {
+                if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                    // A client reaches activation only after JoinData installed
+                    // prepared_go above. Keep standalone defaults for malformed
+                    // transitional state rather than consulting local options.
+                    (true, 1_000, false, true)
+                } else {
+                    let options = self.scenario_game_options.values();
+                    scenario_data.lobby_metadata().map_or(
+                        (options.fair_crew, options.fair_crew_strength, false, true),
+                        |metadata| {
+                            let (use_fair_crew, fair_crew_strength) =
+                                resolve_scenario_fair_crew_parameters(metadata, options);
+                            let embedded = metadata.embedded_game_parameter_values();
+                            let parameters = embedded
+                                .as_ref()
+                                .unwrap_or_else(|| metadata.game_parameter_defaults());
+                            (
+                                use_fair_crew,
+                                fair_crew_strength,
+                                parameters.fair_crew_forced(),
+                                parameters.allow_debug(),
+                            )
+                        },
+                    )
+                }
+            });
         engine.set_use_fair_crew(use_fair_crew);
         engine.set_fair_crew_strength(fair_crew_strength);
+        engine.set_fair_crew_forced(fair_crew_forced);
+        engine.set_allow_debug(allow_debug);
         engine.set_local_players([self.local_owner]);
         engine.set_max_players(
             i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
@@ -30633,6 +30862,11 @@ impl GameApp {
                 )
             })
             .collect::<HashMap<_, _>>();
+        let parameter_bootstrap = (
+            self.engine.fair_crew_forced(),
+            self.engine.allow_debug(),
+            self.engine.control_rate(),
+        );
 
         self.finish_recording();
         self.engine = Engine::new();
@@ -30642,6 +30876,9 @@ impl GameApp {
         self.engine.set_max_players(
             i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
         );
+        self.engine.set_fair_crew_forced(parameter_bootstrap.0);
+        self.engine.set_allow_debug(parameter_bootstrap.1);
+        self.engine.set_control_rate(parameter_bootstrap.2);
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
@@ -30708,6 +30945,18 @@ impl GameApp {
             })?;
             self.mouse_control_allowed = !scenario_data.disables_mouse();
             self.mouse_control = self.mouse_control_allowed;
+            if self.network.is_none() {
+                if let Some(metadata) = scenario_data.lobby_metadata() {
+                    let embedded = metadata.embedded_game_parameter_values();
+                    let parameters = embedded
+                        .as_ref()
+                        .unwrap_or_else(|| metadata.game_parameter_defaults());
+                    self.engine
+                        .set_fair_crew_forced(parameters.fair_crew_forced());
+                    self.engine.set_allow_debug(parameters.allow_debug());
+                    self.engine.set_control_rate(parameters.control_rate());
+                }
+            }
             if let Some(audio) = self.audio.as_mut() {
                 audio.configure_scenario(Some(path));
                 audio.reset_sfx();
@@ -30767,6 +31016,12 @@ impl GameApp {
         self.engine
             .restore_state(&save.engine_state)
             .context("failed to restore saved engine state")?;
+        if let Some(clock) = self.network_control_clock {
+            self.network_control_clock = Some(NetworkControlClock::new(
+                clock.current_tick(),
+                self.engine.control_rate(),
+            ));
+        }
         // Savegame runtime players live in C++'s RestorePlayerInfos until
         // current takeover entries absorb their joined ID/flags/team via
         // SetSavegameResume. Do this before RecreatePlayers filters for the
@@ -57910,74 +58165,379 @@ protected func InputCallback(string answer, int player)
     }
 
     #[test]
-    fn host_control_rate_and_fair_crew_sets_fail_before_batch_mutation() {
-        for (value_type, producer_name) in [(0, "ControlRate"), (5, "FairCrew")] {
-            let mut app = new_running_sandbox_app();
-            let initial_pressed = app
-                .engine
+    fn host_control_rate_set_changes_both_clocks_and_keeps_batch_order() {
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_control_clock = Some(NetworkControlClock::new(37, 4));
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(37, 4).expect("valid timing"),
+        );
+        let initial_pressed = app
+            .engine
+            .player(app.local_owner)
+            .expect("local player")
+            .control
+            .pressed_coms;
+
+        app.apply_ready_controls(
+            37,
+            vec![
+                NetworkControl::Player {
+                    owner: app.local_owner,
+                    event: ControlEvent::Press(ControlButton::Right),
+                },
+                NetworkControl::Set(lc_network::LegacyControlSet {
+                    value_type: 0,
+                    data: 1,
+                    by_client: 0,
+                }),
+            ],
+        )
+        .expect("ControlRate executes after the preceding ordered control");
+
+        assert_ne!(
+            app.engine
                 .player(app.local_owner)
                 .expect("local player")
                 .control
-                .pressed_coms;
+                .pressed_coms,
+            initial_pressed
+        );
+        assert_eq!(app.engine.control_rate(), 5);
+        assert_eq!(app.network_control_clock.map(NetworkControlClock::control_rate), Some(5));
+        assert_eq!(app.network_control_clock.and_then(|clock| clock.tick_for_frame(4)), None);
+        assert_eq!(app.network_control_clock.and_then(|clock| clock.tick_for_frame(5)), Some(37));
 
-            let error = app
-                .apply_ready_controls(
-                    12,
-                    vec![
-                        NetworkControl::Player {
-                            owner: app.local_owner,
-                            event: ControlEvent::Press(ControlButton::Right),
-                        },
-                        NetworkControl::Set(lc_network::LegacyControlSet {
-                            value_type,
-                            data: 1,
-                            by_client: 0,
-                        }),
-                    ],
-                )
-                .expect_err("unmodeled flash-producing Set must fail closed");
-
-            let EngineError::ClassicMenuParityBoundary { detail } = error else {
-                panic!("expected typed parity boundary, got {error:?}");
-            };
-            assert!(
-                detail.contains(producer_name),
-                "unexpected boundary: {detail}"
-            );
-            assert_eq!(
-                app.engine
-                    .player(app.local_owner)
-                    .expect("local player")
-                    .control
-                    .pressed_coms,
-                initial_pressed,
-                "the earlier ordered control cannot mutate before preflight"
-            );
-            assert_eq!(app.executing_ready_tick, None);
-        }
-    }
-
-    #[test]
-    fn other_host_control_set_types_use_a_distinct_typed_boundary() {
-        let mut app = new_running_sandbox_app();
-        let error = app
-            .apply_ready_controls(
-                9,
+        for (delta, expected) in [(i32::MAX, 20), (i32::MIN, 1)] {
+            app.apply_ready_controls(
+                38,
                 vec![NetworkControl::Set(lc_network::LegacyControlSet {
-                    value_type: 2,
-                    data: 37,
+                    value_type: 0,
+                    data: delta,
                     by_client: 0,
                 })],
             )
-            .expect_err("unimplemented host Set must fail closed");
-
-        let EngineError::ClassicMenuParityBoundary { detail } = error else {
-            panic!("expected typed parity boundary, got {error:?}");
-        };
-        assert!(detail.contains("C4ControlSet type 2"), "{detail}");
-        assert!(detail.contains("data 37"), "{detail}");
-        assert!(!detail.contains("timed flash producer"), "{detail}");
+            .expect("ControlRate clamp executes");
+            assert_eq!(app.engine.control_rate(), expected);
+            assert_eq!(
+                app.network_control_clock.map(NetworkControlClock::control_rate),
+                Some(expected)
+            );
+        }
         assert_eq!(app.executing_ready_tick, None);
+    }
+
+    #[test]
+    fn ready_ticks_follow_plus_and_minus_one_control_rate_changes() {
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_control_clock = Some(NetworkControlClock::new(9, 2));
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(9, 2).expect("valid timing"),
+        );
+
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick: 9,
+                controls: vec![NetworkControl::Set(lc_network::LegacyControlSet {
+                    value_type: 0,
+                    data: 1,
+                    by_client: 0,
+                })],
+            })
+            .expect("queue rate increase");
+        app.update().expect("execute rate increase");
+        assert_eq!((app.engine.frame(), app.engine.control_rate()), (1, 3));
+
+        app.update().expect("simulate frame one");
+        app.update().expect("simulate frame two");
+        app.update().expect("stall on the new frame-three cadence");
+        assert_eq!(app.engine.frame(), 3);
+        assert_eq!(
+            app.network_control_clock.map(NetworkControlClock::current_tick),
+            Some(10)
+        );
+
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick: 10,
+                controls: vec![NetworkControl::Set(lc_network::LegacyControlSet {
+                    value_type: 0,
+                    data: -1,
+                    by_client: 0,
+                })],
+            })
+            .expect("queue rate decrease");
+        app.update().expect("execute rate decrease");
+        assert_eq!((app.engine.frame(), app.engine.control_rate()), (4, 2));
+
+        app.update().expect("stall immediately on the new even-frame cadence");
+        assert_eq!(app.engine.frame(), 4);
+        assert_eq!(
+            app.network_control_clock.map(NetworkControlClock::current_tick),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn host_parameter_sets_update_live_game_state_without_boundaries() {
+        let mut app = new_running_sandbox_app();
+        for (value_type, data) in [(2, 37), (3, 4), (4, -1), (5, 777)] {
+            app.apply_ready_controls(
+                9,
+                vec![NetworkControl::Set(lc_network::LegacyControlSet {
+                    value_type,
+                    data,
+                    by_client: 0,
+                })],
+            )
+            .unwrap_or_else(|error| panic!("Set type {value_type} executes: {error}"));
+        }
+
+        assert_eq!(app.network_max_players, 37);
+        assert_eq!(app.engine.max_players(), Some(37));
+        assert_eq!(app.engine.team_distribution(), 4);
+        assert!(app.engine.team_colors());
+        assert!(app.engine.use_fair_crew());
+        assert_eq!(app.engine.fair_crew_strength(), 777);
+
+        for (value_type, data) in [(3, 9), (4, 0)] {
+            app.apply_ready_controls(
+                9,
+                vec![NetworkControl::Set(lc_network::LegacyControlSet {
+                    value_type,
+                    data,
+                    by_client: 0,
+                })],
+            )
+            .expect("team Set executes or ignores invalid data without a boundary");
+        }
+        assert_eq!(app.engine.team_distribution(), 4);
+        assert!(!app.engine.team_colors());
+
+        app.apply_ready_controls(
+            10,
+            vec![NetworkControl::Set(lc_network::LegacyControlSet {
+                value_type: 5,
+                data: -1,
+                by_client: 0,
+            })],
+        )
+        .expect("negative FairCrew disables the option");
+        assert!(!app.engine.use_fair_crew());
+        assert_eq!(app.engine.fair_crew_strength(), 0);
+
+        app.engine.set_fair_crew_forced(true);
+        app.apply_ready_controls(
+            11,
+            vec![NetworkControl::Set(lc_network::LegacyControlSet {
+                value_type: 5,
+                data: 999,
+                by_client: 0,
+            })],
+        )
+        .expect("forced FairCrew ignores the packet without an error");
+        assert!(!app.engine.use_fair_crew());
+        assert_eq!(app.engine.fair_crew_strength(), 0);
+
+        app.network_is_league = true;
+        app.apply_ready_controls(
+            12,
+            vec![NetworkControl::Set(lc_network::LegacyControlSet {
+                value_type: 2,
+                data: 99,
+                by_client: 0,
+            })],
+        )
+        .expect("league MaxPlayer refusal is a synchronized no-op");
+        assert_eq!(app.engine.max_players(), Some(37));
+
+        for value_type in [-1, 6, i32::MAX] {
+            app.apply_ready_controls(
+                13,
+                vec![NetworkControl::Set(lc_network::LegacyControlSet {
+                    value_type,
+                    data: 123,
+                    by_client: 0,
+                })],
+            )
+            .expect("None and unknown Set values are release-build no-ops");
+        }
+        assert_eq!(app.executing_ready_tick, None);
+    }
+
+    #[test]
+    fn host_lobby_sets_update_published_join_data_and_obey_fair_crew_lock() {
+        let mut app = new_running_sandbox_app();
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let mut snapshot = lc_network::HostConfig::default()
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot.parameters.fair_crew_forced = true;
+        app.host_join_snapshot = Some(snapshot);
+        app.engine.set_fair_crew_forced(false);
+        let before = (
+            app.engine.use_fair_crew(),
+            app.engine.fair_crew_strength(),
+        );
+
+        app.execute_control_set(lc_network::LegacyControlSet {
+            value_type: 5,
+            data: 777,
+            by_client: 0,
+        });
+        assert_eq!(
+            (app.engine.use_fair_crew(), app.engine.fair_crew_strength()),
+            before,
+            "the synchronized FairCrewForced parameter owns the lobby gate"
+        );
+        assert!(commands.take_published_join_snapshots().is_empty());
+
+        app.host_join_snapshot
+            .as_mut()
+            .expect("live snapshot")
+            .parameters
+            .fair_crew_forced = false;
+        for (value_type, data) in [(0, 1), (1, 0), (2, 37), (3, 4), (4, 1), (5, 777)] {
+            app.execute_control_set(lc_network::LegacyControlSet {
+                value_type,
+                data,
+                by_client: 0,
+            });
+        }
+
+        let parameters = &app
+            .host_join_snapshot
+            .as_ref()
+            .expect("live snapshot")
+            .parameters;
+        assert_eq!(parameters.control_rate, 2);
+        assert!(!parameters.allow_debug);
+        assert_eq!(parameters.max_players, 37);
+        assert_eq!(parameters.teams.team_distribution, 4);
+        assert_eq!(parameters.teams.team_colors, 1);
+        assert!(parameters.use_fair_crew);
+        assert_eq!(parameters.fair_crew_strength, 777);
+        let published = commands.take_published_join_snapshots();
+        assert_eq!(published.len(), 6);
+        assert_eq!(published.last(), app.host_join_snapshot.as_ref());
+    }
+
+    #[test]
+    fn mutable_set_parameters_round_trip_and_legacy_absence_preserves_bootstrap() {
+        let mut engine = Engine::new();
+        engine.set_fair_crew_forced(true);
+        engine.set_allow_debug(false);
+        engine.set_control_rate(7);
+        let state = engine.capture_state();
+
+        let mut restored = Engine::new();
+        restored.restore_state(&state).expect("modern state restores");
+        assert!(restored.fair_crew_forced());
+        assert!(!restored.allow_debug());
+        assert_eq!(restored.control_rate(), 7);
+
+        let mut legacy = state;
+        legacy.fair_crew_forced = None;
+        legacy.allow_debug = None;
+        legacy.control_rate = None;
+        let mut seeded = Engine::new();
+        seeded.set_fair_crew_forced(true);
+        seeded.set_allow_debug(false);
+        seeded.set_control_rate(9);
+        seeded
+            .restore_state(&legacy)
+            .expect("legacy state keeps bootstrap-owned parameters");
+        assert!(seeded.fair_crew_forced());
+        assert!(!seeded.allow_debug());
+        assert_eq!(seeded.control_rate(), 9);
+    }
+
+    #[test]
+    fn fair_crew_set_changes_the_next_live_physical_lookup() {
+        let mut app = new_running_sandbox_app();
+        let mut definition =
+            Definition::from_script("FCRW", "Fair crew", "#strict\n").expect("definition compiles");
+        definition.set_crew_member(true);
+        definition.set_physical(lc_engine::PhysicalInfo {
+            energy: 50_000,
+            scale: 30_000,
+            hangle: 30_000,
+            swim: 60_000,
+            fight: 50_000,
+            ..lc_engine::PhysicalInfo::default()
+        });
+        app.engine
+            .register_definition(definition)
+            .expect("definition registers");
+        app.engine
+            .join_player(lc_engine::JoinPlayerConfig {
+                name: "Fair crew player".to_string(),
+                player_info_id: 902,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![lc_engine::player_file::CrewInfo {
+                    id: "FCRW".to_string(),
+                    name: "Henry".to_string(),
+                    rank: 1,
+                    experience: 120,
+                    physical: lc_engine::PhysicalInfo {
+                        energy: 55_000,
+                        scale: 30_000,
+                        hangle: 30_000,
+                        swim: 60_000,
+                        fight: 50_000,
+                        ..lc_engine::PhysicalInfo::default()
+                    },
+                    death_count: 0,
+                    total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
+                    participation: 1,
+                    in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                    extra_data: Vec::new(),
+                }],
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("player joins");
+        let crew = app
+            .engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "FCRW")
+            .map(|object| object.id)
+            .expect("fair-crew object exists");
+        let crew_index = app.engine.find_object_index(crew).expect("crew remains live");
+        let before = app.engine.object_physical(crew_index);
+
+        app.apply_ready_controls(
+            14,
+            vec![NetworkControl::Set(lc_network::LegacyControlSet {
+                value_type: 5,
+                data: 0,
+                by_client: 0,
+            })],
+        )
+        .expect("FairCrew executes");
+
+        let after = app.engine.object_physical(crew_index);
+        assert_ne!(after, before, "the lookup cannot retain a stale fair-crew projection");
+        assert_eq!(after.energy, 50_000);
+        assert_eq!(after.scale, 30_000);
+        assert!(app.engine.use_fair_crew());
+        assert_eq!(app.engine.fair_crew_strength(), 0);
     }
 
     #[test]
@@ -57986,7 +58546,19 @@ protected func InputCallback(string answer, int player)
             let mut app = new_running_sandbox_app();
             let (manager, _event_tx) = NetworkManager::test_stub();
             app.network = Some(manager);
+            app.network_control_clock = Some(NetworkControlClock::new(0, 3));
+            app.engine.set_control_rate(3);
             app.control_clients.register(3, false, false);
+            let before = (
+                app.engine.control_rate(),
+                app.network_control_clock.map(NetworkControlClock::control_rate),
+                app.network_max_players,
+                app.engine.max_players(),
+                app.engine.team_distribution(),
+                app.engine.team_colors(),
+                app.engine.use_fair_crew(),
+                app.engine.fair_crew_strength(),
+            );
 
             app.apply_ready_controls(
                 4,
@@ -58009,59 +58581,74 @@ protected func InputCallback(string answer, int player)
             });
 
             assert!(app.control_clients.is_activated(3));
+            assert_eq!(
+                (
+                    app.engine.control_rate(),
+                    app.network_control_clock.map(NetworkControlClock::control_rate),
+                    app.network_max_players,
+                    app.engine.max_players(),
+                    app.engine.team_distribution(),
+                    app.engine.team_colors(),
+                    app.engine.use_fair_crew(),
+                    app.engine.fair_crew_strength(),
+                ),
+                before,
+                "non-host Set type {value_type} must not mutate game parameters"
+            );
             assert!(app.runtime_flash_message.is_none());
             assert_eq!(app.executing_ready_tick, None);
         }
     }
 
     #[test]
-    fn disable_debug_set_refuses_every_author_before_batch_mutation() {
+    fn disable_debug_set_executes_for_every_author_and_does_not_preflight_batch() {
         for by_client in [0, 7] {
             let mut app = new_running_sandbox_app();
+            let (manager, _event_tx) = NetworkManager::test_stub();
+            app.network = Some(manager);
+            app.engine.set_debug_mode(true);
+            app.engine.set_allow_debug(true);
             let initial_pressed = app
                 .engine
                 .player(app.local_owner)
                 .expect("local player")
                 .control
                 .pressed_coms;
-            let error = app
-                .apply_ready_controls(
-                    5,
-                    vec![
-                        NetworkControl::Player {
-                            owner: app.local_owner,
-                            event: ControlEvent::Press(ControlButton::Right),
-                        },
-                        NetworkControl::Set(lc_network::LegacyControlSet {
-                            value_type: 1,
-                            data: 0,
-                            by_client,
-                        }),
-                    ],
-                )
-                .expect_err("DisableDebug is not host-gated and must fail typed");
-            let EngineError::ClassicMenuParityBoundary { detail } = error else {
-                panic!("expected typed parity boundary, got {error:?}");
-            };
-            assert!(detail.contains("C4ControlSet type 1"), "{detail}");
-            assert_eq!(
+            app.apply_ready_controls(
+                5,
+                vec![
+                    NetworkControl::Player {
+                        owner: app.local_owner,
+                        event: ControlEvent::Press(ControlButton::Right),
+                    },
+                    NetworkControl::Set(lc_network::LegacyControlSet {
+                        value_type: 1,
+                        data: 123,
+                        by_client,
+                    }),
+                ],
+            )
+            .expect("DisableDebug executes without a host gate");
+            assert_ne!(
                 app.engine
                     .player(app.local_owner)
                     .expect("local player")
                     .control
                     .pressed_coms,
-                initial_pressed,
-                "batch must preflight before an earlier control mutates"
+                initial_pressed
             );
+            assert!(!app.engine.debug_mode());
+            assert!(!app.engine.allow_debug());
             assert_eq!(app.executing_ready_tick, None);
         }
     }
 
     #[test]
-    fn immediate_host_control_set_cannot_fall_back_to_log_and_continue() {
+    fn immediate_control_sets_execute_for_host_and_non_host_disable_debug() {
         let mut app = new_running_sandbox_app();
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
+        app.engine.set_debug_mode(true);
         event_tx
             .send(NetworkEvent::DirectControl(NetworkControl::Set(
                 lc_network::LegacyControlSet {
@@ -58070,23 +58657,7 @@ protected func InputCallback(string answer, int player)
                     by_client: 0,
                 },
             )))
-            .expect("queue immediate CID_Set");
-
-        let error = app
-            .process_network_events()
-            .expect_err("immediate host Set must fail closed");
-        let EngineError::ClassicMenuParityBoundary { detail } = error else {
-            panic!("expected typed parity boundary, got {error:?}");
-        };
-        assert!(detail.contains("C4ControlSet type 4"), "{detail}");
-        assert!(detail.contains("data 1"), "{detail}");
-    }
-
-    #[test]
-    fn immediate_non_host_disable_debug_set_fails_typed() {
-        let mut app = new_running_sandbox_app();
-        let (manager, event_tx) = NetworkManager::test_stub();
-        app.network = Some(manager);
+            .expect("queue immediate host CID_Set");
         event_tx
             .send(NetworkEvent::DirectControl(NetworkControl::Set(
                 lc_network::LegacyControlSet {
@@ -58097,13 +58668,11 @@ protected func InputCallback(string answer, int player)
             )))
             .expect("queue immediate non-host DisableDebug");
 
-        let error = app
-            .process_network_events()
-            .expect_err("non-host DisableDebug must not silently no-op");
-        let EngineError::ClassicMenuParityBoundary { detail } = error else {
-            panic!("expected typed parity boundary, got {error:?}");
-        };
-        assert!(detail.contains("C4ControlSet type 1"), "{detail}");
+        app.process_network_events()
+            .expect("both immediate CID_Set packets execute");
+        assert!(app.engine.team_colors());
+        assert!(!app.engine.debug_mode());
+        assert!(!app.engine.allow_debug());
     }
 
     #[test]

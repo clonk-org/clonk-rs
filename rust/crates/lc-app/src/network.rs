@@ -19,8 +19,8 @@ use lc_network::{
     connect_client, decode_control_entry_payload, decode_control_packet,
     encode_control_entry_payload, encode_control_packet, start_host, ClientConfig, ClientEvent,
     ClientHandle, ClientId, ClientPlayerResourceRequest, ControlDelivery, ControlPacket,
-    HostConfig, HostEvent, HostHandle, LegacyControlFrame, LegacyControlSet, NetworkAddress,
-    NetworkProtocol, NetworkStatus, ParticipantKind, Tick,
+    HostConfig, HostEvent, HostHandle, HostJoinSnapshot, LegacyControlFrame, LegacyControlSet,
+    NetworkAddress, NetworkProtocol, NetworkStatus, ParticipantKind, Tick,
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -109,12 +109,25 @@ impl NetworkControlClock {
         Some(self.control_tick)
     }
 
-    /// `C4GameControl::Ticks`: advance only after the matching control frame
-    /// has executed and the game is allowed to enter simulation.
-    pub(crate) fn complete_frame(&mut self, frame: u64) {
-        if frame % self.control_rate == 0 {
-            self.control_tick = self.control_tick.wrapping_add(1);
-        }
+    /// Consume the tick whose control frame was admitted by `tick_for_frame`.
+    /// Keep this independent of the current rate: a CID_Set in that frame may
+    /// already have changed the cadence before execution completes.
+    pub(crate) fn complete_control_frame(&mut self) {
+        self.control_tick = self.control_tick.wrapping_add(1);
+    }
+
+    /// `C4CVT_ControlRate`: preserve the absolute FrameCounter phase while
+    /// changing the divisor used by all subsequent frame probes.
+    pub(crate) fn adjust_control_rate(&mut self, delta: i32) -> i32 {
+        let control_rate = (self.control_rate as i32)
+            .saturating_add(delta)
+            .clamp(1, MAX_CONTROL_RATE);
+        self.control_rate = control_rate as u64;
+        control_rate
+    }
+
+    pub(crate) fn control_rate(self) -> i32 {
+        self.control_rate as i32
     }
 
     pub(crate) fn current_tick(self) -> i32 {
@@ -480,6 +493,16 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_published_join_snapshots(&mut self) -> Vec<HostJoinSnapshot> {
+        let mut snapshots = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::PublishJoinSnapshot { snapshot } = command {
+                snapshots.push(snapshot);
+            }
+        }
+        snapshots
+    }
+
     pub(crate) fn take_submitted_join_players(&mut self) -> Vec<(Tick, JoinPlayerControlData)> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -823,6 +846,9 @@ enum NetworkCommand {
     SetJoinAllowed {
         allowed: bool,
         completion: Sender<std::result::Result<(), String>>,
+    },
+    PublishJoinSnapshot {
+        snapshot: HostJoinSnapshot,
     },
     GracefulPart {
         completion: Sender<std::result::Result<(), String>>,
@@ -1269,6 +1295,15 @@ impl NetworkManager {
             .recv()
             .map_err(|_| anyhow!("network worker ended before confirming join admission"))?
             .map_err(|message| anyhow!(message))
+    }
+
+    pub fn publish_join_snapshot(&self, snapshot: HostJoinSnapshot) -> Result<()> {
+        if self.local_client_id != HOST_CLIENT_ID {
+            return Err(anyhow!("only the network host may publish JoinData"));
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::PublishJoinSnapshot { snapshot })
+            .map_err(|_| anyhow!("network worker is not accepting JoinData updates"))
     }
 
     pub fn change_status(
@@ -1767,6 +1802,11 @@ async fn run_host_worker(
                             }
                         }
                     }
+                    NetworkCommand::PublishJoinSnapshot { snapshot } => {
+                        host.publish_join_snapshot(snapshot)
+                            .await
+                            .map_err(|error| anyhow!("host JoinData update failed: {error}"))?;
+                    }
                     NetworkCommand::ChangeStatus(status) => {
                         host.change_status(status)
                             .await
@@ -2140,6 +2180,10 @@ async fn run_client_worker(
                         let _ = event_tx.send(NetworkEvent::Error(
                             message,
                         ));
+                    }
+                    NetworkCommand::PublishJoinSnapshot { .. } => {
+                        let message = "client attempted to publish host JoinData".to_string();
+                        let _ = event_tx.send(NetworkEvent::Error(message));
                     }
                     NetworkCommand::ChangeStatus(_) => {
                         let _ = event_tx.send(NetworkEvent::Error(
@@ -4780,17 +4824,31 @@ mod tests {
         assert_eq!(clock.tick_for_frame(0), Some(9));
         assert_eq!(clock.tick_for_frame(0), Some(9), "waiting keeps the tick");
         assert_eq!(clock.current_tick(), 9);
-        clock.complete_frame(0);
+        clock.complete_control_frame();
         assert_eq!(clock.current_tick(), 10);
 
         assert_eq!(clock.tick_for_frame(1), None);
-        clock.complete_frame(1);
         assert_eq!(clock.current_tick(), 10, "non-control frames do not tick");
 
         assert_eq!(clock.tick_for_frame(2), Some(10));
-        clock.complete_frame(2);
+        clock.complete_control_frame();
         assert_eq!(clock.tick_for_frame(3), None);
         assert_eq!(clock.tick_for_frame(4), Some(11));
+    }
+
+    #[test]
+    fn control_clock_rate_change_consumes_the_admitted_tick_without_resetting_phase() {
+        let mut clock = NetworkControlClock::new(9, 2);
+
+        assert_eq!(clock.tick_for_frame(2), Some(9));
+        assert_eq!(clock.adjust_control_rate(2), 4);
+        clock.complete_control_frame();
+
+        assert_eq!(clock.current_tick(), 10);
+        assert_eq!(clock.tick_for_frame(3), None);
+        assert_eq!(clock.tick_for_frame(4), Some(10));
+        assert_eq!(clock.adjust_control_rate(i32::MAX), MAX_CONTROL_RATE);
+        assert_eq!(clock.adjust_control_rate(i32::MIN), 1);
     }
 
     #[test]
