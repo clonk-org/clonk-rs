@@ -1743,13 +1743,30 @@ impl Player {
     }
 
     pub fn update_asset_value(&mut self, value: i32, objects_owned: u32) {
-        let old_value_gain = self.value_gain;
-        let old_objects_owned = self.objects_owned;
+        let previous = (self.value_gain, self.objects_owned);
         self.value = value;
         self.objects_owned = objects_owned;
-        let gain = i64::from(self.value) - i64::from(self.initial_value);
-        self.value_gain = gain.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-        if self.value_gain != old_value_gain || self.objects_owned != old_objects_owned {
+        self.finish_asset_value_update(previous);
+    }
+
+    pub(crate) fn begin_asset_value_update(&mut self) -> (i32, u32) {
+        let previous = (self.value_gain, self.objects_owned);
+        self.value = self.points.wrapping_add(self.wealth);
+        self.objects_owned = 0;
+        previous
+    }
+
+    pub(crate) fn count_owned_asset(&mut self) {
+        self.objects_owned = self.objects_owned.wrapping_add(1);
+    }
+
+    pub(crate) fn add_asset_value(&mut self, value: i32) {
+        self.value = self.value.wrapping_add(value);
+    }
+
+    pub(crate) fn finish_asset_value_update(&mut self, previous: (i32, u32)) {
+        self.value_gain = self.value.wrapping_sub(self.initial_value);
+        if self.value_gain != previous.0 || self.objects_owned != previous.1 {
             self.arm_view_value();
         }
     }

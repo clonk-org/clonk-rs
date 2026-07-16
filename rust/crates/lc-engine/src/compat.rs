@@ -10117,7 +10117,7 @@ pub(super) fn calculated_definition_value(
 /// `C4Def::GetValue`; otherwise use the explicit object or `cthr->Obj` and
 /// `C4Object::GetValue` (CalcValue/CalcDefValue, construction percentage,
 /// then the containing base's CalcSellValue adjustment).
-fn get_value(args: &[Value]) -> Result<Value, RuntimeError> {
+pub(super) fn get_value(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 4 {
         return Err(RuntimeError::new(
             "GetValue expects at most 4 arguments: object, definition, base, player",

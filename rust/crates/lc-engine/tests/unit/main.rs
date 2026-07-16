@@ -31491,7 +31491,7 @@ func CrewSelection()
 
         engine.spawn_object(SpawnConfig::new("Ore").with_owner(1))?;
 
-        engine.update_player_asset_values();
+        engine.update_player_asset_values()?;
 
         let player = engine.player(1).expect("player present");
         assert_eq!(player.value(), 95);
@@ -31501,6 +31501,214 @@ func CrewSelection()
             "the post-FinalInit ore is a real gain over the initial 35"
         );
         assert_eq!(player.objects_owned(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn player_asset_value_uses_cpp_get_value_chain_on_tick35() -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        engine.register_player(
+            PlayerConfig::new(1, "Builder")
+                .with_wealth(7)
+                .with_points(10),
+        )?;
+
+        let mut crew = Definition::from_script("Crew", "Crew", "#strict 2\n")?;
+        crew.set_crew_member(true);
+        engine.register_definition(crew)?;
+        engine.spawn_object(
+            SpawnConfig::new("Crew")
+                .with_owner(1)
+                .with_alive(true)
+                .with_crew_member(true),
+        )?;
+
+        let mut half_built =
+            Definition::from_script("HalfBuilt", "Half-built", "#strict 2\n")?;
+        half_built.set_value(101);
+        half_built.set_category(CATEGORY_STRUCTURE);
+        engine.register_definition(half_built)?;
+        engine.spawn_object(
+            SpawnConfig::new("HalfBuilt")
+                .with_owner(1)
+                .with_construction(FULL_CON / 2),
+        )?;
+
+        let mut object_override = Definition::from_script(
+            "ObjectOverride",
+            "Object override",
+            r#"#strict 2
+protected func CalcValue(object base, int player)
+{
+    if (base) return 900;
+    return 40 + player;
+}
+public func ReadCachedValue(int player) { return GetPlrValue(player); }
+public func ReadCachedGain(int player) { return GetPlrValueGain(player); }
+"#,
+        )?;
+        object_override.set_value(999);
+        engine.register_definition(object_override)?;
+        let value_probe = engine.spawn_object(
+            SpawnConfig::new("ObjectOverride").with_owner(1),
+        )?;
+
+        let mut definition_override = Definition::from_script(
+            "DefinitionOverride",
+            "Definition override",
+            r#"#strict 2
+protected func CalcDefValue(object base, int player)
+{
+    if (base) return 800;
+    return 30 + player;
+}
+"#,
+        )?;
+        definition_override.set_value(888);
+        engine.register_definition(definition_override)?;
+        engine.spawn_object(SpawnConfig::new("DefinitionOverride").with_owner(1))?;
+
+        for _ in 0..34 {
+            engine.tick()?;
+        }
+        assert_eq!(engine.frame(), 34);
+        let probe_index = engine
+            .find_object_index(value_probe)
+            .expect("value probe remains active");
+        assert_eq!(
+            engine.call_object_function(
+                probe_index,
+                "ReadCachedValue",
+                vec![Value::Int(1)],
+            )?,
+            Value::Int(17),
+            "GetPlrValue stays at the FinalInit points-plus-wealth baseline"
+        );
+        let probe_index = engine
+            .find_object_index(value_probe)
+            .expect("value probe remains active");
+        assert_eq!(
+            engine.call_object_function(
+                probe_index,
+                "ReadCachedGain",
+                vec![Value::Int(1)],
+            )?,
+            Value::Int(0)
+        );
+
+        engine.tick()?;
+        assert_eq!(engine.frame(), 35);
+        let probe_index = engine
+            .find_object_index(value_probe)
+            .expect("value probe remains active");
+        assert_eq!(
+            engine.call_object_function(
+                probe_index,
+                "ReadCachedValue",
+                vec![Value::Int(1)],
+            )?,
+            Value::Int(139),
+            "17 baseline + 50 half-built + 41 CalcValue + 31 CalcDefValue"
+        );
+        let player = engine.player(1).expect("player remains active");
+        assert_eq!(player.initial_value(), 17);
+        assert_eq!(player.value_gain(), 122);
+        assert_eq!(player.objects_owned(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn calc_value_sees_the_live_partial_player_value_on_each_tick35() -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        engine.register_player(
+            PlayerConfig::new(1, "Builder")
+                .with_wealth(7)
+                .with_points(10),
+        )?;
+
+        let mut crew = Definition::from_script("Crew", "Crew", "#strict 2\n")?;
+        crew.set_crew_member(true);
+        engine.register_definition(crew)?;
+        engine.spawn_object(
+            SpawnConfig::new("Crew")
+                .with_owner(1)
+                .with_alive(true)
+                .with_crew_member(true),
+        )?;
+
+        let mut mirror = Definition::from_script(
+            "ValueMirror",
+            "Value mirror",
+            r#"#strict 2
+protected func CalcValue(object base, int player)
+{
+    return GetPlrValue(player);
+}
+"#,
+        )?;
+        mirror.set_value(999);
+        engine.register_definition(mirror)?;
+        engine.spawn_object(SpawnConfig::new("ValueMirror").with_owner(1))?;
+
+        for _ in 0..35 {
+            engine.tick()?;
+        }
+        assert_eq!(engine.player(1).expect("player remains").value(), 34);
+
+        for _ in 0..35 {
+            engine.tick()?;
+        }
+        let player = engine.player(1).expect("player remains");
+        assert_eq!(engine.frame(), 70);
+        assert_eq!(
+            player.value(),
+            34,
+            "each pass resets the live accumulator to points plus wealth before CalcValue"
+        );
+        assert_eq!(player.value_gain(), 17);
+        assert_eq!(player.objects_owned(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn calc_value_created_later_master_link_is_valued_in_the_same_pass(
+    ) -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        engine.register_player(PlayerConfig::new(1, "Builder"))?;
+
+        let mut child = Definition::from_script("CHLD", "Child", "#strict 2\n")?;
+        child.set_value(5);
+        child.set_category(CATEGORY_STRUCTURE);
+        engine.register_definition(child)?;
+
+        let mut parent = Definition::from_script(
+            "PARN",
+            "Parent",
+            r#"#strict 2
+local created;
+protected func CalcValue(object base, int player)
+{
+    if (!created)
+    {
+        created = 1;
+        CreateObject(CHLD, 0, 0, player);
+    }
+    return 10;
+}
+"#,
+        )?;
+        parent.set_category(CATEGORY_OBJECT);
+        engine.register_definition(parent)?;
+        engine.spawn_object(SpawnConfig::new("PARN").with_owner(1))?;
+
+        for _ in 0..35 {
+            engine.tick()?;
+        }
+
+        let player = engine.player(1).expect("player remains");
+        assert_eq!(player.value(), 15);
+        assert_eq!(player.value_gain(), 15);
+        assert_eq!(player.objects_owned(), 2);
         Ok(())
     }
 

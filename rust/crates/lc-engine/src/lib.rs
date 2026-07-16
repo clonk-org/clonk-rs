@@ -11834,6 +11834,50 @@ impl Definition {
         Ok((matches!(value, Value::Bool(true)), outcome, audio, rng))
     }
 
+    /// Run C4Object::GetValue for C4Player::UpdateValue without exposing the
+    /// host helper to script-name shadowing. CalcValue/CalcDefValue and
+    /// construction scaling execute in the object's complete live context.
+    #[allow(clippy::too_many_arguments)]
+    fn player_asset_object_value(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        player: i32,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<
+        (i32, compat::EffectContextOutcome, AudioRegistry, LcgRng),
+        EngineError,
+    > {
+        let args = [
+            compat::object_reference_value(object_id),
+            Value::Nil,
+            Value::Nil,
+            Value::Int(player),
+        ];
+        let (value, outcome, audio, rng) = self.exec_in_object_context(
+            state,
+            object_id,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            "GetValue",
+            |_script, _cells, _this| compat::get_value(&args).map_err(Into::into),
+        )?;
+        Ok((value.as_c4_int().unwrap_or(0), outcome, audio, rng))
+    }
+
     /// Run C4Def::GetValue for C4Command::Buy without exposing the host
     /// helper to script-name shadowing. CalcDefValue and the base's
     /// CalcBuyValue still execute in the actor's complete live host context.
@@ -16940,7 +16984,7 @@ impl Engine {
         // FinalInit(true) establishes InitialValue from one UpdateValue
         // pass; restore/team-selection finalization skips that reset.
         if initial_value {
-            self.update_player_asset_value(number);
+            self.update_player_asset_value(number)?;
             if let Some(player) = self.players.get_mut(&number) {
                 player.reset_initial_value();
             }
@@ -16959,7 +17003,7 @@ impl Engine {
         // FinalInit always performs another UpdateValue, followed by one
         // immediate Player::Execute. If the global Tick35 is active that
         // Execute performs the third value pass before delays decay.
-        self.update_player_asset_value(number);
+        self.update_player_asset_value(number)?;
         let _ = self.execute_one_player(number, check_elimination)?;
         Ok(())
     }
@@ -23326,7 +23370,7 @@ impl Engine {
                     player.set_home_base_material_entries(material.clone());
                 }
             }
-            self.update_player_asset_value(id);
+            self.update_player_asset_value(id)?;
             if check_elimination
                 && !crew_nonempty
                 && self
@@ -23407,9 +23451,9 @@ impl Engine {
     }
 
     #[doc(hidden)]
-    pub fn update_player_asset_values(&mut self) {
+    pub fn update_player_asset_values(&mut self) -> Result<(), EngineError> {
         if self.players.is_empty() {
-            return;
+            return Ok(());
         }
 
         let ids = self
@@ -23426,39 +23470,135 @@ impl Engine {
             })
             .collect::<Vec<_>>();
         for id in ids {
-            self.update_player_asset_value(id);
+            self.update_player_asset_value(id)?;
         }
+        Ok(())
     }
 
-    fn player_asset_total(&self, id: i32) -> Option<(i32, u32)> {
-        let player = self.players.get(&id)?;
-        let mut value = i64::from(player.points()) + i64::from(player.wealth());
-        let mut objects = 0_u32;
-        for object in &self.objects {
-            if !object.state.status.is_active() || object.state.owner != id {
-                continue;
-            }
-            value = value.saturating_add(i64::from(
-                self.definitions
-                    .get(&object.definition_id)
-                    .map(|definition| definition.value())
-                    .unwrap_or(0),
-            ));
-            objects = objects.saturating_add(1);
-        }
-        Some((
-            value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-            objects,
-        ))
-    }
-
-    fn update_player_asset_value(&mut self, id: i32) {
-        let Some((value, objects)) = self.player_asset_total(id) else {
-            return;
+    fn call_player_asset_object_value(
+        &mut self,
+        object_id: ObjectId,
+        player: i32,
+    ) -> Result<i32, EngineError> {
+        let index = self
+            .find_object_index(object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
+        let (definition_id, construction, state_snapshot) = {
+            let object = &self.objects[index];
+            (
+                object.definition_id.clone(),
+                object.state.construction,
+                object.script_state_snapshot(),
+            )
         };
-        if let Some(player) = self.players.get_mut(&id) {
-            player.update_asset_value(value, objects);
+        let definition = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        if !definition.has_function("CalcValue")
+            && !definition.has_function("CalcDefValue")
+        {
+            return Ok(definition.value().wrapping_mul(construction) / FULL_CON);
         }
+        let action_library = definition.action_library().clone();
+        let call = definition.player_asset_object_value(
+            &state_snapshot,
+            object_id,
+            player,
+            self.rng.clone(),
+            &self.global_effects.clone(),
+            self.physics,
+            self.environment,
+            self.frame,
+            self.host_world_context(),
+            self.game_over_triggered,
+            self.audio_registry.clone(),
+        );
+        let (value, outcome, audio_state, new_rng) = match call {
+            Ok(ok) => ok,
+            Err(error) => {
+                return Err(self.apply_script_error_recovery(
+                    error,
+                    index,
+                    &action_library,
+                    object_id,
+                    &definition_id,
+                    true,
+                ));
+            }
+        };
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        self.apply_callback_outcome(
+            index,
+            outcome,
+            &action_library,
+            object_id,
+            &definition_id,
+            true,
+        )?;
+        Ok(value)
+    }
+
+    fn update_player_asset_value(&mut self, id: i32) -> Result<(), EngineError> {
+        let Some(previous) = self
+            .players
+            .get_mut(&id)
+            .map(Player::begin_asset_value_update)
+        else {
+            return Ok(());
+        };
+        let mut visited = HashSet::new();
+        let mut next = self.exec_list.last().copied();
+        while let Some(object_id) = next {
+            visited.insert(object_id);
+            let successors = self
+                .exec_list
+                .iter()
+                .position(|candidate| *candidate == object_id)
+                .map(|position| {
+                    self.exec_list[..position]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let owned = self.find_object_index(object_id).is_some_and(|index| {
+                self.objects[index].state.status.is_active()
+                    && self.objects[index].state.owner == id
+            });
+            if owned {
+                if let Some(player) = self.players.get_mut(&id) {
+                    player.count_owned_asset();
+                }
+                let object_value =
+                    tolerate_script_error(self.call_player_asset_object_value(object_id, id))?
+                        .unwrap_or(0);
+                if let Some(player) = self.players.get_mut(&id) {
+                    player.add_asset_value(object_value);
+                }
+            }
+            next = if let Some(position) = self
+                .exec_list
+                .iter()
+                .position(|candidate| *candidate == object_id)
+            {
+                self.exec_list[..position]
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|candidate| !visited.contains(candidate))
+            } else {
+                successors.into_iter().find(|candidate| {
+                    !visited.contains(candidate) && self.exec_list.contains(candidate)
+                })
+            };
+        }
+        if let Some(player) = self.players.get_mut(&id) {
+            player.finish_asset_value_update(previous);
+        }
+        Ok(())
     }
 
     fn refresh_player_select_count(&mut self, id: i32) {
