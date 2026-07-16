@@ -1871,6 +1871,7 @@ func Ejection(object item)
                 in_action_time: 0,
                 has_died: false,
                 extra_data: Vec::new(),
+                portraits: Default::default(),
             }],
         ))?;
         let crew = engine.player(0).expect("player joins").crew()[0];
@@ -1969,6 +1970,7 @@ func Recruit() { return MakeCrewMember(this(), 0); }
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
+            portraits: Default::default(),
         };
         let mut engine = Engine::with_seed(155);
         engine.register_definition(definition)?;
@@ -16215,6 +16217,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
+                    portraits: Default::default(),
                 }],
                 control_style: false,
                 auto_context_menu: false,
@@ -17669,6 +17672,7 @@ public func RemoveCaptain(int player)
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
+                    portraits: Default::default(),
                 },
                 player_file::CrewInfo {
                     id: "CREW".to_string(),
@@ -17686,6 +17690,7 @@ public func RemoveCaptain(int player)
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
+                    portraits: Default::default(),
                 },
             ],
             control_style: false,
@@ -28202,6 +28207,7 @@ public func TrainTemporaryScale()
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
+                    portraits: Default::default(),
                 }],
                 startup_player_count: 1,
                 control_style: false,
@@ -28426,6 +28432,7 @@ public func TrainTemporaryScale()
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
+                    portraits: Default::default(),
                 }],
                 startup_player_count: 1,
                 control_style: false,
@@ -28515,6 +28522,7 @@ public func TrainTemporaryScale()
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
+                    portraits: Default::default(),
                 }],
                 startup_player_count: 1,
                 control_style: false,
@@ -29537,6 +29545,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
                 in_action_time: 0,
                 has_died: false,
                 extra_data: Vec::new(),
+                portraits: Default::default(),
             }],
             control_style: false,
             auto_context_menu: false,
@@ -32297,6 +32306,7 @@ global func InitializePlayer(int player)
                 in_action_time: 0,
                 has_died: false,
                 extra_data: Vec::new(),
+                portraits: Default::default(),
             };
             let player = engine
                 .join_player(lifecycle_join_config(
@@ -32653,6 +32663,7 @@ func ControlUpSingle()
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
+            portraits: Default::default(),
         };
         let mut reused = Engine::with_seed(1);
         setup(&mut reused)?;
@@ -42665,6 +42676,7 @@ func RemoveAndRecruit(object target) {
                         in_action_time: 0,
                         has_died: false,
                         extra_data: Vec::new(),
+                        portraits: Default::default(),
                     },
                     player_file::CrewInfo {
                         id: "CREW".to_string(),
@@ -42682,6 +42694,7 @@ func RemoveAndRecruit(object target) {
                         in_action_time: 0,
                         has_died: false,
                         extra_data: Vec::new(),
+                        portraits: Default::default(),
                     },
                 ],
                 control_style: false,
@@ -42901,6 +42914,7 @@ func RemoveAndRecruit(object target) {
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
+                    portraits: Default::default(),
                 }],
                 control_style: false,
                 auto_context_menu: false,
@@ -42998,6 +43012,7 @@ func AwardSelf(int amount) {
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
+                    portraits: Default::default(),
                 }],
                 control_style: false,
                 auto_context_menu: false,
@@ -43571,6 +43586,7 @@ func RemoveAndGrabSelf() {
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
+                    portraits: Default::default(),
                 }],
                 control_style: false,
                 auto_context_menu: false,
@@ -44247,6 +44263,279 @@ func Take(object donor) { return GrabObjectInfo(donor); }
         assert!(!engine.player(1).expect("player one").crew().contains(&donor));
     }
 
+    #[test]
+    fn get_portrait_distinguishes_permanent_and_requires_info() {
+        let script = r#"#strict
+public func AttachInfo() { return MakeCrewMember(this(), 0); }
+public func SetPermanent() { return SetPortrait("Permanent", this(), GetID(), true, false); }
+public func SetTemporary() { return SetPortrait("Temporary", this(), GetID(), false, false); }
+public func SetCopied() { return SetPortrait("Permanent", this(), GetID(), true, true); }
+public func SetInvalid() { return SetPortrait("Missing", this(), GetID(), true, false); }
+public func ClearPermanent() { return SetPortrait("none", this(), GetID(), true, false); }
+public func TakeInfo(object donor) { return GrabObjectInfo(donor); }
+public func ReadPortraits() {
+    return [
+        GetPortrait(this(), false, false),
+        GetPortrait(this(), false, true),
+        GetPortrait(this(), true, false),
+        GetPortrait(this(), true, true)
+    ];
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_player(PlayerConfig::new(0, "Portrait owner"))
+            .expect("portrait owner registers");
+        let mut crew = Definition::from_script("PORC", "Portrait crew", script)
+            .expect("portrait crew compiles");
+        crew.set_crew_member(true);
+        attach_one_pixel_portrait(&mut engine, &mut crew, "Permanent");
+        let image = crew
+            .portrait_graphics("Permanent")
+            .expect("portrait fixture exists")
+            .clone();
+        crew.set_portrait_graphics(vec![
+            ("Permanent".to_string(), image.clone()),
+            ("Temporary".to_string(), image),
+        ]);
+        engine
+            .register_definition(crew)
+            .expect("portrait crew registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("PORC")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0),
+            )
+            .expect("portrait crew spawns");
+        let index = engine.find_object_index(id).expect("portrait crew exists");
+        assert_eq!(
+            engine
+                .call_object_function(index, "AttachInfo", Vec::new())
+                .expect("crew info attaches"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(index, "SetPermanent", Vec::new())
+                .expect("permanent portrait sets"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(index, "SetTemporary", Vec::new())
+                .expect("temporary portrait sets"),
+            Value::Bool(true)
+        );
+        let expected = Value::Array(vec![
+            Value::String("Temporary".into()),
+            Value::String("Permanent".into()),
+            Value::C4Id("PORC".into()),
+            Value::C4Id("PORC".into()),
+        ]);
+        assert_eq!(
+            engine
+                .call_object_function(index, "ReadPortraits", Vec::new())
+                .expect("portraits read in a later callback"),
+            expected.clone()
+        );
+
+        let saved = engine.capture_state();
+        engine
+            .restore_state(&saved)
+            .expect("portrait state restores");
+        let index = engine.find_object_index(id).expect("portrait crew restores");
+        assert_eq!(
+            engine
+                .call_object_function(index, "ReadPortraits", Vec::new())
+                .expect("restored portraits read"),
+            expected.clone()
+        );
+        assert_eq!(
+            engine
+                .call_object_function(index, "SetInvalid", Vec::new())
+                .expect("invalid portrait is rejected"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(index, "ReadPortraits", Vec::new())
+                .expect("rejected set preserves both portraits"),
+            expected
+        );
+        assert_eq!(
+            engine
+                .call_object_function(index, "SetCopied", Vec::new())
+                .expect("copied portrait sets"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(index, "ReadPortraits", Vec::new())
+                .expect("owned portrait has no source definition"),
+            Value::Array(vec![
+                Value::String("custom".into()),
+                Value::String("custom".into()),
+                Value::Nil,
+                Value::Nil,
+            ])
+        );
+
+        // A temporary-only assignment does not manufacture a permanent
+        // portrait; pNewPortrait remains absent and the empty fallback wins.
+        let temporary_only = engine
+            .spawn_object(
+                SpawnConfig::new("PORC")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0),
+            )
+            .expect("temporary-only crew spawns");
+        let temporary_index = engine
+            .find_object_index(temporary_only)
+            .expect("temporary-only crew exists");
+        for function in ["AttachInfo", "SetTemporary"] {
+            assert_eq!(
+                engine
+                    .call_object_function(temporary_index, function, Vec::new())
+                    .expect("temporary-only setup succeeds"),
+                Value::Bool(true)
+            );
+        }
+        assert_eq!(
+            engine
+                .call_object_function(temporary_index, "ReadPortraits", Vec::new())
+                .expect("temporary-only portraits read"),
+            Value::Array(vec![
+                Value::String("Temporary".into()),
+                Value::Nil,
+                Value::C4Id("PORC".into()),
+                Value::Nil,
+            ])
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    temporary_index,
+                    "TakeInfo",
+                    vec![Value::Object(id.as_u64())],
+                )
+                .expect("portrait info transfers"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(temporary_index, "ReadPortraits", Vec::new())
+                .expect("receiver reads donor portrait state"),
+            Value::Array(vec![
+                Value::String("custom".into()),
+                Value::String("custom".into()),
+                Value::Nil,
+                Value::Nil,
+            ]),
+            "the donor Info replaces, rather than merges with, receiver state"
+        );
+        let donor_index = engine.find_object_index(id).expect("donor object remains");
+        assert_eq!(
+            engine
+                .call_object_function(donor_index, "ReadPortraits", Vec::new())
+                .expect("donor without Info reads nil"),
+            Value::Array(vec![Value::Nil, Value::Nil, Value::Nil, Value::Nil])
+        );
+
+        // A loaded custom portrait is the permanent fallback. Permanent
+        // clear allocates an empty pNewPortrait and must suppress it.
+        let custom = engine
+            .spawn_object(
+                SpawnConfig::new("PORC")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0),
+            )
+            .expect("custom portrait crew spawns");
+        let custom_index = engine
+            .find_object_index(custom)
+            .expect("custom portrait crew exists");
+        assert_eq!(
+            engine
+                .call_object_function(custom_index, "AttachInfo", Vec::new())
+                .expect("custom portrait info attaches"),
+            Value::Bool(true)
+        );
+        let custom_portrait = CrewPortrait {
+            source: None,
+            name: "custom".to_string(),
+        };
+        let mut custom_state = engine.capture_state();
+        custom_state
+            .crew_object_infos
+            .get_mut(&custom)
+            .expect("custom live info exists")
+            .portraits = CrewPortraitState {
+            current: Some(custom_portrait.clone()),
+            fallback: Some(custom_portrait),
+            permanent: CrewPermanentPortrait::Absent,
+        };
+        let link = custom_state.crew_info_links[&custom];
+        let saved_custom_portraits = custom_state.crew_object_infos[&custom].portraits.clone();
+        custom_state
+            .crew_info_rosters
+            .get_mut(&link.player_id)
+            .and_then(|roster| roster.get_mut(link.roster_index))
+            .expect("custom roster info exists")
+            .portraits = saved_custom_portraits;
+        engine
+            .restore_state(&custom_state)
+            .expect("custom portrait state installs");
+        let custom_index = engine.find_object_index(custom).expect("custom crew restores");
+        assert_eq!(
+            engine
+                .call_object_function(custom_index, "ReadPortraits", Vec::new())
+                .expect("custom fallback reads"),
+            Value::Array(vec![
+                Value::String("custom".into()),
+                Value::String("custom".into()),
+                Value::Nil,
+                Value::Nil,
+            ])
+        );
+        assert_eq!(
+            engine
+                .call_object_function(custom_index, "ClearPermanent", Vec::new())
+                .expect("permanent portrait clears"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(custom_index, "ReadPortraits", Vec::new())
+                .expect("explicit clear suppresses custom fallback"),
+            Value::Array(vec![Value::Nil, Value::Nil, Value::Nil, Value::Nil])
+        );
+        let cleared_state = engine.capture_state();
+        engine
+            .restore_state(&cleared_state)
+            .expect("explicit portrait clear restores");
+        let custom_index = engine.find_object_index(custom).expect("cleared crew restores");
+        assert_eq!(
+            engine
+                .call_object_function(custom_index, "ReadPortraits", Vec::new())
+                .expect("restored clear still suppresses fallback"),
+            Value::Array(vec![Value::Nil, Value::Nil, Value::Nil, Value::Nil])
+        );
+
+        // FnGetPortrait requires pObj->Info (C4Script.cpp:5353-5357).
+        let noncrew = engine
+            .spawn_object(SpawnConfig::new("PORC").with_category(CATEGORY_OBJECT))
+            .expect("info-less object spawns");
+        let noncrew_index = engine
+            .find_object_index(noncrew)
+            .expect("info-less object exists");
+        assert_eq!(
+            engine
+                .call_object_function(noncrew_index, "ReadPortraits", Vec::new())
+                .expect("info-less portrait query executes"),
+            Value::Array(vec![Value::Nil, Value::Nil, Value::Nil, Value::Nil])
+        );
+    }
+
     // FnGrabObjectInfo (C4Script.cpp:2170-2176) -> C4Object::GrabInfo
     // (C4Object.cpp:5696-5726): `this` takes pFrom's info section; the
     // GoldRush TRPR Recruitment creates a temp COWB, grabs its info and
@@ -44280,6 +44569,16 @@ func Recruit() {
         let mut trapper =
             Definition::from_script("TRAP", "Trapper", script).expect("script compiles");
         trapper.set_crew_member(true);
+        attach_one_pixel_portrait(&mut engine, &mut trapper, "1");
+        let image = trapper
+            .portrait_graphics("1")
+            .expect("trapper portrait fixture exists")
+            .clone();
+        trapper.set_portrait_graphics(vec![
+            ("1".to_string(), image.clone()),
+            ("2".to_string(), image.clone()),
+            ("3".to_string(), image),
+        ]);
         engine
             .register_definition(trapper)
             .expect("trapper registers");
@@ -44332,7 +44631,11 @@ func Recruit() {
              Random draw like C++ AdjustPortrait"
         );
         assert_eq!(
-            engine.objects[idx].state.portrait_source.as_deref(),
+            engine
+                .crew_object_info(id)
+                .and_then(|info| info.portraits.current.as_ref())
+                .and_then(|portrait| portrait.source.as_ref())
+                .map(DefinitionId::as_str),
             Some("TRAP"),
             "SetPortrait(..., GetID()) re-sources the portrait to the own def"
         );

@@ -7336,6 +7336,7 @@ public func Activate(object clonk)
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
+            portraits: Default::default(),
         };
         engine
             .crew_rosters
@@ -7358,6 +7359,7 @@ public func Activate(object clonk)
                     age: 0,
                     in_action_time: 0,
                     extra_data: Vec::new(),
+                    portraits: Default::default(),
                 },
             );
             Rc::make_mut(&mut engine.crew_info_links).insert(

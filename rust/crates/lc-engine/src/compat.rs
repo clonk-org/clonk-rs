@@ -31,14 +31,15 @@ use crate::{
     ActionLibrary, ActionProcedure, ActionState, ActionUpdate, AudioCommand, C4D_BORDER_BOTTOM,
     C4D_BORDER_LAYER, C4D_BORDER_SIDES, C4D_BORDER_TOP, CATEGORY_SORT_LIMIT, CNAT_BOTTOM,
     CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, ChangeDefContentsSort,
-    CommandDirection, CrewInfoLink, CrewObjectInfo, CrewSelectionState, DEFAULT_CATEGORY,
-    DefinitionId, DefinitionRect, Direction, DrawTransform, EnvironmentSettings, FULL_CON,
-    FloatVector2, GraphicsOverlayMode, Landscape, MenuRequest, MenuRequestKind, OWNER_NONE,
-    ObjectBaseGraphics, ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate,
-    ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder,
-    PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState, PlayerStatus, QueuedCommand,
-    RgbColor, ScoreboardState, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig,
-    TeamConfiguration, TeamInfo, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
+    CommandDirection, CrewInfoLink, CrewObjectInfo, CrewPermanentPortrait, CrewPortrait,
+    CrewPortraitState, CrewSelectionState, DEFAULT_CATEGORY, DefinitionId, DefinitionRect,
+    Direction, DrawTransform, EnvironmentSettings, FULL_CON, FloatVector2, GraphicsOverlayMode,
+    Landscape, MenuRequest, MenuRequestKind, OWNER_NONE, ObjectBaseGraphics,
+    ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
+    ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicalsUpdate,
+    PhysicsSettings, PlayerControlState, PlayerState, PlayerStatus, QueuedCommand, RgbColor,
+    ScoreboardState, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig, TeamConfiguration,
+    TeamInfo, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
     encode_bridge_action_data,
 };
 #[cfg(test)]
@@ -958,6 +959,13 @@ pub enum PlayerCommand {
         object_id: ObjectId,
         link: Option<CrewInfoLink>,
         name: String,
+    },
+    /// FnSetPortrait mutates the C4ObjectInfo itself. Keep both the live
+    /// projection and its pointer-equivalent roster entry in lockstep.
+    SetCrewInfoPortrait {
+        object_id: ObjectId,
+        link: Option<CrewInfoLink>,
+        portraits: CrewPortraitState,
     },
     /// `FnSetCrewExtraData`: an incremental named-slot write on the exact
     /// C4ObjectInfo pointer and, when linked, its persistent roster entry.
@@ -6337,18 +6345,26 @@ fn smoke(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnSetPortrait (C4Script.cpp:5333-5341): the visual payload is
-/// presentation-only, but the SOURCE DEFINITION is tracked because
-/// AdjustPortrait gates a synced `Random(GetPortraitCount())` draw on
-/// `GetPortrait(obj, true) != GetID()` (Cowboy.c4d/Script.c:552-564).
+/// FnSetPortrait (C4Script.cpp:5333-5350): current portrait and the optional
+/// pNewPortrait override are fields of the target's C4ObjectInfo.
 fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
     let name = parse_optional_string(args.first(), "SetPortrait", "portrait")?;
     let target =
         parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "SetPortrait", "obj")?;
     let source = parse_native_c4id_argument(args.get(2), "SetPortrait")?;
-    if name.as_deref().map(str::is_empty).unwrap_or(true) {
+    let permanent = value_to_bool(
+        args.get(3).unwrap_or(&Value::Nil),
+        "SetPortrait",
+        "permanent",
+    )?;
+    let copy_graphics = value_to_bool(
+        args.get(4).unwrap_or(&Value::Nil),
+        "SetPortrait",
+        "copy graphics",
+    )?;
+    let Some(name) = name.filter(|name| !name.is_empty()) else {
         return Ok(Value::Bool(false));
-    }
+    };
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
@@ -6358,42 +6374,150 @@ fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(target) = target.or(active) else {
             return Ok(Value::Bool(false));
         };
-        // idSourceDef 0 falls back to the target's own definition.
-        let source = match source {
-            Some(source) if context.world.definition_metadata(&source).is_some() => Some(source),
-            Some(_) => return Ok(Value::Bool(false)),
-            None => context
-                .get_world_object(target)
-                .map(|object| object.definition_id().to_string()),
-        };
-        let Some(source) = source else {
+        if !context.object_status_present(target) || !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
+        }
+        let Some((link, mut info)) = context
+            .object_scope(target)
+            .and_then(|object| Some((object.info_link(), object.info_core()?.clone())))
+        else {
             return Ok(Value::Bool(false));
         };
-        if Some(target) == active {
-            if let Some(object) = context.object_context_mut() {
-                object.set_portrait(source, name.clone().unwrap_or_default());
+
+        let mut portraits = info.portraits.clone();
+        if name == "none" {
+            portraits.current = None;
+            if permanent {
+                portraits.permanent = CrewPermanentPortrait::ExplicitNone;
             }
-        } else if let Some(state) = context.nested_objects.get_mut(&target) {
-            state
-                .scope
-                .set_portrait(source, name.clone().unwrap_or_default());
         } else {
-            tracing::debug!(
-                target = target.as_u64(),
-                "SetPortrait: target outside active/nested scopes; source not tracked"
-            );
+            // idSourceDef 0 falls back to the target's live definition.
+            let Some(mut source) = source.or_else(|| context.object_effective_definition_id(target))
+            else {
+                return Ok(Value::Bool(false));
+            };
+            let Some(metadata) = context.world.definition_metadata(&source) else {
+                return Ok(Value::Bool(false));
+            };
+            let mut names = metadata.portrait_names.clone();
+            // C4ObjectInfo::SetPortrait rejects a definition without a
+            // Portraits list before examining the custom special case.
+            if names.is_empty() && name != "random" {
+                return Ok(Value::Bool(false));
+            }
+
+            let mut assign_permanently = permanent;
+            let mut copy = copy_graphics;
+            let selected = if name == "custom"
+                && info.portraits.fallback.as_ref().is_some_and(|portrait| {
+                    portrait.source.is_none() && portrait.name == "custom"
+                })
+            {
+                // Relinking pCustomPortrait ignores both flags.
+                portraits.current = info.portraits.fallback.clone();
+                None
+            } else {
+                let canonical_name = if name == "random" {
+                    if names.is_empty() {
+                        source = "CLNK".to_string();
+                        let Some(metadata) = context.world.definition_metadata(&source) else {
+                            return Ok(Value::Bool(false));
+                        };
+                        names = metadata.portrait_names.clone();
+                        if names.is_empty() {
+                            return Ok(Value::Bool(false));
+                        }
+                        assign_permanently = true;
+                        copy = false;
+                    }
+                    let index = SCRIPT_SAFE_RNG
+                        .with(|rng| rng.borrow_mut().random(names.len() as i32))
+                        as usize;
+                    names[index].clone()
+                } else {
+                    let Some(canonical) = names
+                        .iter()
+                        .find(|candidate| candidate.eq_ignore_ascii_case(&name))
+                    else {
+                        return Ok(Value::Bool(false));
+                    };
+                    canonical.clone()
+                };
+                let selected = if copy {
+                    CrewPortrait {
+                        source: None,
+                        name: "custom".to_string(),
+                    }
+                } else {
+                    CrewPortrait {
+                        source: Some(DefinitionId::from(source.as_str())),
+                        name: canonical_name,
+                    }
+                };
+                portraits.current = Some(selected.clone());
+                Some(selected)
+            };
+            if let Some(selected) = selected.filter(|_| assign_permanently) {
+                portraits.permanent = CrewPermanentPortrait::Assigned(selected);
+            }
         }
+
+        info.portraits = portraits.clone();
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
+        object.set_info_core(Some(info));
+        if let Some(link) = link {
+            if let Some(entry) = context
+                .world
+                .crew_info_state
+                .borrow_mut()
+                .entries
+                .get_mut(&link)
+            {
+                entry.portraits = portraits.clone();
+            }
+        }
+        context.record_player_command(PlayerCommand::SetCrewInfoPortrait {
+            object_id: target,
+            link,
+            portraits,
+        });
         Ok(Value::Bool(true))
     })
 }
 
-/// FnGetPortrait (C4Script.cpp:5352-5395): returns either the selected
-/// portrait suffix or its source definition ID.
+fn resolve_current_portrait(
+    context: &EffectHostContext,
+    portrait: &CrewPortrait,
+) -> Option<CrewPortrait> {
+    let Some(source) = portrait.source.as_ref() else {
+        return Some(portrait.clone());
+    };
+    let canonical_name = context
+        .world
+        .definition_metadata(source.as_str())
+        .and_then(|metadata| {
+            metadata
+                .portrait_names
+                .iter()
+                .find(|name| name.eq_ignore_ascii_case(&portrait.name))
+        })?
+        .clone();
+    Some(CrewPortrait {
+        source: Some(source.clone()),
+        name: canonical_name,
+    })
+}
+
+/// FnGetPortrait (C4Script.cpp:5353-5399): permanent reads pNewPortrait
+/// first and consult the saved/custom fallback only when that pointer is
+/// absent. Current reads inspect the independently mutable Portrait field.
 fn get_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
     let target =
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "GetPortrait", "obj")?;
     let get_id = args.get(1).map(value_raw_truthy).unwrap_or(false);
-    let _permanent = args.get(2).map(value_raw_truthy).unwrap_or(false);
+    let permanent = args.get(2).map(value_raw_truthy).unwrap_or(false);
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
@@ -6403,34 +6527,37 @@ fn get_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(target) = target.or(active) else {
             return Ok(Value::Nil);
         };
-        let overridden = if Some(target) == active {
-            context
-                .object_context()
-                .and_then(|object| object.portrait_override())
-        } else {
-            context
-                .nested_objects
-                .get(&target)
-                .and_then(|state| state.scope.portrait_override())
+        if !context.object_status_present(target) || !context.ensure_object_scope(target) {
+            return Ok(Value::Nil);
+        }
+        let Some(info) = context
+            .object_scope(target)
+            .and_then(ObjectScopeContext::info_core)
+        else {
+            return Ok(Value::Nil);
         };
-        // FnGetPortrait (C4Script.cpp:5359-5395): no assigned portrait
-        // graphics -> nil. A def-id fallback here broke the cavalry's
-        // AdjustPortrait guard (`GetPortrait(this(), true) != GetID()`
-        // must be TRUE for a fresh crew NPC so the Random(3) portrait
-        // pick runs).
-        let portrait = overridden.or_else(|| {
-            context.get_world_object(target).and_then(|object| {
-                object.full_state().and_then(|state| {
-                    Some((state.portrait_source.clone()?, state.portrait_name.clone()?))
-                })
-            })
-        });
+        let portrait = if permanent {
+            match &info.portraits.permanent {
+                CrewPermanentPortrait::Absent => info.portraits.fallback.clone(),
+                CrewPermanentPortrait::ExplicitNone => None,
+                CrewPermanentPortrait::Assigned(portrait) => Some(portrait.clone()),
+            }
+        } else {
+            info.portraits
+                .current
+                .as_ref()
+                .and_then(|portrait| resolve_current_portrait(context, portrait))
+        };
         Ok(portrait
-            .map(|(source, name)| {
+            .map(|portrait| {
                 if get_id {
-                    Value::C4Id(source)
+                    portrait
+                        .source
+                        .and_then(|source| definition_id_for_c4id(source.as_str()))
+                        .map(Value::C4Id)
+                        .unwrap_or(Value::Nil)
                 } else {
-                    Value::String(name)
+                    Value::String(portrait.name)
                 }
             })
             .unwrap_or(Value::Nil))
@@ -18918,6 +19045,7 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                             age: 0,
                             in_action_time: 0,
                             extra_data: Vec::new(),
+                            portraits: CrewPortraitState::default(),
                         })
                     }),
                     scope.info_link(),
@@ -18927,19 +19055,6 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
             })
             .unwrap_or((None, None, None, None));
         let mut donor_core = donor_core?;
-        let donor_portrait = context
-            .get_world_object(from)
-            .and_then(|object| {
-                object.full_state().and_then(|state| {
-                    Some((state.portrait_source.clone()?, state.portrait_name.clone()?))
-                })
-            })
-            .or_else(|| {
-                context
-                    .get_world_object(from)
-                    .map(|object| (object.definition_id().to_string(), "1".to_string()))
-            });
-
         if let Some(scope) = context.object_scope_mut(from) {
             scope.set_crew_status_member(false);
             scope.set_info_rank(None);
@@ -18978,9 +19093,6 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
             scope.info_physical = donor_physical;
             scope.info_definition_physical = donor_definition_physical;
             scope.record_physicals();
-            if let Some((source, name)) = donor_portrait {
-                scope.set_portrait(source, name);
-            }
         }
         context.record_player_command(PlayerCommand::LinkCrewInfo {
             object_id: to,
@@ -19221,6 +19333,7 @@ fn recruit_or_create_crew_info(
             age: entry.age,
             in_action_time: entry.in_action_time,
             extra_data: entry.extra_data.clone(),
+            portraits: entry.portraits.clone(),
         };
         return Ok(Some((link, info, None, entry.physical)));
     }
@@ -19311,6 +19424,7 @@ fn recruit_or_create_crew_info(
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
+            portraits: CrewPortraitState::default(),
         };
         state.entries.insert(link, entry.clone());
         state.order.entry(player).or_default().insert(0, link);
@@ -19328,6 +19442,7 @@ fn recruit_or_create_crew_info(
         age: entry.age,
         in_action_time: entry.in_action_time,
         extra_data: entry.extra_data.clone(),
+        portraits: entry.portraits.clone(),
     };
     if let Some(player) = context.player_state_mut(player) {
         player.crew_created = player.crew_created.wrapping_add(1);
@@ -44367,20 +44482,6 @@ impl ObjectScopeContext {
         self.pending_update.plr_view_range = Some(range);
     }
 
-    /// SetPortrait's current portrait bookkeeping (FnSetPortrait,
-    /// C4Script.cpp:5333-5341).
-    fn set_portrait(&mut self, source: String, name: String) {
-        self.pending_update.portrait_source = Some(source);
-        self.pending_update.portrait_name = Some(name);
-    }
-
-    fn portrait_override(&self) -> Option<(String, String)> {
-        Some((
-            self.pending_update.portrait_source.clone()?,
-            self.pending_update.portrait_name.clone()?,
-        ))
-    }
-
     /// FnSetSolidMask bookkeeping (C4Script.cpp:271-278).
     fn set_solid_mask_rect(&mut self, rect: crate::DefinitionTargetRect) {
         self.pending_update.solid_mask_override = Some(rect);
@@ -49196,6 +49297,7 @@ func RenameInfo(object target, string name, bool make_valid)
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
+            portraits: CrewPortraitState::default(),
         };
         engine
             .join_player(crate::JoinPlayerConfig {
@@ -55892,6 +55994,7 @@ func Probe(object crew, object info_less)
                     in_action_time: 0,
                     has_died: false,
                     extra_data: extra_data.clone(),
+                    portraits: CrewPortraitState::default(),
                 }],
                 control_style: false,
                 auto_context_menu: false,
@@ -56022,6 +56125,7 @@ func Transfer(object donor, object recipient)
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
+                    portraits: CrewPortraitState::default(),
                 }],
                 control_style: false,
                 auto_context_menu: false,

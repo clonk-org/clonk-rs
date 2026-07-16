@@ -1505,6 +1505,41 @@ fn default_crew_rank_name() -> String {
     "Clonk".to_string()
 }
 
+/// One resolved C4ObjectInfo portrait. Definition-backed portraits retain
+/// their source ID; owned/custom graphics deliberately do not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrewPortrait {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<DefinitionId>,
+    pub name: String,
+}
+
+/// Runtime `C4ObjectInfo::pNewPortrait` state. `Absent` must remain distinct
+/// from an allocated-but-empty portrait because only the former falls back
+/// to the saved portrait specification.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CrewPermanentPortrait {
+    #[default]
+    Absent,
+    ExplicitNone,
+    Assigned(CrewPortrait),
+}
+
+/// Portrait data owned by one C4ObjectInfo pointer. This travels as a unit
+/// through GrabObjectInfo and survives retirement in the player's roster.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrewPortraitState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<CrewPortrait>,
+    /// Evaluated `PortraitFile`/custom-file fallback. It is intentionally not
+    /// validated here: permanent GetPortrait returns the saved spec even if
+    /// its definition graphics are unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<CrewPortrait>,
+    #[serde(default)]
+    pub permanent: CrewPermanentPortrait,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrewObjectInfo {
     /// Original C4ObjectInfoCore definition id. This deliberately survives a
@@ -1536,6 +1571,8 @@ pub struct CrewObjectInfo {
     /// mirrored from the owning roster entry and follows GrabObjectInfo.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_data: Vec<(String, lc_script::Value)>,
+    #[serde(default)]
+    pub portraits: CrewPortraitState,
 }
 
 /// Stable identity of one C4ObjectInfo inside a player's CrewInfoList.
@@ -3644,16 +3681,6 @@ pub struct ObjectState {
     /// (default false, C4Object.cpp:2772).
     #[serde(default)]
     pub mobile: bool,
-    /// The crew-info portrait's source definition (FnGetPortrait with
-    /// fGetID; C4Script.cpp:5352). None = the object's own definition.
-    /// Presentation-wise unmodeled; tracked because AdjustPortrait's
-    /// `Random(GetPortraitCount())` draw is gated on it (synced ledger).
-    #[serde(default)]
-    pub portrait_source: Option<String>,
-    /// Current portrait suffix (`Portrait{name}.png`) selected by
-    /// SetPortrait. Kept with the source definition for GetPortrait.
-    #[serde(default)]
-    pub portrait_name: Option<String>,
     /// Per-object SolidMask rect (C4Object::SolidMask; SetSolidMask,
     /// C4Script.cpp:271-278). None = the definition's mask; a zero-area
     /// rect = mask OFF (opened gates save SolidMask=0,0,0,0,0,0).
@@ -3843,8 +3870,6 @@ pub(crate) fn preview_spawn_state(
         local_vars: HashMap::new(),
         in_liquid: false,
         mobile: false,
-        portrait_source: None,
-        portrait_name: None,
         solid_mask_override: None,
         timer: 0,
         own_mass: 0,
@@ -4074,12 +4099,6 @@ impl ObjectState {
         if let Some(crew_disabled) = delta.crew_disabled {
             self.crew_disabled = crew_disabled;
         }
-        if let Some(portrait_source) = &delta.portrait_source {
-            self.portrait_source = Some(portrait_source.clone());
-        }
-        if let Some(portrait_name) = &delta.portrait_name {
-            self.portrait_name = Some(portrait_name.clone());
-        }
         if let Some(rect) = delta.solid_mask_override {
             self.solid_mask_override = Some(rect);
         }
@@ -4183,8 +4202,6 @@ struct ObjectDelta {
     color: Option<u32>,
     /// C4Object::ColorMod overwrite (FnSetClrModulation).
     color_modulation: Option<u32>,
-    portrait_source: Option<String>,
-    portrait_name: Option<String>,
     solid_mask_override: Option<DefinitionTargetRect>,
     /// Script menu write-through (FnCreateMenu/FnCloseMenu et al.):
     /// Some(None) = closed, Some(Some(_)) = open/replaced.
@@ -4445,12 +4462,6 @@ impl ObjectDelta {
         if let Some(crew_disabled) = update.crew_disabled {
             self.crew_disabled = Some(crew_disabled);
         }
-        if let Some(portrait_source) = update.portrait_source {
-            self.portrait_source = Some(portrait_source);
-        }
-        if let Some(portrait_name) = update.portrait_name {
-            self.portrait_name = Some(portrait_name);
-        }
         if let Some(rect) = update.solid_mask_override {
             self.solid_mask_override = Some(rect);
         }
@@ -4564,8 +4575,6 @@ impl From<ObjectUpdate> for ObjectDelta {
             plr_view_range: update.plr_view_range,
             selected: update.selected,
             crew_disabled: update.crew_disabled,
-            portrait_source: update.portrait_source,
-            portrait_name: update.portrait_name,
             solid_mask_override: update.solid_mask_override,
             menu: update.menu,
             shape_override: update.shape_override,
@@ -4660,12 +4669,6 @@ pub struct ObjectUpdate {
     /// FnSetPicture's raw C4Object::PictureRect overwrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub picture_rect: Option<DefinitionRect>,
-    /// SetPortrait's source-definition update (Some = set).
-    #[serde(default)]
-    pub portrait_source: Option<String>,
-    /// SetPortrait's current portrait suffix (Some = set).
-    #[serde(default)]
-    pub portrait_name: Option<String>,
     /// SetSolidMask's rect update (Some = set; zero-area = mask OFF).
     #[serde(default)]
     pub solid_mask_override: Option<DefinitionTargetRect>,
@@ -18033,6 +18036,7 @@ impl Engine {
                 age: info.age,
                 in_action_time: info.in_action_time,
                 extra_data: info.extra_data.clone(),
+                portraits: info.portraits.clone(),
             },
         );
         Rc::make_mut(&mut self.crew_info_links).insert(
@@ -18274,6 +18278,7 @@ impl Engine {
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
+            portraits: CrewPortraitState::default(),
         });
         let index = roster.len() - 1;
         self.crew_info_order
@@ -26459,8 +26464,6 @@ impl Engine {
             info_rank,
             info_link,
             crew_disabled,
-            portrait_source,
-            portrait_name,
             solid_mask_override: update_solid_mask,
             change_def,
             change_def_reinsert,
@@ -26673,12 +26676,6 @@ impl Engine {
             }
             if let Some(crew_disabled) = crew_disabled {
                 object.state.crew_disabled = crew_disabled;
-            }
-            if let Some(portrait_source) = portrait_source {
-                object.state.portrait_source = Some(portrait_source);
-            }
-            if let Some(portrait_name) = portrait_name {
-                object.state.portrait_name = Some(portrait_name);
             }
             if let Some(rect) = update_solid_mask {
                 object.state.solid_mask_override = Some(rect);
@@ -28617,6 +28614,7 @@ impl Engine {
                 info.age = entry.age;
                 info.in_action_time = entry.in_action_time;
                 info.extra_data = entry.extra_data.clone();
+                info.portraits = entry.portraits.clone();
             }
         }
         self.crew_info_control_counts.clear();
@@ -28793,8 +28791,6 @@ impl Engine {
                     local_vars: snapshot.local_vars.clone(),
                     in_liquid: snapshot.in_liquid,
                     mobile: snapshot.mobile,
-                    portrait_source: None,
-                    portrait_name: None,
                     solid_mask_override: None,
                     timer: snapshot.timer,
                     own_mass: snapshot.own_mass,
@@ -30574,6 +30570,7 @@ impl Engine {
                         age: entry.age,
                         in_action_time: entry.in_action_time,
                         extra_data: entry.extra_data.clone(),
+                        portraits: entry.portraits.clone(),
                     };
                     let promoted = adjust_crew_experience(&mut info, change);
                     entry.rank = info.rank;
@@ -30745,6 +30742,26 @@ impl Engine {
                         Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id)
                     {
                         info.name = name;
+                    }
+                }
+                PlayerCommand::SetCrewInfoPortrait {
+                    object_id,
+                    link,
+                    portraits,
+                } => {
+                    if let Some(link) = link {
+                        if let Some(entry) = self
+                            .crew_rosters
+                            .get_mut(&link.player_id)
+                            .and_then(|roster| roster.get_mut(link.roster_index))
+                        {
+                            entry.portraits = portraits.clone();
+                        }
+                    }
+                    if let Some(info) =
+                        Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id)
+                    {
+                        info.portraits = portraits;
                     }
                 }
                 PlayerCommand::SetCrewExtraData {
@@ -30952,6 +30969,7 @@ impl Engine {
                             info.age = entry.age;
                             info.in_action_time = entry.in_action_time;
                             info.extra_data = entry.extra_data.clone();
+                            info.portraits = entry.portraits.clone();
                         }
                         Rc::make_mut(&mut self.crew_info_links).insert(object_id, link);
                     } else {
@@ -48229,8 +48247,6 @@ impl Engine {
                 local_vars,
                 in_liquid: in_liquid.unwrap_or(false),
                 mobile: false,
-                portrait_source: None,
-                portrait_name: None,
                 solid_mask_override: solid_mask,
                 timer: timer.unwrap_or(0),
                 own_mass: 0,
@@ -49298,8 +49314,6 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         local_vars: snapshot.local_vars.clone(),
         in_liquid: snapshot.in_liquid,
         mobile: snapshot.mobile,
-        portrait_source: None,
-        portrait_name: None,
         solid_mask_override: None,
         timer: snapshot.timer,
         own_mass: snapshot.own_mass,

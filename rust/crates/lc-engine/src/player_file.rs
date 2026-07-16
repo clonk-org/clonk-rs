@@ -7,6 +7,7 @@ use lc_resources::{Group, PhysicalInfo};
 use serde::{Deserialize, Serialize};
 
 use crate::scenario::ScenarioError;
+use crate::{CrewPermanentPortrait, CrewPortrait, CrewPortraitState, DefinitionId};
 
 fn default_crew_rank_name() -> String {
     "Clonk".to_string()
@@ -61,10 +62,17 @@ pub struct CrewInfo {
     /// SetCrewExtraData limits newly written types separately.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_data: Vec<(String, lc_script::Value)>,
+    /// Current, saved-fallback, and pending-permanent portrait state owned by
+    /// this exact C4ObjectInfo roster entry.
+    #[serde(default)]
+    pub portraits: CrewPortraitState,
 }
 
 impl CrewInfo {
-    fn from_sections(sections: &[(String, Vec<(String, String)>)]) -> Self {
+    fn from_sections(
+        sections: &[(String, Vec<(String, String)>)],
+        has_custom_portrait: bool,
+    ) -> Self {
         let entry = |section: &str, key: &str| -> Option<String> {
             sections
                 .iter()
@@ -112,8 +120,11 @@ impl CrewInfo {
             }
         }
         let physical = crate::promotion_updated_physical(physical, rank, None);
+        let id = entry("ObjectInfo", "id").unwrap_or_default();
+        let portrait_file = entry("ObjectInfo", "PortraitFile").unwrap_or_default();
+        let portraits = loaded_portrait_state(&id, &portrait_file, has_custom_portrait);
         Self {
-            id: entry("ObjectInfo", "id").unwrap_or_default(),
+            id,
             name: entry("ObjectInfo", "Name").unwrap_or_else(|| "Clonk".to_string()),
             rank,
             rank_name: entry("ObjectInfo", "RankName").unwrap_or_else(default_crew_rank_name),
@@ -128,6 +139,74 @@ impl CrewInfo {
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
+            portraits,
+        }
+    }
+}
+
+fn loaded_portrait_state(
+    own_definition: &str,
+    portrait_file: &str,
+    has_custom_portrait: bool,
+) -> CrewPortraitState {
+    let custom = || CrewPortrait {
+        source: None,
+        name: "custom".to_string(),
+    };
+    if portrait_file == "custom" {
+        if has_custom_portrait {
+            let portrait = custom();
+            return CrewPortraitState {
+                current: Some(portrait.clone()),
+                fallback: Some(portrait),
+                permanent: CrewPermanentPortrait::Absent,
+            };
+        }
+        // C4ObjectInfo::Load clears a stale `custom` spec when neither the
+        // old BMP nor PNG payload can be loaded.
+        return CrewPortraitState::default();
+    }
+    if portrait_file.is_empty() && has_custom_portrait {
+        // The legacy import path owns the current graphics directly and
+        // writes "custom" into PortraitFile, but does not create
+        // pCustomPortrait. Permanent GetPortrait therefore evaluates that
+        // string with the info's own definition ID.
+        return CrewPortraitState {
+            current: Some(custom()),
+            fallback: Some(CrewPortrait {
+                source: Some(DefinitionId::from(own_definition)),
+                name: "custom".to_string(),
+            }),
+            permanent: CrewPermanentPortrait::Absent,
+        };
+    }
+    if portrait_file.is_empty() {
+        return CrewPortraitState::default();
+    }
+
+    let portrait = evaluate_portrait_string(portrait_file, own_definition);
+    CrewPortraitState {
+        current: (portrait_file != "none").then(|| portrait.clone()),
+        fallback: Some(portrait),
+        permanent: CrewPermanentPortrait::Absent,
+    }
+}
+
+fn evaluate_portrait_string(spec: &str, own_definition: &str) -> CrewPortrait {
+    let bytes = spec.as_bytes();
+    if bytes.len() > 6 && bytes[4] == b':' && bytes[5] == b':' {
+        let tail = &spec[6..];
+        let name = tail
+            .split_once("::")
+            .map_or(tail, |(_, portrait_name)| portrait_name);
+        CrewPortrait {
+            source: Some(DefinitionId::from(&spec[..4])),
+            name: name.to_string(),
+        }
+    } else {
+        CrewPortrait {
+            source: Some(DefinitionId::from(own_definition)),
+            name: spec.to_string(),
         }
     }
 }
@@ -295,7 +374,8 @@ fn collect_crew(group: &Group, crew: &mut Vec<CrewInfo>) -> Result<(), ScenarioE
             if let Ok(bytes) = child.read_file("ObjectInfo.txt") {
                 let text = lc_script::c4_string_from_bytes(&bytes);
                 let sections = parse_ini_sections(&text);
-                crew.push(CrewInfo::from_sections(&sections));
+                let has_custom_portrait = custom_portrait_loads(&child);
+                crew.push(CrewInfo::from_sections(&sections, has_custom_portrait));
             }
         } else if entry.is_directory {
             subgroups.push(child);
@@ -305,6 +385,48 @@ fn collect_crew(group: &Group, crew: &mut Vec<CrewInfo>) -> Result<(), ScenarioE
         collect_crew(&child, crew)?;
     }
     Ok(())
+}
+
+fn custom_portrait_loads(group: &Group) -> bool {
+    let Ok(entries) = group.entries() else {
+        return false;
+    };
+    let find = |name: &str| {
+        entries.iter().find(|entry| {
+            !entry.is_directory
+                && entry.relative_path.components().count() == 1
+                && entry
+                    .relative_path
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(name)
+        })
+    };
+    let decode = |entry: &lc_resources::GroupEntry, format| {
+        group
+            .read_entry_bytes_exact(entry)
+            .ok()
+            .and_then(|bytes| image::load_from_memory_with_format(&bytes, format).ok())
+    };
+
+    // C4DefGraphics::LoadGraphics tries an existing PNG first and does not
+    // fall back to the old BMP when that PNG is corrupt.
+    let base = if let Some(png) = find("Portrait.png") {
+        decode(png, image::ImageFormat::Png)
+    } else {
+        find("Portrait.bmp").and_then(|bmp| decode(bmp, image::ImageFormat::Bmp))
+    };
+    let Some(base) = base else {
+        return false;
+    };
+    if let Some(overlay) = find("PortraitOverlay.png") {
+        let Some(overlay) = decode(overlay, image::ImageFormat::Png) else {
+            return false;
+        };
+        if overlay.width() != base.width() || overlay.height() != base.height() {
+            return false;
+        }
+    }
+    true
 }
 
 /// Minimal legacy INI reader: ordered sections of ordered key/value pairs,
@@ -398,7 +520,7 @@ mod tests {
         std::fs::create_dir_all(&first).expect("info dir");
         std::fs::write(
             first.join("ObjectInfo.txt"),
-            "[ObjectInfo]\nid=COWB\nName=Wipf\nRank=2\nRankName=Lieutenant\nExperience=900\nDeathCount=7\nTotalPlayingTime=17999\nBirthday=123\nAge=7\nParticipation=1\n\n[Physical]\nWalk=80000\n",
+            "[ObjectInfo]\nid=COWB\nName=Wipf\nPortraitFile=TRPR::Captain\nRank=2\nRankName=Lieutenant\nExperience=900\nDeathCount=7\nTotalPlayingTime=17999\nBirthday=123\nAge=7\nParticipation=1\n\n[Physical]\nWalk=80000\n",
         )
         .expect("write info");
 
@@ -447,6 +569,19 @@ mod tests {
         assert_eq!(wipf.total_playing_time, 17_999);
         assert_eq!(wipf.birthday, 123);
         assert_eq!(wipf.age, 7);
+        let portrait = wipf
+            .portraits
+            .fallback
+            .as_ref()
+            .expect("saved portrait spec evaluates");
+        assert_eq!(portrait.source.as_ref().map(DefinitionId::as_str), Some("TRPR"));
+        assert_eq!(portrait.name, "Captain");
+        assert_eq!(wipf.portraits.current.as_ref(), Some(portrait));
+        assert_eq!(
+            wipf.portraits.permanent,
+            CrewPermanentPortrait::Absent,
+            "a loaded PortraitFile is a fallback, not pNewPortrait"
+        );
         assert_eq!(wipf.participation, 1);
         assert!(!wipf.in_action);
         assert!(!wipf.has_died);
@@ -461,6 +596,105 @@ mod tests {
         assert_eq!(zorro.death_count, 0, "DeathCount defaults to 0");
         assert_eq!((zorro.birthday, zorro.age), (0, 0));
         assert_eq!(zorro.participation, 1, "Participation defaults to 1");
+    }
+
+    #[test]
+    fn loads_custom_portrait_fallback_only_when_the_embedded_image_decodes() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("Portraits.c4p");
+        std::fs::create_dir_all(&root).expect("player dir");
+        std::fs::write(root.join("Player.txt"), "[Player]\nName=Portraits\n")
+            .expect("write player core");
+
+        for (group_name, crew_name, portrait_file, image_name) in [
+            ("Valid.c4i", "Valid custom", "custom", Some("Portrait.png")),
+            ("Broken.c4i", "Broken custom", "custom", None),
+            ("Embedded.c4i", "Embedded custom", "", Some("Portrait.bmp")),
+        ] {
+            let group = root.join(group_name);
+            std::fs::create_dir_all(&group).expect("crew group");
+            std::fs::write(
+                group.join("ObjectInfo.txt"),
+                format!(
+                    "[ObjectInfo]\nid=CLNK\nName={crew_name}\nPortraitFile={portrait_file}\n"
+                ),
+            )
+            .expect("write crew core");
+            if let Some(image_name) = image_name {
+                image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+                    .save(group.join(image_name))
+                .expect("write custom portrait image");
+            }
+        }
+        let corrupt = root.join("CorruptPng.c4i");
+        std::fs::create_dir_all(&corrupt).expect("corrupt crew group");
+        std::fs::write(
+            corrupt.join("ObjectInfo.txt"),
+            "[ObjectInfo]\nid=CLNK\nName=Corrupt PNG\nPortraitFile=custom\n",
+        )
+        .expect("write corrupt crew core");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(corrupt.join("Portrait.bmp"))
+            .expect("write valid legacy fallback");
+        std::fs::write(corrupt.join("Portrait.png"), b"not a png")
+            .expect("write corrupt preferred PNG");
+
+        let mismatched = root.join("MismatchedOverlay.c4i");
+        std::fs::create_dir_all(&mismatched).expect("overlay crew group");
+        std::fs::write(
+            mismatched.join("ObjectInfo.txt"),
+            "[ObjectInfo]\nid=CLNK\nName=Mismatched overlay\nPortraitFile=custom\n",
+        )
+        .expect("write overlay crew core");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(mismatched.join("Portrait.png"))
+            .expect("write overlay base");
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([4, 5, 6, 255]))
+            .save(mismatched.join("PortraitOverlay.png"))
+            .expect("write mismatched overlay");
+
+        let player = PlayerFile::load_from_path(&root).expect("player file loads");
+        let valid = player
+            .crew
+            .iter()
+            .find(|info| info.name == "Valid custom")
+            .expect("explicit custom crew parsed");
+        let valid_fallback = valid
+            .portraits
+            .fallback
+            .as_ref()
+            .expect("pCustomPortrait fallback retained");
+        assert_eq!(valid_fallback.source, None);
+        assert_eq!(valid_fallback.name, "custom");
+        assert_eq!(valid.portraits.current.as_ref(), Some(valid_fallback));
+
+        let embedded = player
+            .crew
+            .iter()
+            .find(|info| info.name == "Embedded custom")
+            .expect("legacy embedded portrait parsed");
+        let current = embedded
+            .portraits
+            .current
+            .as_ref()
+            .expect("embedded image is current");
+        assert_eq!(current.source, None);
+        let fallback = embedded
+            .portraits
+            .fallback
+            .as_ref()
+            .expect("synthesized PortraitFile fallback exists");
+        assert_eq!(fallback.source.as_ref().map(DefinitionId::as_str), Some("CLNK"));
+        assert_eq!(fallback.name, "custom");
+
+        for name in ["Broken custom", "Corrupt PNG", "Mismatched overlay"] {
+            let info = player
+                .crew
+                .iter()
+                .find(|info| info.name == name)
+                .expect("invalid custom crew parsed");
+            assert_eq!(info.portraits, CrewPortraitState::default());
+        }
     }
 
     #[test]

@@ -3316,6 +3316,7 @@ mod tests {
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
+            portraits: Default::default(),
         }];
         let file = PlayerFile {
             name: "File Tyler".to_string(),

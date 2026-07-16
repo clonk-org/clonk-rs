@@ -38557,6 +38557,7 @@ mod tests {
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
+                    portraits: Default::default(),
                 }],
             });
             // Their movement timings predate live Game.Parameters and were
@@ -54955,6 +54956,7 @@ mod tests {
                 age: 0,
                 in_action_time: 0,
                 extra_data: Vec::new(),
+                portraits: Default::default(),
             },
         );
         app.engine
@@ -61166,6 +61168,7 @@ protected func InputCallback(string answer, int player)
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
+                    portraits: Default::default(),
                 }],
                 startup_player_count: 1,
                 control_style: false,
