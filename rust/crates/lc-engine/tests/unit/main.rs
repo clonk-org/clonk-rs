@@ -31503,6 +31503,10 @@ func DisableAndCount(iPlayer, pTarget)
     SetCrewEnabled(false, pTarget);
     return GetSelectCount(iPlayer);
 }
+func SetEnabled(fEnabled, pTarget)
+{
+    return SetCrewEnabled(fEnabled, pTarget);
+}
 func ResetCallbacks()
 {
     iCursorCallbacks = iSelectCallbacks = 0;
@@ -31621,6 +31625,20 @@ func CrewSelection(fUnselect, fCursor)
                 .get("iSelectCallbacks"),
             Some(&Value::Int(1))
         );
+
+        // SetCrewEnabled's bool parameter uses C4Value::getBool, so every
+        // nonzero integer enables the crew object (C4Script.cpp:4814-4836;
+        // C4Value.h:161,325-331).
+        assert_eq!(
+            call(
+                &mut engine,
+                b,
+                "SetEnabled",
+                vec![Value::Int(2), Value::Object(a.as_u64())],
+            )?,
+            Value::Bool(true)
+        );
+        assert!(!engine.objects[a_index].state.crew_disabled);
         Ok(())
     }
 
@@ -39995,6 +40013,76 @@ public func Fling(pObj, iX, iY, iPrec, fAddSpeed) {
             object.frame_t_attach, 0,
             "FnFling also clears the current-frame latch"
         );
+    }
+
+    #[test]
+    fn fling_add_speed_uses_cpp_bool_coercion() {
+        // FnFling's fAddSpeed parameter is a native bool, converted through
+        // C4Value::getBool. Int(2) must therefore take the same half-current-
+        // speed arm as true (C4Script.cpp:348-356; C4Value.h:161,325-331).
+        let mut caller = Definition::from_script(
+            "FLBC",
+            "Fling bool coercion caller",
+            r#"#strict
+public func Throw(pTarget, fAddSpeed) {
+    return Fling(pTarget, 10, -10, 1, fAddSpeed);
+}
+"#,
+        )
+        .expect("caller script compiles");
+        caller.set_category(CATEGORY_OBJECT);
+
+        let mut target = Definition::from_script("FLBT", "Fling bool target", "#strict\n")
+            .expect("target script compiles");
+        target.set_category(CATEGORY_OBJECT);
+
+        let mut engine = Engine::with_seed(19);
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        engine
+            .register_definition(target)
+            .expect("target registers");
+        let caller_id = engine
+            .spawn_object(SpawnConfig::new("FLBC").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let target_id = engine
+            .spawn_object(SpawnConfig::new("FLBT").with_category(CATEGORY_OBJECT))
+            .expect("fling target spawns");
+        let initial_velocity = FixedVec2::new(
+            C4Fixed::from_raw(147_456),
+            C4Fixed::from_raw(-81_920),
+        );
+        let expected_velocity = FixedVec2::new(
+            C4Fixed::from_raw(729_088),
+            C4Fixed::from_raw(-696_320),
+        );
+        for flag in [Value::Int(2), Value::Bool(true)] {
+            let target_index = engine
+                .find_object_index(target_id)
+                .expect("fling target exists");
+            engine.objects[target_index].set_fixed_velocity(initial_velocity);
+            let caller_index = engine
+                .find_object_index(caller_id)
+                .expect("caller exists");
+            assert_eq!(
+                engine
+                    .call_object_function(
+                        caller_index,
+                        "Throw",
+                        vec![compat::object_reference_value(target_id), flag],
+                    )
+                    .expect("native Fling executes"),
+                Value::Bool(true)
+            );
+            let target_index = engine
+                .find_object_index(target_id)
+                .expect("fling target remains");
+            assert_eq!(
+                engine.objects[target_index].fixed_velocity, expected_velocity,
+                "nonzero integer and true must both add half the current speed"
+            );
+        }
     }
 
     #[test]

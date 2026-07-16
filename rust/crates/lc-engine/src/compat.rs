@@ -23659,7 +23659,11 @@ fn set_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_crew_enabled(args: &[Value]) -> Result<Value, RuntimeError> {
-    let enabled = matches!(args.first(), Some(Value::Bool(true)) | Some(Value::Int(1)));
+    let enabled = value_to_bool(
+        args.first().unwrap_or(&Value::Nil),
+        "SetCrewEnabled",
+        "enabled",
+    )?;
     let target = args
         .get(1)
         .map(|arg| parse_object_reference_argument(arg, "SetCrewEnabled", "obj"))
@@ -23776,7 +23780,11 @@ fn fling(args: &[Value]) -> Result<Value, RuntimeError> {
     let prec = parse_optional_i32(args.get(3), "Fling", "precision")?
         .filter(|&prec| prec != 0)
         .unwrap_or(1);
-    let add_speed = matches!(args.get(4), Some(Value::Bool(true)) | Some(Value::Int(1)));
+    let add_speed = value_to_bool(
+        args.get(4).unwrap_or(&Value::Nil),
+        "Fling",
+        "add speed",
+    )?;
     // FnFling requires an explicit target — `if (!pObj) return false;`
     // (C4Script.cpp:347-349), NO caller fallback (unlike FnJump, :358).
     // The horse/wipf `Fling(GetRider(), ...)` with no rider is a no-op.
