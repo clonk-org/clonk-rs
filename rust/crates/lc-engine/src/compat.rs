@@ -12937,6 +12937,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Log", log_message);
     script.register_host_function("DebugLog", debug_log_message);
     script.register_host_function("LocateFunc", locate_func);
+    script.register_host_function("StartCallTrace", start_call_trace);
     script.register_host_function("GameOver", game_over);
     script.register_host_function("GainMissionAccess", gain_mission_access);
     script.register_host_function("GetMissionAccess", get_mission_access);
@@ -13708,6 +13709,15 @@ fn log_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn debug_log_message(args: &[Value]) -> Result<Value, RuntimeError> {
     log_internal("DebugLog", args, LogLevel::Debug)
+}
+
+/// FnStartCallTrace (C4Script.cpp:5967-5971). The C++ diagnostic is scoped
+/// to the remainder of the active Aul context. Rust's debugger hooks are
+/// fixed when a VM starts and cannot be enabled from an in-flight native
+/// callback, so retain the script-visible void/nil contract as a tolerated
+/// debug-only no-op.
+fn start_call_trace(_args: &[Value]) -> Result<Value, RuntimeError> {
+    Ok(Value::Nil)
 }
 
 #[derive(Clone, Copy)]
@@ -45219,6 +45229,7 @@ mod tests {
         "SoundLevel",
         "Split2Components",
         "Sqrt",
+        "StartCallTrace",
         "Stuck",
         "Sub",
         "Sum",
@@ -50743,6 +50754,20 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(record.level, Level::DEBUG);
         assert_eq!(record.target, "lc-script");
         assert_eq!(record.message, "Debug 42");
+    }
+
+    #[test]
+    fn start_call_trace_is_registered_and_returns_nil() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script("#strict 3\nfunc Probe() { return StartCallTrace(); }")
+            .expect("StartCallTrace probe compiles");
+
+        assert_eq!(
+            script.call("Probe", &[]).expect("StartCallTrace executes"),
+            Value::Nil
+        );
     }
 
     #[test]
