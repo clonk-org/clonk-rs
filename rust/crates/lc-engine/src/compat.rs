@@ -109,6 +109,7 @@ pub(crate) struct HostWorldObject {
     /// C4Object::InLiquid (the cached flag FnInLiquid reads).
     in_liquid: bool,
     pub action_name: String,
+    pub action_index: Option<u32>,
     /// Action.Dir as a script value (0=Left, 1=Right) — read by foreign
     /// GetDir (FnGetDir reads any pObj).
     pub direction: i32,
@@ -163,7 +164,7 @@ pub(crate) struct HostWorldObject {
     own_vertices: bool,
     #[allow(dead_code)]
     pub action_data: i32,
-    pub action_ticks: u32,
+    pub action_ticks: i32,
     pub action_phase: i32,
     container: Option<ObjectId>,
     contents: Vec<ObjectId>,
@@ -1346,7 +1347,7 @@ impl HostWorldObject {
         velocity: Vector2,
         vertices: Vec<ObjectVertex>,
         action_data: i32,
-        action_ticks: u32,
+        action_ticks: i32,
         container: Option<ObjectId>,
     ) -> Self {
         Self::with_category(
@@ -1392,7 +1393,7 @@ impl HostWorldObject {
         rotation: i32,
         vertices: Vec<ObjectVertex>,
         action_data: i32,
-        action_ticks: u32,
+        action_ticks: i32,
         action_phase: i32,
         container: Option<ObjectId>,
         draw_transform: Option<DrawTransform>,
@@ -1405,6 +1406,7 @@ impl HostWorldObject {
             alive: true,
             in_liquid: false,
             action_name: action_name.into(),
+            action_index: None,
             direction: 0,
             action_target,
             action_target2,
@@ -1458,6 +1460,11 @@ impl HostWorldObject {
 
     pub(crate) fn with_unsorted(mut self, unsorted: bool) -> Self {
         self.unsorted = unsorted;
+        self
+    }
+
+    pub(crate) fn with_action_index(mut self, action_index: Option<u32>) -> Self {
+        self.action_index = action_index;
         self
     }
 
@@ -1657,7 +1664,7 @@ impl HostWorldObject {
         &self.vertices
     }
 
-    pub fn action_ticks(&self) -> u32 {
+    pub fn action_ticks(&self) -> i32 {
         self.action_ticks
     }
 
@@ -2602,6 +2609,66 @@ impl HostWorldContext {
         })
     }
 
+    /// Resolve a function strictly through `Game.ScriptEngine`, then return
+    /// the retained script host named by the global function's `LinkedTo`
+    /// pointer. Calling through an arbitrary host that merely shares the
+    /// global table would lose declaring-host local-helper lookup.
+    pub(crate) fn resolve_engine_global_script(
+        &self,
+        name: &str,
+    ) -> Option<(Arc<ScriptEngine>, lc_script::ScriptFunctionResolution)> {
+        let resolve = |script: &Arc<ScriptEngine>| {
+            let resolution = script.resolve_global_function(name)?;
+            let exact_script = self
+                .script_for_host_identity(resolution.host_identity)
+                .map(|(_, _, script)| script)
+                .or_else(|| {
+                    (script.host_identity() == resolution.host_identity)
+                        .then(|| Arc::clone(script))
+                })?;
+            Some((exact_script, resolution))
+        };
+
+        if let Some(resolved) = self.scenario_script.as_ref().and_then(resolve) {
+            return Some(resolved);
+        }
+        for (_, script) in self.linked_script_hosts.iter() {
+            if let Some(resolved) = resolve(script) {
+                return Some(resolved);
+            }
+        }
+        let mut definitions = self.definition_scripts.iter().collect::<Vec<_>>();
+        definitions.sort_by(|(left, _), (right, _)| left.cmp(right));
+        definitions
+            .into_iter()
+            .find_map(|(_, script)| resolve(script))
+    }
+
+    /// Native functions owned by `Game.ScriptEngine` are registered on each
+    /// live Rust script host. Select one deterministically only after strict
+    /// global-script lookup has failed.
+    pub(crate) fn resolve_engine_host_script(&self, name: &str) -> Option<Arc<ScriptEngine>> {
+        if let Some(script) = self
+            .scenario_script
+            .as_ref()
+            .filter(|script| script.has_host_function(name))
+        {
+            return Some(Arc::clone(script));
+        }
+        if let Some((_, script)) = self
+            .linked_script_hosts
+            .iter()
+            .find(|(_, script)| script.has_host_function(name))
+        {
+            return Some(Arc::clone(script));
+        }
+        let mut definitions = self.definition_scripts.iter().collect::<Vec<_>>();
+        definitions.sort_by(|(left, _), (right, _)| left.cmp(right));
+        definitions
+            .into_iter()
+            .find_map(|(_, script)| script.has_host_function(name).then(|| Arc::clone(script)))
+    }
+
     /// Whether any definition script, global script, or host function knows
     /// `name` — the global-function-map lookup of `GetFirstFunc`
     /// (C4Aul.cpp:545-552).
@@ -2686,6 +2753,24 @@ impl HostWorldContext {
             object.definition_id = definition_id.to_string();
             object.unsorted = true;
         }
+    }
+
+    /// Thread a foreign command target's live object locals through one
+    /// deferred effect batch. C++ callbacks all mutate the same C4Object;
+    /// cloned host-world snapshots must therefore expose callback N's final
+    /// cells to callback N+1 before authoritative outcomes are folded.
+    pub(crate) fn preview_object_local_vars(
+        &mut self,
+        id: ObjectId,
+        local_vars: &HashMap<String, Value>,
+    ) {
+        let Some(object) = Rc::make_mut(&mut self.objects).get_mut(&id) else {
+            return;
+        };
+        let Some(state) = object.state.as_mut() else {
+            return;
+        };
+        Rc::make_mut(state).local_vars = local_vars.clone();
     }
 
     pub(crate) fn object_ids(&self) -> &[ObjectId] {
@@ -5002,29 +5087,22 @@ fn broadcast_global_callback(
     let targets = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
-            .map(|context| {
-                context
-                    .master_object_ids()
-                    .into_iter()
-                    .filter(|id| {
-                        context.get_world_object(*id).is_some_and(|object| {
-                            object.status().is_active() && object.category() & BROADCAST_MASK != 0
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
+            .map(EffectHostContext::master_object_ids)
             .unwrap_or_default()
     });
     for target in targets {
-        let active = HOST_CONTEXT.with(|cell| {
+        let eligible = HOST_CONTEXT.with(|cell| {
             cell.borrow()
                 .as_ref()
-                .is_some_and(|context| context.object_status_active(target))
+                .and_then(|context| context.get_world_object(target))
+                .is_some_and(|object| {
+                    object.status().is_active() && object.category() & BROADCAST_MASK != 0
+                })
         });
-        if !active {
+        if !eligible {
             continue;
         }
-        if let Some(result) = call_world_object_script_function(target, function, args) {
+        if let Some(result) = call_world_object_own_function(target, function, args) {
             let value = result?;
             if reject_test && value_raw_truthy(&value) {
                 return Ok(value);
@@ -5039,7 +5117,7 @@ fn broadcast_global_callback(
     });
     match script {
         Some(script) => {
-            call_scoped_script_function(script, function, args).unwrap_or(Ok(Value::Nil))
+            call_scoped_scenario_function(script, function, args).unwrap_or(Ok(Value::Nil))
         }
         None => Ok(Value::Nil),
     }
@@ -8247,7 +8325,12 @@ fn change_def_live(target: ObjectId, new_id: &str) -> Result<bool, RuntimeError>
         cell.borrow()
             .as_ref()
             .and_then(|context| context.object_scope(target))
-            .is_some_and(|object| object.effective_action_name() == "Idle")
+            .is_some_and(|object| {
+                object.action_library.is_idle_entry(
+                    object.effective_action_name(),
+                    object.effective_action_index(),
+                )
+            })
     });
     let action_applied = native_set_action_by_name(target, "Idle")?;
 
@@ -8624,7 +8707,10 @@ fn live_collection_eligible(
         && below_limit
         && !scope
             .action_library
-            .disables_object(scope.effective_action_name())
+            .disables_object_for_entry(
+                scope.effective_action_name(),
+                scope.effective_action_index(),
+            )
         && (ignore_no_collect_delay || scope.no_collect_delay() == 0)
 }
 
@@ -8680,7 +8766,10 @@ fn refresh_live_object_ocf(context: &mut EffectHostContext, target: ObjectId) ->
             scope.category(),
             scope
                 .action_library
-                .disables_object(scope.effective_action_name()),
+                .disables_object_for_entry(
+                    scope.effective_action_name(),
+                    scope.effective_action_index(),
+                ),
         )
     })
     else {
@@ -8835,13 +8924,16 @@ fn live_exit_layer_bounds(
     let object = context.get_world_object(target)?;
     let definition_id = context.object_effective_definition_id(target)?;
     let metadata = context.definition_metadata(&definition_id)?;
-    let action_name = context
+    let (action_name, action_index) = context
         .object_scope(target)
-        .map(ObjectScopeContext::effective_action_name)
-        .unwrap_or(object.action_name.as_str());
-    let procedure = metadata.action_library.procedure_for_action(action_name);
-    if !action_name.is_empty()
-        && action_name != "Idle"
+        .map(|scope| (scope.effective_action_name(), scope.effective_action_index()))
+        .unwrap_or((object.action_name.as_str(), object.action_index));
+    let procedure = metadata
+        .action_library
+        .procedure_for_entry(action_name, action_index);
+    if !metadata
+        .action_library
+        .is_idle_entry(action_name, action_index)
         && matches!(procedure, ActionProcedure::Attach)
     {
         return None;
@@ -13258,7 +13350,28 @@ fn call_scoped_script_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_scoped_script_function_impl(script, function, args, false, false, false)
+    call_scoped_script_function_impl(script, function, args, false, false, false, None, None)
+}
+
+/// Game.Script::Call resolves a named function owned by the scenario host.
+/// Pin that exact ordinary function so a same-name engine global cannot be
+/// selected during the nested VM call; a global-only declaration is absent.
+fn call_scoped_scenario_function(
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    let resolution = script.resolve_function(function, false)?;
+    call_scoped_script_function_impl(
+        script,
+        function,
+        args,
+        false,
+        false,
+        false,
+        None,
+        Some(resolution),
+    )
 }
 
 fn call_scoped_definition_function(
@@ -13290,17 +13403,71 @@ fn call_scoped_script_function_or_global(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_scoped_script_function_impl(script, function, args, true, false, true)
+    call_scoped_script_function_impl(script, function, args, true, false, true, None, None)
 }
 
 /// C4Effect::DoCall's definition/global branch includes engine-native
 /// callbacks such as FxFireInfo after script/global lookup.
 fn call_scoped_effect_function_or_global(
     script: Arc<ScriptEngine>,
+    definition: Option<DefinitionId>,
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_scoped_script_function_impl(script, function, args, true, true, false)
+    call_scoped_script_function_impl(
+        script,
+        function,
+        args,
+        true,
+        true,
+        false,
+        Some(definition),
+        None,
+    )
+}
+
+/// Game.ScriptEngine effect fallback: resolve only the shared engine-global
+/// table (then native hosts), never an arbitrary carrier definition's local
+/// function. C++ executes that retained engine-owned function with both Obj
+/// and Def null (C4Effect.cpp:448-456; C4AulExec.cpp:343-352).
+fn call_scoped_global_effect_function(
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    if !script.has_global_function(function) && !script.has_host_function(function) {
+        return None;
+    }
+    let (previous_script_object, previous_script_definition, previous_definition) =
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                let active = context.object.take();
+                context.dormant_scopes.push(active);
+                (
+                    context.script_object_context.take(),
+                    context.script_definition_context.replace(None),
+                    context.definition_context.take(),
+                )
+            } else {
+                (None, None, None)
+            }
+        });
+    let call = script
+        .call_global_with_ref_args(function, args)
+        .map(|(value, _)| value);
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.object = context.dormant_scopes.pop().unwrap_or(None);
+            context.script_object_context = previous_script_object;
+            context.script_definition_context = previous_script_definition;
+            context.definition_context = previous_definition;
+        }
+    });
+    Some(match call {
+        Ok(value) => Ok(value),
+        Err(lc_script::ScriptError::Runtime(err)) => Err(err),
+        Err(other) => Err(RuntimeError::new(other.to_string())),
+    })
 }
 
 fn call_scoped_script_reference(
@@ -13308,18 +13475,32 @@ fn call_scoped_script_reference(
     function: &str,
     args: &[Value],
 ) -> Option<Result<lc_script::ValueReference, RuntimeError>> {
-    if !script.has_function_or_global(function) {
-        return None;
-    }
-    let previous_script_object = HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            let active = context.object.take();
-            context.dormant_scopes.push(active);
-            context.script_object_context.take()
-        } else {
-            None
-        }
-    });
+    let resolution = script.resolve_function(function, true)?;
+    let (previous_script_object, previous_script_definition, previous_definition) =
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                let definition = if resolution.scope == lc_script::ScriptFunctionScope::Global {
+                    None
+                } else {
+                    context
+                        .world
+                        .script_for_host_identity(resolution.host_identity)
+                        .and_then(|(_, definition, _)| definition)
+                        .or_else(|| context.definition_context.clone())
+                };
+                let active = context.object.take();
+                context.dormant_scopes.push(active);
+                let previous_definition =
+                    std::mem::replace(&mut context.definition_context, definition.clone());
+                (
+                    context.script_object_context.take(),
+                    context.script_definition_context.replace(definition),
+                    previous_definition,
+                )
+            } else {
+                (None, None, None)
+            }
+        });
     let cells = lc_script::LocalCells::from_local_vars(&HashMap::new());
     let call = script.call_reference_with_cells_and_this_preserving_caller(
         function,
@@ -13331,6 +13512,8 @@ fn call_scoped_script_reference(
         if let Some(context) = cell.borrow_mut().as_mut() {
             context.object = context.dormant_scopes.pop().unwrap_or(None);
             context.script_object_context = previous_script_object;
+            context.script_definition_context = previous_script_definition;
+            context.definition_context = previous_definition;
         }
     });
     Some(match call {
@@ -13347,26 +13530,66 @@ fn call_scoped_script_function_impl(
     include_globals: bool,
     include_host: bool,
     preserve_caller: bool,
+    definition_override: Option<Option<DefinitionId>>,
+    resolution_override: Option<lc_script::ScriptFunctionResolution>,
 ) -> Option<Result<Value, RuntimeError>> {
-    let resolvable = if include_globals {
-        script.has_function_or_global(function)
-    } else {
-        script.has_function(function)
-    } || (include_host && script.has_host_function(function));
+    let pinned_resolution = resolution_override;
+    let resolution = pinned_resolution.clone().or_else(|| {
+        if include_globals {
+            script.resolve_function(function, true)
+        } else {
+            script.resolve_function(function, false)
+        }
+    });
+    let resolvable = resolution.is_some() || (include_host && script.has_host_function(function));
     if !resolvable {
         return None;
     }
-    let previous_script_object = HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow_mut().as_mut() {
-            let active = context.object.take();
-            context.dormant_scopes.push(active);
-            context.script_object_context.take()
-        } else {
-            None
-        }
+    let (previous_script_object, previous_script_definition, previous_definition) =
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                let definition = match definition_override {
+                    Some(definition) => definition,
+                    None => match resolution.as_ref() {
+                        Some(resolution)
+                            if resolution.scope == lc_script::ScriptFunctionScope::Global =>
+                        {
+                            None
+                        }
+                        Some(resolution) => context
+                            .world
+                            .script_for_host_identity(resolution.host_identity)
+                            .and_then(|(_, definition, _)| definition)
+                            .or_else(|| context.definition_context.clone()),
+                        None => context.definition_context.clone(),
+                    },
+                };
+                let active = context.object.take();
+                context.dormant_scopes.push(active);
+                let previous_definition =
+                    std::mem::replace(&mut context.definition_context, definition.clone());
+                (
+                    context.script_object_context.take(),
+                    context.script_definition_context.replace(definition),
+                    previous_definition,
+                )
+            } else {
+                (None, None, None)
+            }
     });
     let locals = HashMap::new();
-    let call = if preserve_caller {
+    let call = if let Some(resolution) = pinned_resolution {
+        let cells = lc_script::LocalCells::from_local_vars(&locals);
+        script
+            .call_pinned_with_cells_and_this(
+                resolution.function.as_ref(),
+                false,
+                args,
+                &cells,
+                Value::Nil,
+            )
+            .map(|value| (value, cells.snapshot()))
+    } else if preserve_caller {
         let cells = lc_script::LocalCells::from_local_vars(&locals);
         script
             .call_with_cells_and_this_preserving_caller(function, args, &cells, Value::Nil)
@@ -13378,6 +13601,8 @@ fn call_scoped_script_function_impl(
         if let Some(context) = cell.borrow_mut().as_mut() {
             context.object = context.dormant_scopes.pop().unwrap_or(None);
             context.script_object_context = previous_script_object;
+            context.script_definition_context = previous_script_definition;
+            context.definition_context = previous_definition;
         }
     });
     Some(match call {
@@ -13411,7 +13636,7 @@ fn definition_call(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Nil); // C4Id2Def failure → C4VNull (C4Script.cpp:3462)
     };
     let pars: Vec<Value> = args.iter().skip(2).take(8).cloned().collect();
-    call_scoped_script_function(script, name, &pars).unwrap_or(Ok(Value::Nil))
+    call_scoped_scenario_function(script, name, &pars).unwrap_or(Ok(Value::Nil))
 }
 
 /// FnGameCall (C4Script.cpp:3470-3484): runs a function on the scenario
@@ -13460,36 +13685,26 @@ fn game_call_ex(args: &[Value]) -> Result<Value, RuntimeError> {
     let targets: Vec<ObjectId> = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
-            .map(|context| {
-                context
-                    .world_object_ids()
-                    .into_iter()
-                    .filter(|id| {
-                        context
-                            .get_world_object(*id)
-                            .map(|object| {
-                                object.status().is_active()
-                                    && object.category() & BROADCAST_MASK != 0
-                            })
-                            .unwrap_or(false)
-                    })
-                    .collect()
-            })
+            .map(EffectHostContext::master_object_ids)
             .unwrap_or_default()
     });
     for target in targets {
-        // The C++ loop re-checks Status against the live list — skip
-        // objects an earlier broadcast call removed.
-        let destroyed = HOST_CONTEXT.with(|cell| {
+        // C++ evaluates Category and Status at each live-list node's turn;
+        // an earlier callback may delete, deactivate, or recategorize a later
+        // object into or out of the set.
+        let eligible = HOST_CONTEXT.with(|cell| {
             cell.borrow()
                 .as_ref()
-                .map(|context| context.nested_object_destroyed(target))
+                .and_then(|context| context.get_world_object(target))
+                .map(|object| {
+                    object.status().is_active() && object.category() & BROADCAST_MASK != 0
+                })
                 .unwrap_or(false)
         });
-        if destroyed {
+        if !eligible {
             continue;
         }
-        if let Some(result) = call_world_object_script_function(target, &name, &pars) {
+        if let Some(result) = call_world_object_own_function(target, &name, &pars) {
             result?;
         }
     }
@@ -13500,7 +13715,9 @@ fn game_call_ex(args: &[Value]) -> Result<Value, RuntimeError> {
             .and_then(|context| context.world.scenario_script().cloned())
     });
     match script {
-        Some(script) => call_scoped_script_function(script, &name, &pars).unwrap_or(Ok(Value::Nil)),
+        Some(script) => {
+            call_scoped_scenario_function(script, &name, &pars).unwrap_or(Ok(Value::Nil))
+        }
         None => Ok(Value::Nil),
     }
 }
@@ -15661,7 +15878,8 @@ pub(crate) struct HostObjectContext<'a> {
     pub rotation: i32,
     pub effects: &'a [EffectState],
     pub action_name: String,
-    pub action_ticks: u32,
+    pub action_index: Option<u32>,
+    pub action_ticks: i32,
     pub action_data: i32,
     pub action_phase: i32,
     pub action_library: ActionLibrary,
@@ -15707,7 +15925,7 @@ impl<'a> HostObjectContext<'a> {
         velocity: Vector2,
         effects: &'a [EffectState],
         action_name: impl Into<String>,
-        action_ticks: u32,
+        action_ticks: i32,
         action_data: i32,
         action_library: ActionLibrary,
         direction: Direction,
@@ -15762,7 +15980,7 @@ impl<'a> HostObjectContext<'a> {
         rotation: i32,
         effects: &'a [EffectState],
         action_name: impl Into<String>,
-        action_ticks: u32,
+        action_ticks: i32,
         action_data: i32,
         action_phase: i32,
         action_library: ActionLibrary,
@@ -15806,6 +16024,7 @@ impl<'a> HostObjectContext<'a> {
             rotation,
             effects,
             action_name: action_name.into(),
+            action_index: None,
             action_ticks,
             action_data,
             action_phase,
@@ -15834,6 +16053,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_walk_rotation(mut self, walk_rotation: WalkRotationSeed) -> Self {
         self.walk_rotation = walk_rotation;
+        self
+    }
+
+    pub(crate) fn with_action_index(mut self, action_index: Option<u32>) -> Self {
+        self.action_index = action_index;
         self
     }
 
@@ -18216,7 +18440,7 @@ fn effect_script_fx_callback_exists(
         };
         if let Some(command_target) = command_target {
             let target = ObjectId::new(command_target as u64);
-            if context.get_world_object(target).is_some() {
+            if context.has_callable_object(target) {
                 return context
                     .object_effective_definition_id(target)
                     .and_then(|id| context.world.definition_script(&id))
@@ -18229,14 +18453,7 @@ fn effect_script_fx_callback_exists(
         {
             return script.has_function_or_global(function);
         }
-        context
-            .world
-            .scenario_script()
-            .is_some_and(|script| script.has_global_function(function))
-            || context
-                .world
-                .definition_scripts()
-                .any(|script| script.has_global_function(function))
+        context.world.resolve_engine_global_script(function).is_some()
     })
 }
 
@@ -18255,7 +18472,7 @@ fn effect_fx_callback_exists(
         };
         if let Some(command_target) = command_target {
             let target = ObjectId::new(command_target as u64);
-            if context.get_world_object(target).is_some() {
+            if context.has_callable_object(target) {
                 return context
                     .object_effective_definition_id(target)
                     .and_then(|id| context.world.definition_script(&id))
@@ -18271,11 +18488,8 @@ fn effect_fx_callback_exists(
         {
             return script.has_function_or_global(function) || script.has_host_function(function);
         }
-        context.world.scenario_script().is_some_and(|script| {
-            script.has_global_function(function) || script.has_host_function(function)
-        }) || context.world.definition_scripts().any(|script| {
-            script.has_global_function(function) || script.has_host_function(function)
-        })
+        context.world.resolve_engine_global_script(function).is_some()
+            || context.world.resolve_engine_host_script(function).is_some()
     })
 }
 
@@ -18296,48 +18510,98 @@ fn dispatch_effect_fx_callback(
         // (C4Effect.cpp:443-445,456). GetFuncRecursive also reaches native
         // engine functions (notably FxFireInfo).
         let command_target = ObjectId::new(command_target as u64);
-        let target_exists = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .is_some_and(|context| context.get_world_object(command_target).is_some())
+        let (target_exists, resolution) = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let Some(context) = borrow.as_ref() else {
+                return (false, None);
+            };
+            let target_exists = context.has_callable_object(command_target);
+            let resolution = target_exists
+                .then(|| context.object_effective_definition_id(command_target))
+                .flatten()
+                .and_then(|id| context.world.definition_script(&id))
+                .and_then(|script| script.resolve_function(function, true));
+            (target_exists, resolution)
         });
         if target_exists {
-            return call_world_object_function(command_target, function, call_args);
+            if let Some(resolution) = resolution.filter(|resolution| {
+                resolution.scope == lc_script::ScriptFunctionScope::Global
+            }) {
+                let exact_script = HOST_CONTEXT.with(|cell| {
+                    cell.borrow().as_ref().and_then(|context| {
+                        context
+                            .world
+                            .script_for_host_identity(resolution.host_identity)
+                            .map(|(_, _, script)| script)
+                    })
+                });
+                return exact_script.and_then(|script| {
+                    call_world_object_resolved_global_function(
+                        command_target,
+                        script,
+                        resolution,
+                        function,
+                        call_args,
+                    )
+                });
+            }
+            return call_world_object_function_inflight(command_target, function, call_args);
         }
     }
     let definition_script = command_id.and_then(definition_id_for_c4id).and_then(|id| {
         HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| context.world.definition_script(&id).cloned())
+            cell.borrow().as_ref().and_then(|context| {
+                context
+                    .world
+                    .definition_script(&id)
+                    .cloned()
+                    .map(|script| (id, script))
+            })
         })
     });
-    if let Some(script) = definition_script {
+    if let Some((definition, script)) = definition_script {
         // idCommandTarget resolves the def script with Obj=nullptr
         // (C4Effect.cpp:446-447); GetFuncRecursive reaches globals.
-        return call_scoped_effect_function_or_global(script, function, call_args);
+        let resolution = script.resolve_function(function, true);
+        if let Some(resolution) = resolution
+            .as_ref()
+            .filter(|resolution| resolution.scope == lc_script::ScriptFunctionScope::Global)
+        {
+            let exact_script = HOST_CONTEXT.with(|cell| {
+                cell.borrow().as_ref().and_then(|context| {
+                    context
+                        .world
+                        .script_for_host_identity(resolution.host_identity)
+                        .map(|(_, _, script)| script)
+                })
+            });
+            return exact_script.and_then(|script| {
+                call_scoped_global_effect_function(script, function, call_args)
+            });
+        }
+        let local_definition = resolution
+            .filter(|resolution| resolution.scope == lc_script::ScriptFunctionScope::Local)
+            .map(|_| definition);
+        return call_scoped_effect_function_or_global(
+            script,
+            local_definition,
+            function,
+            call_args,
+        );
     }
-    // No command target at all: Game.ScriptEngine — GLOBAL script
-    // functions (C4Effect.cpp:448-449). Any loaded script host shares the
-    // engine-global function table.
+    // No command target at all: Game.ScriptEngine — resolve the retained
+    // GLOBAL function's exact LinkedTo host, then native engine functions.
     let global_carrier = HOST_CONTEXT.with(|cell| {
         cell.borrow().as_ref().and_then(|context| {
             context
                 .world
-                .scenario_script()
-                .filter(|script| {
-                    script.has_global_function(function) || script.has_host_function(function)
-                })
-                .or_else(|| {
-                    context.world.definition_scripts().find(|script| {
-                        script.has_global_function(function) || script.has_host_function(function)
-                    })
-                })
-                .cloned()
+                .resolve_engine_global_script(function)
+                .map(|(script, _)| script)
+                .or_else(|| context.world.resolve_engine_host_script(function))
         })
     });
     global_carrier
-        .and_then(|script| call_scoped_effect_function_or_global(script, function, call_args))
+        .and_then(|script| call_scoped_global_effect_function(script, function, call_args))
 }
 
 /// `C4Object::GetInfoString` effect suffix: query every attached effect in
@@ -22204,7 +22468,10 @@ fn fire_effect_start_core(
                             && scope.status().is_active()
                             && !scope
                                 .action_library
-                                .is_idle_action(scope.effective_action_name())
+                                .is_idle_entry(
+                                    scope.effective_action_name(),
+                                    scope.effective_action_index(),
+                                )
                             && (scope.effective_action_target(0) == Some(target)
                                 || scope.effective_action_target(1) == Some(target));
                     }
@@ -22214,7 +22481,9 @@ fn fire_effect_start_core(
                                 .world
                                 .definition_metadata(object.definition_id())
                                 .is_some_and(|metadata| {
-                                    !metadata.action_library.is_idle_action(object.action_name())
+                                    !metadata
+                                        .action_library
+                                        .is_idle_entry(object.action_name(), object.action_index)
                                 })
                             && (object.action_target(0) == Some(target)
                                 || object.action_target(1) == Some(target))
@@ -22831,13 +23100,21 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(name) => name,
         None => return Ok(Value::Bool(false)),
     };
-    let name = if name == "ActIdle" {
-        "Idle".to_string()
+    let name = lc_script::c4_string_from_bytes(&lc_script::c4_string_bytes(&name));
+    let builtin_idle = crate::action::is_builtin_idle_name(&name);
+    let name = if builtin_idle {
+        crate::action::DEFAULT_ACTION_NAME.to_string()
     } else {
-        lc_script::c4_string_from_bytes(&lc_script::c4_string_bytes(&name))
+        name
     };
 
-    let mut sync_callbacks: Option<(ObjectId, Option<String>, Option<String>)> = None;
+    let mut sync_callbacks: Option<(
+        ObjectId,
+        Option<String>,
+        Option<String>,
+        i32,
+        Option<String>,
+    )> = None;
     let staged = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
@@ -22861,23 +23138,57 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         if !action_exists {
             return Ok(Value::Bool(false));
         }
+        let incomplete_activity = context
+            .object_context()
+            .and_then(|object| {
+                object
+                    .pending_update
+                    .change_def
+                    .as_deref()
+                    .or(object.definition_id.as_deref())
+            })
+            .and_then(|definition| context.world.definition_metadata(definition))
+            .is_some_and(|metadata| metadata.fire.incomplete_activity);
         let object = match context.object_context_mut() {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
         };
 
         let current_action = object.effective_action_name().to_string();
+        let current_index = object.effective_action_index();
+        let current_phase = object.action_phase();
+        let callback_definition = object
+            .pending_update
+            .change_def
+            .clone()
+            .or_else(|| object.definition_id.clone());
+        let requested_index = object.action_library.named_action_index(&name);
         let blocks_other_actions = object.effective_blocks_other_actions();
-        let changed_action = name != current_action;
-        if blocks_other_actions && name != current_action && !force {
+        let requested_action_changed =
+            name != current_action || requested_index != current_index;
+        if blocks_other_actions && requested_action_changed && !force {
             return Ok(Value::Bool(false));
         }
+
+        // C4Object::SetAction validates the requested slot and applies the
+        // old action's NoOtherAction gate first, then accepts the call but
+        // coerces its resulting numeric action to ActIdle when the object is
+        // incomplete and the live definition disallows incomplete activity
+        // (C4Object.cpp:4111-4130).
+        let actual_name = if object.construction() < FULL_CON && !incomplete_activity {
+            crate::action::DEFAULT_ACTION_NAME
+        } else {
+            name.as_str()
+        };
+        let actual_index = object.action_library.named_action_index(actual_name);
+        let changed_action =
+            actual_name != current_action || actual_index != current_index;
 
         let update = object
             .pending_update
             .action
             .get_or_insert_with(ActionUpdate::default);
-        update.set_name(name.clone());
+        update.set_name(actual_name.to_string());
         update.set_force(force);
         // C4Object::SetAction snaps fix_x/fix_y after changing the action
         // (C4Object.cpp:4144). If it follows DoCon in this staged call, that
@@ -22888,15 +23199,24 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
 
         // SetActionByName carries the action targets, and C4Object::SetAction
         // assigns them ONLY when non-null (C4Object.cpp:4123-4125:
-        // `if (pTarget) Action.Target = pTarget;`) — nil preserves.
-        if target1.is_some() {
-            object.set_action_target(0, target1);
+        // `if (pTarget) Action.Target = pTarget;`) — nil preserves. Its
+        // Idle/ActIdle sentinel branch discards both supplied target args
+        // before calling SetAction (C4Object.cpp:4225-4227).
+        if !builtin_idle {
+            if target1.is_some() {
+                object.set_action_target(0, target1);
+            }
+            if target2.is_some() {
+                object.set_action_target(1, target2);
+            }
         }
-        if target2.is_some() {
-            object.set_action_target(1, target2);
-        }
+        // SetAction always clears PhaseDelay, even when it selects the same
+        // numeric slot and Phase was already zero (C4Object.cpp:4142-4146).
+        // Action.Time resets only when the numeric slot changes.
         if changed_action {
             object.reset_action_ticks();
+        } else {
+            object.reset_action_phase_delay();
         }
         // `Action.Phase = Action.PhaseDelay = 0` runs UNCONDITIONALLY on
         // every successful SetAction (C4Object.cpp:4132, outside the
@@ -22904,7 +23224,7 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         // new action (the GoldRush FireRifle ph6 -> LoadRifle ph0 case).
         object.set_action_phase(0);
 
-        let procedure_changed = object.update_effective_action(&name);
+        let procedure_changed = object.update_effective_action(actual_name);
         if procedure_changed {
             object.reset_action_data();
         }
@@ -22919,14 +23239,23 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         }
         sync_callbacks = Some((
             object.id(),
-            object
-                .action_library
-                .start_call_for_action(&name)
+            (actual_name != crate::action::DEFAULT_ACTION_NAME)
+                .then(|| {
+                    object
+                        .action_library
+                        .spec_for_entry(actual_name, actual_index)
+                        .and_then(|spec| spec.start_call.as_deref())
+                })
+                .flatten()
                 .map(str::to_string),
             object
                 .action_library
-                .abort_call_for_action(&current_action)
+                .spec_for_entry(&current_action, current_index)
+                .and_then(|spec| spec.abort_call.as_deref())
+                .filter(|_| !force)
                 .map(str::to_string),
+            current_phase,
+            callback_definition,
         ));
         let object_id = object.id();
         // SetAction calls SetOCF before Start/Abort callbacks. Use the full
@@ -22941,7 +23270,14 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
     // (SetActionByName defaults SAC_StartCall|SAC_AbortCall) — the
     // coach's Drive0 StartCall reads the PRE-SetDir facing for its seat
     // vertex, so deferral changes the result.
-    if let Some((id, start_call, abort_call)) = sync_callbacks {
+    if let Some((
+        id,
+        start_call,
+        abort_call,
+        previous_phase,
+        callback_definition,
+    )) = sync_callbacks
+    {
         let depth = SETACTION_DEPTH.with(|d| {
             d.set(d.get() + 1);
             d.get()
@@ -22958,13 +23294,29 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             SETACTION_DEPTH.with(|d| d.set(d.get() - 1));
             return Ok(staged);
         }
-        for callback in [start_call, abort_call].into_iter().flatten() {
-            if let Some(Err(error)) = call_world_object_own_function(id, &callback, &[]) {
+        let callbacks = [
+            start_call.map(|callback| (callback, Vec::new())),
+            abort_call.map(|callback| (callback, vec![Value::Int(previous_phase)])),
+        ];
+        for (callback, args) in callbacks.into_iter().flatten() {
+            if let Some(Err(error)) = call_world_object_own_function(id, &callback, &args) {
                 tracing::warn!(
                     %error,
                     callback,
                     "SetAction callback error; continuing like the C++ fail-safe exec"
                 );
+            }
+            let receiver_is_live = HOST_CONTEXT.with(|cell| {
+                cell.borrow().as_ref().is_some_and(|context| {
+                    context.object_status_present(id)
+                        && callback_definition.as_deref().is_none_or(|expected| {
+                            context.object_effective_definition_id(id).as_deref()
+                                == Some(expected)
+                        })
+                })
+            });
+            if !receiver_is_live {
+                break;
             }
         }
         SETACTION_DEPTH.with(|d| d.set(d.get() - 1));
@@ -23540,20 +23892,17 @@ fn get_act_time(args: &[Value]) -> Result<Value, RuntimeError> {
             None => return Ok(Value::Nil),
         };
 
-        let clamp_ticks = |ticks: u32| -> Value {
-            let clamped = ticks.min(i32::MAX as u32) as i32;
-            Value::Int(clamped)
-        };
+        let action_time = |ticks: i32| Value::Int(ticks);
 
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
                 if target == object.id() {
-                    return Ok(clamp_ticks(object.effective_action_ticks()));
+                    return Ok(action_time(object.effective_action_ticks()));
                 }
             }
 
             if let Some(other) = context.get_world_object(target) {
-                return Ok(clamp_ticks(other.action_ticks()));
+                return Ok(action_time(other.action_ticks()));
             }
 
             return Ok(Value::Nil);
@@ -23564,7 +23913,7 @@ fn get_act_time(args: &[Value]) -> Result<Value, RuntimeError> {
             None => return Ok(Value::Nil),
         };
 
-        Ok(clamp_ticks(object.effective_action_ticks()))
+        Ok(action_time(object.effective_action_ticks()))
     })
 }
 
@@ -23654,17 +24003,29 @@ fn set_phase(args: &[Value]) -> Result<Value, RuntimeError> {
         // objects; the phase clamps to [0, Length] (BoundBy is INCLUSIVE
         // of Length — the wrap transition fires at the next ExecAction).
         let action_name = object.effective_action_name().to_string();
-        if object.action_library.is_idle_action(&action_name) {
+        let action_index = object.effective_action_index();
+        if object
+            .action_library
+            .is_idle_entry(&action_name, action_index)
+        {
             return Ok(Value::Bool(false));
         }
         let length = object
             .action_library
-            .specs()
-            .get(&action_name)
+            .spec_for_entry(&action_name, action_index)
             .and_then(|spec| spec.length)
-            .map(|length| i32::try_from(length).unwrap_or(i32::MAX))
             .unwrap_or(1);
-        object.set_action_phase(phase.clamp(0, length));
+        // C++ BoundBy evaluates the lower comparison first and does not
+        // require ordered bounds. With a negative malformed Length,
+        // negative input becomes 0 while nonnegative input becomes Length.
+        let phase = if phase < 0 {
+            0
+        } else if phase > length {
+            length
+        } else {
+            phase
+        };
+        object.set_action_phase(phase);
         Ok(Value::Bool(true))
     })
 }
@@ -24852,7 +25213,9 @@ fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
         let object = context.object_context()?;
         let action_name = object.effective_action_name().to_string();
         if !matches!(
-            object.action_library.procedure_for_action(&action_name),
+            object
+                .action_library
+                .procedure_for_entry(&action_name, object.effective_action_index()),
             crate::action::ActionProcedure::Walk
         ) {
             return None;
@@ -25820,6 +26183,12 @@ fn native_set_action_by_name_with_target(
     name: &str,
     action_target: Option<ObjectId>,
 ) -> Result<bool, RuntimeError> {
+    let builtin_idle = crate::action::is_builtin_idle_name(name);
+    let name = if builtin_idle {
+        crate::action::DEFAULT_ACTION_NAME
+    } else {
+        name
+    };
     let callbacks = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
@@ -25848,9 +26217,17 @@ fn native_set_action_by_name_with_target(
             return Ok(None);
         }
         let current = object.effective_action_name().to_string();
+        let current_index = object.effective_action_index();
+        let requested_index = object.action_library.named_action_index(name);
         let previous_phase = object.action_phase();
-        let definition = object.definition_id.clone();
-        if object.effective_blocks_other_actions() && current != name {
+        let definition = object
+            .pending_update
+            .change_def
+            .clone()
+            .or_else(|| object.definition_id.clone());
+        if object.effective_blocks_other_actions()
+            && (current != name || current_index != requested_index)
+        {
             return Ok(None);
         }
         // C4Object::SetAction accepts the requested ActMap entry but coerces
@@ -25861,8 +26238,9 @@ fn native_set_action_by_name_with_target(
         } else {
             name
         };
+        let actual_index = object.action_library.named_action_index(actual_name);
 
-        let changed = current != actual_name;
+        let changed = current != actual_name || current_index != actual_index;
         let update = object
             .pending_update
             .action
@@ -25872,13 +26250,17 @@ fn native_set_action_by_name_with_target(
         update.callbacks_dispatched = true;
         if changed {
             object.reset_action_ticks();
+        } else {
+            object.reset_action_phase_delay();
         }
         object.set_action_phase(0);
         if object.update_effective_action(actual_name) {
             object.reset_action_data();
         }
-        if let Some(action_target) = action_target {
-            object.set_action_target(0, Some(action_target));
+        if !builtin_idle {
+            if let Some(action_target) = action_target {
+                object.set_action_target(0, Some(action_target));
+            }
         }
         let position = object.effective_position();
         object.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
@@ -25886,12 +26268,18 @@ fn native_set_action_by_name_with_target(
 
         let callbacks = (
             (actual_name != "Idle")
-                .then(|| object.action_library.start_call_for_action(actual_name))
+                .then(|| {
+                    object
+                        .action_library
+                        .spec_for_entry(actual_name, actual_index)
+                        .and_then(|spec| spec.start_call.as_deref())
+                })
                 .flatten()
                 .map(str::to_string),
             object
                 .action_library
-                .abort_call_for_action(&current)
+                .spec_for_entry(&current, current_index)
+                .and_then(|spec| spec.abort_call.as_deref())
                 .map(str::to_string),
             previous_phase,
             definition,
@@ -25956,9 +26344,14 @@ fn native_set_dir(target: ObjectId, direction: Direction) -> Result<(), RuntimeE
             return Ok(None);
         };
         let action = object.effective_action_name();
-        let directions = object.action_library.directions_for(action);
+        let action_index = object.effective_action_index();
+        let directions = object
+            .action_library
+            .directions_for_entry(action, action_index);
         let raw_direction = direction.to_script_value();
-        if object.action_library.is_idle_action(action)
+        if object
+            .action_library
+            .is_idle_entry(action, action_index)
             || raw_direction < 0
             || raw_direction >= directions as i32
         {
@@ -25969,7 +26362,7 @@ fn native_set_dir(target: ObjectId, direction: Direction) -> Result<(), RuntimeE
                 .then(|| {
                     object
                         .action_library
-                        .turn_action_for(action)
+                        .turn_action_for_entry(action, action_index)
                         .map(str::to_string)
                 })
                 .flatten(),
@@ -28539,32 +28932,42 @@ fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
                 // The same C4Object::SetDir gates as the self path; the
                 // TurnAction fires through the staged action update.
                 let action_name = scope.effective_action_name().to_string();
-                if scope.action_library.is_idle_action(&action_name) {
+                let action_index = scope.effective_action_index();
+                if scope
+                    .action_library
+                    .is_idle_entry(&action_name, action_index)
+                {
                     return Ok(Value::Bool(true));
                 }
-                let directions = scope.action_library.directions_for(&action_name) as i32;
+                let directions = scope
+                    .action_library
+                    .directions_for_entry(&action_name, action_index)
+                    as i32;
                 if direction.to_script_value() < 0 || direction.to_script_value() >= directions {
                     return Ok(Value::Bool(true));
                 }
-                if scope.direction() != direction {
-                    if let Some(turn_action) = scope
+                let turn_action = (scope.direction() != direction)
+                    .then(|| {
+                        scope
                         .action_library
-                        .turn_action_for(&action_name)
+                        .turn_action_for_entry(&action_name, action_index)
                         .map(str::to_string)
-                    {
-                        if scope.action_library.contains(&turn_action) {
-                            let update = scope
-                                .pending_update
-                                .action
-                                .get_or_insert_with(ActionUpdate::default);
-                            update.set_name(turn_action.clone());
-                            update.set_force(false);
-                            scope.update_effective_action(&turn_action);
-                        }
-                    }
+                    })
+                    .flatten();
+                drop(borrow);
+                if let Some(turn_action) = turn_action {
+                    let _ = native_set_action_by_name(target, &turn_action)?;
                 }
-                scope.set_direction(direction);
-                return Ok(Value::Bool(true));
+                return HOST_CONTEXT.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    let context = borrow.as_mut().ok_or_else(|| {
+                        RuntimeError::new("SetDir requires an active engine context")
+                    })?;
+                    if let Some(scope) = context.object_scope_mut(target) {
+                        scope.set_direction(direction);
+                    }
+                    Ok(Value::Bool(true))
+                });
             }
         }
         let object = match context.object_context_mut() {
@@ -28577,10 +28980,17 @@ fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         // single-direction actions reject SetDir(1)); a CHANGE fires the
         // action's TurnAction through SetActionByName first.
         let action_name = object.effective_action_name().to_string();
-        if object.action_library.is_idle_action(&action_name) {
+        let action_index = object.effective_action_index();
+        if object
+            .action_library
+            .is_idle_entry(&action_name, action_index)
+        {
             return Ok(Value::Bool(true));
         }
-        let directions = object.action_library.directions_for(&action_name) as i32;
+        let directions = object
+            .action_library
+            .directions_for_entry(&action_name, action_index)
+            as i32;
         if direction.to_script_value() < 0 || direction.to_script_value() >= directions {
             return Ok(Value::Bool(true));
         }
@@ -28588,7 +28998,7 @@ fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
             .then(|| {
                 object
                     .action_library
-                    .turn_action_for(&action_name)
+                    .turn_action_for_entry(&action_name, action_index)
                     .map(str::to_string)
             })
             .flatten();
@@ -29787,7 +30197,10 @@ fn preview_object_com_build(
             .is_some_and(|scope| {
                 scope
                     .action_library
-                    .is_idle_action(scope.effective_action_name())
+                    .is_idle_entry(
+                        scope.effective_action_name(),
+                        scope.effective_action_index(),
+                    )
                     || scope.effective_action_procedure() == ActionProcedure::Walk
             })
     });
@@ -36412,9 +36825,11 @@ fn get_act_map_val(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
     let definition = parse_native_c4id_argument(args.get(2), "GetActMapVal")?;
-    let (Some(entry), Some(action)) = (entry, action) else {
+    let entry_index = parse_optional_i32(args.get(3), "GetActMapVal", "entry_nr")?.unwrap_or(0);
+    let Some(entry) = entry else {
         return Ok(Value::Nil);
     };
+    let action = action.unwrap_or_default();
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -36424,41 +36839,95 @@ fn get_act_map_val(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         // `idDef` defaults to the executing definition (cthr->Def).
-        let library = match definition {
+        let (library, graphics) = match definition {
             Some(id) => match context.definition_metadata(&id) {
-                Some(metadata) => metadata.action_library.clone(),
+                Some(metadata) => (&metadata.action_library, Some(&metadata.action_graphics)),
                 None => return Ok(Value::Nil),
             },
-            None => match context.object_context() {
-                Some(object) => object.action_library.clone(),
-                None => {
-                    let Some(definition) = context.current_definition_id() else {
-                        return Ok(Value::Nil);
-                    };
+            None => match context.executing_definition_id() {
+                Some(Some(definition)) => {
                     let Some(metadata) = context.definition_metadata(definition.as_str()) else {
                         return Ok(Value::Nil);
                     };
-                    metadata.action_library.clone()
+                    (&metadata.action_library, Some(&metadata.action_graphics))
                 }
+                // An active C++ frame with `cthr->Def == nullptr` has no
+                // implicit definition, even if the copied host context still
+                // carries an affected object for deferred state folding.
+                Some(None) => return Ok(Value::Nil),
+                // Direct unit host contexts have no active VM frame. Retain
+                // their historical synthetic ActionLibrary fallback.
+                None => match context.object_context() {
+                    Some(object) => (&object.action_library, None),
+                    None => return Ok(Value::Nil),
+                },
             },
         };
+        if !library.is_declared(&action) {
+            return Ok(Value::Nil);
+        }
+        if let Some(reflection) = library.reflection(&action) {
+            return Ok(reflection
+                .get(entry.as_str(), entry_index)
+                .unwrap_or(Value::Nil));
+        }
         let Some(spec) = library.specs().get(&action) else {
             return Ok(Value::Nil);
         };
 
+        // Synthetic fixtures have no resource-backed exact reflection. Keep
+        // their historical modeled values and derive the newly covered table
+        // entries from ActionSpec/graphics with C++ defaults.
+        let graphics = graphics.and_then(|graphics| graphics.get(&action));
+        if entry == "Facet" {
+            let facet = graphics.and_then(|graphics| graphics.facet.as_ref());
+            return Ok(match entry_index {
+                0 => Value::Int(facet.map_or(0, |facet| facet.x)),
+                1 => Value::Int(facet.map_or(0, |facet| facet.y)),
+                2 => Value::Int(facet.map_or(0, |facet| facet.width)),
+                3 => Value::Int(facet.map_or(0, |facet| facet.height)),
+                4 => Value::Int(facet.map_or(0, |facet| facet.target_x)),
+                5 => Value::Int(facet.map_or(0, |facet| facet.target_y)),
+                _ => Value::Nil,
+            });
+        }
+        if entry_index != 0 {
+            return Ok(Value::Nil);
+        }
+
         Ok(match entry.as_str() {
             "Name" => Value::String(action.clone()),
             "Procedure" => Value::String(spec.procedure.clone().unwrap_or_default()),
-            "Length" => Value::Int(spec.length.unwrap_or(1) as i32),
-            "Delay" => Value::Int(spec.delay.unwrap_or(0) as i32),
+            "Directions" => Value::Int(spec.directions.unwrap_or(1)),
+            "FlipDir" => {
+                Value::Int(graphics.and_then(|graphics| graphics.flip_dir).unwrap_or(0))
+            },
+            "Length" => Value::Int(spec.length.unwrap_or(1)),
+            "Delay" => Value::Int(spec.delay.unwrap_or(0)),
             "Attach" => Value::Int(spec.attach as i32),
+            "FacetBase" => Value::Int(i32::from(
+                graphics.is_some_and(|graphics| graphics.facet_base),
+            )),
+            "FacetTopFace" => Value::Int(i32::from(
+                graphics.is_some_and(|graphics| graphics.facet_top_face),
+            )),
+            "FacetTargetStretch" => Value::Int(i32::from(
+                graphics.is_some_and(|graphics| graphics.facet_target_stretch),
+            )),
             "NextAction" => Value::String(spec.next.clone().unwrap_or_default()),
             "StartCall" => Value::String(spec.start_call.clone().unwrap_or_default()),
             "EndCall" => Value::String(spec.end_call.clone().unwrap_or_default()),
             "AbortCall" => Value::String(spec.abort_call.clone().unwrap_or_default()),
             "PhaseCall" => Value::String(spec.phase_call.clone().unwrap_or_default()),
+            "Sound" => Value::String(String::new()),
             "NoOtherAction" => Value::Int(i32::from(spec.no_other_action)),
+            "ObjectDisabled" => Value::Int(i32::from(spec.disabled)),
             "DigFree" => Value::Int(spec.dig_free.unwrap_or(0)),
+            "EnergyUsage" => Value::Int(spec.energy_usage),
+            "InLiquidAction" => Value::String(spec.in_liquid_action.clone().unwrap_or_default()),
+            "TurnAction" => Value::String(spec.turn_action.clone().unwrap_or_default()),
+            "Reverse" => Value::Int(i32::from(graphics.is_some_and(|graphics| graphics.reverse))),
+            "Step" => Value::Int(spec.step.unwrap_or(1)),
             _ => Value::Nil,
         })
     })
@@ -37059,8 +37528,40 @@ fn reflect_object_values(
     );
 
     let action_name = scope
-        .map(|scope| scope.effective_action_name().to_string())
-        .or_else(|| state.map(|state| state.action.name.clone()))
+        .map(|scope| {
+            if scope
+                .pending_update
+                .action
+                .as_ref()
+                .and_then(|action| action.name.as_ref())
+                .is_some()
+            {
+                if scope.effective_action_index().is_none()
+                    && crate::action::is_builtin_idle_name(scope.effective_action_name())
+                {
+                    String::new()
+                } else {
+                    scope.effective_action_name().to_string()
+                }
+            } else {
+                state
+                    .map(|state| state.action.compiled_name().to_string())
+                    .unwrap_or_else(|| {
+                        if scope.effective_action_index().is_none()
+                            && crate::action::is_builtin_idle_name(
+                                scope.effective_action_name(),
+                            )
+                        {
+                            String::new()
+                        } else {
+                            scope.effective_action_name().to_string()
+                        }
+                    })
+            }
+        })
+        .or_else(|| {
+            state.map(|state| state.action.compiled_name().to_string())
+        })
         .or_else(|| {
             world_object
                 .as_ref()
@@ -37092,8 +37593,8 @@ fn reflect_object_values(
         &object_path("ActionTime"),
         Value::Int(
             scope
-                .map(|scope| scope.current_action_ticks.min(i32::MAX as u32) as i32)
-                .or_else(|| state.map(|state| state.action.time.min(i32::MAX as u32) as i32))
+                .map(|scope| scope.current_action_ticks)
+                .or_else(|| state.map(|state| state.action.time))
                 .unwrap_or(0),
         ),
     );
@@ -37118,13 +37619,10 @@ fn reflect_object_values(
     let phase_delay = scope
         .and_then(|scope| {
             scope.pending_update.action.as_ref().and_then(|action| {
-                action
-                    .ticks
-                    .map(|ticks| ticks.min(i32::MAX as u32) as i32)
-                    .or_else(|| action.name.as_ref().map(|_| 0))
+                action.ticks.or_else(|| action.name.as_ref().map(|_| 0))
             })
         })
-        .or_else(|| state.map(|state| state.action.ticks.min(i32::MAX as u32) as i32))
+        .or_else(|| state.map(|state| state.action.ticks))
         .unwrap_or(0);
     reflection.push(&object_path("PhaseDelay"), Value::Int(phase_delay));
 
@@ -38141,9 +38639,8 @@ fn any_container(_args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(123))
 }
 
-/// FnActIdle (C4Script.cpp:1831-1836): true when the object has no action
-/// (C++ Act == ActIdle; our engine stores that as an empty or "Idle" name),
-/// nil without an object.
+/// FnActIdle (C4Script.cpp:1831-1836): true only for the built-in ActIdle
+/// slot. A physical ActMap entry named "Idle" remains an active action.
 fn act_idle(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let target_id =
@@ -38156,24 +38653,43 @@ fn act_idle(args: &[Value]) -> Result<Value, RuntimeError> {
             None => return Ok(Value::Nil),
         };
 
-        let action_name = if let Some(target) = target_id {
+        let idle = if let Some(target) = target_id {
             match context.object_context() {
                 Some(object) if target == object.id() => {
-                    Some(object.effective_action_name().to_string())
+                    let name = object.effective_action_name();
+                    Some(
+                        name.is_empty()
+                            || object
+                                .action_library
+                                .is_idle_entry(name, object.effective_action_index()),
+                    )
                 }
-                _ => context
-                    .get_world_object(target)
-                    .map(|other| other.action_name.clone()),
+                _ => context.get_world_object(target).map(|other| {
+                    other.action_name.is_empty()
+                        || context
+                            .definition_metadata(other.definition_id())
+                            .map(|metadata| {
+                                metadata.action_library.is_idle_entry(
+                                    &other.action_name,
+                                    other.action_index,
+                                )
+                            })
+                            .unwrap_or(
+                                other.action_index.is_none() && other.action_name == "Idle",
+                            )
+                }),
             }
         } else {
-            context
-                .object_context()
-                .map(|object| object.effective_action_name().to_string())
+            context.object_context().map(|object| {
+                let name = object.effective_action_name();
+                name.is_empty()
+                    || object
+                        .action_library
+                        .is_idle_entry(name, object.effective_action_index())
+            })
         };
 
-        Ok(action_name
-            .map(|name| Value::Bool(name.is_empty() || name == "Idle"))
-            .unwrap_or(Value::Nil))
+        Ok(idle.map(Value::Bool).unwrap_or(Value::Nil))
     })
 }
 
@@ -40301,10 +40817,16 @@ fn call_world_object_reference_with(
             None => (lc_script::LocalCells::from_local_vars(&local_vars), false),
         }
     });
-    let previous_script_object = HOST_CONTEXT.with(|cell| {
-        cell.borrow_mut()
-            .as_mut()
-            .and_then(|context| context.script_object_context.replace(target))
+    let (previous_script_object, previous_script_definition) = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return (None, None);
+        };
+        let definition = context.object_effective_definition_id(target);
+        (
+            context.script_object_context.replace(target),
+            context.script_definition_context.replace(definition),
+        )
     });
     let this = object_reference_value(target);
     let call = if preserve_caller {
@@ -40315,6 +40837,7 @@ fn call_world_object_reference_with(
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             context.script_object_context = previous_script_object;
+            context.script_definition_context = previous_script_definition;
         }
     });
     let succeeded = call.is_ok();
@@ -40386,7 +40909,47 @@ fn call_world_object_own_function_inflight(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_world_object_function_with_options(target, function, args, false, false, None, false, true)
+    call_world_object_function_with_options(
+        target, function, args, false, false, None, false, true, None,
+    )
+}
+
+/// C4Effect callbacks may target the object whose Construction callback is
+/// currently running, before Rust inserts it into HostWorldContext. C++
+/// already has that C4Object pointer and executes recursive/global/native
+/// callback lookup with it as `this` (C4Effect.cpp:42-56,439-456).
+fn call_world_object_function_inflight(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    call_world_object_function_with_options(
+        target, function, args, true, true, None, false, true, None,
+    )
+}
+
+/// Execute an engine-global function already selected through a command
+/// object's definition while retaining that object's live `this` and locals.
+/// The pinned body and exact `LinkedTo` host prevent the command definition's
+/// ordinary helpers from shadowing helpers owned by the global declaration.
+fn call_world_object_resolved_global_function(
+    target: ObjectId,
+    script: Arc<ScriptEngine>,
+    resolution: lc_script::ScriptFunctionResolution,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    call_world_object_function_with_options(
+        target,
+        function,
+        args,
+        false,
+        true,
+        Some(script),
+        false,
+        true,
+        Some(resolution),
+    )
 }
 
 fn call_world_object_function_with(
@@ -40407,6 +40970,7 @@ fn call_world_object_function_with(
         script_override,
         preserve_caller,
         false,
+        None,
     )
 }
 
@@ -40419,6 +40983,7 @@ fn call_world_object_function_with_options(
     script_override: Option<Arc<ScriptEngine>>,
     preserve_caller: bool,
     allow_scope_without_world_object: bool,
+    pinned_resolution: Option<lc_script::ScriptFunctionResolution>,
 ) -> Option<Result<Value, RuntimeError>> {
     let prep = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut().as_mut().and_then(|context| {
@@ -40459,13 +41024,28 @@ fn call_world_object_function_with_options(
     });
     // The HOST_CONTEXT borrow is released here: the nested VM's host
     // functions re-borrow it against the swapped-in scope.
-    let previous_script_object = HOST_CONTEXT.with(|cell| {
-        cell.borrow_mut()
-            .as_mut()
-            .and_then(|context| context.script_object_context.replace(target))
+    let (previous_script_object, previous_script_definition) = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return (None, None);
+        };
+        let definition = context.object_effective_definition_id(target);
+        (
+            context.script_object_context.replace(target),
+            context.script_definition_context.replace(definition),
+        )
     });
     let this = object_reference_value(target);
-    let call = if preserve_caller {
+    let call = if let Some(resolution) = pinned_resolution {
+        debug_assert!(!preserve_caller);
+        script.call_pinned_with_cells_and_this(
+            resolution.function.as_ref(),
+            resolution.scope == lc_script::ScriptFunctionScope::Global,
+            args,
+            &cells,
+            this,
+        )
+    } else if preserve_caller {
         script.call_with_cells_and_this_preserving_caller(function, args, &cells, this)
     } else {
         script.call_with_cells_and_this(function, args, &cells, this)
@@ -40473,6 +41053,7 @@ fn call_world_object_function_with_options(
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             context.script_object_context = previous_script_object;
+            context.script_definition_context = previous_script_definition;
         }
     });
     if created_session {
@@ -40550,6 +41131,11 @@ struct EffectHostContext {
     /// state this host context carries. Definition-commanded effects keep
     /// their carrier in `object` but execute with a null script object.
     script_object_context: Option<ObjectId>,
+    /// `cthr->Def` captured when the active script frame was entered.
+    /// ChangeDef mutates `cthr->Obj->Def`, but the suspended frame keeps its
+    /// original definition until a nested object/definition call replaces
+    /// the whole script context (C4AulExec.cpp:343-352, 1417-1456).
+    script_definition_context: Option<Option<DefinitionId>>,
     global: Option<EffectScopeContext>,
     /// LIVE local cells per object with an in-flight VM session: deeper
     /// nested calls onto the same object share them, so mid-call local
@@ -40634,7 +41220,11 @@ struct EffectHostContext {
     /// Script/definition contexts paired with each AB_CALLGLOBAL suspension.
     /// Object scopes use `dormant_scopes` so explicit-object natives and
     /// nested arrow calls can still reach the suspended caller object.
-    global_call_contexts: Vec<(Option<ObjectId>, Option<DefinitionId>)>,
+    global_call_contexts: Vec<(
+        Option<ObjectId>,
+        Option<DefinitionId>,
+        Option<Option<DefinitionId>>,
+    )>,
     /// Completed nested-call scopes by target, resumed on repeat calls and
     /// folded into `EffectContextOutcome::other_objects` in first-call order.
     nested_objects: HashMap<ObjectId, NestedScopeState>,
@@ -40668,6 +41258,32 @@ impl EffectHostContext {
             .and_then(Landscape::raster_state)
             .map(|state| state.texmap().clone());
         let solid_mask_bakes = world.solid_mask_bakes.as_ref().clone();
+        let resolved_script_definition = definition_context.clone().or_else(|| {
+            script_object_context.and_then(|script_object| {
+                object
+                    .as_ref()
+                    .filter(|object| object.id == script_object)
+                    .and_then(|object| object.definition_id.as_deref())
+                    .map(DefinitionId::from)
+                    .or_else(|| {
+                        world
+                            .get(script_object)
+                            .map(|object| DefinitionId::from(object.definition_id()))
+                    })
+            })
+        });
+        // A null-object frame is authoritatively `Def=null`. Object-only
+        // unit fixtures that supply neither a definition id nor a world
+        // object have no modeled VM frame, so preserve their synthetic
+        // ActionLibrary fallback instead of treating the missing metadata as
+        // an authoritative null definition.
+        let script_definition_context = if resolved_script_definition.is_some()
+            || script_object_context.is_none()
+        {
+            Some(resolved_script_definition)
+        } else {
+            None
+        };
         let mut object = object.map(|ctx| {
             let HostObjectContext {
                 id,
@@ -40690,6 +41306,7 @@ impl EffectHostContext {
                 rotation,
                 effects,
                 action_name,
+                action_index,
                 action_ticks,
                 action_data,
                 action_phase,
@@ -40739,6 +41356,7 @@ impl EffectHostContext {
                     effects.to_vec(),
                     action_library,
                     action_name,
+                    action_index,
                     action_ticks,
                     action_data,
                     action_phase,
@@ -40821,6 +41439,7 @@ impl EffectHostContext {
             object,
             definition_context,
             script_object_context,
+            script_definition_context,
             global,
             solid_mask_bakes,
             world,
@@ -41445,6 +42064,7 @@ impl EffectHostContext {
             object.fixed_rotation = scope.fixed_rotation();
             object.vertices = scope.vertices().to_vec();
             object.action_name = scope.current_action_name.clone();
+            object.action_index = scope.current_action_index;
             object.action_procedure = scope.effective_procedure_name().map(str::to_string);
             object.action_phase = scope.current_action_phase;
             object.action_ticks = scope.current_action_ticks;
@@ -41642,11 +42262,21 @@ impl EffectHostContext {
                 let action_name = scope
                     .map(|scope| scope.effective_action_name().to_string())
                     .unwrap_or_else(|| object.action_name.clone());
+                let action_index = scope
+                    .map(ObjectScopeContext::effective_action_index)
+                    .unwrap_or(object.action_index);
                 let action_idle = scope
-                    .map(|scope| scope.action_library.is_idle_action(&action_name))
+                    .map(|scope| {
+                        scope
+                            .action_library
+                            .is_idle_entry(&action_name, action_index)
+                    })
                     .or_else(|| {
-                        metadata
-                            .map(|metadata| metadata.action_library.is_idle_action(&action_name))
+                        metadata.map(|metadata| {
+                            metadata
+                                .action_library
+                                .is_idle_entry(&action_name, action_index)
+                        })
                     })
                     .unwrap_or(true);
                 let snapshot = CommandObjectSnapshot {
@@ -42447,12 +43077,15 @@ impl EffectHostContext {
                 self.world.definition_script(&definition_id)?.clone()
             }
         };
-        // GetFuncRecursive walks the def script up to Game.ScriptEngine
-        // (C4Aul.cpp): GLOBAL script functions resolve for nested calls
-        // and effect callbacks alike (GoldRush's FxStayThereStart lives
-        // in the scenario script, C4Effect.cpp:31-40).
-        let resolvable = script.has_function(function)
-            || (include_globals && script.has_global_function(function))
+        // Recursive/effect calls may fall through to Game.ScriptEngine;
+        // C4Object::Call/GetSFunc requires an ordinary function owned by
+        // the exact object script. A `global func` leaves only an unnamed
+        // link in that host and is not an owner-local candidate.
+        let resolvable = (if include_globals {
+            script.has_function_or_global(function)
+        } else {
+            script.has_local_function(function)
+        })
             || (host_fallback && script.has_host_function(function));
         if !resolvable {
             return None;
@@ -42544,6 +43177,7 @@ impl EffectHostContext {
             state.effects.clone(),
             metadata.action_library.clone(),
             state.action.name.clone(),
+            state.action.act_map_index,
             state.action.time,
             state.action.data,
             state.action.phase,
@@ -42667,6 +43301,12 @@ impl EffectHostContext {
         self.nested_objects
             .get_mut(&target)
             .map(|state| &mut state.scope)
+    }
+
+    /// A C4Object pointer is callable while its scope is in-flight even when
+    /// the object has not yet entered the copied world/master list.
+    fn has_callable_object(&self, target: ObjectId) -> bool {
+        self.object_scope(target).is_some() || self.get_world_object(target).is_some()
     }
 
     /// Stage one C4Object::DoCon call, including its percent-step component
@@ -43639,20 +44279,25 @@ impl EffectHostContext {
     fn set_global_call_context(&mut self, enter: bool) {
         if enter {
             self.dormant_scopes.push(self.object.take());
+            let script_definition =
+                self.script_definition_context.replace(None);
             self.global_call_contexts.push((
                 self.script_object_context.take(),
                 self.definition_context.take(),
+                script_definition,
             ));
             return;
         }
 
-        let Some((script_object, definition)) = self.global_call_contexts.pop() else {
+        let Some((script_object, definition, script_definition)) = self.global_call_contexts.pop()
+        else {
             debug_assert!(false, "unbalanced global-call context exit");
             return;
         };
         self.object = self.dormant_scopes.pop().unwrap_or(None);
         self.script_object_context = script_object;
         self.definition_context = definition;
+        self.script_definition_context = script_definition;
     }
 
     fn current_definition_id(&self) -> Option<DefinitionId> {
@@ -43685,6 +44330,22 @@ impl EffectHostContext {
                     })
                 })
             })
+    }
+
+    /// Exact `cthr->Def` for natives whose fallback is the executing script
+    /// host rather than the object's potentially changed live definition.
+    fn executing_definition_id(&self) -> Option<Option<DefinitionId>> {
+        match &self.script_definition_context {
+            Some(definition) => Some(definition.clone()),
+            None => {
+                if let Some((_, definition, _)) = lc_script::caller_host_identity()
+                    .and_then(|identity| self.world.script_for_host_identity(identity))
+                {
+                    return Some(definition);
+                }
+                self.definition_context.clone().map(Some)
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -44243,13 +44904,14 @@ struct ObjectScopeContext {
     assign_death: Option<bool>,
     action_library: ActionLibrary,
     current_action_name: String,
+    current_action_index: Option<u32>,
     current_action_blocks_other_actions: bool,
     current_action_target: Option<ObjectId>,
     current_action_target2: Option<ObjectId>,
     current_action_data: i32,
     /// Legacy-named storage for C4Action::Time, distinct from PhaseDelay
     /// (`ActionUpdate::ticks`).
-    current_action_ticks: u32,
+    current_action_ticks: i32,
     current_action_phase: i32,
     current_energy: i32,
     /// C4Object::Breath on the raw physical scale.
@@ -44350,7 +45012,8 @@ impl ObjectScopeContext {
         effects: Vec<EffectState>,
         action_library: ActionLibrary,
         action_name: String,
-        action_ticks: u32,
+        action_index: Option<u32>,
+        action_ticks: i32,
         action_data: i32,
         action_phase: i32,
         direction: Direction,
@@ -44370,7 +45033,8 @@ impl ObjectScopeContext {
         physical_changes: Vec<(String, i32)>,
         definition_physical: PhysicalInfo,
     ) -> Self {
-        let blocks_other_actions = action_library.blocks_other_actions(&action_name);
+        let blocks_other_actions =
+            action_library.blocks_other_actions_for_entry(&action_name, action_index);
         let clamped_damage = damage.max(0);
         let clamped_construction = construction.max(0);
         Self {
@@ -44393,6 +45057,7 @@ impl ObjectScopeContext {
             assign_death: None,
             action_library,
             current_action_name: action_name,
+            current_action_index: action_index,
             current_action_blocks_other_actions: blocks_other_actions,
             current_action_target: action_target,
             current_action_target2: action_target2,
@@ -44461,7 +45126,10 @@ impl ObjectScopeContext {
         self.action_library = metadata.action_library.clone();
         self.current_action_blocks_other_actions = self
             .action_library
-            .blocks_other_actions(&self.current_action_name);
+            .blocks_other_actions_for_entry(
+                &self.current_action_name,
+                self.current_action_index,
+            );
         self.definition_physical = metadata.physical;
         self.ocf_base = metadata.ocf_base;
         self.crew_member = metadata.crew_member;
@@ -45119,7 +45787,10 @@ impl ObjectScopeContext {
         // the two action-gated bits from same-call GetOCF/world reads.
         if self
             .action_library
-            .disables_object(self.effective_action_name())
+            .disables_object_for_entry(
+                self.effective_action_name(),
+                self.effective_action_index(),
+            )
         {
             mask &= !(ocf::COLLECTION | ocf::FIGHT_READY);
         }
@@ -45169,7 +45840,10 @@ impl ObjectScopeContext {
         }
         if self
             .action_library
-            .disables_object(self.effective_action_name())
+            .disables_object_for_entry(
+                self.effective_action_name(),
+                self.effective_action_index(),
+            )
         {
             mask &= !(ocf::COLLECTION | ocf::FIGHT_READY);
         }
@@ -45244,11 +45918,20 @@ impl ObjectScopeContext {
 
     fn update_effective_action(&mut self, action: &str) -> bool {
         let previous_name = self.current_action_name.clone();
-        let previous_procedure = self.action_library.procedure_for_action(&previous_name);
+        let previous_index = self.current_action_index;
+        let previous_procedure = self
+            .action_library
+            .procedure_for_entry(&previous_name, previous_index);
         self.current_action_name = action.to_string();
-        self.current_action_blocks_other_actions = self.action_library.blocks_other_actions(action);
-        let next_procedure = self.action_library.procedure_for_action(action);
-        previous_name != action && previous_procedure != next_procedure
+        self.current_action_index = self.action_library.named_action_index(action);
+        self.current_action_blocks_other_actions = self
+            .action_library
+            .blocks_other_actions_for_entry(action, self.current_action_index);
+        let next_procedure = self
+            .action_library
+            .procedure_for_entry(action, self.current_action_index);
+        (previous_name != action || previous_index != self.current_action_index)
+            && previous_procedure != next_procedure
     }
 
     fn effective_action_name(&self) -> &str {
@@ -45260,15 +45943,31 @@ impl ObjectScopeContext {
         &self.current_action_name
     }
 
+    fn effective_action_index(&self) -> Option<u32> {
+        if let Some(name) = self
+            .pending_update
+            .action
+            .as_ref()
+            .and_then(|update| update.name.as_deref())
+        {
+            return self.action_library.named_action_index(name);
+        }
+        self.current_action_index
+    }
+
     fn effective_procedure_name(&self) -> Option<&str> {
         let action = self.effective_action_name();
-        self.action_library.procedure_name_for_action(action)
+        self.action_library
+            .procedure_name_for_entry(action, self.effective_action_index())
     }
 
     fn effective_blocks_other_actions(&self) -> bool {
         if let Some(update) = self.pending_update.action.as_ref() {
             if let Some(name) = update.name.as_ref() {
-                return self.action_library.blocks_other_actions(name);
+                return self.action_library.blocks_other_actions_for_entry(
+                    name,
+                    self.action_library.named_action_index(name),
+                );
             }
         }
         self.current_action_blocks_other_actions
@@ -45298,18 +45997,16 @@ impl ObjectScopeContext {
         }
     }
 
-    fn effective_action_ticks(&self) -> u32 {
-        if let Some(update) = self.pending_update.action.as_ref() {
-            if let Some(ticks) = update.ticks {
-                return ticks;
-            }
-        }
+    fn effective_action_ticks(&self) -> i32 {
+        // Legacy name: this is C4Action::Time. ActionUpdate::ticks is the
+        // distinct C4Action::PhaseDelay and must not shadow GetActTime.
         self.current_action_ticks
     }
 
     fn effective_action_procedure(&self) -> ActionProcedure {
         let action = self.effective_action_name();
-        self.action_library.procedure_for_action(action)
+        self.action_library
+            .procedure_for_entry(action, self.effective_action_index())
     }
 
     #[allow(dead_code)]
@@ -45382,12 +46079,16 @@ impl ObjectScopeContext {
     }
 
     fn reset_action_ticks(&mut self) {
+        self.reset_action_phase_delay();
+        self.current_action_ticks = 0;
+    }
+
+    fn reset_action_phase_delay(&mut self) {
         let update = self
             .pending_update
             .action
             .get_or_insert_with(ActionUpdate::default);
         update.set_ticks(0);
-        self.current_action_ticks = 0;
     }
 
     fn energy(&self) -> i32 {
@@ -48420,6 +49121,17 @@ global func PreInitializePlayer(int player)
     where
         F: FnOnce() -> Result<T, RuntimeError>,
     {
+        with_object_host_context_actions_and_ticks(actions, 0, func)
+    }
+
+    fn with_object_host_context_actions_and_ticks<F, T>(
+        actions: &[&str],
+        action_ticks: i32,
+        func: F,
+    ) -> (Result<T, RuntimeError>, EffectContextOutcome)
+    where
+        F: FnOnce() -> Result<T, RuntimeError>,
+    {
         let specs = actions
             .iter()
             .map(|name| ((*name).to_string(), ActionSpec::default()))
@@ -48435,7 +49147,7 @@ global func PreInitializePlayer(int player)
                 Vector2::ZERO,
                 &[],
                 "Idle",
-                0,
+                action_ticks,
                 0,
                 ActionLibrary::new(None, specs),
                 Direction::Left,
@@ -48716,6 +49428,212 @@ global func PreInitializePlayer(int player)
             error.message().contains("expected object"),
             "unexpected error: {}",
             error.message()
+        );
+    }
+
+    #[test]
+    fn get_act_map_val_reflects_the_complete_cpp_entry_table_and_indexes() {
+        assert!(get_act_map_val(&[
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::String("bad index".to_string()),
+        ])
+        .expect_err("native entry_nr conversion precedes body lookup")
+        .message()
+        .contains("expected int"));
+        let mut action = lc_resources::ActionDefinition::default();
+        action.procedure = Some("ODD".to_string());
+        action.directions = Some(12);
+        action.flip_dir = Some(13);
+        action.length = Some(14);
+        action.attach = 15;
+        action.delay = Some(16);
+        action.facet = Some(lc_resources::definition::ActionFacet {
+            x: 1,
+            y: 2,
+            width: 20,
+            height: 30,
+            target_x: 4,
+            target_y: 5,
+        });
+        action.facet_base = true;
+        action.facet_top_face = true;
+        action.facet_target_stretch = true;
+        action.next_action = Some("Missing".to_string());
+        action.no_other_action = true;
+        action.end_call = Some("End".to_string());
+        action.abort_call = Some("Abort".to_string());
+        action.phase_call = Some("Phase".to_string());
+        action.sound = Some("TravelSound".to_string());
+        action.disabled = true;
+        action.dig_free = Some(9);
+        action.energy_usage = -10;
+        action.in_liquid_action = Some("Swim".to_string());
+        action.turn_action = Some("Turn".to_string());
+        action.reverse = true;
+        action.step = Some(11);
+        action.reflected_ints = HashMap::from([
+            ("Directions".to_string(), -2),
+            ("FlipDir".to_string(), -3),
+            ("Length".to_string(), -4),
+            ("Attach".to_string(), -5),
+            ("Delay".to_string(), -6),
+            ("FacetBase".to_string(), 2),
+            ("FacetTopFace".to_string(), -7),
+            ("FacetTargetStretch".to_string(), 3),
+            ("NoOtherAction".to_string(), 2),
+            ("ObjectDisabled".to_string(), -8),
+            ("DigFree".to_string(), -9),
+            ("EnergyUsage".to_string(), -10),
+            ("Reverse".to_string(), 2),
+            ("Step".to_string(), -11),
+        ]);
+
+        let default_action = lc_resources::ActionDefinition::default();
+        let mut action_library = ActionLibrary::new(
+            None,
+            HashMap::from([
+                ("Laser".to_string(), ActionSpec::default()),
+                ("Defaults".to_string(), ActionSpec::default()),
+                (String::new(), ActionSpec::default()),
+            ]),
+        );
+        action_library.set_reflections(HashMap::from([
+            (
+                "Laser".to_string(),
+                crate::action::C4ActionReflection::from_resource("Laser", &action),
+            ),
+            (
+                "Defaults".to_string(),
+                crate::action::C4ActionReflection::from_resource("Defaults", &default_action),
+            ),
+            (
+                String::new(),
+                crate::action::C4ActionReflection::from_resource("", &default_action),
+            ),
+        ]));
+        let metadata = DefinitionMetadata {
+            action_library,
+            ..DefinitionMetadata::default()
+        };
+        let world = HostWorldContext::default().with_definition_metadata(Rc::new(HashMap::from([
+            (DefinitionId::from("TST1"), metadata),
+            (DefinitionId::from("EMP1"), DefinitionMetadata::default()),
+        ])));
+        let (result, _) = with_definition_effect_context_with_state(
+            DefinitionId::from("TST1"),
+            &[],
+            world,
+            1,
+            false,
+            || {
+                let query = |entry: &str, action: &str, id: Value, index: i32| {
+                    get_act_map_val(&[
+                        Value::String(entry.to_string()),
+                        Value::String(action.to_string()),
+                        id,
+                        Value::Int(index),
+                    ])
+                };
+                Ok::<Value, RuntimeError>(Value::Array(vec![
+                    query("Name", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("Procedure", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("Directions", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("FlipDir", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("Length", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("Attach", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("Delay", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("Facet", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("Facet", "Laser", Value::C4Id("TST1".into()), 1)?,
+                    query("Facet", "Laser", Value::C4Id("TST1".into()), 2)?,
+                    query("Facet", "Laser", Value::C4Id("TST1".into()), 3)?,
+                    query("Facet", "Laser", Value::C4Id("TST1".into()), 4)?,
+                    query("Facet", "Laser", Value::C4Id("TST1".into()), 5)?,
+                    query("FacetBase", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("FacetTopFace", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("FacetTargetStretch", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("NextAction", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("NoOtherAction", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("StartCall", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("EndCall", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("AbortCall", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("PhaseCall", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("Sound", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("ObjectDisabled", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("DigFree", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("EnergyUsage", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("InLiquidAction", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("TurnAction", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("Reverse", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("Step", "Laser", Value::C4Id("TST1".into()), 0)?,
+                    query("Sound", "Defaults", Value::Nil, 0)?,
+                    query("Directions", "Defaults", Value::Nil, 0)?,
+                    query("Facet", "Defaults", Value::Nil, 5)?,
+                    query("Facet", "Laser", Value::Nil, 6)?,
+                    query("Length", "Laser", Value::Nil, 1)?,
+                    query("Length", "Laser", Value::Nil, -1)?,
+                    query("Disabled", "Laser", Value::Nil, 0)?,
+                    query("Length", "laser", Value::Nil, 0)?,
+                    query("Length", "Idle", Value::Nil, 0)?,
+                    query("Length", "Idle", Value::C4Id("EMP1".into()), 0)?,
+                    get_act_map_val(&[
+                        Value::String("Length".to_string()),
+                        Value::Nil,
+                        Value::C4Id("TST1".into()),
+                        Value::Int(0),
+                    ])?,
+                    query("Length", "Laser", Value::C4Id("MISS".into()), 0)?,
+                ]))
+            },
+        );
+
+        assert_eq!(
+            result.expect("complete GetActMapVal probes succeed"),
+            Value::Array(vec![
+                Value::String("Laser".into()),
+                Value::String("ODD".into()),
+                Value::Int(-2),
+                Value::Int(-3),
+                Value::Int(-4),
+                Value::Int(-5),
+                Value::Int(-6),
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(20),
+                Value::Int(30),
+                Value::Int(4),
+                Value::Int(5),
+                Value::Int(2),
+                Value::Int(-7),
+                Value::Int(3),
+                Value::String("Missing".into()),
+                Value::Int(2),
+                Value::String(String::new()),
+                Value::String("End".into()),
+                Value::String("Abort".into()),
+                Value::String("Phase".into()),
+                Value::String("TravelSound".into()),
+                Value::Int(-8),
+                Value::Int(-9),
+                Value::Int(-10),
+                Value::String("Swim".into()),
+                Value::String("Turn".into()),
+                Value::Int(2),
+                Value::Int(-11),
+                Value::String(String::new()),
+                Value::Int(1),
+                Value::Int(0),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Int(1),
+                Value::Nil,
+            ])
         );
     }
 
@@ -61533,9 +62451,8 @@ func Probe(state) {
             HostWorldContext::default(),
             1,
             || {
-                // Re-setting the SAME action keeps the running ticks (only
-                // an action CHANGE resets them); C++ SetAction has no
-                // ticks parameter (C4Script.cpp:747-753).
+                // Re-setting the SAME action keeps Action.Time but always
+                // clears the distinct PhaseDelay (C4Object.cpp:4138-4146).
                 set_action(&[Value::String("Idle".into())])?;
                 get_act_time(&[])
             },
@@ -61545,10 +62462,7 @@ func Probe(state) {
         assert_eq!(value, Value::Int(7));
         let update = outcome.object_update.expect("action update recorded");
         let action = update.action.expect("action update exists");
-        assert_eq!(
-            action.ticks, None,
-            "no ticks write: the running value stands"
-        );
+        assert_eq!(action.ticks, Some(0), "PhaseDelay resets independently");
     }
 
     #[test]
@@ -63147,6 +64061,68 @@ func Probe(state) {
         let update = outcome.object_update.expect("phase update recorded");
         let action = update.action.expect("action update present");
         assert_eq!(action.phase, Some(5), "9 clamps to Length (5), inclusive");
+    }
+
+    #[test]
+    fn set_phase_preserves_cpp_bound_by_order_for_negative_length() {
+        let library = ActionLibrary::new(
+            Some("Odd".to_string()),
+            HashMap::from([(
+                "Odd".to_string(),
+                crate::action::ActionSpec::default().with_length(-3),
+            )]),
+        );
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                None,
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Odd",
+                0,
+                0,
+                library,
+                Direction::Left,
+                CommandDirection::Stop,
+                0,
+                None,
+                None,
+                &[],
+                crate::FULL_CON,
+            )),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || {
+                Ok::<Value, RuntimeError>(Value::Array(vec![
+                    set_phase(&[Value::Int(-4)])?,
+                    get_phase(&[])?,
+                    set_phase(&[Value::Int(9)])?,
+                    get_phase(&[])?,
+                ]))
+            },
+        );
+
+        assert_eq!(
+            result.expect("SetPhase runs"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(0),
+                Value::Bool(true),
+                Value::Int(-3),
+            ])
+        );
+        assert_eq!(
+            outcome
+                .object_update
+                .and_then(|update| update.action)
+                .and_then(|action| action.phase),
+            Some(-3)
+        );
     }
 
     #[test]
@@ -65930,6 +66906,51 @@ public func Probe(object carrier)
         assert_eq!(action.target2, None, "nil target2 must not stage a clear");
     }
 
+    #[test]
+    fn set_action_idle_sentinel_ignores_supplied_targets_like_cpp() {
+        let target1 = Value::Object(2);
+        let target2 = Value::Object(3);
+        for name in ["Idle", "ActIdle"] {
+            let args = vec![
+                Value::String(name.into()),
+                target1.clone(),
+                target2.clone(),
+            ];
+            let (result, outcome) =
+                with_object_host_context_actions(&["Idle", "ActIdle"], || set_action(&args));
+            assert_eq!(result.expect("SetAction returns bool"), Value::Bool(true));
+            let action = outcome
+                .object_update
+                .expect("action update recorded")
+                .action
+                .expect("action delta present");
+            assert_eq!(action.name.as_deref(), Some("Idle"));
+            assert_eq!(action.target, None, "{name} must ignore target1");
+            assert_eq!(action.target2, None, "{name} must ignore target2");
+        }
+    }
+
+    #[test]
+    fn same_slot_set_action_always_clears_phase_delay_like_cpp() {
+        let args = [Value::String("Idle".into())];
+        let (result, outcome) = with_object_host_context_actions_and_ticks(&[], 6, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![set_action(&args)?, get_act_time(&[])?]))
+        });
+        assert_eq!(
+            result.expect("SetAction returns bool"),
+            Value::Array(vec![Value::Bool(true), Value::Int(6)]),
+            "same-slot SetAction preserves Action.Time"
+        );
+        let action = outcome
+            .object_update
+            .expect("action update recorded")
+            .action
+            .expect("action delta present");
+        assert_eq!(action.name.as_deref(), Some("Idle"));
+        assert_eq!(action.phase, None, "already-zero phase needs no write");
+        assert_eq!(action.ticks, Some(0), "PhaseDelay resets unconditionally");
+    }
+
     #[allow(clippy::arc_with_non_send_sync)]
     fn call_fight_with_fixture(
         caller_ready: bool,
@@ -68110,6 +69131,9 @@ protected func Initialize() { order = order * 10 + 3; }
         }
         let mut product = crate::Definition::from_script("PROD", "Product", product_script)
             .expect("product script compiles");
+        // Construction runs while Con=0. C4Object::SetAction only keeps a
+        // non-idle action there when the definition enables IncompleteActivity.
+        product.set_incomplete_activity(true);
         product.configure_actions(
             None,
             HashMap::from([(

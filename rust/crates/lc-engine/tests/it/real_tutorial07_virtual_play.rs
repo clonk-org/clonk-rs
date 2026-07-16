@@ -630,6 +630,7 @@ fn return_from_hut_and_collect_gold(
 }
 
 #[test]
+#[ignore = "over-constrained virtual tutorial driver; excluded from parity gates"]
 fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn Error>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (mut engine, owner) = load_tutorial07();

@@ -4,6 +4,65 @@ use lc_resources::Group;
 use lc_script::Value;
 
 #[test]
+fn construction_effect_command_target_callbacks_keep_the_inflight_object_as_this() {
+    // C4Effect stores the command-target pointer and executes both local and
+    // recursively resolved global callbacks with that pointer as `this`,
+    // even while Construction is running before normal object-list insertion
+    // (src/C4Effect.cpp:42-56,439-456).
+    let script = r#"#strict 2
+local local_started, global_started;
+
+func Construction()
+{
+  AddEffect("BirthLocal", this(), 100, 0, this());
+  AddEffect("BirthGlobal", this(), 100, 0, this());
+}
+
+func FxBirthLocalStart(object target, int number, int temp)
+{
+  if (this() != target) return -1;
+  if (temp) return 0;
+  local_started = 1;
+  SetR(11);
+  return 0;
+}
+
+global func FxBirthGlobalStart(object target, int number, int temp)
+{
+  if (this() != target || GetR() != 11) return -1;
+  global_started = 1;
+  SetR(37);
+  return 0;
+}
+"#;
+
+    let mut engine = Engine::new();
+    engine
+        .register_definition(
+            Definition::from_script("BORN", "Construction effect target", script)
+                .expect("construction effect script compiles"),
+        )
+        .expect("construction effect definition registers");
+
+    let object = engine
+        .spawn_object(SpawnConfig::new("BORN"))
+        .expect("construction effect object spawns");
+    let snapshot = engine
+        .object_snapshot(object)
+        .expect("construction effect object remains");
+
+    assert_eq!(snapshot.rotation, 37);
+    assert_eq!(snapshot.local_vars.get("local_started"), Some(&Value::Int(1)));
+    assert_eq!(snapshot.local_vars.get("global_started"), Some(&Value::Int(1)));
+    assert_eq!(snapshot.effects.len(), 2);
+    assert!(snapshot.effects.iter().all(|effect| {
+        effect.priority == 100
+            && effect.command_target == Some(object.as_u64() as i32)
+            && effect.command_id.as_deref() == Some("BORN")
+    }));
+}
+
+#[test]
 fn live_object_add_effect_checks_once_with_cpp_arguments() {
     // C4Effect::New inserts the pending effect and synchronously asks each
     // same/higher-priority checker through Fx<Name>Effect with

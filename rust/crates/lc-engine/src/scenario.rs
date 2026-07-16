@@ -29,6 +29,7 @@ use crate::{
     RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, TeamInfo, Vector2, action::ActionSpec,
     LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC,
 };
+use crate::action::is_builtin_idle_name;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScenarioError {
@@ -177,7 +178,9 @@ pub struct SkyConfig {
 struct DefinitionActions {
     default_action: Option<String>,
     specs: HashMap<String, ActionSpec>,
+    physical: Vec<(String, ActionSpec)>,
     graphics: HashMap<String, DefinitionActionGraphics>,
+    reflections: HashMap<String, crate::action::C4ActionReflection>,
 }
 
 #[derive(Debug, Clone)]
@@ -2719,6 +2722,8 @@ impl Scenario {
             }
             if let Some(actions) = &definition.actions {
                 compiled.configure_actions(actions.default_action.clone(), actions.specs.clone());
+                compiled.configure_physical_actions(actions.physical.clone());
+                compiled.configure_action_reflections(actions.reflections.clone());
                 compiled.configure_action_graphics(actions.graphics.clone());
             }
             // Resource-backed definitions already installed the literal
@@ -3069,7 +3074,9 @@ impl Scenario {
                 Some(DefinitionActions {
                     default_action,
                     specs: actions,
+                    physical: Vec::new(),
                     graphics: HashMap::new(),
+                    reflections: HashMap::new(),
                 })
             };
 
@@ -9455,12 +9462,12 @@ struct LegacyObjectRecord {
     action_name: Option<String>,
     action_phase: Option<i32>,
     /// Action.Time (`ActionTime=`, C4Object.cpp:2745 area).
-    action_ticks: Option<u32>,
+    action_ticks: Option<i32>,
     /// Action.PhaseDelay (`PhaseDelay=`), the intra-phase counter.
-    action_phase_delay: Option<u32>,
+    action_phase_delay: Option<i32>,
     action_data: Option<i32>,
-    action_target: Option<u64>,
-    action_target2: Option<u64>,
+    action_target: Option<i32>,
+    action_target2: Option<i32>,
     /// C4Object::pLayer (`Layer=`, C4Object.cpp:2819).
     layer: Option<u64>,
     /// C4Object::Visibility (`Visibility=`, C4Object.cpp:2814).
@@ -9805,13 +9812,7 @@ impl LegacyObjectRecord {
                         self.line, trimmed_value, err
                     ))
                 })?;
-                if ticks < 0 {
-                    return Err(ScenarioError::LegacyObjectsParse(format!(
-                        "Objects.txt line {}: ActionTime must be >= 0 (got {})",
-                        self.line, ticks
-                    )));
-                }
-                self.action_ticks = Some(ticks as u32);
+                self.action_ticks = Some(ticks);
             }
             "phasedelay" => {
                 let value = parse_i32(trimmed_value).map_err(|err| {
@@ -9820,7 +9821,7 @@ impl LegacyObjectRecord {
                         self.line, trimmed_value, err
                     ))
                 })?;
-                self.action_phase_delay = Some(value.max(0) as u32);
+                self.action_phase_delay = Some(value);
             }
             "actiondata" => {
                 self.action_data = Some(parse_i32(trimmed_value).map_err(|err| {
@@ -9839,7 +9840,7 @@ impl LegacyObjectRecord {
                 })?);
             }
             "actiontarget1" => {
-                self.action_target = Some(parse_u64(trimmed_value).map_err(|err| {
+                self.action_target = Some(parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
                         "Objects.txt line {}: invalid ActionTarget1 `{}` ({})",
                         self.line, trimmed_value, err
@@ -9847,7 +9848,7 @@ impl LegacyObjectRecord {
                 })?);
             }
             "actiontarget2" => {
-                self.action_target2 = Some(parse_u64(trimmed_value).map_err(|err| {
+                self.action_target2 = Some(parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
                         "Objects.txt line {}: invalid ActionTarget2 `{}` ({})",
                         self.line, trimmed_value, err
@@ -10242,13 +10243,45 @@ impl LegacyObjectRecord {
 fn build_action_state(
     name: Option<String>,
     phase: Option<i32>,
-    time: Option<u32>,
-    phase_delay: Option<u32>,
+    time: Option<i32>,
+    phase_delay: Option<i32>,
     data: Option<i32>,
-    target: Option<u64>,
-    target2: Option<u64>,
+    target: Option<i32>,
+    target2: Option<i32>,
 ) -> Option<ActionState> {
-    let name = name?;
+    if name.is_none()
+        && phase.is_none()
+        && time.is_none()
+        && phase_delay.is_none()
+        && data.is_none()
+        && target.is_none()
+        && target2.is_none()
+    {
+        return None;
+    }
+    // C4Action::CompileFunc compiles every field independently. A save may
+    // carry ActionTarget1/2 without an explicit Action name; its zeroed
+    // fixed-size Name buffer is an empty string. SetActionByName("") then
+    // fails, preserving the saved fixed coordinates, while the pointers
+    // still proceed through DenumeratePointers.
+    // `C4Action::Name` is a `C4MaxName + 1` fixed buffer compiled through
+    // `toC4CStr` (C4Action.cpp:45-54). Both lookup and a failed lookup's
+    // observable raw name therefore see at most 30 native bytes, not 30
+    // Unicode scalar values. Round-trip through the C4 byte projection so
+    // legacy high bytes are neither split nor counted as UTF-8 characters.
+    let name = name.unwrap_or_default();
+    let name_bytes = lc_script::c4_string_bytes(&name);
+    let visible_len = name_bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(name_bytes.len())
+        .min(30);
+    let name = lc_script::c4_string_from_bytes(&name_bytes[..visible_len]);
+    let name = if is_builtin_idle_name(&name) {
+        "Idle".to_string()
+    } else {
+        name
+    };
     let mut state = ActionState::new(name);
     if let Some(value) = phase {
         state.phase = value;
@@ -10264,10 +10297,10 @@ fn build_action_state(
     if let Some(value) = data {
         state.data = value;
     }
-    if let Some(target) = target {
+    if let Some(target) = target.and_then(|target| u64::try_from(target).ok()) {
         state.target = Some(ObjectId::new(target));
     }
-    if let Some(target2) = target2 {
+    if let Some(target2) = target2.and_then(|target| u64::try_from(target).ok()) {
         state.target2 = Some(ObjectId::new(target2));
     }
     Some(state)
@@ -11141,18 +11174,36 @@ fn scenario_definition_from_resource(
 
 fn convert_action_map(map: &ResourceActionMap) -> DefinitionActions {
     let mut specs = HashMap::new();
+    let mut physical = Vec::with_capacity(map.actions.len());
     let mut graphics = HashMap::new();
-    for (name, definition) in &map.actions {
+    graphics.insert(
+        crate::PHYSICAL_ACTION_GRAPHICS_MARKER.to_string(),
+        DefinitionActionGraphics::default(),
+    );
+    let mut reflections = HashMap::new();
+    for (index, (name, definition)) in map.actions.iter().enumerate() {
         let (spec, visuals) = convert_action_definition(definition);
-        // Duplicate action names: the FIRST entry wins, matching the forward
-        // scan in C++ SetActionByName.
+        physical.push((name.clone(), spec.clone()));
+        // SetActionByName and FnGetActMapVal both scan the physical ActMap
+        // forward, so the first duplicate name wins.
         specs.entry(name.clone()).or_insert(spec);
-        graphics.entry(name.clone()).or_insert(visuals);
+        graphics
+            .entry(name.clone())
+            .or_insert_with(|| visuals.clone());
+        graphics.insert(
+            crate::physical_action_graphics_key(index.min(u32::MAX as usize) as u32),
+            visuals,
+        );
+        reflections
+            .entry(name.clone())
+            .or_insert_with(|| crate::action::C4ActionReflection::from_resource(name, definition));
     }
     DefinitionActions {
         default_action: map.default_action.clone(),
         specs,
+        physical,
         graphics,
+        reflections,
     }
 }
 
@@ -11166,8 +11217,13 @@ fn convert_action_definition(
     if let Some(next) = &action.next_action {
         spec = spec.with_next(next.clone());
     }
-    if let Some(procedure) = &action.procedure {
-        spec = spec.with_procedure(procedure.clone());
+    spec = spec.with_next_index(action.next_action_index);
+    if let Some(procedure) = action.procedure.as_deref().and_then(|procedure| {
+        lc_resources::definition::PROCEDURE_NAMES
+            .iter()
+            .find(|candidate| **candidate == procedure)
+    }) {
+        spec = spec.with_procedure(*procedure);
     }
     if let Some(delay) = action.delay {
         spec = spec.with_delay(delay);
@@ -11189,6 +11245,9 @@ fn convert_action_definition(
     }
     if action.no_other_action {
         spec = spec.with_no_other_action(true);
+    }
+    if action.disabled {
+        spec = spec.with_disabled(true);
     }
     if action.energy_usage != 0 {
         spec = spec.with_energy_usage(action.energy_usage);
@@ -11213,7 +11272,7 @@ fn convert_action_definition(
     }
     let mut graphics = DefinitionActionGraphics::default();
     graphics.length = action.length;
-    graphics.directions = action.directions.unwrap_or(1).max(1);
+    graphics.directions = action.directions.unwrap_or(1);
     graphics.flip_dir = action.flip_dir;
     graphics.reverse = action.reverse;
     graphics.facet_base = action.facet_base;
@@ -11599,7 +11658,7 @@ struct ActionManifest {
     #[serde(default)]
     phase: Option<i32>,
     #[serde(default)]
-    ticks: Option<u32>,
+    ticks: Option<i32>,
     #[serde(default)]
     data: Option<i32>,
 }
@@ -12044,6 +12103,104 @@ global func Step(state, frame, random)
     return nil;
 }
 "#;
+
+    #[test]
+    fn loaded_actidle_name_uses_the_builtin_sentinel() {
+        let state = build_action_state(
+            Some("ActIdle".to_string()),
+            Some(4),
+            Some(5),
+            Some(6),
+            None,
+            None,
+            None,
+        )
+        .expect("saved action builds");
+        assert_eq!(state.name, "Idle");
+        assert_eq!(state.act_map_index, None);
+    }
+
+    #[test]
+    fn loaded_action_name_buffer_stops_at_nul_before_lookup() {
+        let state = build_action_state(
+            Some("Walk\0ignored".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("saved action builds");
+
+        assert_eq!(state.name, "Walk");
+        assert_eq!(lc_script::c4_string_bytes(state.compiled_name()), b"Walk");
+    }
+
+    #[test]
+    fn legacy_scenario_action_conversion_keeps_exact_first_reflection() {
+        let mut first = ResourceActionDefinition::default();
+        first.length = Some(7);
+        first.sound = Some("Zap".to_string());
+        first.disabled = true;
+        first.reflected_ints.insert("ObjectDisabled".to_string(), 7);
+        first.reflected_ints.insert("Length".to_string(), -3);
+        let mut duplicate = ResourceActionDefinition::default();
+        duplicate.length = Some(99);
+        let converted = convert_action_map(&ResourceActionMap {
+            default_action: None,
+            actions: vec![
+                ("Probe".to_string(), first),
+                ("Probe".to_string(), duplicate),
+            ],
+        });
+        let spec = converted.specs.get("Probe").expect("runtime action retained");
+        assert_eq!(
+            spec.length,
+            Some(7),
+            "runtime action selection keeps the first physical slot"
+        );
+        let reflection = converted
+            .reflections
+            .get("Probe")
+            .expect("exact compiler view retained");
+        assert_eq!(reflection.get("Length", 0), Some(lc_script::Value::Int(-3)));
+        assert_eq!(
+            reflection.get("Sound", 0),
+            Some(lc_script::Value::String("Zap".into()))
+        );
+        assert_eq!(
+            reflection.get("ObjectDisabled", 0),
+            Some(lc_script::Value::Int(7))
+        );
+    }
+
+    #[test]
+    fn legacy_scenario_action_conversion_retains_signed_runtime_fields() {
+        let mut action = ResourceActionDefinition::default();
+        action.length = Some(-4);
+        action.delay = Some(-6);
+        action.step = Some(-11);
+        action.directions = Some(-2);
+        action.flip_dir = Some(-3);
+        let converted = convert_action_map(&ResourceActionMap {
+            default_action: None,
+            actions: vec![("Odd".to_string(), action)],
+        });
+
+        let spec = converted.specs.get("Odd").expect("runtime action retained");
+        assert_eq!(spec.length, Some(-4));
+        assert_eq!(spec.delay, Some(-6));
+        assert_eq!(spec.step, Some(-11));
+        assert_eq!(spec.directions, Some(-2));
+        let graphics = converted
+            .graphics
+            .get("Odd")
+            .expect("runtime action graphics retained");
+        assert_eq!(graphics.length, Some(-4));
+        assert_eq!(graphics.directions, -2);
+        assert_eq!(graphics.flip_dir, Some(-3));
+    }
 
     #[test]
     fn legacy_objects_size_preserves_oversize_construction() {
@@ -20541,11 +20698,11 @@ public func ActualizePhase(pClonk)
         assert_eq!(gem_snapshot.direction, Direction::Right);
         assert_eq!(gem_snapshot.command_direction, CommandDirection::Right);
         assert_eq!(gem_snapshot.action.name, "Idle");
-        // ActIdle carries no phase or time: SetActionByName("Idle") clears
-        // the action at load (C4Object.cpp:4214-4215, 2840-2849) — the
-        // saved ActionTime=6/Phase=2 do NOT survive on an idle object.
+        // Load enters ActIdle, then restores saved Time/Phase/PhaseDelay for
+        // any successful SetActionByName call (C4Object.cpp:2862-2876).
         assert_eq!(gem_snapshot.action.ticks, 0);
-        assert_eq!(gem_snapshot.action.phase, 0);
+        assert_eq!(gem_snapshot.action.phase, 2);
+        assert_eq!(gem_snapshot.action.time, 6);
         assert_eq!(gem_snapshot.action.data, 5);
         assert_eq!(gem_snapshot.action.target, Some(ObjectId::new(100)));
     }
@@ -22795,7 +22952,294 @@ mod game_start_sync {
             crate::action::DEFAULT_ACTION_NAME,
             "unresolvable saved action (CCAN Stand) falls to Idle, not a def default"
         );
-        assert_eq!(phase, 0, "Idle carries no phase");
+        assert_eq!(
+            phase, 2,
+            "failed saved-action lookup leaves the compiled phase untouched"
+        );
+    }
+
+    #[test]
+    fn loaded_actions_restore_signed_counters_and_cpp_data_rules() {
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        let loaded = defs.join("Loaded.c4d");
+        std::fs::create_dir_all(&loaded).expect("definition dir");
+        std::fs::write(
+            loaded.join("DefCore.txt"),
+            "[DefCore]\nid=LOAD\nName=Loaded\nCategory=16\n",
+        )
+        .expect("defcore");
+        std::fs::write(
+            loaded.join("ActMap.txt"),
+            "[Action]\nName=Passive\nDelay=0\nLength=1\n\n\
+             [Action]\nName=Attached\nProcedure=ATTACH\nDelay=0\nLength=1\n",
+        )
+        .expect("actmap");
+        std::fs::write(
+            loaded.join("Script.c"),
+            "#strict\npublic func ReadLoadedAction() { return [GetAction(), GetObjectVal(\"Action\"), GetActTime(), GetObjectVal(\"PhaseDelay\"), GetObjectVal(\"ActionData\")]; }\n",
+        )
+        .expect("script");
+        write_scenario(
+            dir.path(),
+            "[Object]\nid=LOAD\nNumber=100\nCategory=16\nX=10\nY=20\nFixX=F999424\nFixY=F1327104\nAction=Passive\nActionTime=-7\nPhase=-2\nPhaseDelay=-3\nActionData=41\n\n\
+             [Object]\nid=LOAD\nNumber=101\nCategory=16\nAction=Attached\nActionTime=-8\nPhase=-4\nPhaseDelay=-5\nActionData=42\n\n\
+             [Object]\nid=LOAD\nNumber=102\nCategory=16\nX=30\nY=40\nFixX=F2015232\nFixY=F2654208\nAction=Missing\nActionTime=-9\nPhase=-6\nPhaseDelay=-7\nActionData=43\n\n\
+             [Object]\nid=LOAD\nNumber=103\nCategory=16\nCon=50000\nAction=Attached\nActionTime=-10\nPhase=-8\nPhaseDelay=-9\nActionData=44\n",
+        );
+
+        let resolver = ProbeResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario = Scenario::load_from_path_with(dir.path().join("Sync.c4s"), &resolver)
+            .expect("scenario loads");
+        let mut engine = Engine::with_seed(11);
+        scenario
+            .apply_before_network_final_init(&mut engine)
+            .expect("pre-final-sync scenario applies");
+        let passive = engine
+            .object_snapshot(ObjectId::new(100))
+            .expect("passive object");
+        assert_eq!(passive.action.name, "Passive");
+        assert_eq!((passive.action.time, passive.action.phase, passive.action.ticks), (-7, -2, -3));
+        assert_eq!(
+            passive.action.data, 41,
+            "ActIdle -> DFA_NONE preserves Action.Data"
+        );
+        let passive_index = engine
+            .find_object_index(ObjectId::new(100))
+            .expect("passive object is live");
+        assert_eq!(
+            engine.objects[passive_index].fixed_position,
+            crate::math::FixedVec2::from_ints(10, 20),
+            "successful load-time SetAction resynchronizes FixX/FixY"
+        );
+
+        let attached = engine
+            .object_snapshot(ObjectId::new(101))
+            .expect("attached object");
+        assert_eq!(attached.action.name, "Attached");
+        assert_eq!((attached.action.time, attached.action.phase, attached.action.ticks), (-8, -4, -5));
+        assert_eq!(
+            attached.action.data, 0,
+            "ActIdle -> non-NONE procedure clears Action.Data"
+        );
+
+        let missing = engine
+            .object_snapshot(ObjectId::new(102))
+            .expect("missing-action object");
+        assert_eq!(missing.action.name, crate::action::DEFAULT_ACTION_NAME);
+        assert_eq!(missing.action.act_map_index, None);
+        assert_eq!(missing.action.raw_name.as_deref(), Some("Missing"));
+        assert_eq!((missing.action.time, missing.action.phase, missing.action.ticks), (-9, -6, -7));
+        assert_eq!(missing.action.data, 43);
+        let missing_index = engine
+            .find_object_index(ObjectId::new(102))
+            .expect("missing-action object is live");
+        assert_eq!(
+            engine.objects[missing_index].fixed_position,
+            crate::math::FixedVec2 {
+                x: crate::math::C4Fixed::from_raw(2_015_232),
+                y: crate::math::C4Fixed::from_raw(2_654_208),
+            },
+            "failed SetActionByName retains compiled FixX/FixY"
+        );
+
+        let partial = engine
+            .object_snapshot(ObjectId::new(103))
+            .expect("partial object");
+        assert_eq!(partial.action.name, crate::action::DEFAULT_ACTION_NAME);
+        assert_eq!(partial.action.compiled_name(), "");
+        assert_eq!((partial.action.time, partial.action.phase, partial.action.ticks), (-10, -8, -9));
+        assert_eq!(
+            partial.action.data, 44,
+            "incomplete-object coercion remains DFA_NONE -> DFA_NONE"
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(missing_index, "ReadLoadedAction", Vec::new())
+                .expect("raw action probe succeeds"),
+            lc_script::Value::Array(vec![
+                lc_script::Value::String("Idle".to_string()),
+                lc_script::Value::String("Missing".to_string()),
+                lc_script::Value::Int(-9),
+                lc_script::Value::Int(-7),
+                lc_script::Value::Int(43),
+            ])
+        );
+
+        let encoded = serde_json::to_string(&missing).expect("snapshot serializes");
+        let decoded: crate::ObjectSnapshot =
+            serde_json::from_str(&encoded).expect("snapshot deserializes");
+        assert_eq!(decoded.action.raw_name.as_deref(), Some("Missing"));
+    }
+
+    #[test]
+    fn loaded_action_names_truncate_to_the_cpp_30_native_byte_buffer() {
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        let loaded = defs.join("Loaded.c4d");
+        std::fs::create_dir_all(&loaded).expect("definition dir");
+
+        // Twenty-eight ASCII bytes plus the two-byte UTF-8 spelling of `é`
+        // fill C4Action::Name exactly. The suffix exists only in the source
+        // file and must be discarded before SetActionByName runs.
+        let matching_name = format!("{}é", "M".repeat(28));
+        let unresolved_name = format!("{}é", "U".repeat(28));
+        assert_eq!(lc_script::c4_string_bytes(&matching_name).len(), 30);
+        assert_eq!(lc_script::c4_string_bytes(&unresolved_name).len(), 30);
+
+        std::fs::write(
+            loaded.join("DefCore.txt"),
+            "[DefCore]\nid=LOAD\nName=Loaded\nCategory=16\n",
+        )
+        .expect("defcore");
+        std::fs::write(
+            loaded.join("ActMap.txt"),
+            format!("[Action]\nName={matching_name}\nDelay=0\nLength=1\n"),
+        )
+        .expect("actmap");
+        std::fs::write(
+            loaded.join("Script.c"),
+            "#strict 2\nfunc ReadRawAction() { return GetObjectVal(\"Action\"); }\n",
+        )
+        .expect("script");
+        write_scenario(
+            dir.path(),
+            &format!(
+                "[Object]\nid=LOAD\nNumber=100\nCategory=16\nX=10\nY=20\nFixX=F999424\nFixY=F1327104\nAction={matching_name}TRAILING\n\n\
+                 [Object]\nid=LOAD\nNumber=101\nCategory=16\nX=30\nY=40\nFixX=F2015232\nFixY=F2654208\nAction={unresolved_name}TRAILING\n"
+            ),
+        );
+
+        let resolver = ProbeResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario = Scenario::load_from_path_with(dir.path().join("Sync.c4s"), &resolver)
+            .expect("scenario loads");
+        let mut engine = Engine::with_seed(11);
+        scenario
+            .apply_before_network_final_init(&mut engine)
+            .expect("pre-final-sync scenario applies");
+
+        let matched_index = engine
+            .find_object_index(ObjectId::new(100))
+            .expect("matched object exists");
+        let matched = &engine.objects[matched_index];
+        assert_eq!(matched.state.action.name, matching_name);
+        assert_eq!(matched.state.action.raw_name, None);
+        assert_eq!(
+            matched.fixed_position,
+            crate::math::FixedVec2::from_ints(10, 20),
+            "the truncated physical name resolves and SetAction resynchronizes FixX/FixY"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(matched_index, "ReadRawAction", Vec::new())
+                .expect("matched raw action reads"),
+            lc_script::Value::String(matching_name.clone())
+        );
+
+        let unresolved_index = engine
+            .find_object_index(ObjectId::new(101))
+            .expect("unresolved object exists");
+        let unresolved = &engine.objects[unresolved_index];
+        assert_eq!(unresolved.state.action.name, crate::action::DEFAULT_ACTION_NAME);
+        assert_eq!(
+            unresolved.state.action.raw_name.as_deref(),
+            Some(unresolved_name.as_str()),
+            "a failed lookup retains only the compiled 30-byte buffer"
+        );
+        assert_eq!(
+            unresolved.fixed_position,
+            crate::math::FixedVec2 {
+                x: crate::math::C4Fixed::from_raw(2_015_232),
+                y: crate::math::C4Fixed::from_raw(2_654_208),
+            },
+            "the unresolved truncated name leaves the serialized fixed position untouched"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(unresolved_index, "ReadRawAction", Vec::new())
+                .expect("unresolved raw action reads"),
+            lc_script::Value::String(unresolved_name)
+        );
+    }
+
+    #[test]
+    fn objects_txt_missing_action_targets_are_null_before_scenario_callbacks() {
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        let loaded = defs.join("Loaded.c4d");
+        std::fs::create_dir_all(&loaded).expect("definition dir");
+        std::fs::write(
+            loaded.join("DefCore.txt"),
+            "[DefCore]\nid=LOAD\nName=Loaded\nCategory=16\n",
+        )
+        .expect("defcore");
+        std::fs::write(
+            loaded.join("Script.c"),
+            "#strict\nlocal seen_target1, seen_target2;\npublic func CaptureTargets() { seen_target1 = GetActionTarget(0); seen_target2 = GetActionTarget(1); return 1; }\n",
+        )
+        .expect("script");
+        write_scenario(
+            dir.path(),
+            "[Object]\nid=LOAD\nNumber=100\nCategory=16\nAction=Idle\nActionTarget1=999\nActionTarget2=1000\n",
+        );
+        let scenario_dir = dir.path().join("Sync.c4s");
+        std::fs::write(
+            scenario_dir.join("Script.c"),
+            "#strict\nfunc Initialize() { var obj = FindObject(LOAD); obj->CaptureTargets(); return 1; }\n",
+        )
+        .expect("scenario script");
+
+        let (engine, _) = load(dir.path());
+        let object = engine
+            .object_snapshot(ObjectId::new(100))
+            .expect("loaded object");
+        assert_eq!(object.action.target, None);
+        assert_eq!(object.action.target2, None);
+        assert_eq!(
+            object.local_vars.get("seen_target1"),
+            Some(&lc_script::Value::Nil),
+            "scenario Initialize runs after ActionTarget1 denumeration"
+        );
+        assert_eq!(
+            object.local_vars.get("seen_target2"),
+            Some(&lc_script::Value::Nil),
+            "scenario Initialize runs after ActionTarget2 denumeration"
+        );
+    }
+
+    #[test]
+    fn objects_txt_action_targets_accept_the_old_enumeration_offset() {
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        let loaded = defs.join("Loaded.c4d");
+        std::fs::create_dir_all(&loaded).expect("definition dir");
+        std::fs::write(
+            loaded.join("DefCore.txt"),
+            "[DefCore]\nid=LOAD\nName=Loaded\nCategory=16\n",
+        )
+        .expect("defcore");
+        write_scenario(
+            dir.path(),
+            "[Object]\nid=LOAD\nNumber=100\nCategory=16\nActionTarget1=1000000042\nActionTarget2=1000000043\n\n\
+             [Object]\nid=LOAD\nNumber=42\nCategory=16\n",
+        );
+
+        let (engine, _) = load(dir.path());
+        let holder = engine
+            .object_snapshot(ObjectId::new(100))
+            .expect("holder object");
+        assert_eq!(
+            holder.action.raw_name.as_deref(),
+            Some(""),
+            "a missing Action= retains C4Action's empty compiled Name buffer"
+        );
+        assert_eq!(holder.action.target, Some(ObjectId::new(42)));
+        assert_eq!(holder.action.target2, None);
     }
 
     #[test]

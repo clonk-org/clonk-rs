@@ -1,5 +1,5 @@
 use crate::{decode_legacy_script_text, GraphicsImage, Group, GroupError};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -729,7 +729,8 @@ pub struct ActionDefinition {
     /// Numeric DFA_* procedure from `CrossMapActMap` (C4Def.cpp:778-782);
     /// `DFA_NONE` when ProcedureName has no case-sensitive table match.
     pub procedure_index: i32,
-    pub length: Option<u32>,
+    /// Signed `C4ActionDef::Length` (default 1).
+    pub length: Option<i32>,
     pub next_action: Option<String>,
     /// Numeric next action from `CrossMapActMap` (C4Def.cpp:783-792):
     /// `ACT_IDLE`, `ACT_HOLD`, or an index into `ActionMap::actions`.
@@ -737,12 +738,18 @@ pub struct ActionDefinition {
     /// `InLiquidAction` (C4ActionDef; the ExecAction head switches to it
     /// while InLiquid, C4Object.cpp:4749-4753).
     pub in_liquid_action: Option<String>,
-    pub delay: Option<u32>,
-    pub step: Option<u32>,
+    /// Signed `C4ActionDef::Delay` (default 0). Negative values are odd but
+    /// valid compiler input and make the phase-delay comparison succeed.
+    pub delay: Option<i32>,
+    /// Signed `C4ActionDef::Step` (default 1). Zero freezes the phase and a
+    /// negative value runs it backwards.
+    pub step: Option<i32>,
     pub phase_call: Option<String>,
     pub start_call: Option<String>,
     pub end_call: Option<String>,
     pub abort_call: Option<String>,
+    /// Raw `Sound` identifier reflected by `GetActMapVal`.
+    pub sound: Option<String>,
     pub no_other_action: bool,
     /// `ObjectDisabled=` (C4ActionDef::Disabled, C4Def.cpp:106): the
     /// action suspends the object — vetoes OCF_Collection/OCF_FightReady
@@ -754,16 +761,21 @@ pub struct ActionDefinition {
     pub energy_usage: i32,
     pub dig_free: Option<i32>,
     pub attach: u32,
-    pub directions: Option<u32>,
+    /// Signed `C4ActionDef::Directions` (default 1).
+    pub directions: Option<i32>,
     /// `TurnAction` (C4ActionDef): SetDir fires it on direction change
     /// (C4Object.cpp:4225-4240).
     pub turn_action: Option<String>,
-    pub flip_dir: Option<u32>,
+    /// Signed `C4ActionDef::FlipDir` (default 0).
+    pub flip_dir: Option<i32>,
     pub facet: Option<ActionFacet>,
     pub reverse: bool,
     pub facet_base: bool,
     pub facet_top_face: bool,
     pub facet_target_stretch: bool,
+    /// Exact signed C4ActionDef compiler values used to preserve non-boolean
+    /// payloads for fields whose modeled runtime projection is boolean.
+    pub reflected_ints: HashMap<String, i32>,
 }
 
 impl Default for ActionDefinition {
@@ -783,6 +795,7 @@ impl Default for ActionDefinition {
             start_call: None,
             end_call: None,
             abort_call: None,
+            sound: None,
             no_other_action: false,
             disabled: false,
             energy_usage: 0,
@@ -796,6 +809,7 @@ impl Default for ActionDefinition {
             facet_base: false,
             facet_top_face: false,
             facet_target_stretch: false,
+            reflected_ints: HashMap::new(),
         }
     }
 }
@@ -955,7 +969,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         }};
     }
 
-    for raw_line in text.lines() {
+    // StdCompiler::CreateNameTree terminates a line on either byte, not only
+    // LF/CRLF. Old packed groups can therefore contain valid CR-only INI.
+    for raw_line in text.split(['\r', '\n']) {
         let line = raw_line.trim();
         if line.is_empty()
             || line.starts_with(';')
@@ -1686,16 +1702,74 @@ fn is_script_file(path: &Path) -> bool {
     false
 }
 
+fn ini_section_name(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    if bytes.first() != Some(&b'[') || !bytes.get(1).is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let mut cursor = 1;
+    while bytes.get(cursor).is_some_and(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_')
+    }) {
+        cursor += 1;
+    }
+    let name_end = cursor;
+    while bytes.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+        cursor += 1;
+    }
+    (bytes.get(cursor) == Some(&b']')).then(|| &line[1..name_end])
+}
+
+fn ini_value(line: &str) -> Option<(&str, &str)> {
+    let bytes = line.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let mut cursor = 0;
+    while bytes.get(cursor).is_some_and(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_')
+    }) {
+        cursor += 1;
+    }
+    let name_end = cursor;
+    while bytes.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+        cursor += 1;
+    }
+    (bytes.get(cursor) == Some(&b'=')).then(|| (&line[..name_end], &line[cursor + 1..]))
+}
+
 fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
-    let text = String::from_utf8_lossy(bytes);
-    let mut default_action: Option<String> = None;
+    // StdStrBuf/CreateNameTree consume a native C string. Preserve arbitrary
+    // legacy bytes through lc-script's lossless byte projection and ignore
+    // everything after the first NUL like the C++ loader.
+    let bytes = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+    let action_slots = bytes.iter().filter(|byte| **byte == b'[').count();
+    if action_slots == 0 {
+        return Err(DefinitionError::ActMapParse(
+            "ActMap.txt contains no action slots".to_string(),
+        ));
+    }
+    let text = lc_script::c4_string_from_bytes(bytes);
     let mut actions: Vec<(String, ActionDefinition)> = Vec::new();
     let mut current_name: Option<String> = None;
     let mut current_definition = ActionDefinition::default();
+    let mut compile_current_action = false;
+    let mut seen_keys = HashSet::new();
+    // Valid INI sections form an indentation tree. Only root [Action]
+    // nodes feed mkArrayAdaptS; nested actions and their values are ignored.
+    let mut section_stack: Vec<(usize, bool)> = Vec::new();
 
-    for raw_line in text.lines() {
-        let line = raw_line.trim();
-        if line.is_empty()
+    // StdCompiler::CreateNameTree terminates a line on either byte, not only
+    // LF/CRLF. Old packed groups can therefore contain valid CR-only INI.
+    for raw_line in text.split(['\r', '\n']) {
+        let indent = raw_line
+            .as_bytes()
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        let line = &raw_line[indent..];
+        let structural = line.trim_end_matches([' ', '\t', '\r']);
+        if structural.is_empty()
             || line.starts_with(';')
             || line.starts_with('#')
             || line.starts_with("//")
@@ -1703,141 +1777,212 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
             continue;
         }
 
-        if line.starts_with('[') && line.ends_with(']') {
-            if let Some(name) = current_name.take() {
-                actions.push((name, current_definition));
+        if let Some(section) = ini_section_name(structural) {
+            while section_stack
+                .last()
+                .is_some_and(|(parent_indent, _)| *parent_indent >= indent)
+            {
+                section_stack.pop();
             }
-            current_definition = ActionDefinition::default();
+            let root_section = section_stack.is_empty();
+            if root_section {
+                if compile_current_action {
+                    actions.push((current_name.take().unwrap_or_default(), current_definition));
+                }
+                current_definition = ActionDefinition::default();
+                current_name = None;
+                seen_keys.clear();
+                compile_current_action = section == "Action";
+            }
+            section_stack.push((indent, root_section && section == "Action"));
             continue;
         }
 
-        let Some((raw_key, raw_value)) = line.split_once('=') else {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let Some((key, raw_value)) = ini_value(line) else {
             continue;
         };
-        let key = raw_key.trim();
-        let value = raw_value.trim();
+        let value_indent = indent.saturating_add(1);
+        while section_stack
+            .last()
+            .is_some_and(|(parent_indent, _)| *parent_indent >= value_indent)
+        {
+            section_stack.pop();
+        }
+        if !compile_current_action
+            || section_stack.len() != 1
+            || !section_stack[0].1
+        {
+            continue;
+        }
+        let value = raw_value.trim_start_matches([' ', '\t']);
+        if !seen_keys.insert(key.to_string()) {
+            continue;
+        }
 
-        if key.eq_ignore_ascii_case("Name") {
-            if !value.is_empty() {
-                if let Some(name) = current_name.replace(value.to_string()) {
-                    actions.push((name, current_definition));
-                    current_definition = ActionDefinition::default();
-                }
+        if key == "Name" {
+            if let Some(value) = parse_action_string(value) {
+                current_name = Some(value);
             }
             continue;
         }
 
-        if key.eq_ignore_ascii_case("Default") {
-            if !value.is_empty() {
-                default_action = Some(value.to_string());
+        match key {
+            "Procedure" => {
+                current_definition.procedure = parse_action_string(value);
             }
-            continue;
-        }
-
-        match key.to_ascii_lowercase().as_str() {
-            "procedure" => {
-                if !value.is_empty() {
-                    current_definition.procedure = Some(value.to_string());
-                }
+            "Length" => {
+                let raw = parse_action_int(value, 1);
+                current_definition
+                    .reflected_ints
+                    .insert("Length".to_string(), raw);
+                current_definition.length = Some(raw);
             }
-            "length" => {
-                current_definition.length = parse_u32(value);
+            "NextAction" => {
+                current_definition.next_action = parse_action_string(value);
             }
-            "nextaction" => {
-                if !value.is_empty() {
-                    current_definition.next_action = Some(value.to_string());
-                }
+            "InLiquidAction" => {
+                current_definition.in_liquid_action = parse_action_string(value);
             }
-            "inliquidaction" => {
-                if !value.is_empty() {
-                    current_definition.in_liquid_action = Some(value.to_string());
-                }
+            "Delay" => {
+                let raw = parse_action_int(value, 0);
+                current_definition
+                    .reflected_ints
+                    .insert("Delay".to_string(), raw);
+                current_definition.delay = Some(raw);
             }
-            "delay" => {
-                current_definition.delay = parse_u32(value);
+            "Step" => {
+                let raw = parse_action_int(value, 1);
+                current_definition
+                    .reflected_ints
+                    .insert("Step".to_string(), raw);
+                current_definition.step = Some(raw);
             }
-            "step" => {
-                current_definition.step = parse_u32(value);
-            }
-            "phasecall" => {
+            "PhaseCall" => {
                 if !value.is_empty() && !value.eq_ignore_ascii_case("None") {
-                    current_definition.phase_call = Some(value.to_string());
+                    current_definition.phase_call = parse_action_string(value);
                 }
             }
-            "startcall" => {
+            "StartCall" => {
                 if !value.is_empty() && !value.eq_ignore_ascii_case("None") {
-                    current_definition.start_call = Some(value.to_string());
+                    current_definition.start_call = parse_action_string(value);
                 }
             }
-            "endcall" => {
+            "EndCall" => {
                 if !value.is_empty() && !value.eq_ignore_ascii_case("None") {
-                    current_definition.end_call = Some(value.to_string());
+                    current_definition.end_call = parse_action_string(value);
                 }
             }
-            "abortcall" => {
+            "AbortCall" => {
                 if !value.is_empty() && !value.eq_ignore_ascii_case("None") {
-                    current_definition.abort_call = Some(value.to_string());
+                    current_definition.abort_call = parse_action_string(value);
                 }
             }
-            "nootheraction" => {
-                current_definition.no_other_action = parse_bool(value);
+            "Sound" => {
+                current_definition.sound = parse_action_string(value);
             }
-            "objectdisabled" => {
-                current_definition.disabled = parse_bool(value);
+            "NoOtherAction" => {
+                let raw = parse_action_int(value, 0);
+                current_definition
+                    .reflected_ints
+                    .insert("NoOtherAction".to_string(), raw);
+                current_definition.no_other_action = raw != 0;
             }
-            "energyusage" => {
-                current_definition.energy_usage = parse_i32(value).unwrap_or(0);
+            "ObjectDisabled" => {
+                let raw = parse_action_int(value, 0);
+                current_definition
+                    .reflected_ints
+                    .insert("ObjectDisabled".to_string(), raw);
+                current_definition.disabled = raw != 0;
             }
-            "digfree" => {
-                current_definition.dig_free = parse_i32(value);
+            "EnergyUsage" => {
+                let raw = parse_action_int(value, 0);
+                current_definition
+                    .reflected_ints
+                    .insert("EnergyUsage".to_string(), raw);
+                current_definition.energy_usage = raw;
             }
-            "attach" => {
-                current_definition.attach = parse_i32(value).unwrap_or(0).max(0) as u32;
+            "DigFree" => {
+                let raw = parse_action_int(value, 0);
+                current_definition
+                    .reflected_ints
+                    .insert("DigFree".to_string(), raw);
+                current_definition.dig_free = Some(raw);
             }
-            "turnaction" => {
-                if !value.is_empty() {
-                    current_definition.turn_action = Some(value.to_string());
-                }
+            "Attach" => {
+                let raw = parse_action_attach(value);
+                current_definition
+                    .reflected_ints
+                    .insert("Attach".to_string(), raw);
+                current_definition.attach = raw as u32;
             }
-            "directions" => {
-                current_definition.directions = parse_u32(value);
+            "TurnAction" => {
+                current_definition.turn_action = parse_action_string(value);
             }
-            "flipdir" => {
-                current_definition.flip_dir = parse_u32(value);
+            "Directions" => {
+                let raw = parse_action_int(value, 1);
+                current_definition
+                    .reflected_ints
+                    .insert("Directions".to_string(), raw);
+                current_definition.directions = Some(raw);
             }
-            "facet" => {
+            "FlipDir" => {
+                let raw = parse_action_int(value, 0);
+                current_definition
+                    .reflected_ints
+                    .insert("FlipDir".to_string(), raw);
+                current_definition.flip_dir = Some(raw);
+            }
+            "Facet" => {
                 current_definition.facet = parse_action_facet(value);
             }
-            "reverse" => {
-                current_definition.reverse = parse_bool(value);
+            "Reverse" => {
+                let raw = parse_action_int(value, 0);
+                current_definition
+                    .reflected_ints
+                    .insert("Reverse".to_string(), raw);
+                current_definition.reverse = raw != 0;
             }
-            "facetbase" => {
-                current_definition.facet_base = parse_bool(value);
+            "FacetBase" => {
+                let raw = parse_action_int(value, 0);
+                current_definition
+                    .reflected_ints
+                    .insert("FacetBase".to_string(), raw);
+                current_definition.facet_base = raw != 0;
             }
-            "facettopface" => {
-                current_definition.facet_top_face = parse_bool(value);
+            "FacetTopFace" => {
+                let raw = parse_action_int(value, 0);
+                current_definition
+                    .reflected_ints
+                    .insert("FacetTopFace".to_string(), raw);
+                current_definition.facet_top_face = raw != 0;
             }
-            "facettargetstretch" => {
-                current_definition.facet_target_stretch = parse_bool(value);
+            "FacetTargetStretch" => {
+                let raw = parse_action_int(value, 0);
+                current_definition
+                    .reflected_ints
+                    .insert("FacetTargetStretch".to_string(), raw);
+                current_definition.facet_target_stretch = raw != 0;
             }
             _ => {}
         }
     }
 
-    if let Some(name) = current_name {
-        actions.push((name, current_definition));
+    if compile_current_action {
+        actions.push((current_name.unwrap_or_default(), current_definition));
     }
-
-    if actions.is_empty() && default_action.is_some() {
-        return Err(DefinitionError::ActMapParse(
-            "ActMap.txt declared a default action but no actions".into(),
-        ));
+    // C4Def::LoadActMap allocates SCharCount('[', data) slots, while the INI
+    // compiler consumes only real [Action] sections in their own order.
+    // Unknown/malformed/comment brackets therefore become default slots at
+    // the end rather than being interleaved with compiled actions.
+    while actions.len() < action_slots {
+        actions.push((String::new(), ActionDefinition::default()));
     }
 
     cross_map_act_map(&mut actions);
 
     Ok(ActionMap {
-        default_action,
+        default_action: None,
         actions,
     })
 }
@@ -2511,6 +2656,140 @@ fn parse_reflected_int(value: &str) -> i32 {
     parse_i32(value).unwrap_or_else(|| i32::from(parse_bool(value)))
 }
 
+fn parse_action_string(value: &str) -> Option<String> {
+    let value = value.trim_start_matches([' ', '\t']);
+    let bytes = lc_script::c4_string_bytes(value);
+    let bytes = &bytes[..bytes.len().min(30)];
+    (!bytes.is_empty()).then(|| lc_script::c4_string_from_bytes(bytes))
+}
+
+fn parse_action_int(value: &str, default: i32) -> i32 {
+    parse_action_i32(value).unwrap_or(default)
+}
+
+fn parse_action_i32(value: &str) -> Option<i32> {
+    parse_action_i32_prefix(&lc_script::c4_string_bytes(value)).map(|(value, _)| value)
+}
+
+fn parse_action_attach(value: &str) -> i32 {
+    let bytes = lc_script::c4_string_bytes(value);
+    let mut cursor = 0;
+    let mut flags = 0;
+    loop {
+        while bytes.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+            cursor += 1;
+        }
+        if let Some((value, consumed)) = parse_action_i32_prefix(&bytes[cursor..]) {
+            flags |= value;
+            cursor += consumed;
+        } else {
+            let start = cursor;
+            while bytes.get(cursor).is_some_and(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+            }) {
+                cursor += 1;
+            }
+            if cursor == start {
+                return 0;
+            }
+            flags |= match &bytes[start..cursor] {
+                b"CNAT_None" => 0,
+                b"CNAT_Left" => 1,
+                b"CNAT_Right" => 2,
+                b"CNAT_Top" => 4,
+                b"CNAT_Bottom" => 8,
+                b"CNAT_Center" => 16,
+                b"CNAT_MultiAttach" => 32,
+                b"CNAT_NoCollision" => 64,
+                _ => 0,
+            };
+        }
+        while bytes.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'|') {
+            break;
+        }
+        cursor += 1;
+    }
+    flags
+}
+
+fn parse_action_i32_prefix(value: &[u8]) -> Option<(i32, usize)> {
+    let mut cursor = 0;
+    while value.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+        cursor += 1;
+    }
+    let number_start = cursor;
+    // StdCompilerINIRead chooses base 16 only when the untrimmed number
+    // itself starts with 0x. A leading sign therefore keeps base 10, exactly
+    // like its strtol call (`-0x10` reads decimal -0 and stops at `x`).
+    let radix = if value.get(cursor) == Some(&b'0')
+        && value
+            .get(cursor + 1)
+            .is_some_and(|byte| matches!(byte, b'x' | b'X'))
+    {
+        cursor += 2;
+        16u32
+    } else {
+        10u32
+    };
+    let negative = if radix == 10 {
+        match value.get(cursor) {
+            Some(b'-') => {
+                cursor += 1;
+                true
+            }
+            Some(b'+') => {
+                cursor += 1;
+                false
+            }
+            _ => false,
+        }
+    } else {
+        false
+    };
+    let digits_start = cursor;
+    let mut magnitude = 0u128;
+    while let Some(digit) = value.get(cursor).and_then(|byte| match byte {
+        b'0'..=b'9' => Some(u32::from(*byte - b'0')),
+        b'a'..=b'f' if radix == 16 => Some(u32::from(*byte - b'a') + 10),
+        b'A'..=b'F' if radix == 16 => Some(u32::from(*byte - b'A') + 10),
+        _ => None,
+    }) {
+        if digit >= radix {
+            break;
+        }
+        magnitude = magnitude
+            .saturating_mul(u128::from(radix))
+            .saturating_add(u128::from(digit));
+        cursor += 1;
+    }
+    if cursor == digits_start {
+        // strtol("0x", ..., 16) still consumes the leading zero.
+        if radix == 16 {
+            return Some((0, number_start + 1));
+        }
+        return None;
+    }
+    // strtol saturates to native C `long` and the result is then assigned to
+    // int32_t. LP64 uses 64-bit long; Windows LLP64 and 32-bit targets use
+    // 32-bit long. The final Rust cast supplies the same modulo narrowing.
+    let long_bits = std::mem::size_of::<std::os::raw::c_long>() * 8;
+    let long_max = (1u128 << (long_bits - 1)) - 1;
+    let long_min_magnitude = 1u128 << (long_bits - 1);
+    let signed = if negative {
+        if magnitude >= long_min_magnitude {
+            -(long_min_magnitude as i128)
+        } else {
+            -(magnitude as i128)
+        }
+    } else {
+        magnitude.min(long_max) as i128
+    };
+    Some(((signed as i64) as i32, cursor))
+}
+
 fn parse_u32(value: &str) -> Option<u32> {
     parse_i64(value).and_then(|num| if num < 0 { None } else { Some(num as u32) })
 }
@@ -2602,27 +2881,50 @@ fn parse_i64(value: &str) -> Option<i64> {
 }
 
 fn parse_action_facet(value: &str) -> Option<ActionFacet> {
-    let parts: Vec<_> = value
-        .split([',', ';'])
-        .map(|part| part.trim())
-        .filter(|part| !part.is_empty())
-        .collect();
-    // C4TargetRect: x,y,wdt,hgt with mkDefaultAdapt(0) tx,ty — 4 to 6
-    // entries are valid (C4TargetRect::CompileFunc, C4Rect.cpp:80-86;
-    // Mage.c4d AimMagic uses the 5-value form).
-    if parts.len() < 4 || parts.len() > 6 {
-        return None;
-    }
-    let mut numbers = Vec::with_capacity(parts.len());
-    for part in parts {
-        numbers.push(parse_i32(part)?);
+    // Every C4TargetRect component has its own zero default. Empty slots and
+    // omitted trailing components therefore keep their position instead of
+    // shifting later values left. Keep the shared StdCompiler cursor too:
+    // once the comma after a value is missing, Separator() makes all later
+    // reads fail even if another comma occurs farther along the string.
+    let mut numbers = [0; 6];
+    let bytes = lc_script::c4_string_bytes(value);
+    let mut cursor = 0;
+    let mut readable = true;
+    let component_count = numbers.len();
+    for (index, slot) in numbers.iter_mut().enumerate() {
+        if !readable {
+            continue;
+        }
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        {
+            cursor += 1;
+        }
+        if let Some((value, consumed)) = parse_action_i32_prefix(&bytes[cursor..]) {
+            *slot = value;
+            cursor += consumed;
+        }
+        if index < component_count - 1 {
+            while bytes
+                .get(cursor)
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+            {
+                cursor += 1;
+            }
+            if bytes.get(cursor) == Some(&b',') {
+                cursor += 1;
+            } else {
+                readable = false;
+            }
+        }
     }
     let x = numbers[0];
     let y = numbers[1];
     let width = numbers[2];
     let height = numbers[3];
-    let target_x = numbers.get(4).copied().unwrap_or(0);
-    let target_y = numbers.get(5).copied().unwrap_or(0);
+    let target_x = numbers[4];
+    let target_y = numbers[5];
     Some(ActionFacet {
         x,
         y,
@@ -2795,6 +3097,38 @@ Entrance=1,2,,4
         assert_eq!((six.target_x, six.target_y), (0, -4));
         let four = parse_action_facet("0,0,16,20").expect("4-value facet parses");
         assert_eq!((four.target_x, four.target_y), (0, 0));
+        let sparse = parse_action_facet("1,,3,4,,6").expect("empty slots default in place");
+        assert_eq!(
+            (
+                sparse.x,
+                sparse.y,
+                sparse.width,
+                sparse.height,
+                sparse.target_x,
+                sparse.target_y
+            ),
+            (1, 0, 3, 4, 0, 6)
+        );
+        let malformed = parse_action_facet("1,bad,3,4").expect("bad slot defaults");
+        assert_eq!(
+            (malformed.x, malformed.y, malformed.width, malformed.height),
+            (1, 0, 0, 0),
+            "a failed primitive leaves the compiler cursor before later separators"
+        );
+        let trailing_junk =
+            parse_action_facet("1junk,2,3,4,5,6").expect("numeric prefix parses");
+        assert_eq!(
+            (
+                trailing_junk.x,
+                trailing_junk.y,
+                trailing_junk.width,
+                trailing_junk.height,
+                trailing_junk.target_x,
+                trailing_junk.target_y
+            ),
+            (1, 0, 0, 0, 0, 0),
+            "a separator mismatch after a numeric prefix blocks later reads"
+        );
     }
 
     #[test]
@@ -3729,6 +4063,118 @@ Procedure=Walk
     }
 
     #[test]
+    fn parse_act_map_preserves_complete_cpp_reflection_values() {
+        let data = br#"
+[Action]
+Name=Reflect
+Procedure=OddProcedure
+Directions=-2
+FlipDir=-3
+Length=-4
+Attach=-5
+Delay=-6
+Facet=1,,3,4,,6
+FacetBase=2
+FacetTopFace=-7
+FacetTargetStretch=3
+NextAction=Missing
+NoOtherAction=2
+StartCall=None
+EndCall=End
+AbortCall=none
+PhaseCall=Phase
+Sound=TravelSound
+ObjectDisabled=-8
+DigFree=-9
+EnergyUsage=-10
+InLiquidAction=Swim
+TurnAction=Turn
+Reverse=2
+Step=-11
+
+[Action]
+Length=5
+
+[Action]
+Name=TextDefaults
+Directions=false
+Reverse=true
+Step=false
+Step=7
+Attach=cnat_left
+EnergyUsage=12junk
+length=9
+"#;
+        let map = parse_act_map(data).expect("complete action table parses");
+        let action = map.get("Reflect").expect("reflection action exists");
+        assert_eq!(map.get("").and_then(|action| action.length), Some(5));
+        let text_defaults = map.get("TextDefaults").expect("text-default action exists");
+        assert_eq!(text_defaults.reflected_ints.get("Directions"), Some(&1));
+        assert_eq!(text_defaults.reflected_ints.get("Reverse"), Some(&0));
+        assert_eq!(text_defaults.reflected_ints.get("Step"), Some(&1));
+        assert_eq!(text_defaults.reflected_ints.get("Attach"), Some(&0));
+        assert_eq!(text_defaults.reflected_ints.get("EnergyUsage"), Some(&12));
+        assert_eq!(text_defaults.length, None, "lower-case key is unknown");
+        assert_eq!(action.procedure.as_deref(), Some("OddProcedure"));
+        assert_eq!(action.next_action.as_deref(), Some("Missing"));
+        assert_eq!(action.start_call, None, "CrossMap clears None callbacks");
+        assert_eq!(
+            action.abort_call, None,
+            "CrossMap clears None case-insensitively"
+        );
+        assert_eq!(action.end_call.as_deref(), Some("End"));
+        assert_eq!(action.phase_call.as_deref(), Some("Phase"));
+        assert_eq!(action.sound.as_deref(), Some("TravelSound"));
+        assert_eq!(action.in_liquid_action.as_deref(), Some("Swim"));
+        assert_eq!(action.turn_action.as_deref(), Some("Turn"));
+        assert_eq!(
+            action.facet,
+            Some(ActionFacet {
+                x: 1,
+                y: 0,
+                width: 3,
+                height: 4,
+                target_x: 0,
+                target_y: 6,
+            })
+        );
+        assert!(action.no_other_action);
+        assert!(action.disabled);
+        assert!(action.facet_base);
+        assert!(action.facet_top_face);
+        assert!(action.facet_target_stretch);
+        assert!(action.reverse);
+        assert_eq!(action.directions, Some(-2));
+        assert_eq!(action.flip_dir, Some(-3));
+        assert_eq!(action.length, Some(-4));
+        assert_eq!(action.delay, Some(-6));
+        assert_eq!(action.step, Some(-11));
+        assert_eq!(
+            action.attach,
+            (-5i32) as u32,
+            "bit tests keep raw two's-complement bits"
+        );
+        for (entry, expected) in [
+            ("Directions", -2),
+            ("FlipDir", -3),
+            ("Length", -4),
+            ("Attach", -5),
+            ("Delay", -6),
+            ("FacetBase", 2),
+            ("FacetTopFace", -7),
+            ("FacetTargetStretch", 3),
+            ("NoOtherAction", 2),
+            ("ObjectDisabled", -8),
+            ("DigFree", -9),
+            ("EnergyUsage", -10),
+            ("Reverse", 2),
+            ("Step", -11),
+        ] {
+            assert_eq!(action.reflected_ints.get(entry), Some(&expected), "{entry}");
+        }
+    }
+
+    #[test]
     fn parse_act_map_records_dig_free() {
         let data = br#"
 [Action]
@@ -3747,11 +4193,139 @@ DigFree=24
 [Action]
 Name=Scale
 Procedure=Scale
-Attach=1
+Attach=CNAT_Left|CNAT_Bottom
 "#;
         let map = parse_act_map(data).expect("act map parsed");
         let scale = map.get("Scale").expect("scale action present");
-        assert_eq!(scale.attach, 1);
+        assert_eq!(scale.attach, 9);
+        assert_eq!(scale.reflected_ints.get("Attach"), Some(&9));
+    }
+
+    #[test]
+    fn parse_act_map_accepts_trailing_section_comments_like_cpp() {
+        let data = br#"
+[Action] # ready, as used by shipped Airlock ActMaps
+Name=Open
+Length=7
+
+[Action] trailing text is ignored by CreateNameTree
+Name=Close
+Length=9
+"#;
+        let map = parse_act_map(data).expect("commented action headers parse");
+        assert_eq!(map.get("Open").and_then(|action| action.length), Some(7));
+        assert_eq!(map.get("Close").and_then(|action| action.length), Some(9));
+    }
+
+    #[test]
+    fn parse_act_map_accepts_cr_only_name_tree_lines() {
+        let map = parse_act_map(
+            b"[Action]\rName=First\rLength=7\rNextAction=Second\r[Action]\rName=Second\rLength=9\r",
+        )
+        .expect("CR-only ActMap parses");
+
+        let first = map.get("First").expect("first action exists");
+        assert_eq!(first.length, Some(7));
+        assert_eq!(first.next_action_index, 1);
+        assert_eq!(map.get("Second").and_then(|action| action.length), Some(9));
+    }
+
+    #[test]
+    fn parse_act_map_matches_cpp_slot_order_indentation_and_exact_keys() {
+        let data = br#"# [comment slot]
+[Other]
+[Action]
+Name =Wrong
+Name=First
+Length =9
+Length=7
+Delay	=5
+[1]
+Sound=[
+[Other]
+ [Action]
+ Name=Nested
+[Action]
+Name=Second
+Default=Ghost
+"#;
+        let map = parse_act_map(data).expect("C++ name-tree edge map parses");
+        assert_eq!(map.default_action, None, "Default is not an ActMap field");
+        assert_eq!(map.actions.len(), 8, "every raw '[' allocates one slot");
+        assert_eq!(map.actions[0].0, "First");
+        assert_eq!(map.actions[0].1.length, Some(7));
+        assert_eq!(map.actions[0].1.delay, Some(5));
+        assert_eq!(map.actions[0].1.sound.as_deref(), Some("["));
+        assert_eq!(map.actions[1].0, "Second");
+        assert!(map.actions[2..].iter().all(|(name, _)| name.is_empty()));
+        assert!(map.get("Nested").is_none(), "nested Action is not root");
+    }
+
+    #[test]
+    fn parse_act_map_preserves_native_string_bytes_and_stops_at_nul() {
+        let mut data = b"[Action]\nName=Raw\nSound=".to_vec();
+        data.extend(std::iter::repeat_n(b'a', 29));
+        data.extend_from_slice("é".as_bytes());
+        data.extend_from_slice(b"\nPhaseCall=");
+        data.push(0xff);
+        data.extend_from_slice(b"\0[Action]\nName=AfterNul\n");
+
+        let map = parse_act_map(&data).expect("raw-byte ActMap parses");
+        assert_eq!(map.actions.len(), 1, "post-NUL brackets are invisible");
+        let raw = map.get("Raw").expect("pre-NUL action exists");
+        let sound = lc_script::c4_string_bytes(raw.sound.as_deref().expect("Sound retained"));
+        assert_eq!(sound, [vec![b'a'; 29], vec![0xc3]].concat());
+        assert_eq!(
+            lc_script::c4_string_bytes(raw.phase_call.as_deref().expect("raw call retained")),
+            vec![0xff]
+        );
+        assert!(map.get("AfterNul").is_none());
+    }
+
+    #[test]
+    fn action_int_and_attach_parsing_follow_stdcompiler_cursors() {
+        assert_eq!(parse_action_i32("-0x2"), Some(0));
+        assert_eq!(parse_action_i32("+0x2"), Some(0));
+        assert_eq!(parse_action_i32("0x10junk"), Some(16));
+        assert_eq!(parse_action_i32("junk"), None);
+        if std::mem::size_of::<std::os::raw::c_long>() == 8 {
+            assert_eq!(parse_action_i32("2147483648"), Some(i32::MIN));
+            assert_eq!(parse_action_i32("0xFFFFFFFF"), Some(-1));
+            assert_eq!(parse_action_i32("999999999999999999999999"), Some(-1));
+            assert_eq!(parse_action_i32("-999999999999999999999999"), Some(0));
+        } else {
+            assert_eq!(parse_action_i32("2147483648"), Some(i32::MAX));
+            assert_eq!(parse_action_i32("0xFFFFFFFF"), Some(i32::MAX));
+            assert_eq!(
+                parse_action_i32("999999999999999999999999"),
+                Some(i32::MAX)
+            );
+            assert_eq!(
+                parse_action_i32("-999999999999999999999999"),
+                Some(i32::MIN)
+            );
+        }
+
+        for (source, expected) in [
+            ("CNAT_Left # comment|CNAT_Bottom", 1),
+            ("CNAT_Left,CNAT_Bottom", 1),
+            ("Unknown_Name|CNAT_Bottom", 8),
+            ("1junk|CNAT_Bottom", 1),
+            ("CNAT_Left||CNAT_Bottom", 0),
+            ("CNAT_Left|", 0),
+            ("|CNAT_Left", 0),
+            ("CNAT_Left|#comment", 0),
+        ] {
+            assert_eq!(parse_action_attach(source), expected, "{source}");
+        }
+
+        let map = parse_act_map(
+            b"[Action]\nName=Numbers\nLength=-0x2\nAttach=CNAT_Left # comment\n",
+        )
+        .expect("numeric cursor integration parses");
+        let action = map.get("Numbers").expect("numeric action exists");
+        assert_eq!(action.reflected_ints.get("Length"), Some(&0));
+        assert_eq!(action.reflected_ints.get("Attach"), Some(&1));
     }
 
     #[test]

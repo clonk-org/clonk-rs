@@ -1932,14 +1932,14 @@ impl Engine {
         };
         let target_id = self.objects[target_index].id;
         let target_definition = self.objects[target_index].definition_id.clone();
-        let target_action_name = self.objects[target_index].state.action.name.clone();
+        let target_action = self.objects[target_index].state.action.clone();
         let target_action_active =
             self.definitions
                 .get(&target_definition)
                 .is_some_and(|definition| {
                     !definition
                         .action_library()
-                        .is_idle_action(&target_action_name)
+                        .is_idle_state(&target_action)
                 });
         let target_action_target = self.objects[target_index].state.action.target;
         let mut items = Vec::new();
@@ -2189,7 +2189,7 @@ impl Engine {
                         .is_some_and(|definition| {
                             !definition
                                 .action_library()
-                                .is_idle_action(&object.state.action.name)
+                                .is_idle_state(&object.state.action)
                         });
                 !object.destroyed
                     && object.state.status.is_active()
@@ -5195,11 +5195,11 @@ impl Engine {
             return ActionProcedure::Undefined;
         };
         let library = definition.action_library();
-        let action_name = &self.objects[index].state.action.name;
-        if library.is_idle_action(action_name) {
+        let action = &self.objects[index].state.action;
+        if library.is_idle_state(action) {
             return ActionProcedure::Undefined;
         }
-        library.procedure_for_action(action_name)
+        library.procedure_for_entry(&action.name, action.act_map_index)
     }
 
     // ---- Contents shifting (C4Object.cpp:5751-5797) -----------------------

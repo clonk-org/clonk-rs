@@ -24,6 +24,7 @@ mod far_worlds_deep_lorry_acquire;
 mod far_worlds_jungle_amulet;
 mod flight_movement;
 mod gamma;
+mod get_act_map_val;
 mod get_entrance;
 mod get_inventory;
 mod get_material_color;

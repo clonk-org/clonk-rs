@@ -299,7 +299,8 @@ pub struct Engine {
 
 /// Ownership scope of a resolved script function. A global function is
 /// owned by the script engine even when its local FnLink lives on a
-/// definition host; callers executing it therefore have no `cthr->Def`.
+/// definition host. Ownership alone does not determine execution `Obj` or
+/// `Def`: native callers may still supply a command object as `this`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScriptFunctionScope {
     Local,
@@ -787,7 +788,7 @@ impl Engine {
             .map(|cell| crate::vm::CallArg::Reference(crate::vm::LValueRef::cell(cell.clone())))
             .collect();
         let result = vm
-            .call_engine_args(name, call_args)
+            .call_engine_global_args(name, call_args)
             .map_err(ScriptError::from)?;
         let finals = cells.iter().map(|cell| cell.borrow().clone()).collect();
         Ok((result, finals))
@@ -838,6 +839,48 @@ impl Engine {
             .map_err(ScriptError::from)?;
         let finals = cells.iter().map(|cell| cell.borrow().clone()).collect();
         Ok((result, finals))
+    }
+
+    /// Execute an immutable function captured by a native callback against
+    /// shared object-local cells and an explicit `this`. The entry body is
+    /// never re-resolved by name; `engine_global` enables exact lookup through
+    /// a global function's retained `LinkedTo` host for calls inside its body.
+    /// This is a fresh engine callback and does not inherit an ambient caller.
+    #[doc(hidden)]
+    pub fn call_pinned_with_cells_and_this(
+        &self,
+        function: &Function,
+        engine_global: bool,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<Value, ScriptError> {
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            &self.var_decls,
+            self.debugger_hooks.clone(),
+        )
+        .with_host_identity(self.host_identity)
+        .with_host_reference_functions(&self.host_reference_functions)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
+        .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref())
+        .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_this(this);
+        let vm = if engine_global {
+            vm.with_exact_global_link_lookup()
+        } else {
+            vm
+        };
+        vm.call_pinned_with_cells(function, args, cells)
+            .map_err(ScriptError::from)
     }
 
     /// Call a function with per-object local variable context
@@ -1482,6 +1525,93 @@ mod tests {
                 .0,
             Value::Int(1)
         );
+    }
+
+    #[test]
+    fn exact_global_ref_entry_skips_a_same_name_local_without_a_shared_table() {
+        let mut host = Engine::new();
+        host.load_script("global func Pick(&slot) { slot = 7; return 70; }")
+            .expect("global declaration compiles");
+        host.load_script("func Pick(&slot) { slot = 1; return 10; }")
+            .expect("same-name local declaration compiles");
+        host.register_host_function("NativeOnly", |args| {
+            Ok(Value::Int(
+                args.first().and_then(Value::as_c4_int).unwrap_or(0) + 1,
+            ))
+        });
+
+        let (ordinary, ordinary_args) = host
+            .call_with_ref_args("Pick", &[Value::Int(0)])
+            .expect("ordinary local entry resolves");
+        assert_eq!(ordinary, Value::Int(10));
+        assert_eq!(ordinary_args, vec![Value::Int(1)]);
+
+        let (global, global_args) = host
+            .call_global_with_ref_args("Pick", &[Value::Int(0)])
+            .expect("exact global entry resolves");
+        assert_eq!(global, Value::Int(70));
+        assert_eq!(global_args, vec![Value::Int(7)]);
+
+        let (native, native_args) = host
+            .call_global_with_ref_args("NativeOnly", &[Value::Int(40)])
+            .expect("host fallback resolves");
+        assert_eq!(native, Value::Int(41));
+        assert_eq!(native_args, vec![Value::Int(40)]);
+    }
+
+    #[test]
+    fn pinned_global_shared_context_uses_its_linked_host_helper() {
+        let mut linked_host = Engine::new();
+        linked_host
+            .load_script(
+                "local Shared;\n\
+                 func Helper() { Shared = Shared + 4; return Shared; }\n\
+                 global func Deferred() {\n\
+                     Shared = Shared + 2;\n\
+                     return [this, Helper(), Shared];\n\
+                 }",
+            )
+            .expect("linked-host script compiles");
+
+        let mut destination = Engine::new();
+        destination
+            .load_script("global func Helper() { return 999; }")
+            .expect("conflicting destination helper compiles");
+
+        let mut globals = linked_host
+            .global_access_functions()
+            .map(|(name, function)| (name.clone(), function.clone()))
+            .collect::<HashMap<_, _>>();
+        globals.extend(
+            destination
+                .global_access_functions()
+                .map(|(name, function)| (name.clone(), function.clone())),
+        );
+        linked_host.set_global_functions(Some(Arc::new(globals)));
+        let pinned = linked_host
+            .resolve_global_function("Deferred")
+            .expect("global callback resolves")
+            .function;
+        let cells = crate::vm::LocalCells::from_local_vars(&HashMap::from([(
+            "Shared".to_string(),
+            Value::Int(5),
+        )]));
+
+        let value = linked_host
+            .call_pinned_with_cells_and_this(
+                &pinned,
+                true,
+                &[],
+                &cells,
+                Value::Object(42),
+            )
+            .expect("pinned callback runs on its LinkedTo host");
+
+        assert_eq!(
+            value,
+            Value::Array(vec![Value::Object(42), Value::Int(11), Value::Int(11)])
+        );
+        assert_eq!(cells.snapshot().get("Shared"), Some(&Value::Int(11)));
     }
 
     #[test]

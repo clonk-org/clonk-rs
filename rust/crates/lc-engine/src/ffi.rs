@@ -927,7 +927,7 @@ impl LcEngineRuntimeObjectStateArray {
             let definition_id = CString::new(object.definition_id.clone()).map_err(|_| {
                 format!("definition id for object {} contains null byte", object.id)
             })?;
-            let action_name = CString::new(object.action.name.clone())
+            let action_name = CString::new(object.action.compiled_name())
                 .map_err(|_| format!("action name for object {} contains null byte", object.id))?;
 
             let mut contents_ptr = ptr::null();
@@ -948,7 +948,7 @@ impl LcEngineRuntimeObjectStateArray {
             buffer.action_names.push(action_name);
 
             // The ABI field is Action.Time (RustEngineBridge.cpp:397,1173).
-            let action_ticks = i32::try_from(object.action.time).unwrap_or_else(|_| i32::MAX);
+            let action_ticks = object.action.time;
 
             let has_container = object.container.is_some();
             let container_id = object.container.map(|id| id.as_u64()).unwrap_or_default();
@@ -1133,11 +1133,7 @@ unsafe fn make_snapshot(
         };
         let mut action = ActionState::new(action_name);
         action.phase = entry.action_phase;
-        if entry.action_ticks >= 0 {
-            action.time = entry.action_ticks as u32;
-        } else {
-            action.ticks = 0;
-        }
+        action.time = entry.action_ticks;
         action.data = entry.action_data;
 
         let direction = Direction::from_raw(entry.direction);
@@ -3404,7 +3400,7 @@ global func Step(state, frame, random)
             alive: true,
             action_name: action.as_ptr(),
             action_phase: 3,
-            action_ticks: 2,
+            action_ticks: -2,
             action_data: 0,
             direction: 13,
             command_direction: 200,
@@ -3469,7 +3465,7 @@ global func Step(state, frame, random)
         // The ABI action_ticks slot carries C4Object Action.Time (the
         // bridge exports obj->Action.Time); the phase-delay counter is
         // not transported.
-        assert_eq!(recorded.action.time, 2);
+        assert_eq!(recorded.action.time, -2);
 
         let effect = &recorded.effects[0];
         assert_eq!(effect.name, "FxFire");

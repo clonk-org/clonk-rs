@@ -149,6 +149,399 @@ pub enum MenuCommandKind {
     DropAll,
 }
 
+#[cfg(test)]
+mod signed_action_direction_regression {
+    use super::*;
+
+    #[test]
+    fn exec_action_set_dir_respects_signed_directions_gate() -> Result<(), EngineError> {
+        for (raw_directions, expected) in [
+            (-2, Direction::Left),
+            (0, Direction::Left),
+            (1, Direction::Left),
+            (2, Direction::Right),
+        ] {
+            let id = format!("D{:03}", raw_directions + 2);
+            let mut definition = Definition::from_script(id.as_str(), "Direction gate", "")?;
+            definition.configure_actions(
+                None,
+                HashMap::from([(
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_directions(raw_directions),
+                )]),
+            );
+            let mut engine = Engine::new();
+            engine.register_definition(definition)?;
+            let object = engine.spawn_object(
+                SpawnConfig::new(id.as_str())
+                    .with_action(ActionState::new("Walk"))
+                    .with_direction(Direction::Left),
+            )?;
+            let index = engine.find_object_index(object).expect("object exists");
+            let definition_id = engine.objects[index].definition_id.clone();
+
+            engine.set_exec_action_direction(index, &definition_id, Direction::Right)?;
+
+            assert_eq!(
+                engine.objects[index].state.direction,
+                expected,
+                "Directions={raw_directions}"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod stale_phase_call_regression {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn install_physical_actions(
+        definition: &mut Definition,
+        actions: Vec<(&str, ActionSpec)>,
+    ) {
+        definition.configure_actions(
+            None,
+            actions
+                .iter()
+                .map(|(name, spec)| ((*name).to_string(), spec.clone()))
+                .collect(),
+        );
+        definition.configure_physical_actions(
+            actions
+                .into_iter()
+                .map(|(name, spec)| (name.to_string(), spec))
+                .collect(),
+        );
+    }
+
+    #[test]
+    fn phase_call_keeps_stale_function_owner_but_uses_changed_def_act_map(
+    ) -> Result<(), EngineError> {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut old_hooks = DebuggerHooks::new();
+        {
+            let calls = Arc::clone(&calls);
+            old_hooks.set_on_call(move |name, _| {
+                if name == "OnPhase" {
+                    calls.lock().unwrap().push(format!("old:{name}"));
+                }
+            });
+        }
+        let mut new_hooks = DebuggerHooks::new();
+        {
+            let calls = Arc::clone(&calls);
+            new_hooks.set_on_call(move |name, _| {
+                if matches!(name, "OnPhase" | "NewZeroStart" | "NewOneStart") {
+                    calls.lock().unwrap().push(format!("new:{name}"));
+                }
+            });
+        }
+
+        let mut old = Definition::from_script(
+            "POLD",
+            "Old phase owner",
+            r#"#strict
+local marker;
+protected func OnPhase()
+{
+    marker = 1;
+    ChangeDef(PNW1);
+    return 1;
+}
+"#,
+        )?;
+        old.set_c4_callback_convention(true);
+        old.set_debugger_hooks(old_hooks);
+        let source = ActionSpec::default()
+            // ChangeDef's mandatory SetAction(ActIdle) resets the live
+            // phase to zero. A zero stale Length proves ExecAction still
+            // performs the old comparison and numeric NextAction afterward.
+            .with_length(0)
+            .with_delay(1)
+            .with_phase_call("OnPhase")
+            .with_next_index(1);
+        install_physical_actions(
+            &mut old,
+            vec![("Source", source), ("OldTarget", ActionSpec::default())],
+        );
+
+        let mut new = Definition::from_script(
+            "PNW1",
+            "New phase target",
+            r#"#strict
+local marker;
+protected func OnPhase() { marker = 2; return 1; }
+protected func NewZeroStart() { marker = marker * 10 + 4; return 1; }
+protected func NewOneStart() { marker = marker * 10 + 3; return 1; }
+"#,
+        )?;
+        new.set_c4_callback_convention(true);
+        new.set_debugger_hooks(new_hooks);
+        install_physical_actions(
+            &mut new,
+            vec![
+                (
+                    "NewZero",
+                    ActionSpec::default().with_start_call("NewZeroStart"),
+                ),
+                (
+                    "NewOne",
+                    ActionSpec::default().with_start_call("NewOneStart"),
+                ),
+            ],
+        );
+
+        let mut engine = Engine::new();
+        engine.register_definition(old)?;
+        engine.register_definition(new)?;
+        let mut action = ActionState::new("Source");
+        action.act_map_index = Some(0);
+        let object = engine.spawn_object(
+            SpawnConfig::new("POLD")
+                .with_action(action)
+                .with_loaded(true),
+        )?;
+
+        engine.tick()?;
+
+        let index = engine.find_object_index(object).expect("object remains");
+        assert_eq!(engine.objects[index].definition_id, "PNW1");
+        assert_eq!(
+            (
+                engine.objects[index].state.action.name.as_str(),
+                engine.objects[index].state.action.act_map_index,
+            ),
+            ("NewOne", Some(1)),
+            "stale numeric NextAction resolves in the changed definition",
+        );
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("marker"),
+            Some(&Value::Int(13)),
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["old:OnPhase", "new:NewOneStart"],
+            "the stale PhaseCall function runs on its old script, then current target callbacks run on the new script",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn removed_phase_receiver_still_runs_phase_end_start_before_stopping(
+    ) -> Result<(), EngineError> {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let calls = Arc::clone(&calls);
+            hooks.set_on_call(move |name, _| {
+                if matches!(name, "OnPhase" | "OnStart" | "OnEnd") {
+                    calls.lock().unwrap().push(name.to_string());
+                }
+            });
+        }
+        let mut definition = Definition::from_script(
+            "PDEL",
+            "Deleted phase receiver",
+            r#"#strict
+protected func OnPhase() { RemoveObject(); return 1; }
+protected func OnStart() { return 1; }
+protected func OnEnd() { return 1; }
+"#,
+        )?;
+        definition.set_c4_callback_convention(true);
+        definition.set_debugger_hooks(hooks);
+        let source = ActionSpec::default()
+            .with_length(0)
+            .with_delay(1)
+            .with_phase_call("OnPhase")
+            .with_end_call("OnEnd")
+            .with_next_index(1);
+        install_physical_actions(
+            &mut definition,
+            vec![
+                ("Source", source),
+                ("Target", ActionSpec::default().with_start_call("OnStart")),
+            ],
+        );
+
+        let mut engine = Engine::new();
+        engine.register_definition(definition)?;
+        let mut action = ActionState::new("Source");
+        action.act_map_index = Some(0);
+        engine.spawn_object(
+            SpawnConfig::new("PDEL")
+                .with_action(action)
+                .with_loaded(true),
+        )?;
+
+        engine.tick()?;
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["OnPhase", "OnStart"],
+            "SetAction starts the target even with Status=0, then suppresses old EndCall",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn script_set_action_coerces_incomplete_objects_to_act_idle_and_skips_start_call(
+    ) -> Result<(), EngineError> {
+        let mut definition = Definition::from_script(
+            "PINC",
+            "Partial action gate",
+            r#"#strict
+local walk_started, old_aborted, aborted_phase, abort_saw_action;
+public func Probe()
+{
+    walk_started = 0;
+    old_aborted = 0;
+    aborted_phase = -1;
+    abort_saw_action = "";
+    return SetAction("Walk");
+}
+protected func WalkStarted() { walk_started++; return 1; }
+protected func OldAborted(phase)
+{
+    old_aborted++;
+    aborted_phase = phase;
+    abort_saw_action = GetAction();
+    return 1;
+}
+"#,
+        )?;
+        definition.set_c4_callback_convention(true);
+        install_physical_actions(
+            &mut definition,
+            vec![
+                (
+                    "Old",
+                    ActionSpec::default().with_abort_call("OldAborted"),
+                ),
+                (
+                    "Walk",
+                    ActionSpec::default().with_start_call("WalkStarted"),
+                ),
+            ],
+        );
+
+        let mut engine = Engine::new();
+        engine.register_definition(definition)?;
+        let mut action = ActionState::new("Old");
+        action.act_map_index = Some(0);
+        action.phase = 7;
+        let object = engine.spawn_object(
+            SpawnConfig::new("PINC")
+                .with_action(action)
+                .with_loaded(true),
+        )?;
+        let index = engine.find_object_index(object).expect("object exists");
+        // Establish a state that can only arise after an already-active
+        // object loses construction. The call below is the seam under test.
+        engine.objects[index].state.construction = FULL_CON / 2;
+
+        assert_eq!(
+            engine.call_object_function(index, "Probe", Vec::new())?,
+            Value::Bool(true),
+            "the requested slot is valid, so SetAction succeeds despite coercion",
+        );
+
+        let object = &engine.objects[index].state;
+        assert_eq!(
+            (object.action.name.as_str(), object.action.act_map_index),
+            ("Idle", None),
+        );
+        assert_eq!(object.local_vars.get("walk_started"), Some(&Value::Nil));
+        assert_eq!(object.local_vars.get("old_aborted"), Some(&Value::Int(1)));
+        assert_eq!(object.local_vars.get("aborted_phase"), Some(&Value::Int(7)));
+        assert_eq!(
+            object.local_vars.get("abort_saw_action"),
+            Some(&Value::String("Idle".into())),
+            "AbortCall runs after Action.Act has become ActIdle",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn natural_phase_end_refreshes_ocf_before_start_and_end_callbacks(
+    ) -> Result<(), EngineError> {
+        let mut definition = Definition::from_script(
+            "POCF",
+            "Natural action OCF refresh",
+            r#"#strict
+local callback_order, start_saw_fight_ready, end_saw_fight_ready;
+protected func TargetStarted()
+{
+    callback_order = callback_order * 10 + 1;
+    if (GetOCF() & OCF_FightReady) start_saw_fight_ready = 1;
+    return 1;
+}
+protected func SourceEnded()
+{
+    callback_order = callback_order * 10 + 2;
+    if (GetOCF() & OCF_FightReady) end_saw_fight_ready = 1;
+    return 1;
+}
+"#,
+        )?;
+        definition.set_c4_callback_convention(true);
+        definition.set_category(CATEGORY_OBJECT | CATEGORY_LIVING);
+        install_physical_actions(
+            &mut definition,
+            vec![
+                (
+                    "Source",
+                    ActionSpec::default()
+                        .with_length(1)
+                        .with_delay(1)
+                        .with_end_call("SourceEnded")
+                        .with_disabled(true)
+                        .with_next_index(1),
+                ),
+                (
+                    "Target",
+                    ActionSpec::default().with_start_call("TargetStarted"),
+                ),
+            ],
+        );
+
+        let mut engine = Engine::new();
+        engine.register_definition(definition)?;
+        let mut action = ActionState::new("Source");
+        action.act_map_index = Some(0);
+        let object = engine.spawn_object(
+            SpawnConfig::new("POCF")
+                .with_action(action)
+                .with_alive(true)
+                .with_loaded(true),
+        )?;
+
+        engine.tick()?;
+
+        let index = engine.find_object_index(object).expect("object remains");
+        let state = &engine.objects[index].state;
+        assert_eq!(
+            (state.action.name.as_str(), state.action.act_map_index),
+            ("Target", Some(1)),
+        );
+        assert_eq!(state.local_vars.get("callback_order"), Some(&Value::Int(12)));
+        assert_eq!(
+            state.local_vars.get("start_saw_fight_ready"),
+            Some(&Value::Int(1)),
+        );
+        assert_eq!(
+            state.local_vars.get("end_saw_fight_ready"),
+            Some(&Value::Int(1)),
+            "SetOCF runs after action selection and before both callbacks",
+        );
+        Ok(())
+    }
+}
+
 impl MenuCommandKind {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -2328,7 +2721,7 @@ impl Default for MovementProfile {
 #[derive(Clone, Copy)]
 #[doc(hidden)]
 pub struct BridgeParameters {
-    #[doc(hidden)] pub duration: u32,
+    #[doc(hidden)] pub duration: i32,
     #[doc(hidden)] pub move_clonk: bool,
     wall: bool,
     material: Option<MaterialId>,
@@ -2339,7 +2732,11 @@ impl BridgeParameters {
     pub fn from_action_data(data: i32) -> Self {
         let raw = data as u32;
         let duration_raw = (raw >> 16) & 0xFFFF;
-        let duration = if duration_raw == 0 { 100 } else { duration_raw };
+        let duration = if duration_raw == 0 {
+            100
+        } else {
+            duration_raw as i32
+        };
         let move_clonk = (raw & 0x100) != 0;
         let wall = (raw & 0x200) != 0;
         let material_byte = (raw & 0xFF) as u8;
@@ -2354,7 +2751,7 @@ impl BridgeParameters {
         }
     }
 
-    fn step_interval(&self, direction: CommandDirection) -> Option<u32> {
+    fn step_interval(&self, direction: CommandDirection) -> Option<i32> {
         if self.wall {
             match direction {
                 CommandDirection::Left | CommandDirection::Right => Some(4),
@@ -3805,7 +4202,9 @@ struct ActionChange {
 
 impl ActionChange {
     fn should_record(&self, current: &ActionState) -> bool {
-        self.requested_name_change || self.previous.name != current.name
+        self.requested_name_change
+            || self.previous.name != current.name
+            || self.previous.act_map_index != current.act_map_index
     }
 }
 
@@ -4027,6 +4426,7 @@ impl ObjectState {
                 // name-change resets or new-library reconciliation.
                 if let Some(name) = &action.name {
                     self.action.name = name.clone();
+                    self.action.act_map_index = None;
                 }
                 if delta.change_def_reset_action_time {
                     self.action.time = 0;
@@ -5018,7 +5418,7 @@ impl ObjectUpdate {
         self
     }
 
-    pub fn with_action_ticks(mut self, ticks: u32) -> Self {
+    pub fn with_action_ticks(mut self, ticks: i32) -> Self {
         let mut update = self.action.unwrap_or_default();
         update.set_ticks(ticks);
         self.action = Some(update);
@@ -5413,7 +5813,7 @@ enum ActionTransitionKind {
 
 #[derive(Debug, Clone)]
 struct ActionTransitionEvent {
-    previous_action: String,
+    previous_action: ActionState,
     kind: ActionTransitionKind,
 }
 
@@ -6522,7 +6922,12 @@ impl Object {
 
     fn snapshot(&self, library: Option<&ActionLibrary>) -> ObjectSnapshot {
         let procedure = library
-            .and_then(|lib| lib.procedure_name_for_action(&self.state.action.name))
+            .and_then(|lib| {
+                lib.procedure_name_for_entry(
+                    &self.state.action.name,
+                    self.state.action.act_map_index,
+                )
+            })
             .map(|name| name.to_string());
         // The INT position is the sim-state x/y (C++ exports object->x/y);
         // it may legitimately differ from fixtoi(fix) after the DoCon
@@ -6838,7 +7243,7 @@ impl Object {
 
     fn record_action_event(&mut self, previous: ActionState, kind: ActionTransitionKind) {
         self.pending_action_events.push_back(ActionTransitionEvent {
-            previous_action: previous.name,
+            previous_action: previous,
             kind,
         });
     }
@@ -7941,6 +8346,37 @@ fn denumerate_object_reference(reference: &mut Option<ObjectId>, object_numbers:
     }
 }
 
+fn denumerate_legacy_enumerated_object_reference(
+    reference: &mut Option<ObjectId>,
+    object_numbers: &HashSet<u64>,
+) {
+    let Some(raw) = reference.map(ObjectId::as_u64) else {
+        return;
+    };
+    // Old saves used Game.Objects.Enumerated and added C4EnumPointer1.
+    // C4EnumeratedObjectPtr recognizes only this inclusive reserved band.
+    let number = if (1_000_000_000..=1_001_000_000).contains(&raw) {
+        raw - 1_000_000_000
+    } else {
+        raw
+    };
+    *reference = object_numbers
+        .contains(&number)
+        .then(|| ObjectId::new(number));
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_enumerated_object_reference_removes_the_compatibility_offset() {
+    let mut reference = Some(ObjectId::new(1_000_000_042));
+    denumerate_legacy_enumerated_object_reference(&mut reference, &HashSet::from([42]));
+    assert_eq!(reference, Some(ObjectId::new(42)));
+
+    let mut missing = Some(ObjectId::new(1_000_000_043));
+    denumerate_legacy_enumerated_object_reference(&mut missing, &HashSet::from([42]));
+    assert_eq!(missing, None);
+}
+
 fn denumerate_effect_value(value: &mut EffectVarValue, object_numbers: &HashSet<u64>) {
     match value {
         EffectVarValue::Object(id) if !object_numbers.contains(id) => {
@@ -8891,13 +9327,23 @@ pub struct DefinitionActionFacet {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct DefinitionActionGraphics {
     pub facet: Option<DefinitionActionFacet>,
-    pub directions: u32,
-    pub flip_dir: Option<u32>,
+    pub directions: i32,
+    pub flip_dir: Option<i32>,
     pub reverse: bool,
     pub facet_base: bool,
     pub facet_top_face: bool,
     pub facet_target_stretch: bool,
-    pub length: Option<u32>,
+    pub length: Option<i32>,
+}
+
+/// Reserved metadata key indicating that an action-graphics map also carries
+/// physical ActMap slots. Legacy/synthetic maps omit it and remain name-only.
+#[doc(hidden)]
+pub const PHYSICAL_ACTION_GRAPHICS_MARKER: &str = "\0lc:actmap:physical";
+
+#[doc(hidden)]
+pub fn physical_action_graphics_key(index: u32) -> String {
+    format!("\0lc:actmap:{index}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9580,16 +10026,36 @@ impl Definition {
 
         if let Some(action_map) = &resource.action_map {
             let mut specs = HashMap::new();
+            let mut physical_actions = Vec::with_capacity(action_map.actions.len());
             let mut visuals = HashMap::new();
-            for (action_name, action_def) in &action_map.actions {
+            let mut reflections = HashMap::new();
+            visuals.insert(
+                PHYSICAL_ACTION_GRAPHICS_MARKER.to_string(),
+                DefinitionActionGraphics::default(),
+            );
+            for (index, (action_name, action_def)) in action_map.actions.iter().enumerate() {
                 let (spec, graphics) = Self::convert_action_definition(action_def);
-                specs.insert(action_name.clone(), spec);
-                visuals.insert(action_name.clone(), graphics);
+                physical_actions.push((action_name.clone(), spec.clone()));
+                // SetActionByName and FnGetActMapVal both scan the physical
+                // ActMap forward, so the first duplicate name wins.
+                specs.entry(action_name.clone()).or_insert(spec);
+                visuals
+                    .entry(action_name.clone())
+                    .or_insert_with(|| graphics.clone());
+                visuals.insert(
+                    physical_action_graphics_key(index.min(u32::MAX as usize) as u32),
+                    graphics,
+                );
+                reflections.entry(action_name.clone()).or_insert_with(|| {
+                    crate::action::C4ActionReflection::from_resource(action_name, action_def)
+                });
             }
             // Real ActMaps carry no default action: C++ objects start
             // ActIdle (C4Object::Init). Only DSL manifests set one.
             let default_action = action_map.default_action.clone();
             definition.configure_actions(default_action.clone(), specs);
+            definition.configure_physical_actions(physical_actions);
+            definition.configure_action_reflections(reflections);
             definition.configure_action_graphics(visuals);
         }
 
@@ -9763,8 +10229,12 @@ impl Definition {
         action: &ResourceActionDefinition,
     ) -> (ActionSpec, DefinitionActionGraphics) {
         let mut spec = ActionSpec::default();
-        if let Some(procedure) = &action.procedure {
-            spec = spec.with_procedure(procedure.clone());
+        if let Some(procedure) = action.procedure.as_deref().and_then(|procedure| {
+            lc_resources::definition::PROCEDURE_NAMES
+                .iter()
+                .find(|candidate| **candidate == procedure)
+        }) {
+            spec = spec.with_procedure(*procedure);
         }
         if let Some(length) = action.length {
             spec = spec.with_length(length);
@@ -9772,6 +10242,7 @@ impl Definition {
         if let Some(next) = &action.next_action {
             spec = spec.with_next(next.clone());
         }
+        spec = spec.with_next_index(action.next_action_index);
         if let Some(delay) = action.delay {
             spec = spec.with_delay(delay);
         }
@@ -9799,6 +10270,15 @@ impl Definition {
         if action.energy_usage != 0 {
             spec = spec.with_energy_usage(action.energy_usage);
         }
+        if let Some(in_liquid_action) = &action.in_liquid_action {
+            spec = spec.with_in_liquid_action(in_liquid_action.clone());
+        }
+        if let Some(directions) = action.directions {
+            spec = spec.with_directions(directions);
+        }
+        if let Some(turn_action) = &action.turn_action {
+            spec = spec.with_turn_action(turn_action.clone());
+        }
         if let Some(dig_free) = action.dig_free {
             spec = spec.with_dig_free(dig_free);
         }
@@ -9807,7 +10287,7 @@ impl Definition {
         }
         let mut graphics = DefinitionActionGraphics::default();
         graphics.length = action.length;
-        graphics.directions = action.directions.unwrap_or(1).max(1);
+        graphics.directions = action.directions.unwrap_or(1);
         graphics.flip_dir = action.flip_dir;
         graphics.reverse = action.reverse;
         graphics.facet_base = action.facet_base;
@@ -9861,6 +10341,17 @@ impl Definition {
         specs: HashMap<String, ActionSpec>,
     ) {
         self.action_library = ActionLibrary::new(default_action, specs);
+    }
+
+    pub(crate) fn configure_physical_actions(&mut self, actions: Vec<(String, ActionSpec)>) {
+        self.action_library.set_physical_actions(actions);
+    }
+
+    pub(crate) fn configure_action_reflections(
+        &mut self,
+        reflections: HashMap<String, action::C4ActionReflection>,
+    ) {
+        self.action_library.set_reflections(reflections);
     }
 
     pub fn configure_action_graphics(
@@ -10048,7 +10539,9 @@ impl Definition {
         // OCF_FightReady: the OCF_Alive BIT, an action without
         // ObjectDisabled, and !Def->NoFight (SetOCF, C4Object.cpp:606-610).
         if ocf & crate::ocf::ALIVE != 0
-            && !self.action_library.disables_object(&state.action.name)
+            && !self
+                .action_library
+                .disables_object_for_entry(&state.action.name, state.action.act_map_index)
             && !self.no_fight
         {
             ocf |= crate::ocf::FIGHT_READY;
@@ -10117,7 +10610,12 @@ impl Definition {
                         .map(|limit| state.contents.len() < limit as usize)
                         .unwrap_or(true);
                     if below_limit
-                        && !self.action_library.disables_object(&state.action.name)
+                        && !self
+                            .action_library
+                            .disables_object_for_entry(
+                                &state.action.name,
+                                state.action.act_map_index,
+                            )
                         && state.no_collect_delay == 0
                     {
                         ocf |= crate::ocf::COLLECTION;
@@ -11004,6 +11502,7 @@ impl Definition {
                     state.draw_transform,
                     state.base_graphics.clone(),
                 )
+                .with_action_index(state.action.act_map_index)
                 .with_shape_vertices(&state.shape_vertices)
                 .with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
@@ -11236,6 +11735,7 @@ impl Definition {
                     state.draw_transform,
                     state.base_graphics.clone(),
                 )
+                .with_action_index(state.action.act_map_index)
                 .with_shape_vertices(&state.shape_vertices)
                 .with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
@@ -11428,6 +11928,7 @@ impl Definition {
                     state.draw_transform,
                     state.base_graphics.clone(),
                 )
+                .with_action_index(state.action.act_map_index)
                 .with_shape_vertices(&state.shape_vertices)
                 .with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
@@ -11564,6 +12065,7 @@ impl Definition {
 
     fn call_action_callback(
         &self,
+        object_definition: &Definition,
         function: &str,
         kind: ActionCallbackKind,
         state: &ObjectState,
@@ -11596,7 +12098,12 @@ impl Definition {
             }
         } else {
             vec![
-                build_state_value(&self.id, object_id, state, &self.action_library),
+                build_state_value(
+                    &object_definition.id,
+                    object_id,
+                    state,
+                    &object_definition.action_library,
+                ),
                 Value::String(action_name.to_string()),
             ]
         };
@@ -11623,7 +12130,7 @@ impl Definition {
                     state.action.time,
                     state.action.data,
                     state.action.phase,
-                    self.action_library.clone(),
+                    object_definition.action_library.clone(),
                     state.direction,
                     state.command_direction,
                     0,
@@ -11631,13 +12138,14 @@ impl Definition {
                     state.action.target2,
                     &state.vertices,
                     state.category,
-                    self.ocf_base,
-                    self.crew_member,
+                    object_definition.ocf_base,
+                    object_definition.crew_member,
                     state.draw_transform,
                     state.base_graphics.clone(),
                 )
+                .with_action_index(state.action.act_map_index)
                 .with_shape_vertices(&state.shape_vertices)
-                .with_definition_id(self.id.as_str())
+                .with_definition_id(object_definition.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
@@ -11648,9 +12156,9 @@ impl Definition {
                     state.info_physical,
                     state.temporary_physical,
                     state.physical_changes.clone(),
-                    *self.physical(),
+                    *object_definition.physical(),
                 )
-                .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_walk_rotation(object_definition.walk_rotation_seed(state))
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_script_rotation_velocity(state.script_rotation_velocity)
@@ -11756,6 +12264,7 @@ impl Definition {
             state.draw_transform,
             state.base_graphics.clone(),
         )
+        .with_action_index(state.action.act_map_index)
         .with_shape_vertices(&state.shape_vertices)
         .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
@@ -11891,6 +12400,7 @@ impl Definition {
             state.draw_transform,
             state.base_graphics.clone(),
         )
+        .with_action_index(state.action.act_map_index)
         .with_shape_vertices(&state.shape_vertices)
         .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
@@ -12357,6 +12867,7 @@ impl Definition {
             state.draw_transform,
             state.base_graphics.clone(),
         )
+        .with_action_index(state.action.act_map_index)
         .with_shape_vertices(&state.shape_vertices)
         .with_definition_id(self.id.as_str())
         .with_graphics_overlays(state.graphics_overlays.clone())
@@ -12641,6 +13152,7 @@ impl Definition {
             state.draw_transform,
             state.base_graphics.clone(),
         )
+        .with_action_index(state.action.act_map_index)
         .with_shape_vertices(&state.shape_vertices)
         .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
@@ -12880,11 +13392,6 @@ impl Definition {
         )
     }
 
-    /// Whether the definition script declares the `Fx<Name><Event>` callback.
-    fn has_effect_callback(&self, effect_name: &str, event: &str) -> bool {
-        self.script.has_effect_callback(effect_name, event)
-    }
-
     /// `Fx<Name>Damage` (C4Effect.cpp:312-322): the effect is asked to
     /// modify a damage/energy change before it applies.
     #[allow(clippy::too_many_arguments)]
@@ -13104,14 +13611,15 @@ impl Definition {
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
         let next_object_id = world.next_object_id();
-        if !self.script.has_effect_callback(&effect.name, event) {
+        let callback_name = format!("Fx{}{}", effect.name, event);
+        let Some(callback) = resolve_effect_script_callback(effect, &callback_name, &world) else {
             return Ok((
                 EffectContextOutcome::empty(next_object_id, audio.clone()),
                 audio,
                 rng,
                 None,
             ));
-        }
+        };
         // Fx callbacks resolve CODE on the effect command target/id, but
         // pForObj remains the affected object's real C4Object. Its ActMap,
         // physicals, OCF metadata and definition id therefore come from the
@@ -13155,21 +13663,26 @@ impl Definition {
         // Effect callbacks execute on the effect's command target
         // (pFn->Exec(pCommandTarget, ...), C4Effect.cpp:129,345,392,456):
         // `this()` is the command target and its object locals are live.
-        // Foreign command targets get `this()` only — their locals are not
-        // modeled in this dispatch (the nested-call divergence noted in
-        // PORT_STATUS applies).
-        let context_object = effect
-            .command_target
-            .map(|number| ObjectId::new(number as u64));
+        // The affected carrier and command target may be different objects,
+        // so copy locals from the command target's world snapshot unless it
+        // is the carrier whose threaded event snapshot is newer.
+        let context_object = callback.command_object;
         let context_is_self =
             carrier.is_some_and(|(_, object_id)| context_object == Some(object_id));
         let context_this = context_object
             .map(compat::object_reference_value)
             .unwrap_or(Value::Nil);
-        let context_locals = carrier
-            .filter(|(_, object_id)| context_object == Some(*object_id))
-            .map(|(state, _)| state.local_vars.clone())
-            .unwrap_or_default();
+        let context_locals = if context_is_self {
+            carrier
+                .map(|(state, _)| state.local_vars.clone())
+                .unwrap_or_default()
+        } else {
+            context_object
+                .and_then(|object_id| world.get(object_id))
+                .and_then(|object| object.full_state())
+                .map(|state| state.local_vars.clone())
+                .unwrap_or_default()
+        };
         // The callback's LIVE local cells: registered as the object's
         // session so nested calls / cross-object references back onto it
         // share the storage (C++ mutates the one live C4Object).
@@ -13179,11 +13692,7 @@ impl Definition {
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let audio_guard = enter_audio_context(audio);
-        let callback_definition_context = if effect.command_target.is_none() {
-            effect.command_id.clone()
-        } else {
-            None
-        };
+        let callback_definition_context = callback.definition_context.clone();
         let (result, mut commands) = compat::with_effect_context_with_state_and_definition(
             carrier.map(|(state, object_id)| {
                 let carrier_walk_rotation = carrier_metadata
@@ -13237,6 +13746,7 @@ impl Definition {
                     state.draw_transform,
                     state.base_graphics.clone(),
                 )
+                .with_action_index(state.action.act_map_index)
                 .with_shape_vertices(&state.shape_vertices)
                 .with_definition_id(carrier_definition_id.as_deref().unwrap_or(self.id.as_str()))
                 .with_alive(state.alive)
@@ -13270,9 +13780,29 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
-                if let Some(session_id) = context_object.filter(|_| context_is_self) {
+                if let Some(session_id) = context_object {
                     compat::register_session_local_cells(session_id, context_cells.clone());
-                    return self.script.call_effect_callback_in_context_with_cells(
+                }
+                if callback.engine_global_entry {
+                    if context_object.is_some() {
+                        return callback
+                            .script
+                            .call_pinned_with_cells_and_this(
+                                &callback.resolution.function,
+                                true,
+                                &args,
+                                &context_cells,
+                                context_this,
+                            )
+                            .map(|value| Some((value, context_cells.snapshot())));
+                    }
+                    return callback
+                        .script
+                        .call_pinned_with_ref_args(&callback.resolution.function, true, &args)
+                        .map(|(value, _)| Some((value, HashMap::new())));
+                }
+                if context_object.is_some() {
+                    return callback.script.call_effect_callback_in_context_with_cells(
                         &effect.name,
                         event,
                         &args,
@@ -13280,7 +13810,7 @@ impl Definition {
                         context_this,
                     );
                 }
-                self.script.call_effect_callback_in_context(
+                callback.script.call_effect_callback_in_context(
                     &effect.name,
                     event,
                     &args,
@@ -13294,30 +13824,30 @@ impl Definition {
         let environment_delta = env_guard.finish();
         let audio_state = audio_guard.finish();
 
-        result
-            .map(|callback_result| {
-                if !environment_delta.is_empty() {
-                    commands.environment = Some(environment_delta);
-                }
-                if !physics_delta.is_empty() {
-                    commands.physics = Some(physics_delta);
-                }
-                let callback_result = callback_result.map(|(value, updated_locals)| {
-                    if context_is_self {
-                        commands.context_locals = Some(updated_locals);
-                    }
-                    value
-                });
-                (commands, audio_state, rng, callback_result)
-            })
-            .map_err(|source| {
-                script_execution_error(
-                    format!("{}::{}::{}", self.id, effect.name, function_label),
-                    "EffectCallback".to_string(),
-                    source,
-                    None,
-                )
-            })
+        let callback_result = recover_effect_callback_error(
+            result,
+            &context_cells,
+            format!("{}::{}::{}", self.id, effect.name, function_label),
+        )?;
+        if !environment_delta.is_empty() {
+            commands.environment = Some(environment_delta);
+        }
+        if !physics_delta.is_empty() {
+            commands.physics = Some(physics_delta);
+        }
+        let callback_result = callback_result.map(|(value, updated_locals)| {
+            if context_is_self {
+                commands.context_locals = Some(updated_locals);
+            } else if let Some(context_object) = context_object {
+                append_effect_command_target_locals(
+                    &mut commands,
+                    context_object,
+                    updated_locals,
+                );
+            }
+            value
+        });
+        Ok((commands, audio_state, rng, callback_result))
     }
 }
 
@@ -20985,7 +21515,10 @@ impl Engine {
                     .and_then(|definition| {
                         definition
                             .action_library()
-                            .procedure_name_for_action(&object.state.action.name)
+                            .procedure_name_for_entry(
+                                &object.state.action.name,
+                                object.state.action.act_map_index,
+                            )
                     })
                     .map(|name| name.to_string());
                 // World objects expose the cached mask like C++ obj->OCF
@@ -21014,6 +21547,7 @@ impl Engine {
                     object.state.container,
                     object.state.draw_transform,
                 )
+                .with_action_index(object.state.action.act_map_index)
                 .with_unsorted(object.unsorted)
                 .with_fixed_motion(object.fixed_position, object.fixed_velocity)
                 .with_fixed_rotation(object.fixed_rotation)
@@ -24177,6 +24711,14 @@ impl Engine {
             .and_then(|definition| definition.sprite_image_variant(graphics_name).cloned())
     }
 
+    /// C4Def graphics scale (`DefCore Scale / 100.0`) used to map logical
+    /// facet coordinates into the selected definition bitmap.
+    pub fn definition_graphics_scale(&self, definition_id: &str) -> f32 {
+        self.definitions
+            .get(definition_id)
+            .map_or(1.0, Definition::graphics_scale)
+    }
+
     pub fn definition_sprite_variant_names(&self, definition_id: &str) -> Vec<String> {
         self.definitions
             .get(definition_id)
@@ -25065,7 +25607,10 @@ impl Engine {
                 (
                     definition
                         .action_library()
-                        .procedure_for_action(&object.state.action.name),
+                        .procedure_for_entry(
+                            &object.state.action.name,
+                            object.state.action.act_map_index,
+                        ),
                     definition.line_connect(),
                     definition.is_collectible(),
                     definition.move_to_range(),
@@ -25074,7 +25619,7 @@ impl Engine {
                     definition.no_push_enter(),
                     definition
                         .action_library()
-                        .is_idle_action(&object.state.action.name),
+                        .is_idle_state(&object.state.action),
                 )
             })
             .unwrap_or((
@@ -25422,7 +25967,10 @@ impl Engine {
                 .map(|definition| {
                     let procedure = definition
                         .action_library()
-                        .procedure_for_action(&object.state.action.name);
+                        .procedure_for_entry(
+                            &object.state.action.name,
+                            object.state.action.act_map_index,
+                        );
                     (
                         procedure,
                         definition.line_connect(),
@@ -25433,7 +25981,7 @@ impl Engine {
                         definition.no_push_enter(),
                         definition
                             .action_library()
-                            .is_idle_action(&object.state.action.name),
+                            .is_idle_state(&object.state.action),
                     )
                 })
                 .unwrap_or((
@@ -25962,8 +26510,6 @@ impl Engine {
             // live Def/ActMap used by ExecAction, movement, effects and Timer
             // in this same frame — including a swap from queue effects or
             // ControlCommandFinished rather than the direct queued delta.
-            action_library = self.object_definition_context(idx)?.1;
-
             if !queued_spawns.is_empty() {
                 spawn_requests.extend(queued_spawns);
             }
@@ -25981,6 +26527,9 @@ impl Engine {
             // may replace the live action through TurnAction, but C++ keeps
             // this entry for phase advance through the end of ExecAction.
             let exec_action_source = self.objects[idx].state.action.name.clone();
+            let exec_action_index = self.objects[idx].state.action.act_map_index;
+            let (exec_action_definition_id, exec_action_library) =
+                self.object_definition_context(idx)?;
             let exec_action_returned_early = self.apply_physics_at_index(idx)?;
             if self.objects[idx].destroyed {
                 continue;
@@ -25994,10 +26543,10 @@ impl Engine {
             // walk phase one step behind on every acceleration frame).
             // An early `return` inside ExecAction (the free-fall swim
             // exit) skips it entirely; movement below still runs.
+            let mut allow_deleted_phase_end_start = false;
             if !exec_action_returned_early {
                 let physical_for_advance = self.object_physical(idx);
-                let pre_phase_action_state = self.objects[idx].state.action.clone();
-                let advance_outcome = {
+                let mut advance_outcome = {
                     let object = &mut self.objects[idx];
                     // iPhaseAdvance (C4Object.cpp:4696): WALK fixtoi(|xdir|*10)
                     // (:4787-4789), SCALE fixtoi(|ydir|*14) (:4830-4832),
@@ -26009,7 +26558,9 @@ impl Engine {
                     // velocity (:5010-ish "iPhaseAdvance = fixtoi(lLimit*10)"),
                     // DIG fixtoi(diglimit*40) (:4894-4895); everything else 1.
                     let phase_advance =
-                        match action_library.procedure_for_action(&exec_action_source) {
+                        match exec_action_library
+                            .procedure_for_entry(&exec_action_source, exec_action_index)
+                        {
                         ActionProcedure::Walk | ActionProcedure::Hang => {
                             math::fixtoi(object.fixed_velocity.x.abs() * 10)
                         }
@@ -26033,50 +26584,28 @@ impl Engine {
                         _ => 1,
                     };
                     let increment_live_time = object.state.action.name == exec_action_source
+                        && object.state.action.act_map_index == exec_action_index
                         && !matches!(
-                            action_library.procedure_for_action(&exec_action_source),
+                            exec_action_library
+                                .procedure_for_entry(&exec_action_source, exec_action_index),
                             ActionProcedure::Bridge
                                 | ActionProcedure::Build
                                 | ActionProcedure::Connect
                                 | ActionProcedure::Lift
                         );
-                    action_library.advance_state_from_action_by(
+                    exec_action_library.advance_state_from_entry_by(
                         &mut object.state.action,
                         &exec_action_source,
+                        exec_action_index,
                         phase_advance,
                         increment_live_time,
                     )
                 };
 
-                // The phase-end transition runs through SetAction
-                // (C4Object.cpp:5462), which ALWAYS resyncs the fixed
-                // coords to the integer position (:4144) — the tumbling
-                // snake's fix_y snaps back every 17-phase cycle. Hold
-                // clamps without a transition (wrapped=false).
-                if advance_outcome.wrapped {
-                    let object = &mut self.objects[idx];
-                    object.fixed_position =
-                        FixedVec2::from_ints(object.state.position.x, object.state.position.y);
-                }
-                // A same-name NextAction chain still owes its StartCall+EndCall
-                // pair (SetAction with SAC_StartCall|SAC_EndCall,
-                // C4Object.cpp:5462); name-changing wraps are recorded by the
-                // block below.
-                if advance_outcome.wrapped
-                    && self.objects[idx].state.action.name == pre_phase_action_state.name
-                {
-                    self.objects[idx].record_action_event(
-                        pre_phase_action_state.clone(),
-                        ActionTransitionKind::Natural,
-                    );
-                }
-                if self.objects[idx].state.action.name != pre_phase_action_state.name {
-                    self.objects[idx]
-                        .record_action_event(pre_phase_action_state, ActionTransitionKind::Natural);
-                }
-
-                if let Some(event) = advance_outcome.phase_event {
-                    if let Some(function_name) = action_library.phase_call_for_action(&event.action)
+                if let Some(event) = advance_outcome.phase_event.take() {
+                    if let Some(function_name) = exec_action_library
+                        .spec_for_entry(&event.action, event.act_map_index)
+                        .and_then(|spec| spec.phase_call.as_deref())
                     {
                         // C++ runs the PhaseCall AFTER `Phase += Step` but
                         // BEFORE the length-wrap SetAction
@@ -26086,21 +26615,70 @@ impl Engine {
                         // rest of the state is live.
                         let mut state_snapshot = self.objects[idx].script_state_snapshot();
                         state_snapshot.action.name = event.live_action;
+                        state_snapshot.action.act_map_index = event.live_act_map_index;
                         state_snapshot.action.phase = event.phase;
                         self.invoke_action_callback(
                             idx,
                             ActionCallbackKind::Phase,
                             &event.action,
+                            event.act_map_index,
                             Some(function_name),
                             Some(state_snapshot),
                             None,
+                            Some(&exec_action_definition_id),
                         )?;
-                        if self.objects[idx].destroyed
-                            || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
-                        {
-                            continue;
-                        }
                     }
+                }
+
+                // Only after PhaseCall returns does C++ compare the LIVE
+                // phase against the stale pAction Length and call ordinary
+                // SetAction(NextAction). Callback-side SetPhase/SetAction can
+                // therefore suppress or alter this transition.
+                let transition_previous_state = self.objects[idx].state.action.clone();
+                if let Some(phase_end) = advance_outcome.phase_end.take() {
+                    let (current_definition_id, current_action_library) =
+                        self.object_definition_context(idx)?;
+                    // PhaseCall is synchronous and may have changed both
+                    // Con and Def. The ensuing SetAction(NextAction) reads
+                    // that LIVE pair before applying the incomplete-object
+                    // ActIdle coercion (C4Object.cpp:4127-4130,5480-5485).
+                    let active_action_allowed = self.objects[idx].state.construction >= FULL_CON
+                        || self
+                            .definitions
+                            .get(&current_definition_id)
+                            .is_some_and(Definition::incomplete_activity);
+                    advance_outcome.wrapped =
+                        exec_action_library.finish_phase_end_against_with_activity(
+                            &mut self.objects[idx].state.action,
+                            &phase_end,
+                            &current_action_library,
+                            active_action_allowed,
+                        );
+                }
+
+                // A successful SetAction always resyncs fixed coords; Hold
+                // and NoOtherAction rejection leave them untouched.
+                if advance_outcome.wrapped {
+                    {
+                        let object = &mut self.objects[idx];
+                        object.fixed_position =
+                            FixedVec2::from_ints(object.state.position.x, object.state.position.y);
+                        object.record_action_event(
+                            transition_previous_state,
+                            ActionTransitionKind::Natural,
+                        );
+                        // A PhaseCall may have assigned removal already. C++
+                        // nevertheless executes the stale pAction phase-end
+                        // SetAction, including its new action's StartCall; the
+                        // callback dispatcher notices Status=0 only afterward
+                        // and suppresses the remaining EndCall.
+                        allow_deleted_phase_end_start = object.destroyed
+                            || matches!(object.state.status, ObjectStatus::Deleted);
+                    }
+                    // C4Object::SetAction refreshes OCF after selecting the
+                    // actual (possibly incomplete-coerced) action and before
+                    // StartCall/EndCall (C4Object.cpp:4165-4183).
+                    self.refresh_object_ocf(idx);
                 }
             }
 
@@ -26113,7 +26691,11 @@ impl Engine {
             // the snap eat the sub-pixel remainder DoMovement just built.
             // Transitions recorded during movement/effects still drain at
             // the post-movement call below.
-            self.trigger_action_callbacks(idx, Some(previous_action_name.clone()))?;
+            self.trigger_action_callbacks_impl(
+                idx,
+                Some(previous_action_name.clone()),
+                allow_deleted_phase_end_start,
+            )?;
             if self.objects[idx].destroyed {
                 continue;
             }
@@ -26534,7 +27116,10 @@ impl Engine {
                 let mut applied = object.apply_effect_commands(&effects);
                 effect_events.append(&mut applied);
                 if !matches!(
-                    action_library.procedure_for_action(&object.state.action.name),
+                    action_library.procedure_for_entry(
+                        &object.state.action.name,
+                        object.state.action.act_map_index,
+                    ),
                     ActionProcedure::Flight
                 ) {
                     object.clamp_velocity(&self.physics);
@@ -26729,7 +27314,10 @@ impl Engine {
                     (
                         definition
                             .action_library()
-                            .procedure_for_action(&self.objects[idx].state.action.name),
+                            .procedure_for_entry(
+                                &self.objects[idx].state.action.name,
+                                self.objects[idx].state.action.act_map_index,
+                            ),
                         definition.line_connect(),
                         definition.is_collectible(),
                         definition.move_to_range(),
@@ -26738,18 +27326,21 @@ impl Engine {
                         definition.no_push_enter(),
                         definition
                             .action_library()
-                            .is_idle_action(&self.objects[idx].state.action.name),
+                            .is_idle_state(&self.objects[idx].state.action),
                     )
                 })
                 .unwrap_or((
-                    action_library.procedure_for_action(&self.objects[idx].state.action.name),
+                    action_library.procedure_for_entry(
+                        &self.objects[idx].state.action.name,
+                        self.objects[idx].state.action.act_map_index,
+                    ),
                     OCF_NORMAL,
                     false,
                     0,
                     0,
                     0,
                     0,
-                    action_library.is_idle_action(&self.objects[idx].state.action.name),
+                    action_library.is_idle_state(&self.objects[idx].state.action),
                 ));
             // ExecuteCommand reads the CACHED obj->OCF (refreshed at this
             // object's Execute-start, C4Object.cpp:1058).
@@ -27158,7 +27749,9 @@ impl Engine {
                         FixedVec2::from_ints(object.state.position.x, object.state.position.y);
                 }
                 if matches!(result, ActionUpdateResult::Applied)
-                    && (requested_name_change || object.state.action.name != previous_action.name)
+                    && (requested_name_change
+                        || object.state.action.name != previous_action.name
+                        || object.state.action.act_map_index != previous_action.act_map_index)
                     && !action.callbacks_dispatched
                 {
                     object.record_action_event(previous_action, ActionTransitionKind::Forced);
@@ -27386,7 +27979,16 @@ impl Engine {
         index: usize,
         previous_action: Option<String>,
     ) -> Result<(), EngineError> {
-        if self.objects[index].destroyed {
+        self.trigger_action_callbacks_impl(index, previous_action, false)
+    }
+
+    fn trigger_action_callbacks_impl(
+        &mut self,
+        index: usize,
+        previous_action: Option<String>,
+        allow_deleted_initial_start: bool,
+    ) -> Result<(), EngineError> {
+        if self.objects[index].destroyed && !allow_deleted_initial_start {
             return Ok(());
         }
 
@@ -27406,18 +28008,23 @@ impl Engine {
                 self.objects[index].pending_action_events.clear();
                 break;
             }
-            let current_action = self.objects[index].state.action.name.clone();
+            let current_action = self.objects[index].state.action.clone();
+            let callback_definition = self.objects[index].definition_id.clone();
             self.invoke_action_callback(
                 index,
                 ActionCallbackKind::Start,
-                &current_action,
+                &current_action.name,
+                current_action.act_map_index,
+                None,
                 None,
                 None,
                 None,
             )?;
             if self.objects[index].destroyed
                 || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
+                || self.objects[index].definition_id != callback_definition
             {
+                self.objects[index].pending_action_events.clear();
                 return Ok(());
             }
 
@@ -27428,14 +28035,19 @@ impl Engine {
             self.invoke_action_callback(
                 index,
                 callback_kind,
-                &event.previous_action,
+                &event.previous_action.name,
+                event.previous_action.act_map_index,
                 None,
                 None,
+                matches!(event.kind, ActionTransitionKind::Forced)
+                    .then_some(event.previous_action.phase),
                 None,
             )?;
             if self.objects[index].destroyed
                 || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
+                || self.objects[index].definition_id != callback_definition
             {
+                self.objects[index].pending_action_events.clear();
                 return Ok(());
             }
 
@@ -27443,11 +28055,13 @@ impl Engine {
         }
 
         if needs_start {
-            let current_action = self.objects[index].state.action.name.clone();
+            let current_action = self.objects[index].state.action.clone();
             self.invoke_action_callback(
                 index,
                 ActionCallbackKind::Start,
-                &current_action,
+                &current_action.name,
+                current_action.act_map_index,
+                None,
                 None,
                 None,
                 None,
@@ -27462,28 +28076,35 @@ impl Engine {
         index: usize,
         kind: ActionCallbackKind,
         action_name: &str,
+        action_index: Option<u32>,
         function_override: Option<&str>,
         state_override: Option<ObjectState>,
         abort_phase: Option<i32>,
+        callback_definition_override: Option<&str>,
     ) -> Result<(), EngineError> {
         let definition_id = self.objects[index].definition_id.clone();
-        let action_library = {
-            let definition = self
-                .definitions
-                .get(&definition_id)
-                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-            let definitions_ref = &self.definitions;
-            definition.action_library().clone()
-        };
+        let callback_definition_id = callback_definition_override.unwrap_or(&definition_id);
+        let object_definition = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let action_library = object_definition.action_library().clone();
+        let callback_definition = self
+            .definitions
+            .get(callback_definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(callback_definition_id.to_string()))?;
 
         let function = match function_override {
             Some(name) => Some(name),
-            None => match kind {
-                ActionCallbackKind::Start => action_library.start_call_for_action(action_name),
-                ActionCallbackKind::End => action_library.end_call_for_action(action_name),
-                ActionCallbackKind::Phase => action_library.phase_call_for_action(action_name),
-                ActionCallbackKind::Abort => action_library.abort_call_for_action(action_name),
-            },
+            None => callback_definition
+                .action_library()
+                .spec_for_entry(action_name, action_index)
+                .and_then(|spec| match kind {
+                    ActionCallbackKind::Start => spec.start_call.as_deref(),
+                    ActionCallbackKind::End => spec.end_call.as_deref(),
+                    ActionCallbackKind::Phase => spec.phase_call.as_deref(),
+                    ActionCallbackKind::Abort => spec.abort_call.as_deref(),
+                }),
         };
 
         let Some(function) = function else {
@@ -27491,7 +28112,8 @@ impl Engine {
         };
 
         tracing::debug!(
-            definition = %definition_id,
+            definition = %callback_definition_id,
+            object_definition = %definition_id,
             function,
             ?kind,
             action = action_name,
@@ -27503,15 +28125,12 @@ impl Engine {
             Some(state) => state,
             None => self.objects[index].script_state_snapshot(),
         };
-        let definition = self
-            .definitions
-            .get(&definition_id)
-            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
         let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
-        let callback = definition.call_action_callback(
+        let callback = callback_definition.call_action_callback(
+            object_definition,
             function,
             kind,
             &state_snapshot,
@@ -27943,7 +28562,10 @@ impl Engine {
 
             if clamp_velocity
                 && !matches!(
-                    action_library.procedure_for_action(&object.state.action.name),
+                    action_library.procedure_for_entry(
+                        &object.state.action.name,
+                        object.state.action.act_map_index,
+                    ),
                     ActionProcedure::Flight
                 )
             {
@@ -30025,14 +30647,10 @@ impl Engine {
                 if event.effect.priority != 1
                     && !temp_wrapped_started.contains(&event.effect.number)
                 {
-                    let has_start = resolve_effect_dispatch_definition(
-                        &event.effect,
-                        &world,
-                        definitions,
-                        Some((object_id, object.definition_id.as_str())),
-                        definitions.get(&object.definition_id).unwrap_or(definition),
-                    )
-                    .has_effect_callback(&event.effect.name, "Start");
+                    let callback_name = format!("Fx{}Start", event.effect.name);
+                    let has_start =
+                        resolve_effect_script_callback(&event.effect, &callback_name, &world)
+                            .is_some();
                     if has_start {
                         let uppers = upper_effects_of(&object.state.effects, &event.effect);
                         if !uppers.is_empty() {
@@ -30182,7 +30800,8 @@ impl Engine {
             // C4Effect.cpp:563-565).
             if event.effect.name == C4FX_FIRE {
                 let engine_native = |callback: &str| -> bool {
-                    !dispatch_definition.has_effect_callback(C4FX_FIRE, callback)
+                    let callback_name = format!("Fx{C4FX_FIRE}{callback}");
+                    resolve_effect_script_callback(&event.effect, &callback_name, &world).is_none()
                 };
                 match event.kind {
                     EffectEventKind::Stopped(_) | EffectEventKind::TempRemoved
@@ -30251,13 +30870,7 @@ impl Engine {
                         // mark dead after time elapsed" — the else arm at
                         // :358-360; the intro's Divinity markers die on
                         // their first exec in C++ as well).
-                        timer_kill = if dispatch_definition
-                            .has_effect_callback(&event.effect.name, "Timer")
-                        {
-                            matches!(timer_result, Some(Value::Int(-1)))
-                        } else {
-                            true
-                        };
+                        timer_kill = matches!(timer_result, None | Some(Value::Int(-1)));
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::Stopped(reason) => dispatch_definition
@@ -30497,12 +31110,13 @@ impl Engine {
             }
             if !event_other_objects.is_empty() {
                 for nested in &event_other_objects {
-                    if let Some(new_definition) = nested
-                        .update
-                        .as_ref()
-                        .and_then(|update| update.change_def.as_deref())
-                    {
-                        world.preview_object_change_def(nested.object_id, new_definition);
+                    if let Some(update) = nested.update.as_ref() {
+                        if let Some(local_vars) = update.local_vars.as_ref() {
+                            world.preview_object_local_vars(nested.object_id, local_vars);
+                        }
+                        if let Some(new_definition) = update.change_def.as_deref() {
+                            world.preview_object_change_def(nested.object_id, new_definition);
+                        }
                     }
                 }
                 pending_other_objects.extend(event_other_objects);
@@ -30531,6 +31145,13 @@ impl Engine {
             }
 
             if let Some(update) = object_update {
+                if let Some(new_definition) = update.change_def.as_deref() {
+                    // Later callbacks in this same deferred batch must see
+                    // the carrier's new live definition, just as
+                    // C4Effect::OnObjectChangedDef immediately reassigns
+                    // every callback pointer.
+                    world.preview_object_change_def(object_id, new_definition);
+                }
                 solid_mask_changed |= update.change_def.is_some()
                     || update.solid_mask_override.is_some()
                     || update.base_graphics.is_some()
@@ -32288,6 +32909,7 @@ impl Engine {
             object.refresh_velocity_from_fixed();
         }
         let action_name = self.objects[idx].state.action.name.clone();
+        let action_index = self.objects[idx].state.action.act_map_index;
         self.apply_dig_procedure(idx, definition_id);
         // DoMovement snapshots post-action dirs for Hit* arguments but gates
         // the callbacks with the already-cached OCF field; command/action
@@ -32311,10 +32933,10 @@ impl Engine {
                     definition.contact_function_calls(),
                     definition.border_bound(),
                     definition.rotateable(),
-                    action_library.attach_for_action(&action_name),
+                    action_library.attach_for_entry(&action_name, action_index),
                     definition
                         .action_library()
-                        .procedure_for_action(&action_name),
+                        .procedure_for_entry(&action_name, action_index),
                 )
             })
             .unwrap_or_else(|| {
@@ -32323,8 +32945,8 @@ impl Engine {
                     false,
                     0,
                     0,
-                    action_library.attach_for_action(&action_name),
-                    action_library.procedure_for_action(&action_name),
+                    action_library.attach_for_entry(&action_name, action_index),
+                    action_library.procedure_for_entry(&action_name, action_index),
                 )
             });
         let rotation_base_vertices = self.objects[idx].unrotated_shape_vertices();
@@ -32802,13 +33424,13 @@ impl Engine {
             .definitions
             .get(&self.objects[idx].definition_id)
             .map(|definition| {
-                let action = &self.objects[idx].state.action.name;
+                let action = &self.objects[idx].state.action;
                 let library = definition.action_library();
                 (
-                    library.is_idle_action(action),
+                    library.is_idle_state(action),
                     definition.incomplete_activity(),
-                    library.energy_usage_for_action(action),
-                    library.procedure_for_action(action),
+                    library.energy_usage_for_entry(&action.name, action.act_map_index),
+                    library.procedure_for_entry(&action.name, action.act_map_index),
                 )
             })
             .unwrap_or((true, false, 0, ActionProcedure::Undefined));
@@ -32859,7 +33481,7 @@ impl Engine {
                 .state
                 .action
                 .time
-                .saturating_add(1);
+                .wrapping_add(1);
         }
         // InLiquidAction check (C4Object.cpp:4749-4753): an InLiquid
         // object whose action declares one switches THROUGH
@@ -32872,7 +33494,10 @@ impl Engine {
                 .and_then(|definition| {
                     definition
                         .action_library()
-                        .in_liquid_action_for(&self.objects[idx].state.action.name)
+                        .in_liquid_action_for_entry(
+                            &self.objects[idx].state.action.name,
+                            self.objects[idx].state.action.act_map_index,
+                        )
                         .map(str::to_string)
                 });
             if let Some(target) = switch {
@@ -32902,17 +33527,26 @@ impl Engine {
             if let Some(definition) = self.definitions.get(&definition_id) {
                 let object = &self.objects[idx];
                 let library = definition.action_library();
-                let procedure = library.procedure_for_action(&object.state.action.name);
+                let procedure = library.procedure_for_entry(
+                    &object.state.action.name,
+                    object.state.action.act_map_index,
+                );
                 let gravity = procedure.gravity_component_fixed(gravity);
-                let is_idle = library.is_idle_action(&object.state.action.name);
-                let action_attach = library.attach_for_action(&object.state.action.name);
+                let is_idle = library.is_idle_state(&object.state.action);
+                let action_attach = library.attach_for_entry(
+                    &object.state.action.name,
+                    object.state.action.act_map_index,
+                );
                 (
                     procedure,
                     definition.movement_profile(),
                     gravity,
                     is_idle,
                     action_attach,
-                    library.disables_object(&object.state.action.name),
+                    library.disables_object_for_entry(
+                        &object.state.action.name,
+                        object.state.action.act_map_index,
+                    ),
                 )
             } else {
                 let procedure = ActionProcedure::default();
@@ -33007,7 +33641,7 @@ impl Engine {
                 .state
                 .action
                 .time
-                .saturating_add(1);
+                .wrapping_add(1);
             if !self.apply_bridge_procedure(idx, command_direction, &definition_id)? {
                 // `if (!DoBridge(this)) return;` skips the phase tail
                 // (C4Object.cpp:4998-4999).
@@ -33021,7 +33655,7 @@ impl Engine {
             // The external phase tail still advances Phase/PhaseDelay but
             // must not increment Time a second time.
             self.objects[idx].state.action.time =
-                self.objects[idx].state.action.time.saturating_add(1);
+                self.objects[idx].state.action.time.wrapping_add(1);
             if !self.apply_build_procedure(idx)? {
                 return Ok(true);
             }
@@ -33087,7 +33721,7 @@ impl Engine {
                 .state
                 .action
                 .time
-                .saturating_add(1);
+                .wrapping_add(1);
             let lifter_id = self.objects[idx].id;
             if !self.apply_lift_to_target(idx, command_direction, action_target)? {
                 // C++ uses ordinary SetAction(ActIdle), including its
@@ -33728,10 +34362,11 @@ impl Engine {
     }
 
     fn apply_dig_procedure(&mut self, idx: usize, definition_id: &DefinitionId) {
-        let (action_name, predicted, requested, object_id, construction, shape_rect) = {
+        let (action_name, action_index, predicted, requested, object_id, construction, shape_rect) = {
             let object = &self.objects[idx];
             (
                 object.state.action.name.clone(),
+                object.state.action.act_map_index,
                 Vector2::new(
                     math::fixtoi(object.fixed_position.x + object.fixed_velocity.x),
                     math::fixtoi(object.fixed_position.y + object.fixed_velocity.y),
@@ -33750,10 +34385,10 @@ impl Engine {
         else {
             return;
         };
-        if action_library.is_idle_action(&action_name) {
+        if action_library.is_idle_entry(&action_name, action_index) {
             return;
         }
-        let Some(dig_free_value) = action_library.dig_free_for_action(&action_name) else {
+        let Some(dig_free_value) = action_library.dig_free_for_entry(&action_name, action_index) else {
             return;
         };
 
@@ -33983,7 +34618,7 @@ impl Engine {
             let object = &mut self.objects[idx];
             object.state.action.time = retry_time;
             object.state.action.data =
-                encode_bridge_action_data(remaining as i32, false, parameters.wall, material);
+                encode_bridge_action_data(remaining, false, parameters.wall, material);
             return self.apply_bridge_procedure(idx, command_direction, definition_id);
         }
 
@@ -34093,7 +34728,10 @@ impl Engine {
                             |definition| {
                                 definition
                                     .action_library()
-                                    .procedure_for_action(&container.state.action.name)
+                                    .procedure_for_entry(
+                                        &container.state.action.name,
+                                        container.state.action.act_map_index,
+                                    )
                                     == ActionProcedure::Build
                             },
                         )
@@ -34722,7 +35360,8 @@ impl Engine {
         object.state.command_direction = CommandDirection::Stop;
         object.set_velocity(Vector2::ZERO);
         if matches!(result, ActionUpdateResult::Applied)
-            && previous.name != object.state.action.name
+            && (previous.name != object.state.action.name
+                || previous.act_map_index != object.state.action.act_map_index)
         {
             object.record_action_event(previous, ActionTransitionKind::Forced);
         }
@@ -34924,9 +35563,10 @@ impl Engine {
             return Ok(true);
         }
         let action_name = self.objects[idx].state.action.name.clone();
+        let action_index = self.objects[idx].state.action.act_map_index;
         if definition
             .action_library()
-            .procedure_for_action(&action_name)
+            .procedure_for_entry(&action_name, action_index)
             != ActionProcedure::Connect
         {
             return Ok(true);
@@ -35087,9 +35727,9 @@ impl Engine {
     /// C4Object::SetDir as reached from an internal ExecAction procedure
     /// (C4Object.cpp:4248-4265): run the current action's TurnAction through
     /// SetActionByName on a facing change, then assign the requested direction
-    /// even if that transition failed or changed actions. Direction-count
-    /// validation remains at the script SetDir seam; synthetic action fixtures
-    /// historically omit Directions and are outside this differential.
+    /// even if that transition failed or changed actions. The shared SetDir
+    /// entry rejects idle and out-of-range directions first, including signed
+    /// zero/negative Directions values (C4Object.cpp:4237-4240).
     fn set_exec_action_direction(
         &mut self,
         idx: usize,
@@ -35099,13 +35739,22 @@ impl Engine {
         let Some((current_direction, turn_action)) = self
             .definitions
             .get(definition_id)
-            .map(|definition| {
+            .and_then(|definition| {
                 let library = definition.action_library();
-                let action_name = &self.objects[idx].state.action.name;
-                (
-                    self.objects[idx].state.direction,
-                    library.turn_action_for(action_name).map(str::to_string),
-                )
+                let action = &self.objects[idx].state.action;
+                let raw_direction = direction.to_script_value();
+                (!library.is_idle_state(action)
+                    && raw_direction >= 0
+                    && raw_direction
+                        < library.directions_for_entry(&action.name, action.act_map_index))
+                    .then(|| {
+                        (
+                            self.objects[idx].state.direction,
+                            library
+                                .turn_action_for_entry(&action.name, action.act_map_index)
+                                .map(str::to_string),
+                        )
+                    })
             })
         else {
             return Ok(());
@@ -35135,15 +35784,18 @@ impl Engine {
             .get(definition_id)
             .and_then(|definition| {
                 let library = definition.action_library();
-                let action_name = &self.objects[idx].state.action.name;
+                let action = &self.objects[idx].state.action;
                 let raw_direction = direction.to_script_value();
-                (!library.is_idle_action(action_name)
+                (!library.is_idle_state(action)
                     && raw_direction >= 0
-                    && raw_direction < library.directions_for(action_name) as i32)
+                    && raw_direction
+                        < library.directions_for_entry(&action.name, action.act_map_index) as i32)
                     .then(|| {
                         (
                             self.objects[idx].state.direction,
-                            library.turn_action_for(action_name).map(str::to_string),
+                            library
+                                .turn_action_for_entry(&action.name, action.act_map_index)
+                                .map(str::to_string),
                         )
                     })
             })
@@ -35163,9 +35815,9 @@ impl Engine {
 
     /// Explicit `SetActionByName(..., fForce=true)` transition: applies the
     /// named action even through NoOtherAction, refreshes OCF, resyncs the
-    /// fixed coords, then synchronously runs StartCall followed by AbortCall
-    /// (C4Object.cpp:4142-4198). C++ ObjectAction helpers use the ordinary
-    /// non-forced twin below.
+    /// fixed coords, then synchronously runs StartCall while force suppresses
+    /// EndCall/AbortCall (C4ActionCallbacks.h:24-34). C++ ObjectAction helpers
+    /// use the ordinary non-forced twin below.
     #[doc(hidden)]
     pub fn force_action_with_calls(
         &mut self,
@@ -35176,8 +35828,8 @@ impl Engine {
         self.action_with_optional_target_and_calls(idx, definition_id, name, None, true)
     }
 
-    /// Ordinary non-forced SetActionByName transition, including the same
-    /// synchronous StartCall/AbortCall sequence as the forced engine helper.
+    /// Ordinary non-forced SetActionByName transition, including its
+    /// synchronous StartCall/AbortCall sequence.
     pub(crate) fn action_with_calls(
         &mut self,
         idx: usize,
@@ -35207,6 +35859,8 @@ impl Engine {
         target: Option<ObjectId>,
         force: bool,
     ) -> Result<bool, EngineError> {
+        let builtin_idle = action::is_builtin_idle_name(name);
+        let name = if builtin_idle { "Idle" } else { name };
         let Some(library) = self
             .definitions
             .get(definition_id)
@@ -35214,11 +35868,11 @@ impl Engine {
         else {
             return Ok(false);
         };
-        // SetActionByName("Idle") selects the built-in slot before scanning
+        // SetActionByName("Idle"/"ActIdle") selects the built-in slot before scanning
         // ActMap (C4Object.cpp:4214-4215). ActionState's
         // library-aware update already models that slot; do not reject it
         // merely because a definition's map starts at Walk.
-        if name != "Idle" && !library.contains(name) {
+        if !action::is_builtin_idle_name(name) && !library.contains(name) {
             return Ok(false);
         }
         let previous = self.objects[idx].state.action.clone();
@@ -35232,8 +35886,9 @@ impl Engine {
             data: None,
             // SetAction assigns a target before SetOCF and callbacks when one
             // is supplied (C4Object.cpp:4148-4178). None preserves the old
-            // target for ObjectActionWalk/Jump/etc.
-            target: target.map(Some),
+            // target; the Idle/ActIdle name sentinel discards supplied
+            // targets before SetAction (C4Object.cpp:4225-4227).
+            target: (!builtin_idle).then_some(target).flatten().map(Some),
             target2: None,
             callbacks_dispatched: false,
         };
@@ -35257,12 +35912,14 @@ impl Engine {
                 FixedVec2::from_ints(object.state.position.x, object.state.position.y);
         }
 
-        let current_action = self.objects[idx].state.action.name.clone();
-        if !library.is_idle_action(&current_action) {
+        let current_action = self.objects[idx].state.action.clone();
+        if !library.is_idle_state(&current_action) {
             self.invoke_action_callback(
                 idx,
                 ActionCallbackKind::Start,
-                &current_action,
+                &current_action.name,
+                current_action.act_map_index,
+                None,
                 None,
                 None,
                 None,
@@ -35277,14 +35934,16 @@ impl Engine {
                 && !object.destroyed
                 && !matches!(object.state.status, ObjectStatus::Deleted)
         });
-        if callback_target_survived && !library.is_idle_action(&previous.name) {
+        if callback_target_survived && !force && !library.is_idle_state(&previous) {
             self.invoke_action_callback(
                 idx,
                 ActionCallbackKind::Abort,
                 &previous.name,
+                previous.act_map_index,
                 None,
                 None,
                 Some(previous.phase),
+                None,
             )?;
         }
 
@@ -35308,12 +35967,14 @@ impl Engine {
             return Ok(());
         };
         let library = definition.action_library().clone();
-        let action_name = self.objects[idx].state.action.name.clone();
-        if library.is_idle_action(&action_name) {
+        let action = self.objects[idx].state.action.clone();
+        let action_name = action.name.clone();
+        if library.is_idle_state(&action) {
             return Ok(());
         }
-        let procedure = library.procedure_for_action(&action_name);
-        let action_disabled = library.disables_object(&action_name);
+        let procedure = library.procedure_for_entry(&action_name, action.act_map_index);
+        let action_disabled =
+            library.disables_object_for_entry(&action_name, action.act_map_index);
         let physical = self.object_physical(idx);
         let ocf = self.objects[idx].state.ocf;
         let com_dir = self.objects[idx].state.command_direction;
@@ -35648,9 +36309,10 @@ impl Engine {
             .get(&definition_id)
             .is_some_and(|definition| {
                 let actions = definition.action_library();
-                let action = &self.objects[idx].state.action.name;
-                actions.is_idle_action(action)
-                    || actions.procedure_for_action(action) == ActionProcedure::Walk
+                let action = &self.objects[idx].state.action;
+                actions.is_idle_state(action)
+                    || actions.procedure_for_entry(&action.name, action.act_map_index)
+                        == ActionProcedure::Walk
             });
         if !can_build {
             return Ok(false);
@@ -35969,7 +36631,7 @@ impl Engine {
 
         let object_id = self.objects[idx].id;
         let initial_action = self.objects[idx].state.action.clone();
-        if initial_action.name == library.default_action() {
+        if library.is_idle_state(&initial_action) {
             // Inactive objects: simple mobile natural gravity
             // (C4Object.cpp:4299-4303) — DoGravity's free-fall branch
             // still skips StaticBack (:4662).
@@ -35983,7 +36645,8 @@ impl Engine {
             return Ok(());
         }
 
-        let procedure = library.procedure_for_action(&initial_action.name);
+        let procedure =
+            library.procedure_for_entry(&initial_action.name, initial_action.act_map_index);
         let command_direction = self.objects[idx].state.command_direction;
         let direction = self.objects[idx].state.direction;
         let scaling_upward = matches!(
@@ -36283,7 +36946,10 @@ impl Engine {
             .map(|definition| {
                 definition
                     .action_library()
-                    .procedure_for_action(&self.objects[target_idx].state.action.name)
+                    .procedure_for_entry(
+                        &self.objects[target_idx].state.action.name,
+                        self.objects[target_idx].state.action.act_map_index,
+                    )
             })
             .unwrap_or_default();
         if matches!(
@@ -36518,13 +37184,14 @@ impl Engine {
 
         let target_definition_id = self.objects[target_idx].definition_id.clone();
         let target_action_name = self.objects[target_idx].state.action.name.clone();
+        let target_action_index = self.objects[target_idx].state.action.act_map_index;
         let target_procedure = self
             .definitions
             .get(&target_definition_id)
             .map(|definition| {
                 definition
                     .action_library()
-                    .procedure_for_action(&target_action_name)
+                    .procedure_for_entry(&target_action_name, target_action_index)
             })
             .unwrap_or_default();
         if !matches!(target_procedure, ActionProcedure::Fight) {
@@ -37230,7 +37897,10 @@ impl Engine {
                 .map(|definition| {
                     definition
                         .action_library()
-                        .procedure_for_action(&object.state.action.name)
+                        .procedure_for_entry(
+                            &object.state.action.name,
+                            object.state.action.act_map_index,
+                        )
                 })
                 .unwrap_or_default()
         };
@@ -37502,7 +38172,8 @@ impl Engine {
                 FixedVec2::from_ints(object.state.position.x, object.state.position.y);
         }
         if matches!(result, ActionUpdateResult::Applied)
-            && previous.name != object.state.action.name
+            && (previous.name != object.state.action.name
+                || previous.act_map_index != object.state.action.act_map_index)
         {
             object.record_action_event(previous, ActionTransitionKind::Forced);
         }
@@ -37654,7 +38325,10 @@ impl Engine {
                             .map(|definition| {
                                 definition
                                     .action_library()
-                                    .procedure_for_action(&self.objects[idx].state.action.name)
+                                    .procedure_for_entry(
+                                        &self.objects[idx].state.action.name,
+                                        self.objects[idx].state.action.act_map_index,
+                                    )
                             })
                             .unwrap_or_default();
                         let has_action = !self.objects[idx].state.action.name.is_empty();
@@ -38122,7 +38796,7 @@ impl Engine {
                         .is_some_and(|definition| {
                             !definition
                                 .action_library()
-                                .is_idle_action(&object.state.action.name)
+                                .is_idle_state(&object.state.action)
                         })
                 });
                 let Some(candidate) = candidate else {
@@ -38137,7 +38811,10 @@ impl Engine {
                 let attached = self.definitions.get(&definition_id).is_some_and(|definition| {
                     definition
                         .action_library()
-                        .procedure_for_action(&object.state.action.name)
+                        .procedure_for_entry(
+                            &object.state.action.name,
+                            object.state.action.act_map_index,
+                        )
                         == ActionProcedure::Attach
                 });
                 if attached {
@@ -38397,20 +39074,11 @@ impl Engine {
     fn effect_has_script_callback(
         &self,
         effect: &EffectState,
-        fallback_definition_id: &DefinitionId,
+        _fallback_definition_id: &DefinitionId,
         event: &str,
     ) -> bool {
-        let definition_id = effect
-            .command_target
-            .and_then(|target| self.find_object_index(ObjectId::new(target as u64)))
-            .map(|target_idx| self.objects[target_idx].definition_id.clone())
-            .or_else(|| effect.command_id.clone())
-            .unwrap_or_else(|| fallback_definition_id.clone());
-        self.definitions
-            .get(&definition_id)
-            .or_else(|| self.definitions.get(fallback_definition_id))
-            .map(|definition| definition.has_effect_callback(&effect.name, event))
-            .unwrap_or(false)
+        let callback_name = format!("Fx{}{event}", effect.name);
+        resolve_effect_script_callback(effect, &callback_name, &self.host_world_context()).is_some()
     }
 
     /// `C4Object::ExecLife` breathing block (C4Object.cpp:878-919), run
@@ -39298,13 +39966,18 @@ impl Engine {
                 .command_target
                 .and_then(|target| self.find_object_index(ObjectId::new(target as u64)))
                 .map(|target_idx| self.objects[target_idx].definition_id.clone())
-                .or_else(|| effect.command_id.clone())
+                .or_else(|| {
+                    effect
+                        .command_id
+                        .as_ref()
+                        .filter(|id| self.definitions.contains_key(*id))
+                        .cloned()
+                })
                 .unwrap_or_else(|| host_definition_id.clone());
-            let has_callback = self
-                .definitions
-                .get(&dispatch_id)
-                .map(|definition| definition.has_effect_callback(&effect.name, "Damage"))
-                .unwrap_or(false);
+            let world = self.host_world_context();
+            let callback_name = format!("Fx{}Damage", effect.name);
+            let has_callback =
+                resolve_effect_script_callback(&effect, &callback_name, &world).is_some();
             if !has_callback {
                 continue;
             }
@@ -39316,7 +39989,6 @@ impl Engine {
             let state_snapshot = self.objects[idx].script_state_snapshot();
             let rng_state = self.rng.clone();
             let global_view = self.global_effects.clone();
-            let world = self.host_world_context();
             let Some(definition) = self.definitions.get(&dispatch_id) else {
                 continue;
             };
@@ -39679,7 +40351,10 @@ impl Engine {
         let attached_to_target = matches!(
             definition
                 .action_library()
-                .procedure_for_action(&object.state.action.name),
+                .procedure_for_entry(
+                    &object.state.action.name,
+                    object.state.action.act_map_index,
+                ),
             ActionProcedure::Attach
         ) && object.state.action.target.is_some();
         if attached_to_target {
@@ -40060,6 +40735,7 @@ impl Engine {
                 // Only Act is overwritten; callback-written Time/Data/Phase
                 // and targets survive (C4Object.cpp:1217-1218).
                 self.objects[current_index].state.action.name = "Idle".to_string();
+                self.objects[current_index].state.action.act_map_index = None;
             }
         }
 
@@ -40169,7 +40845,9 @@ impl Engine {
                     .action
                     .apply_update_with_library(&update, &library);
                 if matches!(result, ActionUpdateResult::Applied) {
-                    if previous.name != object.state.action.name {
+                    if previous.name != object.state.action.name
+                        || previous.act_map_index != object.state.action.act_map_index
+                    {
                         object.record_action_event(previous, ActionTransitionKind::Forced);
                     }
                     // Tumble also turns the object (SetDir, C4ObjectCom.cpp:77)
@@ -40522,6 +41200,33 @@ impl Engine {
     /// time in file order, so rebuild once from the reverse execution list at
     /// the equivalent seam.
     pub(crate) fn finish_legacy_object_load(&mut self) {
+        // C4GameObjects::Load compiles every enumerated pointer as a number,
+        // then calls C4Object::DenumeratePointers for the complete list before
+        // any InitializeDef/scenario callback. Missing ActionTarget1/2 values
+        // therefore become null and can never leak as dangling ObjectIds into
+        // those callbacks (C4GameObjects.cpp:600-608; C4Object.cpp:2914-2937).
+        let object_numbers = self
+            .objects
+            .iter()
+            .map(|object| object.id.as_u64())
+            .collect::<HashSet<_>>();
+        for object in &mut self.objects {
+            denumerate_legacy_enumerated_object_reference(
+                &mut object.state.action.target,
+                &object_numbers,
+            );
+            denumerate_legacy_enumerated_object_reference(
+                &mut object.state.action.target2,
+                &object_numbers,
+            );
+            denumerate_object_reference(&mut object.state.layer, &object_numbers);
+            for value in object.state.local_vars.values_mut() {
+                *value = denumerate_script_value(value, &object_numbers);
+            }
+            for effect in &mut object.state.effects {
+                denumerate_effect(effect, &object_numbers);
+            }
+        }
         self.rebuild_sectors();
         self.fix_exec_list_order();
     }
@@ -42524,10 +43229,13 @@ impl Engine {
         };
         definition
             .action_library()
-            .is_idle_action(&object.state.action.name)
+            .is_idle_state(&object.state.action)
             || definition
                 .action_library()
-                .procedure_for_action(&object.state.action.name)
+                .procedure_for_entry(
+                    &object.state.action.name,
+                    object.state.action.act_map_index,
+                )
                 != ActionProcedure::Float
     }
 
@@ -43523,11 +44231,12 @@ impl Engine {
         let action_name = object.state.action.name.as_str();
         let procedure = definition
             .action_library()
-            .procedure_for_action(action_name);
+            .procedure_for_entry(action_name, object.state.action.act_map_index);
         // C++'s numeric `Action.Act <= ActIdle` arm keeps None/Idle inside
         // layer bounds even if a synthetic Idle map names DFA_ATTACH.
-        if !action_name.is_empty()
-            && action_name != "Idle"
+        if !definition
+            .action_library()
+            .is_idle_state(&object.state.action)
             && matches!(procedure, ActionProcedure::Attach)
         {
             return None;
@@ -43984,7 +44693,10 @@ impl Engine {
                 .is_some_and(|definition| {
                     definition
                         .action_library()
-                        .procedure_for_action(&object.state.action.name)
+                        .procedure_for_entry(
+                            &object.state.action.name,
+                            object.state.action.act_map_index,
+                        )
                         == ActionProcedure::Attach
                 })
         });
@@ -44214,7 +44926,10 @@ impl Engine {
                 .map(|definition| {
                     definition
                         .action_library()
-                        .procedure_for_action(&actor.state.action.name)
+                        .procedure_for_entry(
+                            &actor.state.action.name,
+                            actor.state.action.act_map_index,
+                        )
                 })
                 .unwrap_or_default();
             (procedure, actor.state.action.target, actor.state.container)
@@ -44373,7 +45088,10 @@ impl Engine {
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?
             .action_library()
-            .procedure_for_action(&self.objects[actor_index].state.action.name);
+            .procedure_for_entry(
+                &self.objects[actor_index].state.action.name,
+                self.objects[actor_index].state.action.act_map_index,
+            );
         if current_procedure != ActionProcedure::Walk {
             return Ok(false);
         }
@@ -47943,13 +48661,7 @@ impl Engine {
             let world = self.host_world_context();
             let rng_state = self.rng.clone();
             let mut global_effects = std::mem::take(&mut self.global_effects);
-            let dispatch_fallback = self
-                .definition_load_order
-                .first()
-                .and_then(|id| self.definitions.get(id));
             let outcome = Self::run_effect_events_for_global(
-                dispatch_fallback,
-                &self.definitions,
                 self.game_over_triggered,
                 rng_state,
                 vec![event],
@@ -48032,8 +48744,6 @@ impl Engine {
     /// 439-456).
     #[allow(clippy::too_many_arguments)]
     fn run_effect_events_for_global(
-        dispatch_fallback: Option<&Definition>,
-        definitions: &HashMap<DefinitionId, Definition>,
         game_over_triggered: bool,
         mut rng: LcgRng,
         events: Vec<EffectEvent>,
@@ -48127,14 +48837,6 @@ impl Engine {
                 }
                 _ => {}
             }
-            let Some(dispatch_definition) = resolve_global_effect_dispatch_definition(
-                &event.effect,
-                &world,
-                definitions,
-                dispatch_fallback,
-            ) else {
-                continue;
-            };
             // C++ runs Fx* callbacks with fPassErrors=false (fail-safe
             // exec); RNG/audio restore from the pre-call backups on the
             // error path like the object runner.
@@ -48143,15 +48845,16 @@ impl Engine {
             let mut timer_kill = false;
             let mut stop_denied = false;
             let call_result = match event.kind {
-                EffectEventKind::Timer => dispatch_definition
-                    .call_effect_timer(
-                        None,
+                EffectEventKind::Timer => dispatch_global_effect_callback(
                         &event.effect,
-                        frame,
+                        "Timer",
+                        "FxTimer",
+                        vec![Value::Int(event.effect.timer)],
                         rng,
                         global_effects,
                         current_physics,
                         current_environment,
+                        frame,
                         world.clone(),
                         game_over_triggered,
                         current_audio,
@@ -48161,20 +48864,14 @@ impl Engine {
                         // returning C4Fx_Execute_Kill (-1, C4Effects.h:40)
                         // kills the effect; an elapsed interval with NO
                         // timer function kills too (:355-357).
-                        timer_kill = if dispatch_definition
-                            .has_effect_callback(&event.effect.name, "Timer")
-                        {
-                            matches!(timer_result, Some(Value::Int(-1)))
-                        } else {
-                            true
-                        };
+                        timer_kill = matches!(timer_result, None | Some(Value::Int(-1)));
                         (outcome, audio_state, new_rng)
                     }),
-                EffectEventKind::Stopped(reason) => dispatch_definition
-                    .call_effect_stop(
-                        None,
+                EffectEventKind::Stopped(reason) => dispatch_global_effect_callback(
                         &event.effect,
-                        reason,
+                        "Stop",
+                        "FxStop",
+                        vec![effect_stop_reason_value(reason)],
                         rng,
                         global_effects,
                         current_physics,
@@ -48192,11 +48889,11 @@ impl Engine {
                             && matches!(stop_result, Some(Value::Int(-1)));
                         (outcome, audio_state, new_rng)
                     }),
-                EffectEventKind::TempRemoved => dispatch_definition
-                    .call_effect_stop(
-                        None,
+                EffectEventKind::TempRemoved => dispatch_global_effect_callback(
                         &event.effect,
-                        EffectStopReason::Temp,
+                        "Stop",
+                        "FxStop",
+                        vec![Value::Int(1), Value::Bool(true)],
                         rng,
                         global_effects,
                         current_physics,
@@ -48211,10 +48908,11 @@ impl Engine {
                         // (C4Effect.cpp:489 does not check it).
                         (outcome, audio_state, new_rng)
                     }),
-                EffectEventKind::TempReadded => dispatch_definition
-                    .call_effect_temp_readd(
-                        None,
+                EffectEventKind::TempReadded => dispatch_global_effect_callback(
                         &event.effect,
+                        "Start",
+                        "FxStart",
+                        vec![Value::Int(1)],
                         rng,
                         global_effects,
                         current_physics,
@@ -48296,12 +48994,13 @@ impl Engine {
             }
             if !event_other_objects.is_empty() {
                 for nested in &event_other_objects {
-                    if let Some(new_definition) = nested
-                        .update
-                        .as_ref()
-                        .and_then(|update| update.change_def.as_deref())
-                    {
-                        world.preview_object_change_def(nested.object_id, new_definition);
+                    if let Some(update) = nested.update.as_ref() {
+                        if let Some(local_vars) = update.local_vars.as_ref() {
+                            world.preview_object_local_vars(nested.object_id, local_vars);
+                        }
+                        if let Some(new_definition) = update.change_def.as_deref() {
+                            world.preview_object_change_def(nested.object_id, new_definition);
+                        }
                     }
                 }
                 pending_other_objects.extend(event_other_objects);
@@ -48461,6 +49160,7 @@ impl Engine {
             definition_color_by_owner,
             definition_components,
             definition_contact_density,
+            definition_incomplete_activity,
         ) = {
             let definition_ref = self
                 .definitions
@@ -48481,6 +49181,7 @@ impl Engine {
                 definition_ref.color_by_owner(),
                 definition_ref.components().to_vec(),
                 definition_ref.contact_density(),
+                definition_ref.incomplete_activity(),
             )
         };
         // Objects.txt compiles Con/Size verbatim. Fresh non-Oversize
@@ -48493,9 +49194,23 @@ impl Engine {
         };
         let mut initial_action = match action {
             Some(state) => state,
+            // C4Action::Default leaves the compiled Name buffer empty and
+            // numeric Act at ActIdle. CompileFunc still attempts the empty
+            // SetActionByName lookup, which fails without changing either.
+            None if loaded => ActionState::new(String::new()),
             None => default_action_state,
         };
-        initial_action.reconcile_with_library(&action_library);
+        let loaded_action_resolved = loaded
+            && (crate::action::is_builtin_idle_name(&initial_action.name)
+                || action_library.contains(&initial_action.name));
+        if loaded {
+            initial_action.restore_loaded_with_library(
+                &action_library,
+                construction >= FULL_CON || definition_incomplete_activity,
+            );
+        } else {
+            initial_action.reconcile_with_library(&action_library);
+        }
         // Def->CrewMember is an object capability (and drives
         // OCF_CrewMember), not membership in any C4Player::Crew list.
         // Ordinary CreateObject passes no C4ObjectInfo and starts outside
@@ -48796,7 +49511,13 @@ impl Engine {
         // Saved sub-pixel position/rotation (FixX/FixY/FixR,
         // C4Object.cpp:2762-2764) override the itofix seeds; C++ keeps the
         // integer X/Y/Rotation independent — no back-projection.
-        if let Some(fixed) = fixed_position.or(docon_split_fixed) {
+        // FixX/FixY compile before the load-time SetActionByName. Every
+        // successful lookup (including Idle and an incomplete-object
+        // coercion) reaches SetAction's fixed-position resync; only a failed
+        // lookup retains the serialized subpixel pair (C4Object.cpp:
+        // 2867-2877,4165-4170).
+        let saved_fixed_position = fixed_position.filter(|_| !loaded_action_resolved);
+        if let Some(fixed) = saved_fixed_position.or(docon_split_fixed) {
             object.fixed_position = fixed;
         }
         if let Some(fixed) = fixed_rotation {
@@ -49613,8 +50334,7 @@ fn build_state_value(
     let mut action = ValueMap::with_capacity(7);
     action.insert("name".into(), Value::String(state.action.name.clone()));
     action.insert("phase".into(), Value::Int(state.action.phase));
-    let ticks = (state.action.ticks).min(i32::MAX as u32) as i32;
-    action.insert("ticks".into(), Value::Int(ticks));
+    action.insert("ticks".into(), Value::Int(state.action.ticks));
     action.insert("data".into(), Value::Int(state.action.data));
     match state.action.target {
         Some(target) => {
@@ -49638,7 +50358,9 @@ fn build_state_value(
             action.insert("target2".into(), Value::Nil);
         }
     }
-    if let Some(procedure) = library.procedure_name_for_action(&state.action.name) {
+    if let Some(procedure) = library
+        .procedure_name_for_entry(&state.action.name, state.action.act_map_index)
+    {
         action.insert("procedure".into(), Value::String(procedure.to_string()));
     }
     map.insert("action".into(), Value::Proplist(action));
@@ -49735,8 +50457,7 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
     let mut action = ValueMap::with_capacity(7);
     action.insert("name".into(), Value::String(snapshot.action.name.clone()));
     action.insert("phase".into(), Value::Int(snapshot.action.phase));
-    let ticks = snapshot.action.ticks.min(i32::MAX as u32) as i32;
-    action.insert("ticks".into(), Value::Int(ticks));
+    action.insert("ticks".into(), Value::Int(snapshot.action.ticks));
     action.insert("data".into(), Value::Int(snapshot.action.data));
     match snapshot.action.target {
         Some(target) => {
@@ -49946,6 +50667,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.container,
                 object.draw_transform,
             )
+            .with_action_index(object.action.act_map_index)
             .with_fixed_motion(
                 object
                     .fixed_position
@@ -50221,30 +50943,272 @@ struct GlobalEffectRunOutcome {
     rng: LcgRng,
 }
 
-/// C4Effect::GetCallbackScript for GLOBAL effects (C4Effect.cpp:42-57,
-/// DoCall :439-456): the command target object's def script, else the
-/// idCommandTarget def script, else Game.ScriptEngine — modeled as the
-/// first-registered definition, whose script shares the engine-global
-/// function table (`set_global_functions`) that owns every `global func`.
-fn resolve_global_effect_dispatch_definition<'a>(
-    effect: &EffectState,
-    world: &HostWorldContext,
-    definitions: &'a HashMap<DefinitionId, Definition>,
-    fallback: Option<&'a Definition>,
-) -> Option<&'a Definition> {
-    effect
-        .command_target
-        .and_then(|target| world.get(ObjectId::new(target as u64)))
-        .map(|target| target.definition_id().to_string())
-        .or_else(|| effect.command_id.clone())
-        .and_then(|def_id| definitions.get(&def_id))
-        .or(fallback)
+/// One exact `C4Effect::GetCallbackScript` / `GetFuncRecursive` result.
+/// Keeping source selection and function resolution together prevents an
+/// arbitrary affected-object or fallback definition from shadowing the
+/// engine-global table (C4Effect.cpp:31-56,439-456).
+struct EffectScriptCallback {
+    script: Arc<ScriptEngine>,
+    resolution: lc_script::ScriptFunctionResolution,
+    command_object: Option<ObjectId>,
+    definition_context: Option<DefinitionId>,
+    /// The resolved SFunc is owned by Game.ScriptEngine. Invoke the pinned
+    /// body on its exact LinkedTo host; a command object, when present,
+    /// still supplies `this`, live cells, and `cthr->Def`.
+    engine_global_entry: bool,
 }
 
-/// C4Effect::GetCallbackScript (C4Effect.cpp:42-57): Fx* callbacks resolve
-/// against the command target object's def script, else the idCommandTarget
-/// def script, else the host object's script (the C++ global script engine
-/// is unmodeled).
+/// Fold the VM-final local storage of a command target that is not the
+/// affected carrier. C++ executes directly on the one live `C4Object`; the
+/// Rust callback context is copy-in/copy-out, so the target travels through
+/// the existing foreign-object outcome channel.
+fn append_effect_command_target_locals(
+    outcome: &mut EffectContextOutcome,
+    command_target: ObjectId,
+    local_vars: HashMap<String, Value>,
+) {
+    outcome.other_objects.push(compat::NestedObjectOutcome {
+        object_id: command_target,
+        effects: Vec::new(),
+        update: Some(ObjectUpdate {
+            local_vars: Some(local_vars),
+            ..ObjectUpdate::default()
+        }),
+        commands: Vec::new(),
+        command_operations: Vec::new(),
+        destroy: false,
+        assign_death: None,
+    });
+}
+
+/// C4Effect invokes script callbacks through the fail-safe C4Aul `Exec`
+/// path: an ordinary runtime error aborts the callback and yields C4VNull,
+/// but mutations performed before the error stay on the live objects
+/// (C4AulExec.cpp:1318-1342). Rust callbacks run against copied host state,
+/// so turn that error into a nil result while retaining the command target's
+/// live local cells for the normal outcome copy-out. Fatal runtime-boundary
+/// errors remain errors and must not be downgraded.
+fn recover_effect_callback_error(
+    result: Result<Option<(Value, HashMap<String, Value>)>, ScriptError>,
+    context_cells: &lc_script::LocalCells,
+    definition: String,
+) -> Result<Option<(Value, HashMap<String, Value>)>, EngineError> {
+    match result {
+        Ok(result) => Ok(result),
+        Err(source) => match script_execution_error(
+            definition,
+            "EffectCallback".to_string(),
+            source,
+            None,
+        ) {
+            EngineError::Script {
+                definition,
+                function,
+                source,
+                recovery: _,
+            } => {
+                tracing::warn!(
+                    %definition,
+                    function,
+                    error = %source,
+                    "script error in effect callback; continuing like the C++ fail-safe exec"
+                );
+                Ok(Some((Value::Nil, context_cells.snapshot())))
+            }
+            fatal => Err(fatal),
+        },
+    }
+}
+
+fn resolve_effect_script_callback(
+    effect: &EffectState,
+    callback_name: &str,
+    world: &HostWorldContext,
+) -> Option<EffectScriptCallback> {
+    if let Some(command_object) = effect
+        .command_target
+        .map(|target| ObjectId::new(target as u64))
+        .filter(|target| world.get(*target).is_some())
+    {
+        let definition = DefinitionId::from(world.get(command_object)?.definition_id());
+        let source_script = Arc::clone(world.definition_script(&definition)?);
+        let resolution = source_script.resolve_function(callback_name, true)?;
+        let is_global = resolution.scope == lc_script::ScriptFunctionScope::Global;
+        let script = if is_global {
+            world
+                .script_for_host_identity(resolution.host_identity)
+                .map(|(_, _, script)| script)?
+        } else {
+            source_script
+        };
+        return Some(EffectScriptCallback {
+            script,
+            resolution,
+            command_object: Some(command_object),
+            // C4AulExec derives Def from pCommandTarget->Def whenever Obj is
+            // non-null, even when the selected SFunc belongs to the engine.
+            definition_context: Some(definition),
+            engine_global_entry: is_global,
+        });
+    }
+
+    if let Some(definition) = effect
+        .command_id
+        .as_ref()
+        .map(DefinitionId::from)
+        .filter(|definition| world.definition_script(definition).is_some())
+    {
+        let source_script = Arc::clone(world.definition_script(&definition)?);
+        let resolution = source_script.resolve_function(callback_name, true)?;
+        let is_global = resolution.scope == lc_script::ScriptFunctionScope::Global;
+        let script = if is_global {
+            world
+                .script_for_host_identity(resolution.host_identity)
+                .map(|(_, _, script)| script)?
+        } else {
+            source_script
+        };
+        return Some(EffectScriptCallback {
+            script,
+            resolution,
+            command_object: None,
+            definition_context: (!is_global).then_some(definition),
+            engine_global_entry: is_global,
+        });
+    }
+
+    let (script, resolution) = world.resolve_engine_global_script(callback_name)?;
+    Some(EffectScriptCallback {
+        script,
+        resolution,
+        command_object: None,
+        definition_context: None,
+        engine_global_entry: true,
+    })
+}
+
+/// Dispatch for effects on `Game.pGlobalEffects`. It intentionally has no
+/// [`Definition`] receiver: C++ can run System/scenario global callbacks in
+/// a game with no loaded definitions, and an arbitrary fallback definition
+/// must never contribute local Fx functions.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_global_effect_callback(
+    effect: &EffectState,
+    event: &'static str,
+    function_label: &'static str,
+    mut extras: Vec<Value>,
+    rng: LcgRng,
+    global_effects: &[EffectState],
+    physics: PhysicsSettings,
+    environment: EnvironmentSettings,
+    frame: u64,
+    world: HostWorldContext,
+    game_over_triggered: bool,
+    audio: AudioRegistry,
+) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+    let next_object_id = world.next_object_id();
+    let callback_name = format!("Fx{}{}", effect.name, event);
+    let Some(callback) = resolve_effect_script_callback(effect, &callback_name, &world) else {
+        return Ok((
+            EffectContextOutcome::empty(next_object_id, audio.clone()),
+            audio,
+            rng,
+            None,
+        ));
+    };
+
+    let mut args = Vec::with_capacity(2 + extras.len());
+    args.push(Value::Nil);
+    args.push(build_effect_value(effect));
+    args.append(&mut extras);
+
+    let context_object = callback.command_object;
+    let context_this = context_object
+        .map(compat::object_reference_value)
+        .unwrap_or(Value::Nil);
+    let context_locals = context_object
+        .and_then(|object_id| world.get(object_id))
+        .and_then(|object| object.full_state())
+        .map(|state| state.local_vars.clone())
+        .unwrap_or_default();
+    let context_cells = lc_script::LocalCells::from_local_vars(&context_locals);
+
+    let physics_guard = enter_physics_context(physics);
+    let env_guard = enter_environment_context(environment, frame);
+    let guard = enter_random_context(rng);
+    let audio_guard = enter_audio_context(audio);
+    let (result, mut commands) = compat::with_effect_context_with_state_and_definition(
+        None,
+        callback.definition_context.clone(),
+        context_object,
+        global_effects,
+        world,
+        next_object_id,
+        game_over_triggered,
+        || {
+            if let Some(session_id) = context_object {
+                compat::register_session_local_cells(session_id, context_cells.clone());
+            }
+            if callback.engine_global_entry {
+                if context_object.is_some() {
+                    return callback
+                        .script
+                        .call_pinned_with_cells_and_this(
+                            &callback.resolution.function,
+                            true,
+                            &args,
+                            &context_cells,
+                            context_this,
+                        )
+                        .map(|value| Some((value, context_cells.snapshot())));
+                }
+                return callback
+                    .script
+                    .call_pinned_with_ref_args(&callback.resolution.function, true, &args)
+                    .map(|(value, _)| Some((value, HashMap::new())));
+            }
+            callback.script.call_effect_callback_in_context_with_cells(
+                &effect.name,
+                event,
+                &args,
+                &context_cells,
+                context_this,
+            )
+        },
+    );
+    let rng = guard.finish();
+    let physics_delta = physics_guard.finish();
+    let environment_delta = env_guard.finish();
+    let audio_state = audio_guard.finish();
+
+    let callback_result = recover_effect_callback_error(
+        result,
+        &context_cells,
+        format!("Game.ScriptEngine::{}::{}", effect.name, function_label),
+    )?;
+    if !environment_delta.is_empty() {
+        commands.environment = Some(environment_delta);
+    }
+    if !physics_delta.is_empty() {
+        commands.physics = Some(physics_delta);
+    }
+    let callback_result = callback_result.map(|(value, updated_locals)| {
+        if let Some(context_object) = context_object {
+            append_effect_command_target_locals(
+                &mut commands,
+                context_object,
+                updated_locals,
+            );
+        }
+        value
+    });
+    Ok((commands, audio_state, rng, callback_result))
+}
+
+/// Selects the [`Definition`] receiver that supplies carrier metadata and
+/// callback-outcome conversion. The exact C4Effect script source is resolved
+/// separately by [`resolve_effect_script_callback`], so this fallback cannot
+/// shadow `Game.ScriptEngine` with affected-object locals.
 fn resolve_effect_dispatch_definition<'a>(
     effect: &EffectState,
     world: &HostWorldContext,
@@ -50640,14 +51604,7 @@ fn parse_action_update(
             }
             "ticks" => {
                 let ticks = value_to_int(definition, function, value)?;
-                if ticks < 0 {
-                    return Err(EngineError::InvalidScriptOutput {
-                        definition: definition.to_string(),
-                        function: function.to_string(),
-                        detail: "action.ticks must be >= 0".to_string(),
-                    });
-                }
-                update.set_ticks(ticks as u32);
+                update.set_ticks(ticks);
             }
             "data" => {
                 let data = value_to_int(definition, function, value)?;

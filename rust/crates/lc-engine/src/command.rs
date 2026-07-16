@@ -98,7 +98,7 @@ pub struct CommandObjectSnapshot {
     pub contact: u32,
     /// Frames in the current action (C4Object Action.Time) for the
     /// "not if just started" let-go contact check (C4Command.cpp:348,362).
-    pub action_time: u32,
+    pub action_time: i32,
     /// Current shape top (C4Object Shape.y) for the top-free scans
     /// (C4Command.cpp:1867).
     pub shape_top: i32,

@@ -1347,6 +1347,8 @@ func FxRedirectDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
                 .with_controller(9),
         )?;
         let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        let command_target = i32::try_from(victim.as_u64()).expect("test object id fits C4 int");
+        engine.objects[victim_idx].state.effects[0].command_target = Some(command_target);
         engine.objects[victim_idx].last_energy_loss_cause = 7;
 
         engine.cross_check(1)?;
@@ -4028,28 +4030,24 @@ func FxFireTimer(object target, int number, int time)
     }
 
     #[test]
-    fn script_fx_fire_timer_overload_shadows_and_chains_to_the_engine() -> Result<(), EngineError>
+    fn global_fx_fire_timer_overload_shadows_and_chains_to_the_engine() -> Result<(), EngineError>
     {
         // FxFire* are engine functions (AddFunc, C4Script.cpp:6994-6997): a
-        // script FxFireTimer overloads them — the burn only runs when the
-        // overload chains via inherited(...) (C4Aul OwnerOverloaded
-        // includes engine functions).
+        // GLOBAL FxFireTimer overloads them — internal Fire effects have no
+        // command target and resolve from Game.ScriptEngine. A definition-
+        // local same-name function is invisible there (C4Effect.cpp:31-56).
+        // The burn only runs when the global overload chains via inherited.
         let mut engine = Engine::with_seed(43);
         engine.register_definition(
             Definition::from_script(
                 "BARN",
                 "Barn",
-                "#strict\nfunc FxFireTimer(pObj, iNumber, iTime) { return inherited(pObj, iNumber, iTime); }\n",
+                "#strict\nglobal func FxFireTimer(pObj, iNumber, iTime) { if (GetID(pObj) == BARN) return inherited(pObj, iNumber, iTime); return 0; }\n",
             )
             .expect("barn compiles"),
         )?;
         engine.register_definition(
-            Definition::from_script(
-                "SHED",
-                "Shed",
-                "#strict\nfunc FxFireTimer(pObj, iNumber, iTime) { return 0; }\n",
-            )
-            .expect("shed compiles"),
+            Definition::from_script("SHED", "Shed", "").expect("shed compiles"),
         )?;
         let barn = engine.spawn_object(SpawnConfig::new("BARN"))?;
         let shed = engine.spawn_object(SpawnConfig::new("SHED"))?;
@@ -4452,15 +4450,8 @@ func Incineration(iCause) { return 1; }
     #[test]
     fn incinerate_global_fx_fire_start_matches_add_effect() -> Result<(), EngineError> {
         let mut engine = Engine::with_seed(79);
-        assert_eq!(
-            engine.install_global_scripts(&[(
-                "System.c4g/Fire.c".to_string(),
-                "global func FxFireStart(pTarget, iNumber, iTemp, iCause, fBlasted, pIncinerating, iUnused) { return 0; }\n"
-                    .to_string(),
-            )]),
-            1
-        );
         let script = r#"#strict 2
+global func FxFireStart(pTarget, iNumber, iTemp, iCause, fBlasted, pIncinerating, iUnused) { return 0; }
 func ViaIncinerate() { return Incinerate(); }
 func ViaAddEffect(pIncinerating) { return AddEffect("Fire", this(), 100, 1, nil, nil, 7, true, pIncinerating, nil); }
 func FireMode() { return 3; }
@@ -9145,7 +9136,7 @@ protected func OnOldAbort()
         let mut definition = Definition::from_script(
             "LOOP",
             "Loop actor",
-            "#strict\nprotected func OnLoopStart() { return(1); }\nprotected func OnLoopAbort(int iPhase) { return(1); }\n",
+            "#strict\npublic func ResetLoop() { return SetAction(\"Loop\"); }\npublic func ResetLoopForced() { return SetAction(\"Loop\", nil, nil, true); }\nprotected func OnLoopStart() { return(1); }\nprotected func OnLoopAbort(int iPhase) { return(1); }\n",
         )?;
         definition.set_c4_callback_convention(true);
         definition.set_debugger_hooks(hooks);
@@ -9161,6 +9152,7 @@ protected func OnOldAbort()
 
         let mut action = ActionState::new("Loop");
         action.phase = 7;
+        action.ticks = 6;
         action.time = 42;
         let mut engine = Engine::new();
         engine.register_definition(definition)?;
@@ -9170,18 +9162,80 @@ protected func OnOldAbort()
                 .with_loaded(true),
         )?;
         let index = engine.find_object_index(id).expect("actor exists");
-        let definition_id = engine.objects[index].definition_id.clone();
+        assert_eq!(
+            engine.call_object_function(index, "ResetLoop", Vec::new())?,
+            Value::Bool(true)
+        );
 
-        assert!(engine.force_action_with_calls(index, &definition_id, "Loop")?);
-
-        let calls = calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].0, "OnLoopStart");
-        assert_eq!(calls[1].0, "OnLoopAbort");
-        assert_eq!(calls[1].1.first(), Some(&Value::Int(7)));
+        let first_calls = calls.lock().unwrap().clone();
+        assert_eq!(first_calls.len(), 2, "observed callbacks: {first_calls:?}");
+        assert_eq!(first_calls[0].0, "OnLoopStart");
+        assert_eq!(first_calls[1].0, "OnLoopAbort");
+        assert_eq!(first_calls[1].1.first(), Some(&Value::Int(7)));
         let action = &engine.objects[index].state.action;
         assert_eq!(action.phase, 0, "same-name SetAction resets Phase");
+        assert_eq!(action.ticks, 0, "same-name SetAction resets PhaseDelay");
         assert_eq!(action.time, 42, "same-name SetAction preserves Time");
+
+        calls.lock().unwrap().clear();
+        assert_eq!(
+            engine.call_object_function(index, "ResetLoopForced", Vec::new())?,
+            Value::Bool(true)
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[("OnLoopStart".to_string(), Vec::new())],
+            "fDirect/fForce suppresses AbortCall but still runs StartCall"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn phase_call_set_phase_suppresses_same_tick_next_action_like_cpp(
+    ) -> Result<(), EngineError> {
+        let script = r#"#strict 2
+local seen_action;
+protected func OnPhase()
+{
+    seen_action = GetAction();
+    SetPhase(0);
+    return 1;
+}
+func ReadSeen() { return seen_action; }
+"#;
+        let mut definition = Definition::from_script("PHCL", "Phase callback", script)?;
+        definition.set_c4_callback_convention(true);
+        definition.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Loop".to_string(),
+                    ActionSpec::default()
+                        .with_length(1)
+                        .with_delay(1)
+                        .with_phase_call("OnPhase")
+                        .with_next("Done"),
+                ),
+                ("Done".to_string(), ActionSpec::default()),
+            ]),
+        );
+        let mut engine = Engine::new();
+        engine.register_definition(definition)?;
+        let object = engine.spawn_object(
+            SpawnConfig::new("PHCL")
+                .with_action(ActionState::new("Loop"))
+                .with_loaded(true),
+        )?;
+
+        engine.tick()?;
+
+        let index = engine.find_object_index(object).expect("object remains");
+        assert_eq!(engine.objects[index].state.action.name, "Loop");
+        assert_eq!(engine.objects[index].state.action.phase, 0);
+        assert_eq!(
+            engine.call_object_function(index, "ReadSeen", Vec::new())?,
+            Value::String("Loop".to_string())
+        );
         Ok(())
     }
 
@@ -9209,7 +9263,7 @@ protected func OnOldAbort()
         let mut remove_def = Definition::from_script(
             "RMOV",
             "Remove on start",
-            "#strict\nprotected func RemoveOnStart() { RemoveObject(); return(1); }\nprotected func OldAbort(int iPhase) { return(1); }\n",
+            "#strict\npublic func Trigger() { return SetAction(\"New\"); }\nprotected func RemoveOnStart() { RemoveObject(); return(1); }\nprotected func OldAbort(int iPhase) { return(1); }\n",
         )?;
         remove_def.set_c4_callback_convention(true);
         remove_def.set_debugger_hooks(hooks.clone());
@@ -9236,12 +9290,10 @@ protected func OnOldAbort()
         let remove_index = remove_engine
             .find_object_index(removed)
             .expect("remove actor exists");
-        let remove_definition = remove_engine.objects[remove_index].definition_id.clone();
-        assert!(remove_engine.force_action_with_calls(
-            remove_index,
-            &remove_definition,
-            "New"
-        )?);
+        assert_eq!(
+            remove_engine.call_object_function(remove_index, "Trigger", Vec::new())?,
+            Value::Bool(true)
+        );
         assert!(remove_engine.objects[remove_index].destroyed);
         assert_eq!(calls.lock().unwrap().as_slice(), ["RemoveOnStart"]);
 
@@ -9266,7 +9318,7 @@ protected func OnOldAbort()
         let mut swap_def = Definition::from_script(
             "SWAP",
             "Change on start",
-            "#strict\nprotected func ChangeOnStart() { ChangeDef(NEWD); return(1); }\n",
+            "#strict\npublic func Trigger() { return SetAction(\"New\"); }\nprotected func ChangeOnStart() { ChangeDef(NEWD); return(1); }\n",
         )?;
         swap_def.set_c4_callback_convention(true);
         swap_def.set_debugger_hooks(hooks);
@@ -9291,10 +9343,91 @@ protected func OnOldAbort()
         let swap_index = swap_engine
             .find_object_index(swapped)
             .expect("swap actor exists");
-        let swap_definition = swap_engine.objects[swap_index].definition_id.clone();
-        assert!(swap_engine.force_action_with_calls(swap_index, &swap_definition, "New")?);
+        assert_eq!(
+            swap_engine.call_object_function(swap_index, "Trigger", Vec::new())?,
+            Value::Bool(true)
+        );
         assert_eq!(swap_engine.objects[swap_index].definition_id, "NEWD");
         assert_eq!(calls.lock().unwrap().as_slice(), ["ChangeOnStart"]);
+        Ok(())
+    }
+
+    #[test]
+    fn foreign_set_dir_runs_full_turn_action_transition_like_cpp() -> Result<(), EngineError> {
+        let target_script = r#"#strict 2
+local starts, abort_phase;
+func Read() { return [starts, abort_phase]; }
+protected func TurnStart() { starts += 1; return 1; }
+protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
+"#;
+        let mut target = Definition::from_script("SDTG", "SetDir target", target_script)?;
+        target.set_c4_callback_convention(true);
+        target.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_directions(2)
+                        .with_turn_action("Turn")
+                        .with_abort_call("WalkAbort"),
+                ),
+                (
+                    "Turn".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("FLIGHT")
+                        .with_directions(2)
+                        .with_start_call("TurnStart"),
+                ),
+            ]),
+        );
+        let caller = Definition::from_script(
+            "SDCL",
+            "SetDir caller",
+            "#strict 2\nfunc TurnOther(object target) { return SetDir(1, target); }\n",
+        )?;
+        let mut engine = Engine::new();
+        engine.register_definition(target)?;
+        engine.register_definition(caller)?;
+
+        let target = engine.spawn_object(
+            SpawnConfig::new("SDTG")
+                .with_action(ActionState::new("Walk"))
+                .with_direction(Direction::Left)
+                .with_loaded(true),
+        )?;
+        let target_index = engine.find_object_index(target).expect("target exists");
+        {
+            let action = &mut engine.objects[target_index].state.action;
+            action.phase = 7;
+            action.ticks = 6;
+            action.time = 42;
+            action.data = 9;
+        }
+        let caller = engine.spawn_object(SpawnConfig::new("SDCL"))?;
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine.call_object_function(
+                caller_index,
+                "TurnOther",
+                vec![Value::Object(target.as_u64())],
+            )?,
+            Value::Bool(true)
+        );
+        let target_index = engine.find_object_index(target).expect("target remains");
+        let state = &engine.objects[target_index].state;
+        assert_eq!(state.direction, Direction::Right);
+        assert_eq!(state.action.name, "Turn");
+        assert_eq!(
+            (state.action.phase, state.action.ticks, state.action.time, state.action.data),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(
+            engine.call_object_function(target_index, "Read", Vec::new())?,
+            Value::Array(vec![Value::Int(1), Value::Int(7)])
+        );
         Ok(())
     }
 
@@ -10565,7 +10698,7 @@ func LiftTop()
         std::fs::write(def_dir.join("Script.c"), lifter_script).expect("write Script.c");
         std::fs::write(
             def_dir.join("ActMap.txt"),
-            b"[Action]\nName=Lift\nProcedure=Lift\nLength=1\nNextAction=Lift\n",
+            b"[Action]\nName=Lift\nProcedure=LIFT\nLength=1\nNextAction=Lift\n",
         )
         .expect("write ActMap.txt");
         let group = lc_resources::Group::open(&def_dir).expect("open definition group");
@@ -10895,7 +11028,7 @@ func LiftTop()
                 ("Idle".to_string(), ActionSpec::default()),
                 (
                     "Bridge".to_string(),
-                    ActionSpec::default().with_procedure("bridge"),
+                    ActionSpec::default().with_procedure("BRIDGE"),
                 ),
             ]),
         );
@@ -10954,13 +11087,17 @@ func LiftTop()
                     .with_position(Vector2::new(100, 80))
                     .with_fixed_position(FixedVec2::from_ints(100, 80))
                     .with_command_direction(CommandDirection::Left)
-                    .with_action(action)
                     .with_mobile(true)
                     .with_loaded(true),
             )
             .expect("spawn succeeds");
 
         let index = engine.find_object_index(id).expect("object index remains");
+        // C++ load starts at ActIdle and SetAction(BRIDGE) clears Data when
+        // the procedure changes (C4Object.cpp:2867-2877,4106-4114). Stage
+        // this running BRIDGE state after loading; the test targets DoBridge,
+        // not the save loader.
+        engine.objects[index].state.action = action;
         engine
             .apply_physics_at_index(index)
             .expect("bridge procedure succeeds");
@@ -10996,13 +11133,16 @@ func LiftTop()
                     .with_fixed_position(FixedVec2::from_ints(100, 80))
                     .with_direction(Direction::Right)
                     .with_command_direction(CommandDirection::Up)
-                    .with_action(action)
                     .with_mobile(true)
                     .with_loaded(true),
             )
             .expect("spawn succeeds");
 
         let index = engine.find_object_index(id).expect("object index remains");
+        // A loaded ActIdle -> BRIDGE transition clears Action.Data in C++;
+        // inject the already-running action afterward to isolate the blocked
+        // DoBridge retry under test.
+        engine.objects[index].state.action = action;
         engine
             .apply_physics_at_index(index)
             .expect("bridge procedure succeeds");
@@ -11040,11 +11180,11 @@ func LiftTop()
         actions.insert("Idle".to_string(), ActionSpec::default());
         actions.insert(
             "Walk".to_string(),
-            ActionSpec::default().with_procedure("walk"),
+            ActionSpec::default().with_procedure("WALK"),
         );
         actions.insert(
             "Bridge".to_string(),
-            ActionSpec::default().with_procedure("bridge"),
+            ActionSpec::default().with_procedure("BRIDGE"),
         );
         definition.configure_actions(Some("Idle".to_string()), actions);
 
@@ -11089,11 +11229,15 @@ func LiftTop()
                     .with_fixed_position(FixedVec2::from_ints(100, 80))
                     .with_direction(Direction::Right)
                     .with_command_direction(CommandDirection::UpLeft)
-                    .with_action(action)
                     .with_mobile(true)
                     .with_loaded(true),
             )
             .expect("spawn succeeds");
+        let index = engine.find_object_index(id).expect("object index remains");
+        // Save loading correctly clears BRIDGE data on its DFA_NONE ->
+        // DFA_BRIDGE transition. This fixture needs a live, post-transition
+        // action so Action.Time drives the C++ DoBridge cadence.
+        engine.objects[index].state.action = action;
 
         for _ in 0..5 {
             engine.tick().expect("pre-advance tick succeeds");
@@ -11158,7 +11302,7 @@ func LiftTop()
                 ("Idle".to_string(), ActionSpec::default()),
                 (
                     "Bridge".to_string(),
-                    ActionSpec::default().with_procedure("bridge"),
+                    ActionSpec::default().with_procedure("BRIDGE"),
                 ),
             ]),
         );
@@ -11210,11 +11354,15 @@ func LiftTop()
                 SpawnConfig::new("Bridger")
                     .with_position(Vector2::new(100, 80))
                     .with_command_direction(CommandDirection::UpLeft)
-                    .with_action(action)
                     .with_mobile(true)
                     .with_loaded(true),
             )
             .expect("spawn succeeds");
+        let index = engine.find_object_index(id).expect("object index remains");
+        // C4Object::CompileFunc cannot preserve Data while selecting a
+        // different procedure from ActIdle. Stage the running action after
+        // load so this test begins at the collision arm it verifies.
+        engine.objects[index].state.action = action;
 
         for _ in 0..6 {
             engine.tick().expect("bridge tick succeeds");
@@ -19079,6 +19227,7 @@ func Trigger() {
         global func Ping() { return GameCall("Answer", 6); }
         global func PingMissing() { return GameCall("NoSuch"); }
         global func PingDefGlobal() { return GameCall("CallerGlobal"); }
+        global func PingScenarioGlobal() { return GameCall("ScenarioGlobal"); }
         "#;
 
         let mut engine = Engine::with_seed(7);
@@ -19091,7 +19240,8 @@ func Trigger() {
             .install_scenario_script(
                 "Scenario",
                 r#"
-                global func Answer(n) { return n * 7; }
+                func Answer(n) { return n * 7; }
+                global func ScenarioGlobal() { return 123; }
                 "#,
             )
             .expect("scenario installs");
@@ -19116,6 +19266,14 @@ func Trigger() {
             result,
             Value::Nil,
             "owner-scoped lookup: definition globals are not in the scenario host"
+        );
+        let result = engine
+            .call_object_function(caller_idx, "PingScenarioGlobal", Vec::new())
+            .expect("scenario global lookup remains failsafe");
+        assert_eq!(
+            result,
+            Value::Nil,
+            "scenario global declarations are engine-owned behind an unnamed link"
         );
     }
 
@@ -19289,13 +19447,18 @@ func Trigger() {
         // objects are never called.
         let caller_script = r#"
         global func Shout() { return GameCallEx("Roll", 5); }
+        global func ShoutGlobalOnly() { return GameCallEx("GlobalOnly", 5); }
         "#;
         let listener_script = r#"
-        local hits;
+        local hits, promote;
+        func SetPromote(object target) { promote = target; }
         func Roll(n) {
             hits = hits + n;
+            if (promote) SetCategory(524288, promote);
             return 1000; // discarded by the broadcast
         }
+        func MarkGlobalOnly() { hits = hits + 100; return hits; }
+        global func GlobalOnly(n) { return MarkGlobalOnly(); }
         "#;
 
         let mut engine = Engine::with_seed(7);
@@ -19325,7 +19488,7 @@ func Trigger() {
             .install_scenario_script(
                 "Scenario",
                 r#"
-                global func Roll(n) { return n * 3; }
+                func Roll(n) { return n * 3; }
                 "#,
             )
             .expect("scenario installs");
@@ -19333,16 +19496,31 @@ func Trigger() {
         let caller = engine
             .spawn_object(SpawnConfig::new("CLLR"))
             .expect("caller spawns");
+        // Distinct definitions in one sorting category are inserted at the
+        // front of that category bracket. Spawn the plain object first so
+        // the later goal link precedes it in C++ master-list order.
+        let plain = engine
+            .spawn_object(SpawnConfig::new("PLAI"))
+            .expect("plain spawns");
         let goal = engine
             .spawn_object(SpawnConfig::new("GOAL"))
             .expect("goal spawns");
         let rule = engine
             .spawn_object(SpawnConfig::new("RULE"))
             .expect("rule spawns");
-        let plain = engine
-            .spawn_object(SpawnConfig::new("PLAI"))
-            .expect("plain spawns");
         engine.tick().expect("tick succeeds");
+
+        let goal_index = engine.find_object_index(goal).expect("goal exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    goal_index,
+                    "SetPromote",
+                    vec![Value::Object(plain.as_u64())],
+                )
+                .expect("promotion target stores"),
+            Value::Nil
+        );
 
         let caller_idx = engine.find_object_index(caller).expect("caller exists");
         let result = engine
@@ -19353,6 +19531,20 @@ func Trigger() {
             Value::Int(15),
             "only the scenario script's result returns (goal/rule results discarded)"
         );
+        let plain_idx = engine.find_object_index(plain).expect("plain exists");
+        assert_eq!(
+            engine.objects[plain_idx].state.category & (1 << 19),
+            1 << 19,
+            "the goal callback's foreign SetCategory is live before the later list node"
+        );
+        let result = engine
+            .call_object_function(caller_idx, "ShoutGlobalOnly", Vec::new())
+            .expect("global-only broadcast remains failsafe");
+        assert_eq!(
+            result,
+            Value::Nil,
+            "neither object hosts nor Game.Script own the named global function"
+        );
         for (id, expected) in [(goal, Some(&Value::Int(5))), (rule, Some(&Value::Int(5)))] {
             let idx = engine.find_object_index(id).expect("listener exists");
             assert_eq!(
@@ -19361,11 +19553,10 @@ func Trigger() {
                 "goal/rule objects were each called once"
             );
         }
-        let plain_idx = engine.find_object_index(plain).expect("plain exists");
         assert_eq!(
             engine.objects[plain_idx].state.local_vars.get("hits"),
-            None,
-            "plain-category objects are not part of the broadcast"
+            Some(&Value::Int(5)),
+            "an earlier callback's category write admits the later object at its turn"
         );
     }
 
@@ -26579,7 +26770,12 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         let mut actions = HashMap::new();
         actions.insert(
             "Hangle".to_string(),
-            ActionSpec::default().with_procedure("hangle"),
+            // C++ maps procedure names case-sensitively and Directions=1
+            // only permits DIR_Left; this fixture exercises rightward
+            // HANGLE steering, so it needs both direction slots.
+            ActionSpec::default()
+                .with_procedure("HANGLE")
+                .with_directions(2),
         );
         definition.configure_actions(Some("Hangle".to_string()), actions);
         definition.set_physical(PhysicalInfo {
@@ -26895,7 +27091,11 @@ protected func Activity() { SetActionTargets(); return(1); }
         let mut actions = HashMap::new();
         actions.insert(
             "Swim".to_string(),
-            ActionSpec::default().with_procedure("swim"),
+            // DIR_Right is valid only when the ActMap declares two
+            // directions (C4Object::SetDir); procedure mapping is exact.
+            ActionSpec::default()
+                .with_procedure("SWIM")
+                .with_directions(2),
         );
         definition.configure_actions(Some("Swim".to_string()), actions);
         definition.set_physical(PhysicalInfo {
@@ -27036,7 +27236,11 @@ protected func Activity() { SetActionTargets(); return(1); }
         let mut actions = HashMap::new();
         actions.insert(
             "Dig".to_string(),
-            ActionSpec::default().with_procedure("dig"),
+            // DIG's UpRight arm calls SetDir(DIR_Right), which C++ accepts
+            // only for an action with Directions=2.
+            ActionSpec::default()
+                .with_procedure("DIG")
+                .with_directions(2),
         );
         definition.configure_actions(Some("Dig".to_string()), actions);
         definition.set_physical(PhysicalInfo {
@@ -28094,7 +28298,7 @@ func Stuck()
         // ExecAction starts with iPhaseAdvance=1. DFA_PUSH overwrites it
         // only for a nonzero raw xdir; DFA_PULL first resets it to zero
         // (C4Object.cpp:5106-5108,5189-5192).
-        for (action, stationary_advance) in [("Push", 1_u32), ("Pull", 0_u32)] {
+        for (action, stationary_advance) in [("Push", 1_i32), ("Pull", 0_i32)] {
             let (mut engine, crate_id, _) = push_pull_fixture();
             let mut state = ActionState::new(action);
             state.target = Some(crate_id);
@@ -28120,8 +28324,8 @@ func Stuck()
                 );
                 assert_eq!(object.state.action.name, action);
 
-                let accumulated = frame * stationary_advance;
-                let expected_phase = (accumulated / 13) as i32;
+                let accumulated = frame as i32 * stationary_advance;
+                let expected_phase = accumulated / 13;
                 let expected_delay = accumulated % 13;
                 assert_eq!(
                     (object.state.action.phase, object.state.action.ticks),
@@ -48054,6 +48258,8 @@ func FxProbeTimer(pThis, iNumber) {
             )
             .expect("living target spawns");
         let idx = engine.find_object_index(id).expect("target exists");
+        let command_target = i32::try_from(id.as_u64()).expect("test object id fits C4 int");
+        engine.objects[idx].state.effects[0].command_target = Some(command_target);
 
         engine.assign_death(idx, false).expect("death callbacks run");
 
@@ -48142,6 +48348,533 @@ func FxProbeTimer(pThis, iNumber) {
             engine.global_effects()[0].var(0),
             EffectVarValue::Int(4),
             "the timer keeps firing on every elapsed interval"
+        );
+    }
+
+    #[test]
+    fn no_command_target_effect_uses_exact_engine_global_scope() {
+        // C4Effect::GetCallbackScript falls back to Game.ScriptEngine when
+        // both command-target fields are empty; the affected object's local
+        // callback must not shadow that table (C4Effect.cpp:31-56). The
+        // retained global function then resolves the ordinary Helper in its
+        // own LinkedTo host and still has cthr->Def == nullptr.
+        let definition_script = r#"#strict 2
+local result;
+
+func Arm()
+{
+    result = 0;
+    AddEffect("NoTarget", this(), 100, 1);
+    return true;
+}
+
+func Mark(value) { result = value; return true; }
+func Read() { return result; }
+
+// This local same-name callback is invisible from Game.ScriptEngine.
+func FxNoTargetTimer(target, number, time)
+{
+    target->Mark(99);
+    return 0;
+}
+"#;
+        let global_script = r#"#strict 2
+global func FxNoTargetTimer(target, number, time)
+{
+    return Helper(target);
+}
+
+func Helper(target)
+{
+    if (GetActMapVal("Length", "Probe") == nil)
+        target->Mark(17);
+    else
+        target->Mark(98);
+    return 0;
+}
+"#;
+
+        let mut definition =
+            Definition::from_script("FXGS", "Global scope probe", definition_script)
+                .expect("definition script compiles");
+        definition.set_c4_callback_convention(true);
+        definition.configure_actions(
+            Some("Probe".to_string()),
+            HashMap::from([(
+                "Probe".to_string(),
+                ActionSpec {
+                    length: Some(23),
+                    ..ActionSpec::default()
+                },
+            )]),
+        );
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/EffectScope.c".to_string(),
+                global_script.to_string(),
+            )]),
+            1
+        );
+        let id = engine
+            .spawn_object(SpawnConfig::new("FXGS"))
+            .expect("probe spawns");
+        let idx = engine.find_object_index(id).expect("probe exists");
+        engine
+            .call_object_function(idx, "Arm", Vec::new())
+            .expect("effect arms");
+
+        engine.tick().expect("global effect callback runs");
+        let idx = engine.find_object_index(id).expect("probe remains");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Read", Vec::new())
+                .expect("result reads"),
+            Value::Int(17),
+            "the global callback used its exact Helper and no implicit definition"
+        );
+    }
+
+    #[test]
+    fn command_target_global_effect_keeps_this_and_linked_helper_scope() {
+        let definition_script = r#"#strict 2
+local result;
+func Arm() { result = 0; AddEffect("Commanded", this(), 100, 1, this()); return true; }
+func Helper() { return 99; }
+func Mark(value) { result = value; return true; }
+func Read() { return result; }
+"#;
+        let global_script = r#"#strict 2
+global func FxCommandedStart(target, number, temp)
+{
+    this()->Mark(Helper());
+    return 0;
+}
+global func FxCommandedTimer(target, number, time)
+{
+    this()->Mark(Helper());
+    return 0;
+}
+func Helper() { return 17; }
+"#;
+        let mut definition =
+            Definition::from_script("FXCT", "Command-target probe", definition_script)
+                .expect("definition compiles");
+        definition.set_c4_callback_convention(true);
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/CommandedEffect.c".to_string(),
+                global_script.to_string(),
+            )]),
+            1
+        );
+        let id = engine
+            .spawn_object(SpawnConfig::new("FXCT"))
+            .expect("probe spawns");
+        let idx = engine.find_object_index(id).expect("probe exists");
+        engine
+            .call_object_function(idx, "Arm", Vec::new())
+            .expect("effect arms");
+        let idx = engine.find_object_index(id).expect("probe remains");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Read", Vec::new())
+                .expect("synchronous Start result reads"),
+            Value::Int(17),
+            "synchronous Fx*Start retained its System helper and command-target this"
+        );
+
+        engine.tick().expect("command-target callback runs");
+        let idx = engine.find_object_index(id).expect("probe remains");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Read", Vec::new())
+                .expect("result reads"),
+            Value::Int(17),
+            "the global SFunc retained its System helper and command-target this"
+        );
+    }
+
+    #[test]
+    fn object_effect_uses_and_persists_foreign_command_target_locals() {
+        // Every object-effect callback executes with pCommandTarget as its
+        // C4Aul `this` (C4Effect.cpp:345). That object owns the live Local[]
+        // storage even when pForObj is a different carrier.
+        let script = r#"#strict 2
+local counter;
+
+func SetCounter(value) { counter = value; return true; }
+func ReadCounter() { return counter; }
+func ArmObjectEffect(target)
+{
+    AddEffect("ForeignObjectA", target, 100, 1, this());
+    AddEffect("ForeignObjectB", target, 101, 1, this());
+    return true;
+}
+func FxForeignObjectATimer(target, number, time)
+{
+    counter = counter + 1;
+    return 0;
+}
+func FxForeignObjectBTimer(target, number, time)
+{
+    counter = counter + 1;
+    return 0;
+}
+"#;
+        let mut definition =
+            Definition::from_script("FXFO", "Foreign object-effect target", script)
+                .expect("definition compiles");
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(12);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let command_target = engine
+            .spawn_object(SpawnConfig::new("FXFO"))
+            .expect("command target spawns");
+        let carrier = engine
+            .spawn_object(SpawnConfig::new("FXFO"))
+            .expect("carrier spawns");
+        let command_index = engine
+            .find_object_index(command_target)
+            .expect("command target exists");
+        engine
+            .call_object_function(command_index, "SetCounter", vec![Value::Int(40)])
+            .expect("counter seeds");
+        let command_index = engine
+            .find_object_index(command_target)
+            .expect("command target remains");
+        engine
+            .call_object_function(
+                command_index,
+                "ArmObjectEffect",
+                vec![Value::Object(carrier.as_u64())],
+            )
+            .expect("foreign-target effect arms");
+
+        engine.tick().expect("foreign-target timer runs");
+        let command_index = engine
+            .find_object_index(command_target)
+            .expect("command target remains");
+        assert_eq!(
+            engine
+                .call_object_function(command_index, "ReadCounter", Vec::new())
+                .expect("counter reads"),
+            Value::Int(42),
+            "the second same-tick callback observes the first callback's live local write"
+        );
+    }
+
+    #[test]
+    fn object_effect_error_keeps_foreign_command_target_local_writes() {
+        // C4Aul's fail-safe effect Exec aborts on a runtime error without
+        // rolling back writes already made to pCommandTarget. The following
+        // callback in the same object-effect batch must see that live write.
+        let script = r#"#strict 2
+local counter;
+
+func SetCounter(value) { counter = value; return true; }
+func ReadCounter() { return counter; }
+func ArmObjectEffectsWithError(target)
+{
+    AddEffect("ForeignObjectError", target, 100, 1, this());
+    AddEffect("ForeignObjectAfterError", target, 101, 1, this());
+    return true;
+}
+func FxForeignObjectErrorTimer(target, number, time)
+{
+    counter = counter + 1;
+    NoSuchFunctionAnywhere();
+    return 0;
+}
+func FxForeignObjectAfterErrorTimer(target, number, time)
+{
+    counter = counter + 1;
+    return 0;
+}
+"#;
+        let mut definition =
+            Definition::from_script("FXOE", "Object-effect error target", script)
+                .expect("definition compiles");
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(13);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let command_target = engine
+            .spawn_object(SpawnConfig::new("FXOE"))
+            .expect("command target spawns");
+        let carrier = engine
+            .spawn_object(SpawnConfig::new("FXOE"))
+            .expect("carrier spawns");
+        let command_index = engine
+            .find_object_index(command_target)
+            .expect("command target exists");
+        engine
+            .call_object_function(command_index, "SetCounter", vec![Value::Int(40)])
+            .expect("counter seeds");
+        let command_index = engine
+            .find_object_index(command_target)
+            .expect("command target remains");
+        engine
+            .call_object_function(
+                command_index,
+                "ArmObjectEffectsWithError",
+                vec![Value::Object(carrier.as_u64())],
+            )
+            .expect("foreign-target effects arm");
+
+        engine.tick().expect("fail-safe timer batch continues");
+        let command_index = engine
+            .find_object_index(command_target)
+            .expect("command target remains");
+        assert_eq!(
+            engine
+                .call_object_function(command_index, "ReadCounter", Vec::new())
+                .expect("counter reads"),
+            Value::Int(42),
+            "the errored callback's pre-error local write remains live for the next callback"
+        );
+    }
+
+    #[test]
+    fn global_effect_uses_and_persists_command_target_locals() {
+        // Game.pGlobalEffects still calls Exec(pCommandTarget, ...) while
+        // passing nil as pForObj (C4Effect.cpp:345). The absence of a
+        // carrier must not replace the command target's locals with empty
+        // storage.
+        let script = r#"#strict 2
+local counter;
+
+func SetCounter(value) { counter = value; return true; }
+func ReadCounter() { return counter; }
+func ArmGlobalEffect()
+{
+    AddEffect("ForeignGlobalA", nil, 100, 1, this());
+    AddEffect("ForeignGlobalB", nil, 101, 1, this());
+    AddEffect("ForeignGlobalC", nil, 102, 1, this());
+    return true;
+}
+func FxForeignGlobalATimer(target, number, time)
+{
+    counter = counter + 1;
+    return 0;
+}
+func FxForeignGlobalBTimer(target, number, time)
+{
+    counter = counter + 1;
+    return 0;
+}
+func FxForeignGlobalCTimer(target, number, time)
+{
+    counter = counter + 1;
+    return 0;
+}
+"#;
+        let mut definition =
+            Definition::from_script("FXFG", "Global-effect command target", script)
+                .expect("definition compiles");
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(14);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let command_target = engine
+            .spawn_object(SpawnConfig::new("FXFG"))
+            .expect("command target spawns");
+        let command_index = engine
+            .find_object_index(command_target)
+            .expect("command target exists");
+        engine
+            .call_object_function(command_index, "SetCounter", vec![Value::Int(50)])
+            .expect("counter seeds");
+        let command_index = engine
+            .find_object_index(command_target)
+            .expect("command target remains");
+        engine
+            .call_object_function(command_index, "ArmGlobalEffect", Vec::new())
+            .expect("global effect arms");
+
+        engine.tick().expect("global timer runs");
+        let command_index = engine
+            .find_object_index(command_target)
+            .expect("command target remains");
+        assert_eq!(
+            engine
+                .call_object_function(command_index, "ReadCounter", Vec::new())
+                .expect("counter reads"),
+            Value::Int(53),
+            "each carrier-less callback observes earlier same-tick local writes"
+        );
+    }
+
+    #[test]
+    fn global_effect_error_keeps_command_target_local_writes() {
+        // Global effects have no carrier, but their callbacks still execute
+        // on pCommandTarget. An ordinary runtime error yields nil and keeps
+        // the local mutation for the next global-effect callback.
+        let script = r#"#strict 2
+local counter;
+
+func SetCounter(value) { counter = value; return true; }
+func ReadCounter() { return counter; }
+func ArmGlobalEffectsWithError()
+{
+    AddEffect("ForeignGlobalError", nil, 100, 1, this());
+    AddEffect("ForeignGlobalAfterError", nil, 101, 1, this());
+    return true;
+}
+func FxForeignGlobalErrorTimer(target, number, time)
+{
+    counter = counter + 1;
+    NoSuchFunctionAnywhere();
+    return 0;
+}
+func FxForeignGlobalAfterErrorTimer(target, number, time)
+{
+    counter = counter + 1;
+    return 0;
+}
+"#;
+        let mut definition =
+            Definition::from_script("FXGE", "Global-effect error target", script)
+                .expect("definition compiles");
+        definition.set_c4_callback_convention(true);
+
+        let mut engine = Engine::with_seed(15);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let command_target = engine
+            .spawn_object(SpawnConfig::new("FXGE"))
+            .expect("command target spawns");
+        let command_index = engine
+            .find_object_index(command_target)
+            .expect("command target exists");
+        engine
+            .call_object_function(command_index, "SetCounter", vec![Value::Int(50)])
+            .expect("counter seeds");
+        let command_index = engine
+            .find_object_index(command_target)
+            .expect("command target remains");
+        engine
+            .call_object_function(command_index, "ArmGlobalEffectsWithError", Vec::new())
+            .expect("global effects arm");
+
+        engine.tick().expect("fail-safe global timer batch continues");
+        let command_index = engine
+            .find_object_index(command_target)
+            .expect("command target remains");
+        assert_eq!(
+            engine
+                .call_object_function(command_index, "ReadCounter", Vec::new())
+                .expect("counter reads"),
+            Value::Int(52),
+            "the errored global callback's pre-error local write remains live"
+        );
+    }
+
+    #[test]
+    fn global_effect_timer_runs_without_any_registered_definition() {
+        let mut engine = Engine::with_seed(13);
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/SoloEffect.c".to_string(),
+                "global func FxSoloTimer(target, number, time) { EffectVar(0, nil, number) = time; return 0; }\n"
+                    .to_string(),
+            )]),
+            1
+        );
+        let mut effect = EffectState::new("Solo").with_interval(1);
+        effect.number = 1;
+        let mut state = engine.capture_state();
+        state.global_effects = vec![effect];
+        engine.restore_state(&state).expect("effect-only state restores");
+
+        engine.tick().expect("definition-free global callback runs");
+        assert_eq!(engine.global_effects().len(), 1);
+        assert_eq!(engine.global_effects()[0].var(0), EffectVarValue::Int(1));
+    }
+
+    #[test]
+    fn invalid_command_id_damage_falls_back_to_engine_global() {
+        let mut engine = Engine::with_seed(17);
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/DamageEffect.c".to_string(),
+                "global func FxInvalidDamage(target, number, change, cause, caused_by) { return 0; }\n"
+                    .to_string(),
+            )]),
+            1
+        );
+        engine
+            .register_definition(simple_definition("DMGI"))
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("DMGI").add_effect(
+                    EffectState::new("Invalid").with_command_id(Some("MISS")),
+                ),
+            )
+            .expect("target spawns");
+        let idx = engine.find_object_index(id).expect("target exists");
+
+        engine
+            .change_object_damage(idx, 10, 0, OWNER_NONE)
+            .expect("damage callback runs");
+        assert_eq!(engine.object_snapshot(id).expect("target remains").damage, 0);
+    }
+
+    #[test]
+    fn same_callback_batch_change_def_rebinds_effect_stop() {
+        let old_script = r#"#strict 2
+local result;
+func Arm() { result = 0; AddEffect("Swap", this(), 100, 1, this()); return true; }
+func FxSwapTimer(target, number, time) { ChangeDef(FXNW); return -1; }
+"#;
+        let new_script = r#"#strict 2
+local result;
+func FxSwapStop(target, number, reason) { result = 17; return 0; }
+func Read() { return result; }
+"#;
+        let mut old = Definition::from_script("FXOL", "Old effect host", old_script)
+            .expect("old definition compiles");
+        old.set_c4_callback_convention(true);
+        let mut new = Definition::from_script("FXNW", "New effect host", new_script)
+            .expect("new definition compiles");
+        new.set_c4_callback_convention(true);
+        let mut engine = Engine::with_seed(19);
+        engine.register_definition(old).expect("old registers");
+        engine.register_definition(new).expect("new registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("FXOL"))
+            .expect("target spawns");
+        let idx = engine.find_object_index(id).expect("target exists");
+        engine
+            .call_object_function(idx, "Arm", Vec::new())
+            .expect("effect arms");
+
+        engine.tick().expect("timer and rebound Stop run");
+        let snapshot = engine.object_snapshot(id).expect("target remains");
+        assert_eq!(snapshot.definition_id, "FXNW");
+        let idx = engine.find_object_index(id).expect("target remains indexed");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Read", Vec::new())
+                .expect("new definition reads"),
+            Value::Int(17)
         );
     }
 
@@ -50945,6 +51678,11 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
                     .with_mobile(true),
             )
             .expect("object spawns");
+        let object_idx = engine.find_object_index(object).expect("object exists");
+        let command_target = i32::try_from(object.as_u64()).expect("test object id fits C4 int");
+        for effect in &mut engine.objects[object_idx].state.effects {
+            effect.command_target = Some(command_target);
+        }
 
         engine.tick().expect("Death error is fail-safe");
 
@@ -51002,6 +51740,9 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
                     .add_effect(EffectState::new("Witness").with_priority(100)),
             )
             .expect("object spawns");
+        let object_idx = engine.find_object_index(object).expect("object exists");
+        let command_target = i32::try_from(object.as_u64()).expect("test object id fits C4 int");
+        engine.objects[object_idx].state.effects[0].command_target = Some(command_target);
 
         engine.tick().expect("out-of-bounds removal succeeds");
 
@@ -54309,15 +55050,15 @@ func Decaying() {
     #[test]
     fn script_set_action_after_docon_resynchronizes_fixed_position() -> Result<(), EngineError> {
         // Operation order matters inside one script call: DoCon first shifts
-        // only integer y, then C4Object::SetAction snaps fix_x/fix_y to that
-        // adjusted position (src/C4Object.cpp:1414-1515,4144). The staged Rust
-        // fold must not preserve DoCon's stale fixed coordinate past the later
-        // SetAction.
+        // only integer y and makes the object incomplete. The following valid
+        // C4Object::SetAction call succeeds but is coerced to ActIdle, then
+        // snaps fix_x/fix_y to the adjusted position (src/C4Object.cpp:
+        // 1414-1515, 4111-4144). The staged Rust fold must preserve both the
+        // incomplete-activity coercion and the later fixed-position resync.
         let script = r#"#strict
 func DecayThenExist() {
     DoCon(-4);
-    SetAction("Exist");
-    return(1);
+    return(SetAction("Exist"));
 }
 "#;
         let mut definition = Definition::from_script("DHRS", "Dead Horse", script)?;
@@ -54341,12 +55082,16 @@ func DecayThenExist() {
         engine.apply_object_update(id, ObjectUpdate::new().with_position(Vector2::new(20, 100)))?;
         let idx = engine.find_object_index(id).expect("dead horse exists");
 
-        engine.call_object_function(idx, "DecayThenExist", Vec::new())?;
+        assert_eq!(
+            engine.call_object_function(idx, "DecayThenExist", Vec::new())?,
+            Value::Bool(true),
+            "the requested slot is valid even though SetAction coerces it to ActIdle"
+        );
 
         let object = engine.object_snapshot(id).expect("dead horse survives");
         assert_eq!(object.construction, 96_000);
         assert_eq!(object.position.y, 101);
-        assert_eq!(object.action.name, "Exist");
+        assert_eq!(object.action.name, "Idle");
         let idx = engine.find_object_index(id).expect("dead horse survives");
         assert_eq!(engine.objects[idx].fixed_position.y, itofix(101));
         Ok(())
@@ -60623,6 +61368,13 @@ protected func WetStart()
                     .with_loaded(true),
             )
             .expect("incomplete-activity object spawns");
+
+        // The loader correctly coerces a partial non-IncompleteActivity
+        // object to ActIdle before restoring its saved counters. C++ can
+        // still reach this ExecAction guard when an object becomes partial
+        // after starting WALK, so stage that live runtime state explicitly.
+        let reset_idx = engine.find_object_index(reset).expect("reset object exists");
+        engine.objects[reset_idx].state.action = walk_action();
 
         for id in [reset, keep] {
             let idx = engine.find_object_index(id).expect("object exists");

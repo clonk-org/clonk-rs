@@ -69,7 +69,7 @@ struct CaseFrameExpectation {
     delta_y: i32,
     y_dir: i32,
     action: &'static str,
-    action_time: u32,
+    action_time: i32,
     com_dir: CommandDirection,
 }
 
@@ -224,7 +224,7 @@ fn tutorial07_elevator_matches_cpp_fixed_motion_and_shaft_contact() -> Result<()
                 delta_y: expected_down_position(tick),
                 y_dir,
                 action: if stopped { "Wait" } else { "Drill" },
-                action_time: if stopped { 0 } else { tick },
+                action_time: if stopped { 0 } else { tick as i32 },
                 com_dir: if stopped {
                     CommandDirection::Stop
                 } else {
@@ -283,7 +283,7 @@ fn tutorial07_elevator_matches_cpp_fixed_motion_and_shaft_contact() -> Result<()
                 delta_y: expected_up_position(tick),
                 y_dir,
                 action: if stopped { "Wait" } else { "Ride" },
-                action_time: if stopped { 1 } else { tick },
+                action_time: if stopped { 1 } else { tick as i32 },
                 com_dir,
             },
         );

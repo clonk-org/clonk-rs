@@ -38,11 +38,12 @@ use lc_engine::{
     object_visible_for_player,
     particles::SafeRng,
     DefinitionActionGraphics, DefinitionId, DefinitionLineMetadata, DefinitionRect,
-    DefinitionTargetRect, Direction, DrawTransform,
+    DefinitionTargetRect, Direction, DrawTransform, PHYSICAL_ACTION_GRAPHICS_MARKER,
     EnvironmentFrame, EnvironmentSettings, FloatVector2, GammaControlState, GraphicsOverlayMode,
     Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus, ParticleSnapshot,
     PlayerState, RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
     SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent, FULL_CON, OWNER_NONE,
+    physical_action_graphics_key,
 };
 #[cfg(test)]
 use lc_engine::{
@@ -386,6 +387,11 @@ pub struct DefinitionSprite {
     pub image: ImageData,
     pub actions: HashMap<String, DefinitionActionGraphics>,
     pub color_mask: Option<ColorByOwnerMask>,
+    /// DefCore graphics `Scale` of this bitmap's owning definition. Object
+    /// geometry remains in definition coordinates; C4Object scales only the
+    /// source crop selected from `GetGraphics()` (C4Object.cpp:438-467,
+    /// 2639-2670).
+    pub graphics_scale: f32,
     /// The def Shape rect (DefCore Offset + Width/Height): idle objects
     /// draw Shape.Wdt x Shape.Hgt from the graphics origin
     /// (C4Object::DrawFace, C4Object.cpp:438-460) — never the whole
@@ -595,6 +601,70 @@ impl SourceRect {
             y,
             width,
             height,
+        }
+    }
+}
+
+/// Floating-point source geometry used only by C4Object face blits. C++
+/// forwards `GetGraphics()->pDef->Scale` into `Blit` without quantizing the
+/// resulting source rectangle (C4Object.cpp:438-467,2639-2670).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FloatSourceRect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+impl FloatSourceRect {
+    fn scaled(source: SourceRect, scale: f32) -> Self {
+        Self {
+            x: source.x as f32 * scale,
+            y: source.y as f32 * scale,
+            width: source.width as f32 * scale,
+            height: source.height as f32 * scale,
+        }
+    }
+
+    fn is_valid(self) -> bool {
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.width.is_finite()
+            && self.height.is_finite()
+            && self.width > 0.0
+            && self.height > 0.0
+    }
+
+    /// Nearest/point sample for one normalized source axis. Integer origins
+    /// and extents deliberately reduce to the existing SourceRect mapping.
+    fn sample_axis(origin: f32, extent: f32, normalized: f32, flipped: bool) -> i32 {
+        // Preserve the exact operation order of the established integer
+        // sampler. `floor(origin + normalized * extent)` is not equivalent:
+        // adding an integer origin can round a value just below the next
+        // integer upward (the real ELEV 28x44 construction slice exposes
+        // this at specific rows).
+        if origin.fract() == 0.0 && extent.fract() == 0.0 {
+            let origin = origin as i32;
+            let extent = extent as i32;
+            let relative = (normalized * extent as f32)
+                .floor()
+                .clamp(0.0, (extent - 1) as f32) as i32;
+            let relative = if flipped {
+                (extent - 1).saturating_sub(relative)
+            } else {
+                relative
+            };
+            return origin.saturating_add(relative);
+        }
+        let first = origin.floor() as i32;
+        let last = (origin + extent).ceil() as i32 - 1;
+        let sample = (origin + normalized * extent)
+            .floor()
+            .clamp(first as f32, last as f32) as i32;
+        if flipped {
+            first.saturating_add(last).saturating_sub(sample)
+        } else {
+            sample
         }
     }
 }
@@ -3193,8 +3263,9 @@ impl GraphicsSystem {
 
     /// C4ObjectList draws every base before any TopFace
     /// (src/C4ObjectList.cpp:390-396). The pass also owns the construction
-    /// sign, even when the definition has no TopFace. Action FacetTopFace and
-    /// partial GrowthType TopFaces remain separate parity slices.
+    /// sign, even when the definition has no TopFace. An active
+    /// `FacetTopFace` action relocates only the source rectangle; the target
+    /// remains the definition TopFace target (src/C4Object.cpp:2639-2668).
     fn paint_object_top_face(
         &mut self,
         object: &ObjectSnapshot,
@@ -3207,26 +3278,42 @@ impl GraphicsSystem {
             } else {
                 (object.definition_id.clone(), None)
             };
-        let mut sprite = self
+        // SetGraphics swaps only GetGraphics()/the bitmap source. DefCore
+        // TopFace, Shape/GrowthType and the live ActMap remain owned by
+        // object->Def (C4Object.cpp:357-376,404-425,2639-2667).
+        let mut bitmap_sprite = self
             .object_sprites
             .get(&sprite_map_key(
                 &base_definition_id,
                 base_graphics_name.as_deref(),
             ))
             .cloned();
-        if sprite.is_none() && base_graphics_name.is_some() {
-            sprite = self
+        if bitmap_sprite.is_none() && base_graphics_name.is_some() {
+            bitmap_sprite = self
                 .object_sprites
                 .get(&sprite_map_key(&base_definition_id, None))
                 .cloned();
         }
-        if sprite.is_none() && base_definition_id != object.definition_id {
-            sprite = self
+        if bitmap_sprite.is_none() && base_definition_id != object.definition_id {
+            bitmap_sprite = self
                 .object_sprites
                 .get(&sprite_map_key(&object.definition_id, None))
                 .cloned();
         }
-        let Some(sprite) = sprite else {
+        let Some(bitmap_sprite) = bitmap_sprite else {
+            return;
+        };
+        let definition_sprite = self
+            .object_sprites
+            .get(&sprite_map_key(&object.definition_id, None))
+            .cloned()
+            // A same-definition named sheet carries identical definition
+            // metadata in imported atlases. Preserve that legacy fallback
+            // when the default atlas entry itself is unavailable.
+            .or_else(|| {
+                (base_definition_id == object.definition_id).then(|| bitmap_sprite.clone())
+            });
+        let Some(definition_sprite) = definition_sprite else {
             return;
         };
 
@@ -3236,14 +3323,10 @@ impl GraphicsSystem {
         // ColorMod, rotation or object blit mode (C4Object.cpp:2617-2638).
         if object.ocf & lc_engine::ocf::CONSTRUCT != 0 && object.rotation == 0 {
             if let Some(construction) = self.hud_graphics.construction.clone() {
-                let shape_sprite = self
-                    .object_sprites
-                    .get(&sprite_map_key(&object.definition_id, None))
-                    .unwrap_or(&sprite);
                 let shape = Self::con_scaled_shape(
-                    Self::sprite_def_shape(shape_sprite),
+                    Self::sprite_def_shape(&definition_sprite),
                     object.construction.clamp(0, FULL_CON),
-                    shape_sprite.stretch_growth,
+                    definition_sprite.stretch_growth,
                 );
                 let cox = object.position.x + shape.x;
                 let coy = object.position.y + shape.y;
@@ -3270,29 +3353,88 @@ impl GraphicsSystem {
             }
         }
 
-        if object.construction != FULL_CON || object.rotation.rem_euclid(360) != 0 {
+        let construction = object.construction.max(0);
+        if (construction < FULL_CON && !definition_sprite.stretch_growth)
+            || object.rotation.rem_euclid(360) != 0
+        {
             return;
         }
-        let Some(top_face) = sprite.top_face else {
+        let Some(top_face) = definition_sprite.top_face else {
             return;
         };
-        let shape = Self::sprite_def_shape(&sprite);
+        let shape = Self::con_scaled_shape(
+            Self::sprite_def_shape(&definition_sprite),
+            construction,
+            definition_sprite.stretch_growth,
+        );
         let cox = object.position.x + shape.x;
         let coy = object.position.y + shape.y;
+        // UpdateFlipDir installs the object's horizontal draw transform for
+        // every active action, independently of FacetTopFace. DrawTopFace
+        // therefore mirrors a plain definition TopFace too
+        // (src/C4Object.cpp:404-430,2639-2668).
+        let action_graphics =
+            Self::live_action_graphics(&definition_sprite.actions, &object.action);
+        let (draw_dir, flipped) = action_graphics
+            .map(|graphics| Self::resolve_draw_direction(graphics, object.direction))
+            .unwrap_or((object.direction.to_script_value(), false));
+
+        let mut source_x = top_face.x;
+        let mut source_y = top_face.y;
+        if let Some(graphics) = action_graphics.filter(|graphics| graphics.facet_top_face) {
+            // C4ActionDef::Facet is a zeroed C4TargetRect when omitted. Only
+            // its source x/y/size participate in the TopFace override.
+            let (facet_x, facet_y, facet_width, facet_height) = graphics
+                .facet
+                .as_ref()
+                .map(|facet| (facet.x, facet.y, facet.width, facet.height))
+                .unwrap_or((0, 0, 0, 0));
+            let mut phase = object.action.phase;
+            if graphics.reverse {
+                phase = graphics
+                    .length
+                    .unwrap_or(1)
+                    .saturating_sub(1)
+                    .saturating_sub(phase);
+            }
+            source_x = facet_x
+                .saturating_add(top_face.x)
+                .saturating_add(facet_width.saturating_mul(phase));
+            source_y = facet_y
+                .saturating_add(top_face.y)
+                .saturating_add(facet_height.saturating_mul(draw_dir));
+        }
+        let growth_scale = if definition_sprite.stretch_growth && construction != FULL_CON {
+            Some(construction)
+        } else {
+            None
+        };
+        let target_x = growth_scale.map_or(top_face.target_x, |con| {
+            top_face.target_x.saturating_mul(con) / FULL_CON
+        });
+        let target_y = growth_scale.map_or(top_face.target_y, |con| {
+            top_face.target_y.saturating_mul(con) / FULL_CON
+        });
+        let target_width = growth_scale.map_or(top_face.width, |con| {
+            top_face.width.saturating_mul(con) / FULL_CON
+        });
+        let target_height = growth_scale.map_or(top_face.height, |con| {
+            top_face.height.saturating_mul(con) / FULL_CON
+        });
         self.blit_face(
-            &sprite,
-            SourceRect::new(top_face.x, top_face.y, top_face.width, top_face.height),
+            &bitmap_sprite,
+            SourceRect::new(source_x, source_y, top_face.width, top_face.height),
             (
-                (cox + top_face.target_x) as f32,
-                (coy + top_face.target_y) as f32,
-                top_face.width as f32,
-                top_face.height as f32,
+                (cox + target_x) as f32,
+                (coy + target_y) as f32,
+                target_width as f32,
+                target_height as f32,
             ),
             (
                 cox as f32 + shape.width as f32 / 2.0,
                 coy as f32 + shape.height as f32 / 2.0,
             ),
-            false,
+            flipped,
             Some(object_color_by_owner_tint(object)),
             self.viewport_zoom.max(MIN_VIEWPORT_ZOOM),
             0.0,
@@ -3563,6 +3705,17 @@ impl GraphicsSystem {
             })
     }
 
+    fn live_action_graphics<'a>(
+        actions: &'a HashMap<String, DefinitionActionGraphics>,
+        action: &lc_engine::ActionState,
+    ) -> Option<&'a DefinitionActionGraphics> {
+        match action.act_map_index {
+            Some(index) => actions.get(&physical_action_graphics_key(index)),
+            None if actions.contains_key(PHYSICAL_ACTION_GRAPHICS_MARKER) => None,
+            None => actions.get(action.name.as_str()),
+        }
+    }
+
     /// C4Object::Draw facet selection (src/C4Object.cpp:2388-2468):
     /// idle draws the base face only; active actions draw the optional
     /// FacetBase face plus the action facet — an active action with
@@ -3582,7 +3735,8 @@ impl GraphicsSystem {
         let con = object.construction.clamp(0, FULL_CON);
         let def_shape = Self::sprite_def_shape(sprite);
         let inst_shape = Self::con_scaled_shape(def_shape, con, sprite.stretch_growth);
-        let Some(graphics) = sprite.actions.get(object.action.name.as_str()) else {
+        let graphics = Self::live_action_graphics(&sprite.actions, &object.action);
+        let Some(graphics) = graphics else {
             // Idle: BaseFace only, phase (0,0) (src/C4Object.cpp:2388-2392).
             self.draw_base_face(
                 object,
@@ -3679,10 +3833,10 @@ impl GraphicsSystem {
             return;
         }
         // Drawing phase; Reverse mirrors it (src/C4Object.cpp:2419-2420).
-        let length = (graphics.length.unwrap_or(1).max(1) as i32).max(1);
-        let mut phase = object.action.phase.rem_euclid(length);
+        let length = graphics.length.unwrap_or(1);
+        let mut phase = object.action.phase;
         if graphics.reverse {
-            phase = length - 1 - phase;
+            phase = length.saturating_sub(1).saturating_sub(phase);
         }
         let source = SourceRect::new(
             facet.x + facet.width.saturating_mul(phase),
@@ -3812,19 +3966,32 @@ impl GraphicsSystem {
         if dest_w <= 0.0 || dest_h <= 0.0 || source.width <= 0 || source.height <= 0 {
             return;
         }
-        let image_w = sprite.image.width() as i32;
-        let image_h = sprite.image.height() as i32;
-        if source.x < 0 || source.y < 0 {
+        // Every C4Object face path passes GetGraphics()->pDef->Scale to the
+        // facet blit. SetGraphics may select another definition, so scale
+        // the source rectangle with the selected bitmap's metadata while
+        // leaving the live definition's destination/shape untouched.
+        let mut source = FloatSourceRect::scaled(source, sprite.graphics_scale);
+        if !source.is_valid() {
+            return;
+        }
+        let image_w = sprite.image.width() as f32;
+        let image_h = sprite.image.height() as f32;
+        if source.x < 0.0 || source.y < 0.0 {
             return;
         }
         let clamped_w = source.width.min(image_w - source.x);
         let clamped_h = source.height.min(image_h - source.y);
-        if clamped_w <= 0 || clamped_h <= 0 {
+        if !clamped_w.is_finite()
+            || !clamped_h.is_finite()
+            || clamped_w <= 0.0
+            || clamped_h <= 0.0
+        {
             return;
         }
-        dest_w *= clamped_w as f32 / source.width as f32;
-        dest_h *= clamped_h as f32 / source.height as f32;
-        let source = SourceRect::new(source.x, source.y, clamped_w, clamped_h);
+        dest_w *= clamped_w / source.width;
+        dest_h *= clamped_h / source.height;
+        source.width = clamped_w;
+        source.height = clamped_h;
 
         let viewport_x = self.viewport_x;
         let viewport_y = self.viewport_y;
@@ -3833,7 +4000,7 @@ impl GraphicsSystem {
                 GuiPoint::new((dest_x - viewport_x) * zoom, (dest_y - viewport_y) * zoom),
                 GuiSize::new(dest_w * zoom, dest_h * zoom),
             );
-            draw_image_region(
+            draw_image_region_float_source(
                 &mut self.surface,
                 &rect,
                 &sprite.image,
@@ -3868,7 +4035,9 @@ impl GraphicsSystem {
                 zoom,
                 zoom,
             ));
-            draw_image_region_transformed(
+            // Rotation is composed into this matrix too, so rotated object
+            // faces retain the same fractional source rectangle.
+            draw_image_region_transformed_float_source(
                 &mut self.surface,
                 (dest_x, dest_y, dest_w, dest_h),
                 &matrix,
@@ -3909,12 +4078,7 @@ impl GraphicsSystem {
             return false;
         }
 
-        let frame_count = graphics.length.unwrap_or(1).max(1);
-        let frame_count_i32 = if frame_count > i32::MAX as u32 {
-            i32::MAX
-        } else {
-            frame_count as i32
-        };
+        let frame_count_i32 = graphics.length.unwrap_or(1).max(1);
         if frame_count_i32 <= 0 {
             return false;
         }
@@ -4426,8 +4590,7 @@ impl GraphicsSystem {
     ) -> (i32, bool) {
         let direction = direction.to_script_value();
         if let Some(flip_dir) = graphics.flip_dir {
-            let flip_dir = flip_dir.min(i32::MAX as u32) as i32;
-            if flip_dir > 0 && direction >= flip_dir {
+            if flip_dir != 0 && direction >= flip_dir {
                 return (
                     flip_dir
                         .saturating_mul(2)
@@ -5977,6 +6140,119 @@ fn draw_transform_at(matrix: [f32; 9], off_x: f32, off_y: f32) -> GraphicsTransf
 /// Sprite blit through a full projective matrix. This is the CPU equivalent
 /// of C++'s transformed GL/software blit and intentionally keeps the normal
 /// owner-colour, modulation, gamma and framebuffer-composition pipeline.
+/// This float-source form is private to C4Object faces; all other callers
+/// retain the integer [`SourceRect`] entry points below.
+#[allow(clippy::too_many_arguments)]
+fn draw_image_region_transformed_float_source(
+    surface: &mut Surface,
+    dest: (f32, f32, f32, f32),
+    transform: &GraphicsTransform,
+    image: &ImageData,
+    mask: Option<&ColorByOwnerMask>,
+    source: &FloatSourceRect,
+    flip_x: bool,
+    owner_color: Option<u32>,
+    blit: SpriteBlitState,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
+    let (dest_x, dest_y, dest_width, dest_height) = dest;
+    if dest_width <= 0.0 || dest_height <= 0.0 || !source.is_valid() {
+        return;
+    }
+    if image.width() == 0 || image.height() == 0 {
+        return;
+    }
+    let Some(inverse) = transform.inverse() else {
+        return;
+    };
+
+    let corners = [
+        (dest_x, dest_y),
+        (dest_x + dest_width, dest_y),
+        (dest_x, dest_y + dest_height),
+        (dest_x + dest_width, dest_y + dest_height),
+    ];
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for (x, y) in corners {
+        let (x, y) = transform.transform_point(x, y);
+        if !x.is_finite() || !y.is_finite() {
+            return;
+        }
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+
+    let bounds = surface.bounds();
+    let min_x = (min_x.floor() as i32).max(bounds.x);
+    let min_y = (min_y.floor() as i32).max(bounds.y);
+    let max_x = (max_x.ceil() as i32).min(bounds.x + bounds.width as i32);
+    let max_y = (max_y.ceil() as i32).min(bounds.y + bounds.height as i32);
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
+
+    let image_width = image.width() as i32;
+    let image_height = image.height() as i32;
+    let pixels = image.pixels();
+    for target_y in min_y..max_y {
+        for target_x in min_x..max_x {
+            let (sample_x, sample_y) =
+                inverse.transform_point(target_x as f32 + 0.5, target_y as f32 + 0.5);
+            if !sample_x.is_finite() || !sample_y.is_finite() {
+                continue;
+            }
+            let normalized_x = (sample_x - dest_x) / dest_width;
+            let normalized_y = (sample_y - dest_y) / dest_height;
+            if !(0.0..1.0).contains(&normalized_x) || !(0.0..1.0).contains(&normalized_y) {
+                continue;
+            }
+
+            let source_x = FloatSourceRect::sample_axis(
+                source.x,
+                source.width,
+                normalized_x,
+                flip_x,
+            );
+            let source_y =
+                FloatSourceRect::sample_axis(source.y, source.height, normalized_y, false);
+            if source_x < 0
+                || source_y < 0
+                || source_x >= image_width
+                || source_y >= image_height
+            {
+                continue;
+            }
+
+            let idx = (source_y as usize * image.width() as usize + source_x as usize) * 4;
+            if idx + 3 >= pixels.len() {
+                continue;
+            }
+            let color = Color::new(
+                pixels[idx],
+                pixels[idx + 1],
+                pixels[idx + 2],
+                pixels[idx + 3],
+            );
+            let owner_mask =
+                mask.map(|mask_map| mask_map.value_at(source_x as u32, source_y as u32));
+            let source = prepare_sprite_fragment(color, owner_mask, owner_color, blit);
+            if source.alpha() == 0 {
+                continue;
+            }
+            let background = surface
+                .get_pixel(target_x as u32, target_y as u32)
+                .unwrap_or_default();
+            let blended = composite_sprite_fragment(source, background, blit, gamma);
+            let _ = surface.set_pixel(target_x as u32, target_y as u32, blended);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_image_region_transformed(
     surface: &mut Surface,
@@ -6075,6 +6351,93 @@ fn draw_image_region_transformed(
             );
             let owner_mask =
                 mask.map(|mask_map| mask_map.value_at(source_x as u32, source_y as u32));
+            let source = prepare_sprite_fragment(color, owner_mask, owner_color, blit);
+            if source.alpha() == 0 {
+                continue;
+            }
+            let background = surface
+                .get_pixel(target_x as u32, target_y as u32)
+                .unwrap_or_default();
+            let blended = composite_sprite_fragment(source, background, blit, gamma);
+            let _ = surface.set_pixel(target_x as u32, target_y as u32, blended);
+        }
+    }
+}
+
+/// Untransformed float-source counterpart used by straight C4Object faces.
+/// Its normalized sampling is identical to [`draw_image_region`] whenever
+/// the source coordinates are integral.
+#[allow(clippy::too_many_arguments)]
+fn draw_image_region_float_source(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    image: &ImageData,
+    mask: Option<&ColorByOwnerMask>,
+    source: &FloatSourceRect,
+    flip_x: bool,
+    owner_color: Option<u32>,
+    blit: SpriteBlitState,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || !source.is_valid() {
+        return;
+    }
+
+    let dest_width = rect.size.width.max(1.0).round() as u32;
+    let dest_height = rect.size.height.max(1.0).round() as u32;
+    if dest_width == 0 || dest_height == 0 || image.width() == 0 || image.height() == 0 {
+        return;
+    }
+
+    let dest_x = rect.origin.x.round() as i32;
+    let dest_y = rect.origin.y.round() as i32;
+
+    let bounds = surface.bounds();
+    let image_width = image.width() as i32;
+    let image_height = image.height() as i32;
+    let pixels = image.pixels();
+
+    for dy in 0..dest_height {
+        let target_y = dest_y + dy as i32;
+        if target_y < bounds.y || target_y >= bounds.y + bounds.height as i32 {
+            continue;
+        }
+
+        let normalized_y = dy as f32 / dest_height as f32;
+        let src_y = FloatSourceRect::sample_axis(source.y, source.height, normalized_y, false);
+        if src_y < 0 || src_y >= image_height {
+            continue;
+        }
+
+        for dx in 0..dest_width {
+            let target_x = dest_x + dx as i32;
+            if target_x < bounds.x || target_x >= bounds.x + bounds.width as i32 {
+                continue;
+            }
+
+            let normalized_x = dx as f32 / dest_width as f32;
+            let src_x = FloatSourceRect::sample_axis(
+                source.x,
+                source.width,
+                normalized_x,
+                flip_x,
+            );
+            if src_x < 0 || src_x >= image_width {
+                continue;
+            }
+
+            let idx = (src_y as usize * image.width() as usize + src_x as usize) * 4;
+            if idx + 3 >= pixels.len() {
+                continue;
+            }
+
+            let color = Color::new(
+                pixels[idx],
+                pixels[idx + 1],
+                pixels[idx + 2],
+                pixels[idx + 3],
+            );
+            let owner_mask = mask.map(|mask_map| mask_map.value_at(src_x as u32, src_y as u32));
             let source = prepare_sprite_fragment(color, owner_mask, owner_color, blit);
             if source.alpha() == 0 {
                 continue;
@@ -7037,11 +7400,566 @@ mod tests {
             GraphicsSystem::resolve_draw_direction(&flag, direction),
             (4, false)
         );
+
+        let malformed = DefinitionActionGraphics {
+            flip_dir: Some(-2),
+            ..DefinitionActionGraphics::default()
+        };
+        assert_eq!(
+            GraphicsSystem::resolve_draw_direction(
+                &malformed,
+                Direction::from_script_value(0),
+            ),
+            (-5, true),
+            "negative FlipDir remains truthy and uses the signed C++ formula"
+        );
+    }
+
+    #[test]
+    fn renderer_uses_physical_action_graphics_for_duplicate_names() {
+        let first = DefinitionActionGraphics {
+            length: Some(2),
+            ..DefinitionActionGraphics::default()
+        };
+        let last = DefinitionActionGraphics {
+            length: Some(5),
+            ..DefinitionActionGraphics::default()
+        };
+        let actions = HashMap::from([
+            ("Dup".to_string(), first),
+            (physical_action_graphics_key(1), last),
+            (
+                PHYSICAL_ACTION_GRAPHICS_MARKER.to_string(),
+                DefinitionActionGraphics::default(),
+            ),
+        ]);
+        let physical = lc_engine::ActionState {
+            act_map_index: Some(1),
+            ..lc_engine::ActionState::new("Dup")
+        };
+        assert_eq!(
+            GraphicsSystem::live_action_graphics(&actions, &physical)
+                .and_then(|graphics| graphics.length),
+            Some(5)
+        );
+
+        let idle = lc_engine::ActionState::new("Idle");
+        assert!(GraphicsSystem::live_action_graphics(&actions, &idle).is_none());
+    }
+
+    #[test]
+    fn top_face_uses_live_physical_facet_phase_reverse_and_draw_dir() {
+        // DrawTopFace selects Def->ActMap[Action.Act], not the first action
+        // with the same name. FacetTopFace offsets the definition TopFace by
+        // the live reversed Phase and DrawDir (src/C4Object.cpp:2639-2647).
+        let red = Color::opaque(180, 0, 0);
+        let green = Color::opaque(0, 200, 0);
+        let mut pixels = [red.r, red.g, red.b, red.a].repeat(16 * 8);
+        let expected_source = (7usize, 4usize);
+        let expected_offset = (expected_source.1 * 16 + expected_source.0) * 4;
+        pixels[expected_offset..expected_offset + 4]
+            .copy_from_slice(&[green.r, green.g, green.b, green.a]);
+
+        let named_first = DefinitionActionGraphics {
+            facet: Some(lc_engine::DefinitionActionFacet {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+                target_x: 0,
+                target_y: 0,
+            }),
+            facet_top_face: true,
+            length: Some(1),
+            ..DefinitionActionGraphics::default()
+        };
+        let physical_second = DefinitionActionGraphics {
+            facet: Some(lc_engine::DefinitionActionFacet {
+                x: 2,
+                y: 1,
+                width: 2,
+                height: 1,
+                target_x: 99,
+                target_y: 99,
+            }),
+            reverse: true,
+            facet_top_face: true,
+            length: Some(3),
+            ..DefinitionActionGraphics::default()
+        };
+        let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(16, 8, pixels),
+            actions: HashMap::from([
+                ("Dup".to_string(), named_first),
+                (physical_action_graphics_key(1), physical_second),
+                (
+                    PHYSICAL_ACTION_GRAPHICS_MARKER.to_string(),
+                    DefinitionActionGraphics::default(),
+                ),
+            ]),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(0, 0, 4, 4)),
+            stretch_growth: false,
+            // Expected source: Facet(2,1) + TopFace(1,1)
+            // + FacetSize(2,1) * (reversed phase 2, DrawDir 2) = (7,4).
+            top_face: Some(DefinitionTargetRect::new(1, 1, 1, 1, 0, 0)),
+        };
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(10, 10);
+        object.action = lc_engine::ActionState::new("Dup");
+        object.action.act_map_index = Some(1);
+        object.action.phase = 0;
+        object.direction = Direction::from_script_value(2);
+
+        let sprites = Arc::new(HashMap::from([(
+            sprite_map_key("TestObject", None),
+            sprite,
+        )]));
+        let mut graphics = GraphicsSystem::new(
+            24,
+            24,
+            24,
+            "FacetTopFace physical slot",
+            test_font(),
+            sprites,
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
+
+        assert_eq!(
+            graphics.surface().get_pixel(10, 10),
+            Some(green),
+            "the physical duplicate's live FacetTopFace source must win"
+        );
+    }
+
+    #[test]
+    fn top_face_with_cross_definition_graphics_uses_live_definition_metadata() {
+        // SetGraphics may source the bitmap from another definition, but
+        // UpdateFace and DrawTopFace still read Shape and TopFace from the
+        // object's live Def. Source sampling alone uses the selected
+        // graphics definition's Scale (C4Object.cpp:357-376,2639-2670).
+        let blue = Color::opaque(0, 0, 180);
+        let red = Color::opaque(180, 0, 0);
+        let green = Color::opaque(0, 200, 0);
+        let mut override_pixels = [red.r, red.g, red.b, red.a].repeat(12 * 8);
+        // The live TopFace source (2,1,2,2) is mapped through the selected
+        // override bitmap's 2x scale to (4,2,4,4). A 2x2 destination samples
+        // these four physical pixels; omitting width/height scaling samples
+        // neighboring red pixels instead.
+        for (x, y) in [(4usize, 2usize), (6, 2), (4, 4), (6, 4)] {
+            let offset = (y * 12 + x) * 4;
+            override_pixels[offset..offset + 4]
+                .copy_from_slice(&[green.r, green.g, green.b, green.a]);
+        }
+
+        let definition_sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(12, 8, [blue.r, blue.g, blue.b, blue.a].repeat(12 * 8)),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-2, -1, 4, 2)),
+            stretch_growth: false,
+            top_face: Some(DefinitionTargetRect::new(2, 1, 2, 2, 1, 0)),
+        };
+        let override_sprite = DefinitionSprite {
+            graphics_scale: 2.0,
+            image: ImageData::new(12, 8, override_pixels),
+            actions: HashMap::new(),
+            color_mask: None,
+            // Deliberately conflicting metadata: the old path used these
+            // coordinates and drew a red pixel at (14,12).
+            shape: Some(DefinitionRect::new(2, 2, 2, 2)),
+            stretch_growth: false,
+            top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
+        };
+        let sprites = Arc::new(HashMap::from([
+            (sprite_map_key("TestObject", None), definition_sprite),
+            (sprite_map_key("OverrideSheet", None), override_sprite),
+        ]));
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(12, 10);
+        object.base_graphics = Some(lc_engine::ObjectBaseGraphics {
+            definition: "OverrideSheet".to_string(),
+            graphics_name: None,
+            blit_mode: 0,
+        });
+
+        let mut graphics = GraphicsSystem::new(
+            24,
+            20,
+            20,
+            "cross-definition plain TopFace",
+            test_font(),
+            sprites,
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let background = Color::opaque(0, 0, 0);
+        graphics.surface_mut().fill(background);
+        graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
+
+        assert_eq!(
+            [
+                graphics.surface().get_pixel(11, 9),
+                graphics.surface().get_pixel(12, 9),
+                graphics.surface().get_pixel(11, 10),
+                graphics.surface().get_pixel(12, 10),
+            ],
+            [Some(green); 4],
+            "live TopFace metadata must sample the scaled override source rectangle"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(13, 9),
+            Some(background),
+            "the selected bitmap scale must not enlarge destination geometry"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(14, 12),
+            Some(background),
+            "override-definition TopFace metadata must not relocate the draw"
+        );
+    }
+
+    #[test]
+    fn fractional_selected_graphics_scale_keeps_subpixel_top_face_sources() {
+        // C4Facet forwards the float source extent to Blit. Scale=0.5 turns
+        // this logical 1x1 TopFace into a non-empty 0.5x0.5 source; integer
+        // truncation used to discard the draw entirely.
+        let background = Color::opaque(0, 0, 0);
+        let green = Color::opaque(0, 200, 0);
+        let red = Color::opaque(180, 0, 0);
+        let mut pixels = [red.r, red.g, red.b, red.a].repeat(4);
+        pixels[12..16].copy_from_slice(&[green.r, green.g, green.b, green.a]);
+
+        let definition_sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(2, 2, [0, 0, 180, 255].repeat(4)),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            stretch_growth: false,
+            top_face: Some(DefinitionTargetRect::new(2, 2, 1, 1, 0, 0)),
+        };
+        let override_sprite = DefinitionSprite {
+            graphics_scale: 0.5,
+            image: ImageData::new(2, 2, pixels),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: None,
+            stretch_growth: false,
+            top_face: None,
+        };
+        let sprites = Arc::new(HashMap::from([
+            (sprite_map_key("TestObject", None), definition_sprite),
+            (sprite_map_key("HalfScale", None), override_sprite),
+        ]));
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(5, 5);
+        object.base_graphics = Some(lc_engine::ObjectBaseGraphics {
+            definition: "HalfScale".to_string(),
+            graphics_name: None,
+            blit_mode: 0,
+        });
+
+        let mut graphics = GraphicsSystem::new(
+            12,
+            12,
+            12,
+            "fractional TopFace scale",
+            test_font(),
+            sprites,
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(background);
+        graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
+
+        assert_eq!(graphics.surface().get_pixel(5, 5), Some(green));
+        assert_eq!(
+            graphics.surface().get_pixel(6, 5),
+            Some(background),
+            "fractional source scale must not alter the 1x1 destination"
+        );
+    }
+
+    #[test]
+    fn fractional_source_extent_survives_straight_and_transformed_object_blits() {
+        // Logical (1,0,2,1) at Scale=1.25 is the float source
+        // (1.25,0,2.5,1.25). The last of four destination samples reaches
+        // source x=3; the old integer cast collapsed the extent to x=1..2.
+        let red = Color::opaque(200, 0, 0);
+        let green = Color::opaque(0, 200, 0);
+        let blue = Color::opaque(0, 0, 200);
+        let row = [
+            0, 0, 0, 255, red.r, red.g, red.b, red.a, green.r, green.g, green.b, green.a, blue.r,
+            blue.g, blue.b, blue.a,
+        ];
+        let sprite = DefinitionSprite {
+            graphics_scale: 1.25,
+            image: ImageData::new(4, 2, row.repeat(2)),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(0, 0, 4, 1)),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let background = Color::opaque(0, 0, 0);
+        let render = |source, transform| {
+            let mut graphics = GraphicsSystem::new(
+                4,
+                2,
+                2,
+                "fractional object source",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.surface_mut().fill(background);
+            graphics.blit_face(
+                &sprite,
+                source,
+                (0.0, 0.0, 4.0, 1.0),
+                (2.0, 0.5),
+                false,
+                None,
+                1.0,
+                0.0,
+                transform,
+                SpriteBlitState::normal(),
+                None,
+            );
+            (0..4)
+                .map(|x| graphics.surface().get_pixel(x, 0))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            render(SourceRect::new(1, 0, 2, 1), None),
+            vec![Some(red), Some(red), Some(green), Some(blue)]
+        );
+        assert_eq!(
+            render(
+                SourceRect::new(1, 0, 2, 1),
+                Some(DrawTransform::identity()),
+            ),
+            vec![Some(red), Some(green), Some(green), Some(blue)]
+        );
+        // Logical x=2 scales to x=2.5 with width 2.5. Only 1.5 source
+        // pixels remain before the four-pixel sheet edge, so the target is
+        // clipped by 1.5/2.5 and rounds to two rendered pixels.
+        let clipped = vec![Some(green), Some(blue), Some(background), Some(background)];
+        assert_eq!(render(SourceRect::new(2, 0, 2, 1), None), clipped);
+        assert_eq!(
+            render(
+                SourceRect::new(2, 0, 2, 1),
+                Some(DrawTransform::identity()),
+            ),
+            clipped
+        );
+    }
+
+    #[test]
+    fn facet_top_face_with_cross_definition_graphics_uses_live_act_map_and_flip_dir() {
+        // FacetTopFace source offsets and UpdateFlipDir come from the live
+        // object's ActMap even when SetGraphics selected a different Def's
+        // bitmap (C4Object.cpp:404-425,2639-2667).
+        let blue = Color::opaque(0, 0, 180);
+        let red = Color::opaque(180, 0, 0);
+        let green = Color::opaque(0, 200, 0);
+        let mut override_pixels = [red.r, red.g, red.b, red.a].repeat(8 * 4);
+        // Live metadata computes Facet(2,1) + TopFace(1,1)
+        // + FacetSize(2,1) * (Phase 1, mirrored DrawDir 0) = (5,2).
+        let live_source = (5usize, 2usize);
+        let live_source_offset = (live_source.1 * 8 + live_source.0) * 4;
+        override_pixels[live_source_offset..live_source_offset + 4]
+            .copy_from_slice(&[green.r, green.g, green.b, green.a]);
+
+        let live_action = DefinitionActionGraphics {
+            facet: Some(lc_engine::DefinitionActionFacet {
+                x: 2,
+                y: 1,
+                width: 2,
+                height: 1,
+                target_x: 99,
+                target_y: 99,
+            }),
+            directions: 2,
+            flip_dir: Some(1),
+            facet_top_face: true,
+            length: Some(3),
+            ..DefinitionActionGraphics::default()
+        };
+        let definition_sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(8, 4, [blue.r, blue.g, blue.b, blue.a].repeat(8 * 4)),
+            actions: HashMap::from([("Active".to_string(), live_action)]),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-3, -1, 6, 2)),
+            stretch_growth: false,
+            top_face: Some(DefinitionTargetRect::new(1, 1, 1, 1, 0, 0)),
+        };
+        let override_sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(8, 4, override_pixels),
+            actions: HashMap::from([("Active".to_string(), DefinitionActionGraphics::default())]),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(0, 0, 2, 2)),
+            stretch_growth: false,
+            top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
+        };
+        let sprites = Arc::new(HashMap::from([
+            (sprite_map_key("TestObject", None), definition_sprite),
+            (sprite_map_key("OverrideSheet", None), override_sprite),
+        ]));
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(12, 8);
+        object.action = lc_engine::ActionState::new("Active");
+        object.action.phase = 1;
+        object.direction = Direction::from_script_value(1);
+        object.base_graphics = Some(lc_engine::ObjectBaseGraphics {
+            definition: "OverrideSheet".to_string(),
+            graphics_name: None,
+            blit_mode: 0,
+        });
+
+        let mut graphics = GraphicsSystem::new(
+            24,
+            16,
+            16,
+            "cross-definition FacetTopFace",
+            test_font(),
+            sprites,
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let background = Color::opaque(0, 0, 0);
+        graphics.surface_mut().fill(background);
+        graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
+
+        assert_eq!(
+            graphics.surface().get_pixel(14, 7),
+            Some(green),
+            "live FacetTopFace must sample the override bitmap and FlipDir must mirror it"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(9, 7),
+            Some(background),
+            "the live FlipDir transform must move the unflipped target"
+        );
+    }
+
+    #[test]
+    fn flip_dir_mirrors_plain_definition_top_face() {
+        // UpdateFlipDir owns pDrawTransform, so its mirror applies even when
+        // FacetTopFace is false and the source remains Def->TopFace
+        // (src/C4Object.cpp:404-430,2639-2668).
+        let green = Color::opaque(0, 200, 0);
+        let action = DefinitionActionGraphics {
+            flip_dir: Some(1),
+            facet_top_face: false,
+            ..DefinitionActionGraphics::default()
+        };
+        let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(1, 1, vec![green.r, green.g, green.b, green.a]),
+            actions: HashMap::from([("Active".to_string(), action)]),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-3, -1, 6, 2)),
+            stretch_growth: false,
+            top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
+        };
+        let sprites = Arc::new(HashMap::from([(
+            sprite_map_key("TestObject", None),
+            sprite,
+        )]));
+        let render = |direction| {
+            let mut object = make_snapshot().objects.remove(0);
+            object.position = Vector2::new(12, 8);
+            object.action = lc_engine::ActionState::new("Active");
+            object.direction = Direction::from_script_value(direction);
+            let mut graphics = GraphicsSystem::new(
+                24,
+                16,
+                16,
+                "plain TopFace FlipDir",
+                test_font(),
+                Arc::clone(&sprites),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+            graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
+            graphics.surface().clone()
+        };
+
+        let unflipped = render(0);
+        let flipped = render(1);
+        assert_eq!(unflipped.get_pixel(9, 7), Some(green));
+        assert_eq!(flipped.get_pixel(14, 7), Some(green));
+        assert_ne!(
+            flipped.get_pixel(9, 7),
+            Some(green),
+            "FlipDir must move the plain TopFace across the shape center"
+        );
+    }
+
+    #[test]
+    fn partial_growth_type_scales_and_draws_its_top_face_like_cpp() {
+        // UpdateFace retains TopFace below FullCon for GrowthType defs, and
+        // DrawTopFace uses DrawXT with Con-scaled offsets and dimensions
+        // (src/C4Object.cpp:370-376,2653-2662).
+        let green = Color::opaque(0, 200, 0);
+        let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(
+                2,
+                2,
+                [green.r, green.g, green.b, green.a].repeat(4),
+            ),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
+            stretch_growth: true,
+            top_face: Some(DefinitionTargetRect::new(0, 0, 2, 2, 1, 1)),
+        };
+        let sprites = Arc::new(HashMap::from([(
+            sprite_map_key("TestObject", None),
+            sprite,
+        )]));
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(10, 10);
+        object.construction = FULL_CON / 2;
+        let mut graphics = GraphicsSystem::new(
+            20,
+            20,
+            20,
+            "partial GrowthType TopFace",
+            test_font(),
+            sprites,
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+
+        graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
+
+        assert_eq!(graphics.surface().get_pixel(9, 9), Some(green));
+        assert_eq!(
+            graphics.surface().get_pixel(10, 9),
+            Some(Color::opaque(0, 0, 0)),
+            "a 2x2 TopFace scales to exactly 1x1 at fifty-percent Con"
+        );
     }
 
     #[test]
     fn set_obj_draw_transform_rotation_reaches_presenter() {
         let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
             image: ImageData::new(9, 3, [220, 40, 20, 255].repeat(27)),
             actions: HashMap::new(),
             color_mask: None,
@@ -7112,6 +8030,7 @@ mod tests {
     #[test]
     fn overlay_draw_transform_uses_its_full_local_matrix() {
         let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
             image: ImageData::new(9, 3, [30, 180, 70, 255].repeat(27)),
             actions: HashMap::new(),
             color_mask: None,
@@ -7373,6 +8292,7 @@ mod tests {
             sprites.insert(
                 sprite_map_key(definition_id, None),
                 DefinitionSprite {
+                    graphics_scale: 1.0,
                     image: ImageData::from_arc(width, height, image.into_pixels()),
                     actions: engine
                         .definition_action_graphics(definition_id)
@@ -7654,6 +8574,7 @@ mod tests {
         // TargetPos/parallax adjustment, or any face drawing
         // (src/C4Object.cpp:2249-2254). Shape vertices are already absolute.
         let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
             image: ImageData::new(1, 1, vec![255, 0, 255, 255]),
             actions: HashMap::new(),
             color_mask: None,
@@ -8165,6 +9086,7 @@ mod tests {
         // color after SetColorDw, and unowned FISH explicitly sets white in
         // Birth (Objects.c4d/Animals.c4d/Fish.c4d/Script.c:233-240).
         let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
             // CreateColorByOwner clears owner-only base pixels to black.
             image: ImageData::new(1, 1, vec![0, 0, 0, 255]),
             actions: HashMap::new(),
@@ -8264,6 +9186,7 @@ mod tests {
         let body_mask_index = 19 * width as usize + 7;
         assert_eq!(mask[body_mask_index], 147);
         let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
             image: ImageData::from_arc(width, height, image.into_pixels()),
             actions: engine
                 .definition_action_graphics("FISH")
@@ -8338,6 +9261,7 @@ mod tests {
         // object color instead of folding in global ColorMod
         // (StdDDraw2.cpp:773-777). ReleaseClonk uses this exact combination.
         let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
             image: ImageData::new(1, 1, vec![0, 0, 0, 255]),
             actions: HashMap::new(),
             color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([255]))),
@@ -8397,6 +9321,7 @@ mod tests {
         sprites.insert(
             sprite_map_key("BaseAdd", None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(1, 1, vec![source.r, source.g, source.b, source.a]),
                 actions: HashMap::new(),
                 color_mask: None,
@@ -8408,6 +9333,7 @@ mod tests {
         sprites.insert(
             sprite_map_key("ActionAdd", None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(1, 1, vec![source.r, source.g, source.b, source.a]),
                 actions: HashMap::from([(
                     "Active".to_string(),
@@ -8433,6 +9359,7 @@ mod tests {
         sprites.insert(
             sprite_map_key("TopAdd", None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(
                     2,
                     1,
@@ -8513,6 +9440,7 @@ mod tests {
         let source = Color::new(10, 20, 30, 128);
         let owner = 0x0064_788c;
         let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
             image: ImageData::new(1, 1, vec![source.r, source.g, source.b, source.a]),
             actions: HashMap::new(),
             color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([255]))),
@@ -8607,6 +9535,7 @@ mod tests {
             (
                 sprite_map_key("OverlayHost", None),
                 DefinitionSprite {
+                    graphics_scale: 1.0,
                     image: ImageData::new(1, 1, vec![0, 0, 0, 0]),
                     actions: HashMap::new(),
                     color_mask: None,
@@ -8618,6 +9547,7 @@ mod tests {
             (
                 sprite_map_key("OverlayTarget", None),
                 DefinitionSprite {
+                    graphics_scale: 1.0,
                     image: ImageData::new(2, 1, vec![40, 0, 0, 255, 0, 40, 0, 255]),
                     actions: HashMap::new(),
                     color_mask: None,
@@ -8831,6 +9761,7 @@ mod tests {
             .into_rgba8();
         let (width, height) = rgba.dimensions();
         let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
             image: ImageData::new(width, height, rgba.into_raw()),
             actions: HashMap::from([(
                 "Appear".to_string(),
@@ -8896,6 +9827,7 @@ mod tests {
         // for the main surface (StdDDraw2.cpp:768-770; StdGL.cpp:1072-1079).
         let source = Color::new(64, 128, 192, 128);
         let plain_sprite = |width, height, shape| DefinitionSprite {
+            graphics_scale: 1.0,
             image: ImageData::new(
                 width,
                 height,
@@ -8933,6 +9865,7 @@ mod tests {
         sprites.insert(
             sprite_map_key("TopMod2", None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(
                     2,
                     1,
@@ -9010,6 +9943,7 @@ mod tests {
         sprites.insert(
             sprite_map_key("BlackMod2", None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(1, 1, vec![200, 200, 200, 255]),
                 actions: HashMap::new(),
                 color_mask: None,
@@ -9021,6 +9955,7 @@ mod tests {
         sprites.insert(
             sprite_map_key("AddMod2", None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(1, 1, vec![64, 128, 192, 128]),
                 actions: HashMap::new(),
                 color_mask: None,
@@ -9111,6 +10046,7 @@ mod tests {
         // owner's raw color independent of global ColorMod; bit 8 selects
         // MOD2 only for the grey owner surface (StdDDraw2.cpp:768-778).
         let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
             image: ImageData::new(1, 1, vec![255, 255, 255, 255]),
             actions: HashMap::new(),
             color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([64]))),
@@ -9171,6 +10107,7 @@ mod tests {
         // white is MOD2-to-white, while explicit black triggers the PerformBlt
         // black reset. Exact parent mode inherits both mode and ColorMod.
         let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
             image: ImageData::new(3, 3, [64, 128, 192, 255].repeat(9)),
             actions: HashMap::new(),
             color_mask: None,
@@ -9243,6 +10180,7 @@ mod tests {
             .into_rgba8();
         let (width, height) = rgba.dimensions();
         let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
             image: ImageData::new(width, height, rgba.into_raw()),
             actions: HashMap::from([(
                 "Exist".to_string(),
@@ -11634,6 +12572,7 @@ mod tests {
         sprites.insert(
             sprite_map_key(definition_id, None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(width, height, pixels),
                 actions: HashMap::new(),
                 color_mask: None,
@@ -11762,6 +12701,7 @@ mod tests {
         sprites.insert(
             sprite_map_key("TopObject", None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(2, 1, vec![0, 0, 0, 0, 0, 200, 0, 255]),
                 actions: HashMap::from([(
                     "Active".to_string(),
@@ -11776,6 +12716,7 @@ mod tests {
         sprites.insert(
             sprite_map_key("BaseObject", None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(1, 1, vec![0, 0, 200, 255]),
                 actions: HashMap::new(),
                 color_mask: None,
@@ -11845,6 +12786,7 @@ mod tests {
         sprites.insert(
             sprite_map_key("ELEV", None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(1, 1, vec![red.r, red.g, red.b, red.a]),
                 actions: HashMap::from([(
                     "Active".to_string(),
@@ -11859,6 +12801,7 @@ mod tests {
         sprites.insert(
             sprite_map_key("ELEC", None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(1, 1, vec![green.r, green.g, green.b, green.a]),
                 actions: HashMap::from([(
                     "Active".to_string(),
@@ -12187,6 +13130,7 @@ mod tests {
         sprites.insert(
             sprite_map_key("TestObject", None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(16, 8, pixels),
                 actions,
                 color_mask: None,
@@ -12284,6 +13228,7 @@ mod tests {
         sprites.insert(
             sprite_map_key("ELEV", None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(60, 9, elevator_pixels),
                 actions: HashMap::from([("LiftCase".to_string(), lift_case)]),
                 color_mask: None,
@@ -12295,6 +13240,7 @@ mod tests {
         sprites.insert(
             sprite_map_key("ELEC", None),
             DefinitionSprite {
+                graphics_scale: 1.0,
                 image: ImageData::new(24, 26, vec![0; 24 * 26 * 4]),
                 actions: HashMap::new(),
                 color_mask: None,

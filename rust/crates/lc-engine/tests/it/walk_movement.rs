@@ -17,7 +17,12 @@ fn walk_procedure_accelerates_and_brakes() -> Result<(), Box<dyn std::error::Err
     let mut actions = HashMap::new();
     actions.insert(
         "Walk".to_string(),
-        ActionSpec::default().with_procedure("Walk"),
+        // C4ActionDef::Directions defaults to one, which only admits
+        // DIR_Left. This two-facing WALK fixture must declare both slots so
+        // C4Object::SetDir accepts DIR_Right (C4Object.cpp:4239-4242).
+        ActionSpec::default()
+            .with_procedure("WALK")
+            .with_directions(2),
     );
     definition.configure_actions(Some("Walk".to_string()), actions);
     let profile = MovementProfile::default()
@@ -100,7 +105,11 @@ fn walkto_action_uses_walk_procedure() -> Result<(), Box<dyn std::error::Error>>
     let mut actions = HashMap::new();
     actions.insert(
         "WalkTo".to_string(),
-        ActionSpec::default().with_procedure("Walk"),
+        // Procedure names are mapped case-sensitively and right-facing
+        // motion requires Directions=2 in the C++ ActMap.
+        ActionSpec::default()
+            .with_procedure("WALK")
+            .with_directions(2),
     );
     definition.configure_actions(Some("WalkTo".to_string()), actions);
     definition.set_movement_profile(

@@ -1940,16 +1940,17 @@ impl<'a> Vm<'a> {
         self.invoke_value(name, args, 0, ObjectState::default(), None)
     }
 
-    /// Engine-owned SFunc entry: bypass the destination host's own function
-    /// map and invoke the function currently pinned in the shared global
-    /// table. This mirrors calling the C4AulScriptFunc pointer returned by
-    /// GetLocalSFunc rather than resolving its name again through FnLinks.
-    pub(crate) fn call_engine_args(
+    /// Exact engine-global entry with caller-prepared arguments. Unlike
+    /// ordinary engine-scope invocation, a standalone VM without an attached
+    /// shared table skips same-name local overloads and selects the `global
+    /// func` node retained in the host's overload chain.
+    pub(crate) fn call_engine_global_args(
         &self,
         name: &str,
         args: Vec<CallArg>,
     ) -> Result<Value, RuntimeError> {
-        self.invoke_engine_value(name, args, 0, ObjectState::default(), None)
+        self.invoke_engine_global_raw(name, args, 0, None)?
+            .into_value()
     }
 
     /// Invoke an already-resolved immutable script function without another
@@ -1971,6 +1972,33 @@ impl<'a> Vm<'a> {
                 args,
                 depth,
                 ObjectState::default(),
+                None,
+            )?
+            .into_value()
+        })
+    }
+
+    /// Invoke an already-resolved function against shared object-local cells.
+    /// This is a fresh native/engine callback entry, so it deliberately does
+    /// not inherit any ambient script caller retained by a dispatch bridge.
+    pub(crate) fn call_pinned_with_cells(
+        &self,
+        function: &Function,
+        args: &[Value],
+        cells: &LocalCells,
+    ) -> Result<Value, RuntimeError> {
+        let args = args.iter().cloned().map(CallArg::runtime).collect();
+        let depth = 0usize;
+        if depth >= MAX_CALL_DEPTH {
+            return Err(RuntimeError::new("maximum call depth exceeded"));
+        }
+        maybe_grow(|| {
+            self.invoke_script_function(
+                &function.name,
+                function,
+                args,
+                depth,
+                cells.state.clone(),
                 None,
             )?
             .into_value()
@@ -2446,20 +2474,22 @@ impl<'a> Vm<'a> {
             self.owner_strict_level.unwrap_or(function.strict_level)
         };
 
-        // Parameters resolve before object locals in C++
-        // (C4AulParse.cpp:2709-2729). `define_object_local` preserves an
-        // existing binding so MART::Mode0(pObj, ...) receives its argument,
-        // rather than the definition's same-name object-local `pObj`.
+        // C4Aul `var` declarations are FUNCTION-scoped and hoisted: the
+        // parser builds the whole Fn->VarNamed table up front, so a var
+        // read BEFORE its `var` statement is nil, never an error
+        // (Dynamite.c4d reads iX three lines above `var iX`). Function vars,
+        // like parameters, precede object locals in C4Aul's named-variable
+        // table (C4AulParse.cpp:2709-2729). Hoist them first so an effect
+        // callback's `var pClonk` cannot alias MART's persistent `pClonk`.
+        hoist_function_vars(&function.body, &mut env);
+
+        // `define_object_local` preserves parameter/function-var bindings so
+        // MART::Mode0(pObj, ...) receives its argument and a same-name local
+        // declaration remains call-scoped instead of mutating the object.
         for var_decl in self.var_decls {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
-
-        // C4Aul `var` declarations are FUNCTION-scoped and hoisted: the
-        // parser builds the whole Fn->VarNamed table up front, so a var
-        // read BEFORE its `var` statement is nil, never an error
-        // (Dynamite.c4d reads iX three lines above `var iX`).
-        hoist_function_vars(&function.body, &mut env);
 
         let result =
             self.execute_statements(&function.body, &mut env, depth, function.returns_reference)?;
@@ -6863,6 +6893,48 @@ mod tests {
         "#;
         let result = execute_script(source, "Test", &[]).unwrap();
         assert_eq!(result, Value::Int(30));
+    }
+
+    #[test]
+    fn function_var_shadows_same_named_object_local_with_shared_cells() {
+        // C4Aul's function VarNamed table precedes the object's LocalNamed
+        // table. MART relies on this: FxIntDoMagicTimer declares a temporary
+        // `var pClonk` without overwriting MART's persistent `local pClonk`.
+        let script = Parser::new(
+            r#"
+                local pClonk;
+                func Timer() {
+                    var pClonk = nil;
+                    pClonk = 99;
+                    return pClonk;
+                }
+            "#,
+        )
+        .parse_script()
+        .expect("script parses");
+        let var_decls = script.var_decls.clone();
+        let functions: HashMap<String, Function> = script
+            .functions
+            .into_iter()
+            .map(|function| (function.name.clone(), function))
+            .collect();
+        let host_functions = HashMap::new();
+        let vm = Vm::new(&functions, &host_functions, &var_decls, None);
+        let cells = LocalCells::from_local_vars(&HashMap::from([(
+            "pClonk".to_string(),
+            Value::Object(574),
+        )]));
+
+        assert_eq!(
+            vm.call_with_cells("Timer", &[], &cells)
+                .expect("function-local assignment runs"),
+            Value::Int(99)
+        );
+        assert_eq!(
+            cells.snapshot().get("pClonk"),
+            Some(&Value::Object(574)),
+            "the call-scoped var must not alias the persistent object local"
+        );
     }
 
     #[test]
