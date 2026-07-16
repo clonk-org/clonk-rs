@@ -13487,6 +13487,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("DebugLog", debug_log_message);
     script.register_host_function("LocateFunc", locate_func);
     script.register_host_function("StartCallTrace", start_call_trace);
+    script.register_host_function("StartScriptProfiler", start_script_profiler);
+    script.register_host_function("StopScriptProfiler", stop_script_profiler);
     script.register_host_function("GameOver", game_over);
     script.register_host_function("GainMissionAccess", gain_mission_access);
     script.register_host_function("GetMissionAccess", get_mission_access);
@@ -14266,6 +14268,27 @@ fn debug_log_message(args: &[Value]) -> Result<Value, RuntimeError> {
 /// callback, so retain the script-visible void/nil contract as a tolerated
 /// debug-only no-op.
 fn start_call_trace(_args: &[Value]) -> Result<Value, RuntimeError> {
+    Ok(Value::Nil)
+}
+
+/// FnStartScriptProfiler/FnStopScriptProfiler (C4Script.cpp:5973-5993).
+/// The Rust VM has no script-profiler state to arm or dump, so preserve the
+/// tooling calls as counting no-ops while retaining C++'s definition lookup
+/// guard and script-visible return values.
+fn start_script_profiler(args: &[Value]) -> Result<Value, RuntimeError> {
+    let definition = parse_native_c4id_argument(args.first(), "StartScriptProfiler")?;
+    let found = definition.as_deref().is_none_or(|definition| {
+        HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.world.definition_script(definition))
+                .is_some()
+        })
+    });
+    Ok(Value::Bool(found))
+}
+
+fn stop_script_profiler(_args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Nil)
 }
 
@@ -45791,6 +45814,8 @@ mod tests {
         "Split2Components",
         "Sqrt",
         "StartCallTrace",
+        "StartScriptProfiler",
+        "StopScriptProfiler",
         "Stuck",
         "Sub",
         "Sum",
@@ -51639,6 +51664,64 @@ public func RejectConstruction(x, y, builder)
             script.call("Probe", &[]).expect("StartCallTrace executes"),
             Value::Nil
         );
+    }
+
+    #[test]
+    fn script_profiler_builtins_validate_definition_and_execute() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func StartAll() { return StartScriptProfiler(); }\n\
+                 func StartKnown() { return StartScriptProfiler(GOOD); }\n\
+                 func StartUnknown() { return StartScriptProfiler(MISS); }\n\
+                 func Stop() { return StopScriptProfiler(); }",
+            )
+            .expect("script-profiler probes compile");
+        let script = Arc::new(script);
+        assert_eq!(
+            script.call("StartAll", &[]).expect("global profiler starts"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            script
+                .call("StartUnknown", &[])
+                .expect("unknown definition is rejected without a world"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            script.call("Stop", &[]).expect("global profiler stops"),
+            Value::Nil
+        );
+
+        let world = HostWorldContext::default()
+            .with_definition_scripts(HashMap::from([("GOOD".into(), Arc::clone(&script))]));
+
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            assert_eq!(
+                script.call("StartAll", &[]).expect("global profiler starts"),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                script
+                    .call("StartKnown", &[])
+                    .expect("known definition profiler starts"),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                script
+                    .call("StartUnknown", &[])
+                    .expect("unknown definition is rejected"),
+                Value::Bool(false)
+            );
+            assert_eq!(
+                script.call("Stop", &[]).expect("definition profiler stops"),
+                Value::Nil
+            );
+            Ok::<_, RuntimeError>(())
+        });
+        result.expect("script-profiler builtins execute");
     }
 
     #[test]
