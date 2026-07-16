@@ -315,9 +315,10 @@ pub enum AssignmentTarget {
     Variable(String),
     Property(Box<AssignmentTarget>, String),
     Index(Box<AssignmentTarget>, Box<Expr>), // arr[index] as lvalue
-    /// `array[]`: AB_ARRAY_APPEND grows the array immediately and yields a
-    /// reference to the new last slot.
-    ArrayAppend(Box<AssignmentTarget>),
+    /// `expression[]`: AB_ARRAY_APPEND operates on the current stack value.
+    /// A referenced array yields its new last-slot reference; a self-owned
+    /// temporary loses that reference with its container and collapses to nil.
+    ArrayAppend(Box<Expr>),
     LocalSlot(Box<Expr>),                    // Local(expr) as lvalue - object-local slot
     VarSlot(Box<Expr>),                      // Var(expr) as lvalue - function-local slot
     EffectSlot(Vec<Expr>), // EffectVar(index, target, effect_num) as lvalue - effect variable slot

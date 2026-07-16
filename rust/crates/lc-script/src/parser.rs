@@ -1312,8 +1312,7 @@ impl<'a> Parser<'a> {
                 Ok(AssignmentTarget::Index(Box::new(base_target), index))
             }
             Expr::ArrayAppend(base) => {
-                let base_target = Self::expression_to_assignment_target(*base, eq_token)?;
-                Ok(AssignmentTarget::ArrayAppend(Box::new(base_target)))
+                Ok(AssignmentTarget::ArrayAppend(base))
             }
             // Special case: Local(expr), Var(expr), and EffectVar(args...) are assignable lvalues
             // Local() and Var() without arguments default to slot 0

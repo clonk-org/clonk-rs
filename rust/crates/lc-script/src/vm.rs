@@ -1886,22 +1886,32 @@ impl<'a> Vm<'a> {
         object_state: ObjectState,
         caller: Option<ScriptCallerContext>,
     ) -> Result<TrackedValue, RuntimeError> {
+        self.invoke_engine_raw(name, args, depth, object_state, caller)?
+            .into_tracked()
+    }
+
+    fn invoke_engine_raw(
+        &self,
+        name: &str,
+        args: Vec<CallArg>,
+        depth: usize,
+        object_state: ObjectState,
+        caller: Option<ScriptCallerContext>,
+    ) -> Result<ReturnValue, RuntimeError> {
         if depth >= MAX_CALL_DEPTH {
             return Err(RuntimeError::new("maximum call depth exceeded"));
         }
 
         maybe_grow(|| {
             if let Some(function) = self.engine_script_function(name) {
-                return self
-                    .invoke_script_function(
-                        name,
-                        function,
-                        args,
-                        depth,
-                        object_state,
-                        caller.clone(),
-                    )?
-                    .into_tracked();
+                return self.invoke_script_function(
+                    name,
+                    function,
+                    args,
+                    depth,
+                    object_state,
+                    caller.clone(),
+                );
             }
 
             if let Some(function) = self.host_functions.get(name) {
@@ -1909,14 +1919,16 @@ impl<'a> Vm<'a> {
                 let _guard = CallerContextGuard::enter(caller);
                 return self
                     .invoke_host_function(name, function, &values)
-                    .map(TrackedValue::runtime);
+                    .map(TrackedValue::runtime)
+                    .map(ReturnValue::Value);
             }
 
             if let Some(function) = self.host_reference_function(name) {
                 let _guard = CallerContextGuard::enter(caller);
                 return self
                     .invoke_host_reference_function(name, function, &args)
-                    .map(TrackedValue::runtime);
+                    .map(TrackedValue::runtime)
+                    .map(ReturnValue::Value);
             }
 
             Err(RuntimeError::new(format!("unknown function '{name}'")))
@@ -2437,9 +2449,7 @@ impl<'a> Vm<'a> {
             Stmt::Return(expr) => {
                 let value = if returns_reference {
                     match expr {
-                        Some(expr) => {
-                            ReturnValue::Reference(self.expr_to_lvalue(expr, env, depth)?)
-                        }
+                        Some(expr) => self.evaluate_reference_or_value(expr, env, depth)?,
                         None => {
                             return Err(RuntimeError::new(
                                 "reference-returning function must return an lvalue",
@@ -3184,27 +3194,9 @@ impl<'a> Vm<'a> {
                 }
                 Ok(Value::Proplist(map))
             }
-            Expr::Index(target, index) => {
-                // Array values are reference-counted containers in C++. Keep
-                // an addressable Rust path live so the otherwise surprising
-                // empty `array[-1]` growth remains visible to the caller.
-                let collection_reference = self.existing_path_lvalue(target, env, depth)?;
-                let (collection, idx) = if let Some(reference) = &collection_reference {
-                    let idx = self.evaluate(index, env, depth)?;
-                    (reference.read()?, idx)
-                } else {
-                    let collection = self.evaluate(target, env, depth)?;
-                    let idx = self.evaluate(index, env, depth)?;
-                    (collection, idx)
-                };
-                Self::grow_empty_negative_array(
-                    collection_reference.as_ref(),
-                    &collection,
-                    &idx,
-                )?;
-                self.eval_index(collection, idx, env)
-            }
-            Expr::ArrayAppend(_) => self.expr_to_lvalue(expr, env, depth)?.read(),
+            Expr::Index(_, _) | Expr::ArrayAppend(_) => self
+                .evaluate_reference_or_value(expr, env, depth)?
+                .into_value(),
             Expr::ArrayAppendAssignment {
                 target,
                 operation,
@@ -3235,6 +3227,11 @@ impl<'a> Vm<'a> {
                     depth,
                 )
                 .map(|tracked| tracked.value),
+            Expr::Property(target, _)
+                if Self::expression_contains_array_append(target) =>
+            {
+                self.evaluate_reference_or_value(expr, env, depth)?.into_value()
+            }
             Expr::Property(target, name) => {
                 let proplist = self.evaluate(target, env, depth)?;
                 self.eval_property(proplist, name, env)
@@ -3320,30 +3317,9 @@ impl<'a> Vm<'a> {
                 }
                 Ok(TrackedValue::proplist(tracked))
             }
-            Expr::Index(target, index_expr) => {
-                let collection_reference = self.existing_path_lvalue(target, env, depth)?;
-                let (mut collection, index) = match &collection_reference {
-                    Some(reference) => {
-                        let index = self.evaluate(index_expr, env, depth)?;
-                        (reference.read_tracked()?, index)
-                    }
-                    None => {
-                        let collection = self.evaluate_tracked(target, env, depth)?;
-                        let index = self.evaluate(index_expr, env, depth)?;
-                        (collection, index)
-                    }
-                };
-                Self::grow_empty_negative_array(
-                    collection_reference.as_ref(),
-                    &collection.value,
-                    &index,
-                )?;
-                if let Some(reference) = &collection_reference {
-                    collection = reference.read_tracked()?;
-                }
-                self.eval_index_tracked(collection, index, env)
-            }
-            Expr::ArrayAppend(_) => self.expr_to_lvalue(expr, env, depth)?.read_tracked(),
+            Expr::Index(_, _) | Expr::ArrayAppend(_) => self
+                .evaluate_reference_or_value(expr, env, depth)?
+                .into_tracked(),
             Expr::ArrayAppendAssignment {
                 target,
                 operation,
@@ -3370,6 +3346,12 @@ impl<'a> Vm<'a> {
                 env,
                 depth,
             ),
+            Expr::Property(target, _)
+                if Self::expression_contains_array_append(target) =>
+            {
+                self.evaluate_reference_or_value(expr, env, depth)?
+                    .into_tracked()
+            }
             Expr::Property(target, name) => {
                 let collection = self.evaluate_tracked(target, env, depth)?;
                 self.eval_property_tracked(collection, name, env)
@@ -3621,15 +3603,56 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<TrackedValue, RuntimeError> {
+        self.evaluate_reference_assignment_raw(
+            target, operation, operator, value, env, depth, false,
+        )?
+        .into_tracked()
+    }
+
+    fn evaluate_reference_assignment_raw(
+        &self,
+        target: &AssignmentTarget,
+        operation: Option<&BinaryOp>,
+        operator: &str,
+        value: &Expr,
+        env: &mut Environment,
+        depth: usize,
+        preserve_reference: bool,
+    ) -> Result<ReturnValue, RuntimeError> {
         // C++ evaluates an assignment target into one reference before its
         // RHS. Compound bytecodes read and mutate that retained reference;
         // re-evaluating the target would repeat address-side effects.
-        let reference = self.assignment_target_to_lvalue(env, target, depth)?;
+        let reference = match self.assignment_target_to_reference_or_value(env, target, depth)? {
+            ReturnValue::Reference(reference) => reference,
+            ReturnValue::Value(left) => {
+                if matches!(operation, Some(BinaryOp::NilCoalescing))
+                    && !matches!(left.value, Value::Nil)
+                {
+                    return Ok(ReturnValue::Value(left));
+                }
+                self.evaluate_tracked(value, env, depth)?;
+                let expected = if operation.is_some()
+                    && !matches!(operation, Some(BinaryOp::Concat | BinaryOp::NilCoalescing))
+                {
+                    "int&"
+                } else {
+                    "&"
+                };
+                return Err(RuntimeError::new(format!(
+                    "operator \"{operator}\" left side: got \"{}\", but expected \"{expected}\"!",
+                    Self::c4v_type_name(left.value.c4v_type())
+                )));
+            }
+        };
         let result = if matches!(operation, Some(BinaryOp::NilCoalescing)) {
             let left = reference.read_tracked()?;
             if !matches!(left.value, Value::Nil) {
                 // AB_NilCoalescingIt jumps over both the RHS and AB_Set.
-                return Ok(left);
+                return Ok(if preserve_reference {
+                    ReturnValue::Reference(reference)
+                } else {
+                    ReturnValue::Value(left)
+                });
             }
             self.evaluate_tracked(value, env, depth)?
         } else if let Some(operation) = operation {
@@ -3656,7 +3679,11 @@ impl<'a> Vm<'a> {
             self.evaluate_tracked(value, env, depth)?
         };
         reference.write_tracked(result.clone())?;
-        Ok(result)
+        Ok(if preserve_reference {
+            ReturnValue::Reference(reference)
+        } else {
+            ReturnValue::Value(result)
+        })
     }
 
     /// Resolve an increment/decrement operand to its C4Value reference once,
@@ -3672,6 +3699,28 @@ impl<'a> Vm<'a> {
         return_old: bool,
         operation: &str,
     ) -> Result<Value, RuntimeError> {
+        if Self::expression_contains_array_append(expr) {
+            match self.evaluate_reference_or_value(expr, env, 0)? {
+                ReturnValue::Reference(reference) => {
+                    let old_value = Self::counter_operand(reference.read()?, operation)?;
+                    let new_value = old_value.wrapping_add(delta);
+                    reference.write(Value::Int(new_value))?;
+                    return Ok(Value::Int(if return_old {
+                        old_value
+                    } else {
+                        new_value
+                    }));
+                }
+                ReturnValue::Value(value) => {
+                    let operator = if delta > 0 { "++" } else { "--" };
+                    return Err(RuntimeError::new(format!(
+                        "operator \"{operator}\": got \"{}\", but expected \"int&\"!",
+                        Self::c4v_type_name(value.value.c4v_type())
+                    )));
+                }
+            }
+        }
+
         let target = Self::expr_to_assignment_target(expr)?;
 
         // EffectVar is exposed by the engine as a value-style read/write host
@@ -4783,6 +4832,17 @@ impl<'a> Vm<'a> {
             } else {
                 Self::expr_can_be_lvalue(arg)
             };
+            if (script_wants_reference || host_wants_reference)
+                && (Self::expression_contains_array_append(arg)
+                    || matches!(arg, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Variable(_)))
+                    || matches!(arg, Expr::GlobalCall { .. }))
+            {
+                evaluated_args.push(match self.evaluate_reference_or_value(arg, env, depth)? {
+                    ReturnValue::Reference(reference) => CallArg::Reference(reference),
+                    ReturnValue::Value(value) => CallArg::Value(value),
+                });
+                continue;
+            }
             if (script_wants_reference || host_wants_reference) && can_be_reference {
                 evaluated_args.push(CallArg::Reference(self.expr_to_lvalue(arg, env, depth)?));
             } else {
@@ -4835,6 +4895,16 @@ impl<'a> Vm<'a> {
                 | Expr::Call { .. }
                 | Expr::GlobalCall { .. }
         )
+    }
+
+    fn expression_contains_array_append(expr: &Expr) -> bool {
+        match expr {
+            Expr::ArrayAppend(_) => true,
+            Expr::Property(base, _) | Expr::Index(base, _) => {
+                Self::expression_contains_array_append(base)
+            }
+            _ => false,
+        }
     }
 
     /// Native reference parameters receive a null pointer for rvalue call
@@ -4906,13 +4976,33 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<TrackedValue, RuntimeError> {
+        self.evaluate_plain_assignment_raw(target, value_expr, env, depth)?
+            .into_tracked()
+    }
+
+    fn evaluate_plain_assignment_raw(
+        &self,
+        target: &AssignmentTarget,
+        value_expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<ReturnValue, RuntimeError> {
         // AB_Set receives one already-evaluated reference, followed by the
         // RHS. Retain that reference across RHS evaluation without reading it:
         // value-style host references need only their address arguments here.
-        let reference = self.assignment_target_to_lvalue(env, target, depth)?;
+        let reference = match self.assignment_target_to_reference_or_value(env, target, depth)? {
+            ReturnValue::Reference(reference) => reference,
+            ReturnValue::Value(left) => {
+                self.evaluate_tracked(value_expr, env, depth)?;
+                return Err(RuntimeError::new(format!(
+                    "operator \"=\" left side: got \"{}\", but expected \"&\"!",
+                    Self::c4v_type_name(left.value.c4v_type())
+                )));
+            }
+        };
         let tracked = self.evaluate_tracked(value_expr, env, depth)?;
         reference.write_tracked(tracked.clone())?;
-        Ok(tracked)
+        Ok(ReturnValue::Reference(reference))
     }
 
     fn assignment_target_value(
@@ -5015,6 +5105,74 @@ impl<'a> Vm<'a> {
         }
     }
 
+    fn assignment_target_contains_array_append(target: &AssignmentTarget) -> bool {
+        match target {
+            AssignmentTarget::ArrayAppend(_) => true,
+            AssignmentTarget::Property(base, _) | AssignmentTarget::Index(base, _) => {
+                Self::assignment_target_contains_array_append(base)
+            }
+            _ => false,
+        }
+    }
+
+    fn assignment_target_to_reference_or_value(
+        &self,
+        env: &mut Environment,
+        target: &AssignmentTarget,
+        depth: usize,
+    ) -> Result<ReturnValue, RuntimeError> {
+        match target {
+            AssignmentTarget::FunctionCall { name, args } => {
+                let expression = Expr::Call {
+                    callee: Box::new(Expr::Variable(name.clone())),
+                    args: args.clone(),
+                    is_optional: false,
+                    forward_rest: false,
+                };
+                return self.evaluate_reference_or_value(&expression, env, depth);
+            }
+            AssignmentTarget::GlobalFunctionCall {
+                name,
+                args,
+                failsafe,
+                forward_rest,
+            } => {
+                return self.invoke_global_call_raw(
+                    name,
+                    args,
+                    *failsafe,
+                    *forward_rest,
+                    env,
+                    depth,
+                );
+            }
+            _ => {}
+        }
+
+        if !Self::assignment_target_contains_array_append(target) {
+            return self
+                .assignment_target_to_lvalue(env, target, depth)
+                .map(ReturnValue::Reference);
+        }
+
+        match target {
+            AssignmentTarget::ArrayAppend(base) => {
+                self.evaluate_array_append(base, env, depth)
+            }
+            AssignmentTarget::Property(base, property) => {
+                let base = self.assignment_target_to_reference_or_value(env, base, depth)?;
+                self.property_reference_or_value(base, property, env)
+            }
+            AssignmentTarget::Index(base, index) => {
+                let base = self.assignment_target_to_reference_or_value(env, base, depth)?;
+                self.index_reference_or_value(base, index, env, depth)
+            }
+            _ => self
+                .assignment_target_to_lvalue(env, target, depth)
+                .map(ReturnValue::Reference),
+        }
+    }
+
     fn assignment_target_to_lvalue(
         &self,
         env: &mut Environment,
@@ -5095,8 +5253,12 @@ impl<'a> Vm<'a> {
                 Ok(reference.append(PathSegment::Index(index)))
             }
             AssignmentTarget::ArrayAppend(base) => {
-                let reference = self.assignment_target_to_lvalue(env, base, depth)?;
-                self.append_array_slot(reference)
+                match self.evaluate_array_append(base, env, depth)? {
+                    ReturnValue::Reference(reference) => Ok(reference),
+                    ReturnValue::Value(_) => Err(RuntimeError::new(
+                        "this assignment target is a value, not a reference",
+                    )),
+                }
             }
             AssignmentTarget::LocalSlot(index_expr) => {
                 let index = self.evaluate_slot_index("Local()", index_expr, env, depth)?;
@@ -5408,35 +5570,343 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<LValueRef, RuntimeError> {
+        if Self::expression_contains_array_append(expr) {
+            return match self.evaluate_reference_or_value(expr, env, depth)? {
+                ReturnValue::Reference(reference) => Ok(reference),
+                ReturnValue::Value(_) => Err(RuntimeError::new(
+                    "this assignment target is a value, not a reference",
+                )),
+            };
+        }
         let target = Self::expr_to_assignment_target(expr)?;
         self.assignment_target_to_lvalue(env, &target, depth)
     }
 
-    /// Resolve variable-rooted container paths without evaluating them to a
-    /// detached `Value` clone. Definite `func &` calls retain their returned
-    /// reference too; value-call results remain ordinary rvalues.
-    fn existing_path_lvalue(
+    fn evaluate_reference_function_call(
         &self,
         expr: &Expr,
         env: &mut Environment,
         depth: usize,
-    ) -> Result<Option<LValueRef>, RuntimeError> {
-        match expr {
-            Expr::Variable(name) => Ok(env.lvalue(name).or_else(|| {
-                self.global_variable_cell(name)
-                    .map(|cell| self.tracked_cell(cell))
-            })),
-            Expr::Property(base, property) => {
-                let Some(reference) = self.existing_path_lvalue(base, env, depth)? else {
-                    return Ok(None);
+    ) -> Result<Option<ReturnValue>, RuntimeError> {
+        let Expr::Call {
+            callee,
+            args,
+            is_optional,
+            forward_rest,
+        } = expr
+        else {
+            return Ok(None);
+        };
+        let Expr::Variable(name) = callee.as_ref() else {
+            return Ok(None);
+        };
+        if *is_optional {
+            return Ok(None);
+        }
+        let function = if env.engine_scope && !env.linked_host_lookup {
+            self.engine_script_function(name)
+        } else {
+            self.own_or_global_script_function(name)
+        };
+        let Some(function) = function.filter(|function| function.returns_reference) else {
+            return Ok(None);
+        };
+
+        let mut evaluated_args =
+            self.build_call_args(Some(name), Some(function), args, env, depth + 1)?;
+        if *forward_rest {
+            Self::append_forwarded_args(&mut evaluated_args, env)?;
+        }
+        let value = if env.engine_scope && !env.linked_host_lookup {
+            self.invoke_engine_raw(
+                name,
+                evaluated_args,
+                depth + 1,
+                env.object_state.clone(),
+                Some(env.caller_context()),
+            )?
+        } else {
+            self.invoke_raw(
+                name,
+                evaluated_args,
+                depth + 1,
+                env.object_state.clone(),
+                Some(env.caller_context()),
+            )?
+        };
+        Ok(Some(value))
+    }
+
+    fn evaluate_conditional_reference_builtin(
+        &self,
+        expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Option<ReturnValue>, RuntimeError> {
+        let Expr::Call {
+            callee,
+            args,
+            is_optional: false,
+            ..
+        } = expr
+        else {
+            return Ok(None);
+        };
+        let Expr::Variable(name) = callee.as_ref() else {
+            return Ok(None);
+        };
+        let function = if env.engine_scope && !env.linked_host_lookup {
+            self.engine_script_function(name)
+        } else {
+            self.own_or_global_script_function(name)
+        };
+        if function.is_some() || self.has_host_function(name) {
+            return Ok(None);
+        }
+
+        if name == "GlobalN" && args.len() == 1 {
+            return Ok(Some(match self.evaluate_named_global(args, env, depth + 1)? {
+                Some(cell) => ReturnValue::Reference(self.tracked_cell(cell)),
+                None => ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
+            }));
+        }
+        if matches!(name.as_str(), "Local" | "Var") && args.len() <= 1 {
+            if name == "Local" && self.retain_global_call_context_for_host_paths {
+                return Ok(Some(ReturnValue::Value(TrackedValue::runtime(
+                    Value::Nil,
+                ))));
+            }
+            let index = self.evaluate_slot_index(
+                if name == "Local" { "Local()" } else { "Var()" },
+                args.first()
+                    .unwrap_or(&Expr::Literal(Literal::Int(0))),
+                env,
+                depth + 1,
+            )?;
+            if name == "Local" && index < 0 {
+                return Ok(Some(ReturnValue::Value(TrackedValue::runtime(Value::Nil))));
+            }
+            let cell = if name == "Local" {
+                env.object_state.local_slot_cell(index)
+            } else {
+                slot_cell(&env.var_slots, index)
+            };
+            return Ok(Some(ReturnValue::Reference(self.tracked_cell(cell))));
+        }
+        if name == "Par" && args.len() <= 1 {
+            let index = self.evaluate_slot_index(
+                "Par",
+                args.first()
+                    .unwrap_or(&Expr::Literal(Literal::Int(0))),
+                env,
+                depth + 1,
+            )?;
+            let value = usize::try_from(index)
+                .ok()
+                .filter(|index| *index < MAX_CALL_PARAMETERS)
+                .and_then(|index| env.call_args.get(index));
+            return Ok(Some(match value {
+                Some(value) => ReturnValue::Reference(value.lvalue()),
+                None => ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
+            }));
+        }
+        Ok(None)
+    }
+
+    fn call_expression_returns_reference(&self, expr: &Expr, env: &Environment) -> bool {
+        let Expr::Call {
+            callee,
+            args,
+            is_optional: _,
+            ..
+        } = expr
+        else {
+            return false;
+        };
+        match callee.as_ref() {
+            Expr::Variable(name) => {
+                let function = if env.engine_scope && !env.linked_host_lookup {
+                    self.engine_script_function(name)
+                } else {
+                    self.own_or_global_script_function(name)
                 };
+                if function.is_some_and(|function| function.returns_reference) {
+                    return true;
+                }
+                if function.is_some() {
+                    return false;
+                }
+
+                let null_implicit_local = self.retain_global_call_context_for_host_paths
+                    && (name == "Local" && args.len() <= 1
+                        || name == "LocalN" && args.len() == 1);
+                if null_implicit_local {
+                    return false;
+                }
+
+                name == "EffectVar"
+                    || !self.has_host_function(name)
+                        && (matches!(name.as_str(), "Var" | "Local")
+                            && args.len() <= 2
+                            || name == "Par" && args.len() <= 1
+                            || name == "LocalN" && (1..=2).contains(&args.len())
+                            || name == "Global"
+                            || name == "GlobalN" && args.len() == 1)
+            }
+            Expr::Property(_, method) => {
+                matches!(method.as_str(), "Local" | "LocalN" | "Var" | "EffectVar")
+                    || self
+                        .own_or_global_script_function(method)
+                        .is_some_and(|function| function.returns_reference)
+            }
+            _ => false,
+        }
+    }
+
+    /// Evaluate an expression exactly once while retaining the distinction
+    /// between a C4Value reference and an ordinary value. AB_ARRAY_APPEND
+    /// needs that distinction: replacing a self-owned temporary array with a
+    /// reference to its new element destroys the container and leaves the
+    /// stack value as ordinary nil (C4Value.cpp:217-227).
+    fn evaluate_reference_or_value(
+        &self,
+        expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<ReturnValue, RuntimeError> {
+        match expr {
+            Expr::Variable(name) => {
+                if let Some(reference) = env.lvalue(name).or_else(|| {
+                    self.global_variable_cell(name)
+                        .map(|cell| self.tracked_cell(cell))
+                }) {
+                    Ok(ReturnValue::Reference(reference))
+                } else {
+                    self.evaluate_tracked(expr, env, depth)
+                        .map(ReturnValue::Value)
+                }
+            }
+            Expr::Property(base, property) => {
+                let base = self.evaluate_reference_or_value(base, env, depth)?;
+                self.property_reference_or_value(base, property, env)
+            }
+            Expr::Index(base, index_expr) => {
+                let base = self.evaluate_reference_or_value(base, env, depth)?;
+                self.index_reference_or_value(base, index_expr, env, depth)
+            }
+            Expr::ArrayAppend(base) => self.evaluate_array_append(base, env, depth),
+            Expr::GlobalCall {
+                name,
+                args,
+                failsafe,
+                forward_rest,
+            } => self.invoke_global_call_raw(
+                name,
+                args,
+                *failsafe,
+                *forward_rest,
+                env,
+                depth,
+            ),
+            Expr::Call { .. } => {
+                if let Some(value) = self.evaluate_reference_function_call(expr, env, depth)? {
+                    return Ok(value);
+                }
+                if let Some(value) =
+                    self.evaluate_conditional_reference_builtin(expr, env, depth)?
+                {
+                    return Ok(value);
+                }
+                if self.call_expression_returns_reference(expr, env) {
+                    let normalized;
+                    let reference_expr = if let Expr::Call {
+                        callee,
+                        args,
+                        is_optional: true,
+                        forward_rest,
+                    } = expr
+                    {
+                        normalized = Expr::Call {
+                            callee: callee.clone(),
+                            args: args.clone(),
+                            is_optional: false,
+                            forward_rest: *forward_rest,
+                        };
+                        &normalized
+                    } else {
+                        expr
+                    };
+                    self.expr_to_lvalue(reference_expr, env, depth)
+                        .map(ReturnValue::Reference)
+                } else {
+                    self.evaluate_tracked(expr, env, depth)
+                        .map(ReturnValue::Value)
+                }
+            }
+            Expr::Assignment(target, value)
+                if !matches!(target, AssignmentTarget::InvalidValue { .. }) =>
+            {
+                self.evaluate_plain_assignment_raw(target, value, env, depth)
+            }
+            Expr::ArrayAppendAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => self.evaluate_reference_assignment_raw(
+                target,
+                operation.as_ref(),
+                operator,
+                value,
+                env,
+                depth,
+                true,
+            ),
+            Expr::CompoundAssignment {
+                target,
+                operation,
+                operator,
+                value,
+            } => self.evaluate_reference_assignment_raw(
+                target,
+                Some(operation),
+                operator,
+                value,
+                env,
+                depth,
+                true,
+            ),
+            _ => self
+                .evaluate_tracked(expr, env, depth)
+                .map(ReturnValue::Value),
+        }
+    }
+
+    fn property_reference_or_value(
+        &self,
+        base: ReturnValue,
+        property: &str,
+        env: &Environment,
+    ) -> Result<ReturnValue, RuntimeError> {
+        match base {
+            ReturnValue::Value(value)
+                if matches!(value.value, Value::Nil | Value::Object(0)) =>
+            {
+                Err(RuntimeError::new(
+                    "map access with .: map expected, but got nil!",
+                ))
+            }
+            ReturnValue::Value(value) => self
+                .eval_property_tracked(value, property, env)
+                .map(ReturnValue::Value),
+            ReturnValue::Reference(reference) => {
                 if matches!(&reference, LValueRef::HostPath { .. }) {
-                    return Ok(Some(
-                        reference.append(PathSegment::Property(property.clone())),
+                    return Ok(ReturnValue::Reference(
+                        reference.append(PathSegment::Property(property.to_string())),
                     ));
                 }
                 let collection = reference.read()?;
-                if matches!(collection, Value::Object(0)) {
+                if matches!(collection, Value::Nil | Value::Object(0)) {
                     return Err(RuntimeError::new(
                         "map access with .: map expected, but got nil!",
                     ));
@@ -5445,19 +5915,37 @@ impl<'a> Vm<'a> {
                     let cell = self
                         .object_local_cell(env, &collection, property)
                         .unwrap_or_else(|| value_cell(Value::Nil));
-                    return Ok(Some(self.tracked_cell(cell)));
+                    return Ok(ReturnValue::Reference(self.tracked_cell(cell)));
                 }
-                Ok(Some(
-                    reference.append(PathSegment::Property(property.clone())),
+                Ok(ReturnValue::Reference(
+                    reference.append(PathSegment::Property(property.to_string())),
                 ))
             }
-            Expr::Index(base, index_expr) => {
-                let Some(reference) = self.existing_path_lvalue(base, env, depth)? else {
-                    return Ok(None);
-                };
-                let index = self.evaluate(index_expr, env, depth)?;
+        }
+    }
+
+    fn index_reference_or_value(
+        &self,
+        base: ReturnValue,
+        index_expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<ReturnValue, RuntimeError> {
+        let index = self.evaluate(index_expr, env, depth)?;
+        match base {
+            ReturnValue::Value(value)
+                if matches!(value.value, Value::Nil | Value::Object(0)) =>
+            {
+                Err(RuntimeError::new(
+                    "indexed access [index]: array, map or string expected, but got nil",
+                ))
+            }
+            ReturnValue::Value(value) => self
+                .eval_index_tracked(value, index, env)
+                .map(ReturnValue::Value),
+            ReturnValue::Reference(reference) => {
                 let collection = reference.read()?;
-                if matches!(collection, Value::Object(0)) {
+                if matches!(collection, Value::Nil | Value::Object(0)) {
                     return Err(RuntimeError::new(
                         "indexed access [index]: array, map or string expected, but got nil",
                     ));
@@ -5471,30 +5959,49 @@ impl<'a> Vm<'a> {
                     let cell = self
                         .object_local_cell(env, &collection, name)
                         .unwrap_or_else(|| value_cell(Value::Nil));
-                    return Ok(Some(self.tracked_cell(cell)));
+                    return Ok(ReturnValue::Reference(self.tracked_cell(cell)));
+                }
+                if matches!(collection, Value::String(_)) {
+                    return self
+                        .eval_index_tracked(reference.read_tracked()?, index, env)
+                        .map(ReturnValue::Value);
                 }
                 Self::grow_empty_negative_array(Some(&reference), &collection, &index)?;
-                Ok(Some(reference.append(PathSegment::Index(index))))
+                Ok(ReturnValue::Reference(
+                    reference.append(PathSegment::Index(index)),
+                ))
             }
-            Expr::ArrayAppend(_) => self.expr_to_lvalue(expr, env, depth).map(Some),
-            Expr::Call {
-                callee,
-                is_optional,
-                ..
-            } if !is_optional
-                && matches!(callee.as_ref(), Expr::Variable(name) if self
-                    .functions
-                    .get(name)
-                    .or_else(|| self.global_functions.and_then(|functions| functions.get(name)))
-                    .is_some_and(|function| function.returns_reference)) =>
-            {
-                self.expr_to_lvalue(expr, env, depth).map(Some)
+        }
+    }
+
+    fn evaluate_array_append(
+        &self,
+        base: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<ReturnValue, RuntimeError> {
+        match self.evaluate_reference_or_value(base, env, depth)? {
+            ReturnValue::Reference(reference) => self
+                .append_array_slot(reference)
+                .map(ReturnValue::Reference),
+            ReturnValue::Value(value) => {
+                match &value.value {
+                    Value::Array(elements) if elements.len() < ARRAY_MAX_SIZE => {}
+                    Value::Array(_) => return Err(RuntimeError::new("out of memory")),
+                    Value::Nil => {
+                        return Err(RuntimeError::new(
+                            "array append accesss: can't access nil as an array!",
+                        ))
+                    }
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "array append accesss: can't access {} as an array!",
+                            other.type_name()
+                        )))
+                    }
+                }
+                Ok(ReturnValue::Value(TrackedValue::runtime(Value::Nil)))
             }
-            Expr::GlobalCall { name, .. } if self.global_call_may_return_reference(name) =>
-            {
-                self.expr_to_lvalue(expr, env, depth).map(Some)
-            }
-            _ => Ok(None),
         }
     }
 
@@ -5626,8 +6133,7 @@ impl<'a> Vm<'a> {
                 ))
             }
             Expr::ArrayAppend(base) => {
-                let base_target = Self::expr_to_assignment_target(base)?;
-                Ok(AssignmentTarget::ArrayAppend(Box::new(base_target)))
+                Ok(AssignmentTarget::ArrayAppend(base.clone()))
             }
             // Special case: Local(expr), Var(expr), and EffectVar(args...) are valid for increment/decrement
             Expr::Call {
@@ -5652,6 +6158,14 @@ impl<'a> Vm<'a> {
                             )));
                         } else if name == "EffectVar" {
                             return Ok(AssignmentTarget::EffectSlot(args.clone()));
+                        } else if matches!(name.as_str(), "Local" | "LocalN" | "Var")
+                            && args.len() == 2
+                        {
+                            return Ok(AssignmentTarget::MethodSlot {
+                                object: Box::new(args[1].clone()),
+                                method: name.clone(),
+                                args: vec![args[0].clone()],
+                            });
                         }
                         // NEW: Allow any function call to be used with increment/decrement
                         // This supports reference-returning functions (func &)
