@@ -16109,7 +16109,14 @@ fn shape_attach(
                 let ay = position.y + vertex.y + ycnt + ycd;
                 if ax >= 0
                     && ax < landscape.width() as i32
-                    && landscape.density_at(ax, ay, materials) >= contact_density
+                    && movement_density_at(
+                        landscape,
+                        materials,
+                        solid_masks,
+                        excluded_solid_mask,
+                        ax,
+                        ay,
+                    ) >= contact_density
                 {
                     *record = ShapeAttachRecord {
                         mat_valid: true,

@@ -56897,6 +56897,156 @@ protected func Initialize() {
         assert_eq!(object.position, Vector2::new(5, 5));
     }
 
+    fn rect_mask_attach_definition(with_own_mask: bool) -> Definition {
+        let mut definition = simple_definition("Climber");
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+        definition.set_contact_density(50);
+        if with_own_mask {
+            definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 3, 1, 0, 2)));
+        }
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Single".to_string(),
+                    ActionSpec::default().with_attach(CNAT_BOTTOM),
+                ),
+                (
+                    "Multi".to_string(),
+                    ActionSpec::default().with_attach(CNAT_BOTTOM | CNAT_MULTI_ATTACH),
+                ),
+                ("Jump".to_string(), ActionSpec::default()),
+            ]),
+        );
+        definition
+    }
+
+    #[test]
+    fn multi_attach_matches_single_attach_on_rect_solid_mask() {
+        let mut platform = simple_definition("Platform");
+        platform.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 8, 1, 0, 0)));
+
+        let mut engine = Engine::with_seed(49);
+        engine.set_landscape(Landscape::flat(20, 20));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(platform)
+            .expect("platform definition registers");
+        engine
+            .register_definition(rect_mask_attach_definition(false))
+            .expect("climber definition registers");
+        engine
+            .spawn_object(
+                SpawnConfig::new("Platform")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(4, 7))
+                    .with_loaded(true),
+            )
+            .expect("platform spawns");
+        let single = engine
+            .spawn_object(
+                SpawnConfig::new("Climber")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 5))
+                    .with_action(ActionState::new("Single"))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("single-attach climber spawns");
+        let multi = engine
+            .spawn_object(
+                SpawnConfig::new("Climber")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 5))
+                    .with_action(ActionState::new("Multi"))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("multi-attach climber spawns");
+
+        engine.tick().expect("attachment tick succeeds");
+        for (id, action, x) in [(single, "Single", 5), (multi, "Multi", 10)] {
+            let index = engine.find_object_index(id).expect("climber remains");
+            let object = &engine.objects[index];
+            assert_eq!(object.state.action.name, action, "must not run NoAttachAction");
+            assert_eq!(object.state.position, Vector2::new(x, 5));
+            assert_eq!(
+                object.state.shape_attach,
+                ShapeAttachRecord {
+                    mat_valid: true,
+                    mat_vehicle: true,
+                    x,
+                    y: 7,
+                    vtx: 0,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn multi_attach_excludes_own_rect_solid_mask_after_first_motion() {
+        let mut engine = Engine::with_seed(49);
+        engine.set_landscape(Landscape::flat(24, 20));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(rect_mask_attach_definition(true))
+            .expect("climber definition registers");
+
+        let spawn = |engine: &mut Engine, x, action| {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("Climber")
+                        .with_category(CATEGORY_OBJECT)
+                        .with_position(Vector2::new(x, 5))
+                        .with_fixed_position(FixedVec2::from_ints(x, 5))
+                        .with_action(ActionState::new(action))
+                        .with_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO))
+                        .with_mobile(true)
+                        .with_loaded(true),
+                )
+                .expect("self-masked climber spawns")
+        };
+        let single = spawn(&mut engine, 5, "Single");
+        let multi = spawn(&mut engine, 12, "Multi");
+
+        // Execute C4Object::DoMovement directly with the attachment bits
+        // already latched by ExecAction. The custom-procedure ExecAction
+        // default otherwise zeroes xdir before movement (C4Object.cpp:5427).
+        let solid_mask_indices = (0..engine.objects.len()).collect::<Vec<_>>();
+        for (id, attach) in [
+            (single, CNAT_BOTTOM),
+            (multi, CNAT_BOTTOM | CNAT_MULTI_ATTACH),
+        ] {
+            let index = engine.find_object_index(id).expect("climber exists");
+            engine.objects[index].frame_t_attach = attach;
+            let definition_id = engine.objects[index].definition_id.clone();
+            let actions = engine
+                .definitions
+                .get(&definition_id)
+                .expect("climber definition exists")
+                .action_library()
+                .clone();
+            engine
+                .exec_object_movement(
+                    index,
+                    &actions,
+                    &definition_id,
+                    &solid_mask_indices,
+                )
+                .expect("two-pixel movement succeeds");
+        }
+        for (id, expected_x) in [(single, 7), (multi, 14)] {
+            let index = engine.find_object_index(id).expect("climber remains");
+            let object = &engine.objects[index];
+            assert_eq!(object.state.position, Vector2::new(expected_x, 5));
+            assert_eq!(
+                object.state.action.name, "Jump",
+                "the second pixel must exclude the mover's stale own mask"
+            );
+        }
+    }
+
     #[test]
     fn free_rotation_preserves_fractional_translation_accumulator() {
         let mut definition = simple_definition("Spinner");
