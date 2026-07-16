@@ -35065,7 +35065,9 @@ fn find_other_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                     continue;
                 }
                 let matches = match definition.as_ref() {
-                    Some(definition_id) => child.definition_id() != definition_id,
+                    Some(definition_id) => context
+                        .object_effective_definition_id(*child_id)
+                        .is_none_or(|id| id.as_str() != definition_id),
                     None => true,
                 };
                 if matches {
@@ -71574,7 +71576,7 @@ protected func Construction()
             0,
             None,
         )
-        .with_contents(vec![gem_id, hammer_id]);
+        .with_contents(vec![hammer_id, gem_id]);
 
         let gem = HostWorldObject::new(
             gem_id,
@@ -71614,12 +71616,16 @@ protected func Construction()
             Some(container_id),
         );
 
-        let world = HostWorldContext::from_objects(vec![container, gem, hammer]);
+        let world = HostWorldContext::from_objects(vec![container, gem, hammer])
+            .with_definition_metadata(Rc::new(HashMap::from([
+                (DefinitionId::from("GEM1"), DefinitionMetadata::default()),
+                (DefinitionId::from("HAMR"), DefinitionMetadata::default()),
+            ])));
         let context = HostObjectContext::new(
-            container_id,
-            None,
+            hammer_id,
+            Some(container_id),
             ObjectStatus::Normal,
-            100,
+            0,
             OWNER_NONE,
             Vector2::ZERO,
             Vector2::ZERO,
@@ -71635,14 +71641,39 @@ protected func Construction()
             None,
             &[],
             crate::FULL_CON,
-        );
+        )
+        .with_definition_id("HAMR");
 
-        let args = [Value::C4Id("GEM1".into())];
-        let (result, _) = with_effect_context(Some(context), &[], world, 500, || {
+        let args = [
+            Value::C4Id("GEM1".into()),
+            object_reference_value(container_id),
+        ];
+        let (result, _) = with_effect_context(Some(context.clone()), &[], world.clone(), 500, || {
             find_other_contents(&args)
         });
         let value = result.expect("FindOtherContents succeeds");
         assert_eq!(value, object_reference_value(hammer_id));
+
+        let (same_call, _) = with_effect_context(Some(context), &[], world, 500, || {
+            let changed = change_def(&[
+                Value::C4Id("GEM1".into()),
+                object_reference_value(hammer_id),
+            ])?;
+            let matching = find_contents(&args)?;
+            let other = find_other_contents(&args)?;
+            Ok::<_, RuntimeError>(Value::Array(vec![changed, matching, other]))
+        });
+        // ChangeDef's unsorted re-entry appends the hammer after the gem;
+        // both now have GEM1, so FindOtherContents must find no child.
+        assert_eq!(
+            same_call.expect("same-call ChangeDef content searches succeed"),
+            Value::Array(vec![
+                Value::Bool(true),
+                object_reference_value(gem_id),
+                Value::Nil,
+            ]),
+            "both searches must see the live definition after contents re-insertion"
+        );
     }
 
     #[test]
