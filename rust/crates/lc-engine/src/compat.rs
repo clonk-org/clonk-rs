@@ -14231,6 +14231,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("AssignVar", set_var);
     script.register_host_function("SetVar", set_var);
     script.register_host_function("DecVar", dec_var);
+    script.register_host_function("IncVar", inc_var);
     script.register_host_function("Not", legacy_not);
     script.register_host_function("Or", legacy_or);
     script.register_host_function("And", legacy_and);
@@ -19028,6 +19029,24 @@ fn dec_var(args: &[Value]) -> Result<Value, RuntimeError> {
     );
     slots.set(index, decremented.clone());
     Ok(decremented)
+}
+
+/// `FnIncVar` (C4Script.cpp:3379-3383): prefix-increment a slot in the
+/// immediately calling function's `NumVars` list and return the new value.
+fn inc_var(args: &[Value]) -> Result<Value, RuntimeError> {
+    let index = legacy_arg_int(args, 0, "IncVar")?;
+    let Some(slots) = lc_script::caller_var_slots() else {
+        return Ok(Value::Nil);
+    };
+    if index >= LEGACY_MAX_ARRAY_SIZE {
+        return Err(RuntimeError::new("out of memory"));
+    }
+
+    let incremented = Value::Int(
+        cast_stable_raw_i32(&slots.get(index), "IncVar")?.wrapping_add(1),
+    );
+    slots.set(index, incremented.clone());
+    Ok(incremented)
 }
 
 fn random(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -47186,6 +47205,7 @@ mod tests {
         "Hostile",
         "InLiquid",
         "Inc",
+        "IncVar",
         "Incinerate",
         "IncinerateLandscape",
         "InitScenarioPlayer",
@@ -49401,6 +49421,88 @@ global func PreInitializePlayer(int player)
         assert_eq!(
             dec_var(&[Value::Int(0)]).expect("DecVar without a caller succeeds"),
             Value::Nil
+        );
+    }
+
+    #[test]
+    fn inc_var_prefix_increments_the_immediate_callers_var_slot() {
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script(
+                r#"
+                #strict 3
+                func Inner() {
+                    SetVar(0, 4);
+                    var result = IncVar(0);
+                    var unset = IncVar(1);
+                    SetVar(2, true);
+                    var boolean = IncVar(2);
+                    var negative = IncVar(-1);
+                    return [result, Var(0), unset, Var(1), boolean, Var(2), negative, Var(0)];
+                }
+                func Outer() {
+                    SetVar(0, 90);
+                    return [Inner(), Var(0)];
+                }
+                func Last() {
+                    SetVar(999999, 9);
+                    return [IncVar(999999), Var(999999)];
+                }
+                func TooLarge() { return IncVar(1000000); }
+                func Surplus() {
+                    var result = IncVar(3, SetVar(4, 7));
+                    return [result, Var(3), Var(4)];
+                }
+                "#,
+            )
+            .expect("IncVar caller-slot probe compiles");
+
+        assert_eq!(
+            engine.call("Outer", &[]).expect("nested IncVar probe runs"),
+            Value::Array(vec![
+                Value::Array(vec![
+                    Value::Int(5),
+                    Value::Int(6),
+                    Value::Int(1),
+                    Value::Int(1),
+                    Value::Int(2),
+                    Value::Int(2),
+                    Value::Int(6),
+                    Value::Int(6),
+                ]),
+                Value::Int(90),
+            ]),
+            "IncVar mutates only the immediate script caller's NumVars"
+        );
+        assert_eq!(
+            engine.call("Last", &[]).expect("last slot increments"),
+            Value::Array(vec![Value::Int(10), Value::Int(10)])
+        );
+        match engine.call("TooLarge", &[]) {
+            Err(lc_script::ScriptError::Runtime(error)) => {
+                assert_eq!(error.message(), "out of memory")
+            }
+            other => panic!("expected IncVar allocation limit error, got {other:?}"),
+        }
+        assert_eq!(
+            engine
+                .call("Surplus", &[])
+                .expect("surplus argument is evaluated then discarded"),
+            Value::Array(vec![Value::Int(1), Value::Int(1), Value::Int(7)])
+        );
+    }
+
+    #[test]
+    fn inc_var_without_a_script_caller_returns_nil_before_slot_access() {
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        assert_eq!(
+            engine
+                .call("IncVar", &[Value::Int(LEGACY_MAX_ARRAY_SIZE)])
+                .expect("direct IncVar succeeds without a caller"),
+            Value::Nil,
+            "the no-caller return precedes the NumVars allocation limit check"
         );
     }
 
