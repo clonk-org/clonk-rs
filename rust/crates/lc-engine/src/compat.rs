@@ -73358,6 +73358,60 @@ protected func Construction()
     }
 
     #[test]
+    fn assign_removal_ejects_contents_at_the_containers_same_call_position() {
+        let container_script = r#"#strict
+public func MoveThenRemove()
+{
+  SetPosition(345, 210);
+  return RemoveObject(0, true);
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(
+                crate::Definition::from_script("BOX1", "Container", container_script)
+                    .expect("container script compiles"),
+            )
+            .expect("container registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("ITEM", "Item", "#strict\n")
+                    .expect("item script compiles"),
+            )
+            .expect("item registers");
+
+        let container = engine
+            .spawn_object(SpawnConfig::new("BOX1").with_position(Vector2::new(120, 80)))
+            .expect("container spawns");
+        let child = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_position(Vector2::new(7, 11))
+                    .with_container(container),
+            )
+            .expect("contained child spawns");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("container exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(container_index, "MoveThenRemove", Vec::new())
+                .expect("same-call move and removal succeeds"),
+            Value::Bool(true)
+        );
+        let child = engine
+            .object_snapshot(child)
+            .expect("ejected child survives");
+        assert_eq!(child.container, None);
+        assert_eq!(
+            child.position,
+            Vector2::new(345, 210),
+            "AssignRemoval(true) must pass the container's live x/y to Exit"
+        );
+    }
+
+    #[test]
     fn remove_object_eject_flag_controls_self_foreign_and_recursive_contents() {
         let container_script = r#"#strict
 public func RemoveSelfWithEject() { return RemoveObject(0, 1); }
