@@ -1472,6 +1472,10 @@ impl From<&ControlPlayerInfoEntry> for ControlJoinPlayerSemantics {
 /// The `pObj->Info` data a crew object carries (CreateInfoObject links the
 /// C4ObjectInfo, C4Game.cpp:1156-1170): name shown by GetName, rank used
 /// by GetHiRank.
+fn default_crew_rank_name() -> String {
+    "Clonk".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrewObjectInfo {
     /// Original C4ObjectInfoCore definition id. This deliberately survives a
@@ -1480,6 +1484,10 @@ pub struct CrewObjectInfo {
     pub definition_id: DefinitionId,
     pub name: String,
     pub rank: i32,
+    /// Stored `C4ObjectInfoCore::sRankName`. Silent over-table promotions
+    /// retain the preceding name (C4InfoCore.cpp:428-435).
+    #[serde(default = "default_crew_rank_name")]
+    pub rank_name: String,
     pub experience: i32,
     /// Persistent C4ObjectInfoCore death tally.
     #[serde(default)]
@@ -17761,6 +17769,7 @@ impl Engine {
                 definition_id: definition_id.clone(),
                 name: info.name.clone(),
                 rank: info.rank,
+                rank_name: info.rank_name.clone(),
                 experience: info.experience,
                 death_count: info.death_count,
                 total_playing_time: info.total_playing_time,
@@ -17838,15 +17847,43 @@ impl Engine {
     ) -> Option<(usize, player_file::CrewInfo)> {
         loop {
             if let Some(index) = self.idle_crew_info_index(number, id_token) {
+                let (definition_id, rank, stored_rank_name) = {
+                    let info = self.crew_rosters.get(&number)?.get(index)?;
+                    (info.id.clone(), info.rank, info.rank_name.clone())
+                };
+                let rank_name = self.recruit_rank_name(
+                    &DefinitionId::from(definition_id.as_str()),
+                    rank,
+                    &stored_rank_name,
+                );
                 let roster = self.crew_rosters.entry(number).or_default();
                 roster[index].in_action = true; // pHiExp->Recruit()
                 roster[index].in_action_time = self.game_time;
+                roster[index].rank_name = rank_name;
                 return Some((index, roster[index].clone()));
             }
             if !self.create_crew_info(number, id_token) {
                 return None;
             }
         }
+    }
+
+    fn recruit_rank_name(
+        &self,
+        definition_id: &DefinitionId,
+        rank: i32,
+        stored_rank_name: &str,
+    ) -> String {
+        self.definitions
+            .get(definition_id)
+            .and_then(Definition::rank_names)
+            .filter(|names| !names.is_empty())
+            .and_then(|names| {
+                usize::try_from(rank)
+                    .ok()
+                    .map(|rank| names[rank.min(names.len() - 1)].clone())
+            })
+            .unwrap_or_else(|| stored_rank_name.to_string())
     }
 
     /// `C4ObjectInfoList::GetIdle` (C4ObjectInfoList.cpp:113-142): the
@@ -17939,6 +17976,14 @@ impl Engine {
             None => "Clonk".to_string(),
         };
 
+        let rank_name = self
+            .definitions
+            .get(id)
+            .and_then(Definition::rank_names)
+            .and_then(|names| names.first())
+            .cloned()
+            .or_else(|| compat::default_rank_name(0).map(str::to_owned))
+            .unwrap_or_else(default_crew_rank_name);
         let roster = self.crew_rosters.entry(number).or_default();
         // MakeValidName (C4ObjectInfoList.cpp:93-101): number duplicates
         // from 2, overwriting the tail to stay within C4MaxName.
@@ -17961,6 +18006,7 @@ impl Engine {
             id: id.to_string(),
             name,
             rank: 0,
+            rank_name,
             experience: 0,
             physical,
             death_count: 0,
@@ -28030,6 +28076,7 @@ impl Engine {
                 continue;
             };
             if let Some(info) = Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id) {
+                info.rank_name = entry.rank_name.clone();
                 info.total_playing_time = entry.total_playing_time;
                 info.birthday = entry.birthday;
                 info.age = entry.age;
@@ -29979,6 +30026,7 @@ impl Engine {
                         definition_id: DefinitionId::from(entry.id.as_str()),
                         name: entry.name.clone(),
                         rank: entry.rank,
+                        rank_name: entry.rank_name.clone(),
                         experience: entry.experience,
                         death_count: entry.death_count,
                         total_playing_time: entry.total_playing_time,
@@ -29999,6 +30047,7 @@ impl Engine {
             infos.get_mut(&object_id).map(|info| {
                 let promoted = if let Some((roster_info, promoted)) = roster_values.as_ref() {
                     info.rank = roster_info.rank;
+                    info.rank_name = roster_info.rank_name.clone();
                     info.experience = roster_info.experience;
                     *promoted
                 } else {
@@ -30016,15 +30065,54 @@ impl Engine {
             .map(|(info, _)| info.clone())
     }
 
+    fn promotion_rank_name(&self, info: &CrewObjectInfo) -> Option<String> {
+        match self
+            .definitions
+            .get(&info.definition_id)
+            .and_then(Definition::rank_names)
+        {
+            Some(names) => usize::try_from(info.rank)
+                .ok()
+                .and_then(|rank| names.get(rank))
+                .cloned(),
+            None => compat::default_rank_name(info.rank).map(str::to_owned),
+        }
+    }
+
+    fn set_object_info_rank_name(
+        &mut self,
+        object_id: ObjectId,
+        link: Option<CrewInfoLink>,
+        rank_name: String,
+    ) {
+        if let Some(link) = link {
+            if let Some(entry) = self
+                .crew_rosters
+                .get_mut(&link.player_id)
+                .and_then(|roster| roster.get_mut(link.roster_index))
+            {
+                entry.rank_name = rank_name.clone();
+            }
+        }
+        if let Some(info) = Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id) {
+            info.rank_name = rank_name;
+        }
+    }
+
     /// Native `C4Object::DoExperience`: mutate the persistent info first,
     /// then run the promotion-only physical and presentation half exactly
     /// once. Script `DoCrewExp` previews those effects in its host scope and
     /// deliberately replays only [`Self::adjust_object_info_experience`].
     fn do_object_experience(&mut self, object_id: ObjectId, change: i32) {
         let link = self.crew_info_links.get(&object_id).copied();
-        let Some(info) = self.adjust_object_info_experience(object_id, link, change) else {
+        let Some(mut info) = self.adjust_object_info_experience(object_id, link, change) else {
             return;
         };
+        let rank_name = self.promotion_rank_name(&info);
+        if let Some(rank_name) = rank_name.as_ref() {
+            info.rank_name = rank_name.clone();
+            self.set_object_info_rank_name(object_id, link, rank_name.clone());
+        }
 
         let definition_physical = self
             .definitions
@@ -30043,19 +30131,9 @@ impl Engine {
             ));
         }
 
-        // An exhausted custom rank table promotes silently; only definitions
-        // without a custom table fall back to the game-global rank names.
-        let rank_name = match self
-            .definitions
-            .get(&info.definition_id)
-            .and_then(Definition::rank_names)
-        {
-            Some(names) => usize::try_from(info.rank)
-                .ok()
-                .and_then(|rank| names.get(rank))
-                .cloned(),
-            None => compat::default_rank_name(info.rank).map(str::to_owned),
-        };
+        // An exhausted custom rank table promotes silently and retains the
+        // preceding stored rank name; only definitions without a custom table
+        // fall back to the game-global rank names.
         let Some(rank_name) = rank_name else {
             return;
         };
@@ -30265,6 +30343,13 @@ impl Engine {
                     recruit,
                     has_died,
                 } => {
+                    let recruited_rank_name = recruit.then(|| {
+                        self.recruit_rank_name(
+                            &info.definition_id,
+                            info.rank,
+                            &info.rank_name,
+                        )
+                    });
                     if let Some(link) = link {
                         let roster = self.crew_rosters.entry(link.player_id).or_default();
                         let mut created = false;
@@ -30291,10 +30376,14 @@ impl Engine {
                             if recruit && !entry.in_action {
                                 entry.in_action = true;
                                 entry.in_action_time = self.game_time;
+                                if let Some(rank_name) = recruited_rank_name.as_ref() {
+                                    entry.rank_name = rank_name.clone();
+                                }
                             }
                             info.definition_id = DefinitionId::from(entry.id.as_str());
                             info.name = entry.name.clone();
                             info.rank = entry.rank;
+                            info.rank_name = entry.rank_name.clone();
                             info.experience = entry.experience;
                             info.death_count = entry.death_count;
                             info.total_playing_time = entry.total_playing_time;
@@ -30315,7 +30404,13 @@ impl Engine {
                     link,
                     change,
                 } => {
-                    self.adjust_object_info_experience(object_id, link, change);
+                    if let Some(info) =
+                        self.adjust_object_info_experience(object_id, link, change)
+                    {
+                        if let Some(rank_name) = self.promotion_rank_name(&info) {
+                            self.set_object_info_rank_name(object_id, link, rank_name);
+                        }
+                    }
                 }
                 PlayerCommand::AdjustHomeBaseMaterial {
                     player_id,

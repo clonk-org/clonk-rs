@@ -2350,6 +2350,7 @@ mod tests {
             id: "CLNK".to_string(),
             name: "Ada".to_string(),
             rank: 3,
+            rank_name: "Captain".to_string(),
             experience: 50,
             physical: crate::PhysicalInfo::default(),
             death_count: 0,

@@ -4966,7 +4966,7 @@ fn do_crew_exp(args: &[Value]) -> Result<Value, RuntimeError> {
             .and_then(ObjectScopeContext::info_core)
             .and_then(|info| context.definition_metadata(info.definition_id.as_str()))
             .map(|metadata| metadata.physical);
-        let Some((link, info, promoted)) = context.object_scope_mut(target).and_then(|scope| {
+        let Some((link, mut info, promoted)) = context.object_scope_mut(target).and_then(|scope| {
             let link = scope.info_link();
             let mut info = scope.info_core()?.clone();
             let promoted = crate::adjust_crew_experience(&mut info, change);
@@ -4989,18 +4989,42 @@ fn do_crew_exp(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(true));
         };
 
+        let promotion_rank_name = if promoted {
+            match context
+                .world
+                .definition_rank_names
+                .get(&info.definition_id)
+            {
+                Some(names) => usize::try_from(info.rank)
+                    .ok()
+                    .and_then(|rank| names.get(rank))
+                    .cloned(),
+                None => default_rank_name(info.rank).map(str::to_owned),
+            }
+        } else {
+            None
+        };
+        if let Some(rank_name) = promotion_rank_name.as_ref() {
+            info.rank_name = rank_name.clone();
+            if let Some(scope) = context.object_scope_mut(target) {
+                scope.set_info_core(Some(info.clone()));
+            }
+        }
+
         // This projection is live throughout the VM call. A following
         // GrabObjectInfo/MakeCrewMember must see the changed pointer payload.
         if let Some(link) = link {
             let mut state = context.world.crew_info_state.borrow_mut();
             if let Some(entry) = state.entries.get_mut(&link) {
                 entry.rank = info.rank;
+                entry.rank_name = info.rank_name.clone();
                 entry.experience = info.experience;
             }
             for entries in state.idle.values_mut() {
                 for (candidate, entry) in entries {
                     if *candidate == link {
                         entry.rank = info.rank;
+                        entry.rank_name = info.rank_name.clone();
                         entry.experience = info.experience;
                     }
                 }
@@ -5013,41 +5037,26 @@ fn do_crew_exp(args: &[Value]) -> Result<Value, RuntimeError> {
             change,
         });
 
-        if promoted {
-            // Exhausted custom tables promote silently; Game.Rank is used
-            // only when the persistent info definition has no custom table.
-            let rank_name = match context
-                .world
-                .definition_rank_names
-                .get(&info.definition_id)
-            {
-                Some(names) => usize::try_from(info.rank)
-                    .ok()
-                    .and_then(|rank| names.get(rank))
-                    .cloned(),
-                None => default_rank_name(info.rank).map(str::to_owned),
-            };
-            if let Some(rank_name) = rank_name {
-                let object_name = context
-                    .object_custom_name(target)
-                    .unwrap_or_else(|| info.name.clone());
-                context.register_message(MessageCommand::Add(MessageSpec {
-                    kind: MessageKind::Target,
-                    text: format!("{object_name} is promoted|to {rank_name}!"),
-                    target: Some(target),
-                    player: None,
-                    offset: Vector2::ZERO,
-                    color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
-                    flags: 0,
-                    width: None,
-                    decoration: None,
-                    frame_decoration: None,
-                    portrait: None,
-                }));
-                context
-                    .audio_mut()
-                    .play_sound("Trumpet", Some(target), 100, false, false, None);
-            }
+        if let Some(rank_name) = promotion_rank_name {
+            let object_name = context
+                .object_custom_name(target)
+                .unwrap_or_else(|| info.name.clone());
+            context.register_message(MessageCommand::Add(MessageSpec {
+                kind: MessageKind::Target,
+                text: format!("{object_name} is promoted|to {rank_name}!"),
+                target: Some(target),
+                player: None,
+                offset: Vector2::ZERO,
+                color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+                flags: 0,
+                width: None,
+                decoration: None,
+                frame_decoration: None,
+                portrait: None,
+            }));
+            context
+                .audio_mut()
+                .play_sound("Trumpet", Some(target), 100, false, false, None);
         }
 
         Ok(Value::Bool(true))
@@ -18078,6 +18087,9 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                                 .map(|metadata| metadata.name.clone())
                                 .unwrap_or_else(|| "Clonk".to_string()),
                             rank,
+                            rank_name: default_rank_name(rank)
+                                .unwrap_or("Clonk")
+                                .to_string(),
                             experience: 0,
                             death_count: 0,
                             total_playing_time: 0,
@@ -18093,7 +18105,7 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                 )
             })
             .unwrap_or((None, None, None, None));
-        let donor_core = donor_core?;
+        let mut donor_core = donor_core?;
         let donor_portrait = context
             .get_world_object(from)
             .and_then(|object| {
@@ -18119,6 +18131,14 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
         let target_alive = context
             .object_scope(to)
             .is_some_and(ObjectScopeContext::alive);
+        if target_alive {
+            donor_core.rank_name = recruited_rank_name(
+                &context.world,
+                &donor_core.definition_id,
+                donor_core.rank,
+                &donor_core.rank_name,
+            );
+        }
         let linked = donor_link.filter(|link| {
             let valid = retire_host_crew_info(context, *link);
             if valid {
@@ -18265,17 +18285,53 @@ fn relink_host_crew_info(
     recruit: bool,
     has_died: bool,
 ) -> bool {
+    let recruited_name = if recruit {
+        let state = context.world.crew_info_state.borrow();
+        state.entries.get(&link).map(|entry| {
+            recruited_rank_name(
+                &context.world,
+                &DefinitionId::from(entry.id.as_str()),
+                entry.rank,
+                &entry.rank_name,
+            )
+        })
+    } else {
+        None
+    };
     let mut state = context.world.crew_info_state.borrow_mut();
     let Some(entry) = state.entries.get_mut(&link) else {
         return false;
     };
     entry.has_died = has_died;
+    if recruit && !entry.in_action {
+        if let Some(rank_name) = recruited_name {
+            entry.rank_name = rank_name;
+        }
+    }
     entry.in_action = recruit;
     let key = (link.player_id, entry.id.clone());
     if let Some(pool) = state.idle.get_mut(&key) {
         pool.retain(|(candidate, _)| *candidate != link);
     }
     true
+}
+
+fn recruited_rank_name(
+    world: &HostWorldContext,
+    definition_id: &DefinitionId,
+    rank: i32,
+    stored_rank_name: &str,
+) -> String {
+    world
+        .definition_rank_names
+        .get(definition_id)
+        .filter(|names| !names.is_empty())
+        .and_then(|names| {
+            usize::try_from(rank)
+                .ok()
+                .map(|rank| names[rank.min(names.len() - 1)].clone())
+        })
+        .unwrap_or_else(|| stored_rank_name.to_string())
 }
 
 fn recruit_or_create_crew_info(
@@ -18314,11 +18370,27 @@ fn recruit_or_create_crew_info(
         }
         picked
     };
-    if let Some((link, entry)) = idle {
+    if let Some((link, mut entry)) = idle {
+        entry.rank_name = recruited_rank_name(
+            &context.world,
+            &DefinitionId::from(entry.id.as_str()),
+            entry.rank,
+            &entry.rank_name,
+        );
+        if let Some(stored) = context
+            .world
+            .crew_info_state
+            .borrow_mut()
+            .entries
+            .get_mut(&link)
+        {
+            stored.rank_name = entry.rank_name.clone();
+        }
         let info = CrewObjectInfo {
             definition_id: DefinitionId::from(entry.id.as_str()),
             name: entry.name.clone(),
             rank: entry.rank,
+            rank_name: entry.rank_name.clone(),
             experience: entry.experience,
             death_count: entry.death_count,
             total_playing_time: entry.total_playing_time,
@@ -18364,6 +18436,14 @@ fn recruit_or_create_crew_info(
         .definition_metadata(definition_id)
         .map(|metadata| crate::crew_info_physical(metadata.physical, 0))
         .unwrap_or_default();
+    let rank_name = context
+        .world
+        .definition_rank_names
+        .get(&DefinitionId::from(definition_id))
+        .and_then(|names| names.first())
+        .cloned()
+        .or_else(|| default_rank_name(0).map(str::to_owned))
+        .unwrap_or_else(|| "Clonk".to_string());
     let (link, entry) = {
         let mut state = context.world.crew_info_state.borrow_mut();
         {
@@ -18394,6 +18474,7 @@ fn recruit_or_create_crew_info(
             id: definition_id.to_string(),
             name,
             rank: 0,
+            rank_name,
             experience: 0,
             physical,
             death_count: 0,
@@ -18414,6 +18495,7 @@ fn recruit_or_create_crew_info(
         definition_id: DefinitionId::from(entry.id.as_str()),
         name: entry.name.clone(),
         rank: entry.rank,
+        rank_name: entry.rank_name.clone(),
         experience: entry.experience,
         death_count: entry.death_count,
         total_playing_time: entry.total_playing_time,
@@ -36249,6 +36331,7 @@ fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "id" => Value::C4Id(info.definition_id.as_str().to_string()),
             "Name" => Value::String(info.name.clone()),
             "Rank" => Value::Int(info.rank),
+            "RankName" => Value::String(info.rank_name.clone()),
             "Experience" => Value::Int(info.experience),
             "DeathCount" => Value::Int(info.death_count),
             "Birthday" => Value::Int(info.birthday),
@@ -47525,6 +47608,7 @@ func RenameInfo(object target, string name, bool make_valid)
             id: "CREW".to_string(),
             name: name.to_string(),
             rank: 0,
+            rank_name: "Clonk".to_string(),
             experience,
             physical: crate::PhysicalInfo::default(),
             death_count: 0,
@@ -53697,6 +53781,7 @@ func Probe(object crew, object info_less)
                     id: "CREW".to_string(),
                     name: "Ada".to_string(),
                     rank: 0,
+                    rank_name: "Clonk".to_string(),
                     experience: 0,
                     physical: crate::PhysicalInfo::default(),
                     death_count: 0,
@@ -53826,6 +53911,7 @@ func Transfer(object donor, object recipient)
                     id: "CREW".to_string(),
                     name: "Ada".to_string(),
                     rank: 0,
+                    rank_name: "Clonk".to_string(),
                     experience: 0,
                     physical: crate::PhysicalInfo::default(),
                     death_count: 0,

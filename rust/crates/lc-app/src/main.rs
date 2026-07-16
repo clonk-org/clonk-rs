@@ -14152,9 +14152,7 @@ impl GameApp {
                 if let Some(info) = self.engine.crew_object_info(crew.object_id) {
                     crew.info_name = Some(info.name.clone());
                     crew.rank = info.rank;
-                    // Def-custom Rank.txt names (C4Def rank overloads) are
-                    // not loaded yet; the standard DEFRANKS table stands in.
-                    crew.rank_name = default_rank_name(info.rank);
+                    crew.rank_name = Some(info.rank_name.clone());
                 }
             }
         }
@@ -32765,30 +32763,6 @@ fn scoreboard_preferred_rect(rect: Rect) -> lc_frontend::classic_gui::IntRect {
     }
 }
 
-/// `C4RankSystem::GetRankName` over the default rank list
-/// (`Game.Rank.Init(..., LoadResStr(IDS_GAME_DEFRANKS), 1000)`,
-/// src/C4Game.cpp:3518; planet/System.c4g/LanguageUS.txt IDS_GAME_DEFRANKS;
-/// src/C4RankSystem.cpp:184-213, fReturnLastIfOver). Negative ranks have no
-/// name; ranks past the table clamp to the last entry.
-fn default_rank_name(rank: i32) -> Option<String> {
-    const DEFAULT_RANKS: [&str; 11] = [
-        "Clonk",
-        "Ensign",
-        "Lieutenant",
-        "Captain",
-        "Major",
-        "Lieutenant Colonel",
-        "Colonel",
-        "Brigade General",
-        "Major General",
-        "Lieutenant General",
-        "General",
-    ];
-    usize::try_from(rank)
-        .ok()
-        .map(|rank| DEFAULT_RANKS[rank.min(DEFAULT_RANKS.len() - 1)].to_string())
-}
-
 fn collect_player_overlays(
     engine: &Engine,
     snapshot: &SimulationSnapshot,
@@ -37485,6 +37459,7 @@ mod tests {
                     id: "CLNK".to_string(),
                     name: "Clonk".to_string(),
                     rank: 0,
+                    rank_name: "Clonk".to_string(),
                     experience: 0,
                     physical: lc_engine::PhysicalInfo::default(),
                     death_count: 0,
@@ -40524,20 +40499,6 @@ mod tests {
             }
         }
         assert!(varied, "placeholder preview should contain color variation");
-    }
-
-    #[test]
-    fn default_rank_names_follow_the_c4ranksystem_table() {
-        // C4RankSystem::GetRankName over the IDS_GAME_DEFRANKS list
-        // (src/C4RankSystem.cpp:184-213, src/C4Game.cpp:3518): rank 0 is
-        // "Clonk", ranks past the table clamp to the last entry, negative
-        // ranks have no name.
-        assert_eq!(default_rank_name(0).as_deref(), Some("Clonk"));
-        assert_eq!(default_rank_name(1).as_deref(), Some("Ensign"));
-        assert_eq!(default_rank_name(3).as_deref(), Some("Captain"));
-        assert_eq!(default_rank_name(10).as_deref(), Some("General"));
-        assert_eq!(default_rank_name(99).as_deref(), Some("General"));
-        assert_eq!(default_rank_name(-1), None);
     }
 
     #[test]
@@ -58827,6 +58788,7 @@ protected func InputCallback(string answer, int player)
                     id: "FCRW".to_string(),
                     name: "Henry".to_string(),
                     rank: 1,
+                    rank_name: "Ensign".to_string(),
                     experience: 120,
                     physical: lc_engine::PhysicalInfo {
                         energy: 55_000,

@@ -1859,6 +1859,7 @@ func Ejection(object item)
                 id: "DCRW".to_string(),
                 name: "Veteran".to_string(),
                 rank: 0,
+                rank_name: "Clonk".to_string(),
                 experience: 0,
                 physical: PhysicalInfo::default(),
                 death_count: 4,
@@ -1956,6 +1957,7 @@ func Recruit() { return MakeCrewMember(this(), 0); }
             id: "DCRW".to_string(),
             name: name.to_string(),
             rank: 0,
+            rank_name: "Clonk".to_string(),
             experience: 0,
             physical: PhysicalInfo::default(),
             death_count: 0,
@@ -16124,6 +16126,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                     id: "CREW".to_string(),
                     name: "Rookie".to_string(),
                     rank: 0,
+                    rank_name: "Clonk".to_string(),
                     experience: 998,
                     physical: PhysicalInfo::default(),
                     death_count: 0,
@@ -16205,10 +16208,12 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
             .crew_object_info(fighter_id)
             .expect("fighter keeps info");
         assert_eq!((info.experience, info.rank), (1_000, 1));
+        assert_eq!(info.rank_name, "Ensign");
         let state = engine.capture_state();
         let link = state.crew_info_links[&fighter_id];
         let roster = &state.crew_info_rosters[&link.player_id][link.roster_index];
         assert_eq!((roster.experience, roster.rank), (1_000, 1));
+        assert_eq!(roster.rank_name, "Ensign");
 
         let fighter = promotion_frame
             .object(fighter_id)
@@ -17550,6 +17555,7 @@ public func RemoveCaptain(int player)
                     id: "CREW".to_string(),
                     name: "Runner-up".to_string(),
                     rank: 1,
+                    rank_name: "Ensign".to_string(),
                     experience: 1_000,
                     physical: PhysicalInfo::default(),
                     death_count: 0,
@@ -17566,6 +17572,7 @@ public func RemoveCaptain(int player)
                     id: "CREW".to_string(),
                     name: "Captain".to_string(),
                     rank: 5,
+                    rank_name: "Lieutenant Colonel".to_string(),
                     experience: 5_000,
                     physical: PhysicalInfo::default(),
                     death_count: 0,
@@ -28055,6 +28062,7 @@ public func TrainTemporaryScale()
                     id: "TRNR".to_string(),
                     name: "Trainee".to_string(),
                     rank: 0,
+                    rank_name: "Clonk".to_string(),
                     experience: 0,
                     physical: PhysicalInfo {
                         scale: 80_000,
@@ -28272,6 +28280,7 @@ public func TrainTemporaryScale()
                     id: "CLNK".to_string(),
                     name: "Trained".to_string(),
                     rank: 2,
+                    rank_name: "Lieutenant".to_string(),
                     experience: 3_000,
                     physical: PhysicalInfo {
                         energy: 60_000,
@@ -28363,6 +28372,7 @@ public func TrainTemporaryScale()
                     id: "OLDP".to_string(),
                     name: "Fair".to_string(),
                     rank: 0,
+                    rank_name: "Clonk".to_string(),
                     experience: 0,
                     physical: PhysicalInfo {
                         scale: 99_000,
@@ -29390,6 +29400,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
                 id: "BDAY".to_string(),
                 name: "Rookie".to_string(),
                 rank: 0,
+                rank_name: "Clonk".to_string(),
                 experience: 0,
                 physical: PhysicalInfo::default(),
                 death_count: 0,
@@ -32126,6 +32137,12 @@ global func InitializePlayer(int player)
                 id: id.to_string(),
                 name: name.to_string(),
                 rank,
+                rank_name: match rank {
+                    5 => "Lieutenant Colonel",
+                    1 => "Ensign",
+                    _ => "Clonk",
+                }
+                .to_string(),
                 experience: 0,
                 physical: PhysicalInfo::default(),
                 death_count: 0,
@@ -32481,6 +32498,7 @@ func ControlUpSingle()
             id: "CRNW".to_string(),
             name: "Existing".to_string(),
             rank: 0,
+            rank_name: "Clonk".to_string(),
             experience: 0,
             physical: PhysicalInfo::default(),
             death_count: 0,
@@ -42421,6 +42439,7 @@ func RemoveAndRecruit(object target) {
                         id: "CREW".to_string(),
                         name: "First pointer".to_string(),
                         rank: 4,
+                        rank_name: "Major".to_string(),
                         experience: 900,
                         physical: PhysicalInfo::default(),
                         death_count: 0,
@@ -42437,6 +42456,7 @@ func RemoveAndRecruit(object target) {
                         id: "CREW".to_string(),
                         name: "Second pointer".to_string(),
                         rank: 4,
+                        rank_name: "Major".to_string(),
                         experience: 900,
                         physical: PhysicalInfo::default(),
                         death_count: 0,
@@ -42655,6 +42675,7 @@ func RemoveAndRecruit(object target) {
                     id: "HZCK".to_string(),
                     name: "Rookie".to_string(),
                     rank: 0,
+                    rank_name: "Clonk".to_string(),
                     experience: 0,
                     physical: PhysicalInfo::default(),
                     death_count: 0,
@@ -42718,6 +42739,8 @@ func Award(int amount, object target) {
 }
 func AwardSelf(int amount) {
     return [DoCrewExp(amount), GetRank(),
+            GetObjectInfoCoreVal("Rank", "ObjectInfo"),
+            GetObjectInfoCoreVal("RankName", "ObjectInfo"),
             GetObjectInfoCoreVal("Experience", "ObjectInfo")];
 }
 "#;
@@ -42749,6 +42772,7 @@ func AwardSelf(int amount) {
                     id: "CREW".to_string(),
                     name: "Rookie".to_string(),
                     rank: 0,
+                    rank_name: "Clonk".to_string(),
                     experience: 0,
                     physical: PhysicalInfo::default(),
                     death_count: 0,
@@ -42780,12 +42804,20 @@ func AwardSelf(int amount) {
         engine.objects[crew_index].state.info_physical = Some(raw_physical);
         engine.objects[crew_index].state.energy = 12_000;
         engine.pending_audio.clear();
+        assert!(engine.use_fair_crew());
+        let fair_physical_before = engine.object_physical(crew_index);
 
         assert_eq!(
             engine
                 .call_object_function(crew_index, "AwardSelf", vec![Value::Int(8_000)])
                 .expect("large award succeeds"),
-            Value::Array(vec![Value::Bool(true), Value::Int(1), Value::Int(8_000)]),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(1),
+                Value::Int(1),
+                Value::String("Custom One".to_string()),
+                Value::Int(8_000),
+            ]),
             "DoExperience promotes at most one rank and exposes the write immediately"
         );
         assert_eq!(
@@ -42832,6 +42864,11 @@ func AwardSelf(int amount) {
             raw_physical.corrosion_resist
         );
         assert_eq!(promoted_physical.breathe_water, raw_physical.breathe_water);
+        assert_eq!(
+            engine.object_physical(crew_index),
+            fair_physical_before,
+            "promotion updates raw Info physicals but not FairCrew's effective physical"
+        );
         let promotions = engine
             .capture_state()
             .messages
@@ -42849,13 +42886,25 @@ func AwardSelf(int amount) {
             engine
                 .call_object_function(crew_index, "AwardSelf", vec![Value::Int(0)])
                 .expect("zero award can catch up one rank"),
-            Value::Array(vec![Value::Bool(true), Value::Int(2), Value::Int(8_000)])
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(2),
+                Value::Int(2),
+                Value::String("Custom Two".to_string()),
+                Value::Int(8_000),
+            ])
         );
         assert_eq!(
             engine
                 .call_object_function(crew_index, "AwardSelf", vec![Value::Int(-20_000)])
                 .expect("negative award clamps"),
-            Value::Array(vec![Value::Bool(true), Value::Int(2), Value::Int(0)]),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(2),
+                Value::Int(2),
+                Value::String("Custom Two".to_string()),
+                Value::Int(0),
+            ]),
             "experience clamps at zero without demoting"
         );
 
@@ -42865,7 +42914,13 @@ func AwardSelf(int amount) {
             engine
                 .call_object_function(crew_index, "AwardSelf", vec![Value::Int(5_196)])
                 .expect("promotion beyond the custom table succeeds"),
-            Value::Array(vec![Value::Bool(true), Value::Int(3), Value::Int(5_196)])
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(3),
+                Value::Int(3),
+                Value::String("Custom Two".to_string()),
+                Value::Int(5_196),
+            ])
         );
         assert_eq!(engine.capture_state().messages.len(), message_count);
         assert!(!engine.pending_audio.iter().any(|command| matches!(
@@ -42874,10 +42929,21 @@ func AwardSelf(int amount) {
                 if name == "Trumpet" && *target == Some(crew_id)
         )), "an undefined custom rank promotes silently");
         assert_eq!(
+            engine.object_physical(crew_index),
+            fair_physical_before,
+            "silent promotion also leaves FairCrew's effective physical unchanged"
+        );
+        assert_eq!(
             engine
                 .call_object_function(crew_index, "AwardSelf", vec![Value::Int(-20_000)])
                 .expect("experience resets after the silent promotion"),
-            Value::Array(vec![Value::Bool(true), Value::Int(3), Value::Int(0)])
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(3),
+                Value::Int(3),
+                Value::String("Custom Two".to_string()),
+                Value::Int(0),
+            ])
         );
         assert_eq!(
             engine
@@ -42890,6 +42956,8 @@ func AwardSelf(int amount) {
             Value::Array(vec![
                 Value::Bool(true),
                 Value::Int(3),
+                Value::Int(3),
+                Value::String("Custom Two".to_string()),
                 Value::Int(100_000_000),
             ]),
             "the exact maximum suppresses promotion"
@@ -42899,6 +42967,18 @@ func AwardSelf(int amount) {
         let link = persisted.crew_info_links[&crew_id];
         let roster_info = &persisted.crew_info_rosters[&link.player_id][link.roster_index];
         assert_eq!((roster_info.rank, roster_info.experience), (3, 100_000_000));
+        assert_eq!(roster_info.rank_name, "Custom Two");
+
+        let encoded = persisted.to_json_string().expect("promotion state serializes");
+        let restored = EngineState::from_json_str(&encoded).expect("promotion state deserializes");
+        engine.restore_state(&restored).expect("promotion state restores");
+        assert_eq!(
+            engine
+                .crew_object_info(crew_id)
+                .expect("restored crew keeps info")
+                .rank_name,
+            "Custom Two"
+        );
 
         let info_less = engine
             .spawn_object(
@@ -43213,6 +43293,7 @@ func Take(object donor) { return GrabObjectInfo(donor); }
         let receiver_script = r#"#strict 2
 func Take(object donor) {
     return [GrabObjectInfo(donor), GetName(), GetRank(),
+            GetObjectInfoCoreVal("RankName", "ObjectInfo"),
             GetObjectInfoCoreVal("Experience", "ObjectInfo"),
             GetName(donor), GetRank(donor),
             GetCrewCount(0), GetCrewCount(1)];
@@ -43232,6 +43313,10 @@ func RemoveAndGrabSelf() {
             Definition::from_script("DONR", "Donor definition", donor_script)
                 .expect("donor definition compiles");
         donor_definition.set_crew_member(true);
+        donor_definition.set_rank_names(Some(vec![
+            "Custom Recruit".to_string(),
+            "Custom Veteran".to_string(),
+        ]));
         engine
             .register_definition(donor_definition)
             .expect("donor definition registers");
@@ -43260,6 +43345,7 @@ func RemoveAndGrabSelf() {
                     id: "DONR".to_string(),
                     name: "Veteran Ada".to_string(),
                     rank: 4,
+                    rank_name: "Major".to_string(),
                     experience: 8_000,
                     physical: PhysicalInfo::default(),
                     death_count: 0,
@@ -43286,6 +43372,10 @@ func RemoveAndGrabSelf() {
             .crew_object_info(donor)
             .expect("donor starts with persistent info")
             .clone();
+        assert_eq!(
+            donor_info.rank_name, "Custom Veteran",
+            "Recruit clamps an over-table custom rank to the last name"
+        );
         let original_link = engine.capture_state().crew_info_links[&donor];
         let receiver = engine
             .spawn_object(
@@ -43309,6 +43399,7 @@ func RemoveAndGrabSelf() {
                 Value::Bool(true),
                 Value::String("Veteran Ada".to_string()),
                 Value::Int(4),
+                Value::String("Custom Veteran".to_string()),
                 Value::Int(8_000),
                 Value::String("Donor definition".to_string()),
                 Value::Nil,
@@ -43390,6 +43481,7 @@ func RemoveAndGrabSelf() {
                 Value::Bool(true),
                 Value::String("Veteran Ada".to_string()),
                 Value::Int(4),
+                Value::String("Custom Veteran".to_string()),
                 Value::Int(8_000),
                 Value::String("Receiver definition".to_string()),
                 Value::Nil,

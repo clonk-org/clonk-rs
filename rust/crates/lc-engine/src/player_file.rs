@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::scenario::ScenarioError;
 
+fn default_crew_rank_name() -> String {
+    "Clonk".to_string()
+}
+
 /// One crew-roster entry: C4ObjectInfoCore (C4InfoCore.cpp:526-548) with
 /// the runtime recruitment flags (C4ObjectInfo::InAction / HasDied) that
 /// `GetIdle` filters on (C4ObjectInfoList.cpp:113-142) — both start clear
@@ -21,6 +25,9 @@ pub struct CrewInfo {
     pub name: String,
     /// `Rank` (default 0).
     pub rank: i32,
+    /// Persisted `C4ObjectInfoCore::sRankName` (`RankName`, default "Clonk").
+    #[serde(default = "default_crew_rank_name")]
+    pub rank_name: String,
     /// `Experience` (default 0) — GetIdle prefers the highest.
     pub experience: i32,
     /// Persistent `C4ObjectInfoCore::Physical`, compiled from the sibling
@@ -108,6 +115,7 @@ impl CrewInfo {
             id: entry("ObjectInfo", "id").unwrap_or_default(),
             name: entry("ObjectInfo", "Name").unwrap_or_else(|| "Clonk".to_string()),
             rank,
+            rank_name: entry("ObjectInfo", "RankName").unwrap_or_else(default_crew_rank_name),
             experience: int("ObjectInfo", "Experience", 0),
             physical,
             death_count: int("ObjectInfo", "DeathCount", 0),
@@ -389,7 +397,7 @@ mod tests {
         std::fs::create_dir_all(&first).expect("info dir");
         std::fs::write(
             first.join("ObjectInfo.txt"),
-            "[ObjectInfo]\nid=COWB\nName=Wipf\nRank=2\nExperience=900\nDeathCount=7\nTotalPlayingTime=17999\nBirthday=123\nAge=7\nParticipation=1\n\n[Physical]\nWalk=80000\n",
+            "[ObjectInfo]\nid=COWB\nName=Wipf\nRank=2\nRankName=Lieutenant\nExperience=900\nDeathCount=7\nTotalPlayingTime=17999\nBirthday=123\nAge=7\nParticipation=1\n\n[Physical]\nWalk=80000\n",
         )
         .expect("write info");
 
@@ -425,6 +433,7 @@ mod tests {
             .expect("Wipf parsed");
         assert_eq!(wipf.id, "COWB");
         assert_eq!(wipf.rank, 2);
+        assert_eq!(wipf.rank_name, "Lieutenant");
         assert_eq!(wipf.experience, 900);
         assert_eq!(wipf.physical.walk, 80_000);
         assert_eq!(wipf.physical.energy, 60_000);
@@ -447,6 +456,7 @@ mod tests {
             .expect("Zorro parsed");
         assert_eq!(zorro.id, "TRPR");
         assert_eq!(zorro.rank, 0, "Rank defaults to 0");
+        assert_eq!(zorro.rank_name, "Clonk", "RankName defaults to Clonk");
         assert_eq!(zorro.death_count, 0, "DeathCount defaults to 0");
         assert_eq!((zorro.birthday, zorro.age), (0, 0));
         assert_eq!(zorro.participation, 1, "Participation defaults to 1");
@@ -491,6 +501,7 @@ mod tests {
         )
         .expect("pre-DeathCount crew JSON remains readable");
 
+        assert_eq!(info.rank_name, "Clonk");
         assert_eq!(info.death_count, 0);
     }
 

@@ -15426,6 +15426,7 @@ global func Step(state, frame, random)
                     id: "CLNK".to_string(),
                     name: "Henry".to_string(),
                     rank: 1,
+                    rank_name: "Ensign".to_string(),
                     experience: 120,
                     physical: crate::PhysicalInfo {
                         energy: 55_000,

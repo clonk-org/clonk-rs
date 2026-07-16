@@ -4560,6 +4560,7 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
             id: "KNIG".to_owned(),
             name: name.to_owned(),
             rank: 5,
+            rank_name: "Lieutenant Colonel".to_owned(),
             experience: 0,
             physical: lc_engine::PhysicalInfo::default(),
             death_count: 0,
