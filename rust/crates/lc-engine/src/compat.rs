@@ -541,6 +541,9 @@ pub enum PlayerCommand {
         score: i32,
         player_info_id: i32,
     },
+    /// `FnSetRestoreInfos`'s raw `C4NetworkRestartInfos::Infos::What`
+    /// replacement. Unknown and negative bits are deliberately retained.
+    SetRestoreInfos { what: i32 },
     /// `FnSetMaxPlayer`'s direct write to
     /// `C4GameParameters::MaxPlayers`. This is engine-global; like
     /// `LoadScenarioSection`, it uses the existing ordered player-command
@@ -12500,6 +12503,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GainMissionAccess", gain_mission_access);
     script.register_host_function("GetMissionAccess", get_mission_access);
     script.register_host_function("SetNextMission", set_next_mission);
+    script.register_host_function("SetRestoreInfos", set_restore_infos);
     script.register_host_function("Call", call_self);
     script.register_host_function("ObjectCall", object_call);
     script.register_host_function("ProtectedCall", object_call);
@@ -13390,6 +13394,22 @@ fn set_next_mission(args: &[Value]) -> Result<Value, RuntimeError> {
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             context.next_mission_commands.push(command);
+        }
+    });
+    Ok(Value::Nil)
+}
+
+/// `FnSetRestoreInfos` (C4Script.cpp:6116-6119): retain the unvalidated raw
+/// mask for the runtime network-restart handoff and return native void.
+fn set_restore_infos(args: &[Value]) -> Result<Value, RuntimeError> {
+    let what = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetRestoreInfos",
+        "restore mask",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.record_player_command(PlayerCommand::SetRestoreInfos { what });
         }
     });
     Ok(Value::Nil)
@@ -44304,6 +44324,7 @@ mod tests {
         "SetPreSend",
         "SetR",
         "SetRDir",
+        "SetRestoreInfos",
         "SetScoreboardData",
         "SetSeason",
         "SetShape",
@@ -47683,6 +47704,118 @@ func Trigger(object pOther)
                 },
                 NextMissionCommand::Clear,
             ]
+        );
+    }
+
+    #[test]
+    fn set_restore_infos_stores_raw_mask_in_order_and_returns_nil() {
+        let error = set_restore_infos(&[Value::String("not an int".into())])
+            .expect_err("typed integer conversion precedes the write");
+        assert!(error.message().contains("expected integer"));
+
+        let script = r#"#strict
+public func StoreMask(value)
+{
+    return SetRestoreInfos(value, 123);
+}
+
+public func Sequence()
+{
+    return [
+        SetRestoreInfos(RESTORE_ScriptPlayers | RESTORE_PlayerTeams),
+        SetRestoreInfos(-1)
+    ];
+}
+
+public func UseDefault()
+{
+    return SetRestoreInfos();
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(
+                crate::Definition::from_script("CALL", "Caller", script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let caller = engine
+            .spawn_object(crate::SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "StoreMask", vec![Value::Bool(true)])
+                .expect("bool mask call runs"),
+            Value::Nil
+        );
+        assert_eq!(engine.restart_restore_info_mask(), 1);
+
+        let unknown_bits = 0x4000_0003;
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "StoreMask",
+                    vec![Value::Int(unknown_bits)],
+                )
+                .expect("unknown mask bits are retained"),
+            Value::Nil
+        );
+        assert_eq!(engine.restart_restore_info_mask(), unknown_bits);
+
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "Sequence", Vec::new())
+                .expect("ordered mask writes run"),
+            Value::Array(vec![Value::Nil, Value::Nil])
+        );
+        assert_eq!(
+            engine.restart_restore_info_mask(),
+            -1,
+            "the raw signed final write wins without enum validation"
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "UseDefault", Vec::new())
+                .expect("default mask call runs"),
+            Value::Nil
+        );
+        assert_eq!(
+            engine.restart_restore_info_mask(),
+            0,
+            "an omitted typed integer is nil-filled with zero"
+        );
+
+        let captured = engine.capture_state();
+        engine
+            .call_object_function(caller_index, "StoreMask", vec![Value::Int(-1)])
+            .expect("post-save runtime mask write runs");
+        engine
+            .restore_state(&captured)
+            .expect("in-place state restore succeeds");
+        assert_eq!(
+            engine.restart_restore_info_mask(),
+            -1,
+            "C++ save restoration does not overwrite the live restart handoff"
+        );
+
+        let mut fresh = crate::Engine::with_seed(1);
+        fresh
+            .register_definition(
+                crate::Definition::from_script("CALL", "Caller", script)
+                    .expect("fresh caller compiles"),
+            )
+            .expect("fresh caller registers");
+        fresh
+            .restore_state(&captured)
+            .expect("captured state restores into a fresh engine");
+        assert_eq!(
+            fresh.restart_restore_info_mask(),
+            0,
+            "the runtime-only mask is absent from save and snapshot state"
         );
     }
 

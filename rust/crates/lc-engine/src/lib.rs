@@ -13977,6 +13977,9 @@ pub struct Engine {
     /// shared into every script host.
     #[doc(hidden)] pub global_script_functions: Option<Arc<HashMap<String, lc_script::Function>>>,
     next_mission: NextMissionState,
+    /// `Game.RestartRestoreInfos.What`: a process-runtime mask for the next
+    /// network restart. C++ does not compile it into save/snapshot state.
+    restart_restore_info_mask: i32,
     game_over_triggered: bool,
     /// A fatal classic runtime boundary raised from a callback path whose
     /// legacy API cannot return `EngineError` (currently material-reaction
@@ -16000,6 +16003,7 @@ impl Engine {
             scenario_script: None,
             global_script_functions: None,
             next_mission: NextMissionState::default(),
+            restart_restore_info_mask: 0,
             game_over_triggered: false,
             pending_runtime_flash_boundary: None,
             game_evaluated: false,
@@ -20723,6 +20727,13 @@ impl Engine {
 
     pub fn next_mission(&self) -> &NextMissionState {
         &self.next_mission
+    }
+
+    /// Raw `C4NetworkRestartInfos::Infos::What` mask retained for the future
+    /// app/network restart handoff. Bits outside the known 0x1/0x2 flags are
+    /// observable by design because the C++ script host stores them verbatim.
+    pub const fn restart_restore_info_mask(&self) -> i32 {
+        self.restart_restore_info_mask
     }
 
     fn apply_next_mission_commands(
@@ -29951,6 +29962,9 @@ impl Engine {
                 } => {
                     self.round_results
                         .set_league_performance(score, player_info_id);
+                }
+                PlayerCommand::SetRestoreInfos { what } => {
+                    self.restart_restore_info_mask = what;
                 }
                 PlayerCommand::SetMaxPlayer { max_players } => {
                     self.max_players = Some(max_players);
