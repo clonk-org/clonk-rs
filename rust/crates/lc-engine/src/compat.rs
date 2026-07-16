@@ -12877,10 +12877,11 @@ const LEGACY_MAX_PHYSICAL: i32 = 100_000;
 const CONTACT_DIRECTION_MASK: u32 = CNAT_LEFT | CNAT_RIGHT | CNAT_TOP | CNAT_BOTTOM | CNAT_CENTER;
 
 pub(crate) fn compute_vertex_contact(
-    landscape: Option<&Landscape>,
     position: Vector2,
     vertex: &ObjectVertex,
     check_mask: u32,
+    contact_density: i32,
+    mut density_at: impl FnMut(i32, i32) -> Option<i32>,
 ) -> u32 {
     if vertex.cnat & CNAT_NO_COLLISION != 0 {
         return 0;
@@ -12894,29 +12895,44 @@ pub(crate) fn compute_vertex_contact(
     if mask == 0 {
         return 0;
     }
-    let landscape = match landscape {
-        Some(value) => value,
-        None => return 0,
-    };
     let world_x = position.x.saturating_add(vertex.x);
     let world_y = position.y.saturating_add(vertex.y);
+    let mut has_contact = |x, y| {
+        density_at(x, y).is_some_and(|density| density >= contact_density)
+    };
     let mut contact = 0;
-    if (mask & CNAT_CENTER) != 0 && landscape.is_solid_at(world_x, world_y) {
+    if (mask & CNAT_CENTER) != 0 && has_contact(world_x, world_y) {
         contact |= CNAT_CENTER;
     }
-    if (mask & CNAT_LEFT) != 0 && landscape.is_solid_at(world_x - 1, world_y) {
+    if (mask & CNAT_LEFT) != 0 && has_contact(world_x - 1, world_y) {
         contact |= CNAT_LEFT;
     }
-    if (mask & CNAT_RIGHT) != 0 && landscape.is_solid_at(world_x + 1, world_y) {
+    if (mask & CNAT_RIGHT) != 0 && has_contact(world_x + 1, world_y) {
         contact |= CNAT_RIGHT;
     }
-    if (mask & CNAT_TOP) != 0 && landscape.is_solid_at(world_x, world_y - 1) {
+    if (mask & CNAT_TOP) != 0 && has_contact(world_x, world_y - 1) {
         contact |= CNAT_TOP;
     }
-    if (mask & CNAT_BOTTOM) != 0 && landscape.is_solid_at(world_x, world_y + 1) {
+    if (mask & CNAT_BOTTOM) != 0 && has_contact(world_x, world_y + 1) {
         contact |= CNAT_BOTTOM;
     }
     contact
+}
+
+fn resolve_contact_density(context: &EffectHostContext, target: Option<ObjectId>) -> i32 {
+    target
+        .or_else(|| context.object_context().map(|object| object.id()))
+        .and_then(|target| {
+            context
+                .object_scope(target)
+                .map(ObjectScopeContext::contact_density)
+                .or_else(|| {
+                    context
+                        .get_world_object(target)
+                        .map(|object| object.contact_density())
+                })
+        })
+        .unwrap_or(crate::CONTACT_DENSITY_SOLID)
 }
 
 fn resolve_vertices(
@@ -25162,9 +25178,15 @@ fn get_vertex_contact(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         }
 
-        let landscape = context.landscape_ref();
-        let contact =
-            compute_vertex_contact(landscape, position, &vertices[vertex_index as usize], mask);
+        let contact_density = resolve_contact_density(context, target_id);
+        let pending_masks = context.pending_solid_masks();
+        let contact = compute_vertex_contact(
+            position,
+            &vertices[vertex_index as usize],
+            mask,
+            contact_density,
+            |x, y| context.movement_density_at(&pending_masks, x, y),
+        );
         Ok(Value::Int(contact as i32))
     })
 }
@@ -25180,7 +25202,7 @@ fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
         _ => None,
     };
     let vertex_index = match args.get(1) {
-        None | Some(Value::Nil) => -1,
+        None | Some(Value::Nil) => 0,
         Some(value) => value_to_i32(value, "GetContact", "vertex")?,
     };
     let mask = match args.get(2) {
@@ -25203,7 +25225,8 @@ fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
             None => return Ok(Value::Nil),
         };
 
-        let landscape = context.landscape_ref();
+        let contact_density = resolve_contact_density(context, target_id);
+        let pending_masks = context.pending_solid_masks();
 
         if vertex_index == -1 {
             if vertices.is_empty() {
@@ -25211,7 +25234,13 @@ fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
             }
             let mut result = 0u32;
             for vertex in &vertices {
-                result |= compute_vertex_contact(landscape, position, vertex, mask);
+                result |= compute_vertex_contact(
+                    position,
+                    vertex,
+                    mask,
+                    contact_density,
+                    |x, y| context.movement_density_at(&pending_masks, x, y),
+                );
             }
             return Ok(Value::Int(result as i32));
         }
@@ -25220,8 +25249,13 @@ fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         }
 
-        let contact =
-            compute_vertex_contact(landscape, position, &vertices[vertex_index as usize], mask);
+        let contact = compute_vertex_contact(
+            position,
+            &vertices[vertex_index as usize],
+            mask,
+            contact_density,
+            |x, y| context.movement_density_at(&pending_masks, x, y),
+        );
         Ok(Value::Int(contact as i32))
     })
 }
@@ -41513,6 +41547,7 @@ impl EffectHostContext {
             .map(|(index, id)| (id, index))
             .collect::<HashMap<_, _>>();
         let fallback_master_list_order = master_ids.len();
+        let pending_masks = self.pending_solid_masks();
         let ids = self.world_object_ids();
         let objects = ids
             .into_iter()
@@ -41539,6 +41574,9 @@ impl EffectHostContext {
                 let shape_height = live_object_shape(self, id)
                     .map(|shape| shape.height)
                     .unwrap_or(local_shape.height);
+                let contact_density = scope
+                    .map(ObjectScopeContext::contact_density)
+                    .unwrap_or_else(|| object.contact_density());
                 let add_top = (18 - local_shape.height).max(0);
                 let shape = DefinitionRect::new(
                     position.x.saturating_add(local_shape.x),
@@ -41551,10 +41589,11 @@ impl EffectHostContext {
                 );
                 let contact = vertices.iter().fold(0, |bits, vertex| {
                     bits | compute_vertex_contact(
-                        self.world.landscape.as_deref(),
                         position,
                         vertex,
                         0,
+                        contact_density,
+                        |x, y| self.movement_density_at(&pending_masks, x, y),
                     )
                 });
                 let owner = scope.map(ObjectScopeContext::owner).unwrap_or(object.owner);
@@ -62502,10 +62541,10 @@ func Probe(state) {
     }
 
     #[test]
-    fn get_contact_aggregates_vertices() {
+    fn get_contact_defaults_to_vertex_zero_and_preserves_explicit_all_mask() {
         let vertices = [
-            ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER | CNAT_BOTTOM),
             ObjectVertex::new(0, -5).with_cnat(CNAT_TOP),
+            ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER | CNAT_BOTTOM),
         ];
         let landscape = Landscape::flat(4, 0);
         let world = HostWorldContext::with_landscape(
@@ -62518,6 +62557,7 @@ func Probe(state) {
             1,
             false,
         );
+        let object = object_reference_value(ObjectId::new(1));
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
@@ -62543,11 +62583,78 @@ func Probe(state) {
             &[],
             world,
             1,
-            || get_contact(&[Value::Nil, Value::Int(-1)]),
+            || {
+                Ok::<_, RuntimeError>(Value::Array(vec![
+                    get_contact(std::slice::from_ref(&object))?,
+                    get_contact(&[object.clone(), Value::Nil])?,
+                    get_contact(&[object.clone(), Value::Int(-1)])?,
+                    get_contact(&[
+                        object,
+                        Value::Int(-1),
+                        Value::Int(CNAT_CENTER as i32),
+                    ])?,
+                ]))
+            },
         );
 
         let value = result.expect("GetContact succeeds");
-        assert_eq!(value, Value::Int((CNAT_CENTER | CNAT_BOTTOM) as i32));
+        assert_eq!(
+            value,
+            Value::Array(vec![
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int((CNAT_CENTER | CNAT_BOTTOM) as i32),
+                Value::Int(CNAT_CENTER as i32),
+            ])
+        );
+    }
+
+    #[test]
+    fn get_contact_and_get_vertex_contact_honor_live_contact_density() {
+        let target_id = ObjectId::new(1);
+        let vertices = [ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER)];
+        let landscape = Landscape::flat(4, 0);
+        let target = HostWorldObject::new(
+            target_id,
+            "TARG",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            vertices.to_vec(),
+            0,
+            0,
+            None,
+        )
+        .with_contact_density(crate::CONTACT_DENSITY_SOLID + 1);
+        let world = HostWorldContext::with_landscape(
+            vec![target],
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let target = object_reference_value(target_id);
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                get_contact(std::slice::from_ref(&target))?,
+                get_vertex_contact(&[Value::Int(0), Value::Nil, target])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("contact queries succeed"),
+            Value::Array(vec![Value::Int(0), Value::Int(0)])
+        );
     }
 
     #[test]
