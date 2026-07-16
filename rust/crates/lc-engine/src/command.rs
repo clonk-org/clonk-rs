@@ -2283,10 +2283,10 @@ mod tests {
         assert_eq!((views[0].tx, views[0].ty), (Some(200), Some(100)));
     }
 
-    // Acquire's element view reads the defaulted 500/250 search range
-    // (InitEvaluation, C4Command.cpp:1666-1670).
+    // Acquire's element view changes to the defaulted 500/250 search range
+    // on its evaluation-only first Execute (C4Command.cpp:1666-1670).
     #[test]
-    fn command_views_show_acquire_range_defaults() {
+    fn acquire_init_evaluation_consumes_first_execute_and_defaults_ranges() {
         let mut stack = CommandStack::new();
         stack
             .push_front(
@@ -2294,6 +2294,20 @@ mod tests {
                     .with_data(CommandData::Text("WOOD".into())),
             )
             .expect("push");
+
+        let views = stack.command_views();
+        assert_eq!((views[0].tx, views[0].ty), (None, None));
+
+        let actor = snapshot_with_id(7);
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 1);
+        let evaluation = stack.step(&ctx).expect("Acquire evaluates");
+        assert_eq!(evaluation.status, CommandStatus::Running);
+        assert!(evaluation.update.is_none());
+        assert!(evaluation.events.is_empty());
+        assert!(evaluation.operations.is_empty());
 
         let views = stack.command_views();
         assert_eq!(
@@ -2305,6 +2319,12 @@ mod tests {
 
         let views = stack.snapshot().command_views();
         assert_eq!((views[0].tx, views[0].ty), (Some(500), Some(250)));
+
+        let handler = stack.step(&ctx).expect("Acquire handler executes");
+        assert!(matches!(
+            handler.events.as_slice(),
+            [CommandEvent::ControlCommandAcquire { .. }]
+        ));
     }
 
     #[test]
@@ -2373,12 +2393,10 @@ mod tests {
 
         let result0 = stack.step(&ctx0).expect("Wait executes");
         assert_eq!(result0.status, CommandStatus::Running);
-        let update0 = result0
-            .update
-            .expect("wait should issue an update to stop digging");
-        assert_eq!(update0.command_direction, Some(CommandDirection::Stop));
-        let action_update = update0.action.expect("wait should reset the action");
-        assert_eq!(action_update.name.as_deref(), Some("Idle"));
+        assert!(
+            result0.update.is_none(),
+            "InitEvaluation consumes the first Execute before Wait stops Dig"
+        );
 
         let ctx1 = CommandRuntimeContext {
             landscape: None,
@@ -2398,6 +2416,12 @@ mod tests {
 
         let result1 = stack.step(&ctx1).expect("Wait executes again");
         assert_eq!(result1.status, CommandStatus::Running);
+        let update1 = result1
+            .update
+            .expect("the post-evaluation Wait should stop digging");
+        assert_eq!(update1.command_direction, Some(CommandDirection::Stop));
+        let action_update = update1.action.expect("wait should reset the action");
+        assert_eq!(action_update.name.as_deref(), Some("Idle"));
 
         let ctx2 = CommandRuntimeContext {
             landscape: None,
@@ -2417,6 +2441,39 @@ mod tests {
 
         let result2 = stack.step(&ctx2).expect("Wait interval expires");
         assert_eq!(result2.status, CommandStatus::Completed);
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn wait_data_duration_completes_on_eleventh_execute() {
+        let actor = snapshot_with_id(51);
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Wait)
+                    .with_data(CommandData::Integer(10)),
+            )
+            .expect("Wait queues");
+
+        for execution in 1..=10 {
+            let result = stack.step(&ctx).expect("Wait remains queued");
+            assert_eq!(
+                result.status,
+                CommandStatus::Running,
+                "Data=10 must still be waiting on execution {execution}"
+            );
+            assert_eq!(stack.len(), 1);
+            if execution == 1 {
+                assert_eq!(stack.snapshot().commands[0].update_interval, Some(10));
+            }
+        }
+
+        let completed = stack.step(&ctx).expect("Wait interval expires");
+        assert_eq!(completed.status, CommandStatus::Completed);
         assert!(stack.is_empty());
     }
 
@@ -7645,6 +7702,12 @@ mod tests {
             )
             .expect("PushTo queues");
 
+        let evaluation = stack.step(&ctx).expect("PushTo evaluates");
+        assert_eq!(evaluation.status, CommandStatus::Running);
+        assert!(evaluation.update.is_none());
+        assert!(evaluation.events.is_empty());
+        assert_eq!(stack.command_names(), vec!["PushTo"]);
+
         stack.step(&ctx).expect("PushTo requests Grab");
         assert_eq!(stack.command_names(), vec!["Grab", "PushTo"]);
 
@@ -7791,6 +7854,90 @@ mod tests {
     }
 
     #[test]
+    fn push_to_init_evaluation_grounds_once_with_free_move_and_raw_shape_height() {
+        let landscape = crate::Landscape::flat(300, 110);
+        let actor_id = ObjectId::new(445);
+        let target_id = ObjectId::new(446);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Push;
+        actor.action_target = Some(target_id);
+        actor.shape_height = 20;
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(80, 0);
+        target.ocf |= ocf::GRAB;
+        let mut objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::PushTo)
+                    .with_target(Some(target_id))
+                    .with_tx(Some(100))
+                    .with_ty(Some(50)),
+            )
+            .expect("PushTo queues");
+        let mut ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 1);
+        ctx.landscape = Some(&landscape);
+        let evaluation = stack.step(&ctx).expect("PushTo evaluates");
+        assert_eq!(evaluation.status, CommandStatus::Running);
+        assert!(evaluation.update.is_none());
+        assert!(evaluation.events.is_empty());
+        assert_eq!(
+            (stack.command_views()[0].tx, stack.command_views()[0].ty),
+            (Some(100), Some(99)),
+            "walking PushTo drops to the surface and lifts raw Shape.Hgt/2"
+        );
+
+        // Changing the live shape after InitEvaluation must not re-ground
+        // the stored destination on the handler Execute.
+        objects.get_mut(&actor_id).expect("actor present").shape_height = 40;
+        let taller_actor = objects.get(&actor_id).expect("actor present");
+        let mut ctx =
+            move_to_ctx_at_frame(taller_actor, &objects, &players, &definitions, 2);
+        ctx.landscape = Some(&landscape);
+        let handler = stack.step(&ctx).expect("PushTo handler executes");
+        assert_eq!(handler.status, CommandStatus::Running);
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.command_names(), vec!["MoveTo", "PushTo"]);
+        let move_to = snapshot.commands[0]
+            .request
+            .as_ref()
+            .expect("MoveTo request retained");
+        assert_eq!((move_to.tx, move_to.ty), (Some(100), Some(99)));
+
+        // FreeMoveTo accepts the mid-air y unchanged for a CanFly actor.
+        let mut flyer = actor;
+        flyer.physical.can_fly = 1;
+        let flyer_objects = HashMap::from([
+            (actor_id, flyer.clone()),
+            (
+                target_id,
+                objects.get(&target_id).expect("target present").clone(),
+            ),
+        ]);
+        let mut free_stack = CommandStack::new();
+        free_stack
+            .push_front(
+                CommandRequest::new(CommandId::PushTo)
+                    .with_target(Some(target_id))
+                    .with_tx(Some(100))
+                    .with_ty(Some(50)),
+            )
+            .expect("PushTo queues");
+        let mut ctx =
+            move_to_ctx_at_frame(&flyer, &flyer_objects, &players, &definitions, 1);
+        ctx.landscape = Some(&landscape);
+        let _ = free_stack.step(&ctx).expect("free PushTo evaluates");
+        assert_eq!(
+            (free_stack.command_views()[0].tx, free_stack.command_views()[0].ty),
+            (Some(100), Some(50))
+        );
+    }
+
+    #[test]
     fn push_to_completes_with_wait_and_ungrab_when_in_position() {
         let actor_id = ObjectId::new(450);
         let target_id = ObjectId::new(451);
@@ -7829,6 +7976,10 @@ mod tests {
         stack
             .push_front(CommandRequest::new(CommandId::PushTo).with_target(Some(target_id)))
             .expect("PushTo queues");
+        let evaluation = stack.step(&ctx).expect("PushTo evaluates");
+        assert_eq!(evaluation.status, CommandStatus::Running);
+        assert!(evaluation.update.is_none());
+        assert!(evaluation.events.is_empty());
         let result = stack.step(&ctx).expect("PushTo executes");
         assert_eq!(result.status, CommandStatus::Completed);
         let update = result.update.expect("push_to should stop actor");
@@ -12631,6 +12782,10 @@ mod tests {
             )
             .expect("command queued");
 
+        let evaluation = stack.step(&ctx).expect("Acquire evaluates");
+        assert_eq!(evaluation.status, CommandStatus::Running);
+        assert!(evaluation.events.is_empty());
+        assert!(evaluation.operations.is_empty());
         let script = stack.step(&ctx).expect("script stage");
         assert!(matches!(
             script.events.first(),
@@ -12731,6 +12886,10 @@ mod tests {
             )
             .expect("command queued");
 
+        let evaluation = stack.step(&ctx).expect("Acquire evaluates");
+        assert_eq!(evaluation.status, CommandStatus::Running);
+        assert!(evaluation.events.is_empty());
+        assert!(evaluation.operations.is_empty());
         let script = stack.step(&ctx).expect("script stage");
         assert!(matches!(
             script.events.first(),
@@ -12829,6 +12988,10 @@ mod tests {
             )
             .expect("command queued");
 
+        let evaluation = stack.step(&ctx).expect("Acquire evaluates");
+        assert_eq!(evaluation.status, CommandStatus::Running);
+        assert!(evaluation.events.is_empty());
+        assert!(evaluation.operations.is_empty());
         let script = stack.step(&ctx).expect("script stage");
         assert!(matches!(
             script.events.first(),
@@ -13110,6 +13273,11 @@ mod tests {
             transfer_zones: &EMPTY_TRANSFER_ZONES,
             rng: None,
         };
+
+        let evaluation = stack.step(&ctx_initial).expect("Acquire evaluates");
+        assert_eq!(evaluation.status, CommandStatus::Running);
+        assert!(evaluation.events.is_empty());
+        assert!(evaluation.operations.is_empty());
 
         let script_step = stack.step(&ctx_initial).expect("script step evaluates");
         assert_eq!(script_step.status, CommandStatus::Running);
@@ -15451,8 +15619,9 @@ impl CommandSnapshot {
 /// name, Target, Tx, Ty, Target2, Data — the LIVE C4Command fields. The
 /// creating CommandRequest is the base; states whose C++ counterpart
 /// rewrites the fields (MoveTo's target absorption C4Command.cpp:1637,
-/// Acquire's 500/250 range defaults :1666-1670, Construct's found site
-/// :1757-1766) override it with their live values.
+/// PushTo's coordinate adjustment :1645-1652, Acquire's 500/250 range
+/// defaults :1666-1670, Construct's found site :1757-1766) override it with
+/// their live values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandView {
     pub name: String,
@@ -19959,6 +20128,11 @@ struct PushToState {
     tx: Option<i32>,
     ty: Option<i32>,
     update_interval: u32,
+    /// Ordinary AddCommand calls leave PushTo pending InitEvaluation. Older
+    /// snapshots predate this state and therefore retain their old, already
+    /// executing behavior when the field is absent.
+    #[serde(default)]
+    evaluation_pending: bool,
 }
 
 impl PushToState {
@@ -19970,6 +20144,7 @@ impl PushToState {
             tx: request.tx,
             ty: request.ty,
             update_interval: request.update_interval.max(1),
+            evaluation_pending: !request.evaluated,
         })
     }
 
@@ -19977,6 +20152,27 @@ impl PushToState {
         // C4Command::Tx is a C4Value and Ty is an integer; both read as
         // zero when AddCommand left their slots empty.
         Vector2::new(self.tx.unwrap_or(0), self.ty.unwrap_or(0))
+    }
+
+    /// C4CMD_PushTo InitEvaluation (C4Command.cpp:1645-1652): ground the
+    /// destination once, using the actor's live FreeMoveTo/shape state, and
+    /// consume this Execute before the PushTo handler runs.
+    fn init_evaluation(&mut self, ctx: &CommandRuntimeContext<'_>) -> bool {
+        if !self.evaluation_pending {
+            return false;
+        }
+        self.evaluation_pending = false;
+
+        let destination = self.destination();
+        let (mut x, mut y) = (destination.x, destination.y);
+        if let Some(landscape) = ctx.landscape {
+            let free_move = ctx.object.action_procedure == ActionProcedure::Float
+                || ctx.object.physical.can_fly != 0;
+            adjust_move_to_target(landscape, &mut x, &mut y, free_move, ctx.object.shape_height);
+        }
+        self.tx = Some(x);
+        self.ty = Some(y);
+        true
     }
 
     fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
@@ -20168,23 +20364,33 @@ impl JumpState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct WaitState {
     /// Effective duration chosen from Data, Tx, then UpdateInterval. The
-    /// separately queued InitEvaluation tick remains owned by L120.
+    /// active command installs Data/Tx overrides during InitEvaluation.
     remaining: Option<u32>,
+    #[serde(default)]
+    evaluation_pending: bool,
+    /// Data and Tx overwrite UpdateInterval after its ordinary pre-evaluation
+    /// decrement; a plain UpdateInterval must not be reset on that frame.
+    #[serde(default)]
+    evaluation_overrides_interval: bool,
 }
 
 impl WaitState {
     fn from_request(request: &CommandRequest) -> Self {
         // C4CMD_Wait InitEvaluation (C4Command.cpp:1659-1663): a nonzero
         // Data overrides the update interval, else a nonzero Tx does.
-        let interval = match request.data {
-            CommandData::Integer(data) if data != 0 => data.max(0) as u32,
+        let (interval, evaluation_overrides_interval) = match request.data {
+            CommandData::Integer(data) if data != 0 => (data.max(0) as u32, true),
             _ => match request.tx {
-                Some(tx) if tx != 0 => tx.max(0) as u32,
-                _ => request.update_interval,
+                Some(tx) if tx != 0 => (tx.max(0) as u32, true),
+                _ => (request.update_interval, false),
             },
         };
         let remaining = (interval != 0).then_some(interval);
-        Self { remaining }
+        Self {
+            remaining,
+            evaluation_pending: !request.evaluated,
+            evaluation_overrides_interval,
+        }
     }
 
     fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
@@ -21771,20 +21977,30 @@ struct AcquireState {
     script_invoked: bool,
     #[serde(default)]
     script_result: Option<AcquireScriptResult>,
+    /// C4CMD_Acquire defaults its ranges on an evaluation-only Execute.
+    #[serde(default)]
+    evaluation_pending: bool,
 }
 
 impl AcquireState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
         let definition_id =
             command_data_to_definition_id(&request.data).ok_or(CommandError::Unsupported)?;
-        // C4CMD_Acquire InitEvaluation Tx/Ty defaults (C4Command.cpp:
-        // 1666-1670): only a ZERO range becomes 500/250 — the sign of a
-        // nonzero range survives into the Inside(cx-px, -Tx, +Tx) match
-        // (:2115-2116), where a negative range matches nothing.
+        // Fold the eventual InitEvaluation values into private state now;
+        // evaluation_pending still keeps them out of the live command view
+        // and prevents command work until the native evaluation Execute.
         let raw_range_x = request.tx.unwrap_or(0);
         let raw_range_y = request.ty.unwrap_or(0);
-        let range_x = if raw_range_x == 0 { 500 } else { raw_range_x };
-        let range_y = if raw_range_y == 0 { 250 } else { raw_range_y };
+        let range_x = if !request.evaluated && raw_range_x == 0 {
+            500
+        } else {
+            raw_range_x
+        };
+        let range_y = if !request.evaluated && raw_range_y == 0 {
+            250
+        } else {
+            raw_range_y
+        };
         Ok(Self {
             target: request.target,
             definition_id,
@@ -21797,7 +22013,25 @@ impl AcquireState {
             script_pending: false,
             script_invoked: false,
             script_result: None,
+            evaluation_pending: !request.evaluated,
         })
+    }
+
+    /// C4CMD_Acquire InitEvaluation (C4Command.cpp:1666-1670): only a ZERO
+    /// range becomes 500/250. Negative ranges retain their sign and match no
+    /// candidates in the later Inside checks.
+    fn init_evaluation(&mut self) -> bool {
+        if !self.evaluation_pending {
+            return false;
+        }
+        self.evaluation_pending = false;
+        if self.range_x == 0 {
+            self.range_x = 500;
+        }
+        if self.range_y == 0 {
+            self.range_y = 250;
+        }
+        true
     }
 
     fn maybe_reset_buy(&mut self, frame: u64) {
@@ -22655,7 +22889,11 @@ impl CommandState {
                 view.tx = state.tx;
                 view.ty = state.ty;
             }
-            CommandState::Acquire(state) => {
+            CommandState::PushTo(state) => {
+                view.tx = state.tx;
+                view.ty = state.ty;
+            }
+            CommandState::Acquire(state) if !state.evaluation_pending => {
                 view.target = state.target;
                 view.tx = Some(state.range_x);
                 view.ty = Some(state.range_y);
@@ -22909,12 +23147,10 @@ impl ActiveCommand {
             return Err(CommandError::Unsupported);
         }
 
-        // Wait's Data/Tx override is already folded into its current Rust
-        // state. Its separate InitEvaluation tick remains owned by L120.
-        let update_interval = match &state {
-            CommandState::Wait(state) => state.remaining.unwrap_or(0),
-            _ => request.update_interval,
-        };
+        // C4Command::Execute decrements the raw interval before
+        // InitEvaluation. Wait's Data/Tx override is installed only on that
+        // evaluation frame below; folding it in here would lose one tick.
+        let update_interval = request.update_interval;
 
         Ok(Self {
             instance_id: 0,
@@ -22994,6 +23230,28 @@ impl ActiveCommand {
             self.update_interval -= 1;
             if self.update_interval == 0 {
                 return CommandStepResult::completed(None);
+            }
+        }
+
+        // C4Command::InitEvaluation runs after the interval decrement and
+        // consumes the Execute without invoking the command handler.
+        if let CommandState::PushTo(state) = &mut self.state {
+            if state.init_evaluation(ctx) {
+                return CommandStepResult::running(None);
+            }
+        }
+        if let CommandState::Wait(state) = &mut self.state {
+            if state.evaluation_pending {
+                state.evaluation_pending = false;
+                if state.evaluation_overrides_interval {
+                    self.update_interval = state.remaining.unwrap_or(0);
+                }
+                return CommandStepResult::running(None);
+            }
+        }
+        if let CommandState::Acquire(state) = &mut self.state {
+            if state.init_evaluation() {
+                return CommandStepResult::running(None);
             }
         }
 
