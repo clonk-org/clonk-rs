@@ -5658,6 +5658,15 @@ fn do_crew_exp(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnReloadDef (C4Script.cpp:4974-4990). The engine has a source-backed
+/// script relink core, but no runtime resource path from which this native can
+/// safely reload graphics/script data. Preserve the typed tooling surface and
+/// report the unsupported reload as C4ValueInt false.
+fn reload_def(args: &[Value]) -> Result<Value, RuntimeError> {
+    let _definition = parse_native_c4id_argument(args.first(), "ReloadDef")?;
+    Ok(Value::Int(0))
+}
+
 fn get_plr_value(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
@@ -13428,6 +13437,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetLeaguePerformance", set_league_performance);
     script.register_host_function("DoScore", do_score);
     script.register_host_function("DoCrewExp", do_crew_exp);
+    script.register_host_function("ReloadDef", reload_def);
     script.register_host_function("GetScore", get_score);
     script.register_host_function("GetScoreboardString", get_scoreboard_string);
     script.register_host_function("GetScoreboardData", get_scoreboard_data);
@@ -45876,6 +45886,7 @@ mod tests {
         "Punch",
         "PushParticles",
         "Random",
+        "ReloadDef",
         "RemoveEffect",
         "RemoveObject",
         "RemoveUnusedTexMapEntries",
@@ -51950,6 +51961,28 @@ public func RejectConstruction(x, y, builder)
             Ok::<_, RuntimeError>(())
         });
         result.expect("script-profiler builtins execute");
+    }
+
+    #[test]
+    fn reload_def_is_registered_and_returns_false_while_unsupported() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func Explicit() { return ReloadDef(TEST); }\n\
+                 func Local() { return ReloadDef(); }",
+            )
+            .expect("ReloadDef probes compile");
+
+        assert_eq!(
+            script.call("Explicit", &[]).expect("explicit reload executes"),
+            Value::Int(0)
+        );
+        assert_eq!(
+            script.call("Local", &[]).expect("local reload executes"),
+            Value::Int(0)
+        );
     }
 
     #[test]
