@@ -30006,6 +30006,9 @@ impl Engine {
                         synchronize_hostility,
                     )?;
                 }
+                PlayerCommand::InitScenarioPlayer { player_id, team } => {
+                    let _ = self.initialize_scenario_player(player_id, team)?;
+                }
                 PlayerCommand::SetCrewRosters { rosters } => {
                     for (player_id, crew) in rosters {
                         if let Some(player) = self.players.get_mut(&player_id) {

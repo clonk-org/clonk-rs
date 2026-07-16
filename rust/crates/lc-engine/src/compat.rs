@@ -38,6 +38,7 @@ use crate::{
     MenuRequest, MenuRequestKind, ObjectBaseGraphics, ObjectGraphicsOverlay, ObjectId, ObjectState,
     ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer,
     ParticleScope, PathFinder, PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState,
+    PlayerStatus,
     QueuedCommand, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig, ScoreboardState,
     TeamConfiguration, TeamInfo, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
     C4D_BORDER_BOTTOM, C4D_BORDER_LAYER, C4D_BORDER_SIDES, C4D_BORDER_TOP, CATEGORY_SORT_LIMIT,
@@ -579,6 +580,11 @@ pub enum PlayerCommand {
         home_base_material_entries: Option<Vec<(DefinitionId, i32)>>,
         synchronize_hostility: bool,
     },
+    /// `FnInitScenarioPlayer`'s synchronous
+    /// `C4Player::ScenarioAndTeamInit` request. The copied host context
+    /// preflights the return value; the authoritative engine performs the
+    /// scenario/team initialization after the VM call returns.
+    InitScenarioPlayer { player_id: i32, team: i32 },
     /// Final live `C4Player::Crew` lists after a synchronous crew mutation.
     /// Membership is per player and independent of C4Object::Owner; one
     /// object may therefore occur in more than one roster.
@@ -3362,6 +3368,77 @@ fn get_player_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
         } else {
             Ok(Value::Int(matching[idx]))
         }
+    })
+}
+
+/// `FnInitScenarioPlayer` (C4Script.cpp:5827-5832): resume a player whose
+/// ScenarioInit was postponed for runtime team selection. The copied host
+/// context predicts `ScenarioAndTeamInit`'s team-validation result; the
+/// ordered player command runs the existing authoritative initialization
+/// path when this VM call folds back into the engine.
+fn init_scenario_player(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "InitScenarioPlayer expects at most 2 arguments: player and team",
+        ));
+    }
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "InitScenarioPlayer",
+        "player",
+    )?;
+    let requested_team = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "InitScenarioPlayer",
+        "team",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some((status, current_team)) = context
+            .player_state(player_id)
+            .map(|player| (player.status, player.team))
+        else {
+            return Ok(Value::Bool(false));
+        };
+        // The Rust core retains the postponed JoinPlayerConfig only while
+        // the player is in one of the team-selection states. Normal engine
+        // calls reach this builtin through CID_InitScenarioPlayer here.
+        if !matches!(
+            status,
+            PlayerStatus::TeamSelection | PlayerStatus::TeamSelectionPending
+        ) {
+            return Ok(Value::Bool(false));
+        }
+
+        let accepted = match requested_team {
+            -1 => {
+                context.world.auto_generate_teams()
+                    && context
+                        .teams()
+                        .iter()
+                        .map(|team| team.id)
+                        .fold(0, i32::max)
+                        .checked_add(1)
+                        .is_some()
+            }
+            0 => true,
+            team => {
+                context.teams().iter().any(|candidate| candidate.id == team)
+                    && (current_team == Some(team) || !context.team_is_full(team))
+            }
+        };
+
+        // Rejected choices still run ScenarioAndTeamInit: its
+        // OnTeamSelectionFailed arm changes Pending back to TeamSelection.
+        context.record_player_command(PlayerCommand::InitScenarioPlayer {
+            player_id,
+            team: requested_team,
+        });
+        Ok(Value::Bool(accepted))
     })
 }
 
@@ -12283,6 +12360,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerCount", get_player_count);
     script.register_host_function("GetPlayerByIndex", get_player_by_index);
     script.register_host_function("CreateScriptPlayer", create_script_player);
+    script.register_host_function("InitScenarioPlayer", init_scenario_player);
     script.register_host_function("EliminatePlayer", eliminate_player);
     script.register_host_function("GetPlayerName", get_player_name);
     script.register_host_function("GetTaggedPlayerName", get_tagged_player_name);
@@ -44346,6 +44424,7 @@ mod tests {
         "InLiquid",
         "Incinerate",
         "IncinerateLandscape",
+        "InitScenarioPlayer",
         "InsertMaterial",
         "Inside",
         "IsNetwork",

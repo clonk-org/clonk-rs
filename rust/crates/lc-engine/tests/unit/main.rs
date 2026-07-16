@@ -57194,6 +57194,83 @@ func ReadTeam(int player) { return GetPlayerTeam(player); }
     }
 
     #[test]
+    fn init_scenario_player_builtin_resumes_pending_team_choice() -> Result<(), EngineError> {
+        // FnInitScenarioPlayer resolves a live player and synchronously runs
+        // ScenarioAndTeamInit. Missing players return false; a rejected team
+        // reopens a pending selection; an accepted team resumes the existing
+        // ScenarioInit/FinalInit path (C4Script.cpp:5827-5832;
+        // C4Player.cpp:111-151).
+        let script = r#"#strict 2
+func InitPlayer(int player, int team) { return InitScenarioPlayer(player, team); }
+func ReadTeam(int player) { return GetPlayerTeam(player); }
+"#;
+        let mut engine = Engine::new();
+        engine.register_definition(
+            Definition::from_script("TEAM", "Team initializer", script)
+                .expect("team initializer compiles"),
+        )?;
+        let caller = engine.spawn_object(SpawnConfig::new("TEAM"))?;
+        engine.set_teams(vec![
+            TeamInfo::new(1, "Left", 0x00f4_0000),
+            TeamInfo::new(2, "Right", 0x0000_c800),
+        ]);
+        engine.set_runtime_join_team_choice(true);
+        let outcome = engine.join_player(lifecycle_join_config("Chooser", Vec::new()))?;
+        assert_eq!(
+            outcome,
+            JoinPlayerOutcome::AwaitingTeamSelection { number: 0 }
+        );
+        let number = outcome.number();
+        let call = |engine: &mut Engine, function: &str, args| {
+            let index = engine.find_object_index(caller).expect("caller exists");
+            engine.call_object_function(index, function, args)
+        };
+
+        assert_eq!(
+            call(
+                &mut engine,
+                "InitPlayer",
+                vec![Value::Int(99), Value::Int(2)]
+            )?,
+            Value::Bool(false),
+            "missing player is rejected"
+        );
+
+        engine.mark_team_selection_pending(number)?;
+        assert_eq!(
+            call(
+                &mut engine,
+                "InitPlayer",
+                vec![Value::Int(number), Value::Int(99)]
+            )?,
+            Value::Bool(false),
+            "missing team returns ScenarioAndTeamInit's false result"
+        );
+        assert_eq!(
+            engine.player(number).map(Player::status),
+            Some(PlayerStatus::TeamSelection),
+            "OnTeamSelectionFailed reopens the selection"
+        );
+
+        engine.mark_team_selection_pending(number)?;
+        assert_eq!(
+            call(
+                &mut engine,
+                "InitPlayer",
+                vec![Value::Int(number), Value::Int(2)]
+            )?,
+            Value::Bool(true)
+        );
+        assert_eq!(engine.player(number).and_then(Player::team), Some(2));
+        assert_eq!(
+            call(&mut engine, "ReadTeam", vec![Value::Int(number)])?,
+            Value::Int(2),
+            "the script-visible player now carries the selected team"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn script_set_owner_runs_the_full_native_owner_change_sequence() -> Result<(), EngineError> {
         // C4Object::SetOwner validates first, refreshes the CURRENT graphics'
         // ColorByOwner surface, then writes Owner/Controller, transfers a
