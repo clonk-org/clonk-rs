@@ -14557,7 +14557,8 @@ fn log_internal(function: &str, args: &[Value], level: LogLevel) -> Result<Value
 }
 
 fn log_message(args: &[Value]) -> Result<Value, RuntimeError> {
-    log_internal("Log", args, LogLevel::Info)
+    log_internal("Log", args, LogLevel::Info)?;
+    Ok(Value::Nil)
 }
 
 fn debug_log_message(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -52286,7 +52287,7 @@ public func RejectConstruction(x, y, builder)
         subscriber::with_default(subscriber, || {
             let args = [Value::String("Log %02d".into()), Value::Int(3)];
             let result = log_message(&args).expect("Log succeeds");
-            assert_eq!(result, Value::Bool(true));
+            assert_eq!(result, Value::Nil);
         });
         let records = records.lock().unwrap();
         assert_eq!(records.len(), 1);
@@ -52312,6 +52313,29 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(record.level, Level::DEBUG);
         assert_eq!(record.target, "lc-script");
         assert_eq!(record.message, "Debug 42");
+    }
+
+    #[test]
+    fn log_returns_nil_and_takes_the_false_branch() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"
+                #strict 2
+                func Probe() {
+                    var result = Log("first");
+                    if (Log("second")) return 42;
+                    return [result, 7];
+                }
+                "#,
+            )
+            .expect("Log return probe compiles");
+
+        assert_eq!(
+            script.call("Probe", &[]).expect("Log return probe runs"),
+            Value::Array(vec![Value::Nil, Value::Int(7)])
+        );
     }
 
     #[test]
