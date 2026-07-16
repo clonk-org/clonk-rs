@@ -16,9 +16,9 @@ public func DefinitionIdCall()
     return TARG->KeepZero(0);
 }
 
-public func NamespacedObjectCall()
+public func NamespacedObjectCall(object target)
 {
-    return this->TARG::KeepZero(0);
+    return target->TARG::KeepZero(0);
 }
 "#;
 
@@ -28,22 +28,22 @@ public func DefinitionIdCall()
     return TARG->KeepZero(0);
 }
 
-public func NamespacedObjectCall()
+public func NamespacedObjectCall(object target)
 {
-    return this->TARG::KeepZero(0);
+    return target->TARG::KeepZero(0);
 }
 "#;
 
-fn call(engine: &mut Engine, object_id: ObjectId, function: &str) -> Value {
+fn call(engine: &mut Engine, object_id: ObjectId, function: &str, args: Vec<Value>) -> Value {
     let index = engine
         .find_object_index(object_id)
         .expect("caller object remains active");
     engine
-        .call_object_function(index, function, Vec::new())
+        .call_object_function(index, function, args)
         .unwrap_or_else(|error| panic!("{function} succeeds: {error}"))
 }
 
-fn fixture() -> (Engine, ObjectId, ObjectId) {
+fn fixture() -> (Engine, ObjectId, ObjectId, ObjectId) {
     let mut engine = Engine::new();
     engine
         .register_definition(
@@ -70,18 +70,26 @@ fn fixture() -> (Engine, ObjectId, ObjectId) {
     let nonstrict = engine
         .spawn_object(SpawnConfig::new("NSTR"))
         .expect("NONSTRICT caller spawns");
-    (engine, strict, nonstrict)
+    let target = engine
+        .spawn_object(SpawnConfig::new("TARG"))
+        .expect("namespaced target spawns");
+    (engine, strict, nonstrict, target)
 }
 
 fn assert_source_strictness_is_preserved(function: &str) {
-    let (mut engine, strict, nonstrict) = fixture();
+    let (mut engine, strict, nonstrict, target) = fixture();
+    let args = if function == "NamespacedObjectCall" {
+        vec![Value::Object(target.as_u64())]
+    } else {
+        Vec::new()
+    };
     assert_eq!(
-        call(&mut engine, strict, function),
+        call(&mut engine, strict, function, args.clone()),
         Value::Int(0),
         "strict-3 source keeps a zero argument typed as int across {function}"
     );
     assert_eq!(
-        call(&mut engine, nonstrict, function),
+        call(&mut engine, nonstrict, function, args),
         Value::Nil,
         "NONSTRICT source eagerly normalizes the same zero across {function}"
     );

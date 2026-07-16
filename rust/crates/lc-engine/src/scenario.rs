@@ -16952,12 +16952,11 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
-    fn namespaced_object_calls_run_the_named_defs_function_on_the_target() {
-        // `obj->ID::Func(...)` (AB_CALLNS, C4AulParse.cpp:3160-3245):
-        // the function resolves in def ID's script at parse time and runs
-        // with the arrow TARGET as context — GoldRush hitches the horse
-        // with pObj->CHBM::Connect(...). The target's own same-name
-        // function is bypassed.
+    fn namespaced_object_calls_reresolve_on_the_target_definition() {
+        // `obj->ID::Func(...)` validates ID::Func at parse time, but C++
+        // ignores AB_CALLNS at execution and the paired AB_CALL resolves
+        // Func on the arrow target (C4AulExec.cpp:1212-1267). GOOD's Tag
+        // therefore overrides HLPR's parse-time function.
         let dir = tempdir().expect("tempdir");
         let scenario_dir = write_resilience_fixture(
             dir.path(),
@@ -16995,8 +16994,8 @@ public func ActualizePhase(pClonk)
             .expect("object created");
         assert_eq!(
             object.local_vars.get("seen"),
-            Some(&lc_script::Value::Int(5)),
-            "HLPR's code ran with the GOOD object as context"
+            Some(&lc_script::Value::Int(1)),
+            "GOOD's same-name function wins when AB_CALL re-resolves"
         );
     }
 

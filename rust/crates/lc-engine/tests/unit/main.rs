@@ -18700,13 +18700,25 @@ func Trigger() {
         global func PokeMissingSafe(target) { return target->~NoSuch(); }
         global func PokeNil() { return nil->~Anything(); }
         global func PokeEngineFn(target) { return target->GetID(); }
+        global func PokeNamespaced(target) { return target->OTHR::Secret(22); }
+        global func PokeNamespacedMissing(target) { return target->OTHR::NamedOnly(); }
+        global func PokeNamespacedGlobal(target) { return target->OTHR::GlobalOnly(); }
+        global func AssignNamespaced(target) { target->OTHR::Slot() = 9; return 1; }
         "#;
         let probe_script = r#"
-        local tag;
+        local tag, target_slot;
         public func Secret(v) {
             tag = v;
             return v * 2;
         }
+        public func &Slot() { return target_slot; }
+        "#;
+        let namespace_script = r#"
+        local named_slot;
+        public func Secret(v) { return v + 1000; }
+        public func NamedOnly() { return 77; }
+        public func GlobalOnly() { return 99; }
+        public func &Slot() { return named_slot; }
         "#;
 
         let mut engine = Engine::with_seed(7);
@@ -18720,12 +18732,28 @@ func Trigger() {
                 Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
             )
             .expect("probe registers");
+        engine
+            .register_definition(
+                Definition::from_script("OTHR", "Namespace", namespace_script)
+                    .expect("namespace compiles"),
+            )
+            .expect("namespace registers");
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/NamespaceCall.c".to_string(),
+                "global func GlobalOnly() { return GetID(); }".to_string(),
+            )]),
+            1
+        );
         let caller = engine
             .spawn_object(SpawnConfig::new("CLLR"))
             .expect("caller spawns");
         let probe = engine
             .spawn_object(SpawnConfig::new("PROB"))
             .expect("probe spawns");
+        let namespace_target = engine
+            .spawn_object(SpawnConfig::new("OTHR"))
+            .expect("namespace target spawns");
         engine.tick().expect("tick succeeds");
 
         let caller_idx = engine.find_object_index(caller).expect("caller exists");
@@ -18750,6 +18778,62 @@ func Trigger() {
             .call_object_function(caller_idx, "PokeEngineFn", target_arg.clone())
             .expect("engine-fn arrow call succeeds");
         assert_eq!(result, Value::C4Id("PROB".into()), "GetID of the TARGET");
+
+        // AB_CALLNS is ignored by the C++ executor. The paired AB_CALL
+        // therefore re-resolves the parse-time function name on the target:
+        // PROB's override wins over OTHR's same-name function.
+        let result = engine
+            .call_object_function(caller_idx, "PokeNamespaced", target_arg.clone())
+            .expect("namespaced arrow call succeeds");
+        assert_eq!(result, Value::Int(44));
+        let probe_idx = engine.find_object_index(probe).expect("probe exists");
+        assert_eq!(
+            engine.objects[probe_idx].state.local_vars.get("tag"),
+            Some(&Value::Int(22)),
+            "the target override, not the namespaced definition, ran"
+        );
+
+        engine
+            .call_object_function(caller_idx, "PokeNamespacedMissing", target_arg.clone())
+            .expect_err("the namespace's function cannot satisfy a target-def miss");
+
+        let result = engine
+            .call_object_function(caller_idx, "PokeNamespacedGlobal", target_arg.clone())
+            .expect("namespaced arrow call retains the global fallback");
+        assert_eq!(
+            result,
+            Value::C4Id("PROB".into()),
+            "the global fallback ran in the target object's scope"
+        );
+
+        engine
+            .call_object_function(caller_idx, "AssignNamespaced", target_arg.clone())
+            .expect("namespaced reference call succeeds");
+        let probe_idx = engine.find_object_index(probe).expect("probe exists");
+        assert_eq!(
+            engine.objects[probe_idx]
+                .state
+                .local_vars
+                .get("target_slot"),
+            Some(&Value::Int(9)),
+            "reference dispatch also re-resolves Slot on the target definition"
+        );
+        assert!(
+            !engine.objects[probe_idx]
+                .state
+                .local_vars
+                .contains_key("named_slot"),
+            "the namespace definition's reference function did not run"
+        );
+
+        let result = engine
+            .call_object_function(
+                caller_idx,
+                "PokeNamespaced",
+                vec![Value::Object(namespace_target.as_u64())],
+            )
+            .expect("same-definition namespaced call stays valid");
+        assert_eq!(result, Value::Int(1022));
 
         // Missing function: error for `->`, nil for `->~`.
         // (The engine wraps the VM error; the distinction that matters is

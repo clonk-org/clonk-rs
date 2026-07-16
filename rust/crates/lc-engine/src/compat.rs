@@ -13110,10 +13110,10 @@ fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
             target_value.type_name()
         )));
     };
-    // `obj->ID::Func(...)` — the namespace operator (AB_CALLNS): resolve
-    // Func in def ID's script and run it on the target. C++ resolves at
-    // PARSE time and throws hard errors for a missing def or function
-    // (C4AulParse.cpp:3171-3181) — the failsafe `~` does not cover them.
+    // `obj->ID::Func(...)`: C++ validates ID::Func at parse time, but
+    // AB_CALLNS is ignored by the executor (C4AulExec.cpp:1212-1214).
+    // Preserve the validation, then let the paired AB_CALL re-resolve Func
+    // on the target definition just like a plain arrow call.
     if let Some((namespace, function)) = name.split_once("::") {
         let script = HOST_CONTEXT.with(|cell| {
             cell.borrow()
@@ -13130,10 +13130,12 @@ fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
                 "direct object call: function {namespace}::{function} not found"
             )));
         }
-        return match call_world_object_function_in_scope_from_arrow(target, script, function, &pars)
-        {
+        return match call_world_object_function_from_arrow(target, function, &pars) {
             Some(result) => result,
-            None => Ok(Value::Nil),
+            None if failsafe => Ok(Value::Nil),
+            None => Err(RuntimeError::new(format!(
+                "Object call: No function \"{function}\" in object {target}!"
+            ))),
         };
     }
     match call_world_object_function_from_arrow(target, name, &pars) {
@@ -13208,12 +13210,15 @@ fn arrow_method_reference_dispatch(
                 "direct object call: function {namespace}::{function} not found"
             )));
         }
-        return call_world_object_reference_in_scope_from_arrow(target, script, function, &pars)
-            .unwrap_or_else(|| {
-                Err(RuntimeError::new(format!(
-                    "function '{namespace}::{function}' does not return a reference"
-                )))
-            });
+        return match call_world_object_reference_from_arrow(target, function, &pars) {
+            Some(result) => result,
+            None if failsafe => Err(RuntimeError::new(format!(
+                "function '{function}' does not return a reference"
+            ))),
+            None => Err(RuntimeError::new(format!(
+                "Object call: No function \"{function}\" in object {target}!"
+            ))),
+        };
     }
     match call_world_object_reference_from_arrow(target, name, &pars) {
         Some(result) => result,
@@ -40130,9 +40135,9 @@ fn call_world_object_reference_from_arrow(
     call_world_object_reference_with(target, function, args, true, None, true)
 }
 
-/// `obj->ID::Func(...)` (AB_CALLNS, C4AulParse.cpp:3160-3245): runs the
-/// NAMED def's function with the target object as context — the target's
-/// own same-name function is bypassed. Script functions only (GetSFunc).
+/// Runs a function from an already-resolved script owner with `target` as
+/// its object context. Native paths such as GetCustomComponents use this
+/// exact-owner dispatch; arrow calls must instead re-resolve on the target.
 pub(crate) fn call_world_object_function_in_scope(
     target: ObjectId,
     script: Arc<ScriptEngine>,
