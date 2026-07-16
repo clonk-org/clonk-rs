@@ -30714,6 +30714,9 @@ impl Engine {
                         }
                     }
                 }
+                PlayerCommand::AdjustCrewControlCount { link, gain } => {
+                    self.adjust_crew_info_control_count(link, gain);
+                }
                 PlayerCommand::AdjustHomeBaseMaterial {
                     player_id,
                     definition_id,
@@ -39864,6 +39867,7 @@ impl Engine {
     /// links for new infos before the callback outcome reaches Engine.
     fn host_crew_info_state(&self) -> compat::HostCrewInfoState {
         let mut state = compat::HostCrewInfoState::default();
+        state.control_counts = self.crew_info_control_counts.clone();
         for (&number, roster) in &self.crew_rosters {
             state.next_indices.insert(number, roster.len());
             state.roster_names.insert(
@@ -44087,6 +44091,7 @@ impl Engine {
                 range_y,
                 ignore_container,
                 definition_id,
+                command_instance_id,
             } => {
                 let result = self.call_control_command_acquire(
                     caller,
@@ -44096,7 +44101,7 @@ impl Engine {
                     ignore_container,
                     &definition_id,
                 )?;
-                self.set_acquire_script_result(caller, result)?;
+                self.set_acquire_script_result(caller, command_instance_id, result)?;
             }
             CommandEvent::ControlCommandConstruction {
                 caller,
@@ -44104,6 +44109,7 @@ impl Engine {
                 site,
                 target2,
                 definition_id,
+                command_instance_id,
             } => {
                 let result = self.call_control_command_construction(
                     caller,
@@ -44112,7 +44118,7 @@ impl Engine {
                     target2,
                     &definition_id,
                 )?;
-                self.set_construct_script_result(caller, result)?;
+                self.set_construct_script_result(caller, command_instance_id, result)?;
             }
             CommandEvent::SpawnObject {
                 definition_id,
@@ -44196,6 +44202,9 @@ impl Engine {
                     Some(action) => self.apply_call_result(action, caller, result)?,
                     None => {}
                 }
+            }
+            CommandEvent::NativeCommandSuccess { object_id, command } => {
+                self.count_crew_info_control(object_id, command.experience_gain());
             }
             CommandEvent::FailureFeedback { actor_id, feedback } => {
                 self.execute_command_failure_feedback(actor_id, feedback, None)?;
@@ -44337,6 +44346,13 @@ impl Engine {
     }
 
     fn finish_object_command_execution(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
+        let successful_finishes = self
+            .find_object_index(object_id)
+            .map(|index| self.objects[index].commands.take_successful_finishes())
+            .unwrap_or_default();
+        for command in successful_finishes {
+            self.count_crew_info_control(object_id, command.experience_gain());
+        }
         let finished = self
             .find_object_index(object_id)
             .and_then(|index| self.objects[index].commands.finished_front_view());
@@ -44654,13 +44670,20 @@ impl Engine {
     fn set_acquire_script_result(
         &mut self,
         object_id: ObjectId,
+        command_instance_id: u64,
         result: AcquireScriptResult,
     ) -> Result<(), EngineError> {
         let Some(index) = self.find_object_index(object_id) else {
             return Ok(());
         };
         if let Some(object) = self.objects.get_mut(index) {
-            let _ = object.commands.set_acquire_script_result(result);
+            // Native checks `!cObj->Status` after the callback and returns
+            // before interpreting result 2 for a deleted caller.
+            if object.state.status != ObjectStatus::Deleted {
+                let _ = object
+                    .commands
+                    .resolve_acquire_script_result(command_instance_id, result);
+            }
         }
         Ok(())
     }
@@ -44668,13 +44691,18 @@ impl Engine {
     fn set_construct_script_result(
         &mut self,
         object_id: ObjectId,
+        command_instance_id: u64,
         result: AcquireScriptResult,
     ) -> Result<(), EngineError> {
         let Some(index) = self.find_object_index(object_id) else {
             return Ok(());
         };
         if let Some(object) = self.objects.get_mut(index) {
-            let _ = object.commands.set_construct_script_result(result);
+            if object.state.status != ObjectStatus::Deleted {
+                let _ = object
+                    .commands
+                    .resolve_construct_script_result(command_instance_id, result);
+            }
         }
         Ok(())
     }

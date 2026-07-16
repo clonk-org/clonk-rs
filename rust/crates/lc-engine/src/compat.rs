@@ -611,6 +611,14 @@ pub enum PlayerCommand {
         link: Option<CrewInfoLink>,
         change: i32,
     },
+    /// Runtime-only `C4ObjectInfo::ControlCount` delta produced by a native
+    /// command finish inside synchronous script-host execution. Experience
+    /// calls crossed by this delta are transported as ordered
+    /// `AdjustCrewExperience` commands.
+    AdjustCrewControlCount {
+        link: CrewInfoLink,
+        gain: i32,
+    },
     AdjustHomeBaseMaterial {
         player_id: i32,
         definition_id: DefinitionId,
@@ -1189,6 +1197,9 @@ pub(crate) struct HostCrewInfoState {
     pub(crate) order: HashMap<i32, Vec<CrewInfoLink>>,
     pub(crate) next_indices: HashMap<i32, usize>,
     pub(crate) roster_names: HashMap<i32, Vec<String>>,
+    /// Runtime-only `C4ObjectInfo::ControlCount`, sharing the stable roster
+    /// identity used by the authoritative engine.
+    pub(crate) control_counts: HashMap<CrewInfoLink, i32>,
 }
 
 // Not `derive(Debug)`: `ScriptEngine` (in `definition_scripts`) has no Debug.
@@ -4927,6 +4938,116 @@ pub(crate) fn default_rank_name(rank: i32) -> Option<&'static str> {
         .and_then(|rank| DEFAULT_RANK_NAMES.get(rank).copied())
 }
 
+fn apply_host_crew_experience(
+    context: &mut EffectHostContext,
+    target: ObjectId,
+    change: i32,
+) -> bool {
+    if !context.ensure_object_scope(target) {
+        return false;
+    }
+
+    let info_definition_physical = context
+        .object_scope(target)
+        .and_then(ObjectScopeContext::info_core)
+        .and_then(|info| context.definition_metadata(info.definition_id.as_str()))
+        .map(|metadata| metadata.physical);
+    let Some((link, mut info, promoted)) = context.object_scope_mut(target).and_then(|scope| {
+        let link = scope.info_link();
+        let mut info = scope.info_core()?.clone();
+        let promoted = crate::adjust_crew_experience(&mut info, change);
+        scope.set_info_core(Some(info.clone()));
+        if promoted {
+            scope.set_info_rank(Some(info.rank));
+            let physical = scope
+                .info_physical
+                .or(info_definition_physical)
+                .unwrap_or(scope.definition_physical);
+            scope.info_physical = Some(crate::promotion_updated_physical(
+                physical,
+                info.rank,
+                None,
+            ));
+            scope.record_physicals();
+        }
+        Some((link, info, promoted))
+    }) else {
+        return true;
+    };
+
+    let promotion_rank_name = if promoted {
+        match context
+            .world
+            .definition_rank_names
+            .get(&info.definition_id)
+        {
+            Some(names) => usize::try_from(info.rank)
+                .ok()
+                .and_then(|rank| names.get(rank))
+                .cloned(),
+            None => default_rank_name(info.rank).map(str::to_owned),
+        }
+    } else {
+        None
+    };
+    if let Some(rank_name) = promotion_rank_name.as_ref() {
+        info.rank_name = rank_name.clone();
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.set_info_core(Some(info.clone()));
+        }
+    }
+
+    // This projection is live throughout the VM call. A following
+    // GrabObjectInfo/MakeCrewMember must see the changed pointer payload.
+    if let Some(link) = link {
+        let mut state = context.world.crew_info_state.borrow_mut();
+        if let Some(entry) = state.entries.get_mut(&link) {
+            entry.rank = info.rank;
+            entry.rank_name = info.rank_name.clone();
+            entry.experience = info.experience;
+        }
+        for entries in state.idle.values_mut() {
+            for (candidate, entry) in entries {
+                if *candidate == link {
+                    entry.rank = info.rank;
+                    entry.rank_name = info.rank_name.clone();
+                    entry.experience = info.experience;
+                }
+            }
+        }
+    }
+
+    context.record_player_command(PlayerCommand::AdjustCrewExperience {
+        object_id: target,
+        link,
+        change,
+    });
+
+    if let Some(rank_name) = promotion_rank_name {
+        let object_name = context
+            .object_custom_name(target)
+            .unwrap_or_else(|| info.name.clone());
+        context.register_message(MessageCommand::Add(MessageSpec {
+            kind: MessageKind::Target,
+            text: format!("{object_name} is promoted|to {rank_name}!"),
+            target: Some(target),
+            player: None,
+            offset: Vector2::ZERO,
+            color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+            flags: 0,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        }));
+        context
+            .audio_mut()
+            .play_sound("Trumpet", Some(target), 100, false, false, None);
+    }
+
+    true
+}
+
 /// `FnDoCrewExp` -> `C4Object::DoExperience` (C4Script.cpp:4964-4972;
 /// C4Object.cpp:1518-1529). The persistent info pointer is independent of
 /// crew membership, ownership and liveness, so any resolved object succeeds;
@@ -4945,106 +5066,7 @@ fn do_crew_exp(args: &[Value]) -> Result<Value, RuntimeError> {
         else {
             return Ok(Value::Bool(false));
         };
-        if !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
-        }
-
-        let info_definition_physical = context
-            .object_scope(target)
-            .and_then(ObjectScopeContext::info_core)
-            .and_then(|info| context.definition_metadata(info.definition_id.as_str()))
-            .map(|metadata| metadata.physical);
-        let Some((link, mut info, promoted)) = context.object_scope_mut(target).and_then(|scope| {
-            let link = scope.info_link();
-            let mut info = scope.info_core()?.clone();
-            let promoted = crate::adjust_crew_experience(&mut info, change);
-            scope.set_info_core(Some(info.clone()));
-            if promoted {
-                scope.set_info_rank(Some(info.rank));
-                let physical = scope
-                    .info_physical
-                    .or(info_definition_physical)
-                    .unwrap_or(scope.definition_physical);
-                scope.info_physical =
-                    Some(crate::promotion_updated_physical(physical, info.rank, None));
-                scope.record_physicals();
-            }
-            Some((link, info, promoted))
-        }) else {
-            return Ok(Value::Bool(true));
-        };
-
-        let promotion_rank_name = if promoted {
-            match context
-                .world
-                .definition_rank_names
-                .get(&info.definition_id)
-            {
-                Some(names) => usize::try_from(info.rank)
-                    .ok()
-                    .and_then(|rank| names.get(rank))
-                    .cloned(),
-                None => default_rank_name(info.rank).map(str::to_owned),
-            }
-        } else {
-            None
-        };
-        if let Some(rank_name) = promotion_rank_name.as_ref() {
-            info.rank_name = rank_name.clone();
-            if let Some(scope) = context.object_scope_mut(target) {
-                scope.set_info_core(Some(info.clone()));
-            }
-        }
-
-        // This projection is live throughout the VM call. A following
-        // GrabObjectInfo/MakeCrewMember must see the changed pointer payload.
-        if let Some(link) = link {
-            let mut state = context.world.crew_info_state.borrow_mut();
-            if let Some(entry) = state.entries.get_mut(&link) {
-                entry.rank = info.rank;
-                entry.rank_name = info.rank_name.clone();
-                entry.experience = info.experience;
-            }
-            for entries in state.idle.values_mut() {
-                for (candidate, entry) in entries {
-                    if *candidate == link {
-                        entry.rank = info.rank;
-                        entry.rank_name = info.rank_name.clone();
-                        entry.experience = info.experience;
-                    }
-                }
-            }
-        }
-
-        context.record_player_command(PlayerCommand::AdjustCrewExperience {
-            object_id: target,
-            link,
-            change,
-        });
-
-        if let Some(rank_name) = promotion_rank_name {
-            let object_name = context
-                .object_custom_name(target)
-                .unwrap_or_else(|| info.name.clone());
-            context.register_message(MessageCommand::Add(MessageSpec {
-                kind: MessageKind::Target,
-                text: format!("{object_name} is promoted|to {rank_name}!"),
-                target: Some(target),
-                player: None,
-                offset: Vector2::ZERO,
-                color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
-                flags: 0,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
-            }));
-            context
-                .audio_mut()
-                .play_sound("Trumpet", Some(target), 100, false, false, None);
-        }
-
-        Ok(Value::Bool(true))
+        Ok(Value::Bool(apply_host_crew_experience(context, target, change)))
     })
 }
 
@@ -29554,6 +29576,56 @@ fn preview_evaluate_sell(
     resolve_preview_sell(actor, base, definition_id, true)
 }
 
+fn apply_preview_native_command_success(
+    context: &mut EffectHostContext,
+    target: ObjectId,
+    command: CommandId,
+) {
+    let gain = command.experience_gain();
+    if gain == 0 {
+        return;
+    }
+    let Some(link) = context.object_scope(target).and_then(|scope| {
+        scope.info_core()?;
+        scope.info_link()
+    }) else {
+        return;
+    };
+    let experience_awards = {
+        let mut state = context.world.crew_info_state.borrow_mut();
+        let control_count = state.control_counts.entry(link).or_default();
+        let mut awards = 0;
+        for _ in 0..gain {
+            *control_count = control_count.wrapping_add(1);
+            if *control_count % 5 == 0 {
+                awards += 1;
+            }
+        }
+        awards
+    };
+    context.record_player_command(PlayerCommand::AdjustCrewControlCount { link, gain });
+    for _ in 0..experience_awards {
+        apply_host_crew_experience(context, target, 1);
+    }
+}
+
+fn apply_preview_command_experience(target: ObjectId) -> Result<(), RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(());
+        };
+        let successful_finishes = context
+            .object_scope_mut(target)
+            .map(|scope| scope.live_commands.take_successful_finishes())
+            .unwrap_or_default();
+        for command in successful_finishes {
+            apply_preview_native_command_success(context, target, command);
+        }
+        Ok(())
+    })
+}
+
 fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     let active = active_object_id();
     let target = match args.first() {
@@ -29737,6 +29809,7 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     for (actor_id, feedback) in failure_feedback {
         preview_command_failure_feedback(actor_id, feedback)?;
     }
+    apply_preview_command_experience(target)?;
     if had_live_attempt {
         finished = HOST_CONTEXT.with(|cell| {
             cell.borrow()
@@ -40705,6 +40778,9 @@ impl EffectHostContext {
                     caller,
                     on_result,
                 } => entrance_attempts.push((object_id, caller, on_result)),
+                CommandEvent::NativeCommandSuccess { object_id, command } => {
+                    apply_preview_native_command_success(self, object_id, command);
+                }
                 CommandEvent::FailureFeedback { actor_id, feedback } => {
                     failure_feedback.push((actor_id, feedback));
                 }

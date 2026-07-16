@@ -395,6 +395,37 @@ impl CommandId {
             Self::Take2 => "Take2",
         }
     }
+
+    /// `C4Command::GetExpGain` (C4Command.cpp:2441-2496): successful
+    /// native command finishes add this many points to the attached
+    /// `C4ObjectInfo::ControlCount`.
+    pub(crate) const fn experience_gain(self) -> i32 {
+        match self {
+            Self::Wait | Self::Transfer | Self::Retry | Self::Call => 0,
+            Self::Acquire | Self::Home => 2,
+            Self::Chop | Self::Build | Self::Construct | Self::Energy => 5,
+            Self::Attack => 15,
+            Self::Follow
+            | Self::MoveTo
+            | Self::Enter
+            | Self::Exit
+            | Self::Grab
+            | Self::Throw
+            | Self::UnGrab
+            | Self::Jump
+            | Self::Get
+            | Self::Put
+            | Self::Drop
+            | Self::Dig
+            | Self::Activate
+            | Self::PushTo
+            | Self::Context
+            | Self::Buy
+            | Self::Sell
+            | Self::Take
+            | Self::Take2 => 1,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -408,6 +439,54 @@ mod tests {
     static EMPTY_TRANSFER_ZONES: Lazy<TransferZoneTable> = Lazy::new(TransferZoneTable::default);
 
     use crate::ocf;
+
+    #[test]
+    fn command_experience_gain_matches_every_cpp_bucket() {
+        let expected = [
+            1, 1, 1, 1, 1, 5, 1, 5, 1, 1, 0, 1, 1, 1, 1, 1, 1, 5, 0, 15, 1, 1, 1, 2,
+            5, 0, 2, 0, 1, 1,
+        ];
+        for (raw, expected) in (1..=30).zip(expected) {
+            let command = CommandId::from_raw(raw).expect("all C4CMD values are covered");
+            assert_eq!(command.experience_gain(), expected, "{}", command.to_name());
+        }
+    }
+
+    #[test]
+    fn callback_complete_records_native_success_after_command_replacement() {
+        let mut acquire = CommandStack::new();
+        acquire
+            .push_front(
+                CommandRequest::new(CommandId::Acquire)
+                    .with_data(CommandData::Text("WOOD".into())),
+            )
+            .expect("Acquire queues");
+        let acquire_instance = acquire.entries.front().unwrap().instance_id;
+        acquire.clear();
+        assert!(!acquire.resolve_acquire_script_result(
+            acquire_instance,
+            AcquireScriptResult::Complete,
+        ));
+        assert_eq!(acquire.take_successful_finishes(), [CommandId::Acquire]);
+
+        let mut construct = CommandStack::new();
+        construct
+            .push_front(
+                CommandRequest::new(CommandId::Construct)
+                    .with_data(CommandData::Text("HUT1".into())),
+            )
+            .expect("Construct queues");
+        let construct_instance = construct.entries.front().unwrap().instance_id;
+        construct.clear();
+        assert!(!construct.resolve_construct_script_result(
+            construct_instance,
+            AcquireScriptResult::Complete,
+        ));
+        assert_eq!(
+            construct.take_successful_finishes(),
+            [CommandId::Construct]
+        );
+    }
 
     #[test]
     fn c4_angle_matches_cpp_axis_and_diagonal_boundaries() {
@@ -7446,6 +7525,13 @@ mod tests {
         let mut orphaned = ConstructState::from_request(&request);
         let failed = orphaned.step(&failed_ctx);
         assert_eq!(failed.status, CommandStatus::Failed);
+        assert!(matches!(
+            failed.events.as_slice(),
+            [CommandEvent::NativeCommandSuccess {
+                object_id,
+                command: CommandId::Construct,
+            }] if *object_id == builder_id
+        ));
         assert_eq!(
             pushed_request(&failed.operations, CommandId::Build).target,
             Some(construction_id),
@@ -7496,6 +7582,7 @@ mod tests {
                 site,
                 target2: Some(event_target2),
                 definition_id: event_definition,
+                command_instance_id: 0,
             }] if *caller == builder_id
                 && *site == expected
                 && *event_target2 == target2_id
@@ -15481,6 +15568,8 @@ pub enum CommandEvent {
         range_y: i32,
         ignore_container: Option<ObjectId>,
         definition_id: DefinitionId,
+        #[serde(skip)]
+        command_instance_id: u64,
     },
     /// `~ControlCommandConstruction(Target,Tx,Ty,Target2,Data)` runs after
     /// site resolution and before conkit/range/construction checks. Its
@@ -15491,6 +15580,8 @@ pub enum CommandEvent {
         site: Vector2,
         target2: Option<ObjectId>,
         definition_id: DefinitionId,
+        #[serde(skip)]
+        command_instance_id: u64,
     },
     SpawnObject {
         definition_id: DefinitionId,
@@ -15530,6 +15621,14 @@ pub enum CommandEvent {
         caller: ObjectId,
         #[serde(default)]
         on_result: Option<CallResultAction>,
+    },
+    /// An ordered `Finish(true)` that occurs before the same command later
+    /// reaches another callback or a final failure. Most successful finishes
+    /// use the retained command-stack tail; this event preserves the rare
+    /// mixed Construct success-before-failure ordering.
+    NativeCommandSuccess {
+        object_id: ObjectId,
+        command: CommandId,
     },
     /// C4Command::Fail's mode/retry-gated tail. The engine executes this
     /// synchronously after the command handler's own events and before
@@ -15913,6 +16012,10 @@ pub struct CommandStack {
     /// Keep it transient and let that synchronous caller drain it before
     /// `ControlCommandFinished` runs.
     pending_failure_feedback: VecDeque<CommandFailureFeedback>,
+    /// Native `C4Command::Finish(true)` calls awaiting the owning object's
+    /// experience tail. This is separate from `Finished=Completed` because
+    /// script `FinishCommand(true)` sets that flag without calling Finish.
+    pending_successful_finishes: VecDeque<CommandId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15997,7 +16100,19 @@ impl CommandStack {
             detached_throw_preludes: VecDeque::new(),
             detached_drop_preludes: VecDeque::new(),
             pending_failure_feedback: VecDeque::new(),
+            pending_successful_finishes: VecDeque::new(),
         }
+    }
+
+    fn record_native_success(&mut self, command: CommandId) {
+        self.pending_successful_finishes.push_back(command);
+    }
+
+    /// Drain native successful finishes before `ControlCommandFinished`.
+    /// The queue survives callback-driven stack replacement because the
+    /// executing C++ command remains alive through its `iExec` guard.
+    pub(crate) fn take_successful_finishes(&mut self) -> Vec<CommandId> {
+        self.pending_successful_finishes.drain(..).collect()
     }
 
     fn pending_grab_attempt(entry: &ActiveCommand) -> Option<DetachedGrabAttempt> {
@@ -16425,11 +16540,13 @@ impl CommandStack {
     ) -> Option<CommandStepResult> {
         let next_is_move_to =
             self.entries.get(1).and_then(ActiveCommand::id) == Some(CommandId::MoveTo);
+        let mut completed_command = None;
         let mut result = {
             let front = self.entries.front_mut()?;
             if front.finished.is_some() {
                 return None;
             }
+            let command = front.id();
             let result = front.step(ctx, gravity, next_is_move_to);
             if matches!(
                 result.status,
@@ -16437,8 +16554,14 @@ impl CommandStack {
             ) {
                 front.finished = Some(result.status);
             }
+            if result.status == CommandStatus::Completed {
+                completed_command = command;
+            }
             result
         };
+        if let Some(command) = completed_command {
+            self.record_native_success(command);
+        }
 
         if result.status == CommandStatus::Failed {
             if let Some(mut feedback) = self.record_failure_at(0) {
@@ -16493,6 +16616,10 @@ impl CommandStack {
             state.resume_after_stop(ctx)
         };
 
+        if result.status == CommandStatus::Completed {
+            self.record_native_success(CommandId::MoveTo);
+        }
+
         if result.status == CommandStatus::Failed {
             if let Some(index) = index {
                 if let Some(feedback) = self.record_failure_at(index) {
@@ -16538,6 +16665,10 @@ impl CommandStack {
             let mut state = self.detached_build_stops.pop_front()?;
             state.resume_after_stop(ctx)
         };
+
+        if result.status == CommandStatus::Completed {
+            self.record_native_success(CommandId::Build);
+        }
 
         if result.status == CommandStatus::Failed {
             if let Some(index) = index {
@@ -16605,6 +16736,10 @@ impl CommandStack {
             }
             result
         };
+
+        if result.status == CommandStatus::Completed {
+            self.record_native_success(CommandId::Throw);
+        }
 
         if result.status == CommandStatus::Failed {
             if let Some(index) = index {
@@ -16700,6 +16835,10 @@ impl CommandStack {
             }
             result
         };
+
+        if result.status == CommandStatus::Completed {
+            self.record_native_success(CommandId::Drop);
+        }
 
         if result.status == CommandStatus::Failed {
             if let Some(index) = index {
@@ -16821,8 +16960,11 @@ impl CommandStack {
 
     /// Mark the matching front as successfully finished without clearing it.
     /// Live command events use this so `ControlCommandFinished` still sees
-    /// the command after the event's synchronous callbacks return.
+    /// the command after the event's synchronous callbacks return. Calling
+    /// this means the in-flight native command reached `Finish(true)` even
+    /// when a callback detached or pre-finished its stack entry.
     pub fn finish_front_if(&mut self, id: CommandId) -> bool {
+        self.record_native_success(id);
         if let Some(front) = self.entries.front_mut() {
             if front.id() == Some(id) {
                 front.finished = Some(CommandStatus::Completed);
@@ -16840,6 +16982,9 @@ impl CommandStack {
         id: CommandId,
         command_instance_id: u64,
     ) -> bool {
+        // The event itself retains the executing native command's lifetime;
+        // the live stack entry is optional after callback-side replacement.
+        self.record_native_success(id);
         let Some(entry) = self.entries.iter_mut().find(|entry| {
             entry.id() == Some(id)
                 && (command_instance_id == 0 || entry.instance_id == command_instance_id)
@@ -16852,8 +16997,10 @@ impl CommandStack {
 
     /// Finish the exact Drop whose live ObjectComDrop helper just returned.
     /// AddCommand may have pushed entries above it; SetCommand may have
-    /// removed it entirely.
+    /// removed it entirely. The helper return still reaches native
+    /// `Finish(true)`, so success is recorded independently of attachment.
     pub fn finish_pending_drop(&mut self, command_instance_id: u64) -> bool {
+        self.record_native_success(CommandId::Drop);
         let Some(entry) = self.entries.iter_mut().find(|entry| {
             (command_instance_id == 0 || entry.instance_id == command_instance_id)
                 && matches!(
@@ -16873,8 +17020,10 @@ impl CommandStack {
 
     /// Finish the exact Throw whose live ObjectComPutTake helper returned.
     /// Callback-side AddCommand may have pushed another entry above it, and
-    /// SetCommand may have removed it entirely.
+    /// SetCommand may have removed it entirely. The helper return still
+    /// reaches native `Finish(true)` in either case.
     pub(crate) fn finish_pending_throw(&mut self, command_instance_id: u64) -> bool {
+        self.record_native_success(CommandId::Throw);
         let Some(entry) = self.entries.iter_mut().find(|entry| {
             (command_instance_id == 0 || entry.instance_id == command_instance_id)
                 && matches!(
@@ -17067,6 +17216,12 @@ impl CommandStack {
         &mut self,
         disposition: GetAttemptDisposition,
     ) -> Option<GetAttemptResolution> {
+        if disposition == GetAttemptDisposition::Complete {
+            // Get's callbackful collection attempt has returned to the
+            // still-executing native command even if scripts replaced its
+            // stack entry in the meantime.
+            self.record_native_success(CommandId::Get);
+        }
         let index = self.entries.iter().position(
             |entry| matches!(&entry.state, CommandState::Get(state) if state.enter_pending),
         )?;
@@ -17160,6 +17315,9 @@ impl CommandStack {
         definition_id: &str,
         succeeded: bool,
     ) -> Option<BuyAttemptResolution> {
+        if succeeded {
+            self.record_native_success(CommandId::Buy);
+        }
         let index = self.pending_buy_index(base, definition_id)?;
         if let CommandState::Buy(state) = &mut self.entries[index].state {
             state.evaluation_pending = false;
@@ -17228,6 +17386,9 @@ impl CommandStack {
         definition_id: &str,
         succeeded: bool,
     ) -> Option<SellAttemptResolution> {
+        if succeeded {
+            self.record_native_success(CommandId::Sell);
+        }
         let index = self.pending_sell_index(base, definition_id)?;
         if let CommandState::Sell(state) = &mut self.entries[index].state {
             state.evaluation_pending = false;
@@ -17330,6 +17491,38 @@ impl CommandStack {
         Some(ExitActivationResolution { feedback })
     }
 
+    pub(crate) fn resolve_acquire_script_result(
+        &mut self,
+        command_instance_id: u64,
+        result: AcquireScriptResult,
+    ) -> bool {
+        if result == AcquireScriptResult::Complete {
+            self.record_native_success(CommandId::Acquire);
+        }
+        let Some(entry) = self.entries.iter_mut().find(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(&entry.state, CommandState::Acquire(state) if state.script_pending)
+        }) else {
+            return false;
+        };
+        let CommandState::Acquire(state) = &mut entry.state else {
+            unreachable!("pending Acquire predicate matched another command");
+        };
+        if result == AcquireScriptResult::Complete {
+            state.script_pending = false;
+            state.script_invoked = false;
+            state.script_result = None;
+            entry.finished = Some(CommandStatus::Completed);
+        } else {
+            state.script_result = Some(result);
+        }
+        true
+    }
+
+    /// Legacy fixture seam for feeding the first Acquire without a native
+    /// command identity. Engine callback resolution uses the exact-instance
+    /// method above.
+    #[doc(hidden)]
     pub fn set_acquire_script_result(&mut self, result: AcquireScriptResult) -> bool {
         for entry in &mut self.entries {
             if let CommandState::Acquire(state) = &mut entry.state {
@@ -17340,14 +17533,32 @@ impl CommandStack {
         false
     }
 
-    pub fn set_construct_script_result(&mut self, result: AcquireScriptResult) -> bool {
-        for entry in &mut self.entries {
-            if let CommandState::Construct(state) = &mut entry.state {
-                state.script_result = Some(result);
-                return true;
-            }
+    pub(crate) fn resolve_construct_script_result(
+        &mut self,
+        command_instance_id: u64,
+        result: AcquireScriptResult,
+    ) -> bool {
+        if result == AcquireScriptResult::Complete {
+            self.record_native_success(CommandId::Construct);
         }
-        false
+        let Some(entry) = self.entries.iter_mut().find(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(&entry.state, CommandState::Construct(state) if state.script_pending)
+        }) else {
+            return false;
+        };
+        let CommandState::Construct(state) = &mut entry.state else {
+            unreachable!("pending Construct predicate matched another command");
+        };
+        if result == AcquireScriptResult::Complete {
+            state.script_pending = false;
+            state.script_invoked = false;
+            state.script_result = None;
+            entry.finished = Some(CommandStatus::Completed);
+        } else {
+            state.script_result = Some(result);
+        }
+        true
     }
 
     pub fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<CommandStepResult> {
@@ -19154,7 +19365,18 @@ impl ConstructState {
                 }
 
                 if Self::find_command(target, CommandId::Construct).is_none() {
-                    return CommandStepResult::failed(None).with_operations(operations);
+                    let result = CommandStepResult::failed(None).with_operations(operations);
+                    return if adopted_build.is_some() {
+                        // Native first calls Finish(true) after adopting the
+                        // target's Build, then may call Finish(false) when
+                        // that target no longer has Construct (:1714-1725).
+                        result.with_events(vec![CommandEvent::NativeCommandSuccess {
+                            object_id: ctx.object.id,
+                            command: CommandId::Construct,
+                        }])
+                    } else {
+                        result
+                    };
                 }
 
                 let site = self.site.unwrap_or(Vector2::ZERO);
@@ -19261,6 +19483,7 @@ impl ConstructState {
                         site,
                         target2: self.target2,
                         definition_id: definition_id.clone(),
+                        command_instance_id: 0,
                     },
                 ]);
             }
@@ -22248,6 +22471,7 @@ impl AcquireState {
                 range_y: self.range_y,
                 ignore_container: self.ignore_container,
                 definition_id: self.definition_id.clone(),
+                command_instance_id: 0,
             };
             return CommandStepResult::running(None).with_events(vec![event]);
         }
@@ -23426,6 +23650,14 @@ impl ActiveCommand {
                     ..
                 }
                 | CommandEvent::ObjectComExitJump {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::ControlCommandAcquire {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::ControlCommandConstruction {
                     command_instance_id,
                     ..
                 } if *command_instance_id == 0 => {

@@ -26,9 +26,9 @@ use crate::control::{
 use crate::math::{self, itofix};
 use crate::player::CountedControlType;
 use crate::{
-    C4Fixed, CATEGORY_MOUSE_SELECT, CommandDirection, Direction, Engine, EngineError, FixedVec2,
-    MessageSpec, MouseDragSource, ObjectEnterOutcome, ObjectId, PhysicalInfo, Value, Vector2,
-    message, ocf, tolerate_script_error,
+    C4Fixed, CATEGORY_MOUSE_SELECT, CommandDirection, CrewInfoLink, Direction, Engine, EngineError,
+    FixedVec2, MessageSpec, MouseDragSource, ObjectEnterOutcome, ObjectId, PhysicalInfo, Value,
+    Vector2, message, ocf, tolerate_script_error,
 };
 
 /// `C4DoubleClick` (C4Constants.h:156): frames within which a repeated com
@@ -1430,14 +1430,37 @@ impl Engine {
         let Some(cursor) = cursor.filter(|id| self.crew_object_infos.contains_key(id)) else {
             return;
         };
-        let Some(link) = self.crew_info_links.get(&cursor).copied() else {
+        self.count_crew_info_control(cursor, 1);
+    }
+
+    /// Increment one attached `C4ObjectInfo::ControlCount` once per native
+    /// control point. Each resulting multiple of five invokes a distinct
+    /// `DoExperience(1)` call (C4Command.cpp:1617-1622).
+    pub(crate) fn count_crew_info_control(&mut self, object: ObjectId, gain: i32) {
+        if gain <= 0 || !self.crew_object_infos.contains_key(&object) {
+            return;
+        }
+        let Some(link) = self.crew_info_links.get(&object).copied() else {
             return;
         };
-        let control_count = self.crew_info_control_counts.entry(link).or_default();
-        *control_count = control_count.wrapping_add(1);
-        if *control_count % 5 == 0 {
-            self.do_object_experience(cursor, 1);
+        for _ in 0..gain {
+            let awards_experience = {
+                let control_count = self.crew_info_control_counts.entry(link).or_default();
+                *control_count = control_count.wrapping_add(1);
+                *control_count % 5 == 0
+            };
+            if awards_experience {
+                self.do_object_experience(object, 1);
+            }
         }
+    }
+
+    /// Replay a synchronous host preview's runtime-only counter delta. Its
+    /// corresponding experience calls are transported separately so rank,
+    /// physical and presentation ordering stay identical to the preview.
+    pub(crate) fn adjust_crew_info_control_count(&mut self, link: CrewInfoLink, gain: i32) {
+        let control_count = self.crew_info_control_counts.entry(link).or_default();
+        *control_count = control_count.wrapping_add(gain);
     }
 
     #[doc(hidden)]
@@ -7272,9 +7295,9 @@ public func Activate(object clonk)
         (engine, crew, line, structure, endpoint)
     }
 
-    fn engine_with_counted_crew() -> (Engine, ObjectId, ObjectId) {
+    fn engine_with_counted_crew_script(script: &str) -> (Engine, ObjectId, ObjectId) {
         let mut engine = Engine::with_seed(0);
-        register_clonk(&mut engine, "Test", "");
+        register_clonk(&mut engine, "Test", script);
         engine
             .register_player(PlayerConfig::new(0, "Test"))
             .expect("player registers");
@@ -7349,6 +7372,10 @@ public func Activate(object clonk)
         (engine, first, second)
     }
 
+    fn engine_with_counted_crew() -> (Engine, ObjectId, ObjectId) {
+        engine_with_counted_crew_script("")
+    }
+
     fn execute_player_controls(
         engine: &mut Engine,
         controls: impl IntoIterator<Item = (i32, i32)>,
@@ -7358,6 +7385,237 @@ public func Activate(object clonk)
                 .execute_player_control(0, command, data)
                 .expect("player control executes");
         }
+    }
+
+    #[test]
+    fn command_success_experience_uses_shared_control_count_and_exact_modulo() {
+        fn finish_native(engine: &mut Engine, actor: ObjectId, request: CommandRequest) {
+            let command = request.id;
+            let index = engine.find_object_index(actor).expect("actor remains");
+            engine.objects[index]
+                .commands
+                .push_front(request)
+                .expect("command queues");
+            assert!(engine.objects[index].commands.finish_front_if(command));
+            engine
+                .finish_object_command_execution(actor)
+                .expect("successful finish tail runs");
+        }
+
+        let (mut engine, first, second) = engine_with_counted_crew();
+        engine.do_object_experience(first, 999);
+
+        finish_native(&mut engine, first, CommandRequest::new(CommandId::Wait));
+        assert_eq!(engine.crew_info_control_count(first), Some(0));
+        assert_eq!(engine.crew_object_info(first).unwrap().experience, 999);
+
+        finish_native(
+            &mut engine,
+            first,
+            CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(0))
+                .with_ty(Some(0)),
+        );
+        finish_native(
+            &mut engine,
+            first,
+            CommandRequest::new(CommandId::Acquire),
+        );
+        assert_eq!(engine.crew_info_control_count(first), Some(3));
+
+        let index = engine.find_object_index(first).expect("actor remains");
+        engine.objects[index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Attack)
+                    .with_target(Some(ObjectId::new(999_999)))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("failing Attack queues");
+        engine
+            .execute_object_command_now(first)
+            .expect("failing Attack executes");
+        assert_eq!(engine.crew_info_control_count(first), Some(3));
+        assert_eq!(engine.crew_object_info(first).unwrap().experience, 999);
+
+        for _ in 0..2 {
+            finish_native(
+                &mut engine,
+                first,
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(0))
+                    .with_ty(Some(0)),
+            );
+        }
+        assert_eq!(engine.crew_info_control_count(first), Some(5));
+        let info = engine.crew_object_info(first).expect("first crew has info");
+        assert_eq!((info.experience, info.rank), (1_000, 1));
+        assert_eq!(info.rank_name, "Ensign");
+
+        finish_native(
+            &mut engine,
+            first,
+            CommandRequest::new(CommandId::Build).with_target(Some(second)),
+        );
+        assert_eq!(engine.crew_info_control_count(first), Some(10));
+        assert_eq!(engine.crew_object_info(first).unwrap().experience, 1_001);
+
+        finish_native(
+            &mut engine,
+            first,
+            CommandRequest::new(CommandId::Attack).with_target(Some(second)),
+        );
+        assert_eq!(engine.crew_info_control_count(first), Some(25));
+        let info = engine.crew_object_info(first).expect("first crew has info");
+        assert_eq!((info.experience, info.rank), (1_004, 1));
+        let roster = &engine.crew_rosters[&0][0];
+        assert_eq!((roster.experience, roster.rank), (1_004, 1));
+        assert_eq!(roster.rank_name, "Ensign");
+
+        let index = engine.find_object_index(first).expect("actor remains");
+        engine.objects[index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(0))
+                    .with_ty(Some(0)),
+            )
+            .expect("script-finished command queues");
+        engine.objects[index]
+            .commands
+            .finish_entry_public(0, true);
+        engine
+            .finish_object_command_execution(first)
+            .expect("script-finished command clears");
+        assert_eq!(
+            engine.crew_info_control_count(first),
+            Some(25),
+            "FnFinishCommand sets Finished without calling native Finish(true)"
+        );
+    }
+
+    #[test]
+    fn native_finish_awards_after_callback_detaches_or_prefinishes_command() {
+        let script = r#"#strict
+local native_finish_mode;
+
+public func SetNativeFinishMode(int mode)
+{
+    native_finish_mode = mode;
+    return true;
+}
+
+protected func OnActionJump()
+{
+    if (native_finish_mode == 1) SetCommand(this(), "Wait");
+    if (native_finish_mode == 2) FinishCommand(this(), true, 0);
+    return true;
+}
+"#;
+        let (mut engine, detached, prefinished) = engine_with_counted_crew_script(script);
+
+        for actor in [detached, prefinished] {
+            engine.count_crew_info_control(actor, 4);
+        }
+
+        for (actor, mode) in [(detached, 1), (prefinished, 2)] {
+            let index = engine.find_object_index(actor).expect("crew remains");
+            assert_eq!(
+                engine
+                    .call_object_function(index, "SetNativeFinishMode", vec![Value::Int(mode)])
+                    .expect("configure the jump callback"),
+                Value::Bool(true)
+            );
+            let index = engine.find_object_index(actor).expect("crew remains");
+            engine.objects[index]
+                .commands
+                .push_front(CommandRequest::new(CommandId::Jump))
+                .expect("Jump queues");
+            engine
+                .execute_object_command_now(actor)
+                .expect("callbackful Jump finishes");
+
+            assert_eq!(engine.crew_info_control_count(actor), Some(5));
+            assert_eq!(
+                engine.crew_object_info(actor).unwrap().experience,
+                1,
+                "native Finish(true) awards after callback mode {mode}"
+            );
+        }
+
+        let detached_index = engine
+            .find_object_index(detached)
+            .expect("detached crew remains");
+        assert_eq!(
+            engine.objects[detached_index].commands.command_names(),
+            ["Wait"],
+            "SetCommand detached the executing Jump before its native finish tail"
+        );
+    }
+
+    #[test]
+    fn synchronous_execute_command_awards_before_finished_callback() {
+        let script = r#"#strict
+local callback_experience, callback_rank;
+
+protected func ControlCommandFinished()
+{
+    callback_experience = GetObjectInfoCoreVal("Experience", "ObjectInfo");
+    callback_rank = GetRank();
+}
+
+public func CompleteNative()
+{
+    SetCommand(this(), "Context", 0, 0, 0, this());
+    return ExecuteCommand();
+}
+
+public func MarkFinishedOnly()
+{
+    SetCommand(this(), "MoveTo", 0, GetX(), GetY());
+    FinishCommand(this(), true, 0);
+    return ExecuteCommand();
+}
+"#;
+        let (mut engine, first, _) = engine_with_counted_crew_script(script);
+        engine.do_object_experience(first, 999);
+        engine.count_crew_info_control(first, 4);
+        let index = engine.find_object_index(first).expect("first crew remains");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "CompleteNative", Vec::new())
+                .expect("native Context completes synchronously"),
+            Value::Bool(true)
+        );
+        assert_eq!(engine.crew_info_control_count(first), Some(5));
+        let info = engine.crew_object_info(first).expect("first crew has info");
+        assert_eq!((info.experience, info.rank), (1_000, 1));
+        let index = engine.find_object_index(first).expect("first crew remains");
+        assert_eq!(
+            engine.objects[index]
+                .state
+                .local_vars
+                .get("callback_experience"),
+            Some(&Value::Int(1_000))
+        );
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("callback_rank"),
+            Some(&Value::Int(1))
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "MarkFinishedOnly", Vec::new())
+                .expect("script-finished MoveTo clears synchronously"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine.crew_info_control_count(first),
+            Some(5),
+            "FnFinishCommand does not call C4Command::Finish(true)"
+        );
+        assert_eq!(engine.crew_object_info(first).unwrap().experience, 1_000);
     }
 
     #[test]
