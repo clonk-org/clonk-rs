@@ -14230,6 +14230,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("DoHomebaseProduction", do_homebase_production);
     script.register_host_function("AssignVar", set_var);
     script.register_host_function("SetVar", set_var);
+    script.register_host_function("DecVar", dec_var);
     script.register_host_function("Not", legacy_not);
     script.register_host_function("Or", legacy_or);
     script.register_host_function("And", legacy_and);
@@ -19006,6 +19007,27 @@ fn set_var(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     slots.set(index, value.clone());
     Ok(value)
+}
+
+/// `FnDecVar` (C4Script.cpp:3385-3389): prefix-decrement a slot in the
+/// calling function's `NumVars` list and return the new integer value.
+fn dec_var(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new("DecVar expects at most 1 argument"));
+    }
+    let index = legacy_arg_int(args, 0, "DecVar")?;
+    let Some(slots) = lc_script::caller_var_slots() else {
+        return Ok(Value::Nil);
+    };
+    if index >= LEGACY_MAX_ARRAY_SIZE {
+        return Err(RuntimeError::new("out of memory"));
+    }
+
+    let decremented = Value::Int(
+        cast_stable_raw_i32(&slots.get(index), "DecVar")?.wrapping_sub(1),
+    );
+    slots.set(index, decremented.clone());
+    Ok(decremented)
 }
 
 fn random(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -46968,6 +46990,7 @@ mod tests {
         "DeathAnnounce",
         "DebugLog",
         "Dec",
+        "DecVar",
         "DefinitionCall",
         "DigFree",
         "DigFreeRect",
@@ -49342,6 +49365,41 @@ global func PreInitializePlayer(int player)
                 Value::Int(9),
             ])
             .expect("SetVar without a caller succeeds"),
+            Value::Nil
+        );
+    }
+
+    #[test]
+    fn dec_var_decrements_the_callers_var_slot() {
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script(
+                r#"
+                #strict 3
+                func Probe() {
+                    SetVar(0, 5);
+                    return [DecVar(0), Var(0), DecVar(1), Var(1)];
+                }
+                "#,
+            )
+            .expect("DecVar caller-slot probe compiles");
+
+        assert_eq!(
+            engine.call("Probe", &[]).expect("DecVar probe runs"),
+            Value::Array(vec![
+                Value::Int(4),
+                Value::Int(4),
+                Value::Int(-1),
+                Value::Int(-1),
+            ])
+        );
+    }
+
+    #[test]
+    fn dec_var_without_a_script_caller_returns_nil() {
+        assert_eq!(
+            dec_var(&[Value::Int(0)]).expect("DecVar without a caller succeeds"),
             Value::Nil
         );
     }
