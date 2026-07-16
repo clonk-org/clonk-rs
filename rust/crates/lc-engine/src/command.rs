@@ -13619,6 +13619,164 @@ mod tests {
     }
 
     #[test]
+    fn targetless_enter_materializes_and_increments_the_base_failure_counter() {
+        let actor = snapshot_with_id(1);
+        let objects = HashMap::from([(actor.id, actor.clone())]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
+            .expect("base queues");
+        stack
+            .push_front(CommandRequest::new(CommandId::Enter).with_mode(CommandMode::SilentSub))
+            .expect("C++ links a targetless Enter");
+        assert_eq!(stack.command_names(), vec!["Enter", "Wait"]);
+
+        let failed = stack.step(&ctx).expect("targetless Enter executes");
+        assert_eq!(failed.status, CommandStatus::Failed);
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.command_names(), vec!["Wait"]);
+        assert_eq!(snapshot.commands[0].failures, 1);
+    }
+
+    #[test]
+    fn malformed_pushed_command_materializes_before_parent_failure_handling() {
+        let actor = snapshot_with_id(2);
+        let objects = HashMap::from([(actor.id, actor.clone())]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
+            .expect("parent queues");
+        let malformed = CommandRequest::new(CommandId::Call)
+            .with_data(CommandData::Text("Work".into()))
+            .with_mode(CommandMode::SilentSub);
+        let mut parent_result = CommandStepResult::running(None)
+            .with_operations(vec![CommandOperation::PushFront(malformed.clone())]);
+        stack.apply_result_operations(&mut parent_result);
+
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.command_names(), vec!["Call", "Wait"]);
+        assert!(matches!(
+            snapshot.commands[0].state,
+            CommandState::Malformed(CommandId::Call)
+        ));
+        assert_eq!(snapshot.command_views()[0].data, malformed.data);
+
+        // The materialized failure state and its native command identity
+        // survive save/restore, so a parent latch can never outlive a child
+        // merely because typed request conversion rejected its fields.
+        let encoded = serde_json::to_value(&snapshot).expect("snapshot serializes");
+        let decoded: CommandStackSnapshot =
+            serde_json::from_value(encoded).expect("snapshot deserializes");
+        let mut restored = CommandStack::new();
+        restored.restore_from_snapshot(&decoded);
+        let failed = restored.step(&ctx).expect("malformed Call executes");
+        assert_eq!(failed.status, CommandStatus::Failed);
+        let after = restored.snapshot();
+        assert_eq!(after.command_names(), vec!["Wait"]);
+        assert_eq!(after.commands[0].failures, 1);
+    }
+
+    #[test]
+    fn failed_full_stack_push_does_not_permanently_latch_its_parent() {
+        let actor_id = ObjectId::new(3);
+        let pushed_id = ObjectId::new(4);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Push;
+        actor.action_target = Some(pushed_id);
+        let pushed = snapshot_with_id(pushed_id.as_u64());
+        let objects = HashMap::from([(actor_id, actor.clone()), (pushed_id, pushed)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::Dig)
+                    .with_tx(Some(0))
+                    .with_ty(Some(0))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("Dig queues");
+        for _ in 1..MAX_COMMAND_STACK {
+            stack
+                .push_back(CommandRequest::new(CommandId::Wait))
+                .expect("tail fills command stack");
+        }
+
+        let first = stack.step(&ctx).expect("Dig attempts UnGrab");
+        assert_eq!(first.status, CommandStatus::Running);
+        assert_eq!(stack.len(), MAX_COMMAND_STACK);
+        assert_eq!(stack.command_names()[0], "Dig");
+
+        // Once capacity becomes available, executing the still-front parent
+        // clears the stale latch and retries the child instead of hanging.
+        stack.entries.pop_back().expect("free one command slot");
+        let retry = stack.step(&ctx).expect("Dig retries UnGrab");
+        assert_eq!(retry.status, CommandStatus::Running);
+        assert_eq!(stack.command_names()[0], "UnGrab");
+    }
+
+    #[test]
+    fn typed_malformed_exceptions_keep_native_evaluation_and_guard_order() {
+        let actor = snapshot_with_id(5);
+        let objects = HashMap::from([(actor.id, actor.clone())]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+
+        let dig = DigState::from_request(&CommandRequest::new(CommandId::Dig))
+            .expect("missing Dig coordinates are numeric zero");
+        assert_eq!(dig.target, Vector2::ZERO);
+
+        let mut unselected = actor.clone();
+        unselected.crew_member = true;
+        unselected.owner = 7;
+        unselected.selected = false;
+        let unselected_ctx =
+            move_to_ctx_at_frame(&unselected, &objects, &players, &definitions, 0);
+        let mut follow = FollowState::from_request(&CommandRequest::new(CommandId::Follow))
+            .expect("targetless Follow still links");
+        assert_eq!(follow.step(&unselected_ctx).status, CommandStatus::Completed);
+
+        let mut push_to = CommandStack::new();
+        push_to
+            .push_front(CommandRequest::new(CommandId::PushTo))
+            .expect("targetless PushTo links");
+        let evaluation = push_to.step(&ctx).expect("PushTo evaluates");
+        assert_eq!(evaluation.status, CommandStatus::Running);
+        assert_eq!(
+            (push_to.command_views()[0].tx, push_to.command_views()[0].ty),
+            (Some(0), Some(0))
+        );
+        assert_eq!(
+            push_to.step(&ctx).expect("PushTo guard executes").status,
+            CommandStatus::Failed
+        );
+
+        let mut acquire = CommandStack::new();
+        acquire
+            .push_front(CommandRequest::new(CommandId::Acquire))
+            .expect("Data=0 Acquire links");
+        assert_eq!(
+            acquire.step(&ctx).expect("Acquire evaluates").status,
+            CommandStatus::Running
+        );
+        assert_eq!(
+            acquire.step(&ctx).expect("Acquire guard executes").status,
+            CommandStatus::Failed
+        );
+    }
+
+    #[test]
     fn failing_subcommand_increments_base_failures_and_schedules_retry() {
         let actor_id = ObjectId::new(1);
         let mut actor = snapshot_with_id(actor_id.as_u64());
@@ -19578,8 +19736,10 @@ struct DigState {
 
 impl DigState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
-        let tx = request.tx.ok_or(CommandError::Unsupported)?;
-        let ty = request.ty.ok_or(CommandError::Unsupported)?;
+        // Tx is a C4Value and Ty is an integer; omitted command arguments
+        // read as zero rather than making Dig structurally invalid.
+        let tx = request.tx.unwrap_or(0);
+        let ty = request.ty.unwrap_or(0);
         let dig_out_material = match &request.data {
             CommandData::Integer(value) => *value != 0,
             CommandData::Text(text) => !text.is_empty(),
@@ -20123,7 +20283,7 @@ impl ActivateState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PushToState {
-    target: ObjectId,
+    target: Option<ObjectId>,
     container: Option<ObjectId>,
     tx: Option<i32>,
     ty: Option<i32>,
@@ -20137,9 +20297,8 @@ struct PushToState {
 
 impl PushToState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
-        let target = request.target.ok_or(CommandError::Unsupported)?;
         Ok(Self {
-            target,
+            target: request.target,
             container: request.target2,
             tx: request.tx,
             ty: request.ty,
@@ -20195,7 +20354,10 @@ impl PushToState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let target_snapshot = match ctx.resolve(self.target) {
+        let Some(target) = self.target else {
+            return CommandStepResult::failed(None);
+        };
+        let target_snapshot = match ctx.resolve(target) {
             Some(snapshot) => snapshot,
             None => return CommandStepResult::failed(None),
         };
@@ -20204,7 +20366,7 @@ impl PushToState {
             return CommandStepResult::failed(None);
         }
 
-        if self.container == Some(self.target) {
+        if self.container == Some(target) {
             return CommandStepResult::failed(None);
         }
 
@@ -20239,7 +20401,7 @@ impl PushToState {
             if Some(target_container) != self.container {
                 let mut result = CommandStepResult::running(update.clone());
                 let request = CommandRequest::new(CommandId::Activate)
-                    .with_target(Some(self.target))
+                    .with_target(Some(target))
                     .with_update_interval(40)
                     .with_mode(CommandMode::SilentSub);
                 result.operations.push(CommandOperation::PushFront(request));
@@ -20248,12 +20410,12 @@ impl PushToState {
         }
 
         let pushing_target = ctx.object.action_procedure == ActionProcedure::Push
-            && ctx.object.action_target == Some(self.target);
+            && ctx.object.action_target == Some(target);
 
         if !pushing_target {
             let mut result = CommandStepResult::running(update.clone());
             let request = CommandRequest::new(CommandId::Grab)
-                .with_target(Some(self.target))
+                .with_target(Some(target))
                 .with_update_interval(40)
                 .with_mode(CommandMode::SilentSub);
             result.operations.push(CommandOperation::PushFront(request));
@@ -21344,15 +21506,14 @@ impl RetryState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FollowState {
-    target: ObjectId,
+    target: Option<ObjectId>,
     update_interval: u32,
 }
 
 impl FollowState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
-        let target = request.target.ok_or(CommandError::Unsupported)?;
         Ok(Self {
-            target,
+            target: request.target,
             update_interval: request.update_interval.max(1),
         })
     }
@@ -21364,7 +21525,10 @@ impl FollowState {
             return CommandStepResult::completed(None);
         }
 
-        let target = match ctx.resolve(self.target) {
+        let Some(target_id) = self.target else {
+            return CommandStepResult::failed(None);
+        };
+        let target = match ctx.resolve(target_id) {
             Some(snapshot) => snapshot,
             None => return CommandStepResult::failed(None),
         };
@@ -21984,8 +22148,7 @@ struct AcquireState {
 
 impl AcquireState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
-        let definition_id =
-            command_data_to_definition_id(&request.data).ok_or(CommandError::Unsupported)?;
+        let definition_id = command_data_to_definition_id(&request.data).unwrap_or_default();
         // Fold the eventual InitEvaluation values into private state now;
         // evaluation_pending still keeps them out of the live command view
         // and prevents command work until the native evaluation Execute.
@@ -22128,6 +22291,10 @@ impl AcquireState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.definition_id.is_empty() {
+            return CommandStepResult::failed(None);
+        }
+
         let has_item = ctx
             .object
             .contents
@@ -22834,6 +23001,10 @@ enum CommandState {
     Acquire(AcquireState),
     Home(HomeState),
     Energy(EnergyState),
+    /// A recognized command whose request lacked fields required by the
+    /// typed Rust handler. Native C4Command still links such a node and lets
+    /// its handler fail, so retain the command identity and creating request.
+    Malformed(CommandId),
     Unsupported,
 }
 
@@ -22870,7 +23041,33 @@ impl CommandState {
             CommandState::Acquire(_) => Some(CommandId::Acquire),
             CommandState::Home(_) => Some(CommandId::Home),
             CommandState::Energy(_) => Some(CommandId::Energy),
+            CommandState::Malformed(id) => Some(*id),
             CommandState::Unsupported => None,
+        }
+    }
+
+    /// Child-command latches are meaningful only while that child sits
+    /// above its parent. Whenever the parent itself executes, the child has
+    /// completed, failed, or could not be pushed (for example StackFull), so
+    /// retrying must start from an unlatched state like native C4Command.
+    fn clear_child_command_latches(&mut self) {
+        match self {
+            CommandState::Dig(state) => {
+                state.ungrab_requested = false;
+                state.exit_requested = false;
+            }
+            CommandState::Activate(state) => {
+                state.exit_requested = false;
+                state.enter_requested = false;
+            }
+            CommandState::Acquire(state) => {
+                state.buy_requested = false;
+                state.last_buy_request = None;
+            }
+            CommandState::Energy(state) => {
+                state.acquire_requested = false;
+            }
+            _ => {}
         }
     }
 
@@ -22934,6 +23131,9 @@ impl CommandState {
     /// FnGetCommand field view.
     fn denumerate_object_references(&mut self, object_numbers: &HashSet<u64>) {
         match self {
+            CommandState::Follow(state) => {
+                denumerate_object_reference(&mut state.target, object_numbers);
+            }
             CommandState::MoveTo(state) => {
                 denumerate_object_reference(&mut state.target, object_numbers);
             }
@@ -22950,6 +23150,7 @@ impl CommandState {
                 denumerate_object_reference(&mut state.container, object_numbers);
             }
             CommandState::PushTo(state) => {
+                denumerate_object_reference(&mut state.target, object_numbers);
                 denumerate_object_reference(&mut state.container, object_numbers);
             }
             CommandState::Put(state) => {
@@ -22997,6 +23198,7 @@ impl CommandState {
             clear_matching_object_reference(reference, removed)
         };
         match self {
+            CommandState::Follow(state) => clear(&mut state.target),
             CommandState::MoveTo(state) => clear(&mut state.target),
             CommandState::Enter(state) => clear(&mut state.target),
             CommandState::Grab(state) if state.target == removed => {
@@ -23012,7 +23214,9 @@ impl CommandState {
             CommandState::Activate(state) => {
                 clear(&mut state.target) | clear(&mut state.container)
             }
-            CommandState::PushTo(state) => clear(&mut state.container),
+            CommandState::PushTo(state) => {
+                clear(&mut state.target) | clear(&mut state.container)
+            }
             CommandState::Put(state) => clear(&mut state.requested_item),
             CommandState::Drop(state) => {
                 clear(&mut state.requested_item) | clear(&mut state.delegated_container)
@@ -23107,7 +23311,8 @@ struct ActiveCommand {
 
 impl ActiveCommand {
     fn from_request(request: CommandRequest) -> Result<Self, CommandError> {
-        let state = match request.id {
+        let state = (|| -> Result<CommandState, CommandError> {
+            Ok(match request.id {
             CommandId::Follow => CommandState::Follow(FollowState::from_request(&request)?),
             CommandId::MoveTo => CommandState::MoveTo(MoveToState::from_request(&request)),
             CommandId::Enter => CommandState::Enter(EnterState::from_request(&request)?),
@@ -23140,7 +23345,13 @@ impl ActiveCommand {
             CommandId::Acquire => CommandState::Acquire(AcquireState::from_request(&request)?),
             CommandId::Home => CommandState::Home(HomeState::from_request(&request)?),
             CommandId::Energy => CommandState::Energy(EnergyState::from_request(&request)?),
-            _ => CommandState::Unsupported,
+            _ => CommandState::Malformed(request.id),
+            })
+        })();
+        let state = match state {
+            Ok(state) => state,
+            Err(CommandError::Unsupported) => CommandState::Malformed(request.id),
+            Err(error) => return Err(error),
         };
 
         if matches!(state, CommandState::Unsupported) {
@@ -23209,6 +23420,8 @@ impl ActiveCommand {
         gravity: crate::C4Fixed,
         next_is_move_to: bool,
     ) -> CommandStepResult {
+        self.state.clear_child_command_latches();
+
         if self.failures > 0 {
             if self.retries > 0 {
                 self.failures = 0;
@@ -23300,6 +23513,7 @@ impl ActiveCommand {
             CommandState::Acquire(state) => state.step(ctx),
             CommandState::Home(state) => state.step(ctx),
             CommandState::Energy(state) => state.step(ctx),
+            CommandState::Malformed(_) => CommandStepResult::failed(None),
             CommandState::Unsupported => CommandStepResult::failed(None),
         };
         for event in &mut result.events {
