@@ -11783,6 +11783,87 @@ protected func ControlCommand(command, target, tx, ty, target2, data, seventh) {
     }
 
     #[test]
+    fn noncaptain_buy_and_sell_sync_from_the_mutating_team_member() {
+        // SyncHomebaseMaterialToTeam copies the complete list from the player
+        // whose Buy/Sell2Home just changed it. Only the separate join-time
+        // FromTeam path copies from the team captain (C4Player.cpp:850-852,
+        // 887-891,2335-2367).
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 2);
+        engine.set_teams(vec![
+            crate::TeamInfo::new(1, "Team", 0).with_player_ids(vec![1, 2]),
+        ]);
+        engine
+            .set_player_team(1, Some(1))
+            .expect("recipient joins team");
+        engine
+            .set_player_team(2, Some(1))
+            .expect("base owner joins team");
+        engine.set_team_home_base_rule(true);
+
+        let mut item =
+            Definition::from_script("ITEM", "Item", "#strict 2\n").expect("item compiles");
+        item.set_collectible(true);
+        item.set_rebuyable(true);
+        item.set_value(25);
+        engine.register_definition(item).expect("register item");
+        engine.set_player_wealth(2, 25).expect("base owner wealth");
+        for player in [1, 2] {
+            engine
+                .player_mut(player)
+                .expect("team member remains")
+                .set_home_base_material_entries(vec![("ITEM".into(), 1)]);
+        }
+
+        execute_buy_command(&mut engine, crew, hut, "ITEM", 1);
+        for player in [1, 2] {
+            assert_eq!(
+                engine
+                    .player(player)
+                    .expect("team member remains")
+                    .home_base_material()
+                    .get("ITEM"),
+                Some(&0),
+                "player 2's decrement must replace every teammate's list"
+            );
+        }
+        let bought = engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "ITEM" && object.status.is_active())
+            .expect("purchase created an item")
+            .id;
+
+        // Isolate the reverse mutation: a rebuyable sale must create the
+        // missing slot from player 2 and then fan that list out to player 1.
+        for player in [1, 2] {
+            engine
+                .player_mut(player)
+                .expect("team member remains")
+                .set_home_base_material_entries(Vec::new());
+        }
+        execute_sell_command(&mut engine, crew, hut, "ITEM", 1);
+        assert!(
+            engine
+                .object_snapshot(bought)
+                .is_none_or(|object| !object.status.is_active()),
+            "the purchased item was sold"
+        );
+        for player in [1, 2] {
+            assert_eq!(
+                engine
+                    .player(player)
+                    .expect("team member remains")
+                    .home_base_material()
+                    .get("ITEM"),
+                Some(&1),
+                "player 2's increment must replace every teammate's list"
+            );
+        }
+    }
+
+    #[test]
     fn explicit_buy_obeys_the_global_buy_gate() {
         // C4Command::Buy checks BASEFUNC_Buy before either its implicit or
         // explicit-target paths. In particular, an explicit target must not
