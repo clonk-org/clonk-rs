@@ -44700,6 +44700,31 @@ impl Engine {
                 } => {
                     let _ = self.draw_material_quad(&material_texture, vertices, ift);
                 }
+                LandscapeOperation::DrawMatChunks {
+                    origin,
+                    width,
+                    height,
+                    count_x,
+                    count_y,
+                    material,
+                    byte,
+                    map_seed,
+                    random_offsets,
+                    texmap,
+                } => {
+                    let _ = self.draw_material_chunks(
+                        origin,
+                        width,
+                        height,
+                        count_x,
+                        count_y,
+                        &material,
+                        byte,
+                        map_seed,
+                        &random_offsets,
+                        texmap,
+                    );
+                }
                 LandscapeOperation::DrawMap {
                     origin,
                     bitmap,

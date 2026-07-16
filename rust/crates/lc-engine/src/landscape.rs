@@ -830,6 +830,81 @@ impl PixelGrid {
         self.record_render_change(base_revision, base_token, rect, storage_was_shared);
     }
 
+    /// C4Landscape::DrawChunks' single clipped Surface8 batch
+    /// (C4Landscape.cpp:2419-2442). The synchronized Random(1000) results
+    /// were sampled by the script host; DrawChunk's remaining jitter is the
+    /// deterministic ChunkyRandom chain derived from each result and MapSeed.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_material_chunks(
+        &mut self,
+        clip: RasterChangeRect,
+        origin: Vector2,
+        width: i32,
+        height: i32,
+        count_x: i32,
+        count_y: i32,
+        byte: u8,
+        shape: crate::chunky::ChunkShape,
+        random_offsets: &[i32],
+        map_seed: i32,
+    ) {
+        let Some(rect) = clip
+            .clipped_to(self.width as i32, self.height as i32)
+            .map(PixelGridDirtyRect::from)
+        else {
+            return;
+        };
+
+        let storage_was_shared = Arc::strong_count(&self.bytes) > 1;
+        let base_revision = self.revision;
+        let base_token = self.render_token;
+        let bytes = mem::take(Arc::make_mut(&mut self.bytes));
+        let mut surface = crate::chunky::Surface8::from_bytes(
+            self.width as i32,
+            self.height as i32,
+            bytes,
+        );
+        surface.clip(
+            clip.x,
+            clip.y,
+            clip.x.saturating_add(clip.width).saturating_sub(1),
+            clip.y.saturating_add(clip.height).saturating_sub(1),
+        );
+
+        let chunk_width = width / count_x;
+        let chunk_height = height / count_y;
+        let mut offsets = random_offsets.iter().copied();
+        for x in 0..count_x {
+            for y in 0..count_y {
+                let random_offset = offsets
+                    .next()
+                    .expect("validated DrawMatChunks random offset count");
+                crate::chunky::draw_chunk(
+                    &mut surface,
+                    origin
+                        .x
+                        .wrapping_add(width.wrapping_mul(x) / count_x),
+                    origin
+                        .y
+                        .wrapping_add(height.wrapping_mul(y) / count_y),
+                    chunk_width,
+                    chunk_height,
+                    byte,
+                    shape,
+                    random_offset,
+                    map_seed,
+                );
+            }
+        }
+        debug_assert!(offsets.next().is_none());
+
+        self.bytes = Arc::new(surface.into_bytes());
+        self.rebuild_material_counts();
+        self.revision = self.revision.wrapping_add(1);
+        self.render_token = self.advance_rect_render_token(base_token, self.revision, rect);
+        self.record_render_change(base_revision, base_token, rect, storage_was_shared);
+    }
+
     /// The first texmap index carrying the given material (the
     /// Mat2PixColDefault stand-in for grid writes).
     fn byte_for_material(&self, material: MaterialId) -> Option<u8> {
@@ -1288,6 +1363,54 @@ impl RasterChangeRect {
     }
 }
 
+fn material_chunk_raster_bounds(
+    origin: Vector2,
+    width: i32,
+    height: i32,
+    landscape_width: i32,
+    landscape_height: i32,
+) -> (RasterChangeRect, Option<RasterChangeRect>) {
+    let prepare_bounds = RasterChangeRect::new(
+        origin.x.saturating_sub(5),
+        origin.y.saturating_sub(5),
+        width.saturating_add(10),
+        height.saturating_add(10),
+    );
+    if landscape_width <= 0 || landscape_height <= 0 {
+        return (prepare_bounds, None);
+    }
+
+    // CSurface8::Clip clamps each inclusive endpoint independently instead
+    // of intersecting a rectangle with the surface.
+    let clip_x = origin
+        .x
+        .saturating_sub(5)
+        .clamp(0, landscape_width - 1);
+    let clip_y = origin
+        .y
+        .saturating_sub(5)
+        .clamp(0, landscape_height - 1);
+    let clip_x2 = origin
+        .x
+        .saturating_add(width)
+        .saturating_add(5)
+        .clamp(0, landscape_width - 1);
+    let clip_y2 = origin
+        .y
+        .saturating_add(height)
+        .saturating_add(5)
+        .clamp(0, landscape_height - 1);
+    let changed_bounds = (clip_x2 >= clip_x && clip_y2 >= clip_y).then(|| {
+        RasterChangeRect::new(
+            clip_x,
+            clip_y,
+            clip_x2 - clip_x + 1,
+            clip_y2 - clip_y + 1,
+        )
+    });
+    (prepare_bounds, changed_bounds)
+}
+
 impl From<RasterChangeRect> for PixelGridDirtyRect {
     fn from(rect: RasterChangeRect) -> Self {
         Self {
@@ -1671,6 +1794,178 @@ impl Landscape {
         true
     }
 
+    /// Apply DrawMatChunks to a callback's COW landscape so later native
+    /// reads observe C++'s synchronous Surface8 mutation. The authoritative
+    /// Engine fold repeats the same captured geometry with solid-mask
+    /// handling after the VM returns; no global RNG is read here.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn preview_draw_material_chunks(
+        &mut self,
+        origin: Vector2,
+        width: i32,
+        height: i32,
+        count_x: i32,
+        count_y: i32,
+        material: &str,
+        byte: u8,
+        map_seed: i32,
+        random_offsets: &[i32],
+        texmap: RuntimeTexMapState,
+    ) -> bool {
+        let Some(shape) = texmap.material(material).map(|material| material.shape) else {
+            return false;
+        };
+        if !self.replace_runtime_texmap_state(texmap) {
+            return false;
+        }
+        let Some((landscape_width, landscape_height)) = self.grid_dimensions() else {
+            return true;
+        };
+        let (prepare_bounds, changed_bounds) = material_chunk_raster_bounds(
+            origin,
+            width,
+            height,
+            landscape_width,
+            landscape_height,
+        );
+        if count_x <= 0 || count_y <= 0 {
+            let _ = self.raster_transaction(prepare_bounds, |_, _| {});
+            return true;
+        }
+        let expected_offsets = (count_x as usize).saturating_mul(count_y as usize);
+        if random_offsets.len() != expected_offsets {
+            return false;
+        }
+        let Some(changed_bounds) = changed_bounds else {
+            let _ = self.raster_transaction(prepare_bounds, |_, _| {});
+            return true;
+        };
+        let _ = self.raster_transaction_with_bounds(
+            Some(prepare_bounds),
+            Some(changed_bounds),
+            |grid, _state| {
+                grid.draw_material_chunks(
+                    changed_bounds,
+                    origin,
+                    width,
+                    height,
+                    count_x,
+                    count_y,
+                    byte,
+                    shape,
+                    random_offsets,
+                    map_seed,
+                );
+            },
+        );
+        true
+    }
+
+    /// Callback-COW counterpart of Engine's solid-mask raster transaction.
+    /// Keep active MCVehic pixels put while updating each bake's saved
+    /// background exactly as PrepareChange/FinishChange would in C++.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn preview_draw_material_chunks_with_masks(
+        &mut self,
+        bakes: &mut [(crate::ObjectId, crate::SolidMaskBake)],
+        origin: Vector2,
+        width: i32,
+        height: i32,
+        count_x: i32,
+        count_y: i32,
+        material: &str,
+        byte: u8,
+        map_seed: i32,
+        random_offsets: &[i32],
+        texmap: RuntimeTexMapState,
+    ) -> bool {
+        let mask_bounds = self.grid_dimensions().and_then(|(grid_width, grid_height)| {
+            let (prepare_bounds, _) = material_chunk_raster_bounds(
+                origin,
+                width,
+                height,
+                grid_width,
+                grid_height,
+            );
+            RasterChangeRect::new(
+                prepare_bounds.x.saturating_sub(2),
+                prepare_bounds.y.saturating_sub(16),
+                prepare_bounds.width.saturating_add(4),
+                prepare_bounds.height.saturating_add(32),
+            )
+            .clipped_to(grid_width, grid_height)
+        });
+        let vehicle = self.grid_vehicle_byte();
+        let mask_indices = vehicle
+            .map(|_| {
+                bakes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, (_, bake))| {
+                        mask_bounds?
+                            .intersection(bake.x, bake.y, bake.width, bake.height)
+                            .map(|_| index)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if let Some(vehicle) = vehicle {
+            for &index in mask_indices.iter().rev() {
+                let bake = bakes[index].1.clone();
+                let overlap = mask_bounds
+                    .and_then(|bounds| {
+                        bounds.intersection(bake.x, bake.y, bake.width, bake.height)
+                    })
+                    .expect("selected DrawMatChunks mask still overlaps");
+                for y in overlap.y..overlap.y + overlap.height {
+                    for x in overlap.x..overlap.x + overlap.width {
+                        let buffer_index = ((y - bake.y) * bake.width + (x - bake.x)) as usize;
+                        let saved = bake.buffer[buffer_index];
+                        if saved != vehicle {
+                            self.grid_write_byte(x, y, saved);
+                        }
+                    }
+                }
+            }
+        }
+
+        let result = self.preview_draw_material_chunks(
+            origin,
+            width,
+            height,
+            count_x,
+            count_y,
+            material,
+            byte,
+            map_seed,
+            random_offsets,
+            texmap,
+        );
+
+        if let Some(vehicle) = vehicle {
+            for &index in &mask_indices {
+                let bake = &mut bakes[index].1;
+                let overlap = mask_bounds
+                    .and_then(|bounds| {
+                        bounds.intersection(bake.x, bake.y, bake.width, bake.height)
+                    })
+                    .expect("selected DrawMatChunks mask still overlaps");
+                for y in overlap.y..overlap.y + overlap.height {
+                    for x in overlap.x..overlap.x + overlap.width {
+                        let buffer_index = ((y - bake.y) * bake.width + (x - bake.x)) as usize;
+                        if bake.buffer[buffer_index] == vehicle {
+                            continue;
+                        }
+                        bake.buffer[buffer_index] = self.grid_byte_at(x, y).unwrap_or(0);
+                        self.grid_write_byte(x, y, vehicle);
+                    }
+                }
+            }
+        }
+        result
+    }
+
     /// Rebuild the Rust column approximation from the authoritative Surface8
     /// plane. Scenario activation uses this once; runtime transactions use the
     /// affected columns only.
@@ -1716,7 +2011,20 @@ impl Landscape {
         change: impl FnOnce(&mut PixelGrid, &mut LandscapeRasterState) -> R,
     ) -> Option<R> {
         let (width, height) = self.grid_dimensions()?;
-        let bounds = bounds.clipped_to(width, height)?;
+        let changed_bounds = bounds.clipped_to(width, height);
+        self.raster_transaction_with_bounds(Some(bounds), changed_bounds, change)
+    }
+
+    /// DrawChunks is the one legacy writer whose Surface8 clip extends one
+    /// inclusive pixel beyond its PrepareChange/FinishChange C4Rect. Keep
+    /// relight bounds separate from the actual changed-byte bounds while
+    /// retaining the shared texture-map/derived-column transaction seam.
+    fn raster_transaction_with_bounds<R>(
+        &mut self,
+        relight_bounds: Option<RasterChangeRect>,
+        changed_bounds: Option<RasterChangeRect>,
+        change: impl FnOnce(&mut PixelGrid, &mut LandscapeRasterState) -> R,
+    ) -> Option<R> {
         let result = {
             let pixels = self.pixels.as_mut()?;
             let state = self.raster_state.as_mut()?;
@@ -1724,10 +2032,14 @@ impl Landscape {
             pixels.sync_runtime_texmap(state.texmap());
             // FinishChange relights synchronously, so a later direct
             // Surface32 write in the same script call remains visible.
-            pixels.relight_surface32_rect(bounds);
+            if let Some(bounds) = relight_bounds {
+                pixels.relight_surface32_rect(bounds);
+            }
             result
         };
-        self.refresh_raster_columns(bounds.columns());
+        if let Some(bounds) = changed_bounds {
+            self.refresh_raster_columns(bounds.columns());
+        }
         Some(result)
     }
 
@@ -4025,8 +4337,28 @@ impl crate::Engine {
         bounds: RasterChangeRect,
         change: impl FnOnce(&mut PixelGrid, &mut LandscapeRasterState) -> R,
     ) -> Option<R> {
+        self.landscape_raster_transaction_with_draw_bounds(bounds, bounds, change)
+    }
+
+    /// Variant for C4Landscape::DrawChunks, whose actual inclusive
+    /// Surface8 clip differs from its PrepareChange/FinishChange bounds.
+    fn landscape_raster_transaction_with_draw_bounds<R>(
+        &mut self,
+        prepare_bounds: RasterChangeRect,
+        changed_bounds: RasterChangeRect,
+        change: impl FnOnce(&mut PixelGrid, &mut LandscapeRasterState) -> R,
+    ) -> Option<R> {
         let (width, height) = self.landscape.as_ref()?.grid_dimensions()?;
-        let bounds = bounds.clipped_to(width, height)?;
+        let changed_bounds = changed_bounds.clipped_to(width, height);
+        // PrepareChange expands the solid-mask removal window by twice the
+        // maximum light distance before walking Last -> Prev.
+        let mask_bounds = RasterChangeRect::new(
+            prepare_bounds.x.saturating_sub(2),
+            prepare_bounds.y.saturating_sub(16),
+            prepare_bounds.width.saturating_add(4),
+            prepare_bounds.height.saturating_add(32),
+        )
+        .clipped_to(width, height);
         let vehicle = self.landscape.as_ref()?.grid_vehicle_byte();
         let mask_indices = vehicle
             .map(|_| {
@@ -4035,7 +4367,7 @@ impl crate::Engine {
                     .enumerate()
                     .filter_map(|(index, object)| {
                         let bake = object.solid_mask_bake.as_ref()?;
-                        bounds
+                        mask_bounds?
                             .intersection(bake.x, bake.y, bake.width, bake.height)
                             .map(|_| index)
                     })
@@ -4048,7 +4380,8 @@ impl crate::Engine {
         if let Some(vehicle) = vehicle {
             for &index in mask_indices.iter().rev() {
                 let bake = self.objects[index].solid_mask_bake.clone()?;
-                let overlap = bounds.intersection(bake.x, bake.y, bake.width, bake.height)?;
+                let overlap = mask_bounds?
+                    .intersection(bake.x, bake.y, bake.width, bake.height)?;
                 let landscape = self.landscape.as_mut()?;
                 for y in overlap.y..overlap.y + overlap.height {
                     for x in overlap.x..overlap.x + overlap.width {
@@ -4067,7 +4400,7 @@ impl crate::Engine {
         let result = self
             .landscape
             .as_mut()?
-            .raster_transaction(bounds, change);
+            .raster_transaction_with_bounds(Some(prepare_bounds), changed_bounds, change);
 
         // C4SolidMask::First -> Next (oldest to newest). Repair updates the
         // saved background before restoring MCVehic.
@@ -4075,7 +4408,8 @@ impl crate::Engine {
             for &index in &mask_indices {
                 let (objects, landscape) = (&mut self.objects, &mut self.landscape);
                 let bake = objects[index].solid_mask_bake.as_mut()?;
-                let overlap = bounds.intersection(bake.x, bake.y, bake.width, bake.height)?;
+                let overlap = mask_bounds?
+                    .intersection(bake.x, bake.y, bake.width, bake.height)?;
                 let landscape = landscape.as_mut()?;
                 for y in overlap.y..overlap.y + overlap.height {
                     for x in overlap.x..overlap.x + overlap.width {
@@ -4129,6 +4463,84 @@ impl crate::Engine {
         });
         // Once GetIndexMatTex resolved, C++ returns true even when Surface8
         // clipping leaves the polygon wholly outside the landscape.
+        true
+    }
+
+    /// FnDrawMatChunks/C4Landscape::DrawChunks
+    /// (C4Script.cpp:4802-4805; C4Landscape.cpp:2419-2445). Texture-map
+    /// resolution and every synced Random(1000) draw already happened in
+    /// the host callback; this fold only applies the retained deterministic
+    /// ChunkyRandom geometry to the authoritative Surface8 plane.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_material_chunks(
+        &mut self,
+        origin: Vector2,
+        width: i32,
+        height: i32,
+        count_x: i32,
+        count_y: i32,
+        material: &str,
+        byte: u8,
+        map_seed: i32,
+        random_offsets: &[i32],
+        texmap: RuntimeTexMapState,
+    ) -> bool {
+        let Some(shape) = texmap.material(material).map(|material| material.shape) else {
+            return false;
+        };
+        if !self.replace_runtime_texmap(texmap) {
+            return false;
+        }
+
+        let (landscape_width, landscape_height) = self
+            .landscape
+            .as_ref()
+            .and_then(Landscape::grid_dimensions)
+            .unwrap_or_default();
+        let (prepare_bounds, changed_bounds) = material_chunk_raster_bounds(
+            origin,
+            width,
+            height,
+            landscape_width,
+            landscape_height,
+        );
+
+        // Non-positive counts enter neither C++ loop, but resolution and a
+        // possible texmap allocation still succeed without any RNG draw.
+        // PrepareChange/FinishChange nevertheless bracket the empty batch.
+        if count_x <= 0 || count_y <= 0 {
+            let _ = self.landscape_raster_transaction(prepare_bounds, |_, _| {});
+            return true;
+        }
+        let expected_offsets = (count_x as usize).saturating_mul(count_y as usize);
+        if random_offsets.len() != expected_offsets {
+            return false;
+        }
+
+        let Some(changed_bounds) = changed_bounds else {
+            let _ = self.landscape_raster_transaction(prepare_bounds, |_, _| {});
+            return true;
+        };
+        let _ = self.landscape_raster_transaction_with_draw_bounds(
+            prepare_bounds,
+            changed_bounds,
+            |grid, _state| {
+            grid.draw_material_chunks(
+                changed_bounds,
+                origin,
+                width,
+                height,
+                count_x,
+                count_y,
+                byte,
+                shape,
+                random_offsets,
+                map_seed,
+            );
+            },
+        );
+        // Once material/texture resolution succeeds, C++ returns true even
+        // when clipping or degenerate geometry changes no pixel.
         true
     }
 

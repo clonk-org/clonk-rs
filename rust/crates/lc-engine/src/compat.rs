@@ -2059,10 +2059,10 @@ impl HostWorldContext {
     }
 
     /// Thread state-bearing landscape operations across effect callbacks
-    /// that execute before the authoritative Engine fold. Pixel writes keep
-    /// the existing deferred-preview boundary, but C4TextureMap allocations
-    /// and DrawDefMap's retained creator mutation are live C++ state needed
-    /// to render later callbacks correctly.
+    /// that execute before the authoritative Engine fold. DrawMatChunks is
+    /// synchronously visible to native pixel reads; DrawMap keeps its older
+    /// deferred-pixel boundary. Texture-map allocations and DrawDefMap's
+    /// retained creator mutation are live state in both cases.
     pub(crate) fn preview_runtime_landscape_operation(&mut self, operation: &LandscapeOperation) {
         match operation {
             LandscapeOperation::DrawMap { texmap, .. }
@@ -2071,6 +2071,36 @@ impl HostWorldContext {
                     return;
                 };
                 let _ = landscape.replace_runtime_texmap_state(texmap.clone());
+            }
+            LandscapeOperation::DrawMatChunks {
+                origin,
+                width,
+                height,
+                count_x,
+                count_y,
+                material,
+                byte,
+                map_seed,
+                random_offsets,
+                texmap,
+            } => {
+                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                    return;
+                };
+                let bakes = Rc::make_mut(&mut self.solid_mask_bakes);
+                let _ = landscape.preview_draw_material_chunks_with_masks(
+                    bakes,
+                    *origin,
+                    *width,
+                    *height,
+                    *count_x,
+                    *count_y,
+                    material,
+                    *byte,
+                    *map_seed,
+                    random_offsets,
+                    texmap.clone(),
+                );
             }
             LandscapeOperation::DrawDefMap {
                 texmap,
@@ -12381,6 +12411,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("FreeRect", free_rect);
     script.register_host_function("DrawDefMap", draw_def_map);
     script.register_host_function("DrawMap", draw_map);
+    script.register_host_function("DrawMatChunks", draw_mat_chunks);
     script.register_host_function("DrawMaterialQuad", draw_material_quad);
     script.register_host_function("ScriptGo", script_go);
     script.register_host_function("ScriptCounter", script_counter);
@@ -14810,6 +14841,22 @@ pub enum LandscapeOperation {
         material_texture: String,
         vertices: [Vector2; 4],
         ift: bool,
+    },
+    /// FnDrawMatChunks -> C4Landscape::DrawChunks
+    /// (C4Script.cpp:4802-4805; C4Landscape.cpp:2419-2445). The callback
+    /// resolves/allocates the texmap pair and samples every Random(1000)
+    /// value synchronously; the fold replays only deterministic geometry.
+    DrawMatChunks {
+        origin: Vector2,
+        width: i32,
+        height: i32,
+        count_x: i32,
+        count_y: i32,
+        material: String,
+        byte: u8,
+        map_seed: i32,
+        random_offsets: Vec<i32>,
+        texmap: crate::landscape::RuntimeTexMapState,
     },
     /// FnDrawMap -> C4Landscape::DrawMap/MapToLandscape
     /// (C4Script.cpp:4851-4855; C4Landscape.cpp:2636-2668,482-510).
@@ -24685,6 +24732,112 @@ fn script_goto(args: &[Value]) -> Result<Value, RuntimeError> {
             context.script_counter_request = Some(counter);
         }
         Ok(Value::Int(counter))
+    })
+}
+
+/// FnDrawMatChunks/C4Landscape::DrawChunks (C4Script.cpp:4802-4805;
+/// C4Landscape.cpp:2419-2445): resolve the separate material/texture pair,
+/// then sample one synchronized Random(1000) value per chunk in x-major,
+/// y-minor order. The resulting offsets are carried to the deferred fold so
+/// authoritative drawing cannot consume the global RNG a second time.
+fn draw_mat_chunks(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "DrawMatChunks",
+        "x",
+    )?;
+    let y = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "DrawMatChunks",
+        "y",
+    )?;
+    let width = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "DrawMatChunks",
+        "wdt",
+    )?;
+    let height = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "DrawMatChunks",
+        "hgt",
+    )?;
+    let count_x = value_to_i32(
+        args.get(4).unwrap_or(&Value::Nil),
+        "DrawMatChunks",
+        "count-x",
+    )?;
+    let count_y = value_to_i32(
+        args.get(5).unwrap_or(&Value::Nil),
+        "DrawMatChunks",
+        "count-y",
+    )?;
+    // FnStringPar maps null string parameters to "". Passing None to
+    // get_index would instead wildcard-match the first material slot.
+    let material =
+        parse_optional_string(args.get(6), "DrawMatChunks", "material")?.unwrap_or_default();
+    let texture =
+        parse_optional_string(args.get(7), "DrawMatChunks", "texture")?.unwrap_or_default();
+    let ift = value_to_bool(
+        args.get(8).unwrap_or(&Value::Nil),
+        "DrawMatChunks",
+        "ift",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Int(0));
+        };
+        let Some(map_seed) = context
+            .world
+            .landscape_ref()
+            .and_then(Landscape::raster_state)
+            .map(crate::landscape::LandscapeRasterState::map_seed)
+        else {
+            return Ok(Value::Int(0));
+        };
+        let Some(texmap) = context.runtime_texmap.as_mut() else {
+            return Ok(Value::Int(0));
+        };
+
+        // GetMapColorIndex special-cases exact-case "Sky" to byte zero,
+        // then DrawChunks still performs the independent material lookup.
+        let slot = if material == "Sky" {
+            0
+        } else {
+            texmap.get_index(&material, Some(&texture), true)
+        };
+        if (material != "Sky" && slot == 0) || texmap.material(&material).is_none() {
+            return Ok(Value::Int(0));
+        }
+        let byte = if material == "Sky" {
+            0
+        } else {
+            slot | if ift { 0x80 } else { 0 }
+        };
+
+        let mut random_offsets = Vec::new();
+        for _ in 0..count_x {
+            for _ in 0..count_y {
+                random_offsets.push(draw_context_random(1_000)?);
+            }
+        }
+        let texmap = texmap.clone();
+        let operation = LandscapeOperation::DrawMatChunks {
+            origin: Vector2::new(x, y),
+            width,
+            height,
+            count_x,
+            count_y,
+            material,
+            byte,
+            map_seed,
+            random_offsets,
+            texmap,
+        };
+        context.preview_draw_mat_chunks(&operation);
+        context.register_landscape_operation(operation);
+        Ok(Value::Int(1))
     })
 }
 
@@ -39166,6 +39319,44 @@ impl EffectHostContext {
         self.pending_landscape_ops.push(operation);
     }
 
+    /// DrawMatChunks must use this callback's LIVE mask vector: an earlier
+    /// SetPosition/DoCon may already have removed or re-put a mask without
+    /// changing the entry snapshot stored on HostWorldContext.
+    fn preview_draw_mat_chunks(&mut self, operation: &LandscapeOperation) {
+        let LandscapeOperation::DrawMatChunks {
+            origin,
+            width,
+            height,
+            count_x,
+            count_y,
+            material,
+            byte,
+            map_seed,
+            random_offsets,
+            texmap,
+        } = operation
+        else {
+            return;
+        };
+        let Some(landscape) = self.world.landscape.as_mut().map(Rc::make_mut) else {
+            return;
+        };
+        let _ = landscape.preview_draw_material_chunks_with_masks(
+            &mut self.solid_mask_bakes,
+            *origin,
+            *width,
+            *height,
+            *count_x,
+            *count_y,
+            material,
+            *byte,
+            *map_seed,
+            random_offsets,
+            texmap.clone(),
+        );
+        self.world.solid_mask_bakes = Rc::new(self.solid_mask_bakes.clone());
+    }
+
     /// Run FnFreeRect against this callback's private COW landscape before
     /// returning to script. C++ mutates Surface8 synchronously, so later
     /// GBack*/GetMaterial calls in the same callback must see the clear. The
@@ -43818,6 +44009,7 @@ mod tests {
         "DoScoreboardShow",
         "DrawDefMap",
         "DrawMap",
+        "DrawMatChunks",
         "DrawMaterialQuad",
         "EffectCall",
         "EffectVar",
@@ -48787,6 +48979,83 @@ public func RejectConstruction(x, y, builder)
         )
     }
 
+    fn draw_mat_chunks_world() -> HostWorldContext {
+        let mut densities = vec![0; 128];
+        densities[2] = 100;
+        let mut material_names = vec![None; 128];
+        material_names[2] = Some("Vehicle".to_string());
+        let mut texture_names = vec![None; 128];
+        texture_names[2] = Some("Smooth".to_string());
+        let mut shapes = vec![None; 128];
+        shapes[2] = Some(crate::chunky::ChunkShape::Flat);
+        let mut texmap = crate::landscape::RuntimeTexMapState {
+            densities: densities.clone(),
+            material_names: material_names.clone(),
+            texture_names: texture_names.clone(),
+            match_texture_names: texture_names.clone(),
+            shapes,
+            materials: vec![crate::landscape::RuntimeTexMapMaterial {
+                name: "Earth".to_string(),
+                density: 100,
+                shape: crate::chunky::ChunkShape::Rough,
+            }],
+            texture_inventory: vec!["Rough".to_string()],
+            default_material_entries: Vec::new(),
+        };
+        texmap.set_default_material_entry("Vehicle", 2);
+        let mut landscape = Landscape::new(16, vec![12; 16]).expect("landscape builds");
+        landscape.set_world_height(12);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            16,
+            12,
+            vec![0; 16 * 12],
+            densities,
+            material_names,
+            texture_names,
+        ));
+        landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 9, texmap));
+        landscape.refresh_all_raster_columns();
+        HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        )
+    }
+
+    fn draw_mat_chunks_masked_world() -> HostWorldContext {
+        let mut world = draw_mat_chunks_world();
+        let landscape = world
+            .landscape
+            .as_mut()
+            .map(Rc::make_mut)
+            .expect("landscape exists");
+        for y in 4..6 {
+            for x in 5..7 {
+                landscape.grid_write_byte(x, y, 2);
+            }
+        }
+        world.with_solid_mask_bakes(vec![(
+            ObjectId::new(90),
+            crate::SolidMaskBake {
+                x: 5,
+                y: 4,
+                width: 2,
+                height: 2,
+                tx: 0,
+                ty: 0,
+                mask_width: 2,
+                pixels: None,
+                buffer: vec![0; 4],
+                rotated: None,
+            },
+        )])
+    }
+
     fn draw_map_world(
         width: u32,
         height: u32,
@@ -49352,6 +49621,319 @@ public func RejectConstruction(x, y, builder)
             );
             assert!(outcome.landscape.is_empty());
             assert_eq!(final_rng, initial_rng);
+        }
+    }
+
+    #[test]
+    fn draw_mat_chunks_matches_chunk_pixels_and_consumes_rng_in_cpp_order() {
+        // DrawChunks enters x first, then y, and samples Random(1000) before
+        // each DrawChunk call (C4Landscape.cpp:2434-2438). The Rough shape
+        // then combines that sampled offset with the retained MapSeed.
+        let seed = 59;
+        let mut expected_rng = LcgRng::new(seed);
+        let expected_offsets = (0..4)
+            .map(|_| expected_rng.random(1_000))
+            .collect::<Vec<_>>();
+        let expected_after = expected_rng.random(1_000);
+        let args = [
+            Value::Int(4),
+            Value::Int(3),
+            Value::Int(8),
+            Value::Int(6),
+            Value::Int(2),
+            Value::Int(2),
+            Value::String("Earth".to_string()),
+            Value::String("Rough".to_string()),
+            Value::Bool(true),
+        ];
+        let mut replay_world = draw_mat_chunks_world();
+        let initial_landscape = replay_world
+            .landscape_ref()
+            .expect("landscape exists")
+            .clone();
+        let guard = enter_random_context(LcgRng::new(seed));
+        let (result, outcome) =
+            with_effect_context(None, &[], replay_world.clone(), 1, || {
+                let drew = draw_mat_chunks(&args)?;
+                let immediate_texture = get_texture(&[Value::Int(6), Value::Int(5)])?;
+                let after = random(&[Value::Int(1_000)])?;
+                Ok::<_, RuntimeError>((drew, immediate_texture, after))
+            });
+        let final_rng = guard.finish();
+
+        assert_eq!(
+            result.expect("DrawMatChunks and Random succeed"),
+            (
+                Value::Int(1),
+                Value::String("Rough".to_string()),
+                Value::Int(expected_after)
+            )
+        );
+        assert_eq!(final_rng, expected_rng);
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::DrawMatChunks {
+                origin,
+                width,
+                height,
+                count_x,
+                count_y,
+                material,
+                byte,
+                map_seed,
+                random_offsets,
+                texmap,
+            } => {
+                assert_eq!(*origin, Vector2::new(4, 3));
+                assert_eq!((*width, *height, *count_x, *count_y), (8, 6, 2, 2));
+                assert_eq!(material, "Earth");
+                assert_eq!(*byte, 1 | 0x80);
+                assert_eq!(*map_seed, 9);
+                assert_eq!(random_offsets, &expected_offsets);
+                assert_eq!(texmap.material_names[1].as_deref(), Some("Earth"));
+                assert_eq!(
+                    texmap.match_texture_names[1].as_deref(),
+                    Some("Rough")
+                );
+            }
+            other => panic!("unexpected landscape operation: {other:?}"),
+        }
+
+        // State-bearing replay makes the newly allocated TextureMap slot
+        // live to a later effect callback before the authoritative fold.
+        replay_world.preview_runtime_landscape_operation(&outcome.landscape[0]);
+        assert_eq!(
+            replay_world
+                .landscape_ref()
+                .and_then(Landscape::raster_state)
+                .and_then(|state| state.texmap().material_names[1].as_deref()),
+            Some("Earth")
+        );
+
+        let mut engine = crate::Engine::new();
+        engine.set_landscape(initial_landscape);
+        engine.apply_landscape_operations(outcome.landscape);
+        let landscape = engine.landscape().expect("folded landscape exists");
+        let actual = (0..12)
+            .flat_map(|y| {
+                (0..16).map(move |x| {
+                    landscape
+                        .grid_byte_at(x, y)
+                        .expect("pixel is in bounds")
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // Golden Surface8 rows produced by the C++ DrawChunk and Allegro
+        // polygon oracle for offsets 231,283,416,148 and MapSeed 9.
+        let golden_rows = [
+            "................",
+            "................",
+            ".........###....",
+            "....##########..",
+            "...############.",
+            "...###########..",
+            "....##########..",
+            "...############.",
+            "...###########..",
+            "....##########..",
+            "........#####...",
+            ".........###....",
+        ];
+        let golden = golden_rows
+            .into_iter()
+            .flat_map(str::bytes)
+            .map(|pixel| if pixel == b'#' { 1 | 0x80 } else { 0 })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, golden);
+        assert_eq!(
+            actual
+                .iter()
+                .filter(|&&byte| byte == (1 | 0x80))
+                .count(),
+            87
+        );
+    }
+
+    #[test]
+    fn draw_mat_chunks_offscreen_clip_collapses_to_the_cpp_boundary_pixel() {
+        // The raw clip begins at x=16, wholly right of this 16-pixel plane.
+        // CSurface8::Clip independently clamps both endpoints to x=15, and
+        // the Rough polygon still reaches that one column. A normal rectangle
+        // intersection would incorrectly discard all seven C++ pixels.
+        let args = [
+            Value::Int(21),
+            Value::Int(3),
+            Value::Int(20),
+            Value::Int(6),
+            Value::Int(1),
+            Value::Int(1),
+            Value::String("Earth".to_string()),
+            Value::String("Rough".to_string()),
+            Value::Bool(false),
+        ];
+        let mut world = draw_mat_chunks_world();
+        assert!(
+            world
+                .landscape
+                .as_mut()
+                .map(Rc::make_mut)
+                .is_some_and(|landscape| {
+                    landscape.set_surface32_pixel(15, 5, 0x0011_2233)
+                })
+        );
+        let initial_landscape = world.landscape_ref().expect("landscape exists").clone();
+        let guard = enter_random_context(LcgRng::new(59));
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            let drew = draw_mat_chunks(&args)?;
+            let immediate = get_texture(&[Value::Int(15), Value::Int(5)])?;
+            Ok::<_, RuntimeError>((drew, immediate))
+        });
+        let final_rng = guard.finish();
+
+        assert_eq!(
+            result.expect("offscreen DrawMatChunks succeeds"),
+            (Value::Int(1), Value::String("Rough".to_string()))
+        );
+        assert_eq!(final_rng.count, 1);
+        let mut engine = crate::Engine::new();
+        engine.set_landscape(initial_landscape);
+        engine.apply_landscape_operations(outcome.landscape);
+        let landscape = engine.landscape().expect("folded landscape exists");
+        assert_eq!(
+            landscape.surface32_pixel_at(15, 5),
+            None,
+            "Relight expands the raw offscreen prepare box before clipping"
+        );
+        for y in 0..12 {
+            for x in 0..16 {
+                let expected = u8::from(x == 15 && (3..=9).contains(&y));
+                assert_eq!(
+                    landscape.grid_byte_at(x, y),
+                    Some(expected),
+                    "C++ edge clip pixel ({x},{y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn draw_mat_chunks_preview_repairs_solid_masks_and_updates_their_background() {
+        let args = [
+            Value::Int(4),
+            Value::Int(3),
+            Value::Int(8),
+            Value::Int(6),
+            Value::Int(2),
+            Value::Int(2),
+            Value::String("Earth".to_string()),
+            Value::String("Rough".to_string()),
+            Value::Bool(true),
+        ];
+        let guard = enter_random_context(LcgRng::new(59));
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            draw_mat_chunks_masked_world(),
+            1,
+            || {
+                let drew = draw_mat_chunks(&args)?;
+                let masked_texture = get_texture(&[Value::Int(5), Value::Int(4)])?;
+                Ok::<_, RuntimeError>((drew, masked_texture))
+            },
+        );
+        let _ = guard.finish();
+
+        assert_eq!(
+            result.expect("masked DrawMatChunks succeeds"),
+            (Value::Int(1), Value::String("Smooth".to_string())),
+            "FinishChange re-puts the Vehicle mask before the host returns"
+        );
+
+        let mut replay_world = draw_mat_chunks_masked_world();
+        replay_world.preview_runtime_landscape_operation(&outcome.landscape[0]);
+        let landscape = replay_world.landscape_ref().expect("landscape exists");
+        for y in 4..6 {
+            for x in 5..7 {
+                assert_eq!(landscape.grid_byte_at(x, y), Some(2));
+            }
+        }
+        assert_eq!(replay_world.solid_mask_bakes.len(), 1);
+        assert_eq!(
+            replay_world.solid_mask_bakes[0].1.buffer,
+            vec![1 | 0x80; 4],
+            "Repair stores the newly drawn terrain beneath the mask"
+        );
+    }
+
+    #[test]
+    fn draw_mat_chunks_failure_and_zero_count_paths_do_not_draw_rng() {
+        for (material, texture) in [("Missing", "Rough"), ("Earth", "Missing")] {
+            let args = [
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(8),
+                Value::Int(6),
+                Value::Int(2),
+                Value::Int(2),
+                Value::String(material.to_string()),
+                Value::String(texture.to_string()),
+                Value::Bool(false),
+            ];
+            let initial_rng = LcgRng::new(61);
+            let guard = enter_random_context(initial_rng.clone());
+            let (result, outcome) = with_effect_context(
+                None,
+                &[],
+                draw_mat_chunks_world(),
+                1,
+                || draw_mat_chunks(&args),
+            );
+            let final_rng = guard.finish();
+
+            assert_eq!(
+                result.expect("unresolved DrawMatChunks is not an error"),
+                Value::Int(0)
+            );
+            assert!(outcome.landscape.is_empty());
+            assert_eq!(final_rng, initial_rng);
+        }
+
+        let zero_count_args = [
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(8),
+            Value::Int(6),
+            Value::Int(0),
+            Value::Int(2),
+            Value::String("Earth".to_string()),
+            Value::String("Rough".to_string()),
+            Value::Bool(false),
+        ];
+        let initial_rng = LcgRng::new(67);
+        let guard = enter_random_context(initial_rng.clone());
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            draw_mat_chunks_world(),
+            1,
+            || draw_mat_chunks(&zero_count_args),
+        );
+        let final_rng = guard.finish();
+
+        assert_eq!(result.expect("zero-count call succeeds"), Value::Int(1));
+        assert_eq!(final_rng, initial_rng);
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::DrawMatChunks {
+                random_offsets,
+                texmap,
+                ..
+            } => {
+                assert!(random_offsets.is_empty());
+                assert_eq!(texmap.material_names[1].as_deref(), Some("Earth"));
+            }
+            other => panic!("unexpected landscape operation: {other:?}"),
         }
     }
 

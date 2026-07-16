@@ -47,6 +47,22 @@ impl Surface8 {
         self.bytes
     }
 
+    /// CSurface8::Clip (StdSurface8.cpp:79-83): clamp both inclusive
+    /// endpoints independently to the surface before later SetPix calls.
+    pub(crate) fn clip(&mut self, x: i32, y: i32, x2: i32, y2: i32) {
+        if self.width <= 0 || self.height <= 0 {
+            self.clip_x = 1;
+            self.clip_y = 1;
+            self.clip_x2 = 0;
+            self.clip_y2 = 0;
+            return;
+        }
+        self.clip_x = x.clamp(0, self.width - 1);
+        self.clip_y = y.clamp(0, self.height - 1);
+        self.clip_x2 = x2.clamp(0, self.width - 1);
+        self.clip_y2 = y2.clamp(0, self.height - 1);
+    }
+
     /// CSurface8::SetPix (StdSurface8.h:45-51): silently clipped.
     pub(crate) fn set_pix(&mut self, x: i32, y: i32, col: u8) {
         if x < self.clip_x || x > self.clip_x2 || y < self.clip_y || y > self.clip_y2 {
@@ -470,6 +486,22 @@ mod tests {
                 0, 0, 0, 0, //
                 0, 9, 9, 9, //
                 0, 9, 9, 9,
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_clip_clamps_inclusive_endpoints_like_csurface8() {
+        let mut surface = Surface8::new(6, 4);
+        surface.clip(2, 1, 4, 2);
+        surface.box_fill(0, 0, 5, 3, 7);
+        assert_eq!(
+            surface.into_bytes(),
+            vec![
+                0, 0, 0, 0, 0, 0, //
+                0, 0, 7, 7, 7, 0, //
+                0, 0, 7, 7, 7, 0, //
+                0, 0, 0, 0, 0, 0,
             ]
         );
     }
