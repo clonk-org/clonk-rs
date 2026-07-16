@@ -25610,6 +25610,7 @@ impl Engine {
             no_transfer_zones,
             no_push_enter,
             action_idle,
+            action_disabled,
         ) = self
             .definitions
             .get(&object.definition_id)
@@ -25630,6 +25631,10 @@ impl Engine {
                     definition
                         .action_library()
                         .is_idle_state(&object.state.action),
+                    definition.action_library().disables_object_for_entry(
+                        &object.state.action.name,
+                        object.state.action.act_map_index,
+                    ),
                 )
             })
             .unwrap_or((
@@ -25641,6 +25646,7 @@ impl Engine {
                 0,
                 0,
                 true,
+                false,
             ));
         CommandObjectSnapshot {
             id: object.id,
@@ -25667,6 +25673,7 @@ impl Engine {
             container: object.state.container,
             action_name: object.state.action.name.clone(),
             action_idle,
+            action_disabled,
             action_target: object.state.action.target,
             action_target2: object.state.action.target2,
             action_procedure: procedure,
@@ -25971,6 +25978,7 @@ impl Engine {
                 no_transfer_zones,
                 no_push_enter,
                 action_idle,
+                action_disabled,
             ) = self
                 .definitions
                 .get(&object.definition_id)
@@ -25992,6 +26000,10 @@ impl Engine {
                         definition
                             .action_library()
                             .is_idle_state(&object.state.action),
+                        definition.action_library().disables_object_for_entry(
+                            &object.state.action.name,
+                            object.state.action.act_map_index,
+                        ),
                     )
                 })
                 .unwrap_or((
@@ -26003,6 +26015,7 @@ impl Engine {
                     0,
                     0,
                     true,
+                    false,
                 ));
             // ExecuteCommand reads the CACHED obj->OCF (C4Command.cpp uses
             // Target->OCF etc. straight off the objects).
@@ -26039,6 +26052,7 @@ impl Engine {
                     container: object.state.container,
                     action_name: object.state.action.name.clone(),
                     action_idle,
+                    action_disabled,
                     action_target: object.state.action.target,
                     action_target2: object.state.action.target2,
                     action_procedure: procedure,
@@ -27317,6 +27331,7 @@ impl Engine {
                 no_transfer_zones,
                 no_push_enter,
                 action_idle,
+                action_disabled,
             ) = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
@@ -27337,6 +27352,10 @@ impl Engine {
                         definition
                             .action_library()
                             .is_idle_state(&self.objects[idx].state.action),
+                        definition.action_library().disables_object_for_entry(
+                            &self.objects[idx].state.action.name,
+                            self.objects[idx].state.action.act_map_index,
+                        ),
                     )
                 })
                 .unwrap_or((
@@ -27351,6 +27370,10 @@ impl Engine {
                     0,
                     0,
                     action_library.is_idle_state(&self.objects[idx].state.action),
+                    action_library.disables_object_for_entry(
+                        &self.objects[idx].state.action.name,
+                        self.objects[idx].state.action.act_map_index,
+                    ),
                 ));
             // ExecuteCommand reads the CACHED obj->OCF (refreshed at this
             // object's Execute-start, C4Object.cpp:1058).
@@ -27392,6 +27415,7 @@ impl Engine {
                     container: self.objects[idx].state.container,
                     action_name: self.objects[idx].state.action.name.clone(),
                     action_idle,
+                    action_disabled,
                     action_target: self.objects[idx].state.action.target,
                     action_target2: self.objects[idx].state.action.target2,
                     action_procedure: procedure,
@@ -53592,11 +53616,20 @@ mod command_contact_regression {
         definition.set_pathfinder(-4);
         definition.set_no_transfer_zones(-3);
         definition.set_no_push_enter(-2);
+        definition.configure_actions(
+            Some("Route".to_owned()),
+            HashMap::from([(
+                "Route".to_owned(),
+                ActionSpec::default().with_disabled(true),
+            )]),
+        );
         engine
             .register_definition(definition)
             .expect("definition registers");
         let object_id = engine
-            .spawn_object(SpawnConfig::new("ROUT"))
+            .spawn_object(
+                SpawnConfig::new("ROUT").with_action(ActionState::new("Route")),
+            )
             .expect("object spawns");
         let index = engine.find_object_index(object_id).expect("object exists");
 
@@ -53605,6 +53638,7 @@ mod command_contact_regression {
         assert_eq!(snapshot.pathfinder, -4);
         assert_eq!(snapshot.no_transfer_zones, -3);
         assert_eq!(snapshot.no_push_enter, -2);
+        assert!(snapshot.action_disabled);
         assert_eq!(snapshot.ocf & ocf::CREW_MEMBER, 0);
     }
 

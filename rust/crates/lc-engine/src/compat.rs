@@ -42357,6 +42357,20 @@ impl EffectHostContext {
                         })
                     })
                     .unwrap_or(true);
+                let action_disabled = scope
+                    .map(|scope| {
+                        scope
+                            .action_library
+                            .disables_object_for_entry(&action_name, action_index)
+                    })
+                    .or_else(|| {
+                        metadata.map(|metadata| {
+                            metadata
+                                .action_library
+                                .disables_object_for_entry(&action_name, action_index)
+                        })
+                    })
+                    .unwrap_or(false);
                 let snapshot = CommandObjectSnapshot {
                     id,
                     master_list_order,
@@ -42386,6 +42400,7 @@ impl EffectHostContext {
                         .unwrap_or(object.container),
                     action_name,
                     action_idle,
+                    action_disabled,
                     action_target: scope
                         .map(|scope| scope.effective_action_target(0))
                         .unwrap_or(object.action_target),

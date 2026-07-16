@@ -61,6 +61,9 @@ pub struct CommandObjectSnapshot {
     /// Whether Action.Act is ActIdle (or the inactive ActHold slot), as
     /// opposed to a real ActMap entry that happens to be named "Idle".
     pub action_idle: bool,
+    /// Whether the current physical ActMap entry has ObjectDisabled set.
+    /// Built-in ActIdle/ActHold slots remain false regardless of name.
+    pub action_disabled: bool,
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
     pub action_procedure: ActionProcedure,
@@ -581,6 +584,7 @@ mod tests {
             // Generic command fixtures model a live action unless a test
             // explicitly opts into the built-in ActIdle slot.
             action_idle: false,
+            action_disabled: false,
             action_target: None,
             action_target2: None,
             action_procedure: ActionProcedure::Undefined,
@@ -665,6 +669,14 @@ mod tests {
         walker.crew_member = true;
         walker.ocf |= ocf::CREW_MEMBER;
         walker.shape_top = -10;
+        walker
+    }
+
+    fn pathfinder_jumper(position: Vector2) -> CommandObjectSnapshot {
+        let mut walker = walking_jumper(position);
+        walker.crew_member = false;
+        walker.ocf &= !ocf::CREW_MEMBER;
+        walker.pathfinder = 1;
         walker
     }
 
@@ -1487,17 +1499,17 @@ mod tests {
 
     // C4Command::MoveTo DFA_FLIGHT arm (C4Command.cpp:414-417): no ComDir
     // steering at all — only FlightControl, which re-arms the Fly action
-    // for a CanFly crew member with the target in the ±60° top sector.
+    // for a CanFly Pathfinder object with the target in the ±60° top sector.
     #[test]
-    fn move_to_flight_runs_flight_control_without_steering() {
+    fn move_to_noncrew_pathfinder_flight_control_and_disabled_gate() {
         let landscape = crate::Landscape::flat(300, 110);
         let mut flyer = snapshot_with_id(1);
         flyer.position = Vector2::new(100, 100);
         flyer.action_procedure = ActionProcedure::Flight;
-        flyer.crew_member = true;
-        flyer.ocf |= ocf::CREW_MEMBER;
+        flyer.pathfinder = 1;
         flyer.physical.can_fly = 1;
         flyer.shape_top = -10;
+        assert_eq!(flyer.ocf & ocf::CREW_MEMBER, 0);
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
@@ -1522,6 +1534,22 @@ mod tests {
             update.action.and_then(|action| action.name),
             Some("Fly".into()),
             "FlightControl takes off (C4Command.cpp:1843)"
+        );
+
+        let mut disabled_flyer = flyer.clone();
+        disabled_flyer.action_disabled = true;
+        let mut disabled_ctx =
+            move_to_ctx_at_frame(&disabled_flyer, &objects, &players, &definitions, 1);
+        disabled_ctx.landscape = Some(&landscape);
+        let mut disabled_state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(110))
+                .with_ty(Some(30)),
+        );
+        let disabled_result = disabled_state.step(&disabled_ctx);
+        assert!(
+            disabled_result.update.is_none(),
+            "ObjectDisabled suppresses FlightControl without inventing flight steering"
         );
     }
 
@@ -1897,9 +1925,9 @@ mod tests {
     // in the ±(35±10)° diagonal, path free, farther than 30, 15px head
     // room -> a C4CMD_Jump goes on TOP of the MoveTo.
     #[test]
-    fn move_to_diagonal_free_jump_like_cpp() {
+    fn move_to_noncrew_pathfinder_diagonal_free_jump_like_cpp() {
         let landscape = crate::Landscape::flat(300, 110);
-        let walker = walking_jumper(Vector2::new(100, 100));
+        let walker = pathfinder_jumper(Vector2::new(100, 100));
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
@@ -1927,9 +1955,9 @@ mod tests {
     // Trigger 3 (C4Command.cpp:1896-1908): CNAT_RIGHT wall contact with
     // the target up the wall (angle ≈ ±80°) jumps without a path check.
     #[test]
-    fn move_to_low_side_contact_jump_like_cpp() {
+    fn move_to_noncrew_pathfinder_low_side_contact_jump_like_cpp() {
         let landscape = crate::Landscape::flat(300, 110);
-        let mut walker = walking_jumper(Vector2::new(100, 100));
+        let mut walker = pathfinder_jumper(Vector2::new(100, 100));
         walker.contact = crate::CNAT_RIGHT;
         let objects = HashMap::new();
         let players = HashMap::new();
@@ -1958,7 +1986,7 @@ mod tests {
     // Trigger 2 (C4Command.cpp:1874-1893): target overhead on a ledge —
     // side-move first (pushed on top), then the jump.
     #[test]
-    fn move_to_high_angle_side_move_jump_like_cpp() {
+    fn move_to_noncrew_pathfinder_high_angle_side_move_jump_like_cpp() {
         // Ledge: surface 110 everywhere except a plateau (top 75) right of
         // the target.
         let mut surface = vec![110i32; 300];
@@ -1967,7 +1995,7 @@ mod tests {
         }
         let landscape =
             crate::Landscape::with_default_material(300, surface, None).expect("landscape");
-        let walker = walking_jumper(Vector2::new(140, 100));
+        let walker = pathfinder_jumper(Vector2::new(140, 100));
         let objects = HashMap::new();
         let players = HashMap::new();
         let definitions = HashMap::new();
@@ -18564,11 +18592,10 @@ impl MoveToState {
         }
     }
 
-    /// `C4Command::FlightControl` (C4Command.cpp:1816-1849): CanFly crew
-    /// walking toward a distant target within ±60° of straight up takes
-    /// off (SetActionByName("Fly")); C++ always returns false, so the
-    /// jump control still runs. The ActMap Disabled check (:1824-1828)
-    /// is unmodeled (no Disabled flag in the snapshot).
+    /// `C4Command::FlightControl` (C4Command.cpp:1816-1849): CanFly crew or
+    /// Pathfinder definitions walking toward a distant target within ±60°
+    /// of straight up take off unless the current ActMap entry is Disabled.
+    /// C++ always returns false, so jump control still runs.
     fn flight_control(
         &self,
         ctx: &CommandRuntimeContext<'_>,
@@ -18577,7 +18604,10 @@ impl MoveToState {
         if ctx.object.physical.can_fly == 0 {
             return None;
         }
-        if ctx.object.ocf & crate::ocf::CREW_MEMBER == 0 {
+        if ctx.object.ocf & crate::ocf::CREW_MEMBER == 0 && ctx.object.pathfinder == 0 {
+            return None;
+        }
+        if ctx.object.action_disabled {
             return None;
         }
         let landscape = ctx.landscape?;
@@ -18603,14 +18633,13 @@ impl MoveToState {
     }
 
     /// `C4Command::JumpControl` (C4Command.cpp:1851-1920): the three
-    /// walking-jump triggers. Gate: OCF_CrewMember (Def->Pathfinder has
-    /// no DefCore parse yet — documented gap).
+    /// walking-jump triggers for crew or Pathfinder definitions.
     fn jump_control(
         &self,
         ctx: &CommandRuntimeContext<'_>,
         target: Vector2,
     ) -> Option<Vec<CommandOperation>> {
-        if ctx.object.ocf & crate::ocf::CREW_MEMBER == 0 {
+        if ctx.object.ocf & crate::ocf::CREW_MEMBER == 0 && ctx.object.pathfinder == 0 {
             return None;
         }
         let landscape = ctx.landscape?;
