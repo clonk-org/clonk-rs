@@ -5279,6 +5279,88 @@ func Incineration(iCause) { return 1; }
     }
 
     #[test]
+    fn cross_check_reverse_area_hit_uses_live_con_scaled_shape() -> Result<(), EngineError> {
+        // CrossCheck's pass-2 sector query uses C4Object::Area, whose Top/Height
+        // accessors expand a short construction shape upward to 18 pixels. The
+        // final Inside check does not: C++ tests the raw live Shape
+        // (C4GameObjects.cpp:156-160). Put the rock in that expanded-only band
+        // so a Con=50 victim rejects it while the same full-Con shape accepts it.
+        fn run_case(construction: i32) -> Result<(Option<Value>, i32), EngineError> {
+            let mut engine = Engine::with_seed(199);
+            let mut victim_def = Definition::from_script(
+                "Victim",
+                "Victim",
+                "#strict 2\nlocal query_calls;\nfunc QueryCatchBlow(by) { query_calls += 1; return 0; }\n",
+            )?;
+            victim_def.set_category(CATEGORY_LIVING);
+            victim_def.set_mass(100);
+            victim_def.set_physical(PhysicalInfo {
+                energy: 100_000,
+                ..PhysicalInfo::default()
+            });
+            victim_def.set_shape_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+            engine.register_definition(victim_def)?;
+
+            let mut rock_def = simple_definition("Rock");
+            rock_def.set_category(CATEGORY_OBJECT);
+            rock_def.set_mass(50);
+            engine.register_definition(rock_def)?;
+
+            let victim = engine.spawn_object(
+                SpawnConfig::new("Victim")
+                    .with_loaded(true)
+                    .with_alive(true)
+                    .with_energy(100_000)
+                    .with_construction(construction)
+                    .with_position(Vector2::new(50, 50)),
+            )?;
+            let _rock = engine.spawn_object(
+                SpawnConfig::new("Rock")
+                    .with_loaded(true)
+                    .with_position(Vector2::new(50, 42))
+                    .with_velocity(Vector2::new(5, 0)),
+            )?;
+
+            let victim_idx = engine.find_object_index(victim).expect("victim exists");
+            let expected_shape = if construction == FULL_CON {
+                DefinitionRect::new(-10, -10, 20, 20)
+            } else {
+                DefinitionRect::new(-10, -5, 20, 10)
+            };
+            assert_eq!(
+                engine.objects[victim_idx].current_shape_rect(),
+                Some(expected_shape),
+                "the test must distinguish the live and definition shapes"
+            );
+
+            engine.cross_check(1)?;
+
+            let victim_idx = engine.find_object_index(victim).expect("victim remains");
+            let victim = &engine.objects[victim_idx];
+            Ok((
+                victim.state.local_vars.get("query_calls").cloned(),
+                victim.state.energy,
+            ))
+        }
+
+        let (partial_calls, partial_energy) = run_case(FULL_CON / 2)?;
+        assert_eq!(
+            partial_calls, None,
+            "the rock is outside the Con=50 live Shape"
+        );
+        assert_eq!(partial_energy, 100_000);
+
+        let (full_calls, full_energy) = run_case(FULL_CON)?;
+        assert_eq!(
+            full_calls,
+            Some(Value::Int(1)),
+            "the unchanged full-Con Shape still receives the hit"
+        );
+        assert!(full_energy < 100_000);
+        Ok(())
+    }
+
+    #[test]
     fn cross_check_collection_prefers_master_forward_living_collector() -> Result<(), EngineError> {
         // CrossCheck's outer loop walks the C++ main list First->Next. Its
         // category-descending order puts Living before StaticBack even though

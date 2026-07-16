@@ -36375,22 +36375,10 @@ impl Engine {
                 let obj1 = &self.objects[idx];
                 (obj1.definition_id.clone(), obj1.state.layer)
             };
-            let (shape_rect, collection_rect, obj1_mass) = self
+            let collection_rect = self
                 .definitions
                 .get(&definition_id)
-                .map(|definition| {
-                    (
-                        definition.shape_rect(),
-                        definition.collection_rect(),
-                        definition.mass(),
-                    )
-                })
-                .unwrap_or((None, None, 0));
-            let fallback_half_extents = if shape_rect.is_none() {
-                Some(Self::object_half_extents(&self.objects[idx]))
-            } else {
-                None
-            };
+                .and_then(|definition| definition.collection_rect());
             // obj1->Area: candidates from the sector lists under the shape
             let collector_shape_rect = self.object_shape_rect(&self.objects[idx]);
             let candidate_ids = self
@@ -36432,12 +36420,17 @@ impl Engine {
                 let candidate_position = self.objects[candidate_idx].state.position;
                 let dx = candidate_position.x - obj1_position.x;
                 let dy = candidate_position.y - obj1_position.y;
-                // Inside(obj2->x - (obj1->x + Shape.x), 0, Shape.Wdt - 1)
+                // Inside(obj2->x - (obj1->x + Shape.x), 0, Shape.Wdt - 1).
+                // This is the raw LIVE Shape, without Area's addtop expansion;
+                // re-read it for each candidate because an earlier callback may
+                // change obj1's shape (C4GameObjects.cpp:159-160).
+                let shape_rect = self.objects[idx].current_shape_rect();
                 if let Some(shape) = shape_rect {
                     if !shape.contains_offset(dx, dy) {
                         continue;
                     }
-                } else if let Some((half_w, half_h)) = fallback_half_extents {
+                } else {
+                    let (half_w, half_h) = Self::object_half_extents(&self.objects[idx]);
                     if dx < -half_w || dx >= half_w || dy < -half_h || dy >= half_h {
                         continue;
                     }
