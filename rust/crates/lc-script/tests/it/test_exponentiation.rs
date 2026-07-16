@@ -108,6 +108,14 @@ fn exponentiation_edge_semantics_match_cpp() {
 }
 
 #[test]
+fn exponentiation_bool_coercion_and_overflow_match_cpp() {
+    assert_eq!(
+        eval("[5 ** -2, true ** 3, (1 << 30) ** 2]"),
+        Value::Array(vec![Value::Int(0), Value::Int(1), Value::Int(0)])
+    );
+}
+
+#[test]
 fn exponentiation_compound_assignment_updates_the_retained_reference() {
     let mut engine = Engine::new();
     engine
