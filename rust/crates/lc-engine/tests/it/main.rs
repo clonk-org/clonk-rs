@@ -25,6 +25,7 @@ mod flight_movement;
 mod gamma;
 mod get_entrance;
 mod get_inventory;
+mod global_call;
 mod hangle_movement;
 mod is_newgfx;
 mod legacy_scenario_loading;

@@ -594,6 +594,15 @@ impl<'a> Lexer<'a> {
             }
         }
         let lexeme = &self.input[start_idx..end_idx];
+        if lexeme == "global"
+            && self.strict_level >= 3
+            && self.peek_char() == Some('-')
+            && self.peek_char_at(1) == Some('>')
+        {
+            self.bump_char();
+            self.bump_char();
+            return Token::new(TokenKind::GlobalCall, line, column);
+        }
         let kind = match lexeme {
             "func" => TokenKind::Keyword(Keyword::Func),
             "global" => TokenKind::Keyword(Keyword::Global),

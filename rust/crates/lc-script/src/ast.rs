@@ -330,6 +330,13 @@ pub enum AssignmentTarget {
         name: String,
         args: Vec<Expr>,
     },
+    GlobalFunctionCall {
+        // global->func(&...) as lvalue - exact engine reference return
+        name: String,
+        args: Vec<Expr>,
+        failsafe: bool,
+        forward_rest: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -343,6 +350,14 @@ pub enum Expr {
         callee: Box<Expr>,
         args: Vec<Expr>,
         is_optional: bool,
+        forward_rest: bool,
+    },
+    /// Strict-3 `global->Fn(...)` / `global->~Fn(...)`: engine-owner lookup
+    /// with no object or definition context (C4Aul AB_CALLGLOBAL).
+    GlobalCall {
+        name: String,
+        args: Vec<Expr>,
+        failsafe: bool,
         forward_rest: bool,
     },
     Array(Vec<Expr>),

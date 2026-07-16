@@ -1317,6 +1317,17 @@ impl<'a> Parser<'a> {
                     eq_token.column,
                 ))
             }
+            Expr::GlobalCall {
+                name,
+                args,
+                failsafe,
+                forward_rest,
+            } => Ok(AssignmentTarget::GlobalFunctionCall {
+                name,
+                args,
+                failsafe,
+                forward_rest,
+            }),
             _ => Err(ParseError::new(
                 "invalid assignment target",
                 eq_token.line,
@@ -1351,6 +1362,7 @@ impl<'a> Parser<'a> {
                     token.column,
                 ))
             }
+            Expr::GlobalCall { .. } => Ok(()),
             _ => Err(ParseError::new(
                 "increment/decrement requires an lvalue (variable, property, index, Local(n), or Var(n))",
                 token.line,
@@ -2019,6 +2031,22 @@ impl<'a> Parser<'a> {
                     self.consume()?; // consume ')'
                 }
                 Ok(Expr::This)
+            }
+            TokenKind::GlobalCall => {
+                let failsafe = self.consume_if_symbol(Symbol::Tilde)?.is_some();
+                let (name, _) = self.expect_identifier("expected function name after 'global->'")?;
+                self.expect_symbol(
+                    Symbol::LParen,
+                    "expected '(' after global function name",
+                )?;
+                let (args, forward_rest) = self.parse_argument_list()?;
+                self.expect_symbol(Symbol::RParen, "expected ')' after arguments")?;
+                Ok(Expr::GlobalCall {
+                    name,
+                    args,
+                    failsafe,
+                    forward_rest,
+                })
             }
             TokenKind::Identifier(name) => Ok(Expr::Variable(name)),
             // Contextual keywords: declaration words carry no expression

@@ -30,6 +30,7 @@ mod test_exponentiation;
 mod test_fbrg_script;
 mod test_for_in_iterable_types;
 mod test_frcs_hex;
+mod test_global_call;
 mod test_host_reference_functions;
 mod test_increment_decrement_lvalues;
 mod test_increment_nil;

@@ -8,7 +8,7 @@ use crate::ast::{
     Parameter, SafeNavigationStep, Stmt, TypeAnnotation, UnaryOp, VarDecl,
 };
 use crate::debugger::DebuggerHooks;
-use crate::engine::{HostFunction, HostReferenceFunction};
+use crate::engine::{GlobalCallContextHook, HostFunction, HostReferenceFunction};
 use crate::error::RuntimeError;
 use crate::value::{C4VType, Literal, Value, ValueMap};
 
@@ -641,6 +641,7 @@ pub(crate) enum LValueRef {
         function: HostFunction,
         args: Vec<Value>,
         caller: ScriptCallerContext,
+        global_call_context_hook: Option<GlobalCallContextHook>,
         segments: Vec<PathSegment>,
     },
 }
@@ -743,8 +744,11 @@ impl LValueRef {
                 function,
                 args,
                 caller,
+                global_call_context_hook,
                 segments,
             } => {
+                let _context =
+                    GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
                 let _guard = CallerContextGuard::enter(Some(caller.clone()));
                 read_path(&function(args)?, segments).map(TrackedValue::runtime)
             }
@@ -792,8 +796,11 @@ impl LValueRef {
                 function,
                 args,
                 caller,
+                global_call_context_hook,
                 segments,
             } => {
+                let _context =
+                    GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
                 let _guard = CallerContextGuard::enter(Some(caller.clone()));
                 let replacement = if segments.is_empty() {
                     tracked.value
@@ -835,6 +842,7 @@ impl LValueRef {
                 function,
                 args,
                 caller,
+                global_call_context_hook,
                 segments,
             } => {
                 let mut segments = segments.clone();
@@ -843,6 +851,7 @@ impl LValueRef {
                     function: function.clone(),
                     args: args.clone(),
                     caller: caller.clone(),
+                    global_call_context_hook: global_call_context_hook.clone(),
                     segments,
                 }
             }
@@ -1235,6 +1244,27 @@ impl ReturnValue {
     }
 }
 
+struct GlobalCallContextGuard<'a> {
+    hook: Option<&'a GlobalCallContextHook>,
+}
+
+impl<'a> GlobalCallContextGuard<'a> {
+    fn enter(hook: Option<&'a GlobalCallContextHook>) -> Self {
+        if let Some(hook) = hook {
+            hook(true);
+        }
+        Self { hook }
+    }
+}
+
+impl Drop for GlobalCallContextGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(hook) = self.hook {
+            hook(false);
+        }
+    }
+}
+
 pub struct Vm<'a> {
     functions: &'a HashMap<String, Function>,
     host_identity: ScriptHostIdentity,
@@ -1267,6 +1297,11 @@ pub struct Vm<'a> {
     /// Reference-preserving twin of `method_dispatch`, used when an arrow
     /// call occupies an lvalue position.
     method_reference_dispatch: Option<&'a crate::engine::MethodReferenceDispatch>,
+    /// Embedding-engine context switch for AB_CALLGLOBAL's null Obj/Def.
+    global_call_context_hook: Option<&'a GlobalCallContextHook>,
+    /// References returned from a global callee may outlive its temporary
+    /// null Obj/Def context. Lazy host-backed references must recreate it.
+    retain_global_call_context_for_host_paths: bool,
     /// The engine-global `static` table (GlobalNamed); resolved after
     /// locals, before global constants (C4AulParse.cpp:2836-2839).
     globals_named: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
@@ -1305,6 +1340,8 @@ impl<'a> Vm<'a> {
             this_value: Value::Nil,
             method_dispatch: None,
             method_reference_dispatch: None,
+            global_call_context_hook: None,
+            retain_global_call_context_for_host_paths: false,
             globals_named: None,
             globals_numbered: None,
             globals_consts: None,
@@ -1369,6 +1406,14 @@ impl<'a> Vm<'a> {
         dispatch: Option<&'a crate::engine::MethodReferenceDispatch>,
     ) -> Self {
         self.method_reference_dispatch = dispatch;
+        self
+    }
+
+    pub fn with_global_call_context_hook(
+        mut self,
+        hook: Option<&'a GlobalCallContextHook>,
+    ) -> Self {
+        self.global_call_context_hook = hook;
         self
     }
 
@@ -1838,6 +1883,93 @@ impl<'a> Vm<'a> {
 
             Err(RuntimeError::new(format!("unknown function '{name}'")))
         })
+    }
+
+    /// Exact Game.ScriptEngine lookup used by strict-3 `global->Fn()`.
+    /// Unlike ordinary engine-scope calls, a bare VM may only fall back to
+    /// an OWN declaration when that declaration is itself `global func`.
+    fn engine_global_script_function(&self, name: &str) -> Option<&Function> {
+        match self.global_functions {
+            Some(functions) => functions.get(name),
+            None => self.functions.get(name).and_then(|function| {
+                std::iter::successors(Some(function), |function| {
+                    function.overloaded.as_deref()
+                })
+                .find(|function| function.access == AccessLevel::Global)
+            }),
+        }
+    }
+
+    fn invoke_engine_global_raw(
+        &self,
+        name: &str,
+        args: Vec<CallArg>,
+        depth: usize,
+        caller: Option<ScriptCallerContext>,
+    ) -> Result<ReturnValue, RuntimeError> {
+        if depth >= MAX_CALL_DEPTH {
+            return Err(RuntimeError::new("maximum call depth exceeded"));
+        }
+
+        maybe_grow(|| {
+            if let Some(function) = self.engine_global_script_function(name) {
+                return self.invoke_script_function(
+                    name,
+                    function,
+                    args,
+                    depth,
+                    ObjectState::default(),
+                    caller.clone(),
+                );
+            }
+
+            if let Some(function) = self.host_functions.get(name) {
+                let values = self.call_args_to_values(&args)?;
+                let _guard = CallerContextGuard::enter(caller);
+                return self
+                    .invoke_host_function(name, function, &values)
+                    .map(TrackedValue::runtime)
+                    .map(ReturnValue::Value);
+            }
+
+            if let Some(function) = self.host_reference_function(name) {
+                let _guard = CallerContextGuard::enter(caller);
+                return self
+                    .invoke_host_reference_function(name, function, &args)
+                    .map(TrackedValue::runtime)
+                    .map(ReturnValue::Value);
+            }
+
+            Err(RuntimeError::new(format!("unknown function '{name}'")))
+        })
+    }
+
+    /// A global call is a fresh null-`this` VM frame but shares every engine
+    /// table and host bridge with the suspended caller.
+    fn engine_global_vm(&self) -> Vm<'a> {
+        Vm {
+            functions: self.functions,
+            host_identity: self.host_identity,
+            owner_strict_level: self.owner_strict_level,
+            host_functions: self.host_functions,
+            host_reference_functions: self.host_reference_functions,
+            var_decls: self.var_decls,
+            debugger: self.debugger.clone(),
+            constants: self.constants,
+            global_functions: self.global_functions,
+            exact_global_link_lookup: true,
+            this_value: Value::Nil,
+            method_dispatch: self.method_dispatch,
+            method_reference_dispatch: self.method_reference_dispatch,
+            global_call_context_hook: self.global_call_context_hook,
+            retain_global_call_context_for_host_paths: true,
+            globals_named: self.globals_named,
+            globals_numbered: self.globals_numbered,
+            globals_consts: self.globals_consts,
+            local_cell_hook: self.local_cell_hook,
+            cell_identities: RefCell::new(HashMap::new()),
+            constant_identities: RefCell::new(HashMap::new()),
+        }
     }
 
     fn engine_script_function(&self, name: &str) -> Option<&Function> {
@@ -2564,6 +2696,19 @@ impl<'a> Vm<'a> {
                 let right = self.evaluate(rhs, env, depth)?;
                 self.eval_binary(left, op, right, env.strict_level, None)
             }
+            Expr::GlobalCall {
+                name,
+                args,
+                failsafe,
+                forward_rest,
+            } => self.invoke_global_call(
+                name,
+                args,
+                *failsafe,
+                *forward_rest,
+                env,
+                depth,
+            ),
             Expr::Call {
                 callee,
                 args,
@@ -2601,6 +2746,21 @@ impl<'a> Vm<'a> {
                             && !self.functions.contains_key(name)
                             && !self.has_host_function(name)
                         {
+                            if name == "Local"
+                                && self.retain_global_call_context_for_host_paths
+                            {
+                                let index = args
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or(Expr::Literal(Literal::Int(0)));
+                                let _ = self.evaluate_slot_index(
+                                    "Local()",
+                                    &index,
+                                    env,
+                                    depth + 1,
+                                )?;
+                                return Ok(Value::Nil);
+                            }
                             let index = Box::new(
                                 args.first()
                                     .cloned()
@@ -2664,6 +2824,19 @@ impl<'a> Vm<'a> {
                                 .get(1)
                                 .map(|arg| self.evaluate(arg, env, depth + 1))
                                 .transpose()?;
+                            if self.retain_global_call_context_for_host_paths
+                                && target.as_ref().is_none_or(|value| {
+                                    matches!(
+                                        value,
+                                        Value::Nil
+                                            | Value::Int(0)
+                                            | Value::Bool(false)
+                                            | Value::Object(0)
+                                    )
+                                })
+                            {
+                                return Ok(Value::Nil);
+                            }
                             let cell = self.localn_cell(env, &local_name, target);
                             let value = cell.borrow().clone();
                             return Ok(value);
@@ -3194,6 +3367,21 @@ impl<'a> Vm<'a> {
                     self.evaluate_tracked(right, env, depth)
                 }
             }
+            Expr::GlobalCall {
+                name,
+                args,
+                failsafe,
+                forward_rest,
+            } => self
+                .invoke_global_call_raw(
+                    name,
+                    args,
+                    *failsafe,
+                    *forward_rest,
+                    env,
+                    depth,
+                )?
+                .into_tracked(),
             Expr::Call {
                 callee,
                 args,
@@ -3260,7 +3448,14 @@ impl<'a> Vm<'a> {
                         && args.len() <= 1
                         || name == "LocalN" && (1..=2).contains(&args.len())
                         || name == "Global";
-                    if builtin_reference && function.is_none() && !self.has_host_function(name) {
+                    let null_implicit_local = self.retain_global_call_context_for_host_paths
+                        && (name == "Local" && args.len() <= 1
+                            || name == "LocalN" && args.len() == 1);
+                    if builtin_reference
+                        && !null_implicit_local
+                        && function.is_none()
+                        && !self.has_host_function(name)
+                    {
                         return self.expr_to_lvalue(expr, env, depth)?.read_tracked();
                     }
                     if !matches!(name.as_str(), "inherited" | "_inherited")
@@ -4019,6 +4214,246 @@ impl<'a> Vm<'a> {
         }
     }
 
+    fn is_global_vm_builtin(name: &str) -> bool {
+        matches!(
+            name,
+            "this" | "Var" | "Local" | "SetLocal" | "LocalN" | "Global" | "GlobalN" | "eval"
+        )
+    }
+
+    fn global_call_may_return_reference(&self, name: &str) -> bool {
+        self.engine_global_script_function(name)
+            .map(|function| function.returns_reference)
+            .unwrap_or_else(|| {
+                name == "EffectVar"
+                    || !self.has_host_function(name)
+                        && matches!(
+                            name,
+                            "Var" | "Local" | "LocalN" | "Global" | "GlobalN"
+                        )
+            })
+    }
+
+    fn global_builtin_int_arg(
+        &self,
+        name: &str,
+        args: &[CallArg],
+        index: usize,
+    ) -> Result<i32, RuntimeError> {
+        match args.get(index).map(CallArg::read).transpose()?.unwrap_or(Value::Nil) {
+            Value::Int(value) => Ok(value),
+            Value::Bool(value) => Ok(i32::from(value)),
+            Value::Nil => Ok(0),
+            other => Err(RuntimeError::new(format!(
+                "call to \"{name}\" parameter {}: got \"{}\", but expected \"int\"!",
+                index + 1,
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn global_builtin_object_arg(
+        &self,
+        name: &str,
+        args: &[CallArg],
+        index: usize,
+    ) -> Result<Option<Value>, RuntimeError> {
+        match args.get(index).map(CallArg::read).transpose()?.unwrap_or(Value::Nil) {
+            Value::Nil | Value::Int(0) | Value::Bool(false) | Value::Object(0) => Ok(None),
+            value @ Value::Object(_) => Ok(Some(value)),
+            other => Err(RuntimeError::new(format!(
+                "call to \"{name}\" parameter {}: got \"{}\", but expected \"object\"!",
+                index + 1,
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn global_builtin_string_arg(
+        &self,
+        name: &str,
+        args: &[CallArg],
+        index: usize,
+        strict_level: Option<u8>,
+    ) -> Result<String, RuntimeError> {
+        match args.get(index).map(CallArg::read).transpose()?.unwrap_or(Value::Nil) {
+            Value::String(value) => Ok(value),
+            Value::Nil => Ok(String::new()),
+            Value::Int(0) | Value::Bool(false) if strict_level.unwrap_or(0) < 3 => {
+                Ok(String::new())
+            }
+            other => Err(RuntimeError::new(format!(
+                "call to \"{name}\" parameter {}: got \"{}\", but expected \"string\"!",
+                index + 1,
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn invoke_global_builtin_raw(
+        &self,
+        name: &str,
+        args: &[CallArg],
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<ReturnValue, RuntimeError> {
+        let value = |value| ReturnValue::Value(TrackedValue::runtime(value));
+        match name {
+            "this" => Ok(value(Value::Nil)),
+            "Var" => {
+                let index = self.global_builtin_int_arg(name, args, 0)?;
+                Ok(ReturnValue::Reference(
+                    self.tracked_cell(slot_cell(&env.var_slots, index)),
+                ))
+            }
+            "Global" => {
+                let index = self.global_builtin_int_arg(name, args, 0)?;
+                Ok(ReturnValue::Reference(
+                    self.tracked_cell(self.numbered_global_cell(index)?),
+                ))
+            }
+            "GlobalN" => {
+                let name = self.global_builtin_string_arg(name, args, 0, env.strict_level)?;
+                match self.global_variable_cell(&name) {
+                    Some(cell) => Ok(ReturnValue::Reference(self.tracked_cell(cell))),
+                    None => Ok(value(Value::Nil)),
+                }
+            }
+            "Local" => {
+                let index = self.global_builtin_int_arg(name, args, 0)?;
+                let Some(target) = self.global_builtin_object_arg(name, args, 1)? else {
+                    return Ok(value(Value::Nil));
+                };
+                if index < 0 {
+                    return Ok(value(Value::Nil));
+                }
+                Ok(ReturnValue::Reference(self.tracked_cell(
+                    self.numbered_local_cell(env, index, Some(target)),
+                )))
+            }
+            "LocalN" => {
+                let local_name =
+                    self.global_builtin_string_arg(name, args, 0, env.strict_level)?;
+                let Some(target) = self.global_builtin_object_arg(name, args, 1)? else {
+                    return Ok(value(Value::Nil));
+                };
+                Ok(ReturnValue::Reference(self.tracked_cell(
+                    self.localn_cell(env, &local_name, Some(target)),
+                )))
+            }
+            "SetLocal" => {
+                let index = self.global_builtin_int_arg(name, args, 0)?;
+                let tracked = args
+                    .get(1)
+                    .map(CallArg::read_tracked)
+                    .transpose()?
+                    .unwrap_or_else(|| TrackedValue::runtime(Value::Nil));
+                let Some(target) = self.global_builtin_object_arg(name, args, 2)? else {
+                    return Ok(value(Value::Bool(false)));
+                };
+                self.tracked_cell(self.numbered_local_cell(env, index, Some(target)))
+                    .write_tracked(tracked.clone())?;
+                Ok(ReturnValue::Value(tracked))
+            }
+            "eval" => {
+                let code = match args.get(0).map(CallArg::read).transpose()? {
+                    Some(Value::String(code)) => code,
+                    _ => return Ok(value(Value::Nil)),
+                };
+                let Ok(expr) = crate::parser::Parser::with_strict_level(&code, env.strict_level)
+                    .parse_direct_exec_expression()
+                else {
+                    return Ok(value(Value::Nil));
+                };
+                let mut exec_env = Environment::new_with_params(
+                    &[],
+                    &[],
+                    env.strict_level,
+                    ObjectState::default(),
+                )?;
+                exec_env.engine_scope = true;
+                self.evaluate_tracked(&expr, &mut exec_env, depth + 1)
+                    .map(ReturnValue::Value)
+            }
+            _ => Err(RuntimeError::new(format!("unknown function '{name}'"))),
+        }
+    }
+
+    /// Strict-3 `global->Fn(args)`: arguments belong to the suspended caller
+    /// and therefore evaluate before AB_CALLGLOBAL clears Obj/Def. The raw
+    /// return preserves `func &` and native reference results.
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_global_call_raw(
+        &self,
+        name: &str,
+        args: &[Expr],
+        failsafe: bool,
+        forward_rest: bool,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<ReturnValue, RuntimeError> {
+        let function = self.engine_global_script_function(name);
+        let vm_builtin = function.is_none()
+            && !self.has_host_function(name)
+            && Self::is_global_vm_builtin(name);
+        let known = function.is_some() || self.has_host_function(name) || vm_builtin;
+        if !known {
+            if !failsafe {
+                return Err(RuntimeError::new(format!("unknown function '{name}'")));
+            }
+            // Parse_Params(0, nullptr) still evaluates every explicit
+            // argument, but a missing failsafe call forwards no `...` slots.
+            let _ = self.build_call_args(Some(name), None, args, env, depth + 1)?;
+            return Ok(ReturnValue::Value(TrackedValue::runtime(Value::Nil)));
+        }
+
+        let mut evaluated_args =
+            self.build_call_args(Some(name), function, args, env, depth + 1)?;
+        // Parse_Params evaluates every explicit expression, then balances the
+        // stack down to C4AUL_MAX_Par before AB_CALLGLOBAL dispatches.
+        evaluated_args.truncate(MAX_CALL_PARAMETERS);
+        if forward_rest {
+            Self::append_forwarded_args(&mut evaluated_args, env)?;
+        }
+
+        let _context = GlobalCallContextGuard::enter(self.global_call_context_hook);
+        let global_vm = self.engine_global_vm();
+        if vm_builtin {
+            return global_vm.invoke_global_builtin_raw(name, &evaluated_args, env, depth + 1);
+        }
+        if function.is_none() && name == "EffectVar" {
+            if let Some(host) = global_vm.host_functions.get(name) {
+                return Ok(ReturnValue::Reference(LValueRef::HostPath {
+                    function: host.clone(),
+                    args: global_vm.call_args_to_values(&evaluated_args)?,
+                    caller: env.caller_context(),
+                    global_call_context_hook: global_vm.global_call_context_hook.cloned(),
+                    segments: Vec::new(),
+                }));
+            }
+        }
+        global_vm.invoke_engine_global_raw(
+            name,
+            evaluated_args,
+            depth + 1,
+            Some(env.caller_context()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_global_call(
+        &self,
+        name: &str,
+        args: &[Expr],
+        failsafe: bool,
+        forward_rest: bool,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        self.invoke_global_call_raw(name, args, failsafe, forward_rest, env, depth)?
+            .into_value()
+    }
+
     /// `base->name(args)` / `base->~name(args)`: the direct object call
     /// (AB_CALL/AB_CALLFS, C4AulExec.cpp:1216-1305). The target evaluates
     /// first; a FALSY target throws even for the failsafe form (:1224-1226);
@@ -4293,6 +4728,7 @@ impl<'a> Vm<'a> {
                 | Expr::Index(_, _)
                 | Expr::ArrayAppend(_)
                 | Expr::Call { .. }
+                | Expr::GlobalCall { .. }
         )
     }
 
@@ -4326,6 +4762,7 @@ impl<'a> Vm<'a> {
                 Expr::Property(_, _) => true,
                 _ => false,
             },
+            Expr::GlobalCall { name, .. } => self.global_call_may_return_reference(name),
             _ => false,
         }
     }
@@ -4507,6 +4944,11 @@ impl<'a> Vm<'a> {
             }
             AssignmentTarget::LocalSlot(index_expr) => {
                 let index = self.evaluate_slot_index("Local()", index_expr, env, depth)?;
+                if self.retain_global_call_context_for_host_paths {
+                    return Err(RuntimeError::new(
+                        "function 'Local' does not return a reference",
+                    ));
+                }
                 Ok(self.tracked_cell(env.object_state.local_slot_cell(index)))
             }
             AssignmentTarget::VarSlot(index_expr) => {
@@ -4523,6 +4965,10 @@ impl<'a> Vm<'a> {
                         function: function.clone(),
                         args: arg_values,
                         caller: env.caller_context(),
+                        global_call_context_hook: self
+                            .retain_global_call_context_for_host_paths
+                            .then(|| self.global_call_context_hook.cloned())
+                            .flatten(),
                         segments: Vec::new(),
                     });
                 }
@@ -4548,6 +4994,24 @@ impl<'a> Vm<'a> {
                 env.lvalue(&slot_name)
                     .ok_or_else(|| RuntimeError::new("EffectVar slot disappeared"))
             }
+            AssignmentTarget::GlobalFunctionCall {
+                name,
+                args,
+                failsafe,
+                forward_rest,
+            } => match self.invoke_global_call_raw(
+                name,
+                args,
+                *failsafe,
+                *forward_rest,
+                env,
+                depth,
+            )? {
+                ReturnValue::Reference(reference) => Ok(reference),
+                ReturnValue::Value(_) => Err(RuntimeError::new(format!(
+                    "function '{name}' does not return a reference"
+                ))),
+            },
             AssignmentTarget::FunctionCall { name, args }
                 if name == "Global"
                     && !self.functions.contains_key(name)
@@ -4594,6 +5058,21 @@ impl<'a> Vm<'a> {
                     .get(1)
                     .map(|arg| self.evaluate(arg, env, depth + 1))
                     .transpose()?;
+                if self.retain_global_call_context_for_host_paths
+                    && target.as_ref().is_none_or(|value| {
+                        matches!(
+                            value,
+                            Value::Nil
+                                | Value::Int(0)
+                                | Value::Bool(false)
+                                | Value::Object(0)
+                        )
+                    })
+                {
+                    return Err(RuntimeError::new(
+                        "function 'LocalN' does not return a reference",
+                    ));
+                }
                 Ok(self.tracked_cell(self.localn_cell(env, &local_name, target)))
             }
             AssignmentTarget::FunctionCall { name, args }
@@ -4817,6 +5296,10 @@ impl<'a> Vm<'a> {
             {
                 self.expr_to_lvalue(expr, env, depth).map(Some)
             }
+            Expr::GlobalCall { name, .. } if self.global_call_may_return_reference(name) =>
+            {
+                self.expr_to_lvalue(expr, env, depth).map(Some)
+            }
             _ => Ok(None),
         }
     }
@@ -4916,8 +5399,16 @@ impl<'a> Vm<'a> {
             .map(|arg| self.evaluate(arg, env, depth))
             .transpose()?;
         let target = explicit_target
-            .filter(|value| !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false)))
+            .filter(|value| {
+                !matches!(
+                    value,
+                    Value::Nil | Value::Int(0) | Value::Bool(false) | Value::Object(0)
+                )
+            })
             .or(default_target);
+        if target.is_none() && self.retain_global_call_context_for_host_paths {
+            return Ok(TrackedValue::runtime(Value::Bool(false)));
+        }
         let cell = self.numbered_local_cell(env, index, target);
         self.tracked_cell(cell).write_tracked(tracked.clone())?;
         Ok(tracked)
@@ -4992,6 +5483,17 @@ impl<'a> Vm<'a> {
                     expr
                 )))
             }
+            Expr::GlobalCall {
+                name,
+                args,
+                failsafe,
+                forward_rest,
+            } => Ok(AssignmentTarget::GlobalFunctionCall {
+                name: name.clone(),
+                args: args.clone(),
+                failsafe: *failsafe,
+                forward_rest: *forward_rest,
+            }),
             _ => Err(RuntimeError::new(format!(
                 "invalid increment/decrement target: {:?}",
                 expr

@@ -11826,6 +11826,17 @@ fn foreign_local_cell_hook(target: &Value, name: &str) -> Option<lc_script::Valu
     })
 }
 
+/// AB_CALLGLOBAL temporarily runs with `cthr->Obj = cthr->Def = nullptr`
+/// while retaining the suspended caller frame. The VM brackets the dynamic
+/// extent with this hook after evaluating its arguments.
+fn global_call_context_hook(enter: bool) {
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.set_global_call_context(enter);
+        }
+    });
+}
+
 /// `obj->Method(args)` / `obj->~Method(args)` — the AB_CALL/AB_CALLFS
 /// direct object call (C4AulExec.cpp:1216-1305), forwarded by the VM as
 /// [target, name, failsafe, args...]. Resolution is FindSameNameFunc on the
@@ -12550,6 +12561,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_method_reference_dispatch(std::rc::Rc::new(
         arrow_method_reference_dispatch,
     ));
+    script.register_global_call_context_hook(std::sync::Arc::new(global_call_context_hook));
     script.register_local_cell_hook(std::rc::Rc::new(foreign_local_cell_hook));
     script.register_host_function("NoContainer", no_container);
     script.register_host_function("AnyContainer", any_container);
@@ -38834,6 +38846,10 @@ struct EffectHostContext {
     /// always `object`; scopes move between locations by identity, so one
     /// object never has two scopes (no double-apply on fold).
     dormant_scopes: Vec<Option<ObjectScopeContext>>,
+    /// Script/definition contexts paired with each AB_CALLGLOBAL suspension.
+    /// Object scopes use `dormant_scopes` so explicit-object natives and
+    /// nested arrow calls can still reach the suspended caller object.
+    global_call_contexts: Vec<(Option<ObjectId>, Option<DefinitionId>)>,
     /// Completed nested-call scopes by target, resumed on repeat calls and
     /// folded into `EffectContextOutcome::other_objects` in first-call order.
     nested_objects: HashMap<ObjectId, NestedScopeState>,
@@ -39053,6 +39069,7 @@ impl EffectHostContext {
             game_over_triggered,
             runtime_flash_boundary: false,
             dormant_scopes: Vec::new(),
+            global_call_contexts: Vec::new(),
             nested_objects: HashMap::new(),
             session_local_cells: HashMap::new(),
             removed_object_references: HashSet::new(),
@@ -41850,6 +41867,25 @@ impl EffectHostContext {
         self.object.as_ref()
     }
 
+    fn set_global_call_context(&mut self, enter: bool) {
+        if enter {
+            self.dormant_scopes.push(self.object.take());
+            self.global_call_contexts.push((
+                self.script_object_context.take(),
+                self.definition_context.take(),
+            ));
+            return;
+        }
+
+        let Some((script_object, definition)) = self.global_call_contexts.pop() else {
+            debug_assert!(false, "unbalanced global-call context exit");
+            return;
+        };
+        self.object = self.dormant_scopes.pop().unwrap_or(None);
+        self.script_object_context = script_object;
+        self.definition_context = definition;
+    }
+
     fn current_definition_id(&self) -> Option<DefinitionId> {
         // FnGetID prefers cthr->Obj->Def. Definition-commanded effects may
         // still carry a mutation object in `object` while their actual
@@ -41861,7 +41897,8 @@ impl EffectHostContext {
                 // gives the nested C4Aul frame its destination definition as
                 // cthr->Def. HOST_CONTEXT itself remains no-object, so derive
                 // that definition from the active local frame's exact host.
-                (lc_script::caller_uses_engine_scope() == Some(false))
+                (self.global_call_contexts.is_empty()
+                    && lc_script::caller_uses_engine_scope() == Some(false))
                     .then(lc_script::caller_host_identity)
                     .flatten()
                     .and_then(|identity| {
@@ -41904,6 +41941,10 @@ impl EffectHostContext {
         debug_assert!(
             self.dormant_scopes.is_empty(),
             "all nested calls must have finished before the context closes"
+        );
+        debug_assert!(
+            self.global_call_contexts.is_empty(),
+            "all global calls must have finished before the context closes"
         );
         // Cross-object LocalN cells fold like any other foreign mutation:
         // merged into the target's outcome locals (cells hold the LATEST

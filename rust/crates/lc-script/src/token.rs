@@ -11,6 +11,9 @@ pub enum TokenKind {
     Number(i32),
     String(String),
     C4Id(String), // 4-character definition ID like "CLNK", "COWB"
+    /// Strict-3 adjacent `global->` (C4Aul ATT_GLOBALCALL). The lexer
+    /// consumes the arrow so whitespace keeps the ordinary identifier path.
+    GlobalCall,
     Keyword(Keyword),
     Symbol(Symbol),
     Directive(String), // Directive like "#include", "#appendto", "#strict"
