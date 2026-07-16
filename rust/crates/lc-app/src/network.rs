@@ -588,6 +588,18 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_internal_player_scripts(
+        &mut self,
+    ) -> Vec<(Tick, lc_engine::ControlPacket)> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitInternalPlayerScript { tick, control } = command {
+                submitted.push((tick, control));
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn take_submitted_votes(&mut self) -> Vec<lc_engine::VoteControlData> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -792,6 +804,11 @@ pub enum NetworkControl {
     JoinPlayer(JoinPlayerControlData),
     RemovePlayer(lc_engine::RemovePlayerControlData),
     SurrenderPlayer(lc_engine::SurrenderPlayerControlData),
+    ActivateGameGoalMenu(lc_engine::ActivateGameGoalMenuControlData),
+    ToggleHostility(lc_engine::ToggleHostilityControlData),
+    ActivateGameGoalRule(lc_engine::ActivateGameGoalRuleControlData),
+    SetPlayerTeam(lc_engine::SetPlayerTeamControlData),
+    EliminatePlayer(lc_engine::EliminatePlayerControlData),
     Vote(lc_engine::VoteControlData),
     VoteEnd(lc_engine::VoteControlData),
     PlayerControl(PlayerControlData),
@@ -836,6 +853,10 @@ enum NetworkCommand {
     SubmitSurrenderPlayer {
         tick: Tick,
         surrender: lc_engine::SurrenderPlayerControlData,
+    },
+    SubmitInternalPlayerScript {
+        tick: Tick,
+        control: lc_engine::ControlPacket,
     },
     SubmitVote(lc_engine::VoteControlData),
     SubmitVoteEnd(lc_engine::VoteControlData),
@@ -1149,6 +1170,90 @@ impl NetworkManager {
                 surrender: lc_engine::SurrenderPlayerControlData { player, by_client },
             })
             .map_err(|_| anyhow!("network worker is not accepting player surrender"))
+    }
+
+    fn submit_internal_player_script(
+        &self,
+        tick: Tick,
+        control: lc_engine::ControlPacket,
+    ) -> Result<()> {
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitInternalPlayerScript { tick, control })
+            .map_err(|_| anyhow!("network worker is not accepting internal player controls"))
+    }
+
+    pub fn submit_activate_game_goal_menu(&self, tick: Tick, player: i32) -> Result<()> {
+        let by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the goal-menu wire field"))?;
+        self.submit_internal_player_script(
+            tick,
+            lc_engine::ControlPacket::ActivateGameGoalMenu(
+                lc_engine::ActivateGameGoalMenuControlData { player, by_client },
+            ),
+        )
+    }
+
+    pub fn submit_toggle_hostility(
+        &self,
+        tick: Tick,
+        player: i32,
+        opponent: i32,
+    ) -> Result<()> {
+        let by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the hostility wire field"))?;
+        self.submit_internal_player_script(
+            tick,
+            lc_engine::ControlPacket::ToggleHostility(lc_engine::ToggleHostilityControlData {
+                opponent,
+                player,
+                by_client,
+            }),
+        )
+    }
+
+    pub fn submit_activate_game_goal_rule(
+        &self,
+        tick: Tick,
+        player: i32,
+        object: i32,
+    ) -> Result<()> {
+        let by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the goal-rule wire field"))?;
+        self.submit_internal_player_script(
+            tick,
+            lc_engine::ControlPacket::ActivateGameGoalRule(
+                lc_engine::ActivateGameGoalRuleControlData {
+                    object,
+                    player,
+                    by_client,
+                },
+            ),
+        )
+    }
+
+    pub fn submit_set_player_team(&self, tick: Tick, player: i32, team: i32) -> Result<()> {
+        let by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the team-switch wire field"))?;
+        self.submit_internal_player_script(
+            tick,
+            lc_engine::ControlPacket::SetPlayerTeam(lc_engine::SetPlayerTeamControlData {
+                team,
+                player,
+                by_client,
+            }),
+        )
+    }
+
+    pub fn submit_eliminate_player(&self, tick: Tick, player: i32) -> Result<()> {
+        let by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the eliminate-player wire field"))?;
+        self.submit_internal_player_script(
+            tick,
+            lc_engine::ControlPacket::EliminatePlayer(lc_engine::EliminatePlayerControlData {
+                player,
+                by_client,
+            }),
+        )
     }
 
     pub fn submit_vote(&self, vote_type: u8, approve: bool, data: i32) -> Result<()> {
@@ -1776,6 +1881,9 @@ async fn run_host_worker(
                             current_millis(),
                         );
                     }
+                    NetworkCommand::SubmitInternalPlayerScript { tick, control } => {
+                        frame_builder.record_control(tick, control, current_millis());
+                    }
                     NetworkCommand::SubmitVote(vote) => {
                         let data = encode_control_entry_payload(
                             &lc_engine::ControlPacket::Vote(vote),
@@ -2160,6 +2268,10 @@ async fn run_client_worker(
                             lc_engine::ControlPacket::SurrenderPlayer(surrender),
                             current_millis(),
                         );
+                    }
+                    NetworkCommand::SubmitInternalPlayerScript { tick, control } => {
+                        client_activation.refresh_frame(frame_tick_to_i32(tick));
+                        frame_builder.record_control(tick, control, current_millis());
                     }
                     NetworkCommand::SubmitVote(vote) => {
                         let data = encode_control_entry_payload(
@@ -2627,6 +2739,21 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         }
         lc_engine::ControlPacket::SurrenderPlayer(surrender) => {
             Some(NetworkControl::SurrenderPlayer(surrender))
+        }
+        lc_engine::ControlPacket::ActivateGameGoalMenu(control) => {
+            Some(NetworkControl::ActivateGameGoalMenu(control))
+        }
+        lc_engine::ControlPacket::ToggleHostility(control) => {
+            Some(NetworkControl::ToggleHostility(control))
+        }
+        lc_engine::ControlPacket::ActivateGameGoalRule(control) => {
+            Some(NetworkControl::ActivateGameGoalRule(control))
+        }
+        lc_engine::ControlPacket::SetPlayerTeam(control) => {
+            Some(NetworkControl::SetPlayerTeam(control))
+        }
+        lc_engine::ControlPacket::EliminatePlayer(control) => {
+            Some(NetworkControl::EliminatePlayer(control))
         }
         lc_engine::ControlPacket::Vote(vote) => Some(NetworkControl::Vote(vote)),
         lc_engine::ControlPacket::VoteEnd(result) => Some(NetworkControl::VoteEnd(result)),
@@ -4767,6 +4894,159 @@ mod tests {
                 command.clone(),
             )),
             Some(NetworkControl::CustomCommand(command))
+        );
+    }
+
+    #[test]
+    fn decoded_internal_player_scripts_are_retained_for_ordered_execution() {
+        let cases = vec![
+            (
+                lc_engine::ControlPacket::ActivateGameGoalMenu(
+                    lc_engine::ActivateGameGoalMenuControlData {
+                        player: 3,
+                        by_client: 4,
+                    },
+                ),
+                NetworkControl::ActivateGameGoalMenu(
+                    lc_engine::ActivateGameGoalMenuControlData {
+                        player: 3,
+                        by_client: 4,
+                    },
+                ),
+            ),
+            (
+                lc_engine::ControlPacket::ToggleHostility(
+                    lc_engine::ToggleHostilityControlData {
+                        opponent: 5,
+                        player: 3,
+                        by_client: 4,
+                    },
+                ),
+                NetworkControl::ToggleHostility(lc_engine::ToggleHostilityControlData {
+                    opponent: 5,
+                    player: 3,
+                    by_client: 4,
+                }),
+            ),
+            (
+                lc_engine::ControlPacket::ActivateGameGoalRule(
+                    lc_engine::ActivateGameGoalRuleControlData {
+                        object: 42,
+                        player: 3,
+                        by_client: 4,
+                    },
+                ),
+                NetworkControl::ActivateGameGoalRule(
+                    lc_engine::ActivateGameGoalRuleControlData {
+                        object: 42,
+                        player: 3,
+                        by_client: 4,
+                    },
+                ),
+            ),
+            (
+                lc_engine::ControlPacket::SetPlayerTeam(lc_engine::SetPlayerTeamControlData {
+                    team: 6,
+                    player: 3,
+                    by_client: 4,
+                }),
+                NetworkControl::SetPlayerTeam(lc_engine::SetPlayerTeamControlData {
+                    team: 6,
+                    player: 3,
+                    by_client: 4,
+                }),
+            ),
+            (
+                lc_engine::ControlPacket::EliminatePlayer(
+                    lc_engine::EliminatePlayerControlData {
+                        player: 3,
+                        by_client: 4,
+                    },
+                ),
+                NetworkControl::EliminatePlayer(lc_engine::EliminatePlayerControlData {
+                    player: 3,
+                    by_client: 4,
+                }),
+            ),
+        ];
+
+        for (packet, expected) in cases {
+            assert_eq!(network_control_for_packet(packet), Some(expected));
+        }
+    }
+
+    #[test]
+    fn manager_queues_internal_player_scripts_with_authenticated_local_author() {
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        manager
+            .submit_activate_game_goal_menu(20, 3)
+            .expect("queue goal menu");
+        manager
+            .submit_toggle_hostility(21, 3, 4)
+            .expect("queue hostility toggle");
+        manager
+            .submit_activate_game_goal_rule(22, 3, 42)
+            .expect("queue goal/rule activation");
+        manager
+            .submit_set_player_team(23, 3, 5)
+            .expect("queue team switch");
+        manager
+            .submit_eliminate_player(24, 3)
+            .expect("queue elimination");
+
+        assert_eq!(
+            commands.take_submitted_internal_player_scripts(),
+            vec![
+                (
+                    20,
+                    lc_engine::ControlPacket::ActivateGameGoalMenu(
+                        lc_engine::ActivateGameGoalMenuControlData {
+                            player: 3,
+                            by_client: 7,
+                        },
+                    ),
+                ),
+                (
+                    21,
+                    lc_engine::ControlPacket::ToggleHostility(
+                        lc_engine::ToggleHostilityControlData {
+                            opponent: 4,
+                            player: 3,
+                            by_client: 7,
+                        },
+                    ),
+                ),
+                (
+                    22,
+                    lc_engine::ControlPacket::ActivateGameGoalRule(
+                        lc_engine::ActivateGameGoalRuleControlData {
+                            object: 42,
+                            player: 3,
+                            by_client: 7,
+                        },
+                    ),
+                ),
+                (
+                    23,
+                    lc_engine::ControlPacket::SetPlayerTeam(
+                        lc_engine::SetPlayerTeamControlData {
+                            team: 5,
+                            player: 3,
+                            by_client: 7,
+                        },
+                    ),
+                ),
+                (
+                    24,
+                    lc_engine::ControlPacket::EliminatePlayer(
+                        lc_engine::EliminatePlayerControlData {
+                            player: 3,
+                            by_client: 7,
+                        },
+                    ),
+                ),
+            ]
         );
     }
 

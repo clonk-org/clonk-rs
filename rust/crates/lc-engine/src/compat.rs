@@ -1040,6 +1040,12 @@ pub enum PlayerCommand {
         player_id: i32,
         target: Option<ObjectId>,
     },
+    /// `FnActivateGameGoalMenu`: evaluate the live goals on every peer and
+    /// build presentation state only for a locally controlled player.
+    ActivateGameGoalMenu {
+        player_id: i32,
+        open_menu: bool,
+    },
     /// `FnSetPlayerTeam`'s complete, callback-approved team transition.
     /// The host has already made every field visible to the still-running
     /// VM; this payload lets the authoritative engine repeat the transition
@@ -4179,6 +4185,37 @@ fn eliminate_player(args: &[Value]) -> Result<Value, RuntimeError> {
             player.surrendered = false;
         }
         context.record_player_command(PlayerCommand::Eliminate { player_id });
+        Ok(Value::Int(1))
+    })
+}
+
+/// FnActivateGameGoalMenu (C4Script.cpp:5953-5960): a missing player fails;
+/// every valid peer evaluates the goals, while the embedding runtime decides
+/// whether its locally controlled player may build the actual menu.
+fn activate_game_goal_menu(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "ActivateGameGoalMenu expects at most 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "ActivateGameGoalMenu",
+        "player",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Int(0));
+        };
+        if context.player_state(player_id).is_none() {
+            return Ok(Value::Int(0));
+        }
+        let open_menu = context.world.local_players.contains(&player_id);
+        context.record_player_command(PlayerCommand::ActivateGameGoalMenu {
+            player_id,
+            open_menu,
+        });
         Ok(Value::Int(1))
     })
 }
@@ -13347,6 +13384,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerByIndex", get_player_by_index);
     script.register_host_function("CreateScriptPlayer", create_script_player);
     script.register_host_function("InitScenarioPlayer", init_scenario_player);
+    script.register_host_function("ActivateGameGoalMenu", activate_game_goal_menu);
     script.register_host_function("EliminatePlayer", eliminate_player);
     script.register_host_function("SurrenderPlayer", surrender_player);
     script.register_host_function("GetPlayerName", get_player_name);
@@ -45534,6 +45572,7 @@ mod tests {
         "AbortMessageBoard",
         "Abs",
         "ActIdle",
+        "ActivateGameGoalMenu",
         "AddCommand",
         "AddEffect",
         "AddEvaluationData",

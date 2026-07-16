@@ -55,9 +55,22 @@ pub enum ControlPacket {
     /// Queued team choice that resumes a player waiting in
     /// `PS_TeamSelectionPending` (`CID_InitScenarioPlayer`).
     InitScenarioPlayer(InitScenarioPlayerControlData),
+    /// Queued synchronized goal evaluation and local goal-menu activation
+    /// (`CID_ActivateGameGoalMenu`).
+    ActivateGameGoalMenu(ActivateGameGoalMenuControlData),
+    /// Queued one-way hostility toggle (`CID_ToggleHostility`).
+    ToggleHostility(ToggleHostilityControlData),
     /// Queued player surrender (`CID_SurrenderPlayer`). C++ authenticates the
     /// player through the inherited `ByClient` field before executing it.
     SurrenderPlayer(SurrenderPlayerControlData),
+    /// Queued object-scoped goal or rule activation
+    /// (`CID_ActivateGameGoalRule`).
+    ActivateGameGoalRule(ActivateGameGoalRuleControlData),
+    /// Queued runtime player-team switch (`CID_SetPlayerTeam`).
+    SetPlayerTeam(SetPlayerTeamControlData),
+    /// Host-only synchronized regular player elimination
+    /// (`CID_EliminatePlayer`).
+    EliminatePlayer(EliminatePlayerControlData),
     /// Deterministic state checksum used for desync detection (`CID_SyncCheck`).
     SyncCheck(SyncCheckPacket),
     /// Deterministic game-state synchronization (`CID_Synchronize`,
@@ -347,6 +360,46 @@ pub struct InitScenarioPlayerControlData {
     pub by_client: i32,
 }
 
+/// Body of `C4ControlActivateGameGoalMenu` and its control bases.
+///
+/// The C++ compiler writes inherited packed `Plr` followed by packed
+/// `ByClient` (`src/C4Control.cpp:1566-1570,53-57`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivateGameGoalMenuControlData {
+    pub player: i32,
+    pub by_client: i32,
+}
+
+impl Default for ActivateGameGoalMenuControlData {
+    fn default() -> Self {
+        Self {
+            player: -1,
+            by_client: -1,
+        }
+    }
+}
+
+/// Body of `C4ControlToggleHostility` and its control bases.
+///
+/// The C++ compiler writes packed `Opponent`, inherited packed `Plr`, then
+/// packed `ByClient` (`src/C4Control.cpp:1690-1694,1566-1570,53-57`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToggleHostilityControlData {
+    pub opponent: i32,
+    pub player: i32,
+    pub by_client: i32,
+}
+
+impl Default for ToggleHostilityControlData {
+    fn default() -> Self {
+        Self {
+            opponent: -1,
+            player: -1,
+            by_client: -1,
+        }
+    }
+}
+
 impl Default for InitScenarioPlayerControlData {
     fn default() -> Self {
         Self {
@@ -365,6 +418,58 @@ impl Default for InitScenarioPlayerControlData {
 pub struct SurrenderPlayerControlData {
     pub player: i32,
     pub by_client: i32,
+}
+
+/// Body of `C4ControlActivateGameGoalRule` and its control bases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivateGameGoalRuleControlData {
+    pub object: i32,
+    pub player: i32,
+    pub by_client: i32,
+}
+
+impl Default for ActivateGameGoalRuleControlData {
+    fn default() -> Self {
+        Self {
+            object: 0,
+            player: -1,
+            by_client: -1,
+        }
+    }
+}
+
+/// Body of `C4ControlSetPlayerTeam` and its control bases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetPlayerTeamControlData {
+    pub team: i32,
+    pub player: i32,
+    pub by_client: i32,
+}
+
+impl Default for SetPlayerTeamControlData {
+    fn default() -> Self {
+        Self {
+            team: 0,
+            player: -1,
+            by_client: -1,
+        }
+    }
+}
+
+/// Body of host-only `C4ControlEliminatePlayer` and its control bases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EliminatePlayerControlData {
+    pub player: i32,
+    pub by_client: i32,
+}
+
+impl Default for EliminatePlayerControlData {
+    fn default() -> Self {
+        Self {
+            player: -1,
+            by_client: -1,
+        }
+    }
 }
 
 /// Shared body of `C4ControlVote` and `C4ControlVoteEnd`.
@@ -951,6 +1056,11 @@ impl RawPacket {
         const CID_SCRIPT: u8 = 0x88;
         const CID_MESSAGE_BOARD_ANSWER: u8 = 0xd0;
         const CID_CUSTOM_COMMAND: u8 = 0xd1;
+        const CID_ACTIVATE_GAME_GOAL_MENU: u8 = 0xd3;
+        const CID_TOGGLE_HOSTILITY: u8 = 0xd4;
+        const CID_ACTIVATE_GAME_GOAL_RULE: u8 = 0xd6;
+        const CID_SET_PLAYER_TEAM: u8 = 0xd7;
+        const CID_ELIMINATE_PLAYER: u8 = 0xd8;
         const CID_PLR_SELECT: u8 = 0xA0;
         const CID_PLR_CONTROL: u8 = 0xA1;
         const CID_PLR_COMMAND: u8 = 0xA2;
@@ -1077,6 +1187,52 @@ impl RawPacket {
                     argument,
                     player,
                     by_client,
+                },
+            )));
+        }
+
+        if id == CID_ACTIVATE_GAME_GOAL_MENU {
+            return Ok(Some(ControlPacket::ActivateGameGoalMenu(
+                ActivateGameGoalMenuControlData {
+                    player: parse_int_field_or(&self.fields, "Plr", -1)?,
+                    by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
+                },
+            )));
+        }
+
+        if id == CID_TOGGLE_HOSTILITY {
+            return Ok(Some(ControlPacket::ToggleHostility(
+                ToggleHostilityControlData {
+                    opponent: parse_int_field_or(&self.fields, "Opponent", -1)?,
+                    player: parse_int_field_or(&self.fields, "Plr", -1)?,
+                    by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
+                },
+            )));
+        }
+
+        if id == CID_ACTIVATE_GAME_GOAL_RULE {
+            return Ok(Some(ControlPacket::ActivateGameGoalRule(
+                ActivateGameGoalRuleControlData {
+                    object: parse_int_field_or(&self.fields, "Object", 0)?,
+                    player: parse_int_field_or(&self.fields, "Plr", -1)?,
+                    by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
+                },
+            )));
+        }
+
+        if id == CID_SET_PLAYER_TEAM {
+            return Ok(Some(ControlPacket::SetPlayerTeam(SetPlayerTeamControlData {
+                team: parse_int_field_or(&self.fields, "Team", 0)?,
+                player: parse_int_field_or(&self.fields, "Plr", -1)?,
+                by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
+            })));
+        }
+
+        if id == CID_ELIMINATE_PLAYER {
+            return Ok(Some(ControlPacket::EliminatePlayer(
+                EliminatePlayerControlData {
+                    player: parse_int_field_or(&self.fields, "Plr", -1)?,
+                    by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
                 },
             )));
         }
@@ -2341,6 +2497,93 @@ mod tests {
         };
         assert_eq!(command.command.as_bytes(), &[0x80]);
         assert_eq!(command.argument.as_bytes(), &[0xff]);
+    }
+
+    #[test]
+    fn parses_internal_player_script_packets_and_cpp_defaults() {
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=211\n\
+    [Activate Game Goal Menu]\n\
+      Plr=-4\n\
+      ByClient=7\n\
+  [IDPacket]\n\
+    ID=212\n\
+    [Toggle Hostility]\n\
+      Opponent=130\n\
+      Plr=-4\n\
+      ByClient=7\n\
+  [IDPacket]\n\
+    ID=214\n\
+    [Activate Game Goal/Rule]\n\
+      Object=130\n\
+      Plr=-4\n\
+      ByClient=7\n\
+  [IDPacket]\n\
+    ID=215\n\
+    [Set Player Team]\n\
+      Team=130\n\
+      Plr=-4\n\
+      ByClient=7\n\
+  [IDPacket]\n\
+    ID=216\n\
+    [Eliminate Player]\n\
+      Plr=-4\n\
+      ByClient=7\n\
+  [IDPacket]\n\
+    ID=211\n\
+    [Activate Game Goal Menu]\n\
+  [IDPacket]\n\
+    ID=212\n\
+    [Toggle Hostility]\n\
+  [IDPacket]\n\
+    ID=214\n\
+    [Activate Game Goal/Rule]\n\
+  [IDPacket]\n\
+    ID=215\n\
+    [Set Player Team]\n\
+  [IDPacket]\n\
+    ID=216\n\
+    [Eliminate Player]\n";
+
+        assert_eq!(
+            parse_control_ini(input).expect("parse internal player controls"),
+            vec![
+                ControlPacket::ActivateGameGoalMenu(ActivateGameGoalMenuControlData {
+                    player: -4,
+                    by_client: 7,
+                }),
+                ControlPacket::ToggleHostility(ToggleHostilityControlData {
+                    opponent: 130,
+                    player: -4,
+                    by_client: 7,
+                }),
+                ControlPacket::ActivateGameGoalRule(ActivateGameGoalRuleControlData {
+                    object: 130,
+                    player: -4,
+                    by_client: 7,
+                }),
+                ControlPacket::SetPlayerTeam(SetPlayerTeamControlData {
+                    team: 130,
+                    player: -4,
+                    by_client: 7,
+                }),
+                ControlPacket::EliminatePlayer(EliminatePlayerControlData {
+                    player: -4,
+                    by_client: 7,
+                }),
+                ControlPacket::ActivateGameGoalMenu(
+                    ActivateGameGoalMenuControlData::default(),
+                ),
+                ControlPacket::ToggleHostility(ToggleHostilityControlData::default()),
+                ControlPacket::ActivateGameGoalRule(
+                    ActivateGameGoalRuleControlData::default(),
+                ),
+                ControlPacket::SetPlayerTeam(SetPlayerTeamControlData::default()),
+                ControlPacket::EliminatePlayer(EliminatePlayerControlData::default()),
+            ]
+        );
     }
 
     #[test]

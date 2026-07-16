@@ -412,6 +412,7 @@ impl RuntimeHandle {
         // Playback consumes the recorded control stream; it is never the
         // control host that synthesizes new Game.Input packets.
         engine.set_control_host(false);
+        engine.set_replay_control(true);
         Self {
             engine,
             scenario_path: None,
@@ -459,6 +460,33 @@ impl RuntimeHandle {
                 ControlPacket::CustomCommand(data) => {
                     self.engine
                         .execute_custom_command_control(&data, true)
+                        .map_err(|error| error.to_string())?;
+                }
+                ControlPacket::ActivateGameGoalMenu(data) => {
+                    self.engine
+                        .execute_activate_game_goal_menu_control(&data)
+                        .map_err(|error| error.to_string())?;
+                    // Replay evaluates goals but never opens presentation UI.
+                    self.engine.take_game_goal_menu_requests();
+                }
+                ControlPacket::ToggleHostility(data) => {
+                    self.engine
+                        .execute_toggle_hostility_control(&data)
+                        .map_err(|error| error.to_string())?;
+                }
+                ControlPacket::ActivateGameGoalRule(data) => {
+                    self.engine
+                        .execute_activate_game_goal_rule_control(&data)
+                        .map_err(|error| error.to_string())?;
+                }
+                ControlPacket::SetPlayerTeam(data) => {
+                    self.engine
+                        .execute_set_player_team_control(&data)
+                        .map_err(|error| error.to_string())?;
+                }
+                ControlPacket::EliminatePlayer(data) => {
+                    self.engine
+                        .execute_eliminate_player_control(&data)
                         .map_err(|error| error.to_string())?;
                 }
                 ControlPacket::Synchronize(data) => {
@@ -2067,6 +2095,7 @@ fn load_scenario_into_runtime(
         .map_err(|error| format!("failed to load scenario: {error}"))?;
     runtime.engine = Engine::with_seed(seed);
     runtime.engine.set_control_host(false);
+    runtime.engine.set_replay_control(true);
     // The lc-app boot sequence: materials, then the engine-global
     // System.c4g scripts, then the scenario (which adds its own System.c4g).
     {
@@ -2248,6 +2277,11 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                         ControlPacket::Script(_) => "Script",
                         ControlPacket::MessageBoardAnswer(_) => "MessageBoardAnswer",
                         ControlPacket::CustomCommand(_) => "CustomCommand",
+                        ControlPacket::ActivateGameGoalMenu(_) => "ActivateGameGoalMenu",
+                        ControlPacket::ToggleHostility(_) => "ToggleHostility",
+                        ControlPacket::ActivateGameGoalRule(_) => "ActivateGameGoalRule",
+                        ControlPacket::SetPlayerTeam(_) => "SetPlayerTeam",
+                        ControlPacket::EliminatePlayer(_) => "EliminatePlayer",
                         ControlPacket::InitScenarioPlayer(_) => "InitScenarioPlayer",
                         ControlPacket::SurrenderPlayer(_) => "SurrenderPlayer",
                         ControlPacket::SyncCheck(_) => "SyncCheck",
@@ -2302,6 +2336,7 @@ pub extern "C" fn lc_engine_runtime_reset(
     let Some(path) = runtime.scenario_path.clone() else {
         runtime.engine = Engine::with_seed(runtime.seed);
         runtime.engine.set_control_host(false);
+        runtime.engine.set_replay_control(true);
         runtime.last_frame = runtime.engine.frame();
         runtime.control_log_strings.clear();
         runtime.control_packets.clear();
@@ -4861,6 +4896,72 @@ global func Step(state, frame, random)
         let mut expected = crate::rng::LcgRng::seed_from_u64(0);
         expected.random(100);
         assert_eq!(runtime.engine.debug_rng_clone(), expected);
+    }
+
+    #[test]
+    fn replay_executes_internal_player_script_packets_in_recorded_order() {
+        let mut runtime = RuntimeHandle::new();
+        for (player, client) in [(1, 7), (2, 9)] {
+            runtime
+                .engine
+                .register_player(PlayerConfig::new(player, format!("Player {player}")))
+                .expect("player registers");
+            runtime
+                .engine
+                .player_mut(player)
+                .expect("player remains")
+                .set_at_client(crate::PlayerAtClient::new(client));
+        }
+        runtime
+            .engine
+            .set_teams(vec![crate::TeamInfo::new(4, "Four", 0x44)]);
+        runtime
+            .engine
+            .register_definition(
+                Definition::from_script(
+                    "RULE",
+                    "Rule",
+                    "#strict 3\nlocal Marker; func Activate(player) { Marker = player; return true; } func ReadMarker() { return Marker; }",
+                )
+                .expect("rule compiles"),
+            )
+            .expect("rule registers");
+        let rule = runtime
+            .engine
+            .spawn_object(SpawnConfig::new("RULE"))
+            .expect("rule spawns");
+        let rule_number = i32::try_from(rule.as_u64()).expect("fixture id fits i32");
+
+        let controls = format!(
+            "[Control]\n\
+             [IDPacket]\nID=211\n[Activate Game Goal Menu]\nPlr=1\nByClient=7\n\
+             [IDPacket]\nID=212\n[Toggle Hostility]\nOpponent=2\nPlr=1\nByClient=7\n\
+             [IDPacket]\nID=214\n[Activate Game Goal/Rule]\nObject={rule_number}\nPlr=1\nByClient=7\n\
+             [IDPacket]\nID=215\n[Set Player Team]\nTeam=4\nPlr=1\nByClient=7\n\
+             [IDPacket]\nID=216\n[Eliminate Player]\nPlr=2\nByClient=0\n"
+        );
+        runtime.control_packets.insert(
+            0,
+            parse_control_ini(&controls).expect("internal controls parse"),
+        );
+        runtime
+            .apply_control_packets_for_frame(0)
+            .expect("internal controls replay");
+
+        assert!(runtime.engine.player(1).unwrap().is_hostile_towards(2));
+        assert_eq!(runtime.engine.player(1).unwrap().team(), Some(4));
+        assert_eq!(
+            runtime.engine.player(2).unwrap().status(),
+            crate::PlayerStatus::Eliminated
+        );
+        let rule_index = runtime.engine.find_object_index(rule).unwrap();
+        assert_eq!(
+            runtime
+                .engine
+                .call_object_function(rule_index, "ReadMarker", Vec::new())
+                .expect("rule marker reads"),
+            lc_script::Value::Int(1)
+        );
     }
 
     #[test]

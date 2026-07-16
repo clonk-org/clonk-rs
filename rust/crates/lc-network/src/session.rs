@@ -3267,6 +3267,21 @@ fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String>
             lc_engine::ControlPacket::CustomCommand(command) => {
                 ("CID_CustomCommand", command.by_client)
             }
+            lc_engine::ControlPacket::ActivateGameGoalMenu(control) => {
+                ("CID_ActivateGameGoalMenu", control.by_client)
+            }
+            lc_engine::ControlPacket::ToggleHostility(control) => {
+                ("CID_ToggleHostility", control.by_client)
+            }
+            lc_engine::ControlPacket::ActivateGameGoalRule(control) => {
+                ("CID_ActivateGameGoalRule", control.by_client)
+            }
+            lc_engine::ControlPacket::SetPlayerTeam(control) => {
+                ("CID_SetPlayerTeam", control.by_client)
+            }
+            lc_engine::ControlPacket::EliminatePlayer(control) => {
+                ("CID_EliminatePlayer", control.by_client)
+            }
             lc_engine::ControlPacket::RemovePlayer(remove) => {
                 ("CID_RemovePlr", remove.by_client)
             }
@@ -3513,6 +3528,11 @@ fn authenticated_single_control(
         lc_engine::ControlPacket::Script(data) => data.by_client,
         lc_engine::ControlPacket::MessageBoardAnswer(data) => data.by_client,
         lc_engine::ControlPacket::CustomCommand(data) => data.by_client,
+        lc_engine::ControlPacket::ActivateGameGoalMenu(data) => data.by_client,
+        lc_engine::ControlPacket::ToggleHostility(data) => data.by_client,
+        lc_engine::ControlPacket::ActivateGameGoalRule(data) => data.by_client,
+        lc_engine::ControlPacket::SetPlayerTeam(data) => data.by_client,
+        lc_engine::ControlPacket::EliminatePlayer(data) => data.by_client,
         lc_engine::ControlPacket::InitScenarioPlayer(data) => data.by_client,
         lc_engine::ControlPacket::SurrenderPlayer(data) => data.by_client,
         lc_engine::ControlPacket::Synchronize(data) => data.by_client,
@@ -7276,6 +7296,85 @@ mod tests {
         assert!(error.contains("queued CID_CustomCommand"));
         assert!(error.contains("claimed author 0"));
         assert!(error.contains("authenticated author is 7"));
+    }
+
+    #[test]
+    fn internal_player_script_controls_authenticate_direct_and_queued_authors() {
+        fn controls(by_client: i32) -> [EngineControlPacket; 5] {
+            [
+                EngineControlPacket::ActivateGameGoalMenu(
+                    lc_engine::ActivateGameGoalMenuControlData {
+                        player: 3,
+                        by_client,
+                    },
+                ),
+                EngineControlPacket::ToggleHostility(lc_engine::ToggleHostilityControlData {
+                    opponent: 4,
+                    player: 3,
+                    by_client,
+                }),
+                EngineControlPacket::ActivateGameGoalRule(
+                    lc_engine::ActivateGameGoalRuleControlData {
+                        object: 42,
+                        player: 3,
+                        by_client,
+                    },
+                ),
+                EngineControlPacket::SetPlayerTeam(lc_engine::SetPlayerTeamControlData {
+                    team: 5,
+                    player: 3,
+                    by_client,
+                }),
+                EngineControlPacket::EliminatePlayer(lc_engine::EliminatePlayerControlData {
+                    player: 3,
+                    by_client,
+                }),
+            ]
+        }
+
+        let names = [
+            "CID_ActivateGameGoalMenu",
+            "CID_ToggleHostility",
+            "CID_ActivateGameGoalRule",
+            "CID_SetPlayerTeam",
+            "CID_EliminatePlayer",
+        ];
+        for (name, control) in names.into_iter().zip(controls(7)) {
+            let payload = encode_control_entry_payload(&control).expect("encode direct control");
+            assert_eq!(
+                authenticated_single_control(&payload, 7).expect("matching direct author"),
+                control
+            );
+            let direct_error = authenticated_single_control(&payload, 8)
+                .expect_err("direct author spoof must fail");
+            assert!(direct_error.contains("claimed author 7"), "{name}: {direct_error}");
+
+            let packet = encode_control_packet(&LegacyControlFrame {
+                client_id: 7,
+                tick: 12,
+                timestamp_ms: 0,
+                controls: vec![control],
+            })
+            .expect("encode queued control");
+            validate_queued_control_authors(&packet).expect("matching queued author");
+
+            let forged = controls(0)
+                .into_iter()
+                .zip(names)
+                .find_map(|(candidate, candidate_name)| (candidate_name == name).then_some(candidate))
+                .expect("fixture name exists");
+            let forged_packet = encode_control_packet(&LegacyControlFrame {
+                client_id: 7,
+                tick: 12,
+                timestamp_ms: 0,
+                controls: vec![forged],
+            })
+            .expect("encode forged queued control");
+            let queued_error = validate_queued_control_authors(&forged_packet)
+                .expect_err("queued author spoof must fail");
+            assert!(queued_error.contains(name), "{name}: {queued_error}");
+            assert!(queued_error.contains("claimed author 0"), "{name}: {queued_error}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

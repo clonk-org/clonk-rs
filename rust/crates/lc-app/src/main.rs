@@ -17842,13 +17842,29 @@ impl GameApp {
                 );
             }
             MenuAction::ActivateGoals => {
-                // C++ queues CID_ActivateGameGoalMenu and shows the goal
-                // list with fulfilled markers (C4MainMenu.cpp:332-380);
-                // rust lists the live C4D_Goal objects directly.
-                let goals = self.goal_rule_entries(C4D_GOAL);
-                self.cache_definition_icons(&goals);
-                self.ingame_menu
-                    .replace(player, Some(IngameMenuState::goals_menu(&goals)));
+                // Goal callbacks are synchronized by
+                // CID_ActivateGameGoalMenu. Only packet execution may open
+                // the local menu and expose its fulfilled markers.
+                if self.network.is_some() {
+                    let tick = self.local_control_submission_tick();
+                    if let Some(Err(error)) = self
+                        .network
+                        .as_ref()
+                        .map(|network| network.submit_activate_game_goal_menu(tick, player))
+                    {
+                        tracing::warn!(player, %error, "failed to queue goal menu activation");
+                    }
+                } else {
+                    let by_client = self
+                        .engine
+                        .player(player)
+                        .map(|player| player.at_client().get())
+                        .unwrap_or(-1);
+                    self.engine.execute_activate_game_goal_menu_control(
+                        &lc_engine::ActivateGameGoalMenuControlData { player, by_client },
+                    )?;
+                    self.apply_game_goal_menu_requests();
+                }
             }
             MenuAction::ActivateRules => {
                 let rules = self.goal_rule_entries(C4D_RULE);
@@ -18050,14 +18066,10 @@ impl GameApp {
                 );
             }
             MenuAction::GoalInfo(id) => {
-                return Err(classic_ingame_menu_child_error(
-                    ClassicIngameMenuChild::GoalInfo(id),
-                ));
+                self.submit_game_goal_rule_activation(player, &id)?;
             }
             MenuAction::RuleInfo(id) => {
-                return Err(classic_ingame_menu_child_error(
-                    ClassicIngameMenuChild::RuleInfo(id),
-                ));
+                self.submit_game_goal_rule_activation(player, &id)?;
             }
             MenuAction::JoinPlayer(file) => match self.submit_runtime_network_player(&file) {
                 Ok(()) => {
@@ -18140,6 +18152,70 @@ impl GameApp {
             });
         }
         entries
+    }
+
+    fn apply_game_goal_menu_requests(&mut self) {
+        for request in self.engine.take_game_goal_menu_requests() {
+            if !request.open_menu {
+                continue;
+            }
+            let entries = request
+                .goals
+                .into_iter()
+                .map(|definition_id| GoalRuleEntry {
+                    name: self
+                        .engine
+                        .definition_name(&definition_id)
+                        .unwrap_or(&definition_id)
+                        .to_string(),
+                    fulfilled: request.fulfilled_goals.contains(&definition_id),
+                    definition_id,
+                })
+                .collect::<Vec<_>>();
+            self.cache_definition_icons(&entries);
+            self.ingame_menu.replace(
+                request.player,
+                Some(IngameMenuState::goals_menu(&entries)),
+            );
+        }
+    }
+
+    fn submit_game_goal_rule_activation(
+        &mut self,
+        player: i32,
+        definition_id: &str,
+    ) -> Result<(), EngineError> {
+        let Some(object) = self
+            .engine
+            .first_active_object_for_definition(definition_id)
+            .and_then(|object| i32::try_from(object.as_u64()).ok())
+        else {
+            return Ok(());
+        };
+        if self.network.is_some() {
+            let tick = self.local_control_submission_tick();
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_activate_game_goal_rule(tick, player, object))
+            {
+                tracing::warn!(player, object, %error, "failed to queue goal/rule activation");
+            }
+        } else {
+            let by_client = self
+                .engine
+                .player(player)
+                .map(|player| player.at_client().get())
+                .unwrap_or(-1);
+            self.engine.execute_activate_game_goal_rule_control(
+                &lc_engine::ActivateGameGoalRuleControlData {
+                    object,
+                    player,
+                    by_client,
+                },
+            )?;
+        }
+        Ok(())
     }
 
     /// Loads the definition pictures for goal/rule menu symbols
@@ -26619,6 +26695,28 @@ impl GameApp {
                     self.engine.execute_surrender_player_control(control);
                     Ok(())
                 }
+                NetworkControl::ActivateGameGoalMenu(control) => {
+                    self.engine
+                        .execute_activate_game_goal_menu_control(&control)?;
+                    self.apply_game_goal_menu_requests();
+                    Ok(())
+                }
+                NetworkControl::ToggleHostility(control) => self
+                    .engine
+                    .execute_toggle_hostility_control(&control)
+                    .map(|_| ()),
+                NetworkControl::ActivateGameGoalRule(control) => self
+                    .engine
+                    .execute_activate_game_goal_rule_control(&control)
+                    .map(|_| ()),
+                NetworkControl::SetPlayerTeam(control) => self
+                    .engine
+                    .execute_set_player_team_control(&control)
+                    .map(|_| ()),
+                NetworkControl::EliminatePlayer(control) => self
+                    .engine
+                    .execute_eliminate_player_control(&control)
+                    .map(|_| ()),
                 NetworkControl::Vote(vote) => self.execute_league_vote(vote),
                 NetworkControl::VoteEnd(result) => {
                     self.execute_league_vote_end(result);
@@ -26734,6 +26832,7 @@ impl GameApp {
                 break;
             }
         }
+        self.apply_game_goal_menu_requests();
         // A script/control callback may have called
         // EliminatePlayer(plr, true). While the current ready marker is live,
         // local_control_submission_tick selects tick + 1, matching Game.Input.
@@ -27323,6 +27422,7 @@ impl GameApp {
                     .engine
                     .tick()
                     .map_err(map_runtime_flash_producer_engine_error)?;
+                self.apply_game_goal_menu_requests();
                 // Requests made by simulation scripts belong to a later
                 // control tick, never to the frame that just executed them.
                 self.flush_pending_remove_player_controls(false)?;
@@ -31583,6 +31683,7 @@ impl GameApp {
         }
         engine.set_network_game(network_game);
         engine.set_recording_active(!network_game && self.recording_enabled);
+        engine.set_replay_control(replay);
         engine.set_league_game(self.network_is_league);
         seed_engine_player_info_parameters(
             &mut engine,
@@ -50701,8 +50802,6 @@ mod tests {
             (MenuAction::ActivateTeamSelection, "TeamSelection"),
             (MenuAction::ActivateObserver, "Observer"),
             (MenuAction::ActivateHostDisconnect, "HostDisconnect"),
-            (MenuAction::GoalInfo("GOAL".into()), "GoalInfo"),
-            (MenuAction::RuleInfo("RULE".into()), "RuleInfo"),
         ];
         for (action, label) in unsupported {
             app.ingame_menu.clear();
@@ -60260,6 +60359,52 @@ mod tests {
             10,
             "DisableDebug removes /speed before the following packet executes"
         );
+        assert_eq!(app.executing_ready_tick, None);
+    }
+
+    #[test]
+    fn synchronized_goal_menu_evaluates_before_opening_only_for_local_player() {
+        let mut app = new_running_sandbox_app();
+        let player = app.local_owner;
+        let mut goal = Definition::from_script(
+            "IGOL",
+            "Integrated Goal",
+            "#strict 3\nfunc IsFulfilled() { return true; }",
+        )
+        .expect("goal definition compiles");
+        goal.set_category(C4D_GOAL);
+        app.engine
+            .register_definition(goal)
+            .expect("goal definition registers");
+        app.engine
+            .spawn_object(lc_engine::SpawnConfig::new("IGOL"))
+            .expect("goal object spawns");
+        let by_client = app
+            .engine
+            .player(player)
+            .expect("local player remains")
+            .at_client()
+            .get();
+        let control = NetworkControl::ActivateGameGoalMenu(
+            lc_engine::ActivateGameGoalMenuControlData { player, by_client },
+        );
+
+        app.engine.set_local_players([player]);
+        app.apply_ready_controls(12, vec![control.clone()])
+            .expect("local goal menu control executes");
+        let menu = app.ingame_menu.get(player).expect("local menu opens");
+        assert_eq!(menu.page(), ingame_menu::MenuPage::Goals);
+        assert_eq!(menu.items().len(), 1);
+        assert_eq!(
+            menu.items()[0].action,
+            MenuAction::GoalInfo("IGOL".to_string())
+        );
+
+        app.ingame_menu.replace(player, None);
+        app.engine.set_local_players([]);
+        app.apply_ready_controls(13, vec![control])
+            .expect("remote peer still evaluates goal control");
+        assert!(app.ingame_menu.get(player).is_none());
         assert_eq!(app.executing_ready_tick, None);
     }
 

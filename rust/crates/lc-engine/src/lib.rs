@@ -61,16 +61,16 @@ pub use action::{
 };
 pub use command::{CommandStackSnapshot, MenuRequest, MenuRequestKind};
 pub use control::{
-    interpret_player_control_command, ClientCoreControlData, ClientJoinControlData,
+    interpret_player_control_command, ActivateGameGoalMenuControlData,
+    ActivateGameGoalRuleControlData, ClientCoreControlData, ClientJoinControlData,
     ClientRemoveControlData, ClientUpdateControlData, CommandKind, ControlButton, ControlCommand,
-    ControlEvent, ControlPacket, ControlPacketId, ControlPlayerInfoEntry,
-    CustomCommandControlData,
-    InitScenarioPlayerControlData,
-    JoinPlayerControlData, JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData,
-    NetworkResourceCore,
+    ControlEvent, ControlPacket, ControlPacketId, ControlPlayerInfoEntry, CustomCommandControlData,
+    EliminatePlayerControlData, InitScenarioPlayerControlData, JoinPlayerControlData,
+    JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData, NetworkResourceCore,
     PlayerCommandControlData, PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest,
     PlayerSelectControlData, RemovePlayerControlData, ScriptControlData, ScriptStrictness,
-    SurrenderPlayerControlData, SyncCheckPacket, SynchronizeControlData, VoteControlData,
+    SetPlayerTeamControlData, SurrenderPlayerControlData, SyncCheckPacket,
+    SynchronizeControlData, ToggleHostilityControlData, VoteControlData,
     CLIENT_UPDATE_ACTIVATE,
     CLIENT_UPDATE_SET_OBSERVER,
     CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
@@ -14094,6 +14094,17 @@ pub struct ScriptControlPolicy {
     pub allow_scripting_in_replays: bool,
 }
 
+/// Goal rows produced by one synchronized `ActivateGameGoalMenu` call.
+/// Evaluation happens on every peer; `open_menu` is true only where
+/// the addressed player is locally controlled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameGoalMenuRequest {
+    pub player: i32,
+    pub goals: Vec<DefinitionId>,
+    pub fulfilled_goals: Vec<DefinitionId>,
+    pub open_menu: bool,
+}
+
 impl ScriptControlPolicy {
     pub const fn live(console_active: bool) -> Self {
         Self {
@@ -14204,6 +14215,9 @@ pub struct Engine {
     /// C++ includes `pRecord` in `C4GameControl::SyncMode`; this process-local
     /// state deliberately does not enter synchronized snapshots.
     recording_active: bool,
+    /// Process-local `Game.Control.isReplay()` state. It suppresses local
+    /// presentation without changing synchronized goal evaluation.
+    replay_control: bool,
     /// `Game.Parameters::isLeague()` — specifically whether the synchronized
     /// LeagueAddress is non-empty. This is independent from network play:
     /// ordinary network games may still allow script-driven team switches.
@@ -14231,6 +14245,9 @@ pub struct Engine {
     /// synchronized control tick; applying the script callback must not
     /// remove the player inline.
     pending_remove_player_controls: Vec<RemovePlayerControlData>,
+    /// Runtime presentation requests produced after synchronized goal
+    /// evaluation. This is deliberately excluded from EngineState.
+    pending_game_goal_menu_requests: Vec<GameGoalMenuRequest>,
     /// Explicit client-local players. `None` is the standalone/headless
     /// default where every registered player has local control.
     local_players: Option<HashSet<i32>>,
@@ -16290,6 +16307,7 @@ impl Engine {
             debug_mode: false,
             network_game: false,
             recording_active: false,
+            replay_control: false,
             league_game: false,
             league_name: Rc::new(Vec::new()),
             player_info_league_progress_data: Rc::new(BTreeMap::new()),
@@ -16298,6 +16316,7 @@ impl Engine {
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             player_info_league_progress_updates: Vec::new(),
             pending_remove_player_controls: Vec::new(),
+            pending_game_goal_menu_requests: Vec::new(),
             local_players: None,
             active_message_board_input: None,
             message_board_commands: vec![InitialNetworkMessageBoardCommand::speed()],
@@ -19906,6 +19925,128 @@ impl Engine {
         Ok(true)
     }
 
+    fn internal_player_script_allowed(&self, player: i32, by_client: i32) -> bool {
+        player == OWNER_NONE
+            || self
+                .player(player)
+                .is_some_and(|player| player.at_client() == PlayerAtClient::new(by_client))
+    }
+
+    fn execute_internal_script_at_scope(
+        &mut self,
+        scope: i32,
+        source: &str,
+    ) -> Result<(), EngineError> {
+        if scope == SCRIPT_SCOPE_CONSOLE {
+            let _ = self.direct_exec_scenario_script(source, "internal script", Some(3))?;
+            return Ok(());
+        }
+        if scope == SCRIPT_SCOPE_GLOBAL {
+            let _ = self.direct_exec_script_control_global(source, "internal script", Some(3))?;
+            return Ok(());
+        }
+
+        let object_index = u64::try_from(scope)
+            .ok()
+            .and_then(|number| self.find_object_index(ObjectId::new(number)))
+            .filter(|&index| self.objects[index].state.status != ObjectStatus::Deleted);
+        if let Some(index) = object_index {
+            let _ = tolerate_script_error(self.direct_exec_on_object_at_strict(
+                index,
+                source,
+                "internal script",
+                Some(3),
+            ))?;
+        } else {
+            let _ = self.direct_exec_script_control_global(source, "internal script", Some(3))?;
+        }
+        Ok(())
+    }
+
+    /// Execute `CID_ActivateGameGoalMenu` through the strict internal-script
+    /// path after applying the inherited player/author gate.
+    pub fn execute_activate_game_goal_menu_control(
+        &mut self,
+        control: &ActivateGameGoalMenuControlData,
+    ) -> Result<bool, EngineError> {
+        if !self.internal_player_script_allowed(control.player, control.by_client) {
+            return Ok(false);
+        }
+        self.execute_internal_script_at_scope(
+            SCRIPT_SCOPE_GLOBAL,
+            &format!("ActivateGameGoalMenu({})", control.player),
+        )?;
+        Ok(true)
+    }
+
+    /// Execute `CID_ToggleHostility`. The one-way hostility declaration is
+    /// read by the script at execution time, so adjacent packets flip it
+    /// independently in their synchronized order.
+    pub fn execute_toggle_hostility_control(
+        &mut self,
+        control: &ToggleHostilityControlData,
+    ) -> Result<bool, EngineError> {
+        if !self.internal_player_script_allowed(control.player, control.by_client) {
+            return Ok(false);
+        }
+        self.execute_internal_script_at_scope(
+            SCRIPT_SCOPE_GLOBAL,
+            &format!(
+                "SetHostility({},{},!Hostile({},{},true))",
+                control.player, control.opponent, control.player, control.opponent
+            ),
+        )?;
+        Ok(true)
+    }
+
+    /// Execute object-scoped `CID_ActivateGameGoalRule`, including the C++
+    /// fallback to global scope when the object pointer is not safe.
+    pub fn execute_activate_game_goal_rule_control(
+        &mut self,
+        control: &ActivateGameGoalRuleControlData,
+    ) -> Result<bool, EngineError> {
+        if !self.internal_player_script_allowed(control.player, control.by_client) {
+            return Ok(false);
+        }
+        self.execute_internal_script_at_scope(
+            control.object,
+            &format!("Activate({})", control.player),
+        )?;
+        Ok(true)
+    }
+
+    /// Execute `CID_SetPlayerTeam`; team/league/callback validation remains
+    /// inside the ordinary `SetPlayerTeam` host function.
+    pub fn execute_set_player_team_control(
+        &mut self,
+        control: &SetPlayerTeamControlData,
+    ) -> Result<bool, EngineError> {
+        if !self.internal_player_script_allowed(control.player, control.by_client) {
+            return Ok(false);
+        }
+        self.execute_internal_script_at_scope(
+            SCRIPT_SCOPE_GLOBAL,
+            &format!("SetPlayerTeam({},{})", control.player, control.team),
+        )?;
+        Ok(true)
+    }
+
+    /// Execute host-only `CID_EliminatePlayer`. This override intentionally
+    /// does not apply the inherited player ownership gate.
+    pub fn execute_eliminate_player_control(
+        &mut self,
+        control: &EliminatePlayerControlData,
+    ) -> Result<bool, EngineError> {
+        if control.by_client != 0 {
+            return Ok(false);
+        }
+        self.execute_internal_script_at_scope(
+            SCRIPT_SCOPE_GLOBAL,
+            &format!("EliminatePlayer({})", control.player),
+        )?;
+        Ok(true)
+    }
+
     /// Execute one synchronized `CID_MessageBoardAnswer` packet. The packet
     /// is accepted only for the client that owns the addressed player;
     /// `NO_OWNER` remains the C++ control's explicit ownerless exception.
@@ -20199,6 +20340,10 @@ impl Engine {
         self.control_host = control_host;
     }
 
+    pub fn set_replay_control(&mut self, replay_control: bool) {
+        self.replay_control = replay_control;
+    }
+
     #[doc(hidden)]
     pub fn is_control_host(&self) -> bool {
         self.control_host
@@ -20222,6 +20367,13 @@ impl Engine {
     /// The embedding control layer assigns them to a not-yet-executed tick.
     pub fn take_pending_remove_player_controls(&mut self) -> Vec<RemovePlayerControlData> {
         std::mem::take(&mut self.pending_remove_player_controls)
+    }
+
+    /// Drain goal evaluations in synchronized control order. Remote/replay
+    /// requests remain observable with `open_menu == false` so callers can
+    /// discard only the presentation while retaining callback execution.
+    pub fn take_game_goal_menu_requests(&mut self) -> Vec<GameGoalMenuRequest> {
+        std::mem::take(&mut self.pending_game_goal_menu_requests)
     }
 
     pub fn set_local_players<I>(&mut self, players: I)
@@ -21334,6 +21486,24 @@ impl Engine {
     pub fn evaluate_round_goals(
         &mut self,
     ) -> Result<(Vec<DefinitionId>, Vec<DefinitionId>), EngineError> {
+        let first_local_player = self
+            .players
+            .keys()
+            .copied()
+            .filter(|player| {
+                self.local_players
+                    .as_ref()
+                    .is_none_or(|local| local.contains(player))
+            })
+            .min()
+            .unwrap_or(OWNER_NONE);
+        self.evaluate_goals_for_player(first_local_player)
+    }
+
+    fn evaluate_goals_for_player(
+        &mut self,
+        player: i32,
+    ) -> Result<(Vec<DefinitionId>, Vec<DefinitionId>), EngineError> {
         let rivalry = self
             .exec_list
             .iter()
@@ -21347,17 +21517,6 @@ impl Engine {
                     && object.state.status.is_active()
                     && object.definition_id.as_str() == "RVLR"
             });
-        let first_local_player = self
-            .players
-            .keys()
-            .copied()
-            .filter(|player| {
-                self.local_players
-                    .as_ref()
-                    .is_none_or(|local| local.contains(player))
-            })
-            .min()
-            .unwrap_or(OWNER_NONE);
 
         let mut goals = Vec::new();
         let mut fulfilled = Vec::new();
@@ -21401,7 +21560,7 @@ impl Engine {
             });
             let is_fulfilled = if let Some(index) = target {
                 let (function, args) = if rivalry {
-                    ("IsFulfilledforPlr", vec![Value::Int(first_local_player)])
+                    ("IsFulfilledforPlr", vec![Value::Int(player)])
                 } else {
                     ("IsFulfilled", Vec::new())
                 };
@@ -21416,6 +21575,19 @@ impl Engine {
             }
         }
         Ok((goals, fulfilled))
+    }
+
+    /// First active object with this definition in C++ master-list order.
+    /// Player goal/rule menu commands re-resolve the object at click time.
+    pub fn first_active_object_for_definition(&self, definition: &str) -> Option<ObjectId> {
+        self.exec_list.iter().rev().find_map(|&object_id| {
+            let index = self.find_object_index(object_id)?;
+            let object = &self.objects[index];
+            (!object.destroyed
+                && object.state.status.is_active()
+                && object.definition_id == definition)
+                .then_some(object_id)
+        })
     }
 
     pub fn next_mission(&self) -> &NextMissionState {
@@ -28487,6 +28659,7 @@ impl Engine {
 
     pub fn restore_state(&mut self, state: &EngineState) -> Result<(), EngineError> {
         self.active_message_board_input = None;
+        self.pending_game_goal_menu_requests.clear();
         self.player_info_league_progress_updates.clear();
         for object in &state.objects {
             if !self
@@ -30859,6 +31032,20 @@ impl Engine {
                     if let Some(player) = self.players.get_mut(&player_id) {
                         player.remove_message_board_query(target);
                     }
+                }
+                PlayerCommand::ActivateGameGoalMenu {
+                    player_id,
+                    open_menu,
+                } => {
+                    let (goals, fulfilled_goals) =
+                        self.evaluate_goals_for_player(player_id)?;
+                    self.pending_game_goal_menu_requests
+                        .push(GameGoalMenuRequest {
+                            player: player_id,
+                            goals,
+                            fulfilled_goals,
+                            open_menu: open_menu && !self.replay_control,
+                        });
                 }
                 PlayerCommand::SetPlayerTeam {
                     player_id,
@@ -53056,6 +53243,246 @@ mod script_relink_regression {
                 .clonk_names(),
             Some("Append")
         );
+    }
+}
+
+#[cfg(test)]
+mod internal_player_script_control_parity {
+    use super::*;
+
+    fn register_player(engine: &mut Engine, player: i32, by_client: i32) {
+        engine
+            .register_player(PlayerConfig::new(player, format!("Player {player}")))
+            .expect("player registers");
+        engine
+            .player_mut(player)
+            .expect("player remains registered")
+            .set_at_client(PlayerAtClient::new(by_client));
+    }
+
+    #[test]
+    fn internal_player_controls_apply_exact_author_and_host_gates() {
+        let mut engine = Engine::new();
+        register_player(&mut engine, 1, 7);
+        register_player(&mut engine, 2, 9);
+        engine.set_teams(vec![
+            TeamInfo::new(4, "Four", 0x44),
+            TeamInfo::new(5, "Five", 0x55),
+        ]);
+
+        let hostility = ToggleHostilityControlData {
+            opponent: 2,
+            player: 1,
+            by_client: 7,
+        };
+        assert!(engine
+            .execute_toggle_hostility_control(&hostility)
+            .expect("toggle executes"));
+        assert!(engine.player(1).unwrap().is_hostile_towards(2));
+        assert!(engine
+            .execute_toggle_hostility_control(&hostility)
+            .expect("second toggle executes"));
+        assert!(!engine.player(1).unwrap().is_hostile_towards(2));
+
+        let spoofed = ToggleHostilityControlData {
+            by_client: 8,
+            ..hostility
+        };
+        assert!(!engine
+            .execute_toggle_hostility_control(&spoofed)
+            .expect("spoof is a synchronized no-op"));
+        assert!(!engine.player(1).unwrap().is_hostile_towards(2));
+
+        assert!(engine
+            .execute_set_player_team_control(&SetPlayerTeamControlData {
+                team: 4,
+                player: 1,
+                by_client: 7,
+            })
+            .expect("team packet executes"));
+        assert_eq!(engine.player(1).unwrap().team(), Some(4));
+
+        assert!(engine
+            .execute_set_player_team_control(&SetPlayerTeamControlData {
+                team: 99,
+                player: 1,
+                by_client: 7,
+            })
+            .expect("invalid team is rejected inside the host function"));
+        assert_eq!(engine.player(1).unwrap().team(), Some(4));
+
+        engine.set_league_game(true);
+        assert!(engine
+            .execute_set_player_team_control(&SetPlayerTeamControlData {
+                team: 5,
+                player: 1,
+                by_client: 7,
+            })
+            .expect("league rejection is not a packet failure"));
+        assert_eq!(engine.player(1).unwrap().team(), Some(4));
+
+        assert!(!engine
+            .execute_eliminate_player_control(&EliminatePlayerControlData {
+                player: 1,
+                by_client: 7,
+            })
+            .expect("non-host elimination is a no-op"));
+        assert_eq!(engine.player(1).unwrap().status(), PlayerStatus::Active);
+
+        assert!(engine
+            .execute_eliminate_player_control(&EliminatePlayerControlData {
+                player: 2,
+                by_client: 0,
+            })
+            .expect("host may eliminate a remote-owned player"));
+        assert_eq!(engine.player(2).unwrap().status(), PlayerStatus::Eliminated);
+    }
+
+    #[test]
+    fn goal_rule_control_uses_object_scope_and_global_fallback() {
+        let mut engine = Engine::new();
+        register_player(&mut engine, 3, 7);
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "RuleFallback.c".to_string(),
+                "static RuleFallback; global func Activate(player) { RuleFallback = player; return true; }"
+                    .to_string(),
+            )]),
+            1
+        );
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "RULE",
+                    "Rule",
+                    "#strict 3\nlocal Marker; func Activate(player) { Marker = player; return true; } func ReadMarker() { return Marker; }",
+                )
+                .expect("rule definition compiles"),
+            )
+            .expect("rule definition registers");
+
+        let normal = engine
+            .spawn_object(SpawnConfig::new("RULE"))
+            .expect("active rule spawns");
+        let normal_number = i32::try_from(normal.as_u64()).unwrap();
+        assert!(engine
+            .execute_activate_game_goal_rule_control(&ActivateGameGoalRuleControlData {
+                object: normal_number,
+                player: 3,
+                by_client: 7,
+            })
+            .expect("active SafeObjectPointer scope executes"));
+        let index = engine.find_object_index(normal).unwrap();
+        assert_eq!(
+            engine
+                .call_object_function(index, "ReadMarker", Vec::new())
+                .expect("marker reads"),
+            Value::Int(3)
+        );
+
+        let inactive = engine
+            .spawn_object(SpawnConfig::new("RULE").with_status(ObjectStatus::Inactive))
+            .expect("inactive rule spawns");
+        let inactive_number = i32::try_from(inactive.as_u64()).unwrap();
+        assert!(engine
+            .execute_activate_game_goal_rule_control(&ActivateGameGoalRuleControlData {
+                object: inactive_number,
+                player: 3,
+                by_client: 7,
+            })
+            .expect("inactive SafeObjectPointer scope executes"));
+        let index = engine.find_object_index(inactive).unwrap();
+        assert_eq!(
+            engine
+                .call_object_function(index, "ReadMarker", Vec::new())
+                .expect("inactive marker reads"),
+            Value::Int(3)
+        );
+
+        let fallback = engine
+            .script_globals
+            .borrow()
+            .get("RuleFallback")
+            .cloned()
+            .expect("fallback global exists");
+        assert_eq!(*fallback.borrow(), Value::Nil);
+
+        assert!(engine
+            .execute_activate_game_goal_rule_control(&ActivateGameGoalRuleControlData {
+                object: 999_999,
+                player: 3,
+                by_client: 7,
+            })
+            .expect("missing object falls back globally"));
+        assert_eq!(*fallback.borrow(), Value::Int(3));
+
+        assert!(!engine
+            .execute_activate_game_goal_rule_control(&ActivateGameGoalRuleControlData {
+                object: 999_999,
+                player: 3,
+                by_client: 8,
+            })
+            .expect("unauthorized packet is a no-op"));
+        assert_eq!(*fallback.borrow(), Value::Int(3));
+    }
+
+    #[test]
+    fn goal_menu_control_evaluates_every_peer_but_marks_only_local_ui() {
+        let mut engine = Engine::new();
+        register_player(&mut engine, 3, 7);
+        let mut goal = Definition::from_script(
+            "GOAL",
+            "Goal",
+            "#strict 3\nfunc IsFulfilled() { return true; }",
+        )
+        .expect("goal definition compiles");
+        goal.set_category(CATEGORY_GOAL);
+        engine.register_definition(goal).expect("goal registers");
+        engine
+            .spawn_object(SpawnConfig::new("GOAL"))
+            .expect("goal object spawns");
+        let control = ActivateGameGoalMenuControlData {
+            player: 3,
+            by_client: 7,
+        };
+
+        engine.set_local_players([3]);
+        assert!(engine
+            .execute_activate_game_goal_menu_control(&control)
+            .expect("local goal control executes"));
+        let requests = engine.take_game_goal_menu_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].player, 3);
+        assert_eq!(requests[0].goals, vec!["GOAL".to_string()]);
+        assert_eq!(requests[0].fulfilled_goals, vec!["GOAL".to_string()]);
+        assert!(requests[0].open_menu);
+
+        engine.set_replay_control(true);
+        assert!(engine
+            .execute_activate_game_goal_menu_control(&control)
+            .expect("replay still evaluates goals"));
+        let requests = engine.take_game_goal_menu_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].fulfilled_goals, vec!["GOAL".to_string()]);
+        assert!(!requests[0].open_menu);
+
+        engine.set_replay_control(false);
+        engine.set_local_players([]);
+        assert!(engine
+            .execute_activate_game_goal_menu_control(&control)
+            .expect("remote peer still evaluates goals"));
+        let requests = engine.take_game_goal_menu_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].fulfilled_goals, vec!["GOAL".to_string()]);
+        assert!(!requests[0].open_menu);
+
+        assert!(!engine
+            .execute_activate_game_goal_menu_control(&ActivateGameGoalMenuControlData {
+                by_client: 8,
+                ..control
+            })
+            .expect("spoof is rejected"));
+        assert!(engine.take_game_goal_menu_requests().is_empty());
     }
 }
 

@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 
 use lc_engine::{
-    ClientCoreControlData, ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
+    ActivateGameGoalMenuControlData, ActivateGameGoalRuleControlData, ClientCoreControlData,
+    ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
     ControlPacket as EngineControlPacket, ControlPacketId, ControlPlayerInfoEntry,
-    CustomCommandControlData,
-    InitScenarioPlayerControlData, JoinPlayerControlData, JoinPlayerSource, LegacyCString,
-    MessageBoardAnswerControlData, NetworkResourceCore, PlayerCommandControlData,
-    PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest, PlayerSelectControlData,
-    RemovePlayerControlData, ScriptControlData, ScriptStrictness, SurrenderPlayerControlData,
-    SyncCheckPacket, SynchronizeControlData, VoteControlData,
+    CustomCommandControlData, EliminatePlayerControlData, InitScenarioPlayerControlData,
+    JoinPlayerControlData, JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData,
+    NetworkResourceCore, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
+    PlayerInfoUpdateRequest, PlayerSelectControlData, RemovePlayerControlData, ScriptControlData,
+    ScriptStrictness, SetPlayerTeamControlData, SurrenderPlayerControlData, SyncCheckPacket,
+    SynchronizeControlData, ToggleHostilityControlData, VoteControlData,
     CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
@@ -46,6 +47,11 @@ const CID_SET: u8 = 0x80 | 0x07;
 const CID_SCRIPT: u8 = 0x80 | 0x08;
 const CID_MESSAGE_BOARD_ANSWER: u8 = 0x80 | 0x50;
 const CID_CUSTOM_COMMAND: u8 = 0x80 | 0x51;
+const CID_ACTIVATE_GAME_GOAL_MENU: u8 = 0x80 | 0x53;
+const CID_TOGGLE_HOSTILITY: u8 = 0x80 | 0x54;
+const CID_ACTIVATE_GAME_GOAL_RULE: u8 = 0x80 | 0x56;
+const CID_SET_PLAYER_TEAM: u8 = 0x80 | 0x57;
+const CID_ELIMINATE_PLAYER: u8 = 0x80 | 0x58;
 const MAX_VARINT_BYTES: usize = 5;
 const MAX_PLAYER_INFO_COUNT: i32 = 5_000;
 const PLAYER_INFO_SYNC_FLAGS: u16 = 0x7fcd;
@@ -649,6 +655,11 @@ fn decode_control(
         CID_SCRIPT => decode_script(reader),
         CID_MESSAGE_BOARD_ANSWER => decode_message_board_answer(reader),
         CID_CUSTOM_COMMAND => decode_custom_command(reader),
+        CID_ACTIVATE_GAME_GOAL_MENU => decode_activate_game_goal_menu(reader),
+        CID_TOGGLE_HOSTILITY => decode_toggle_hostility(reader),
+        CID_ACTIVATE_GAME_GOAL_RULE => decode_activate_game_goal_rule(reader),
+        CID_SET_PLAYER_TEAM => decode_set_player_team(reader),
+        CID_ELIMINATE_PLAYER => decode_eliminate_player(reader),
         other => Err(LegacyControlError::UnsupportedPacket(other)),
     }
 }
@@ -737,6 +748,62 @@ fn decode_custom_command(
             argument,
             player,
             by_client,
+        },
+    ))
+}
+
+fn decode_activate_game_goal_menu(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::ActivateGameGoalMenu(
+        ActivateGameGoalMenuControlData {
+            player: reader.read_int32()?,
+            by_client: reader.read_int32()?,
+        },
+    ))
+}
+
+fn decode_toggle_hostility(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::ToggleHostility(
+        ToggleHostilityControlData {
+            opponent: reader.read_int32()?,
+            player: reader.read_int32()?,
+            by_client: reader.read_int32()?,
+        },
+    ))
+}
+
+fn decode_activate_game_goal_rule(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::ActivateGameGoalRule(
+        ActivateGameGoalRuleControlData {
+            object: reader.read_int32()?,
+            player: reader.read_int32()?,
+            by_client: reader.read_int32()?,
+        },
+    ))
+}
+
+fn decode_set_player_team(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::SetPlayerTeam(SetPlayerTeamControlData {
+        team: reader.read_int32()?,
+        player: reader.read_int32()?,
+        by_client: reader.read_int32()?,
+    }))
+}
+
+fn decode_eliminate_player(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::EliminatePlayer(
+        EliminatePlayerControlData {
+            player: reader.read_int32()?,
+            by_client: reader.read_int32()?,
         },
     ))
 }
@@ -1638,6 +1705,45 @@ fn encode_custom_command(buffer: &mut Vec<u8>, data: &CustomCommandControlData) 
     append_int32(buffer, data.by_client);
 }
 
+fn encode_activate_game_goal_menu(
+    buffer: &mut Vec<u8>,
+    data: &ActivateGameGoalMenuControlData,
+) {
+    buffer.push(CID_ACTIVATE_GAME_GOAL_MENU);
+    append_int32(buffer, data.player);
+    append_int32(buffer, data.by_client);
+}
+
+fn encode_toggle_hostility(buffer: &mut Vec<u8>, data: &ToggleHostilityControlData) {
+    buffer.push(CID_TOGGLE_HOSTILITY);
+    append_int32(buffer, data.opponent);
+    append_int32(buffer, data.player);
+    append_int32(buffer, data.by_client);
+}
+
+fn encode_activate_game_goal_rule(
+    buffer: &mut Vec<u8>,
+    data: &ActivateGameGoalRuleControlData,
+) {
+    buffer.push(CID_ACTIVATE_GAME_GOAL_RULE);
+    append_int32(buffer, data.object);
+    append_int32(buffer, data.player);
+    append_int32(buffer, data.by_client);
+}
+
+fn encode_set_player_team(buffer: &mut Vec<u8>, data: &SetPlayerTeamControlData) {
+    buffer.push(CID_SET_PLAYER_TEAM);
+    append_int32(buffer, data.team);
+    append_int32(buffer, data.player);
+    append_int32(buffer, data.by_client);
+}
+
+fn encode_eliminate_player(buffer: &mut Vec<u8>, data: &EliminatePlayerControlData) {
+    buffer.push(CID_ELIMINATE_PLAYER);
+    append_int32(buffer, data.player);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_controls(
     controls: &[EngineControlPacket],
     buffer: &mut Vec<u8>,
@@ -1723,6 +1829,26 @@ fn encode_control(
         }
         EngineControlPacket::CustomCommand(data) => {
             encode_custom_command(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::ActivateGameGoalMenu(data) => {
+            encode_activate_game_goal_menu(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::ToggleHostility(data) => {
+            encode_toggle_hostility(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::ActivateGameGoalRule(data) => {
+            encode_activate_game_goal_rule(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::SetPlayerTeam(data) => {
+            encode_set_player_team(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::EliminatePlayer(data) => {
+            encode_eliminate_player(buffer, data);
             Ok(())
         }
         EngineControlPacket::Unknown { .. } => {
@@ -1901,6 +2027,79 @@ mod tests {
 
         assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected));
+    }
+
+    #[test]
+    fn internal_player_script_entries_match_cpp_packed_field_order() {
+        let cases = [
+            (
+                EngineControlPacket::ActivateGameGoalMenu(
+                    ActivateGameGoalMenuControlData {
+                        player: -4,
+                        by_client: 7,
+                    },
+                ),
+                vec![0xd3, 0xfc, 0x07],
+            ),
+            (
+                EngineControlPacket::ToggleHostility(ToggleHostilityControlData {
+                    opponent: 130,
+                    player: -4,
+                    by_client: 7,
+                }),
+                vec![0xd4, 0x82, 0x01, 0xfc, 0x07],
+            ),
+            (
+                EngineControlPacket::ActivateGameGoalRule(
+                    ActivateGameGoalRuleControlData {
+                        object: 130,
+                        player: -4,
+                        by_client: 7,
+                    },
+                ),
+                vec![0xd6, 0x82, 0x01, 0xfc, 0x07],
+            ),
+            (
+                EngineControlPacket::SetPlayerTeam(SetPlayerTeamControlData {
+                    team: 130,
+                    player: -4,
+                    by_client: 7,
+                }),
+                vec![0xd7, 0x82, 0x01, 0xfc, 0x07],
+            ),
+            (
+                EngineControlPacket::EliminatePlayer(EliminatePlayerControlData {
+                    player: -4,
+                    by_client: 7,
+                }),
+                vec![0xd8, 0xfc, 0x07],
+            ),
+        ];
+
+        for (control, encoded) in cases {
+            assert_eq!(encode_control_entry_payload(&control), Ok(encoded.clone()));
+            assert_eq!(decode_control_entry_payload(&encoded), Ok(control));
+        }
+    }
+
+    #[test]
+    fn internal_player_script_entries_reject_every_truncated_body() {
+        for complete in [
+            &[0xd3, 0xfc, 0x07][..],
+            &[0xd4, 0x82, 0x01, 0xfc, 0x07][..],
+            &[0xd6, 0x82, 0x01, 0xfc, 0x07][..],
+            &[0xd7, 0x82, 0x01, 0xfc, 0x07][..],
+            &[0xd8, 0xfc, 0x07][..],
+        ] {
+            for end in 1..complete.len() {
+                assert_eq!(
+                    decode_control_entry_payload(&complete[..end]),
+                    Err(LegacyControlError::UnexpectedEof),
+                    "unexpected result for {:02x?}",
+                    &complete[..end]
+                );
+            }
+        }
     }
 
     #[test]
