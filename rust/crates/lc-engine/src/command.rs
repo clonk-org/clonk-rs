@@ -773,6 +773,69 @@ mod tests {
     }
 
     #[test]
+    fn move_to_direct_pathfinder_success_returns_without_steering_or_recheck_delay() {
+        // C4Command::MoveTo returns after every PathFinder::Find call. A
+        // successful direct finder ray emits no intermediate waypoint, does
+        // not set PathChecked, and must not fall through to steering in the
+        // same Execute (C4Command.cpp:236-248). This reversed line makes the
+        // command-level PathFree sample (16,8), while C4PathFinder's ray
+        // samples (16,7), deterministically reaching that direct-success arm.
+        let mut landscape =
+            crate::Landscape::with_default_material(40, vec![40; 40], None)
+                .expect("test landscape");
+        landscape.set_world_height(40);
+        let mut bytes = vec![0; 40 * 40];
+        bytes[8 * 40 + 16] = 1;
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            40,
+            40,
+            bytes,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+
+        let start = Vector2::new(30, 10);
+        let target = Vector2::new(2, 5);
+        assert!(!command_path_free(
+            &landscape,
+            start.x,
+            start.y,
+            target.x,
+            target.y
+        ));
+        let direct_path = PathFinder::new(&landscape, &[])
+            .find(start, target)
+            .expect("finder's reversed ray is direct");
+        assert_eq!(direct_path.waypoints.len(), 2, "start and target only");
+
+        let walker = walking_jumper(start);
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
+        ctx.frame = 1;
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(target.x))
+                .with_ty(Some(target.y)),
+        );
+
+        for execution in 1..=2 {
+            let result = state.step(&ctx);
+            assert_eq!(result.status, CommandStatus::Running);
+            assert!(result.update.is_none(), "execution {execution} must not steer");
+            assert!(result.operations.is_empty(), "no intermediate waypoint");
+            assert!(!state.path_checked, "direct success has no recheck delay");
+            assert_eq!(
+                state.pathfinder_settings_update.take(),
+                Some((1, true)),
+                "execution {execution} invokes the finder again"
+            );
+        }
+    }
+
+    #[test]
     fn pathfinder_waypoint_skips_regrounding_after_solid_offset() {
         // ObjectAddWaypoint first nudges this point left from the ledge via
         // AdjustSolidOffset, then creates an already-evaluated MoveTo. The
@@ -17972,7 +18035,7 @@ impl MoveToState {
                             }
                             return CommandStepResult::running(None).with_operations(operations);
                         }
-                        Some(_) => self.path_checked = true,
+                        Some(_) => return CommandStepResult::running(None),
                         None => {
                             self.path_checked = true;
                             return CommandStepResult::running(None);
