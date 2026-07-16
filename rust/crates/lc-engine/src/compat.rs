@@ -18474,13 +18474,15 @@ fn set_var(args: &[Value]) -> Result<Value, RuntimeError> {
         return Err(RuntimeError::new("SetVar expects at most 2 arguments"));
     }
     let index = legacy_arg_int(args, 0, "SetVar")?;
-    if !(0..AUL_MAX_PAR).contains(&index) {
-        return Ok(Value::Nil);
-    }
     let value = args.get(1).cloned().unwrap_or(Value::Nil);
     let Some(slots) = lc_script::caller_var_slots() else {
         return Ok(Value::Nil);
     };
+    // C4ValueList::GetItem clamps negative indices to zero, grows NumVars
+    // through slot 999,999, and throws at the million-slot boundary.
+    if index >= LEGACY_MAX_ARRAY_SIZE {
+        return Err(RuntimeError::new("out of memory"));
+    }
     slots.set(index, value.clone());
     Ok(value)
 }
@@ -48131,6 +48133,56 @@ global func PreInitializePlayer(int player)
             legacy_s_equal(&[Value::String("\u{ff}".into()), Value::String(split_utf8)])
                 .expect("byte-equivalent strings compare"),
             Value::Int(1)
+        );
+    }
+
+    #[test]
+    fn set_var_matches_c4_value_list_index_growth_and_limit() {
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script(
+                r#"
+                #strict 3
+                func High() { return [SetVar(15, 42), Var(15)]; }
+                func Negative() { Var(0) = 1; return [SetVar(-1, 7), Var(0), Var(-1)]; }
+                func Last() { return [SetVar(999999, 9), Var(999999)]; }
+                func TooLarge() { return SetVar(1000000, 9); }
+                "#,
+            )
+            .expect("SetVar boundary probe compiles");
+
+        assert_eq!(
+            engine.call("High", &[]).expect("high SetVar index runs"),
+            Value::Array(vec![Value::Int(42), Value::Int(42)])
+        );
+        assert_eq!(
+            engine
+                .call("Negative", &[])
+                .expect("negative SetVar index runs"),
+            Value::Array(vec![Value::Int(7), Value::Int(7), Value::Int(7)])
+        );
+        assert_eq!(
+            engine
+                .call("Last", &[])
+                .expect("last valid SetVar index runs"),
+            Value::Array(vec![Value::Int(9), Value::Int(9)])
+        );
+        match engine.call("TooLarge", &[]) {
+            Err(lc_script::ScriptError::Runtime(error)) => {
+                assert_eq!(error.message(), "out of memory")
+            }
+            other => panic!("expected SetVar allocation limit error, got {other:?}"),
+        }
+
+        // FnSetVar returns nil before touching NumVars when there is no caller.
+        assert_eq!(
+            set_var(&[
+                Value::Int(LEGACY_MAX_ARRAY_SIZE),
+                Value::Int(9),
+            ])
+            .expect("SetVar without a caller succeeds"),
+            Value::Nil
         );
     }
 
