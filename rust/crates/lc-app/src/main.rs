@@ -26707,6 +26707,10 @@ impl GameApp {
                     self.engine.execute_em_draw_tool_control(&control);
                     Ok(())
                 }
+                NetworkControl::EmDropDef(control) => self
+                    .engine
+                    .execute_em_drop_def_control(&control)
+                    .map(|_| ()),
                 NetworkControl::ActivateGameGoalMenu(control) => {
                     self.engine
                         .execute_activate_game_goal_menu_control(&control)?;
@@ -60367,6 +60371,43 @@ mod tests {
                 .mode(),
             lc_engine::LANDSCAPE_MODE_EXACT
         );
+        assert_eq!(app.executing_ready_tick, None);
+    }
+
+    #[test]
+    fn synchronized_em_drop_def_executes_at_the_ready_tick() {
+        let mut app = new_running_sandbox_app();
+        let mut definition =
+            Definition::from_script("DROP", "Drop", "#strict\n").expect("definition compiles");
+        definition.set_category(lc_engine::CATEGORY_OBJECT);
+        app.engine
+            .register_definition(definition)
+            .expect("definition registers");
+        assert!(app
+            .engine
+            .first_active_object_for_definition("DROP")
+            .is_none());
+
+        app.apply_ready_controls(
+            12,
+            vec![NetworkControl::EmDropDef(
+                lc_engine::EmDropDefControlData {
+                    id: *b"DROP",
+                    x: 23,
+                    y: 17,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("synchronized editor definition drop executes");
+
+        let object = app
+            .engine
+            .first_active_object_for_definition("DROP")
+            .and_then(|id| app.engine.object_snapshot(id))
+            .expect("dropped object exists");
+        assert_eq!(object.position, Vector2::new(23, 17));
+        assert_eq!(object.owner, lc_engine::OWNER_NONE);
         assert_eq!(app.executing_ready_tick, None);
     }
 

@@ -458,6 +458,11 @@ impl RuntimeHandle {
                 ControlPacket::EmDrawTool(data) => {
                     self.engine.execute_em_draw_tool_control(&data);
                 }
+                ControlPacket::EmDropDef(data) => {
+                    self.engine
+                        .execute_em_drop_def_control(&data)
+                        .map_err(|error| error.to_string())?;
+                }
                 ControlPacket::Script(data) => {
                     self.engine
                         .execute_script_control(&data, ScriptControlPolicy::replay(false))
@@ -2287,6 +2292,7 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                         ControlPacket::PlayerSelect(_) => "PlayerSelect",
                         ControlPacket::EmMoveObject(_) => "EMMoveObject",
                         ControlPacket::EmDrawTool(_) => "EMDrawTool",
+                        ControlPacket::EmDropDef(_) => "EMDropDef",
                         ControlPacket::Script(_) => "Script",
                         ControlPacket::MessageBoardAnswer(_) => "MessageBoardAnswer",
                         ControlPacket::CustomCommand(_) => "CustomCommand",
@@ -5043,6 +5049,42 @@ global func Step(state, frame, random)
                 .mode(),
             crate::LANDSCAPE_MODE_EXACT
         );
+    }
+
+    #[test]
+    fn replay_executes_em_drop_def_before_the_frame_tick() {
+        let mut runtime = RuntimeHandle::new();
+        let mut definition =
+            Definition::from_script("DROP", "Drop", "#strict\n").expect("definition compiles");
+        definition.set_category(crate::CATEGORY_OBJECT);
+        runtime
+            .engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let controls = "[Control]\n\
+                        [IDPacket]\n\
+                        ID=178\n\
+                        [EM Drop Def]\n\
+                        ID=DROP\n\
+                        X=23\n\
+                        Y=17\n\
+                        ByClient=0\n";
+        runtime.control_packets.insert(
+            0,
+            parse_control_ini(controls).expect("editor drop control parses"),
+        );
+
+        runtime
+            .apply_control_packets_for_frame(0)
+            .expect("editor drop control replays");
+
+        let object = runtime
+            .engine
+            .first_active_object_for_definition("DROP")
+            .and_then(|id| runtime.engine.object_snapshot(id))
+            .expect("dropped object exists");
+        assert_eq!(object.position, crate::Vector2::new(23, 17));
+        assert_eq!(object.owner, crate::OWNER_NONE);
     }
 
     #[test]

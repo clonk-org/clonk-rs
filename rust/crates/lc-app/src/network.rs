@@ -819,6 +819,7 @@ pub enum NetworkControl {
     CustomCommand(lc_engine::CustomCommandControlData),
     EmMoveObject(lc_engine::EmMoveObjectControlData),
     EmDrawTool(lc_engine::EmDrawToolControlData),
+    EmDropDef(lc_engine::EmDropDefControlData),
     Player { owner: i32, event: ControlEvent },
     InitScenarioPlayer(lc_engine::InitScenarioPlayerControlData),
     Synchronize(lc_engine::SynchronizeControlData),
@@ -2731,6 +2732,7 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         }
         lc_engine::ControlPacket::EmMoveObject(data) => Some(NetworkControl::EmMoveObject(data)),
         lc_engine::ControlPacket::EmDrawTool(data) => Some(NetworkControl::EmDrawTool(data)),
+        lc_engine::ControlPacket::EmDropDef(data) => Some(NetworkControl::EmDropDef(data)),
         lc_engine::ControlPacket::Synchronize(data) => Some(NetworkControl::Synchronize(data)),
         lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
         lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
@@ -4944,6 +4946,20 @@ mod tests {
                 control.clone(),
             )),
             Some(NetworkControl::EmDrawTool(control))
+        );
+    }
+
+    #[test]
+    fn decoded_em_drop_def_is_retained_for_ordered_execution() {
+        let control = lc_engine::EmDropDefControlData {
+            id: *b"HUT2",
+            x: -130,
+            y: 130,
+            by_client: 4,
+        };
+        assert_eq!(
+            network_control_for_packet(lc_engine::ControlPacket::EmDropDef(control)),
+            Some(NetworkControl::EmDropDef(control))
         );
     }
 

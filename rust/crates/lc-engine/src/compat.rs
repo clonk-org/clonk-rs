@@ -34029,9 +34029,12 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             base_position.y.saturating_add(y_offset),
         );
 
-        let completion = completion_percent.clamp(0, 100);
-        let construction_value = ((i64::from(completion) * i64::from(FULL_CON)) / 100)
-            .clamp(0, i64::from(FULL_CON)) as i32;
+        // FnCreateConstruction forwards `iCompletion * FullCon / 100`
+        // without clamping the percentage (C4Script.cpp:1911-1933). Normal
+        // definitions clamp in DoCon; Oversize definitions retain values
+        // above FullCon, including EMDropDef's unusual FullCon argument.
+        let construction_value =
+            ((i64::from(completion_percent) * i64::from(FULL_CON)) / 100) as i32;
 
         if check_site && !construction_check(context, &definition, &metadata, position)? {
             return Ok(None);

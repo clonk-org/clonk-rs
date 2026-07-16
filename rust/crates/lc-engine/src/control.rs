@@ -59,6 +59,9 @@ pub enum ControlPacket {
     /// Synchronized editor landscape drawing (`CID_EMDrawTool`,
     /// C4Control.cpp:994-1054).
     EmDrawTool(EmDrawToolControlData),
+    /// Synchronized editor definition drop (`CID_EMDropDef`,
+    /// C4Control.cpp:1524-1564).
+    EmDropDef(EmDropDefControlData),
     /// Queued team choice that resumes a player waiting in
     /// `PS_TeamSelectionPending` (`CID_InitScenarioPlayer`).
     InitScenarioPlayer(InitScenarioPlayerControlData),
@@ -445,6 +448,29 @@ impl Default for EmDrawToolControlData {
             ift: false,
             material: LegacyCString::default(),
             texture: LegacyCString::default(),
+            by_client: -1,
+        }
+    }
+}
+
+/// Body of `C4ControlEMDropDef` (`CID_EMDropDef`).
+///
+/// C++ writes the definition through `C4IDAdapt`, then packed X/Y and the
+/// inherited packed `ByClient` (`src/C4Control.cpp:1524-1530,53-57`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmDropDefControlData {
+    pub id: [u8; 4],
+    pub x: i32,
+    pub y: i32,
+    pub by_client: i32,
+}
+
+impl Default for EmDropDefControlData {
+    fn default() -> Self {
+        Self {
+            id: *b"NONE",
+            x: 0,
+            y: 0,
             by_client: -1,
         }
     }
@@ -1167,6 +1193,7 @@ impl RawPacket {
         const CID_PLR_COMMAND: u8 = 0xA2;
         const CID_EM_MOVE_OBJECT: u8 = 0xB0;
         const CID_EM_DRAW_TOOL: u8 = 0xB1;
+        const CID_EM_DROP_DEF: u8 = 0xB2;
 
         if id == PID_NONE {
             return Ok(None);
@@ -1466,6 +1493,37 @@ impl RawPacket {
                 ift: parse_bool_field_or(&self.fields, "IFT", false)?,
                 material: legacy_string("Material")?,
                 texture: legacy_string("Texture")?,
+                by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
+            })));
+        }
+
+        if id == CID_EM_DROP_DEF {
+            let raw_id = self
+                .fields
+                .get("ID")
+                .map(|value| legacy_string_bytes(value))
+                .unwrap_or_else(|| b"NONE".to_vec());
+            // The INI identifier adaptor has a fixed four-byte buffer: long
+            // values are truncated, while short values compile as C4ID_None.
+            // RCT_ID stops at the first byte outside its identifier alphabet.
+            let raw_id = raw_id
+                .into_iter()
+                .take_while(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-')
+                })
+                .take(4)
+                .collect::<Vec<_>>();
+            let mut id = *b"NONE";
+            if raw_id.len() == id.len() {
+                id.copy_from_slice(&raw_id);
+            }
+            if id == *b"0000" {
+                id = *b"NONE";
+            }
+            return Ok(Some(ControlPacket::EmDropDef(EmDropDefControlData {
+                id,
+                x: parse_int_field_or(&self.fields, "X", 0)?,
+                y: parse_int_field_or(&self.fields, "Y", 0)?,
                 by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
             })));
         }
@@ -1946,9 +2004,19 @@ pub fn parse_control_ini(input: &str) -> Result<Vec<ControlPacket>, ControlParse
         };
 
         let key = key.trim();
-        let value = unescape_value(value.trim());
+        let raw_value = value.trim();
+        let mut value = unescape_value(raw_value);
 
         if let Some(packet) = current.as_mut() {
+            // Unlike ordinary INI strings, StdCompiler's RCT_ID adaptor does
+            // not strip quotes. Preserve that leading non-identifier byte so
+            // CID_EMDropDef defaults a quoted ID to C4ID_None like C++.
+            if packet.id == Some(0xb2)
+                && key.eq_ignore_ascii_case("ID")
+                && raw_value.starts_with('"')
+            {
+                value = raw_value.to_string();
+            }
             if key.eq_ignore_ascii_case("ID") && packet.id.is_none() {
                 let parsed =
                     value
@@ -2787,6 +2855,64 @@ mod tests {
         ] {
             assert_eq!(parse_control_ini(input).unwrap_err(), expected);
         }
+    }
+
+    #[test]
+    fn parses_em_drop_def_fields_and_cpp_defaults() {
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=178\n\
+    [EM Drop Def]\n\
+      ID=HUT2\n\
+      X=-130\n\
+      Y=130\n\
+      ByClient=7\n\
+  [IDPacket]\n\
+    ID=178\n\
+    [EM Drop Def]\n";
+
+        assert_eq!(
+            parse_control_ini(input).expect("parse editor definition drops"),
+            vec![
+                ControlPacket::EmDropDef(EmDropDefControlData {
+                    id: *b"HUT2",
+                    x: -130,
+                    y: 130,
+                    by_client: 7,
+                }),
+                ControlPacket::EmDropDef(EmDropDefControlData::default()),
+            ]
+        );
+    }
+
+    #[test]
+    fn em_drop_def_ini_truncates_long_ids_and_maps_short_ids_to_none() {
+        let input = "\
+[Control]\n\
+[IDPacket]\n\
+ID=178\n\
+[EM Drop Def]\n\
+ID=TOO-LONG\n\
+[IDPacket]\n\
+ID=178\n\
+[EM Drop Def]\n\
+ID=ABC!ignored\n\
+[IDPacket]\n\
+ID=178\n\
+[EM Drop Def]\n\
+ID=\"HUT2\"\n";
+        assert_eq!(
+            parse_control_ini(input).expect("parse C4ID adaptor boundaries"),
+            vec![
+                ControlPacket::EmDropDef(EmDropDefControlData {
+                    id: *b"TOO-",
+                    ..EmDropDefControlData::default()
+                }),
+                ControlPacket::EmDropDef(EmDropDefControlData::default()),
+                ControlPacket::EmDropDef(EmDropDefControlData::default()),
+            ]
+        );
     }
 
     #[test]

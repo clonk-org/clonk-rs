@@ -65,7 +65,8 @@ pub use control::{
     ActivateGameGoalRuleControlData, ClientCoreControlData, ClientJoinControlData,
     ClientRemoveControlData, ClientUpdateControlData, CommandKind, ControlButton, ControlCommand,
     ControlEvent, ControlPacket, ControlPacketId, ControlPlayerInfoEntry, CustomCommandControlData,
-    EliminatePlayerControlData, EmDrawToolControlData, EmMoveObjectControlData,
+    EliminatePlayerControlData, EmDrawToolControlData, EmDropDefControlData,
+    EmMoveObjectControlData,
     InitScenarioPlayerControlData,
     JoinPlayerControlData,
     JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData, NetworkResourceCore,
@@ -20135,6 +20136,72 @@ impl Engine {
             }
             _ => true,
         }
+    }
+
+    /// Execute one synchronized `CID_EMDropDef` packet through the same
+    /// strict global internal-script path as `C4ControlEMDropDef`.
+    pub fn execute_em_drop_def_control(
+        &mut self,
+        control: &EmDropDefControlData,
+    ) -> Result<bool, EngineError> {
+        if self.league_game {
+            return Ok(false);
+        }
+
+        let encoded = lc_script::c4_string_from_bytes(&control.id);
+        let raw_id = lc_script::c4_id_parse(&encoded);
+        if raw_id == 0 {
+            return Ok(false);
+        }
+        let definition_id = lc_script::c4_id_from_raw(raw_id);
+        let Some(category) = self.definition_category(&definition_id) else {
+            return Ok(false);
+        };
+        let definition_text = lc_script::c4_id_text(&definition_id);
+        // C++'s lexer accepts the numeric-to-C4ID transition in e.g. 1_AA;
+        // lc-script's numeric lexer does not yet consume that underscore.
+        // An explicit C4Id conversion is behaviorally identical for this
+        // otherwise-valid four-byte ID and keeps this control executable.
+        let numeric_underscore_id = control
+            .id
+            .iter()
+            .position(|byte| !byte.is_ascii_digit())
+            .is_some_and(|index| {
+                index > 0
+                    && control.id[index] == b'_'
+                    && control.id[index + 1..]
+                        .iter()
+                        .all(u8::is_ascii_alphanumeric)
+            });
+        let definition_expression = if numeric_underscore_id {
+            format!("C4Id(\"{definition_text}\")")
+        } else {
+            definition_text
+        };
+        // `-2147483648` is a unary minus plus an out-of-range positive token
+        // in lc-script. Spell the same i32 value as an in-range expression.
+        let script_i32 = |value: i32| {
+            if value == i32::MIN {
+                "(-2147483647-1)".to_string()
+            } else {
+                value.to_string()
+            }
+        };
+        let x = script_i32(control.x);
+        let y = script_i32(control.y);
+        let source = if category & CATEGORY_STRUCTURE != 0 {
+            format!(
+                "CreateConstruction({},{},{},-1,{},true)",
+                definition_expression, x, y, FULL_CON
+            )
+        } else {
+            format!(
+                "CreateObject({},{},{},-1)",
+                definition_expression, x, y
+            )
+        };
+        self.execute_internal_script_at_scope(SCRIPT_SCOPE_GLOBAL, &source)?;
+        Ok(true)
     }
 
     /// Execute one synchronized `CID_CustomCommand` packet. Player ownership
@@ -54270,6 +54337,138 @@ mod em_draw_tool_control_parity {
             ..EmDrawToolControlData::default()
         }));
         assert_ne!(engine.debug_landscape_byte(3, 3), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod em_drop_def_control_parity {
+    use super::*;
+    use crate::landscape::PixelGrid;
+
+    fn control(id: &[u8; 4], x: i32, y: i32) -> EmDropDefControlData {
+        EmDropDefControlData {
+            id: *id,
+            x,
+            y,
+            by_client: 7,
+        }
+    }
+
+    #[test]
+    fn structures_use_full_create_construction_with_terrain_adjustment() {
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=100\nDigFree=1\n\n\
+             [Material Granite]\nName=Granite\nDensity=100\nDigFree=0\n",
+        )
+        .expect("materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let mut landscape = Landscape::new(40, vec![0; 40]).expect("landscape builds");
+        landscape.set_world_height(40);
+        landscape.set_pixel_grid(PixelGrid::new(
+            40,
+            40,
+            vec![1; 40 * 40],
+            vec![0, 100, 100],
+            vec![None, Some("Earth".to_owned()), Some("Granite".to_owned())],
+            vec![None; 3],
+        ));
+
+        let mut engine = Engine::new();
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        let mut structure = Definition::from_script("HUT1", "Hut", "#strict\n")
+            .expect("structure compiles");
+        structure.set_category(CATEGORY_STRUCTURE);
+        structure.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 8)));
+        structure.set_basement(1);
+        engine
+            .register_definition(structure)
+            .expect("structure registers");
+        let mut oversize = Definition::from_script("OVER", "Oversize", "#strict\n")
+            .expect("oversize structure compiles");
+        oversize.set_category(CATEGORY_STRUCTURE);
+        oversize.set_oversize(true);
+        engine
+            .register_definition(oversize)
+            .expect("oversize structure registers");
+
+        assert!(engine
+            .execute_em_drop_def_control(&control(b"HUT1", 20, 30))
+            .expect("drop executes"));
+        let object = engine
+            .first_active_object_for_definition("HUT1")
+            .and_then(|id| engine.object_snapshot(id))
+            .expect("structure is created");
+        assert_eq!(object.owner, OWNER_NONE);
+        assert_eq!(object.construction, FULL_CON);
+        assert_eq!(engine.debug_landscape_material_name(20, 26), None);
+        assert_eq!(
+            engine.debug_landscape_material_name(20, 30).as_deref(),
+            Some("Granite")
+        );
+
+        assert!(engine
+            .execute_em_drop_def_control(&control(b"OVER", 4, 5))
+            .expect("oversize drop executes"));
+        let oversize = engine
+            .first_active_object_for_definition("OVER")
+            .and_then(|id| engine.object_snapshot(id))
+            .expect("oversize structure is created");
+        assert_eq!(
+            oversize.construction,
+            FULL_CON * (FULL_CON / 100),
+            "the literal FullCon percentage survives Oversize DoCon"
+        );
+    }
+
+    #[test]
+    fn nonstructures_use_create_object_and_invalid_drops_are_noops() {
+        let mut engine = Engine::new();
+        let mut item =
+            Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles");
+        item.set_category(CATEGORY_OBJECT);
+        engine.register_definition(item).expect("item registers");
+        let mut numeric_underscore =
+            Definition::from_script("1_AA", "Edge ID", "#strict\n").expect("edge ID compiles");
+        numeric_underscore.set_category(CATEGORY_OBJECT);
+        engine
+            .register_definition(numeric_underscore)
+            .expect("edge ID registers");
+
+        assert!(!engine
+            .execute_em_drop_def_control(&EmDropDefControlData::default())
+            .expect("C4ID_None is ignored"));
+        assert!(!engine
+            .execute_em_drop_def_control(&control(b"MISS", 1, 2))
+            .expect("unknown definition is ignored"));
+        assert!(engine.first_active_object_for_definition("ITEM").is_none());
+
+        engine.set_league_game(true);
+        assert!(!engine
+            .execute_em_drop_def_control(&control(b"ITEM", 7, 9))
+            .expect("league drop is ignored"));
+        assert!(engine.first_active_object_for_definition("ITEM").is_none());
+
+        engine.set_league_game(false);
+        assert!(engine
+            .execute_em_drop_def_control(&control(b"ITEM", 7, 9))
+            .expect("ordinary drop executes"));
+        let object = engine
+            .first_active_object_for_definition("ITEM")
+            .and_then(|id| engine.object_snapshot(id))
+            .expect("item is created");
+        assert_eq!(object.position, Vector2::new(7, 9));
+        assert_eq!(object.owner, OWNER_NONE);
+        assert_eq!(object.construction, FULL_CON);
+
+        assert!(engine
+            .execute_em_drop_def_control(&control(b"1_AA", i32::MIN, 11))
+            .expect("numeric-underscore ID and INT_MIN coordinate execute"));
+        let edge = engine
+            .first_active_object_for_definition("1_AA")
+            .and_then(|id| engine.object_snapshot(id))
+            .expect("edge object is created");
+        assert_eq!(edge.position, Vector2::new(i32::MIN, 11));
     }
 }
 

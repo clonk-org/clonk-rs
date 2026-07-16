@@ -6,6 +6,7 @@ use lc_engine::{
     ControlPacket as EngineControlPacket, ControlPacketId, ControlPlayerInfoEntry,
     EmMoveObjectControlData,
     CustomCommandControlData, EliminatePlayerControlData, EmDrawToolControlData,
+    EmDropDefControlData,
     InitScenarioPlayerControlData,
     JoinPlayerControlData, JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData,
     NetworkResourceCore, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
@@ -44,6 +45,7 @@ const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
 const CID_PLR_COMMAND: u8 = 0x80 | 0x22;
 const CID_EM_MOVE_OBJECT: u8 = 0x80 | 0x30;
 const CID_EM_DRAW_TOOL: u8 = 0x80 | 0x31;
+const CID_EM_DROP_DEF: u8 = 0x80 | 0x32;
 const CID_INIT_SCENARIO_PLAYER: u8 = 0x80 | 0x52;
 const CID_SURRENDER_PLAYER: u8 = 0x80 | 0x55;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
@@ -77,6 +79,8 @@ pub enum LegacyControlError {
     PlayerSelectObjectCountOutOfRange(i32),
     #[error("EMMoveObject object count {0} is negative")]
     EmMoveObjectCountOutOfRange(i32),
+    #[error("C4ID text exceeds its four-byte control field: {0} bytes")]
+    ControlC4IdTooLong(usize),
     #[error("resource SHA contains an invalid hexadecimal byte")]
     InvalidResourceSha,
     #[error("JoinData C4ID is not exactly four uppercase letters, digits or underscores")]
@@ -658,6 +662,7 @@ fn decode_control(
         CID_PLR_COMMAND => decode_player_command(reader),
         CID_EM_MOVE_OBJECT => decode_em_move_object(reader),
         CID_EM_DRAW_TOOL => decode_em_draw_tool(reader),
+        CID_EM_DROP_DEF => decode_em_drop_def(reader),
         CID_INIT_SCENARIO_PLAYER => decode_init_scenario_player(reader),
         CID_SURRENDER_PLAYER => decode_surrender_player(reader),
         CID_SYNC_CHECK => decode_sync_check(reader),
@@ -1094,6 +1099,27 @@ fn decode_em_draw_tool(
         ift: reader.read_u8()? != 0,
         material: reader.read_c_string()?,
         texture: reader.read_c_string()?,
+        by_client: reader.read_int32()?,
+    }))
+}
+
+fn decode_em_drop_def(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    let raw_id = reader.read_c_string()?;
+    let id = match raw_id.as_bytes() {
+        bytes if bytes.len() < 4 => *b"NONE",
+        bytes if bytes.len() == 4 => normalize_c4_id_text(
+            bytes
+                .try_into()
+                .map_err(|_| LegacyControlError::UnexpectedEof)?,
+        ),
+        bytes => return Err(LegacyControlError::ControlC4IdTooLong(bytes.len())),
+    };
+    Ok(EngineControlPacket::EmDropDef(EmDropDefControlData {
+        id,
+        x: reader.read_int32()?,
+        y: reader.read_int32()?,
         by_client: reader.read_int32()?,
     }))
 }
@@ -1696,6 +1722,14 @@ fn encode_em_draw_tool(buffer: &mut Vec<u8>, data: &EmDrawToolControlData) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_em_drop_def(buffer: &mut Vec<u8>, data: &EmDropDefControlData) {
+    buffer.push(CID_EM_DROP_DEF);
+    append_c4_id(buffer, &data.id);
+    append_int32(buffer, data.x);
+    append_int32(buffer, data.y);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_init_scenario_player(buffer: &mut Vec<u8>, data: &InitScenarioPlayerControlData) {
     buffer.push(CID_INIT_SCENARIO_PLAYER);
     append_int32(buffer, data.team);
@@ -1906,6 +1940,10 @@ fn encode_control(
         EngineControlPacket::EmMoveObject(data) => encode_em_move_object(buffer, data),
         EngineControlPacket::EmDrawTool(data) => {
             encode_em_draw_tool(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::EmDropDef(data) => {
+            encode_em_drop_def(buffer, data);
             Ok(())
         }
         EngineControlPacket::InitScenarioPlayer(data) => {
@@ -2300,6 +2338,54 @@ mod tests {
                 &complete[..end]
             );
         }
+    }
+
+    #[test]
+    fn em_drop_def_entry_matches_cpp_c4id_and_packed_integer_order() {
+        let expected = EngineControlPacket::EmDropDef(EmDropDefControlData {
+            id: *b"HUT2",
+            x: -130,
+            y: 130,
+            by_client: 7,
+        });
+        let encoded = [
+            0xb2, b'H', b'U', b'T', b'2', 0x00, 0x7e, 0xfe, 0x82, 0x01, 0x07,
+        ];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+
+        let default = EngineControlPacket::EmDropDef(EmDropDefControlData::default());
+        assert_eq!(
+            encode_control_entry_payload(&default),
+            Ok(vec![0xb2, b'N', b'O', b'N', b'E', 0x00, 0x00, 0x00, 0xff])
+        );
+        assert_eq!(
+            decode_control_entry_payload(&[0xb2, b'A', 0x00, 0x00, 0x00, 0xff]),
+            Ok(default)
+        );
+    }
+
+    #[test]
+    fn em_drop_def_entry_rejects_truncation_and_overlong_c4ids() {
+        let complete = [
+            0xb2, b'H', b'U', b'T', b'2', 0x00, 0x7e, 0xfe, 0x82, 0x01, 0x07,
+        ];
+        for end in 1..complete.len() {
+            assert_eq!(
+                decode_control_entry_payload(&complete[..end]),
+                Err(LegacyControlError::UnexpectedEof),
+                "unexpected result for {:02x?}",
+                &complete[..end]
+            );
+        }
+
+        assert_eq!(
+            decode_control_entry_payload(&[
+                0xb2, b'A', b'B', b'C', b'D', b'E', 0x00, 0x00, 0x00, 0xff,
+            ]),
+            Err(LegacyControlError::ControlC4IdTooLong(5))
+        );
     }
 
     #[test]
