@@ -66,6 +66,86 @@ func Read(object target)
 }
 
 #[test]
+fn set_entrance_updates_explicit_foreign_target() {
+    let script = r#"#strict 3
+func Open(object target)
+{
+  return [SetEntrance(1, target), GetEntrance(target), GetEntrance()];
+}
+"#;
+    let mut engine = Engine::new();
+    engine
+        .register_definition(
+            Definition::from_script("ENTR", "Entrance setter", script)
+                .expect("entrance setter compiles"),
+        )
+        .expect("entrance setter registers");
+    let caller = engine
+        .spawn_object(SpawnConfig::new("ENTR"))
+        .expect("caller spawns");
+    let target = engine
+        .spawn_object(SpawnConfig::new("ENTR"))
+        .expect("target spawns");
+    let caller_index = engine
+        .find_object_index(caller)
+        .expect("caller remains live");
+
+    assert_eq!(
+        engine
+            .call_object_function(caller_index, "Open", vec![Value::Object(target.as_u64())],)
+            .expect("foreign SetEntrance runs"),
+        Value::Array(vec![Value::Bool(true), Value::Int(1), Value::Int(0)])
+    );
+    assert!(!entrance_status(&engine, caller));
+    assert!(entrance_status(&engine, target));
+}
+
+#[test]
+fn scenario_set_entrance_updates_explicit_targets_without_context_object() {
+    let mut engine = Engine::new();
+    engine
+        .register_definition(
+            Definition::from_script("ENTR", "Entrance target", "#strict 3")
+                .expect("entrance target compiles"),
+        )
+        .expect("entrance target registers");
+    let target = engine
+        .spawn_object(SpawnConfig::new("ENTR"))
+        .expect("target spawns");
+    let witness = engine
+        .spawn_object(SpawnConfig::new("ENTR"))
+        .expect("witness spawns");
+    engine
+        .load_scenario_script_with_convention(
+            "Scenario entrance setter",
+            r#"#strict 3
+func Open(object target, object witness)
+{
+  if (SetEntrance(1, target)) SetEntrance(1, witness);
+}
+"#,
+            true,
+        )
+        .expect("scenario entrance setter loads");
+
+    engine
+        .call_scenario_script_function(
+            "Open",
+            vec![
+                Value::Object(target.as_u64()),
+                Value::Object(witness.as_u64()),
+            ],
+        )
+        .expect("scenario SetEntrance runs");
+
+    assert!(entrance_status(&engine, target));
+    assert!(
+        entrance_status(&engine, witness),
+        "the witness proves the first SetEntrance returned true"
+    );
+}
+
+#[test]
 fn shipped_sub_airlock_toggles_once_per_transition() {
     let group = Group::open(content_root().join("Objects.c4d/Vehicles.c4d/Sub.c4d"))
         .expect("shipped Sub group opens");
