@@ -155,8 +155,8 @@ fn strict3_nil_tolerant_operators_remain_tolerant() {
         func Test() {
             var value, assigned;
             assigned ??= 4;
-            return [value == nil, value != nil, value S= "", value eq "",
-                    value ?? 7, value && 8, value || 9, !value, assigned];
+            return [value == nil, value != nil, value ?? 7,
+                    value && 8, value || 9, !value, assigned];
         }
     "#;
 
@@ -165,8 +165,6 @@ fn strict3_nil_tolerant_operators_remain_tolerant() {
         Value::Array(vec![
             Value::Bool(true),
             Value::Bool(false),
-            Value::Bool(true),
-            Value::Bool(true),
             Value::Int(7),
             Value::Nil,
             Value::Int(9),

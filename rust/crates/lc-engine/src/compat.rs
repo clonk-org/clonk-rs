@@ -48991,7 +48991,7 @@ public func MakeRacesOffset(object container)
 }
 public func ControlCommand(command, target, tx, ty, target2, data)
 {
-    if (command S= "Construct")
+    if (command == "Construct")
         if (CastC4ID(data)->~RejectConstruction(tx - GetX(), ty - GetY(), this()))
             return true;
     return false;

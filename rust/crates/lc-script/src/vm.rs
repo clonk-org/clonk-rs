@@ -4001,19 +4001,12 @@ impl<'a> Vm<'a> {
             }
             // String comparison operators
             StringEqual => self.eval_string_cmp(left, right, strict, |a, b| a == b, "S="),
-            StringNotEqual => self.eval_display_string_cmp(left, right, |a, b| a != b),
             KeywordStringEqual => {
                 self.eval_string_cmp(left, right, strict, |a, b| a == b, "eq")
             }
             KeywordStringNotEqual => {
                 self.eval_string_cmp(left, right, strict, |a, b| a != b, "ne")
             }
-            // Rust currently accepts these non-C++ operators. Preserve their
-            // existing behavior until the grammar-removal parity issue lands.
-            StringLess => self.eval_display_string_cmp(left, right, |a, b| a < b),
-            StringLessEqual => self.eval_display_string_cmp(left, right, |a, b| a <= b),
-            StringGreater => self.eval_display_string_cmp(left, right, |a, b| a > b),
-            StringGreaterEqual => self.eval_display_string_cmp(left, right, |a, b| a >= b),
         }
     }
 
@@ -4270,10 +4263,9 @@ impl<'a> Vm<'a> {
         F: Fn(&str, &str) -> bool,
     {
         // CheckOpPars for S=/eq/ne converts the left operand first, then the
-        // right (C4AulExec.cpp:289-299,691-707). Below #strict 3, raw-falsy
-        // concrete values are Set0() before conversion and therefore compare
-        // as the empty string. Nil itself converts to String without changing
-        // its Any type, so `_getStr()==nullptr` also reads as "" at strict 3.
+        // right (C4AulExec.cpp:289-299,691-707). At the supported NONSTRICT
+        // and STRICT1 levels, raw-falsy concrete values are Set0() before
+        // conversion and therefore compare as the empty string.
         let convert = |value: Value, side: &str| {
             let canonical_nil = match &value {
                 Value::Nil | Value::Object(0) => true,
@@ -4298,18 +4290,6 @@ impl<'a> Vm<'a> {
         let left_str = convert(left, "left")?;
         let right_str = convert(right, "right")?;
         Ok(Value::Bool(cmp(&left_str, &right_str)))
-    }
-
-    fn eval_display_string_cmp<F>(
-        &self,
-        left: Value,
-        right: Value,
-        cmp: F,
-    ) -> Result<Value, RuntimeError>
-    where
-        F: Fn(&str, &str) -> bool,
-    {
-        Ok(Value::Bool(cmp(&left.to_string(), &right.to_string())))
     }
 
     /// `==` per `C4Value::Equals` (C4Value.cpp:823-919). NONSTRICT/STRICT1

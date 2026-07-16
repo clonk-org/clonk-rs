@@ -161,12 +161,7 @@ pub enum Symbol {
     LBracket,
     RBracket,
     // String comparison operators
-    StringEqual,        // S=
-    StringNotEqual,     // S!=
-    StringLess,         // S<
-    StringLessEqual,    // S<=
-    StringGreater,      // S>
-    StringGreaterEqual, // S>=
+    StringEqual, // S=
     // Compound assignment operators
     PlusEqual,
     MinusEqual,

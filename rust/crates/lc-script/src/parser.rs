@@ -1668,17 +1668,14 @@ impl<'a> Parser<'a> {
             } else if self.consume_if_symbol(Symbol::StringEqual)?.is_some() {
                 let right = self.parse_concat()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::StringEqual, Box::new(right));
-            } else if self.consume_if_identifier("eq")?.is_some() {
+            } else if self.strict_level < 2 && self.consume_if_identifier("eq")?.is_some() {
                 let right = self.parse_concat()?;
                 expr = Expr::Binary(
                     Box::new(expr),
                     BinaryOp::KeywordStringEqual,
                     Box::new(right),
                 );
-            } else if self.consume_if_symbol(Symbol::StringNotEqual)?.is_some() {
-                let right = self.parse_concat()?;
-                expr = Expr::Binary(Box::new(expr), BinaryOp::StringNotEqual, Box::new(right));
-            } else if self.consume_if_identifier("ne")?.is_some() {
+            } else if self.strict_level < 2 && self.consume_if_identifier("ne")?.is_some() {
                 let right = self.parse_concat()?;
                 expr = Expr::Binary(
                     Box::new(expr),
@@ -1727,25 +1724,6 @@ impl<'a> Parser<'a> {
             {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::GreaterEqual, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::StringLess)?.is_some() {
-                let right = self.parse_shift()?;
-                expr = Expr::Binary(Box::new(expr), BinaryOp::StringLess, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::StringLessEqual)?.is_some() {
-                let right = self.parse_shift()?;
-                expr = Expr::Binary(Box::new(expr), BinaryOp::StringLessEqual, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::StringGreater)?.is_some() {
-                let right = self.parse_shift()?;
-                expr = Expr::Binary(Box::new(expr), BinaryOp::StringGreater, Box::new(right));
-            } else if self
-                .consume_if_symbol(Symbol::StringGreaterEqual)?
-                .is_some()
-            {
-                let right = self.parse_shift()?;
-                expr = Expr::Binary(
-                    Box::new(expr),
-                    BinaryOp::StringGreaterEqual,
-                    Box::new(right),
-                );
             } else {
                 break;
             }
@@ -2536,6 +2514,19 @@ fn static_const_multi_declarators_parse() {
     fn parse_return_with_simple_expression() {
         let result = parse_script("func Test() { return 42; }");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn strict_two_rejects_textual_string_comparison_operators() {
+        for operator in ["eq", "ne"] {
+            let source = format!(
+                "#strict 2\nfunc Test() {{ return \"a\" {operator} \"a\"; }}"
+            );
+            assert!(
+                parse_script(&source).is_err(),
+                "{operator} must be an identifier rather than an operator at strict two"
+            );
+        }
     }
 
     #[test]

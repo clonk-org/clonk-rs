@@ -22,7 +22,7 @@ fn eval_error(source: &str) -> String {
 }
 
 #[test]
-fn falsy_operands_compare_as_empty_below_strict_three() {
+fn falsy_operands_compare_as_empty_below_strict_two() {
     for expression in [
         "nil S= \"\"",
         "0 S= \"\"",
@@ -51,8 +51,8 @@ fn string_comparison_is_case_sensitive_and_uses_raw_text() {
 }
 
 #[test]
-fn truthy_non_strings_raise_operator_type_errors_at_every_strict_level() {
-    for prefix in ["", "#strict 1\n", "#strict 2\n", "#strict 3\n"] {
+fn truthy_non_strings_raise_operator_type_errors_below_strict_two() {
+    for prefix in ["", "#strict 1\n"] {
         assert_eq!(
             eval_error(&format!(
                 "{prefix}func Test() {{ return 5 S= \"5\"; }}"
@@ -76,15 +76,11 @@ fn truthy_non_strings_raise_operator_type_errors_at_every_strict_level() {
 }
 
 #[test]
-fn strict_three_keeps_typed_zero_and_false_but_nil_is_still_empty() {
+fn strict_two_treats_adjacent_s_equal_as_assignment() {
     assert_eq!(
-        eval("#strict 3\nfunc Test() { return nil S= \"\"; }"),
-        Value::Bool(true)
+        eval("#strict 2\nfunc Test() { var S; S=1; return S; }"),
+        Value::Int(1)
     );
-    assert!(eval_error("#strict 3\nfunc Test() { return 0 S= \"\"; }")
-        .contains("got \"int\""));
-    assert!(eval_error("#strict 3\nfunc Test() { return false S= \"\"; }")
-        .contains("got \"bool\""));
 }
 
 #[test]

@@ -70,69 +70,18 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 'S' => {
-                    // String comparison operators: S=, S!=, S<, S<=, S>, S>=
-                    match self.peek_char() {
-                        Some('=') => {
-                            self.bump_char();
-                            return Ok(Token::new(
-                                TokenKind::Symbol(Symbol::StringEqual),
-                                line,
-                                column,
-                            ));
-                        }
-                        Some('!') => {
-                            self.bump_char();
-                            if self.peek_char() == Some('=') {
-                                self.bump_char();
-                                return Ok(Token::new(
-                                    TokenKind::Symbol(Symbol::StringNotEqual),
-                                    line,
-                                    column,
-                                ));
-                            }
-                            return Err(ParseError::new(
-                                "expected '=' after 'S!' in string comparison operator".to_string(),
-                                line,
-                                column,
-                            ));
-                        }
-                        Some('<') => {
-                            self.bump_char();
-                            if self.peek_char() == Some('=') {
-                                self.bump_char();
-                                return Ok(Token::new(
-                                    TokenKind::Symbol(Symbol::StringLessEqual),
-                                    line,
-                                    column,
-                                ));
-                            }
-                            return Ok(Token::new(
-                                TokenKind::Symbol(Symbol::StringLess),
-                                line,
-                                column,
-                            ));
-                        }
-                        Some('>') => {
-                            self.bump_char();
-                            if self.peek_char() == Some('=') {
-                                self.bump_char();
-                                return Ok(Token::new(
-                                    TokenKind::Symbol(Symbol::StringGreaterEqual),
-                                    line,
-                                    column,
-                                ));
-                            }
-                            return Ok(Token::new(
-                                TokenKind::Symbol(Symbol::StringGreater),
-                                line,
-                                column,
-                            ));
-                        }
-                        _ => {
-                            // 'S' alone is an identifier, let it fall through to identifier lexing
-                            return Ok(self.lex_identifier('S', idx, line, column));
-                        }
+                    // C4Aul has exactly one `S`-prefixed operator: contiguous
+                    // `S=`, and GetOperator disables it at STRICT2+. Every
+                    // other spelling starts an ordinary identifier named S.
+                    if self.strict_level < 2 && self.peek_char() == Some('=') {
+                        self.bump_char();
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::StringEqual),
+                            line,
+                            column,
+                        ));
                     }
+                    return Ok(self.lex_identifier('S', idx, line, column));
                 }
                 'a'..='z' | 'A'..='Z' | '_' => {
                     return Ok(self.lex_identifier(ch, idx, line, column));
@@ -922,7 +871,15 @@ mod tests {
     use super::*;
 
     fn lex_all(source: &str) -> Result<Vec<Token>, ParseError> {
+        lex_all_at_strict_level(source, 0)
+    }
+
+    fn lex_all_at_strict_level(
+        source: &str,
+        strict_level: u8,
+    ) -> Result<Vec<Token>, ParseError> {
         let mut lexer = Lexer::new(source);
+        lexer.set_strict_level(strict_level);
         let mut tokens = Vec::new();
         loop {
             let token = lexer.next_token()?;
@@ -1019,6 +976,45 @@ mod tests {
         let source = "+ - * / % == != < <= > >= && || !";
         let tokens = lex_all(source).unwrap();
         assert_eq!(tokens.len(), 14);
+    }
+
+    #[test]
+    fn only_s_equal_is_a_string_operator_below_strict_two() {
+        let kinds = lex_all("S= S!= S< S<= S> S>=")
+            .expect("operators lex")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Symbol(Symbol::StringEqual),
+                TokenKind::Identifier("S".into()),
+                TokenKind::Symbol(Symbol::BangEqual),
+                TokenKind::Identifier("S".into()),
+                TokenKind::Symbol(Symbol::Less),
+                TokenKind::Identifier("S".into()),
+                TokenKind::Symbol(Symbol::LessEqual),
+                TokenKind::Identifier("S".into()),
+                TokenKind::Symbol(Symbol::Greater),
+                TokenKind::Identifier("S".into()),
+                TokenKind::Symbol(Symbol::GreaterEqual),
+            ]
+        );
+
+        let strict_kinds = lex_all_at_strict_level("S=1", 2)
+            .expect("strict operator adjacency lexes")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            strict_kinds,
+            vec![
+                TokenKind::Identifier("S".into()),
+                TokenKind::Symbol(Symbol::Equal),
+                TokenKind::Number(1),
+            ]
+        );
     }
 
     #[test]

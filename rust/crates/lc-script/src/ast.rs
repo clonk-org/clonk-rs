@@ -459,11 +459,6 @@ pub enum BinaryOp {
     RightShift,
     // String comparison operators
     StringEqual,
-    StringNotEqual,
     KeywordStringEqual,
     KeywordStringNotEqual,
-    StringLess,
-    StringLessEqual,
-    StringGreater,
-    StringGreaterEqual,
 }
