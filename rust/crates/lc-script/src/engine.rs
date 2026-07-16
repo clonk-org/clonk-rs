@@ -1374,7 +1374,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_entries_keep_own_globals_while_global_bodies_use_engine_scope() {
+    fn ordinary_entries_skip_unnamed_global_links_and_use_engine_scope() {
         let mut declaring = Engine::new();
         declaring
             .load_script(
@@ -1399,7 +1399,7 @@ mod tests {
 
         assert_eq!(
             declaring.call("Pick", &[]).expect("global entry resolves"),
-            Value::Int(1)
+            Value::Int(2)
         );
         assert_eq!(
             declaring.call("Queue", &[]).expect("global helper resolves"),
@@ -1409,7 +1409,7 @@ mod tests {
             declaring
                 .call("LocalQueue", &[])
                 .expect("local global fallback resolves"),
-            Value::Int(1)
+            Value::Int(2)
         );
     }
 
@@ -1437,7 +1437,7 @@ mod tests {
         assert_eq!(resolution.function.access, crate::ast::AccessLevel::Public);
         assert_eq!(
             host.call("Pick", &[]).expect("ordinary own root resolves"),
-            Value::Int(2)
+            Value::Int(1)
         );
         assert_eq!(
             host.call_global_with_ref_args("Queue", &[])

@@ -51451,7 +51451,7 @@ mod script_relink_regression {
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL"))
             .expect("caller object spawns");
-        assert_eq!(call(&mut engine, owner, "Probe"), Value::Int(12));
+        assert_eq!(call(&mut engine, owner, "Probe"), Value::Int(1_234));
         assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(1_234));
         assert_eq!(
             engine
@@ -51461,7 +51461,7 @@ mod script_relink_regression {
                 .script
                 .call("Probe", &[])
                 .expect("scenario probe runs"),
-            Value::Int(123)
+            Value::Int(1_234)
         );
 
         let counts = engine
@@ -51480,8 +51480,68 @@ mod script_relink_regression {
                 count
             );
         }
-        assert_eq!(call(&mut engine, owner, "Probe"), Value::Int(12));
+        assert_eq!(call(&mut engine, owner, "Probe"), Value::Int(1_234));
         assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(1_234));
+    }
+
+    #[test]
+    fn declaring_definition_calls_use_the_latest_engine_global_chain() {
+        for (later_source, expected) in [
+            ("global func F() { return 2; }", 2),
+            ("global func F() { return _inherited() + 10; }", 11),
+        ] {
+            let mut engine = Engine::new();
+            register(
+                &mut engine,
+                "GFA1",
+                "#strict 2\n\
+                 global func F() { return 1; }\n\
+                 func CallF() { return F(); }",
+            );
+            register(&mut engine, "GFB1", later_source);
+            engine.relink_scripts().expect("global functions relink");
+            let declaring = engine
+                .spawn_object(SpawnConfig::new("GFA1"))
+                .expect("declaring object spawns");
+            assert_eq!(
+                call(&mut engine, declaring, "CallF"),
+                Value::Int(expected),
+                "later declaration: {later_source}",
+            );
+        }
+    }
+
+    #[test]
+    fn scenario_script_calls_use_the_later_scenario_system_global() {
+        let mut engine = Engine::new();
+        engine
+            .load_scenario_script_with_convention(
+                "Scenario/Script.c",
+                "#strict 2\n\
+                 global func F() { return 1; }\n\
+                 func CallF() { return F(); }",
+                true,
+            )
+            .expect("scenario script loads first");
+        assert_eq!(
+            engine.install_scenario_global_scripts(&[(
+                "Scenario/System/Override.c".into(),
+                "global func F() { return 2; }".into(),
+            )]),
+            1,
+        );
+        engine.relink_scripts().expect("scenario scripts relink");
+
+        assert_eq!(
+            engine
+                .scenario_script
+                .as_ref()
+                .expect("scenario script remains installed")
+                .script
+                .call("CallF", &[])
+                .expect("scenario CallF runs"),
+            Value::Int(2),
+        );
     }
 
     #[test]
@@ -51719,7 +51779,7 @@ mod script_relink_regression {
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL"))
             .expect("caller object spawns");
-        assert_eq!(call(&mut engine, early, "Own"), Value::Int(12));
+        assert_eq!(call(&mut engine, early, "Own"), Value::Int(123));
         assert_eq!(call(&mut engine, late, "Own"), Value::Int(123));
         assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(123));
 
@@ -51733,12 +51793,12 @@ mod script_relink_regression {
                 .expect("early definition reloads")
         );
         assert_eq!(call(&mut engine, early, "Own"), Value::Int(134));
-        assert_eq!(call(&mut engine, late, "Own"), Value::Int(13));
+        assert_eq!(call(&mut engine, late, "Own"), Value::Int(134));
         assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(134));
 
         engine.relink_scripts().expect("repeat relink succeeds");
         assert_eq!(call(&mut engine, early, "Own"), Value::Int(134));
-        assert_eq!(call(&mut engine, late, "Own"), Value::Int(13));
+        assert_eq!(call(&mut engine, late, "Own"), Value::Int(134));
         assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(134));
     }
 

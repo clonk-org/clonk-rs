@@ -2012,11 +2012,17 @@ impl<'a> Vm<'a> {
     }
 
     /// Named functions visible in the destination script's own scope.
-    /// Ordinary callbacks preserve historical own-root dispatch. Exact
-    /// retained-global calls model C++'s unnamed global FnLinks instead.
+    /// A C4Aul `global func` leaves only an unnamed FnLink in its declaring
+    /// host, so every named lookup skips global nodes and falls through to
+    /// the engine table. Ordinary same-name local functions still win. A
+    /// bare/partial fixture VM with no table entry retains its only global.
     fn own_script_function(&self, name: &str) -> Option<&Function> {
         let function = self.functions.get(name)?;
-        if self.exact_global_link_lookup {
+        if self.exact_global_link_lookup
+            || self
+                .global_functions
+                .is_some_and(|functions| functions.contains_key(name))
+        {
             function.first_non_global()
         } else {
             Some(function)
@@ -2024,10 +2030,8 @@ impl<'a> Vm<'a> {
     }
 
     fn own_or_global_script_function(&self, name: &str) -> Option<&Function> {
-        self.own_script_function(name).or_else(|| {
-            self.global_functions
-                .and_then(|functions| functions.get(name))
-        })
+        self.own_script_function(name)
+            .or_else(|| self.engine_global_script_function(name))
     }
 
     fn invoke_reference(
