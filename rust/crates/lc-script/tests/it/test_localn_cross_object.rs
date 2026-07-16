@@ -93,6 +93,75 @@ fn arrow_form_localn_read_resolves_the_target_object_local() {
 }
 
 #[test]
+fn object_index_and_property_read_named_local_cells() {
+    let (mut engine, cells) = engine_with_stub_hook();
+    cells.borrow_mut().extend([
+        ((7, "iWater".to_string()), value_cell(Value::Int(77))),
+        (
+            (7, "items".to_string()),
+            value_cell(Value::Array(vec![Value::Int(9)])),
+        ),
+    ]);
+    engine.add_script(
+        Script::compile(
+            "#strict 3\n\
+             local iWater;\n\
+             public func Peek(target, key, items_key) {\n\
+                 return [target[key], target.iWater, target[\"unset\"], target.unset,\n\
+                         target[items_key][0], target.items[0]];\n\
+             }\n\
+             public func PeekSelf(key) { return [this[key], this.iWater]; }\n\
+             public func BadKey(target) { return target[1]; }",
+        )
+        .expect("compiles"),
+    );
+
+    assert_eq!(
+        engine
+            .call(
+                "Peek",
+                &[
+                    Value::Object(7),
+                    Value::String("iWater".to_string()),
+                    Value::String("items".to_string()),
+                ],
+            )
+            .expect("call succeeds"),
+        Value::Array(vec![
+            Value::Int(77),
+            Value::Int(77),
+            Value::Nil,
+            Value::Nil,
+            Value::Int(9),
+            Value::Int(9),
+        ]),
+    );
+    let self_locals = HashMap::from([("iWater".to_string(), Value::Int(88))]);
+    let (self_result, _) = engine
+        .call_with_locals_and_this(
+            "PeekSelf",
+            &[Value::String("iWater".to_string())],
+            &self_locals,
+            Value::Object(7),
+        )
+        .expect("self-object access succeeds");
+    assert_eq!(
+        self_result,
+        Value::Array(vec![Value::Int(88), Value::Int(88)]),
+        "the executing object's live locals take precedence over the foreign hook",
+    );
+    let error = engine
+        .call("BadKey", &[Value::Object(7)])
+        .expect_err("object indexing rejects a non-string key");
+    assert!(
+        error
+            .to_string()
+            .contains("indexed access on object: only string keys are allowed"),
+        "got: {error}"
+    );
+}
+
+#[test]
 fn arrow_form_numbered_local_read_resolves_the_target_object_slot() {
     // `pObj->Local(0)`: `->` supplies Obj=pObj, so FnLocal returns
     // pObj->Local[0] (C4Script.cpp:3423-3433, pObj defaulting to cthr->Obj).

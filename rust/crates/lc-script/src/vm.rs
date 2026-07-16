@@ -1540,6 +1540,40 @@ impl<'a> Vm<'a> {
         env.object_state.named_local_cell(local_name)
     }
 
+    /// C4Value::GetContainerElement's object branch: object `[]` and `.`
+    /// reads resolve the named local on that object. The executing object
+    /// owns its cells in this VM; foreign objects are supplied by the host.
+    fn object_local_cell(
+        &self,
+        env: &Environment,
+        target: &Value,
+        name: &str,
+    ) -> Option<ValueCell> {
+        if matches!(target, Value::Object(0)) {
+            return None;
+        }
+        if target == &self.this_value {
+            Some(env.object_state.named_local_cell(name))
+        } else {
+            self.local_cell_hook.and_then(|hook| hook(target, name))
+        }
+    }
+
+    fn object_local_tracked(
+        &self,
+        env: &Environment,
+        target: &Value,
+        name: &str,
+    ) -> TrackedValue {
+        self.object_local_cell(env, target, name)
+            .map(|cell| self.read_tracked_cell(&cell))
+            .unwrap_or_else(|| TrackedValue::runtime(Value::Nil))
+    }
+
+    fn object_local_value(&self, env: &Environment, target: &Value, name: &str) -> Value {
+        self.object_local_tracked(env, target, name).value
+    }
+
     /// Numbered Local slot cell (FnLocal by-reference, C4Script.cpp:
     /// 3423-3433: `pObj->Local[iIndex].GetRef()`): a FOREIGN target
     /// resolves through the cross-object cell hook under the engine's
@@ -3158,7 +3192,7 @@ impl<'a> Vm<'a> {
                     &collection,
                     &idx,
                 )?;
-                self.eval_index(collection, idx)
+                self.eval_index(collection, idx, env)
             }
             Expr::ArrayAppend(_) => self.expr_to_lvalue(expr, env, depth)?.read(),
             Expr::ArrayAppendAssignment {
@@ -3193,7 +3227,7 @@ impl<'a> Vm<'a> {
                 .map(|tracked| tracked.value),
             Expr::Property(target, name) => {
                 let proplist = self.evaluate(target, env, depth)?;
-                self.eval_property(proplist, name)
+                self.eval_property(proplist, name, env)
             }
             Expr::SafeNavigation { receiver, steps } => self
                 .evaluate_safe_navigation_tracked(receiver, steps, env, depth)
@@ -3291,16 +3325,7 @@ impl<'a> Vm<'a> {
                 if let Some(reference) = &collection_reference {
                     collection = reference.read_tracked()?;
                 }
-                let segment = PathSegment::Index(index.clone());
-                let string_result = matches!(&collection.value, Value::String(_));
-                let inherited_identity = collection.identity_at(&segment);
-                let value = self.eval_index(collection.value, index)?;
-                let identity = if string_result {
-                    RawIdentity::runtime(&value)
-                } else {
-                    inherited_identity
-                };
-                Ok(TrackedValue { value, identity })
+                self.eval_index_tracked(collection, index, env)
             }
             Expr::ArrayAppend(_) => self.expr_to_lvalue(expr, env, depth)?.read_tracked(),
             Expr::ArrayAppendAssignment {
@@ -3331,9 +3356,7 @@ impl<'a> Vm<'a> {
             ),
             Expr::Property(target, name) => {
                 let collection = self.evaluate_tracked(target, env, depth)?;
-                let identity = collection.identity_at(&PathSegment::Property(name.clone()));
-                let value = self.eval_property(collection.value, name)?;
-                Ok(TrackedValue { value, identity })
+                self.eval_property_tracked(collection, name, env)
             }
             Expr::SafeNavigation { receiver, steps } => {
                 self.evaluate_safe_navigation_tracked(receiver, steps, env, depth)
@@ -3528,16 +3551,7 @@ impl<'a> Vm<'a> {
             current = match &step.operation {
                 NavigationOperation::Index(index_expr) => {
                     let index = self.evaluate(index_expr, env, depth)?;
-                    let segment = PathSegment::Index(index.clone());
-                    let string_result = matches!(&current.value, Value::String(_));
-                    let inherited_identity = current.identity_at(&segment);
-                    let value = self.eval_index(current.value, index)?;
-                    let identity = if string_result {
-                        RawIdentity::runtime(&value)
-                    } else {
-                        inherited_identity
-                    };
-                    TrackedValue { value, identity }
+                    self.eval_index_tracked(current, index, env)?
                 }
                 // SetNoRef before AB_JUMPNIL makes the guarded base a value.
                 // AB_ARRAY_APPEND therefore operates on that detached value:
@@ -3560,9 +3574,7 @@ impl<'a> Vm<'a> {
                     }
                 },
                 NavigationOperation::Property(name) => {
-                    let identity = current.identity_at(&PathSegment::Property(name.clone()));
-                    let value = self.eval_property(current.value, name)?;
-                    TrackedValue { value, identity }
+                    self.eval_property_tracked(current, name, env)?
                 }
                 NavigationOperation::MethodCall {
                     name,
@@ -4187,8 +4199,16 @@ impl<'a> Vm<'a> {
         c4_values_equal(left, right, strict, left_identity, right_identity)
     }
 
-    fn eval_index(&self, collection: Value, index: Value) -> Result<Value, RuntimeError> {
+    fn eval_index(
+        &self,
+        collection: Value,
+        index: Value,
+        env: &Environment,
+    ) -> Result<Value, RuntimeError> {
         match (&collection, index) {
+            (Value::Object(0), _) => Err(RuntimeError::new(
+                "indexed access [index]: array, map or string expected, but got nil",
+            )),
             (Value::Array(elements), index) => Ok(elements
                 .get(array_index(&index)?)
                 .cloned()
@@ -4197,6 +4217,12 @@ impl<'a> Vm<'a> {
             (Value::Proplist(entries), key) => {
                 Ok(entries.get_key(&key).cloned().unwrap_or(Value::Nil))
             }
+            (target @ Value::Object(_), Value::String(name)) => {
+                Ok(self.object_local_value(env, target, &name))
+            }
+            (Value::Object(_), _) => Err(RuntimeError::new(
+                "indexed access on object: only string keys are allowed",
+            )),
             (other, _) => Err(RuntimeError::new(format!(
                 "cannot index value of type {}",
                 other.type_name()
@@ -4204,13 +4230,76 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn eval_property(&self, value: Value, name: &str) -> Result<Value, RuntimeError> {
+    fn eval_index_tracked(
+        &self,
+        collection: TrackedValue,
+        index: Value,
+        env: &Environment,
+    ) -> Result<TrackedValue, RuntimeError> {
+        match (&collection.value, &index) {
+            (Value::Object(0), _) => {
+                return self
+                    .eval_index(collection.value, index, env)
+                    .map(TrackedValue::runtime);
+            }
+            (target @ Value::Object(_), Value::String(name)) => {
+                return Ok(self.object_local_tracked(env, target, name));
+            }
+            (Value::Object(_), _) => {
+                return self
+                    .eval_index(collection.value, index, env)
+                    .map(TrackedValue::runtime);
+            }
+            _ => {}
+        }
+
+        let segment = PathSegment::Index(index.clone());
+        let string_result = matches!(&collection.value, Value::String(_));
+        let inherited_identity = collection.identity_at(&segment);
+        let value = self.eval_index(collection.value, index, env)?;
+        let identity = if string_result {
+            RawIdentity::runtime(&value)
+        } else {
+            inherited_identity
+        };
+        Ok(TrackedValue { value, identity })
+    }
+
+    fn eval_property(
+        &self,
+        value: Value,
+        name: &str,
+        env: &Environment,
+    ) -> Result<Value, RuntimeError> {
         match &value {
+            Value::Object(0) => Err(RuntimeError::new(
+                "map access with .: map expected, but got nil!",
+            )),
             Value::Proplist(entries) => Ok(entries.get(name).cloned().unwrap_or(Value::Nil)),
+            target @ Value::Object(_) => Ok(self.object_local_value(env, target, name)),
             other => Err(RuntimeError::new(format!(
                 "cannot access property '{name}' on value of type {}",
                 other.type_name()
             ))),
+        }
+    }
+
+    fn eval_property_tracked(
+        &self,
+        collection: TrackedValue,
+        name: &str,
+        env: &Environment,
+    ) -> Result<TrackedValue, RuntimeError> {
+        match &collection.value {
+            Value::Object(0) => self
+                .eval_property(collection.value, name, env)
+                .map(TrackedValue::runtime),
+            target @ Value::Object(_) => Ok(self.object_local_tracked(env, target, name)),
+            _ => {
+                let identity = collection.identity_at(&PathSegment::Property(name.to_string()));
+                let value = self.eval_property(collection.value, name, env)?;
+                Ok(TrackedValue { value, identity })
+            }
         }
     }
 
@@ -5270,15 +5359,53 @@ impl<'a> Vm<'a> {
                 self.global_variable_cell(name)
                     .map(|cell| self.tracked_cell(cell))
             })),
-            Expr::Property(base, property) => Ok(self
-                .existing_path_lvalue(base, env, depth)?
-                .map(|reference| reference.append(PathSegment::Property(property.clone())))),
+            Expr::Property(base, property) => {
+                let Some(reference) = self.existing_path_lvalue(base, env, depth)? else {
+                    return Ok(None);
+                };
+                if matches!(&reference, LValueRef::HostPath { .. }) {
+                    return Ok(Some(
+                        reference.append(PathSegment::Property(property.clone())),
+                    ));
+                }
+                let collection = reference.read()?;
+                if matches!(collection, Value::Object(0)) {
+                    return Err(RuntimeError::new(
+                        "map access with .: map expected, but got nil!",
+                    ));
+                }
+                if matches!(collection, Value::Object(_)) {
+                    let cell = self
+                        .object_local_cell(env, &collection, property)
+                        .unwrap_or_else(|| value_cell(Value::Nil));
+                    return Ok(Some(self.tracked_cell(cell)));
+                }
+                Ok(Some(
+                    reference.append(PathSegment::Property(property.clone())),
+                ))
+            }
             Expr::Index(base, index_expr) => {
                 let Some(reference) = self.existing_path_lvalue(base, env, depth)? else {
                     return Ok(None);
                 };
                 let collection = reference.read()?;
                 let index = self.evaluate(index_expr, env, depth)?;
+                if matches!(collection, Value::Object(0)) {
+                    return Err(RuntimeError::new(
+                        "indexed access [index]: array, map or string expected, but got nil",
+                    ));
+                }
+                if matches!(collection, Value::Object(_)) {
+                    let Value::String(name) = &index else {
+                        return Err(RuntimeError::new(
+                            "indexed access on object: only string keys are allowed",
+                        ));
+                    };
+                    let cell = self
+                        .object_local_cell(env, &collection, name)
+                        .unwrap_or_else(|| value_cell(Value::Nil));
+                    return Ok(Some(self.tracked_cell(cell)));
+                }
                 Self::grow_empty_negative_array(Some(&reference), &collection, &index)?;
                 Ok(Some(reference.append(PathSegment::Index(index))))
             }
