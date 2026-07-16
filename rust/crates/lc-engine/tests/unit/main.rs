@@ -7396,6 +7396,9 @@ global func MenuCommand(state, kind, selection)
     #[test]
     fn home_base_production_shared_across_team_when_rule_enabled() {
         let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(1, "Ordered", 0).with_player_ids(vec![1, 2]),
+        ]);
         engine.set_team_home_base_rule(true);
 
         let mut crew = build_definition();
@@ -7426,17 +7429,46 @@ global func MenuCommand(state, kind, selection)
         engine
             .register_player(follower)
             .expect("follower registered");
-
-        for _ in 0..60 {
+        for (id, name) in [(1, "Leader"), (2, "Follower")] {
             engine
-                .tick_player_systems()
-                .expect("player systems advance");
+                .reinitialize_player_after_restore(
+                    id,
+                    PlayerAtClient::HOST,
+                    "Local",
+                    name,
+                    PlayerRuntimeControl::NONE,
+                    false,
+                    true,
+                    false,
+                    false,
+                )
+                .expect("production fixture disables elimination");
+            let player = engine.player_mut(id).expect("player remains");
+            player.set_production_delay(0);
+            player.set_production_unit(0);
+            player.set_home_base_material_entries(Vec::new());
         }
+
+        for _ in 0..2099 {
+            engine.tick().expect("simulation frame advances");
+        }
+        assert_eq!(engine.frame(), 2099);
+
+        let leader = engine.player(1).expect("leader present");
+        let follower = engine.player(2).expect("follower present");
+        assert!(leader.home_base_material().get("Brick").is_none());
+        assert!(follower.home_base_material().get("Brick").is_none());
+        assert_eq!((leader.production_delay(), follower.production_delay()), (59, 59));
+
+        engine.tick().expect("sixtieth Tick35 boundary advances");
+        assert_eq!(engine.frame(), 2100);
 
         let leader = engine.player(1).expect("leader present");
         let follower = engine.player(2).expect("follower present");
         assert_eq!(leader.home_base_material().get("Brick"), Some(&1));
         assert_eq!(follower.home_base_material().get("Brick"), Some(&1));
+        assert_eq!((leader.production_delay(), follower.production_delay()), (0, 60));
+        assert_eq!((leader.production_unit(), follower.production_unit()), (1, 0));
     }
 
     #[test]
@@ -7447,7 +7479,7 @@ global func MenuCommand(state, kind, selection)
         // C4Player.cpp:1637-1664).
         let mut engine = Engine::new();
         engine.set_teams(vec![
-            TeamInfo::new(1, "Ordered", 0).with_player_ids(vec![20, 10]),
+            TeamInfo::new(1, "Ordered", 0).with_player_ids(vec![99, 20, 10]),
         ]);
         engine.set_team_home_base_rule(true);
 
@@ -7484,7 +7516,17 @@ global func MenuCommand(state, kind, selection)
         engine.player_mut(1).expect("follower").set_production_delay(59);
         engine.player_mut(5).expect("leader").set_production_delay(59);
 
-        engine.tick_player_systems().expect("Tick35 player pass");
+        for _ in 0..34 {
+            engine.tick().expect("pre-boundary frame advances");
+        }
+        assert_eq!(
+            (
+                engine.player(5).expect("leader").production_delay(),
+                engine.player(1).expect("follower").production_delay(),
+            ),
+            (59, 59),
+        );
+        engine.tick().expect("Tick35 player pass");
 
         let follower = engine.player(1).expect("follower remains");
         let leader = engine.player(5).expect("leader remains");
@@ -7494,8 +7536,143 @@ global func MenuCommand(state, kind, selection)
     }
 
     #[test]
+    fn home_base_production_updates_empty_and_nonleader_delay_bookkeeping() {
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(1, "Ordered", 0).with_player_ids(vec![20, 10]),
+        ]);
+        engine.set_team_home_base_rule(true);
+
+        let mut crew = build_definition();
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("definition registers");
+        for owner in [1, 5] {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("Test")
+                        .with_owner(owner)
+                        .with_alive(true)
+                        .with_crew_member(true),
+                )
+                .expect("crew spawns");
+        }
+        engine
+            .register_player(
+                PlayerConfig::new(1, "Follower")
+                    .with_player_info_id(10)
+                    .with_team(Some(1)),
+            )
+            .expect("follower registers");
+        engine
+            .register_player(
+                PlayerConfig::new(5, "Leader")
+                    .with_player_info_id(20)
+                    .with_team(Some(1)),
+            )
+            .expect("leader registers");
+        engine.player_mut(1).expect("follower").set_production_delay(59);
+        engine.player_mut(5).expect("leader").set_production_delay(59);
+
+        for _ in 0..35 {
+            engine.tick().expect("frame advances");
+        }
+
+        let follower = engine.player(1).expect("follower remains");
+        let leader = engine.player(5).expect("leader remains");
+        assert!(leader.home_base_production_entries().is_empty());
+        assert!(follower.home_base_production_entries().is_empty());
+        assert_eq!((leader.production_delay(), follower.production_delay()), (0, 60));
+        assert_eq!((leader.production_unit(), follower.production_unit()), (1, 0));
+    }
+
+    #[test]
+    fn home_base_production_pauses_during_team_selection() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(
+                PlayerConfig::new(1, "Choosing")
+                    .with_status(PlayerStatus::TeamSelection)
+                    .with_home_base_production(HashMap::from([("Brick".to_string(), 10)]))
+                    .with_production_delay(59),
+            )
+            .expect("player registers");
+
+        for _ in 0..70 {
+            engine.tick().expect("frame advances");
+        }
+        engine
+            .set_player_status(1, PlayerStatus::TeamSelectionPending)
+            .expect("selection becomes pending");
+        for _ in 0..70 {
+            engine.tick().expect("pending-selection frame advances");
+        }
+
+        let player = engine.player(1).expect("player remains");
+        assert_eq!(player.production_delay(), 59);
+        assert_eq!(player.production_unit(), 0);
+        assert!(player.home_base_material().get("Brick").is_none());
+    }
+
+    #[test]
+    fn missing_team_definition_does_not_gate_home_base_production() {
+        let mut engine = Engine::new();
+        engine.set_team_home_base_rule(true);
+        let mut crew = build_definition();
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("definition registers");
+        for owner in [1, 2] {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("Test")
+                        .with_owner(owner)
+                        .with_alive(true)
+                        .with_crew_member(true),
+                )
+                .expect("crew spawns");
+            engine
+                .register_player(
+                    PlayerConfig::new(owner, format!("Player {owner}"))
+                        .with_team(Some(99)),
+                )
+                .expect("player registers");
+            engine
+                .reinitialize_player_after_restore(
+                    owner,
+                    PlayerAtClient::HOST,
+                    "Local",
+                    format!("Player {owner}"),
+                    PlayerRuntimeControl::NONE,
+                    false,
+                    true,
+                    false,
+                    false,
+                )
+                .expect("production fixture disables elimination");
+            let player = engine.player_mut(owner).expect("player remains");
+            player.set_home_base_production(HashMap::from([("Brick".to_string(), 10)]));
+            player.set_home_base_material_entries(Vec::new());
+            player.set_production_delay(59);
+            player.set_production_unit(0);
+        }
+
+        for _ in 0..35 {
+            engine.tick().expect("frame advances");
+        }
+
+        for owner in [1, 2] {
+            let player = engine.player(owner).expect("player remains");
+            assert_eq!(player.production_delay(), 0);
+            assert_eq!(player.production_unit(), 1);
+            assert_eq!(player.home_base_material().get("Brick"), Some(&1));
+        }
+    }
+
+    #[test]
     fn home_base_production_respects_rule_toggle() {
         let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(2, "Toggle", 0).with_player_ids(vec![1, 2]),
+        ]);
         engine.set_team_home_base_rule(false);
 
         let mut crew = build_definition();

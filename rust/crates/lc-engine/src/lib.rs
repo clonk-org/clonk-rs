@@ -23297,16 +23297,19 @@ impl Engine {
         });
         if self.frame % 35 == 0 && normal_status {
             let team = self.players.get(&id).and_then(Player::team);
-            let should_produce = match team {
-                Some(team) if self.team_home_base_rule => {
+            let valid_team_home_base = team.filter(|team| {
+                self.team_home_base_rule
+                    && self.teams.iter().any(|candidate| candidate.id == *team)
+            });
+            let should_produce = match valid_team_home_base {
+                Some(team) => {
                     self.runtime_team_members_in_order(team).first().copied() == Some(id)
                 }
                 _ => true,
             };
-            let team_home_base_rule = self.team_home_base_rule;
             let team_update = self.players.get_mut(&id).and_then(|player| {
                 (player.advance_home_base_production_as_leader(should_produce)
-                    && team_home_base_rule)
+                    && valid_team_home_base.is_some())
                     .then(|| {
                         player
                             .team()
