@@ -2,7 +2,7 @@
 //! argument slot before entering the callee (`CheckConvertFunctionParameters`,
 //! C4AulExec.cpp:1364-1397).
 
-use lc_script::{Engine, Script, Value};
+use lc_script::{Engine, Script, TypeAnnotation, Value, ValueMap};
 
 fn eval(source: &str) -> Result<Value, lc_script::ScriptError> {
     let mut engine = Engine::new();
@@ -45,6 +45,77 @@ fn param_with_int_type() {
         );
     }
     assert!(result.is_ok());
+}
+
+#[test]
+fn map_parameter_carries_map_annotation_and_checks_runtime_type() {
+    let script = Script::compile("#strict 3\nfunc Accept(map value) { return value; }")
+        .expect("map parameter compiles");
+    let parameter = &script.functions()["Accept"].params[0];
+    assert_eq!(parameter.name, "value");
+    assert_eq!(parameter.type_annotation, Some(TypeAnnotation::Map));
+
+    let mut engine = Engine::new();
+    engine.add_script(script);
+    let map = Value::Proplist(ValueMap::from([("answer", Value::Int(42))]));
+    assert_eq!(
+        engine
+            .call("Accept", std::slice::from_ref(&map))
+            .expect("a C4V_Map argument is accepted"),
+        map
+    );
+    assert_eq!(
+        engine
+            .call("Accept", &[Value::Nil])
+            .expect("nil converts to every non-reference C4Value type"),
+        Value::Nil
+    );
+    assert_eq!(
+        runtime_message(
+            engine
+                .call("Accept", &[Value::Array(Vec::new())])
+                .expect_err("an array is not a map")
+        ),
+        r#"call to "Accept" parameter 1: got "array", but expected "map"!"#
+    );
+}
+
+#[test]
+fn map_parameter_type_parses_after_an_int_parameter() {
+    let script = Script::compile(
+        "func F(int first, map second) { return second; }\n\
+         func G(map|nil value) { return value; }",
+    )
+    .expect("map annotations compile in base and union positions");
+    let params = &script.functions()["F"].params;
+    assert_eq!(params[0].type_annotation, Some(TypeAnnotation::Int));
+    assert_eq!(params[1].name, "second");
+    assert_eq!(params[1].type_annotation, Some(TypeAnnotation::Map));
+    assert_eq!(
+        script.functions()["G"].params[0].type_annotation,
+        Some(TypeAnnotation::Union(vec![
+            TypeAnnotation::Map,
+            TypeAnnotation::Nil,
+        ]))
+    );
+}
+
+#[test]
+fn lone_map_type_word_remains_an_untyped_parameter_named_map() {
+    let script = Script::compile("func F(map) { return map; }")
+        .expect("a parameter named map still compiles");
+    let parameter = &script.functions()["F"].params[0];
+    assert_eq!(parameter.name, "map");
+    assert_eq!(parameter.type_annotation, None);
+
+    let mut engine = Engine::new();
+    engine.add_script(script);
+    assert_eq!(
+        engine
+            .call("F", &[Value::Int(7)])
+            .expect("the untyped parameter accepts an integer"),
+        Value::Int(7)
+    );
 }
 
 #[test]

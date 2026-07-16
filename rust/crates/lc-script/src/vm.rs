@@ -2286,7 +2286,7 @@ impl<'a> Vm<'a> {
             Some(TypeAnnotation::Object) => C4VType::C4Object,
             Some(TypeAnnotation::Id) => C4VType::C4Id,
             Some(TypeAnnotation::Array) => C4VType::Array,
-            Some(TypeAnnotation::Proplist) => C4VType::Map,
+            Some(TypeAnnotation::Map | TypeAnnotation::Proplist) => C4VType::Map,
             // `effect`, `nil`, and union annotations are extensions beyond
             // LegacyClonk's C4V_Type parameter grammar. Keep their prior
             // unrestricted behavior instead of inventing a conversion tag.

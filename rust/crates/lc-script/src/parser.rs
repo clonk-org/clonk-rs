@@ -690,6 +690,10 @@ impl<'a> Parser<'a> {
                     self.consume()?;
                     TypeAnnotation::Array
                 }
+                "map" => {
+                    self.consume()?;
+                    TypeAnnotation::Map
+                }
                 "proplist" => {
                     self.consume()?;
                     TypeAnnotation::Proplist
@@ -742,6 +746,10 @@ impl<'a> Parser<'a> {
                         "array" => {
                             self.consume()?;
                             TypeAnnotation::Array
+                        }
+                        "map" => {
+                            self.consume()?;
+                            TypeAnnotation::Map
                         }
                         "proplist" => {
                             self.consume()?;

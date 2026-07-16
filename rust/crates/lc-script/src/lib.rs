@@ -10,7 +10,7 @@ mod token;
 mod vm;
 
 pub use crate::debugger::DebuggerHooks;
-pub use crate::ast::{AppendTo, Function};
+pub use crate::ast::{AppendTo, Function, TypeAnnotation};
 pub use crate::ast::{VarDecl, VarDeclKind};
 pub use crate::engine::{
     new_global_slots, new_global_variables, register_global_declarations, Engine, GlobalSlots,
