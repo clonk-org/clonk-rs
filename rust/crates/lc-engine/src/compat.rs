@@ -1008,6 +1008,12 @@ pub enum PlayerCommand {
     /// `LoadScenarioSection`, it uses the existing ordered player-command
     /// outcome channel only as script-to-engine transport.
     SetMaxPlayer { max_players: i32 },
+    /// Register one `C4MessageInput` custom command. The host function always
+    /// reports success after this request, while the authoritative registry
+    /// silently preserves its first entry for a duplicate name.
+    AddMessageBoardCommand {
+        command: crate::InitialNetworkMessageBoardCommand,
+    },
     /// Append a `C4MessageBoardQuery` after removing the first query for the
     /// same callback object from this player.
     CallMessageBoard {
@@ -3962,6 +3968,48 @@ fn on_message_board_answer(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(Err(error)) => Err(error),
         None => Ok(Value::Bool(false)),
     }
+}
+
+/// `FnAddMsgBoardCmd` (C4Script.cpp:5198-5217): register a first-wins custom
+/// chat command. Unnamed DirectExec/eval callers may only install the
+/// Identifier-restricted form; ordinary named functions may install all
+/// three restriction variants.
+fn add_msg_board_cmd(args: &[Value]) -> Result<Value, RuntimeError> {
+    // Native parameter conversion happens before the function body, so
+    // validate all three slots before applying either early-return gate.
+    let command = parse_optional_string(args.first(), "AddMsgBoardCmd", "command")?;
+    let script = parse_optional_string(args.get(1), "AddMsgBoardCmd", "script")?;
+    let raw_restriction = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "AddMsgBoardCmd",
+        "restriction",
+    )?;
+
+    let (Some(command), Some(script)) = (command, script) else {
+        return Ok(Value::Bool(false));
+    };
+    if raw_restriction != 2 && lc_script::caller_is_temporary_script() != Some(false) {
+        return Ok(Value::Bool(false));
+    }
+    let restriction = match raw_restriction {
+        0 => crate::MessageBoardCommandRestriction::Escaped,
+        1 => crate::MessageBoardCommandRestriction::Plain,
+        2 => crate::MessageBoardCommandRestriction::Identifier,
+        _ => return Ok(Value::Bool(false)),
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.record_player_command(PlayerCommand::AddMessageBoardCommand {
+                command: crate::InitialNetworkMessageBoardCommand {
+                    name: command,
+                    script,
+                    restriction,
+                },
+            });
+        }
+    });
+    Ok(Value::Bool(true))
 }
 
 fn get_player_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -13192,6 +13240,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CallMessageBoard", call_message_board);
     script.register_host_function("AbortMessageBoard", abort_message_board);
     script.register_host_function("OnMessageBoardAnswer", on_message_board_answer);
+    script.register_host_function("AddMsgBoardCmd", add_msg_board_cmd);
     script.register_host_function("GetTeamConfig", get_team_config);
     script.register_host_function("GetTeamCount", get_team_count);
     script.register_host_function("GetTeamByIndex", get_team_by_index);
@@ -45330,6 +45379,7 @@ mod tests {
         "AddEvaluationData",
         "AddMenuItem",
         "AddMessage",
+        "AddMsgBoardCmd",
         "AddVertex",
         "AdjustWalkRotation",
         "And",

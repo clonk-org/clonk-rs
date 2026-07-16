@@ -30818,6 +30818,9 @@ impl Engine {
                 PlayerCommand::SetMaxPlayer { max_players } => {
                     self.max_players = Some(max_players);
                 }
+                PlayerCommand::AddMessageBoardCommand { command } => {
+                    let _ = self.add_message_board_command(command);
+                }
                 PlayerCommand::CallMessageBoard { player_id, query } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
                         player.call_message_board(query);
@@ -51393,6 +51396,13 @@ mod custom_command_control_parity {
             .expect("custom-command execution is not a fatal engine error")
     }
 
+    fn call_script(engine: &mut Engine, function: &str) -> Value {
+        engine
+            .call_scenario_script_value(function, &[])
+            .expect("message-board registration script executes")
+            .expect("message-board registration function exists")
+    }
+
     #[test]
     fn custom_command_registry_is_first_wins_and_enters_join_data() {
         let mut already_disabled = Engine::new();
@@ -51442,6 +51452,99 @@ mod custom_command_control_parity {
             .message_board_commands()
             .iter()
             .any(|command| command.name == "probe"));
+    }
+
+    #[test]
+    fn add_msg_board_cmd_validates_the_caller_and_drives_custom_command_execution() {
+        let mut engine = probe_engine();
+
+        for (name, restriction) in [("direct-escaped", 0), ("direct-plain", 1)] {
+            let source = format!("AddMsgBoardCmd(\"{name}\", \"Capture(11)\", {restriction})");
+            assert_eq!(
+                engine
+                    .direct_exec_script_control_global(&source, "internal script", Some(3))
+                    .expect("the rejected DirectExec registration returns normally"),
+                Value::Bool(false)
+            );
+        }
+        assert_eq!(
+            engine
+                .direct_exec_script_control_global(
+                    "AddMsgBoardCmd(\"direct-identifier\", \"Capture(12)\", C4MSGCMDR_Identifier)",
+                    "internal script",
+                    Some(3),
+                )
+                .expect("Identifier-restricted DirectExec registration succeeds"),
+            Value::Bool(true)
+        );
+        assert!(engine
+            .message_board_commands()
+            .iter()
+            .any(|command| command.name == "direct-identifier"));
+        assert!(engine
+            .message_board_commands()
+            .iter()
+            .all(|command| { command.name != "direct-escaped" && command.name != "direct-plain" }));
+
+        engine
+            .load_scenario_script_with_convention(
+                "AddMsgBoardCmd.c",
+                r#"#strict 2
+func RegisterCommands()
+{
+    return [
+        AddMsgBoardCmd(nil, "Capture(1)", C4MSGCMDR_Identifier),
+        AddMsgBoardCmd("nil-script", nil, C4MSGCMDR_Identifier),
+        AddMsgBoardCmd("invalid-low", "Capture(2)", -1),
+        AddMsgBoardCmd("invalid-high", "Capture(3)", 3),
+        AddMsgBoardCmd("probe", "Capture(%d)", C4MSGCMDR_Escaped),
+        AddMsgBoardCmd("probe", "Capture(999)", C4MSGCMDR_Identifier)
+    ];
+}
+
+func RegisterFromEval()
+{
+    return eval("AddMsgBoardCmd(\"eval-command\", \"Capture(8)\", C4MSGCMDR_Plain)");
+}
+"#,
+                true,
+            )
+            .expect("AddMsgBoardCmd scenario probe compiles");
+        assert_eq!(
+            call_script(&mut engine, "RegisterCommands"),
+            Value::Array(vec![
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Bool(true),
+            ])
+        );
+        assert_eq!(
+            call_script(&mut engine, "RegisterFromEval"),
+            Value::Bool(false),
+            "the unnamed eval frame may not install a Plain command"
+        );
+        assert!(engine
+            .message_board_commands()
+            .iter()
+            .all(|command| command.name != "eval-command"));
+
+        let probe_commands = engine
+            .message_board_commands()
+            .iter()
+            .filter(|command| command.name == "probe")
+            .collect::<Vec<_>>();
+        assert_eq!(probe_commands.len(), 1, "the first registration wins");
+        assert_eq!(probe_commands[0].script, "Capture(%d)");
+
+        assert!(execute(&mut engine, &command(b"probe", b"73", -1, 9), true));
+        assert_eq!(
+            probe(&engine),
+            Value::Int(73),
+            "the registered template executes through CID_CustomCommand"
+        );
     }
 
     #[test]
