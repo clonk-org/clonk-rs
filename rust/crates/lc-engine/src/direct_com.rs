@@ -16404,6 +16404,76 @@ protected func ControlContents(idTarget) { return(1); }
         trio
     }
 
+    fn set_crew_rank(engine: &mut Engine, crew: ObjectId, rank: i32) {
+        Rc::make_mut(&mut engine.crew_ranks).insert(crew.as_u64(), rank);
+    }
+
+    #[test]
+    fn hi_rank_active_crew_cursor_death_prefers_an_older_higher_rank() {
+        // Crew is newest-first [head, veteran, cursor]. Once the cursor dies,
+        // the fallback pass must scan past the rank-0 head to the older
+        // rank-3 veteran (C4Player.cpp:1003-1020,1235-1258).
+        let mut engine = Engine::new();
+        let [cursor, veteran, head] = crew_trio(&mut engine);
+        set_crew_rank(&mut engine, cursor, 0);
+        set_crew_rank(&mut engine, veteran, 3);
+        set_crew_rank(&mut engine, head, 0);
+
+        let cursor_index = engine.find_object_index(cursor).expect("cursor exists");
+        engine.objects[cursor_index].state.alive = true;
+        engine
+            .assign_death(cursor_index, false)
+            .expect("cursor death adjusts the player cursor");
+
+        assert_eq!(engine.crew_cursor(1), Some(veteran));
+        assert_eq!(engine.selected_crew(1), vec![veteran]);
+    }
+
+    #[test]
+    fn hi_rank_active_crew_equal_ranks_keep_the_first_roster_entry() {
+        // C4ObjectList::stMain order is newest-first. C++ replaces its
+        // candidate only for a STRICTLY higher rank, so equal ranks retain
+        // the newest crew member at the head of the roster.
+        let mut engine = Engine::new();
+        let [oldest, middle, newest] = crew_trio(&mut engine);
+        for crew in [oldest, middle, newest] {
+            set_crew_rank(&mut engine, crew, 2);
+        }
+
+        engine
+            .select_crew(1, [middle, newest])
+            .expect("select remaining crew");
+
+        assert_eq!(engine.player_hi_rank_active_crew(1, false), Some(newest));
+        assert_eq!(engine.crew_cursor(1), Some(newest));
+    }
+
+    #[test]
+    fn hi_rank_active_crew_select_only_ranks_only_selected_members() {
+        // The first AdjustCursorCommand pass considers Select members only:
+        // the unselected rank-9 middle member cannot beat the selected
+        // rank-3 head, which in turn beats the selected rank-1 old cursor.
+        let mut engine = Engine::new();
+        let [oldest, unselected_veteran, selected_head] = crew_trio(&mut engine);
+        set_crew_rank(&mut engine, oldest, 1);
+        set_crew_rank(&mut engine, unselected_veteran, 9);
+        set_crew_rank(&mut engine, selected_head, 3);
+
+        engine
+            .select_crew(1, [selected_head])
+            .expect("select the roster head");
+
+        assert_eq!(
+            engine.player_hi_rank_active_crew(1, true),
+            Some(selected_head)
+        );
+        assert_eq!(
+            engine.player_hi_rank_active_crew(1, false),
+            Some(unselected_veteran)
+        );
+        assert_eq!(engine.crew_cursor(1), Some(selected_head));
+    }
+
     fn control_state(engine: &Engine, owner: i32) -> &crate::player::PlayerControlState {
         &engine.players.get(&owner).expect("player").control
     }
