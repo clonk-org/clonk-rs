@@ -104,6 +104,64 @@ global func GetCustomComponents(object builder)
 }
 
 #[test]
+fn get_component_definition_branch_uses_custom_recipe_and_builder() {
+    // FnGetComponent's idDef branch passes the calling object as builder to
+    // C4Def::GetCustomComponents. The shipped dead fish returns two FSHM and
+    // one FSHB only for a trapper/Indian builder; indexed reads collapse the
+    // adjacent duplicate FSHM entries (C4Script.cpp:2679-2691;
+    // C4Def.cpp:1278-1320).
+    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+    let query = Definition::from_script(
+        "QRY1",
+        "Component query",
+        r#"#strict 2
+public func IsTrapper() { return true; }
+public func Probe()
+{
+    return [
+        GetComponent(FSHM, 0, 0, DFSH),
+        GetComponent(MEAT, 0, 0, DFSH),
+        GetComponent(FSHB, 0, 0, DFSH),
+        GetComponent(0, 0, 0, DFSH),
+        GetComponent(0, 1, 0, DFSH),
+        GetComponent(0, 2, 0, DFSH),
+        GetComponent(FSHM, 0, 0, FSHM),
+        GetComponent(0, 0, 0, FSHM),
+        GetComponent(0, 1, 0, FSHM)
+    ];
+}
+"#,
+    )
+    .expect("component query compiles");
+    engine
+        .register_definition(query)
+        .expect("component query registers");
+    let builder = engine
+        .spawn_object(SpawnConfig::new("QRY1"))
+        .expect("component builder spawns");
+    let index = engine
+        .find_object_index(builder)
+        .expect("component builder index");
+
+    assert_eq!(
+        engine
+            .call_object_function(index, "Probe", Vec::new())
+            .expect("definition component query runs"),
+        Value::Array(vec![
+            Value::Int(2),
+            Value::Int(0),
+            Value::Int(1),
+            Value::C4Id("FSHM".into()),
+            Value::C4Id("FSHB".into()),
+            Value::Nil,
+            Value::Int(1),
+            Value::C4Id("FSHM".into()),
+            Value::Nil,
+        ])
+    );
+}
+
+#[test]
 fn dead_fish_embowel_uses_the_trappers_custom_components() {
     // FnSplit2Components asks the SOURCE definition for custom components,
     // executing GetCustomComponents on the dead fish with the native-call

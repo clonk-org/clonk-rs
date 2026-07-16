@@ -5677,36 +5677,43 @@ fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
         parse_object_reference_argument(args.get(2).unwrap_or(&Value::Nil), "GetComponent", "obj")?;
     let definition = parse_native_c4id_argument(args.get(3), "GetComponent")?;
 
+    let indexed = |components: &[(String, i32)], index: i32| -> Value {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| components.get(index))
+            .map(|(id, _)| Value::C4Id(id.clone()))
+            .unwrap_or(Value::Nil)
+    };
+    if let Some(definition) = definition {
+        // C4Def::GetComponentCount/GetIndexedComponent run the definition's
+        // GetCustomComponents with cthr->Obj as the builder. Capture that
+        // object before the nested callback changes or removes it.
+        let builder = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            context.definition_metadata(&definition)?;
+            Some(context.script_object_context)
+        });
+        let Some(builder) = builder else {
+            return Ok(Value::Nil);
+        };
+        let components = resolve_component_list(&definition, None, builder)?;
+        if let Some(component) = component {
+            let count = components
+                .iter()
+                .find(|(id, _)| id.eq_ignore_ascii_case(&component))
+                .map(|(_, count)| *count)
+                .unwrap_or(0);
+            return Ok(Value::Int(count));
+        }
+        return Ok(indexed(&components, index));
+    }
+
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
-        let indexed = |components: &[(String, i32)], index: i32| -> Value {
-            usize::try_from(index)
-                .ok()
-                .and_then(|index| components.get(index))
-                .map(|(id, _)| Value::C4Id(id.clone()))
-                .unwrap_or(Value::Nil)
-        };
-        if let Some(def_id) = definition {
-            let Some(metadata) = context
-                .world
-                .definition_metadata(&DefinitionId::from(def_id.as_str()))
-            else {
-                return Ok(Value::Nil);
-            };
-            if let Some(component) = component {
-                let count = metadata
-                    .components
-                    .iter()
-                    .find(|(id, _)| id.eq_ignore_ascii_case(&component))
-                    .map(|(_, count)| *count)
-                    .unwrap_or(0);
-                return Ok(Value::Int(count));
-            }
-            return Ok(indexed(&metadata.components, index));
-        }
         let object = match target {
             Some(id) => context.get_world_object(id),
             None => context
