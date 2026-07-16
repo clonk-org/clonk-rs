@@ -35557,23 +35557,17 @@ fn set_obj_draw_transform(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnSetObjDrawTransform2 (C4Script.cpp:5276-5305): nine matrix integers
+/// followed by iOverlayID, always applied to `cthr->Obj`.
 fn set_obj_draw_transform2(args: &[Value]) -> Result<Value, RuntimeError> {
     let matrix = parse_draw_transform_matrix(args, "SetObjDrawTransform2")?;
-    let mut index = 9;
-    let mut target_id: Option<ObjectId> = None;
-    if let Some(arg) = args.get(index) {
-        target_id = parse_object_reference_argument(arg, "SetObjDrawTransform2", "object")?;
-        index += 1;
-    }
-    let overlay_id = if let Some(arg) = args.get(index) {
-        let value = value_to_i32(arg, "SetObjDrawTransform2", "overlay")?;
-        index += 1;
-        value
-    } else {
-        0
-    };
+    let overlay_id = args
+        .get(9)
+        .map(|arg| value_to_i32(arg, "SetObjDrawTransform2", "overlay"))
+        .transpose()?
+        .unwrap_or(0);
 
-    if index < args.len() {
+    if args.len() > 10 {
         return Err(RuntimeError::new(
             "SetObjDrawTransform2: additional arguments are not supported",
         ));
@@ -35596,11 +35590,9 @@ fn set_obj_draw_transform2(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow.as_mut().ok_or_else(|| {
             RuntimeError::new("SetObjDrawTransform2 requires an active engine context")
         })?;
-        let object_id =
-            match target_id.or_else(|| context.object_context().map(|object| object.id())) {
-                Some(object) => object,
-                None => return Ok(Value::Bool(false)),
-            };
+        let Some(object_id) = context.script_object_context else {
+            return Ok(Value::Bool(false));
+        };
         if !context.ensure_object_scope(object_id) {
             return Ok(Value::Bool(false));
         }
@@ -35619,8 +35611,8 @@ fn set_obj_draw_transform2(args: &[Value]) -> Result<Value, RuntimeError> {
                 None => return Ok(Value::Bool(false)),
             };
             let combined = existing.combined(delta);
-            let changed = object.set_overlay_transform(overlay_id, Some(combined));
-            Ok(Value::Bool(changed))
+            object.set_overlay_transform(overlay_id, Some(combined));
+            Ok(Value::Bool(true))
         }
     })
 }
@@ -73339,6 +73331,116 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                 .draw_transform,
             Some(Some(DrawTransform::identity()))
         );
+    }
+
+    #[test]
+    fn set_obj_draw_transform2_tenth_argument_is_the_overlay_id() {
+        let object_id = ObjectId::new(8);
+        let object_context = HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            0,
+            0,
+            crate::FULL_CON,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            0,
+            &[],
+            "Idle",
+            0,
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+            None,
+            None,
+        );
+        let with_overlay = object_context
+            .clone()
+            .with_graphics_overlays(vec![ObjectGraphicsOverlay::new(
+                1,
+                GraphicsOverlayMode::Base,
+            )]);
+        let args = [
+            Value::Int(1000),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(1000),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(1000),
+            Value::Int(1),
+        ];
+
+        let (result, outcome) = with_effect_context(
+            Some(with_overlay.clone()),
+            &[],
+            HostWorldContext::default(),
+            100,
+            || set_obj_draw_transform2(&args),
+        );
+        assert_eq!(
+            result.expect("the tenth integer is not parsed as an object"),
+            Value::Bool(true)
+        );
+        let overlays = outcome
+            .object_update
+            .expect("object update expected")
+            .graphics_overlays
+            .expect("overlay update expected");
+        assert_eq!(overlays[0].transform, Some(DrawTransform::identity()));
+
+        let (result, _) = with_effect_context(
+            Some(object_context),
+            &[],
+            HostWorldContext::default(),
+            100,
+            || set_obj_draw_transform2(&args),
+        );
+        assert_eq!(
+            result.expect("a missing overlay is not an error"),
+            Value::Bool(false)
+        );
+
+        let (result, _) = with_effect_context_with_state_and_definition(
+            Some(with_overlay.clone()),
+            Some(DefinitionId::from("TEST")),
+            None,
+            &[],
+            HostWorldContext::default(),
+            100,
+            false,
+            || set_obj_draw_transform2(&args),
+        );
+        assert_eq!(
+            result.expect("a definition-only call is not an error"),
+            Value::Bool(false),
+            "a mutable carrier does not substitute for missing cthr->Obj"
+        );
+
+        let mut surplus = args.to_vec();
+        surplus.push(Value::Int(0));
+        let (result, _) = with_effect_context(
+            Some(with_overlay),
+            &[],
+            HostWorldContext::default(),
+            100,
+            || set_obj_draw_transform2(&surplus),
+        );
+        let error = result.expect_err("an eleventh argument is not accepted");
+        assert!(error.message().contains("additional arguments"));
     }
 
     #[test]
