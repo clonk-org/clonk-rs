@@ -13773,9 +13773,9 @@ fn message(args: &[Value]) -> Result<Value, RuntimeError> {
         let mut played_speech = false;
         if let Some(sound) = extract_speech_segment(&raw_message) {
             if !sound.is_empty() {
-                let speech_target = target_raw
-                    .map(ObjectId::new)
-                    .or_else(|| context.object_context().map(|object| object.id()));
+                // FnMessage's pObj is only the text-message target. Speech
+                // is always anchored to cthr->Obj (C4Script.cpp:2415-2427).
+                let speech_target = context.object_context().map(|object| object.id());
                 context
                     .audio_mut()
                     .play_sound(&sound, speech_target, 100, false, false, None);
@@ -47553,25 +47553,62 @@ func Trigger(object pOther)
     }
 
     #[test]
-    fn message_with_speech_only_emits_audio() {
-        let args = [Value::String("Hello$Horn".into())];
-        let (result, outcome) = with_object_host_context(|| message(&args));
-        assert_eq!(result.expect("Message succeeds"), Value::Bool(true));
+    fn message_family_speech_uses_cpp_anchor_precedence() {
+        // FnMessage ignores pObj for speech and uses cthr->Obj;
+        // FnPlayerMessage prefers pObj; FnPlrMessage uses cthr->Obj
+        // unconditionally (C4Script.cpp:2395-2463).
+        let caller = ObjectId::new(1);
+        let target = ObjectId::new(2);
+        let (result, outcome) = with_object_host_context(|| {
+            let message_result = message(&[
+                Value::String("Hello$MessageSpeech".into()),
+                object_reference_value(target),
+            ])?;
+            let player_result = player_message(&[
+                Value::Int(0),
+                Value::String("Hello$PlayerSpeech".into()),
+                object_reference_value(target),
+            ])?;
+            let plr_result = plr_message(&[
+                Value::String("Hello$PlrSpeech".into()),
+                Value::Int(0),
+            ])?;
+            Ok::<_, RuntimeError>((message_result, player_result, plr_result))
+        });
+        assert_eq!(
+            result.expect("message speech calls succeed"),
+            (Value::Bool(true), Value::Bool(true), Value::Bool(true))
+        );
         assert!(outcome.messages.is_empty());
-        assert_eq!(outcome.audio.events.len(), 1);
-        match &outcome.audio.events[0] {
-            AudioCommand::PlaySound {
-                name,
-                volume,
-                looped,
-                ..
-            } => {
-                assert_eq!(name, "Horn");
-                assert_eq!(*volume, 100);
-                assert!(!looped);
-            }
-            other => panic!("expected PlaySound, got {other:?}"),
-        }
+        assert_eq!(
+            outcome.audio.events,
+            vec![
+                AudioCommand::PlaySound {
+                    name: "MessageSpeech".into(),
+                    target: Some(caller),
+                    volume: 100,
+                    looped: false,
+                    multiple: false,
+                    custom_falloff: None,
+                },
+                AudioCommand::PlaySound {
+                    name: "PlayerSpeech".into(),
+                    target: Some(target),
+                    volume: 100,
+                    looped: false,
+                    multiple: false,
+                    custom_falloff: None,
+                },
+                AudioCommand::PlaySound {
+                    name: "PlrSpeech".into(),
+                    target: Some(caller),
+                    volume: 100,
+                    looped: false,
+                    multiple: false,
+                    custom_falloff: None,
+                },
+            ]
+        );
     }
 
     #[test]
