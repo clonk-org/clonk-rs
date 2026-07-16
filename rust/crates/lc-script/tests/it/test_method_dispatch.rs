@@ -7,6 +7,7 @@
 //! while the current callback remains on the stack.
 
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lc_script::{Engine, Script, Value};
@@ -76,6 +77,7 @@ fn falsy_target_is_an_error_even_for_failsafe_calls() {
     // C4AulExec.cpp:1224-1226: "Object call: target is zero!" — the ~ only
     // covers a MISSING FUNCTION, not a missing target.
     let source = r#"
+        global func Maybe() {}
         global func Probe(target) { return target->~Maybe(); }
     "#;
     let mut engine = Engine::new();
@@ -88,6 +90,40 @@ fn falsy_target_is_an_error_even_for_failsafe_calls() {
         assert!(
             error.to_string().contains("target is zero"),
             "got: {error}"
+        );
+    }
+}
+
+#[test]
+fn null_target_arrow_calls_consume_random_before_the_unchanged_error() {
+    let source = r#"
+        global func Maybe(value) { return value; }
+        global func Plain(target) { return target->Maybe(Random(10)); }
+        global func Failsafe(target) { return target->~Maybe(Random(10)); }
+    "#;
+    let draws = Arc::new(AtomicUsize::new(0));
+    let observed_draws = Arc::clone(&draws);
+    let mut engine = Engine::new();
+    engine.register_host_function("Random", move |args| {
+        assert_eq!(args, [Value::Int(10)]);
+        Ok(Value::Int(
+            observed_draws.fetch_add(1, Ordering::SeqCst) as i32
+        ))
+    });
+    engine.add_script(Script::compile(source).expect("script compiles"));
+
+    for (function, expected_draws) in [("Plain", 1), ("Failsafe", 2)] {
+        let error = engine
+            .call(function, &[Value::Nil])
+            .expect_err("a zero target still throws");
+        assert!(
+            error.to_string().contains("Object call: target is zero!"),
+            "got: {error}"
+        );
+        assert_eq!(
+            draws.load(Ordering::SeqCst),
+            expected_draws,
+            "{function} must advance the deterministic RNG ledger first"
         );
     }
 }

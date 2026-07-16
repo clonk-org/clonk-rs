@@ -4996,13 +4996,18 @@ impl<'a> Vm<'a> {
                 .set_local_tracked(args, Some(target), env, depth + 1)
                 .map(|tracked| tracked.value);
         }
+        if matches!(&target, Value::Nil | Value::Int(0) | Value::Bool(false))
+            || matches!(&target, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
+        {
+            // Parse_Params emits every argument expression before AB_CALL or
+            // AB_CALLFS checks the target (C4AulParse.cpp:3240;
+            // C4AulExec.cpp:1216-1226). Preserve those side effects and let
+            // an argument error win before reporting the zero target.
+            let function = self.functions.get(name);
+            let _ = self.build_call_args(Some(name), function, args, env, depth + 1)?;
+            return Err(RuntimeError::new("Object call: target is zero!"));
+        }
         match &target {
-            Value::Nil | Value::Int(0) | Value::Bool(false) => Err(RuntimeError::new(
-                "Object call: target is zero!".to_string(),
-            )),
-            Value::C4Id(id) if crate::value::c4_id_raw(id) == 0 => Err(RuntimeError::new(
-                "Object call: target is zero!".to_string(),
-            )),
             Value::Object(_) | Value::C4Id(_) if self.method_dispatch.is_some() =>
             {
                 let function = self.functions.get(name);
@@ -5787,15 +5792,15 @@ impl<'a> Vm<'a> {
                         }
                     }
                 }
+                let function = self.functions.get(method);
+                let evaluated_args =
+                    self.build_call_args(Some(method), function, args, env, depth + 1)?;
                 if matches!(target, Value::Nil | Value::Int(0) | Value::Bool(false))
                     || matches!(&target, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
                 {
                     return Err(RuntimeError::new("Object call: target is zero!"));
                 }
 
-                let function = self.functions.get(method);
-                let evaluated_args =
-                    self.build_call_args(Some(method), function, args, env, depth + 1)?;
                 match &target {
                     Value::Object(_) | Value::C4Id(_)
                         if self.method_reference_dispatch.is_some() =>
