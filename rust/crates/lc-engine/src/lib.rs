@@ -8690,6 +8690,9 @@ pub struct Definition {
     action_library: ActionLibrary,
     action_graphics: HashMap<String, DefinitionActionGraphics>,
     crew_member: bool,
+    /// Literal signed DefCore `CrewMember` value returned by FnCrewMember.
+    /// `crew_member` remains the derived nonzero gameplay capability.
+    crew_member_value: i32,
     /// DefCore `SilentCommands`: suppresses C4Command::Fail's common
     /// message/sound/ComDir-stop tail, but not command-specific callbacks.
     silent_commands: bool,
@@ -8989,6 +8992,7 @@ impl Definition {
             action_library: ActionLibrary::default(),
             action_graphics: HashMap::new(),
             crew_member: false,
+            crew_member_value: 0,
             silent_commands: false,
             can_be_base: false,
             clonk_names: None,
@@ -9304,7 +9308,7 @@ impl Definition {
             definition.configure_action_graphics(visuals);
         }
 
-        definition.set_crew_member(resource.core.crew_member);
+        definition.set_crew_member_value(resource.core.crew_member);
         definition.set_silent_commands(resource.core.silent_commands);
         definition.set_category(resource.core.category);
         definition.set_blit_mode(resource.core.blit_mode);
@@ -9590,6 +9594,10 @@ impl Definition {
         self.crew_member
     }
 
+    pub fn crew_member_value(&self) -> i32 {
+        self.crew_member_value
+    }
+
     pub fn can_be_base(&self) -> bool {
         self.can_be_base
     }
@@ -9609,6 +9617,14 @@ impl Definition {
 
     pub fn set_crew_member(&mut self, crew_member: bool) {
         self.crew_member = crew_member;
+        self.crew_member_value = i32::from(crew_member);
+    }
+
+    /// Preserve C4DefCore's raw signed integer while deriving the boolean
+    /// capability used by OCF and player-crew behavior.
+    pub fn set_crew_member_value(&mut self, crew_member: i32) {
+        self.crew_member = crew_member != 0;
+        self.crew_member_value = crew_member;
     }
 
     pub fn silent_commands(&self) -> bool {
@@ -19546,6 +19562,7 @@ impl Engine {
                             blit_mode: definition.blit_mode(),
                             ocf_base: definition.ocf_base(),
                             crew_member: definition.is_crew(),
+                            crew_member_value: definition.crew_member_value(),
                             silent_commands: definition.silent_commands(),
                             vehicle_control: definition.vehicle_control(),
                             action_library: definition.action_library().clone(),
@@ -39045,7 +39062,7 @@ impl Engine {
         core: &lc_resources::definition::DefCore,
     ) {
         definition.set_version(core.version);
-        definition.set_crew_member(core.crew_member);
+        definition.set_crew_member_value(core.crew_member);
         definition.set_silent_commands(core.silent_commands);
         definition.set_category(core.category);
         definition.set_blit_mode(core.blit_mode);
@@ -48386,6 +48403,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     blit_mode: 0,
                     ocf_base: OCF_NORMAL,
                     crew_member: false,
+                    crew_member_value: 0,
                     silent_commands: false,
                     vehicle_control: 0,
                     action_library: ActionLibrary::default(),

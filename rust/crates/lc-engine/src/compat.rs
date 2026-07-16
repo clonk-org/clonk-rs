@@ -259,6 +259,9 @@ pub(crate) struct DefinitionMetadata {
     pub blit_mode: u32,
     pub ocf_base: u32,
     pub crew_member: bool,
+    /// Literal signed C4DefCore::CrewMember value. Gameplay uses the
+    /// derived boolean above; FnCrewMember exposes this raw value.
+    pub crew_member_value: i32,
     /// DefCore `SilentCommands`, read after a failed-command script callback
     /// from the actor's current definition.
     pub silent_commands: bool,
@@ -12459,6 +12462,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetAlive", get_alive);
     script.register_host_function("SetOwner", set_owner);
     script.register_host_function("GetOwner", get_owner);
+    script.register_host_function("CrewMember", crew_member);
     script.register_host_function("Distance", distance);
     script.register_host_function("SetViewOffset", set_view_offset);
     script.register_host_function("GetController", get_controller);
@@ -30491,6 +30495,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
+                crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
                 action_library: ActionLibrary::default(),
@@ -30910,9 +30915,10 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     contact_function_calls: false,
                     blit_mode: 0,
                     ocf_base: ocf::NORMAL,
-                crew_member: false,
-                silent_commands: false,
-                vehicle_control: 0,
+                    crew_member: false,
+                    crew_member_value: 0,
+                    silent_commands: false,
+                    vehicle_control: 0,
                     action_library: ActionLibrary::default(),
                     action_graphics: HashMap::new(),
                     value: 0,
@@ -31990,6 +31996,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
+                crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
                 action_library: ActionLibrary::default(),
@@ -36407,6 +36414,36 @@ fn get_owner(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         Ok(Value::Int(object.owner()))
+    })
+}
+
+/// FnCrewMember (C4Script.cpp:1311-1315): return the target's literal
+/// signed DefCore CrewMember value. A nil target defaults only to cthr->Obj;
+/// a definition-owned/global frame without an object returns nil.
+fn crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target_id = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "CrewMember",
+        "target",
+    )?;
+    // C4Aul's typed one-parameter dispatch evaluates and discards surplus
+    // arguments before entering the native function.
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(target) = target_id.or(context.script_object_context) else {
+            return Ok(Value::Nil);
+        };
+        let Some(definition) = context.object_effective_definition_id(target) else {
+            return Ok(Value::Nil);
+        };
+        Ok(context
+            .definition_metadata(&definition)
+            .map(|metadata| Value::Int(metadata.crew_member_value))
+            .unwrap_or(Value::Nil))
     })
 }
 
@@ -43687,6 +43724,7 @@ mod tests {
         "CreateObject",
         "CreateParticle",
         "CreateScriptPlayer",
+        "CrewMember",
         "CustomMessage",
         "DeathAnnounce",
         "DebugLog",
@@ -51596,6 +51634,7 @@ func ProbeBadIndex(id) {
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
+                crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
                 action_library: ActionLibrary::default(),
@@ -51657,6 +51696,7 @@ func ProbeBadIndex(id) {
                     blit_mode: 0,
                     ocf_base: 0,
                 crew_member: false,
+                crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
                 action_library: ActionLibrary::default(),
@@ -51696,6 +51736,7 @@ func ProbeBadIndex(id) {
                     blit_mode: 0,
                     ocf_base: 0,
                 crew_member: false,
+                crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
                 action_library: ActionLibrary::default(),
@@ -51759,6 +51800,7 @@ func ProbeBadIndex(id) {
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
+                crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
                 action_library: ActionLibrary::default(),
@@ -51834,6 +51876,7 @@ func ProbeBadIndex(id) {
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
+                crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
                 action_library: ActionLibrary::default(),
@@ -51919,6 +51962,7 @@ func ProbeBadIndex(id) {
             blit_mode: 0,
             ocf_base: 0,
                 crew_member: false,
+                crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
                 action_library: ActionLibrary::default(),
@@ -53043,6 +53087,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
+                crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
                 action_library: ActionLibrary::default(),
@@ -53195,6 +53240,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
+                crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
                 action_library: ActionLibrary::default(),
@@ -53271,6 +53317,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 blit_mode: 0,
                 ocf_base: 0,
                 crew_member: false,
+                crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
                 action_library: ActionLibrary::default(),
@@ -60183,6 +60230,136 @@ public func Probe(object carrier)
         assert_eq!(value, Value::Int(42));
     }
 
+    #[test]
+    fn crew_member_reads_raw_effective_definitions_or_nil_like_cpp() {
+        let script = r#"#strict
+func Probe(object pRaw, object pRuntimeCrew)
+{
+    return [CrewMember(), CrewMember(pRaw), CrewMember(nil), pRaw->CrewMember(), CrewMember(pRuntimeCrew)];
+}
+
+func ChangeAndProbe()
+{
+    ChangeDef("ZERO");
+    return CrewMember();
+}
+"#;
+        let caller_dir = tempfile::tempdir().expect("caller resource directory");
+        std::fs::write(
+            caller_dir.path().join("DefCore.txt"),
+            b"[DefCore]\nid=CALL\nName=Caller\nCrewMember=-2\n",
+        )
+        .expect("caller DefCore writes");
+        std::fs::write(caller_dir.path().join("Script.c"), script)
+            .expect("caller script writes");
+        let caller_group =
+            lc_resources::Group::open(caller_dir.path()).expect("caller group opens");
+        let caller_resource =
+            lc_resources::ResourceDefinition::load(&caller_group).expect("caller resource loads");
+        let caller_definition =
+            crate::Definition::from_resource(&caller_resource).expect("caller resource compiles");
+        assert_eq!(caller_definition.crew_member_value(), -2);
+        assert!(caller_definition.is_crew());
+        let mut raw_definition =
+            crate::Definition::from_script("RAWW", "Raw", "#strict\n").expect("raw compiles");
+        raw_definition.set_crew_member_value(7);
+        let zero_definition =
+            crate::Definition::from_script("ZERO", "Zero", "#strict\n").expect("zero compiles");
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(caller_definition)
+            .expect("caller registers");
+        engine
+            .register_definition(raw_definition)
+            .expect("raw registers");
+        engine
+            .register_definition(zero_definition)
+            .expect("zero registers");
+
+        // Runtime crew membership is deliberately the inverse of the
+        // definitions. FnCrewMember reads Def->CrewMember, not Object state
+        // or OCF_CrewMember.
+        let caller = engine
+            .spawn_object(crate::SpawnConfig::new("CALL").with_crew_member(false))
+            .expect("caller spawns");
+        let raw = engine
+            .spawn_object(crate::SpawnConfig::new("RAWW").with_crew_member(false))
+            .expect("raw target spawns");
+        let runtime_crew = engine
+            .spawn_object(crate::SpawnConfig::new("ZERO").with_crew_member(true))
+            .expect("runtime crew target spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Probe",
+                    vec![
+                        object_reference_value(raw),
+                        object_reference_value(runtime_crew),
+                    ],
+                )
+                .expect("CrewMember probe runs"),
+            Value::Array(vec![
+                Value::Int(-2),
+                Value::Int(7),
+                Value::Int(-2),
+                Value::Int(7),
+                Value::Int(0),
+            ])
+        );
+
+        let changed = engine
+            .call_object_function(caller_index, "ChangeAndProbe", vec![])
+            .expect("ChangeDef probe runs");
+
+        let carrier = HostObjectContext::new(
+            ObjectId::new(99),
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        )
+        .with_definition_id("RAWW");
+        let (global, _) = with_effect_context_with_state_and_definition(
+            Some(carrier),
+            Some(DefinitionId::from("CALL")),
+            None,
+            &[],
+            engine.host_world_context(),
+            4,
+            false,
+            || crew_member(&[]),
+        );
+        assert_eq!(
+            global.expect("definition-only CrewMember succeeds"),
+            Value::Nil,
+            "cthr->Def must not substitute for a missing cthr->Obj"
+        );
+
+        assert_eq!(
+            changed,
+            Value::Int(0),
+            "same-call ChangeDef must switch the effective definition"
+        );
+    }
+
     fn set_owner_target_world(
         owner: i32,
         controller: i32,
@@ -63206,6 +63383,7 @@ public func SeedFull()
                 blit_mode: 0,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
+                crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
                 action_library: ActionLibrary::default(),
@@ -63427,6 +63605,7 @@ protected func Construction()
             blit_mode: 0,
             ocf_base: ocf::NORMAL,
                 crew_member: false,
+                crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
                 action_library: ActionLibrary::default(),

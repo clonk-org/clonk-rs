@@ -33539,7 +33539,7 @@ fn load_definitions_from_group(
                     match Definition::from_resource(&resource) {
                         Ok(definition) => match engine.register_definition(definition) {
                             Ok(()) => {
-                                if resource.core.crew_member {
+                                if resource.core.crew_member != 0 {
                                     if spawn_candidate
                                         .as_ref()
                                         .map(|existing| existing.eq_ignore_ascii_case("Clonk"))

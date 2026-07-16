@@ -2693,7 +2693,12 @@ impl Scenario {
                 compiled.configure_actions(actions.default_action.clone(), actions.specs.clone());
                 compiled.configure_action_graphics(actions.graphics.clone());
             }
-            compiled.set_crew_member(definition.crew_member);
+            // Resource-backed definitions already installed the literal
+            // signed DefCore value above. Only the JSON manifest's boolean
+            // surface should normalize it to 0/1.
+            if definition.core.is_none() {
+                compiled.set_crew_member(definition.crew_member);
+            }
             compiled.set_can_be_base(definition.can_be_base);
             // DefCore shape: the spawn vertices C++ takes from the def
             // (C4Def Vertices/VertexX/...); without them every spawned
@@ -3128,7 +3133,14 @@ impl Scenario {
                 scenario_definition.category = category_value;
             }
 
-            scenario_definition.crew_member = crew_member || scenario_definition.crew_member;
+            if crew_member {
+                scenario_definition.crew_member = true;
+                if let Some(core) = scenario_definition.core.as_mut() {
+                    if core.crew_member == 0 {
+                        core.crew_member = 1;
+                    }
+                }
+            }
 
             if let Some(actions) = actions_override {
                 scenario_definition.actions = Some(actions);
@@ -11077,7 +11089,7 @@ fn scenario_definition_from_resource(
         description,
         script: script.combined().to_string(),
         actions,
-        crew_member: core.crew_member,
+        crew_member: core.crew_member != 0,
         can_be_base: core.can_be_base,
         movement: MovementProfile::default(),
         category: core.category,

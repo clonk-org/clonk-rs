@@ -420,7 +420,10 @@ pub struct DefCore {
     pub version: [i32; 5],
     pub name: Option<String>,
     pub category: i32,
-    pub crew_member: bool,
+    /// Raw DefCore `CrewMember` value. C++ stores this as a signed integer:
+    /// gameplay treats any nonzero value as enabled, while FnCrewMember
+    /// returns the literal value to script.
+    pub crew_member: i32,
     pub value: i32,
     /// `Rebuy` (C4Def.cpp:359): sold objects may introduce their ID into
     /// the player's home-base stock when nonzero.
@@ -824,7 +827,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut name: Option<String> = None;
     let mut category: i32 = 0;
     let mut category_set = false;
-    let mut crew_member = false;
+    let mut crew_member: i32 = 0;
     let mut can_be_base = false;
     let mut object_value: i32 = 0;
     let mut rebuyable = false;
@@ -990,7 +993,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 category_set = true;
             }
             "crewmember" => {
-                crew_member = parse_bool(value);
+                crew_member = parse_i32(value).unwrap_or(0);
             }
             // C4DefCore::CompileFunc names CanBeBase as "Base"
             // (C4Def.cpp:317). Keep the descriptive alias for fixtures.
@@ -2957,7 +2960,7 @@ mod tests {
         assert_eq!(parsed.id, "CLNK");
         assert_eq!(parsed.name.as_deref(), Some("Clonk"));
         assert_eq!(parsed.category, (1 << 3) | (1 << 4));
-        assert!(parsed.crew_member);
+        assert_eq!(parsed.crew_member, 1);
         assert_eq!(parsed.blit_mode, 2);
         assert_eq!(parsed.move_to_range, 17);
         assert_eq!(parsed.collection, None);
@@ -2971,6 +2974,10 @@ mod tests {
         let signed = parse_def_core(b"[DefCore]\nid=SIGN\nMoveToRange=-3\n")
             .expect("signed range parses");
         assert_eq!(signed.move_to_range, -3);
+
+        let raw_crew = parse_def_core(b"[DefCore]\nid=CREW\nCrewMember=-2\n")
+            .expect("raw crew value parses");
+        assert_eq!(raw_crew.crew_member, -2);
     }
 
     #[test]
@@ -3138,7 +3145,7 @@ EndCall=OnIdleEnd
         assert_eq!(def.core.id, "EXMP");
         assert_eq!(def.core.name.as_deref(), Some("Example"));
         assert_eq!(def.core.category, 1 << 4);
-        assert!(!def.core.crew_member);
+        assert_eq!(def.core.crew_member, 0);
         assert_eq!(def.script.files.len(), 1);
         assert!(def.script.combined.contains("Initialize"));
         let action_map = def.action_map.expect("action map present");
