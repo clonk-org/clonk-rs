@@ -18328,21 +18328,11 @@ fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
         },
     };
 
-    let max_priority = match args.get(2) {
-        Some(Value::Int(value)) if *value >= 0 => Some(*value),
-        Some(Value::Int(_)) => {
-            return Err(RuntimeError::new(
-                "GetEffectCount: max priority must be >= 0 when provided",
-            ));
-        }
-        Some(Value::Nil) | None => None,
-        Some(other) => {
-            return Err(RuntimeError::new(format!(
-                "GetEffectCount: expected int for max priority, got {}",
-                other.type_name()
-            )));
-        }
-    };
+    let max_priority = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "GetEffectCount",
+        "max priority",
+    )?;
 
     let count = effects
         .iter()
@@ -18354,10 +18344,8 @@ fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
                     return false;
                 }
             }
-            if let Some(limit) = max_priority {
-                if effect.priority.abs() > limit {
-                    return false;
-                }
+            if max_priority != 0 && effect.priority > max_priority {
+                return false;
             }
             true
         })
@@ -67119,18 +67107,40 @@ public func Probe(object carrier)
         spark.insert("interval".into(), Value::Int(1));
         spark.insert("timer".into(), Value::Int(0));
 
+        let mut upper = ValueMap::new();
+        upper.insert("name".into(), Value::String("Upper".into()));
+        upper.insert("priority".into(), Value::Int(-200));
+        upper.insert("interval".into(), Value::Int(1));
+        upper.insert("timer".into(), Value::Int(0));
+
         let state = {
             let mut map = ValueMap::new();
             map.insert(
                 "effects".into(),
-                Value::Array(vec![Value::Proplist(glow), Value::Proplist(spark)]),
+                Value::Array(vec![
+                    Value::Proplist(glow),
+                    Value::Proplist(spark),
+                    Value::Proplist(upper),
+                ]),
             );
             Value::Proplist(map)
         };
 
         let value = get_effect_count(&[Value::Nil, state.clone(), Value::Nil])
             .expect("GetEffectCount without context succeeds");
-        assert_eq!(value, Value::Int(2));
+        assert_eq!(value, Value::Int(3));
+
+        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Int(0)])
+            .expect("explicit zero keeps the C++ unbounded sentinel");
+        assert_eq!(value, Value::Int(3));
+
+        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Int(100)])
+            .expect("positive cap includes temp-removed effects by signed priority");
+        assert_eq!(value, Value::Int(3));
+
+        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Int(-100)])
+            .expect("negative priority caps are valid");
+        assert_eq!(value, Value::Int(1));
 
         let value = get_effect_count(&[Value::String("Spark".into()), state, Value::Int(50)])
             .expect("GetEffectCount with state filter succeeds");

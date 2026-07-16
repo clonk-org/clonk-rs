@@ -8595,7 +8595,12 @@ func Install()
 }
 func Probe() { return CheckEffect("Merge", this(), 50, 0); }
 func FxShieldEffect() { return(-3); }
-func FxShieldAdd() { SetR(GetR() * 10 + 2); return(0); }
+func FxShieldAdd()
+{
+  if (GetEffectCount("*", this(), -100) != 1) return(-1);
+  SetR(GetR() * 10 + GetEffectCount("*", this(), 100));
+  return(0);
+}
 func FxUpperStop(pTarget, iNumber, iTemp, fTemp)
 {
   if (iTemp == 1 && fTemp) SetR(GetR() * 10 + 1);
@@ -8632,7 +8637,7 @@ func FxUpperStart(pTarget, iNumber, iTemp)
                 .expect("caller remains live")
                 .rotation,
             123,
-            "AnnulCalls orders Upper Stop, Shield Add, Upper Start"
+            "AnnulCalls orders Upper Stop, signed-priority count 2, Upper Start"
         );
     }
 
