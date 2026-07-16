@@ -3329,6 +3329,36 @@ fn set_max_player(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(1))
 }
 
+/// `FnTestMessageBoard` (C4Script.cpp:3564-3573): invalid players return
+/// nil. The ordinary multi-query availability probe is always true for a
+/// valid player; the explicit in-use form reports whether any query node is
+/// retained, including an answered query awaiting its control packet.
+fn test_message_board(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "TestMessageBoard",
+        "player",
+    )?;
+    let test_if_in_use = value_to_bool(
+        args.get(1).unwrap_or(&Value::Nil),
+        "TestMessageBoard",
+        "test if in use",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let player = borrow
+            .as_ref()
+            .and_then(|context| context.player_state(player_id));
+        let Some(player) = player else {
+            return Ok(Value::Nil);
+        };
+        Ok(Value::Bool(
+            !test_if_in_use || !player.message_board_queries.is_empty(),
+        ))
+    })
+}
+
 /// `FnCallMessageBoard` (C4Script.cpp:3575-3585): register one player query,
 /// replacing the first query for the same callback object and appending the
 /// replacement at the list tail.
@@ -12689,6 +12719,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetPlayerTeam", set_player_team);
     script.register_host_function("GetMaxPlayer", get_max_player);
     script.register_host_function("SetMaxPlayer", set_max_player);
+    script.register_host_function("TestMessageBoard", test_message_board);
     script.register_host_function("CallMessageBoard", call_message_board);
     script.register_host_function("AbortMessageBoard", abort_message_board);
     script.register_host_function("OnMessageBoardAnswer", on_message_board_answer);
@@ -45234,6 +45265,7 @@ mod tests {
         "Sub",
         "Sum",
         "SurrenderPlayer",
+        "TestMessageBoard",
         "TrainPhysical",
         "UnselectCrew",
         "Value",

@@ -24,6 +24,22 @@ public func AbortQuery(int player)
     return AbortMessageBoard(this(), player);
 }
 
+public func TestState(int player)
+{
+    var invalid = TestMessageBoard(999, true);
+    var available_default = TestMessageBoard(player);
+    var available_explicit = TestMessageBoard(player, false);
+    var empty = TestMessageBoard(player, true);
+    var opened = CallMessageBoard(this(), false, "state probe", player);
+    var pending = TestMessageBoard(player, true);
+    return [invalid, available_default, available_explicit, empty, opened, pending];
+}
+
+public func InUse(int player)
+{
+    return TestMessageBoard(player, true);
+}
+
 public func RemoveThenOpen(int player)
 {
     RemoveObject();
@@ -204,6 +220,65 @@ fn call_message_board_rejects_a_target_removed_earlier_in_the_same_script_call()
             .message_board_queries
             .is_empty(),
         "AssignRemoval's synchronous Status=0 must reject the callback target"
+    );
+}
+
+#[test]
+fn test_message_board_reports_validity_availability_and_retained_query_state() {
+    let (mut engine, target, _) = fixture();
+    engine
+        .player_mut(PLAYER)
+        .expect("message-board player remains")
+        .set_at_client(PlayerAtClient::new(7));
+
+    assert_eq!(
+        call(&mut engine, target, "TestState", vec![Value::Int(PLAYER)],),
+        Value::Array(vec![
+            Value::Nil,
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+        ])
+    );
+    assert_eq!(
+        engine
+            .player(PLAYER)
+            .expect("message-board player remains")
+            .to_state()
+            .message_board_queries
+            .len(),
+        1,
+        "the pending-state probe sees the query registered earlier in the same call"
+    );
+
+    for frame in 1..=35 {
+        engine.tick().unwrap_or_else(|error| {
+            panic!("state query activation tick {frame} succeeds: {error}")
+        });
+    }
+    let control = engine
+        .prepare_message_board_answer_control(LegacyCString::default(), 7)
+        .expect("active input produces its synchronized answer");
+    assert!(
+        engine
+            .player(PLAYER)
+            .expect("message-board player remains")
+            .message_board_queries()[0]
+            .answered
+    );
+    assert_eq!(
+        call(&mut engine, target, "InUse", vec![Value::Int(PLAYER)]),
+        Value::Bool(true)
+    );
+    assert!(engine
+        .execute_message_board_answer_control(&control)
+        .expect("the queued no-answer control removes its query"));
+    assert_eq!(
+        call(&mut engine, target, "InUse", vec![Value::Int(PLAYER)]),
+        Value::Bool(false),
+        "synchronized removal of the last query clears the in-use probe"
     );
 }
 
