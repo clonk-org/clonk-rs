@@ -1739,6 +1739,104 @@ func Death()
     }
 
     #[test]
+    fn dead_living_fow_view_range_decays_and_restores_runtime_membership(
+    ) -> Result<(), EngineError> {
+        // C4Player::Execute keeps dead living objects in the runtime-only
+        // FoWViewObjs list and subtracts ten after control/menu processing.
+        // The list is rebuilt from saved PlrViewRange values after loading
+        // (C4Player.cpp:214-226; C4ObjectList.cpp:597-604).
+        fn corpse_definition() -> Result<Definition, EngineError> {
+            let mut definition = Definition::from_script("FOWC", "FoW corpse", "#strict 2\n")?;
+            definition.set_crew_member(true);
+            definition.configure_actions(
+                Some("Idle".to_string()),
+                HashMap::from([
+                    ("Idle".to_string(), ActionSpec::default()),
+                    ("Dead".to_string(), ActionSpec::default()),
+                ]),
+            );
+            Ok(definition)
+        }
+
+        let mut engine = Engine::with_seed(92);
+        engine.register_player(PlayerConfig::new(0, "Owner"))?;
+        engine.register_definition(corpse_definition()?)?;
+        engine.frame = 1; // avoid unrelated Tick35 elimination work
+        let corpse = engine.spawn_object(
+            SpawnConfig::new("FOWC")
+                .with_owner(0)
+                .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                .with_crew_member(true)
+                .with_plr_view_range(500)
+                .with_alive(true),
+        )?;
+        let corpse_index = engine.find_object_index(corpse).expect("corpse exists");
+        engine.assign_death(corpse_index, false)?;
+        assert_eq!(
+            engine
+                .object_snapshot(corpse)
+                .expect("corpse remains")
+                .plr_view_range,
+            500
+        );
+
+        engine.tick_player_systems()?;
+        assert_eq!(
+            engine
+                .object_snapshot(corpse)
+                .expect("corpse remains")
+                .plr_view_range,
+            490
+        );
+
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("nonzero view range serializes");
+        let decoded = EngineState::from_json_str(&encoded).expect("view range state decodes");
+        assert_eq!(
+            decoded
+                .objects
+                .iter()
+                .find(|object| object.snapshot.id == corpse)
+                .map(|object| object.snapshot.plr_view_range),
+            Some(490)
+        );
+
+        let mut restored = Engine::with_seed(93);
+        restored.register_definition(corpse_definition()?)?;
+        restored.restore_state(&decoded)?;
+        for _ in 0..48 {
+            restored.tick_player_systems()?;
+        }
+        assert_eq!(
+            restored
+                .object_snapshot(corpse)
+                .expect("restored corpse remains")
+                .plr_view_range,
+            10
+        );
+        restored.tick_player_systems()?;
+        assert_eq!(
+            restored
+                .object_snapshot(corpse)
+                .expect("restored corpse remains")
+                .plr_view_range,
+            0
+        );
+        restored.tick_player_systems()?;
+        assert_eq!(
+            restored
+                .object_snapshot(corpse)
+                .expect("removed FoW target remains as a corpse")
+                .plr_view_range,
+            0,
+            "removal from FoWViewObjs stops further decay"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn assign_death_runs_exit_callbacks_in_contents_order_before_death() -> Result<(), EngineError>
     {
         let corpse_script = r#"#strict 2

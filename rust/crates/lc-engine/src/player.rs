@@ -766,6 +766,10 @@ pub struct Player {
     view_wealth: i32,
     view_value: i32,
     crew: Vec<ObjectId>,
+    /// Runtime-only `C4Player::FoWViewObjs`. The list is rebuilt from
+    /// objects' saved `PlrViewRange` values after a restore and deliberately
+    /// does not enter `PlayerState` (`C4Player.h:97`).
+    fow_view_objects: Vec<ObjectId>,
     crew_created: i32,
     home_base_material: HashMap<DefinitionId, u32>,
     home_base_material_entries: Vec<(DefinitionId, i32)>,
@@ -852,6 +856,7 @@ impl Player {
             view_wealth: 0,
             view_value: 0,
             crew: Vec::new(),
+            fow_view_objects: Vec::new(),
             crew_created: 0,
             home_base_material: HashMap::new(),
             home_base_material_entries: Vec::new(),
@@ -1139,6 +1144,7 @@ impl Player {
             view_wealth: 0,
             view_value: 0,
             crew: Vec::new(),
+            fow_view_objects: Vec::new(),
             crew_created: 0,
             home_base_material,
             home_base_material_entries,
@@ -1320,6 +1326,7 @@ impl Player {
             view_wealth,
             view_value,
             crew,
+            fow_view_objects: Vec::new(),
             crew_created,
             home_base_material,
             home_base_material_entries,
@@ -1940,6 +1947,28 @@ impl Player {
 
     pub fn crew(&self) -> &[ObjectId] {
         &self.crew
+    }
+
+    pub(crate) fn fow_view_objects(&self) -> &[ObjectId] {
+        &self.fow_view_objects
+    }
+
+    pub(crate) fn has_fow_view_object(&self, object: ObjectId) -> bool {
+        self.fow_view_objects.contains(&object)
+    }
+
+    pub(crate) fn add_fow_view_object(&mut self, object: ObjectId) {
+        if !self.fow_view_objects.contains(&object) {
+            self.fow_view_objects.push(object);
+        }
+    }
+
+    pub(crate) fn remove_fow_view_object(&mut self, object: ObjectId) {
+        self.fow_view_objects.retain(|candidate| *candidate != object);
+    }
+
+    pub(crate) fn clear_fow_view_objects(&mut self) {
+        self.fow_view_objects.clear();
     }
 
     pub fn crew_created(&self) -> i32 {

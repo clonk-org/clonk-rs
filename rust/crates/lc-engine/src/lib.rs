@@ -17748,6 +17748,7 @@ impl Engine {
         self.crew_info_control_counts
             .retain(|link, _| link.player_id != number);
         self.players.insert(number, player);
+        self.actualize_ownerless_fow_objects_for_new_player();
         self.recheck_runtime_team_memberships();
         if activates_auto_stop {
             self.reset_inactive_crew_command_directions(number);
@@ -18699,6 +18700,7 @@ impl Engine {
                 self.objects[index].state.energy = self.object_physical(index).energy;
             }
         }
+        self.actualize_object_fow_view_range(id);
 
         if first_base.is_some() {
             if let Some(index) = self.find_object_index(id) {
@@ -18970,6 +18972,7 @@ impl Engine {
         player.control.select_flash = 30;
         player.control.cursor_flash = 30;
         self.players.insert(id, player);
+        self.actualize_ownerless_fow_objects_for_new_player();
         self.recheck_runtime_team_memberships();
         if activates_auto_stop {
             self.reset_inactive_crew_command_directions(id);
@@ -19231,6 +19234,8 @@ impl Engine {
                 .flatten();
             (old_owner, flag_base_target)
         };
+
+        self.actualize_object_fow_after_owner_change(object_id, new_owner);
 
         if let Some(target) = flag_base_target {
             if let Some(target_index) = self.find_object_index(target) {
@@ -25068,6 +25073,112 @@ impl Engine {
         Ok(())
     }
 
+    fn remove_object_from_fow_view_lists(&mut self, object_id: ObjectId) {
+        for player in self.players.values_mut() {
+            player.remove_fow_view_object(object_id);
+        }
+    }
+
+    /// `C4Object::PlrFoWActualize`: a nonzero range belongs to the valid
+    /// owner's runtime FoW list, or to every current player when ownerless.
+    /// These lists are intentionally absent from save data.
+    fn actualize_object_fow_view_range(&mut self, object_id: ObjectId) {
+        self.remove_object_from_fow_view_lists(object_id);
+        let Some(index) = self.find_object_index(object_id) else {
+            return;
+        };
+        let object = &self.objects[index];
+        if object.destroyed
+            || object.state.status == ObjectStatus::Deleted
+            || object.state.plr_view_range == 0
+        {
+            return;
+        }
+        let owner = object.state.owner;
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.add_fow_view_object(object_id);
+        } else {
+            for player in self.players.values_mut() {
+                player.add_fow_view_object(object_id);
+            }
+        }
+    }
+
+    /// `C4Object::SetOwner` removes the old membership, but its NO_OWNER arm
+    /// does not call `PlrFoWActualize` and therefore does not immediately add
+    /// the object to every player.
+    fn actualize_object_fow_after_owner_change(
+        &mut self,
+        object_id: ObjectId,
+        new_owner: i32,
+    ) {
+        self.remove_object_from_fow_view_lists(object_id);
+        if new_owner != OWNER_NONE {
+            self.actualize_object_fow_view_range(object_id);
+        }
+    }
+
+    fn actualize_ownerless_fow_objects_for_new_player(&mut self) {
+        // C4Player::Init walks Game.Objects First -> Next. `exec_list` is the
+        // reverse C++ master list, hence the reversed iterator here.
+        let object_ids = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        for object_id in object_ids {
+            let ownerless = self.find_object_index(object_id).is_some_and(|index| {
+                let object = &self.objects[index];
+                !object.destroyed
+                    && object.state.status != ObjectStatus::Deleted
+                    && object.state.owner == OWNER_NONE
+                    && object.state.plr_view_range != 0
+            });
+            if ownerless {
+                self.actualize_object_fow_view_range(object_id);
+            }
+        }
+    }
+
+    fn rebuild_fow_view_objects(&mut self) {
+        for player in self.players.values_mut() {
+            player.clear_fow_view_objects();
+        }
+        // C4ObjectList::AssignPlrViewRange walks Last -> Prev, which is the
+        // stored order of the reverse-master `exec_list`.
+        let object_ids = self.exec_list.clone();
+        for object_id in object_ids {
+            self.actualize_object_fow_view_range(object_id);
+        }
+    }
+
+    fn decay_dead_fow_view_objects(&mut self, player_id: i32) {
+        let view_objects = self
+            .players
+            .get(&player_id)
+            .map(|player| player.fow_view_objects().to_vec())
+            .unwrap_or_default();
+        for object_id in view_objects {
+            let Some(index) = self.find_object_index(object_id) else {
+                if let Some(player) = self.players.get_mut(&player_id) {
+                    player.remove_fow_view_object(object_id);
+                }
+                continue;
+            };
+            let object = &mut self.objects[index];
+            if object.destroyed || object.state.status == ObjectStatus::Deleted {
+                if let Some(player) = self.players.get_mut(&player_id) {
+                    player.remove_fow_view_object(object_id);
+                }
+                continue;
+            }
+            if !object.state.alive && object.state.category & CATEGORY_LIVING != 0 {
+                object.state.plr_view_range = object.state.plr_view_range.wrapping_sub(10);
+                if object.state.plr_view_range <= 0 {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.remove_fow_view_object(object_id);
+                    }
+                }
+            }
+        }
+    }
+
     /// One complete C4Player::Execute pass. The list caller invokes this in
     /// player-number order; FinalInit invokes it for just the joining/restored
     /// player and ignores the list-level retirement result.
@@ -25093,6 +25204,9 @@ impl Engine {
             .is_some_and(|player| !player.crew().is_empty());
         self.update_player_view(id);
         self.execute_player_control_and_menu(id)?;
+        // C4Player::Execute decays dead living FoW targets after control/menu
+        // and before Tick35 work, independently of whether FoW is enabled.
+        self.decay_dead_fow_view_objects(id);
 
         let normal_status = self.players.get(&id).is_some_and(|player| {
             matches!(
@@ -27663,6 +27777,8 @@ impl Engine {
             menu: update_menu,
             ..
         } = update;
+        let fow_range_changed = plr_view_range.is_some();
+        let fow_crew_actualize = crew_member == Some(true);
 
         let definition_id = self.objects[index].definition_id.clone();
         let previous_action_name = self.objects[index].state.action.name.clone();
@@ -27972,6 +28088,13 @@ impl Engine {
 
         let current_status = self.objects[index].state.status;
         self.update_inactive_list_for_status_change(object_id, previous_status, current_status);
+        if fow_range_changed || fow_crew_actualize {
+            self.actualize_object_fow_view_range(object_id);
+        } else if previous_owner != new_owner {
+            self.actualize_object_fow_after_owner_change(object_id, new_owner);
+        } else if current_status == ObjectStatus::Deleted {
+            self.remove_object_from_fow_view_lists(object_id);
+        }
 
         if solid_mask_refresh {
             // SetSolidMask and SetGraphics reflow the bake immediately
@@ -30341,6 +30464,7 @@ impl Engine {
         self.refresh_elimination_state();
 
         self.fix_exec_list_order();
+        self.rebuild_fow_view_objects();
         self.rebuild_sectors();
         Ok(())
     }
@@ -40391,18 +40515,22 @@ impl Engine {
             self.player_adjust_cursor_command(owner)?;
         }
         // C++ retains a dead living object's range only while the owning
-        // player's FoWViewObjs still contains it. Until the separately queued
-        // explicit FoWViewObjs model lands, a valid unchanged owner plus a
-        // nonzero range is the available normal-state membership projection.
-        if let Some(idx) = self.find_object_index(object_id) {
-            let state = &mut self.objects[idx].state;
-            let retained_by_owner_fow = owner_player_exists
+        // player's runtime FoWViewObjs still contains it.
+        let retained_by_owner_fow = self.find_object_index(object_id).is_some_and(|idx| {
+            let state = &self.objects[idx].state;
+            owner_player_exists
                 && state.owner == owner
                 && state.category & CATEGORY_LIVING != 0
-                && state.plr_view_range != 0;
-            if !retained_by_owner_fow {
-                state.plr_view_range = 0;
+                && self
+                    .players
+                    .get(&owner)
+                    .is_some_and(|player| player.has_fow_view_object(object_id))
+        });
+        if !retained_by_owner_fow {
+            if let Some(idx) = self.find_object_index(object_id) {
+                self.objects[idx].state.plr_view_range = 0;
             }
+            self.actualize_object_fow_view_range(object_id);
         }
         // Engine script call (C4Object.cpp:1173)
         if let Some(idx) = self.find_object_index(object_id) {
@@ -50235,6 +50363,7 @@ impl Engine {
             self.objects[index].mark_destroyed();
             self.clear_destroyed_object_layers();
         }
+        self.actualize_object_fow_view_range(id);
         self.refresh_object_ocf(index);
         // Loaded objects restore their action WITHOUT callbacks. Native
         // host creation marked `initialized` already ran every SetAction
