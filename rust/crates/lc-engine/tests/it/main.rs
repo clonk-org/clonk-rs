@@ -26,6 +26,7 @@ mod flight_movement;
 mod gamma;
 mod get_entrance;
 mod get_inventory;
+mod get_material_color;
 mod global_call;
 mod hangle_movement;
 mod is_newgfx;

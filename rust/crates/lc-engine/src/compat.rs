@@ -5393,6 +5393,49 @@ fn material_name(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetMaterialColor (C4Script.cpp:4466-4473): read one channel from the
+/// material core's three RGB palette entries. Invalid materials return nil.
+fn get_material_color(args: &[Value]) -> Result<Value, RuntimeError> {
+    let material_index = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetMaterialColor",
+        "material",
+    )?;
+    let number = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GetMaterialColor",
+        "number",
+    )?;
+    let channel = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "GetMaterialColor",
+        "channel",
+    )?;
+    let Some(offset) = number
+        .checked_mul(3)
+        .and_then(|offset| offset.checked_add(channel))
+        .and_then(|offset| usize::try_from(offset).ok())
+        .filter(|offset| *offset < 9)
+    else {
+        return Ok(Value::Nil);
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let color = usize::try_from(material_index)
+            .ok()
+            .and_then(crate::material::MaterialId::new)
+            .and_then(|material| {
+                borrow
+                    .as_ref()
+                    .and_then(|context| context.world.materials())
+                    .and_then(|materials| materials.get_by_id(material))
+            })
+            .map(|material| material.color().get(offset).copied().unwrap_or(0));
+        Ok(color.map(Value::Int).unwrap_or(Value::Nil))
+    })
+}
+
 /// FnGetMaterialCount (C4Script.cpp:2207-2213): invalid material indices
 /// return -1. Otherwise select the raw MatCount for fReal/materials without
 /// MinHeightCount, or the vertically filtered EffectiveMatCount.
@@ -12562,6 +12605,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Material", material);
     script.register_host_function("MaterialName", material_name);
     script.register_host_function("GetMaterialCount", get_material_count);
+    script.register_host_function("GetMaterialColor", get_material_color);
     script.register_host_function("GetMaterialVal", get_material_val);
     script.register_host_function("ObjectSetAction", object_set_action);
     script.register_host_function("Smoke", smoke);
@@ -44567,6 +44611,7 @@ mod tests {
         "GetMass",
         "GetMatAdjust",
         "GetMaterial",
+        "GetMaterialColor",
         "GetMaterialCount",
         "GetMaterialVal",
         "GetMaxPlayer",

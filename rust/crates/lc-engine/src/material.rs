@@ -479,7 +479,12 @@ impl MaterialProperties {
 impl Material {
     fn new(id: MaterialId, definition: ResourceMaterialDefinition) -> Self {
         let properties = MaterialProperties::from_definition(&definition);
-        let color = definition.int_list("color").unwrap_or_default();
+        // C4MaterialCore::CompileFunc reads Color and then ColorX into the
+        // same fixed array, so a present ColorX entry replaces Color.
+        let color = definition
+            .int_list("colorx")
+            .or_else(|| definition.int_list("color"))
+            .unwrap_or_default();
         let alpha = definition.int_list("alpha").unwrap_or_default();
         let normalized_name = normalize_key(definition.name());
         Self {
