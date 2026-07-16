@@ -189,6 +189,10 @@ pub(crate) struct HostWorldObject {
 /// System.c4g's DoExplosion/BlastObjectsShockwaveCheck read (GetXVal.c).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DefinitionFireMetadata {
+    /// Complete compiler-shaped DefCore/Physical reflection surface. It
+    /// lives in this already-aggregated definition payload so legacy test
+    /// fixtures can keep using `DefinitionMetadata` struct literals.
+    pub def_core_values: DefCoreValueStore,
     /// C4Shape::FireTop, reflected through GetDefCoreVal.
     pub fire_top: i32,
     /// DefCore LiftTop, reflected for System.c4g's GetDefLiftTop helper.
@@ -238,6 +242,467 @@ pub(crate) struct DefinitionFireMetadata {
     pub attract_lightning: bool,
     /// DefCore NoFight suppresses OCF_FightReady.
     pub no_fight: bool,
+}
+
+/// Primitive values emitted by the C++ `C4ValueGetCompiler`. DefCore
+/// reflection is deliberately compiler-shaped: compound entries are exposed
+/// one primitive at a time through `entry_nr`, never as script arrays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DefCorePrimitive {
+    Int(i32),
+    Bool(bool),
+    String(String),
+    C4Id(String),
+    Nil,
+}
+
+impl DefCorePrimitive {
+    fn into_value(self) -> Value {
+        match self {
+            Self::Int(value) => Value::Int(value),
+            Self::Bool(value) => Value::Bool(value),
+            Self::String(value) => Value::String(value),
+            Self::C4Id(value) => Value::C4Id(value),
+            Self::Nil => Value::Nil,
+        }
+    }
+}
+
+/// Fully defaulted `C4DefCore::CompileFunc` + `C4Shape::CompileFunc(false)`
+/// view, followed by the sibling `Physical` section. Keeping the sections
+/// separate preserves both exact section matching and the C++ no-section
+/// search where duplicate `Float`/`Scale` names are indexed in traversal
+/// order (DefCore first, Physical second).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DefCoreValueStore {
+    def_core: HashMap<&'static str, Vec<DefCorePrimitive>>,
+    physical: HashMap<&'static str, Vec<DefCorePrimitive>>,
+}
+
+impl DefCoreValueStore {
+    fn int(value: i32) -> Vec<DefCorePrimitive> {
+        vec![DefCorePrimitive::Int(value)]
+    }
+
+    fn ints(values: impl IntoIterator<Item = i32>) -> Vec<DefCorePrimitive> {
+        values.into_iter().map(DefCorePrimitive::Int).collect()
+    }
+
+    fn trimmed_ints(values: impl IntoIterator<Item = i32>) -> Vec<DefCorePrimitive> {
+        let mut values = values.into_iter().collect::<Vec<_>>();
+        while values.last() == Some(&0) {
+            values.pop();
+        }
+        Self::ints(values)
+    }
+
+    fn c4id(value: Option<&str>) -> Vec<DefCorePrimitive> {
+        vec![match value {
+            Some(value)
+                if !value.is_empty() && !value.eq_ignore_ascii_case("NONE") && value != "0000" =>
+            {
+                DefCorePrimitive::C4Id(value.to_string())
+            }
+            _ => DefCorePrimitive::Nil,
+        }]
+    }
+
+    fn rect(rect: Option<DefinitionRect>) -> Vec<DefCorePrimitive> {
+        let rect = rect.unwrap_or_default();
+        Self::ints([rect.x, rect.y, rect.width, rect.height])
+    }
+
+    fn target_rect(rect: Option<crate::DefinitionTargetRect>) -> Vec<DefCorePrimitive> {
+        let rect = rect.unwrap_or_else(|| crate::DefinitionTargetRect::new(0, 0, 0, 0, 0, 0));
+        Self::ints([
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            rect.target_x,
+            rect.target_y,
+        ])
+    }
+
+    pub(crate) fn from_definition(definition: &crate::Definition) -> Self {
+        let mut def_core = HashMap::new();
+        let mut physical = HashMap::new();
+        let shape = definition.shape.unwrap_or_default();
+        let picture = definition
+            .picture
+            .map(|picture| DefinitionRect::new(picture.x, picture.y, picture.width, picture.height))
+            .filter(|picture| picture.width != 0 && picture.height != 0)
+            .unwrap_or(shape);
+        let mut category = definition.category;
+        if definition.crew_member_value != 0 {
+            category |= 1 << 18;
+        }
+        if category & CATEGORY_SORT_LIMIT == 0 {
+            category = (category & !CATEGORY_SORT_LIMIT) | 1;
+        }
+        let reflected_int = |entry: &str, fallback: i32| {
+            Self::int(
+                definition
+                    .def_core_reflected_ints
+                    .get(entry)
+                    .copied()
+                    .unwrap_or(fallback),
+            )
+        };
+
+        def_core.insert("id", Self::c4id(Some(definition.id.as_str())));
+        def_core.insert("Version", Self::trimmed_ints(definition.version));
+        def_core.insert(
+            "Name",
+            vec![DefCorePrimitive::String(definition.name.clone())],
+        );
+        def_core.insert(
+            "RequireDef",
+            definition
+                .require_defs
+                .iter()
+                .map(|id| DefCorePrimitive::C4Id(id.clone()))
+                .collect(),
+        );
+        def_core.insert("Category", Self::int(category));
+        def_core.insert("MaxUserSelect", Self::int(definition.max_user_select));
+        def_core.insert("Timer", Self::int(definition.timer));
+        def_core.insert(
+            "TimerCall",
+            vec![DefCorePrimitive::String(
+                definition.timer_call.clone().unwrap_or_default(),
+            )],
+        );
+        def_core.insert(
+            "ContactCalls",
+            reflected_int("ContactCalls", i32::from(definition.contact_function_calls)),
+        );
+        def_core.insert("Width", Self::int(shape.width));
+        def_core.insert("Height", Self::int(shape.height));
+        def_core.insert("Offset", Self::trimmed_ints([shape.x, shape.y]));
+        def_core.insert(
+            "Vertices",
+            reflected_int(
+                "Vertices",
+                definition.shape_vertex_slots.active_count() as i32,
+            ),
+        );
+        def_core.insert(
+            "VertexX",
+            Self::trimmed_ints(
+                definition
+                    .shape_vertex_slots
+                    .slots
+                    .iter()
+                    .map(|vertex| vertex.x),
+            ),
+        );
+        def_core.insert(
+            "VertexY",
+            Self::trimmed_ints(
+                definition
+                    .shape_vertex_slots
+                    .slots
+                    .iter()
+                    .map(|vertex| vertex.y),
+            ),
+        );
+        def_core.insert(
+            "VertexCNAT",
+            Self::trimmed_ints(
+                definition
+                    .shape_vertex_slots
+                    .slots
+                    .iter()
+                    .map(|vertex| vertex.cnat as i32),
+            ),
+        );
+        def_core.insert(
+            "VertexFriction",
+            Self::trimmed_ints(
+                definition
+                    .shape_vertex_slots
+                    .slots
+                    .iter()
+                    .map(|vertex| vertex.friction),
+            ),
+        );
+        def_core.insert("ContactDensity", Self::int(definition.contact_density));
+        def_core.insert("FireTop", Self::int(definition.fire_top));
+        def_core.insert("Value", reflected_int("Value", definition.value));
+        def_core.insert("Mass", Self::int(definition.mass));
+        def_core.insert(
+            "Components",
+            definition
+                .components
+                .iter()
+                .flat_map(|component| {
+                    [
+                        DefCorePrimitive::C4Id(component.id.as_str().to_string()),
+                        DefCorePrimitive::Int(component.count),
+                    ]
+                })
+                .collect(),
+        );
+        def_core.insert(
+            "SolidMask",
+            Self::target_rect(definition.def_core_solid_mask),
+        );
+        def_core.insert(
+            "TopFace",
+            Self::target_rect(definition.def_core_top_face),
+        );
+        def_core.insert("Picture", Self::rect(Some(picture)));
+        def_core.insert("PictureFE", Vec::new());
+        def_core.insert("Entrance", Self::rect(definition.entrance_rect));
+        def_core.insert(
+            "Collection",
+            Self::rect(definition.def_core_collection_rect),
+        );
+        def_core.insert(
+            "CollectionLimit",
+            reflected_int(
+                "CollectionLimit",
+                definition
+                    .collection_limit
+                    .and_then(|value| i32::try_from(value).ok())
+                    .unwrap_or(0),
+            ),
+        );
+        def_core.insert("Placement", Self::int(definition.placement));
+        def_core.insert(
+            "Exclusive",
+            reflected_int("Exclusive", i32::from(definition.exclusive)),
+        );
+        def_core.insert(
+            "ContactIncinerate",
+            reflected_int("ContactIncinerate", definition.contact_incinerate),
+        );
+        def_core.insert("BlastIncinerate", Self::int(definition.blast_incinerate));
+        def_core.insert("BurnTo", Self::c4id(definition.burn_turn_to.as_deref()));
+        def_core.insert(
+            "Base",
+            reflected_int("Base", i32::from(definition.can_be_base)),
+        );
+        def_core.insert("Line", Self::int(definition.line));
+        def_core.insert("LineConnect", Self::int(definition.line_connect as i32));
+        def_core.insert("LineIntersect", Self::int(definition.line_intersect));
+        def_core.insert(
+            "Prey",
+            reflected_int("Prey", i32::from(definition.prey)),
+        );
+        def_core.insert(
+            "Edible",
+            reflected_int("Edible", i32::from(definition.edible)),
+        );
+        def_core.insert("CrewMember", Self::int(definition.crew_member_value));
+        def_core.insert("NoStandardCrew", Self::int(definition.no_standard_crew));
+        def_core.insert("Growth", Self::int(definition.growth));
+        def_core.insert(
+            "Rebuy",
+            reflected_int("Rebuy", i32::from(definition.rebuyable)),
+        );
+        def_core.insert(
+            "Construction",
+            reflected_int("Construction", i32::from(definition.constructable)),
+        );
+        def_core.insert(
+            "ConstructTo",
+            Self::c4id(definition.build_turn_to.as_deref()),
+        );
+        def_core.insert("Grab", reflected_int("Grab", definition.grab));
+        def_core.insert("GrabPutGet", Self::int(definition.grab_put_get));
+        def_core.insert(
+            "Collectible",
+            reflected_int("Collectible", i32::from(definition.collectible)),
+        );
+        def_core.insert("Rotate", reflected_int("Rotate", definition.rotateable));
+        def_core.insert("RotatedEntrance", Self::int(definition.rotated_entrance));
+        def_core.insert(
+            "Chop",
+            reflected_int("Chop", i32::from(definition.chopable)),
+        );
+        def_core.insert("Float", Self::int(definition.float_line));
+        def_core.insert("ContainBlast", Self::int(definition.contain_blast));
+        def_core.insert(
+            "ColorByOwner",
+            reflected_int("ColorByOwner", i32::from(definition.color_by_owner)),
+        );
+        def_core.insert(
+            "ColorByMaterial",
+            vec![DefCorePrimitive::String(
+                definition.color_by_material.clone(),
+            )],
+        );
+        def_core.insert("HorizontalFix", Self::int(definition.no_horizontal_move));
+        def_core.insert(
+            "BorderBound",
+            reflected_int("BorderBound", definition.border_bound),
+        );
+        def_core.insert("LiftTop", Self::int(definition.lift_top));
+        def_core.insert(
+            "UprightAttach",
+            reflected_int("UprightAttach", definition.upright_attach as i32),
+        );
+        def_core.insert(
+            "StretchGrowth",
+            reflected_int("StretchGrowth", i32::from(definition.stretch_growth)),
+        );
+        def_core.insert(
+            "Basement",
+            reflected_int("Basement", definition.basement),
+        );
+        def_core.insert(
+            "NoBurnDecay",
+            reflected_int("NoBurnDecay", i32::from(definition.no_burn_decay)),
+        );
+        def_core.insert(
+            "IncompleteActivity",
+            reflected_int(
+                "IncompleteActivity",
+                i32::from(definition.incomplete_activity),
+            ),
+        );
+        def_core.insert(
+            "AttractLightning",
+            reflected_int("AttractLightning", i32::from(definition.attract_lightning)),
+        );
+        def_core.insert(
+            "Oversize",
+            reflected_int("Oversize", i32::from(definition.oversize)),
+        );
+        def_core.insert(
+            "Fragile",
+            reflected_int("Fragile", i32::from(definition.fragile)),
+        );
+        def_core.insert("Explosive", Self::int(definition.explosive));
+        def_core.insert("Projectile", Self::int(definition.projectile));
+        def_core.insert("NoPushEnter", Self::int(definition.no_push_enter));
+        def_core.insert("DragImagePicture", Self::int(definition.drag_image_picture));
+        def_core.insert("VehicleControl", Self::int(definition.vehicle_control));
+        def_core.insert("Pathfinder", Self::int(definition.pathfinder));
+        def_core.insert("MoveToRange", Self::int(definition.move_to_range));
+        def_core.insert(
+            "NoComponentMass",
+            reflected_int("NoComponentMass", i32::from(definition.no_component_mass)),
+        );
+        def_core.insert(
+            "NoStabilize",
+            reflected_int("NoStabilize", i32::from(definition.no_stabilize)),
+        );
+        def_core.insert("ClosedContainer", Self::int(definition.closed_container));
+        def_core.insert(
+            "SilentCommands",
+            reflected_int("SilentCommands", i32::from(definition.silent_commands)),
+        );
+        def_core.insert(
+            "NoBurnDamage",
+            reflected_int("NoBurnDamage", i32::from(definition.no_burn_damage)),
+        );
+        def_core.insert("TemporaryCrew", Self::int(definition.temporary_crew));
+        def_core.insert("SmokeRate", Self::int(definition.smoke_rate));
+        def_core.insert("BlitMode", Self::int(definition.blit_mode as i32));
+        def_core.insert(
+            "NoBreath",
+            reflected_int("NoBreath", i32::from(definition.no_breath)),
+        );
+        def_core.insert(
+            "ConSizeOff",
+            reflected_int("ConSizeOff", definition.construction_offset),
+        );
+        def_core.insert("NoSell", Self::int(definition.no_sell));
+        def_core.insert(
+            "NoGet",
+            reflected_int("NoGet", i32::from(definition.no_get)),
+        );
+        def_core.insert(
+            "NoFight",
+            reflected_int("NoFight", i32::from(definition.no_fight)),
+        );
+        def_core.insert(
+            "RotatedSolidmasks",
+            reflected_int(
+                "RotatedSolidmasks",
+                i32::from(definition.rotated_solid_masks),
+            ),
+        );
+        def_core.insert("NoTransferZones", Self::int(definition.no_transfer_zones));
+        def_core.insert(
+            "AutoContextMenu",
+            reflected_int("AutoContextMenu", i32::from(definition.auto_context_menu)),
+        );
+        def_core.insert("NeededGfxMode", Self::int(definition.needed_gfx_mode));
+        def_core.insert(
+            "AllowPictureStack",
+            Self::int(definition.allow_picture_stack),
+        );
+        def_core.insert("HideHUDBars", Self::int(definition.hide_hud_bars));
+        def_core.insert("HideHUDElements", Self::int(definition.hide_hud_elements));
+        def_core.insert(
+            "Scale",
+            reflected_int(
+                "Scale",
+                (definition.graphics_scale * 100.0).round() as u32 as i32,
+            ),
+        );
+        def_core.insert(
+            "BaseAutoSell",
+            vec![DefCorePrimitive::Bool(definition.base_auto_sell)],
+        );
+
+        let info = definition.physical;
+        for (name, value) in [
+            ("Energy", info.energy),
+            ("Breath", info.breath),
+            ("Walk", info.walk),
+            ("Jump", info.jump),
+            ("Scale", info.scale),
+            ("Hangle", info.hangle),
+            ("Dig", info.dig),
+            ("Swim", info.swim),
+            ("Throw", info.throw),
+            ("Push", info.push),
+            ("Fight", info.fight),
+            ("Magic", info.magic),
+            ("Float", info.float),
+            ("CanScale", info.can_scale),
+            ("CanHangle", info.can_hangle),
+            ("CanDig", info.can_dig),
+            ("CanConstruct", info.can_construct),
+            ("CanChop", info.can_chop),
+            ("CanFly", info.can_fly),
+            ("CorrosionResist", info.corrosion_resist),
+            ("BreatheWater", info.breathe_water),
+        ] {
+            physical.insert(name, Self::int(value));
+        }
+
+        Self { def_core, physical }
+    }
+
+    fn get(&self, entry: &str, section: Option<&str>, entry_nr: i32) -> Option<Value> {
+        let mut index = usize::try_from(entry_nr).ok()?;
+        let sections: &[&HashMap<&'static str, Vec<DefCorePrimitive>>] = match section {
+            Some("DefCore") => &[&self.def_core],
+            Some("Physical") => &[&self.physical],
+            Some(_) => return None,
+            None => &[&self.def_core, &self.physical],
+        };
+        for entries in sections {
+            let Some(values) = entries.get(entry) else {
+                continue;
+            };
+            if index < values.len() {
+                return values.get(index).cloned().map(DefCorePrimitive::into_value);
+            }
+            index -= values.len();
+        }
+        None
+    }
+
+    fn is_empty(&self) -> bool {
+        self.def_core.is_empty() && self.physical.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -10315,10 +10780,8 @@ pub(super) fn get_value(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(value))
 }
 
-/// FnGetDefCoreVal (C4Script.cpp:4170-4180): DefCore reflection. The hot
-/// entries real content reads resolve from the definition metadata
-/// (Width/Height/Offset from the Shape rect, Value, Mass); anything else
-/// is nil with a debug note (PORT_STATUS).
+/// FnGetDefCoreVal (C4Script.cpp:4170-4183): compiler-shaped reflection over
+/// the complete DefCore/Shape surface and sibling Physical section.
 fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
     let entry = parse_optional_string(args.first(), "GetDefCoreVal", "entry")?;
     let section = parse_optional_string(args.get(1), "GetDefCoreVal", "section")?
@@ -10344,12 +10807,18 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(definition_id) = definition_id else {
             return Ok(Value::Nil);
         };
-        let Some(metadata) = context
-            .world
-            .definition_metadata(&DefinitionId::from(definition_id.as_str()))
-        else {
+        let Some(metadata) = context.definition_metadata(definition_id.as_str()) else {
             return Ok(Value::Nil);
         };
+        if !metadata.fire.def_core_values.is_empty() {
+            return Ok(metadata
+                .fire
+                .def_core_values
+                .get(entry.as_str(), section.as_deref(), entry_index)
+                .unwrap_or(Value::Nil));
+        }
+        // Snapshot-only and synthetic host fixtures predating the complete
+        // reflection store retain the small modeled fallback below.
         if section
             .as_deref()
             .is_some_and(|section| section != "DefCore")
@@ -42364,6 +42833,9 @@ impl EffectHostContext {
             return false;
         };
         metadata.name = name.clone();
+        if let Some(values) = metadata.fire.def_core_values.def_core.get_mut("Name") {
+            *values = vec![DefCorePrimitive::String(name.clone())];
+        }
         self.definition_metadata_overrides
             .insert(id.clone(), metadata);
         self.record_player_command(PlayerCommand::SetDefinitionName {
@@ -47834,6 +48306,312 @@ global func PreInitializePlayer(int player)
     }
 
     #[test]
+    fn get_def_core_val_reflects_rect_vertices_types_and_physical_section_like_cpp() {
+        let mut definition = crate::Definition::from_script("TST1", "Reflection Test", "#strict 2")
+            .expect("definition compiles");
+        definition.set_version([5, 1, 2, 0, 0]);
+        definition.require_defs = vec!["REQ1".to_string()];
+        definition.max_user_select = 7;
+        definition.set_shape_rect(Some(DefinitionRect::new(-5, 6, 70, 80)));
+        definition.set_picture(Some(crate::DefinitionPicture {
+            x: 21,
+            y: 22,
+            width: 23,
+            height: 24,
+        }));
+        definition.set_entrance_rect(Some(DefinitionRect::new(11, 12, 13, 14)));
+        definition.set_collection_rect(Some(DefinitionRect::new(31, 32, 33, 34)));
+        definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(
+            41, 42, 43, 44, 45, 46,
+        )));
+        definition.set_shape_vertex_slots(
+            3,
+            &[
+                ObjectVertex::new(10, -1).with_cnat(1).with_friction(4),
+                ObjectVertex::new(0, 0),
+                ObjectVertex::new(30, 9).with_cnat(3).with_friction(6),
+            ],
+        );
+        definition.set_components(vec![crate::DefinitionComponent {
+            id: DefinitionId::from("COMP"),
+            count: -3,
+        }]);
+        definition.set_timer_call(Some("Tick".to_string()));
+        definition.set_burn_turn_to(Some("BURN".to_string()));
+        definition.set_base_auto_sell(true);
+        definition.set_float_line(111);
+        let mut physical = PhysicalInfo::default();
+        physical.float = 222;
+        physical.energy = 333;
+        definition.set_physical(physical);
+        definition.def_core_reflected_ints.extend([
+            ("Exclusive".to_string(), 7),
+            ("NoGet".to_string(), -8),
+            ("Scale".to_string(), -5),
+            ("CollectionLimit".to_string(), -4),
+        ]);
+
+        let metadata = DefinitionMetadata {
+            fire: DefinitionFireMetadata {
+                def_core_values: DefCoreValueStore::from_definition(&definition),
+                ..DefinitionFireMetadata::default()
+            },
+            ..DefinitionMetadata::default()
+        };
+        let world =
+            HostWorldContext::default().with_definition_metadata(Rc::new(HashMap::from([(
+                DefinitionId::from("TST1"),
+                metadata,
+            )])));
+        let (result, _) = with_definition_effect_context_with_state(
+            DefinitionId::from("TST1"),
+            &[],
+            world,
+            1,
+            false,
+            || {
+                let query = |entry: &str, section: Option<&str>, index: i32| {
+                    get_def_core_val(&[
+                        Value::String(entry.to_string()),
+                        section
+                            .map(|section| Value::String(section.to_string()))
+                            .unwrap_or(Value::Nil),
+                        Value::C4Id("TST1".to_string()),
+                        Value::Int(index),
+                    ])
+                };
+                Ok::<Value, RuntimeError>(Value::Array(vec![
+                    query("Entrance", Some("DefCore"), 0)?,
+                    query("Entrance", Some("DefCore"), 1)?,
+                    query("Entrance", Some("DefCore"), 2)?,
+                    query("Entrance", Some("DefCore"), 3)?,
+                    query("Picture", Some("DefCore"), 0)?,
+                    query("Picture", Some("DefCore"), 1)?,
+                    query("Picture", Some("DefCore"), 2)?,
+                    query("Picture", Some("DefCore"), 3)?,
+                    query("Collection", Some("DefCore"), 0)?,
+                    query("Collection", Some("DefCore"), 3)?,
+                    query("VertexX", Some("DefCore"), 0)?,
+                    query("VertexX", Some("DefCore"), 1)?,
+                    query("VertexX", Some("DefCore"), 2)?,
+                    query("VertexX", Some("DefCore"), 3)?,
+                    query("Vertices", Some("DefCore"), 0)?,
+                    query("Width", Some("DefCore"), 0)?,
+                    query("Height", Some("DefCore"), 0)?,
+                    query("Offset", Some("DefCore"), 0)?,
+                    query("Offset", Some("DefCore"), 1)?,
+                    query("SolidMask", Some("DefCore"), 5)?,
+                    query("Version", Some("DefCore"), 2)?,
+                    query("Version", Some("DefCore"), 3)?,
+                    query("RequireDef", Some("DefCore"), 0)?,
+                    query("Components", Some("DefCore"), 0)?,
+                    query("Components", Some("DefCore"), 1)?,
+                    query("TimerCall", Some("DefCore"), 0)?,
+                    query("BurnTo", Some("DefCore"), 0)?,
+                    query("BaseAutoSell", Some("DefCore"), 0)?,
+                    query("Float", None, 0)?,
+                    query("Float", None, 1)?,
+                    query("Float", Some("Physical"), 0)?,
+                    query("Energy", Some("Physical"), 0)?,
+                    query("Exclusive", Some("DefCore"), 0)?,
+                    query("NoGet", Some("DefCore"), 0)?,
+                    query("Scale", Some("DefCore"), 0)?,
+                    query("CollectionLimit", Some("DefCore"), 0)?,
+                    query("Width", Some("DefCore"), 1)?,
+                    query("Width", Some("defcore"), 0)?,
+                    query("width", Some("DefCore"), 0)?,
+                    query("Unknown", Some("DefCore"), 0)?,
+                    query("Entrance", Some("DefCore"), -1)?,
+                ]))
+            },
+        );
+
+        assert_eq!(
+            result.expect("GetDefCoreVal probes succeed"),
+            Value::Array(vec![
+                Value::Int(11),
+                Value::Int(12),
+                Value::Int(13),
+                Value::Int(14),
+                Value::Int(21),
+                Value::Int(22),
+                Value::Int(23),
+                Value::Int(24),
+                Value::Int(31),
+                Value::Int(34),
+                Value::Int(10),
+                Value::Int(0),
+                Value::Int(30),
+                Value::Nil,
+                Value::Int(3),
+                Value::Int(70),
+                Value::Int(80),
+                Value::Int(-5),
+                Value::Int(6),
+                Value::Int(46),
+                Value::Int(2),
+                Value::Nil,
+                Value::C4Id("REQ1".to_string()),
+                Value::C4Id("COMP".to_string()),
+                Value::Int(-3),
+                Value::String("Tick".to_string()),
+                Value::C4Id("BURN".to_string()),
+                Value::Bool(true),
+                Value::Int(111),
+                Value::Int(222),
+                Value::Int(222),
+                Value::Int(333),
+                Value::Int(7),
+                Value::Int(-8),
+                Value::Int(-5),
+                Value::Int(-4),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+            ])
+        );
+    }
+
+    #[test]
+    fn def_core_value_store_covers_the_complete_cpp_compiler_entry_tables() {
+        let definition = crate::Definition::from_script("TST1", "Reflection Test", "")
+            .expect("definition compiles");
+        let values = DefCoreValueStore::from_definition(&definition);
+        let expected_def_core = [
+            "id",
+            "Version",
+            "Name",
+            "RequireDef",
+            "Category",
+            "MaxUserSelect",
+            "Timer",
+            "TimerCall",
+            "ContactCalls",
+            "Width",
+            "Height",
+            "Offset",
+            "Vertices",
+            "VertexX",
+            "VertexY",
+            "VertexCNAT",
+            "VertexFriction",
+            "ContactDensity",
+            "FireTop",
+            "Value",
+            "Mass",
+            "Components",
+            "SolidMask",
+            "TopFace",
+            "Picture",
+            "PictureFE",
+            "Entrance",
+            "Collection",
+            "CollectionLimit",
+            "Placement",
+            "Exclusive",
+            "ContactIncinerate",
+            "BlastIncinerate",
+            "BurnTo",
+            "Base",
+            "Line",
+            "LineConnect",
+            "LineIntersect",
+            "Prey",
+            "Edible",
+            "CrewMember",
+            "NoStandardCrew",
+            "Growth",
+            "Rebuy",
+            "Construction",
+            "ConstructTo",
+            "Grab",
+            "GrabPutGet",
+            "Collectible",
+            "Rotate",
+            "RotatedEntrance",
+            "Chop",
+            "Float",
+            "ContainBlast",
+            "ColorByOwner",
+            "ColorByMaterial",
+            "HorizontalFix",
+            "BorderBound",
+            "LiftTop",
+            "UprightAttach",
+            "StretchGrowth",
+            "Basement",
+            "NoBurnDecay",
+            "IncompleteActivity",
+            "AttractLightning",
+            "Oversize",
+            "Fragile",
+            "Explosive",
+            "Projectile",
+            "NoPushEnter",
+            "DragImagePicture",
+            "VehicleControl",
+            "Pathfinder",
+            "MoveToRange",
+            "NoComponentMass",
+            "NoStabilize",
+            "ClosedContainer",
+            "SilentCommands",
+            "NoBurnDamage",
+            "TemporaryCrew",
+            "SmokeRate",
+            "BlitMode",
+            "NoBreath",
+            "ConSizeOff",
+            "NoSell",
+            "NoGet",
+            "NoFight",
+            "RotatedSolidmasks",
+            "NoTransferZones",
+            "AutoContextMenu",
+            "NeededGfxMode",
+            "AllowPictureStack",
+            "HideHUDBars",
+            "HideHUDElements",
+            "Scale",
+            "BaseAutoSell",
+        ];
+        let expected_physical = [
+            "Energy",
+            "Breath",
+            "Walk",
+            "Jump",
+            "Scale",
+            "Hangle",
+            "Dig",
+            "Swim",
+            "Throw",
+            "Push",
+            "Fight",
+            "Magic",
+            "Float",
+            "CanScale",
+            "CanHangle",
+            "CanDig",
+            "CanConstruct",
+            "CanChop",
+            "CanFly",
+            "CorrosionResist",
+            "BreatheWater",
+        ];
+
+        assert_eq!(
+            values.def_core.keys().copied().collect::<HashSet<_>>(),
+            expected_def_core.into_iter().collect::<HashSet<_>>()
+        );
+        assert_eq!(
+            values.physical.keys().copied().collect::<HashSet<_>>(),
+            expected_physical.into_iter().collect::<HashSet<_>>()
+        );
+    }
+
+    #[test]
     fn falsy_zero_converts_to_any_parameter_type_like_cpp() {
         // Pre-strict3 callers reset any falsy parameter to nil before the
         // type check (C4AulExec.cpp:1372 `!pPars[i]` -> Set0), and nil
@@ -48492,7 +49270,8 @@ func RenameInfo(object target, string name, bool make_valid)
 func RenameDefinition(string name, bool set_in_info, object target)
 {
     return [SetName(name, 0, CREW, set_in_info),
-            GetName(0, CREW), GetName(target)];
+            GetName(0, CREW), GetName(target),
+            GetDefCoreVal("Name", "DefCore", CREW)];
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
@@ -48523,6 +49302,7 @@ func RenameDefinition(string name, bool set_in_info, object target)
                 Value::Bool(true),
                 Value::String("Renamed".into()),
                 Value::String("Renamed".into()),
+                Value::String("Renamed".into()),
             ])
         );
         assert_eq!(engine.definition_name("CREW"), Some("Renamed"));
@@ -48541,6 +49321,7 @@ func RenameDefinition(string name, bool set_in_info, object target)
                 .expect("exclusive-form probe runs"),
             Value::Array(vec![
                 Value::Bool(false),
+                Value::String("Renamed".into()),
                 Value::String("Renamed".into()),
                 Value::String("Renamed".into()),
             ])

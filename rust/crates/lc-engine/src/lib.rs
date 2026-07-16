@@ -8879,6 +8879,11 @@ pub struct Definition {
     name: String,
     /// DefCore `Version` / C4Def::rC4XVer (src/C4Def.h:190).
     version: [i32; 5],
+    /// DefCore `RequireDef`; reflected as an ID-only C4IDList.
+    require_defs: Vec<String>,
+    /// Exact signed compiler values for DefCore fields whose gameplay
+    /// projection is intentionally normalized to bool/option/nonnegative.
+    def_core_reflected_ints: HashMap<String, i32>,
     /// Trimmed localized C4Def description (`C4Def::GetDesc`).
     description: Option<String>,
     /// Shared compiled script: `host_world_context()` hands clones of this
@@ -8910,6 +8915,7 @@ pub struct Definition {
     /// Literal signed DefCore `CrewMember` value returned by FnCrewMember.
     /// `crew_member` remains the derived nonzero gameplay capability.
     crew_member_value: i32,
+    no_standard_crew: i32,
     /// DefCore `SilentCommands`: suppresses C4Command::Fail's common
     /// message/sound/ComDir-stop tail, but not command-specific callbacks.
     silent_commands: bool,
@@ -8924,10 +8930,12 @@ pub struct Definition {
     clonk_names_owned: bool,
     movement: MovementProfile,
     category: i32,
+    max_user_select: i32,
     /// DefCore `BlitMode`, copied into C4Object::BlitMode at Init/reset.
     blit_mode: u32,
     /// DefCore `ColorByOwner`, used by picture-stack equality.
     color_by_owner: bool,
+    color_by_material: String,
     /// DefCore `AllowPictureStack` APS_* exception bits.
     allow_picture_stack: i32,
     /// C4Def graphics scale (`C4DefCore::Scale / 100.0f`).
@@ -8954,6 +8962,7 @@ pub struct Definition {
     /// DefCore `NoPushEnter` (C4Def.cpp:396): any nonzero value prevents
     /// this definition from executing Enter commands.
     no_push_enter: i32,
+    drag_image_picture: i32,
     picture: Option<DefinitionPicture>,
     picture_image: Option<DefinitionPictureImage>,
     /// First def portrait (C4CFN_Portraits, src/C4Components.h:88) — HUD
@@ -8986,8 +8995,10 @@ pub struct Definition {
     /// callback gate (C4Object.cpp:5281-5286).
     lift_top: i32,
     solid_mask: Option<DefinitionTargetRect>,
+    def_core_solid_mask: Option<DefinitionTargetRect>,
     /// DefCore `TopFace` (C4Def.cpp:306), drawn in the second object pass.
     top_face: Option<DefinitionTargetRect>,
+    def_core_top_face: Option<DefinitionTargetRect>,
     shape_vertices: Vec<ObjectVertex>,
     /// Complete fixed C4Shape slots from DefCore. Fresh C4Object::Init copies
     /// the whole shape, not just its active VtxNum prefix.
@@ -8995,6 +9006,7 @@ pub struct Definition {
     contact_density: i32,
     contact_function_calls: bool,
     collection_rect: Option<DefinitionRect>,
+    def_core_collection_rect: Option<DefinitionRect>,
     collection_limit: Option<u32>,
     /// DefCore `Fragile`; outdoor Put must not throw these objects into a
     /// target's collection area.
@@ -9002,6 +9014,7 @@ pub struct Definition {
     /// Raw DefCore `Projectile`; any nonzero value lets Attack select the
     /// object from the attacker's contents.
     projectile: i32,
+    explosive: i32,
     collectible: bool,
     /// DefCore `NoGet` (src/C4Def.cpp:412): omit this definition from
     /// manual get/activate menus when set to any nonzero value.
@@ -9034,10 +9047,13 @@ pub struct Definition {
     /// DefCore `AutoContextMenu` (C4Def.cpp:416): entering this container
     /// may automatically open its context menu (C4Object.cpp:2049-2056).
     auto_context_menu: bool,
+    needed_gfx_mode: i32,
     no_component_mass: bool,
     /// NoStabilize=1 opts out of the small-tilt upright snap
     /// (C4Object::Stabilize, C4Movement.cpp:491).
     no_stabilize: bool,
+    hide_hud_bars: i32,
+    hide_hud_elements: i32,
     /// DefCore Timer= interval in frames (default 35, C4Def.cpp:298).
     timer: i32,
     /// DefCore TimerCall= function name (C4Def.cpp:299), fired every
@@ -9064,6 +9080,8 @@ pub struct Definition {
     no_burn_damage: bool,
     /// NoBreath=1: exempt from the ExecLife breathing check (C4Object.cpp:880).
     no_breath: bool,
+    temporary_crew: i32,
+    smoke_rate: i32,
     /// `Float` DefCore value (C4Def.cpp:379): IsInLiquidCheck buoyancy line
     /// offset (C4Object.cpp:5609-5612).
     float_line: i32,
@@ -9198,6 +9216,8 @@ impl Definition {
             id,
             name,
             version: DEFAULT_DEFINITION_VERSION,
+            require_defs: Vec::new(),
+            def_core_reflected_ints: HashMap::new(),
             description: None,
             script: Arc::new(script),
             base_script: compiled_script,
@@ -9212,14 +9232,17 @@ impl Definition {
             action_graphics: HashMap::new(),
             crew_member: false,
             crew_member_value: 0,
+            no_standard_crew: 0,
             silent_commands: false,
             can_be_base: false,
             clonk_names: None,
             clonk_names_owned: false,
             movement: MovementProfile::default(),
             category: DEFAULT_CATEGORY,
+            max_user_select: 0,
             blit_mode: 0,
             color_by_owner: false,
+            color_by_material: String::new(),
             allow_picture_stack: 0,
             graphics_scale: 1.0,
             ocf_base: OCF_NORMAL,
@@ -9232,6 +9255,7 @@ impl Definition {
             pathfinder: 0,
             no_transfer_zones: 0,
             no_push_enter: 0,
+            drag_image_picture: 0,
             picture: None,
             picture_image: None,
             portrait_image: None,
@@ -9248,15 +9272,19 @@ impl Definition {
             fire_top: 0,
             lift_top: 0,
             solid_mask: None,
+            def_core_solid_mask: None,
             top_face: None,
+            def_core_top_face: None,
             shape_vertices: Vec::new(),
             shape_vertex_slots: ShapeVertexBuffer::default(),
             contact_density: CONTACT_DENSITY_SOLID,
             contact_function_calls: false,
             collection_rect: None,
+            def_core_collection_rect: None,
             collection_limit: None,
             fragile: false,
             projectile: 0,
+            explosive: 0,
             collectible: false,
             no_get: false,
             grab_put_get: 0,
@@ -9273,8 +9301,11 @@ impl Definition {
             upright_attach: 0,
             rotated_solid_masks: false,
             auto_context_menu: false,
+            needed_gfx_mode: 0,
             no_component_mass: false,
             no_stabilize: false,
+            hide_hud_bars: 0,
+            hide_hud_elements: 0,
             timer: 35,
             timer_call: None,
             components: Vec::new(),
@@ -9286,6 +9317,8 @@ impl Definition {
             no_horizontal_move: 0,
             no_burn_decay: false,
             no_breath: false,
+            temporary_crew: 0,
+            smoke_rate: 100,
             float_line: 0,
             line: 0,
             line_intersect: 0,
@@ -9502,7 +9535,7 @@ impl Definition {
             .core
             .name
             .clone()
-            .unwrap_or_else(|| resource.core.id.clone());
+            .unwrap_or_else(|| "Undefined".to_string());
         let mut definition =
             Definition::from_script(resource.core.id.clone(), name, resource.script.combined())?;
         definition.description = resource.description().map(str::to_owned);
@@ -9510,6 +9543,7 @@ impl Definition {
         // AbortCall gets the last phase — C4Object.cpp:4154-4182).
         definition.set_c4_callback_convention(true);
         definition.set_version(resource.core.version);
+        definition.require_defs = resource.core.require_defs.clone();
 
         if let Some(action_map) = &resource.action_map {
             let mut specs = HashMap::new();
@@ -9527,10 +9561,13 @@ impl Definition {
         }
 
         definition.set_crew_member_value(resource.core.crew_member);
+        definition.no_standard_crew = resource.core.no_standard_crew;
         definition.set_silent_commands(resource.core.silent_commands);
         definition.set_category(resource.core.category);
+        definition.max_user_select = resource.core.max_user_select;
         definition.set_blit_mode(resource.core.blit_mode);
         definition.set_color_by_owner(resource.core.color_by_owner);
+        definition.color_by_material = resource.core.color_by_material.clone();
         definition.set_allow_picture_stack(resource.core.allow_picture_stack);
         definition.set_graphics_scale(resource.core.graphics_scale as f32 / 100.0);
         definition.set_value(resource.core.value);
@@ -9614,6 +9651,7 @@ impl Definition {
         definition.set_collection_limit(resource.core.collection_limit);
         definition.set_fragile(resource.core.fragile);
         definition.set_projectile(resource.core.projectile);
+        definition.explosive = resource.core.explosive;
         definition.set_fire_properties(
             resource.core.contact_incinerate,
             resource.core.no_burn_decay,
@@ -9627,11 +9665,14 @@ impl Definition {
         definition.set_build_turn_to(resource.core.build_turn_to.clone());
         definition.set_incomplete_activity(resource.core.incomplete_activity);
         definition.set_no_breath(resource.core.no_breath);
+        definition.temporary_crew = resource.core.temporary_crew;
+        definition.smoke_rate = resource.core.smoke_rate;
         definition.set_grab(resource.core.grab);
         definition.set_move_to_range(resource.core.move_to_range);
         definition.set_pathfinder(resource.core.pathfinder);
         definition.set_no_transfer_zones(resource.core.no_transfer_zones);
         definition.set_no_push_enter(resource.core.no_push_enter);
+        definition.drag_image_picture = resource.core.drag_image_picture;
         definition.float_line = resource.core.float_line;
         definition.set_line(resource.core.line);
         definition.set_line_intersect(resource.core.line_intersect);
@@ -9653,8 +9694,11 @@ impl Definition {
         definition.set_upright_attach(resource.core.upright_attach);
         definition.set_rotated_solid_masks(resource.core.rotated_solid_masks);
         definition.set_auto_context_menu(resource.core.auto_context_menu);
+        definition.needed_gfx_mode = resource.core.needed_gfx_mode;
         definition.set_no_component_mass(resource.core.no_component_mass);
         definition.set_no_stabilize(resource.core.no_stabilize);
+        definition.hide_hud_bars = resource.core.hide_hud_bars;
+        definition.hide_hud_elements = resource.core.hide_hud_elements;
         definition.set_timer(resource.core.timer);
         definition.set_timer_call(resource.core.timer_call.clone());
         if !resource.core.components.is_empty() {
@@ -9678,6 +9722,7 @@ impl Definition {
         definition.set_rotated_entrance(resource.core.rotated_entrance);
         definition.set_no_fight(resource.core.no_fight);
         definition.set_chopable(resource.core.chopable);
+        definition.def_core_reflected_ints = resource.core.reflected_ints.clone();
         Ok(definition)
     }
 
@@ -10082,6 +10127,8 @@ impl Definition {
     }
 
     pub fn set_value(&mut self, value: i32) {
+        self.def_core_reflected_ints
+            .insert("Value".to_string(), value);
         self.value = value.max(0);
     }
 
@@ -10299,6 +10346,7 @@ impl Definition {
     }
 
     pub fn set_solid_mask(&mut self, rect: Option<DefinitionTargetRect>) {
+        self.def_core_solid_mask = rect;
         self.solid_mask = rect.filter(DefinitionTargetRect::is_positive);
         self.rebuild_solid_mask_pixels();
     }
@@ -10308,6 +10356,7 @@ impl Definition {
     }
 
     pub fn set_top_face(&mut self, rect: Option<DefinitionTargetRect>) {
+        self.def_core_top_face = rect;
         self.top_face = rect.filter(DefinitionTargetRect::is_positive);
     }
 
@@ -10553,6 +10602,7 @@ impl Definition {
     }
 
     pub fn set_collection_rect(&mut self, rect: Option<DefinitionRect>) {
+        self.def_core_collection_rect = rect;
         self.collection_rect = rect.and_then(|r| if r.is_positive() { Some(r) } else { None });
     }
 
@@ -20138,6 +20188,9 @@ impl Engine {
                                 .clonk_names()
                                 .map(|names| names.bytes().filter(|&b| b == b'\n').count() as i32),
                             fire: compat::DefinitionFireMetadata {
+                                def_core_values: compat::DefCoreValueStore::from_definition(
+                                    definition,
+                                ),
                                 fire_top: definition.fire_top(),
                                 lift_top: definition.lift_top(),
                                 blast_incinerate: definition.blast_incinerate(),
@@ -39759,12 +39812,21 @@ impl Engine {
         definition: &mut Definition,
         core: &lc_resources::definition::DefCore,
     ) {
+        definition.set_name(
+            core.name
+                .clone()
+                .unwrap_or_else(|| "Undefined".to_string()),
+        );
         definition.set_version(core.version);
+        definition.require_defs = core.require_defs.clone();
         definition.set_crew_member_value(core.crew_member);
+        definition.no_standard_crew = core.no_standard_crew;
         definition.set_silent_commands(core.silent_commands);
         definition.set_category(core.category);
+        definition.max_user_select = core.max_user_select;
         definition.set_blit_mode(core.blit_mode);
         definition.set_color_by_owner(core.color_by_owner);
+        definition.color_by_material = core.color_by_material.clone();
         definition.set_allow_picture_stack(core.allow_picture_stack);
         definition.set_graphics_scale(core.graphics_scale as f32 / 100.0);
         definition.set_value(core.value);
@@ -39796,6 +39858,7 @@ impl Engine {
         definition.set_collection_limit(core.collection_limit);
         definition.set_fragile(core.fragile);
         definition.set_projectile(core.projectile);
+        definition.explosive = core.explosive;
         definition.set_entrance_rect(core.entrance.map(DefinitionRect::from));
         definition.set_rotated_entrance(core.rotated_entrance);
         definition.set_fire_properties(
@@ -39811,11 +39874,14 @@ impl Engine {
         definition.set_build_turn_to(core.build_turn_to.clone());
         definition.set_incomplete_activity(core.incomplete_activity);
         definition.set_no_breath(core.no_breath);
+        definition.temporary_crew = core.temporary_crew;
+        definition.smoke_rate = core.smoke_rate;
         definition.set_grab(core.grab);
         definition.set_move_to_range(core.move_to_range);
         definition.set_pathfinder(core.pathfinder);
         definition.set_no_transfer_zones(core.no_transfer_zones);
         definition.set_no_push_enter(core.no_push_enter);
+        definition.drag_image_picture = core.drag_image_picture;
         definition.float_line = core.float_line;
         definition.set_line(core.line);
         definition.set_line_intersect(core.line_intersect);
@@ -39837,8 +39903,11 @@ impl Engine {
         definition.set_upright_attach(core.upright_attach);
         definition.set_rotated_solid_masks(core.rotated_solid_masks);
         definition.set_auto_context_menu(core.auto_context_menu);
+        definition.needed_gfx_mode = core.needed_gfx_mode;
         definition.set_no_component_mass(core.no_component_mass);
         definition.set_no_stabilize(core.no_stabilize);
+        definition.hide_hud_bars = core.hide_hud_bars;
+        definition.hide_hud_elements = core.hide_hud_elements;
         definition.set_timer(core.timer);
         definition.set_timer_call(core.timer_call.clone());
         if !core.components.is_empty() {
@@ -39860,6 +39929,7 @@ impl Engine {
         definition.set_attract_lightning(core.attract_lightning);
         definition.set_no_fight(core.no_fight);
         definition.set_chopable(core.chopable);
+        definition.def_core_reflected_ints = core.reflected_ints.clone();
     }
 
     /// Exact callback-entry projection of every C4ObjectInfoList. The host

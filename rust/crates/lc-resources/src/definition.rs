@@ -419,11 +419,17 @@ pub struct DefCore {
     /// (src/C4Def.cpp:124,254).
     pub version: [i32; 5],
     pub name: Option<String>,
+    /// DefCore `RequireDef` C4IDList. Unlike Components, this list carries
+    /// IDs only (`mkParAdapt(RequireDef, false)`).
+    pub require_defs: Vec<String>,
     pub category: i32,
+    pub max_user_select: i32,
     /// Raw DefCore `CrewMember` value. C++ stores this as a signed integer:
     /// gameplay treats any nonzero value as enabled, while FnCrewMember
     /// returns the literal value to script.
     pub crew_member: i32,
+    /// DefCore `NoStandardCrew` / C4DefCore::NativeCrew.
+    pub no_standard_crew: i32,
     pub value: i32,
     /// `Rebuy` (C4Def.cpp:359): sold objects may introduce their ID into
     /// the player's home-base stock when nonzero.
@@ -447,8 +453,10 @@ pub struct DefCore {
     /// `NoPushEnter` (C4Def.cpp:396): any nonzero value prevents this
     /// definition from executing C4Command::Enter.
     pub no_push_enter: i32,
+    pub drag_image_picture: i32,
     pub picture: Option<PictureRect>,
     pub color_by_owner: bool,
+    pub color_by_material: String,
     /// DefCore `AllowPictureStack` exceptions to
     /// C4Object::CanConcatPictureWith's picture equality checks.
     pub allow_picture_stack: i32,
@@ -480,6 +488,7 @@ pub struct DefCore {
     /// `Projectile` (C4Def.cpp:395): nonzero definitions are selected by
     /// C4Command::Attack from the attacker's contents.
     pub projectile: i32,
+    pub explosive: i32,
     /// ContactIncinerate=N: 1-in-N chance of catching fire on contact with a
     /// burning object (CrossCheck pass 1, C4GameObjects.cpp:121-125); 0 = not
     /// inflammable.
@@ -523,6 +532,9 @@ pub struct DefCore {
     pub vehicle_control: i32,
     /// `NoBreath` (C4Def.cpp:409): exempt from the ExecLife breathing check.
     pub no_breath: bool,
+    pub temporary_crew: i32,
+    /// DefCore `SmokeRate` defaults to 100.
+    pub smoke_rate: i32,
     /// NoBurnDamage=1: burning deals no damage (C4Object.cpp:780).
     pub no_burn_damage: bool,
     /// BurnTurnTo=ID: definition change on incineration (C4Effect.cpp:580-585).
@@ -560,6 +572,7 @@ pub struct DefCore {
     /// `AutoContextMenu` (C4Def.cpp:416, default 0): entering this container
     /// may automatically open its context menu (C4Object.cpp:2049-2056).
     pub auto_context_menu: bool,
+    pub needed_gfx_mode: i32,
     /// `SilentCommands` (C4Def.cpp:404, default 0): suppresses the common
     /// command-failure message, sound, and ComDir stop tail.
     pub silent_commands: bool,
@@ -568,6 +581,8 @@ pub struct DefCore {
     pub no_component_mass: bool,
     /// NoStabilize (C4Def.cpp:402): opts out of the Stabilize upright snap.
     pub no_stabilize: bool,
+    pub hide_hud_bars: i32,
+    pub hide_hud_elements: i32,
     /// Timer= interval in frames (default 35, C4Def.cpp:298).
     pub timer: i32,
     /// TimerCall= function name (C4Def.cpp:299); None when absent/empty.
@@ -600,6 +615,11 @@ pub struct DefCore {
     /// `CanBeBase` (C4Def.cpp DefCore): marks structures usable as the
     /// FirstBase in PlaceReadyBase (C4Player.cpp:596-599).
     pub can_be_base: bool,
+    /// Signed compiler values that the gameplay projection intentionally
+    /// normalizes (mostly int32 flags represented as bools/options). Runtime
+    /// reflection must retain these exact post-parse values.
+    #[doc(hidden)]
+    pub reflected_ints: HashMap<String, i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -825,9 +845,13 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut id: Option<String> = None;
     let mut version = [0; 5];
     let mut name: Option<String> = None;
+    let mut reflected_ints = HashMap::new();
+    let mut require_defs = Vec::new();
     let mut category: i32 = 0;
     let mut category_set = false;
+    let mut max_user_select: i32 = 0;
     let mut crew_member: i32 = 0;
+    let mut no_standard_crew: i32 = 0;
     let mut can_be_base = false;
     let mut object_value: i32 = 0;
     let mut rebuyable = false;
@@ -838,8 +862,10 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut pathfinder: i32 = 0;
     let mut no_transfer_zones: i32 = 0;
     let mut no_push_enter: i32 = 0;
+    let mut drag_image_picture: i32 = 0;
     let mut picture: Option<PictureRect> = None;
     let mut color_by_owner = false;
+    let mut color_by_material = String::new();
     let mut allow_picture_stack: i32 = 0;
     let mut graphics_scale: u32 = 100;
     let mut blit_mode: u32 = 0;
@@ -862,6 +888,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut collection_limit: Option<u32> = None;
     let mut fragile = false;
     let mut projectile: i32 = 0;
+    let mut explosive: i32 = 0;
     let mut contact_incinerate: i32 = 0;
     let mut blast_incinerate: i32 = 0;
     let mut contain_blast: i32 = 0;
@@ -869,6 +896,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut no_horizontal_move: i32 = 0;
     let mut no_burn_decay = false;
     let mut no_breath = false;
+    let mut temporary_crew: i32 = 0;
+    let mut smoke_rate: i32 = 100;
     let mut grab = 0;
     let mut float_line = 0;
     let mut line_type: i32 = 0;
@@ -896,11 +925,14 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut rotated_solid_masks = false;
     // AutoContextMenu (C4Def.cpp:416, default 0).
     let mut auto_context_menu = false;
+    let mut needed_gfx_mode: i32 = 0;
     // SilentCommands (C4Def.cpp:404, default 0).
     let mut silent_commands = false;
     let mut no_component_mass = false;
     // NoStabilize (C4Def.cpp:402, default 0): opts out of C4Object::Stabilize.
     let mut no_stabilize = false;
+    let mut hide_hud_bars: i32 = 0;
+    let mut hide_hud_elements: i32 = 0;
     // Timer=/TimerCall= (C4Def.cpp:298-299): the per-object Def timer.
     let mut timer: i32 = 35;
     let mut timer_call: Option<String> = None;
@@ -914,6 +946,14 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut chopable = false;
     let mut attract_lightning = false;
     let mut no_fight = false;
+
+    macro_rules! reflected_int {
+        ($entry:literal, $value:expr) => {{
+            let value = $value;
+            reflected_ints.insert($entry.to_string(), value);
+            value
+        }};
+    }
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -961,11 +1001,17 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     name = Some(value.to_string());
                 }
             }
+            "requiredef" => {
+                require_defs = parse_id_list(value);
+            }
+            "maxuserselect" => {
+                max_user_select = parse_i32(value).unwrap_or(0);
+            }
             "value" => {
-                object_value = parse_i32(value).unwrap_or(0);
+                object_value = reflected_int!("Value", parse_i32(value).unwrap_or(0));
             }
             "rebuy" => {
-                rebuyable = parse_bool(value);
+                rebuyable = reflected_int!("Rebuy", parse_reflected_int(value)) != 0;
             }
             "baseautosell" => {
                 base_auto_sell = Some(parse_bool(value));
@@ -988,6 +1034,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "nopushenter" => {
                 no_push_enter = parse_i32(value).unwrap_or(0);
             }
+            "dragimagepicture" => {
+                drag_image_picture = parse_i32(value).unwrap_or(0);
+            }
             "category" => {
                 category = parse_category(value)?;
                 category_set = true;
@@ -995,10 +1044,13 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "crewmember" => {
                 crew_member = parse_i32(value).unwrap_or(0);
             }
+            "nostandardcrew" => {
+                no_standard_crew = parse_i32(value).unwrap_or(0);
+            }
             // C4DefCore::CompileFunc names CanBeBase as "Base"
             // (C4Def.cpp:317). Keep the descriptive alias for fixtures.
             "base" | "canbebase" => {
-                can_be_base = parse_bool(value);
+                can_be_base = reflected_int!("Base", parse_reflected_int(value)) != 0;
             }
             "picture" => {
                 if let Some(rect) = parse_rect(value) {
@@ -1006,7 +1058,11 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 }
             }
             "colorbyowner" => {
-                color_by_owner = parse_i32(value).unwrap_or(0) != 0;
+                color_by_owner =
+                    reflected_int!("ColorByOwner", parse_reflected_int(value)) != 0;
+            }
+            "colorbymaterial" => {
+                color_by_material = value.chars().take(15).collect();
             }
             "allowpicturestack" => {
                 // StdBitfieldAdapt over the APS_* table
@@ -1019,12 +1075,14 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                         "APS_Graphics" => APS_GRAPHICS,
                         "APS_Name" => APS_NAME,
                         "APS_Overlay" => APS_OVERLAY,
-                        other => other.parse::<i32>().unwrap_or(0),
+                        other => parse_i32(other).unwrap_or(0),
                     })
                     .fold(0, |flags, bit| flags | bit);
             }
             "scale" => {
-                graphics_scale = parse_i32(value).unwrap_or(100).max(0) as u32;
+                let raw = parse_u32(value).unwrap_or(100);
+                reflected_ints.insert("Scale".to_string(), raw as i32);
+                graphics_scale = raw;
             }
             "blitmode" => {
                 blit_mode = parse_i32(value).unwrap_or(0) as u32;
@@ -1042,10 +1100,10 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 shape_height = parse_i32(value);
             }
             "offset" => {
-                let mut parts = value.split(',').map(str::trim);
+                let mut parts = parse_int_array(value);
                 shape_offset = Some((
-                    parts.next().and_then(|v| v.parse().ok()).unwrap_or(0),
-                    parts.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+                    parts.next().unwrap_or(0),
+                    parts.next().unwrap_or(0),
                 ));
             }
             "firetop" => {
@@ -1055,17 +1113,14 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 lift_top = parse_i32(value).unwrap_or(0);
             }
             "solidmask" => {
-                solid_mask =
-                    parse_target_rect(value).filter(|rect| rect.width > 0 && rect.height > 0);
+                solid_mask = parse_target_rect(value);
             }
             "topface" => {
-                top_face =
-                    parse_target_rect(value).filter(|rect| rect.width > 0 && rect.height > 0);
+                top_face = parse_target_rect(value);
             }
             "vertices" => {
-                vertex_count = parse_i32(value)
-                    .unwrap_or(0)
-                    .clamp(0, C4D_MAX_VERTEX as i32) as usize;
+                let raw = reflected_int!("Vertices", parse_i32(value).unwrap_or(0));
+                vertex_count = raw.clamp(0, C4D_MAX_VERTEX as i32) as usize;
             }
             "vertexx" => {
                 fill_i32_array(value, &mut vertex_x);
@@ -1083,19 +1138,24 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 contact_density = parse_i32(value).unwrap_or(C4M_SOLID);
             }
             "contactcalls" => {
-                contact_function_calls = parse_bool(value);
+                contact_function_calls =
+                    reflected_int!("ContactCalls", parse_reflected_int(value)) != 0;
             }
             "collection" => {
-                collection = parse_rect(value).filter(|rect| rect.width > 0 && rect.height > 0);
+                collection = parse_rect(value);
             }
             "fragile" => {
-                fragile = parse_i32(value).unwrap_or(0) != 0;
+                fragile = reflected_int!("Fragile", parse_reflected_int(value)) != 0;
             }
             "projectile" => {
                 projectile = parse_i32(value).unwrap_or(0);
             }
+            "explosive" => {
+                explosive = parse_i32(value).unwrap_or(0);
+            }
             "contactincinerate" => {
-                contact_incinerate = parse_i32(value).unwrap_or(0).max(0);
+                let raw = reflected_int!("ContactIncinerate", parse_i32(value).unwrap_or(0));
+                contact_incinerate = raw.max(0);
             }
             "blastincinerate" => {
                 blast_incinerate = parse_i32(value).unwrap_or(0);
@@ -1110,10 +1170,17 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 no_horizontal_move = parse_i32(value).unwrap_or(0);
             }
             "noburndecay" => {
-                no_burn_decay = parse_bool(value);
+                no_burn_decay =
+                    reflected_int!("NoBurnDecay", parse_reflected_int(value)) != 0;
             }
             "nobreath" => {
-                no_breath = parse_bool(value);
+                no_breath = reflected_int!("NoBreath", parse_reflected_int(value)) != 0;
+            }
+            "temporarycrew" => {
+                temporary_crew = parse_i32(value).unwrap_or(0);
+            }
+            "smokerate" => {
+                smoke_rate = parse_i32(value).unwrap_or(100);
             }
             "line" => {
                 line_type = parse_line_type(value);
@@ -1125,7 +1192,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 float_line = parse_i32(value).unwrap_or(0);
             }
             "grab" => {
-                grab = parse_i32(value).unwrap_or(0).max(0);
+                let raw = reflected_int!("Grab", parse_i32(value).unwrap_or(0));
+                grab = raw.max(0);
             }
             "vehiclecontrol" => {
                 // Plain integer compile (src/C4Def.cpp:398).
@@ -1140,14 +1208,15 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     .map(|token| match token {
                         "C4D_GrabPut" => 1,
                         "C4D_GrabGet" => 2,
-                        other => other.parse::<i32>().unwrap_or(0),
+                        other => parse_i32(other).unwrap_or(0),
                     })
                     .fold(0, |acc, bit| acc | bit);
             }
             "noburndamage" => {
-                no_burn_damage = parse_bool(value);
+                no_burn_damage =
+                    reflected_int!("NoBurnDamage", parse_reflected_int(value)) != 0;
             }
-            "burnturnto" => {
+            "burnto" | "burnturnto" => {
                 if !value.is_empty() {
                     burn_turn_to = Some(value.to_string());
                 }
@@ -1161,33 +1230,36 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 }
             }
             "incompleteactivity" => {
-                incomplete_activity = parse_bool(value);
+                incomplete_activity =
+                    reflected_int!("IncompleteActivity", parse_reflected_int(value)) != 0;
             }
             "collectionlimit" => {
-                collection_limit = match parse_i32(value) {
-                    Some(limit) if limit > 0 => Some(limit as u32),
-                    _ => None,
-                };
+                let raw = reflected_int!("CollectionLimit", parse_i32(value).unwrap_or(0));
+                collection_limit = (raw > 0).then_some(raw as u32);
             }
             "collectible" => {
-                collectible = parse_bool(value);
+                collectible =
+                    reflected_int!("Collectible", parse_reflected_int(value)) != 0;
             }
             "noget" => {
-                no_get = parse_i32(value).unwrap_or(0);
+                no_get = reflected_int!("NoGet", parse_i32(value).unwrap_or(0));
             }
             "construction" => {
-                constructable = parse_bool(value);
+                constructable =
+                    reflected_int!("Construction", parse_reflected_int(value)) != 0;
             }
             "consizeoff" => {
-                con_size_off = parse_i32(value).unwrap_or(0).max(0);
+                let raw = reflected_int!("ConSizeOff", parse_i32(value).unwrap_or(0));
+                con_size_off = raw.max(0);
             }
             "stretchgrowth" => {
-                stretch_growth = parse_bool(value);
+                stretch_growth =
+                    reflected_int!("StretchGrowth", parse_reflected_int(value)) != 0;
             }
             "oversize" => {
                 // C4Compiler stores this BOOL through an integer adapter;
                 // every nonzero value is true, not just the conventional 1.
-                oversize = parse_i32(value).unwrap_or(0) != 0;
+                oversize = reflected_int!("Oversize", parse_reflected_int(value)) != 0;
             }
             "placement" => {
                 placement = parse_i32(value).unwrap_or(0);
@@ -1196,31 +1268,63 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 growth = parse_i32(value).unwrap_or(0);
             }
             "basement" => {
-                basement = parse_i32(value).unwrap_or(0).max(0);
+                let raw = reflected_int!("Basement", parse_i32(value).unwrap_or(0));
+                basement = raw.max(0);
             }
             "rotate" => {
-                rotateable = parse_i32(value).unwrap_or(0).max(0);
+                let raw = reflected_int!("Rotate", parse_i32(value).unwrap_or(0));
+                rotateable = raw.max(0);
             }
             "borderbound" => {
-                border_bound = parse_i32(value).unwrap_or(0).max(0);
+                let raw = reflected_int!("BorderBound", parse_i32(value).unwrap_or(0));
+                border_bound = raw.max(0);
             }
             "uprightattach" => {
-                upright_attach = parse_i32(value).unwrap_or(0).max(0) as u32;
+                let raw = reflected_int!("UprightAttach", parse_i32(value).unwrap_or(0));
+                upright_attach = raw.max(0) as u32;
             }
             "rotatedsolidmasks" => {
-                rotated_solid_masks = parse_bool(value);
+                rotated_solid_masks =
+                    reflected_int!("RotatedSolidmasks", parse_reflected_int(value)) != 0;
             }
             "autocontextmenu" => {
-                auto_context_menu = parse_bool(value);
+                auto_context_menu =
+                    reflected_int!("AutoContextMenu", parse_reflected_int(value)) != 0;
+            }
+            "neededgfxmode" => {
+                needed_gfx_mode = parse_i32(value).unwrap_or(0);
             }
             "silentcommands" => {
-                silent_commands = parse_bool(value);
+                silent_commands =
+                    reflected_int!("SilentCommands", parse_reflected_int(value)) != 0;
             }
             "nocomponentmass" => {
-                no_component_mass = parse_bool(value);
+                no_component_mass =
+                    reflected_int!("NoComponentMass", parse_reflected_int(value)) != 0;
             }
             "nostabilize" => {
-                no_stabilize = parse_bool(value);
+                no_stabilize =
+                    reflected_int!("NoStabilize", parse_reflected_int(value)) != 0;
+            }
+            "hidehudbars" => {
+                hide_hud_bars = parse_named_bitfield(
+                    value,
+                    &[("Energy", 1), ("MagicEnergy", 2), ("Breath", 4), ("All", 7)],
+                );
+            }
+            "hidehudelements" => {
+                hide_hud_elements = parse_named_bitfield(
+                    value,
+                    &[
+                        ("Portrait", 1),
+                        ("Captain", 2),
+                        ("Name", 4),
+                        ("Rank", 8),
+                        ("RankImage", 16),
+                        ("Inventory", 32),
+                        ("All", 63),
+                    ],
+                );
             }
             "timer" => {
                 timer = parse_i32(value).unwrap_or(35);
@@ -1228,7 +1332,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "timercall" => {
                 let trimmed = value.trim();
                 if !trimmed.is_empty() {
-                    timer_call = Some(trimmed.to_string());
+                    timer_call = Some(trimmed.chars().take(29).collect());
                 }
             }
             "components" => {
@@ -1245,22 +1349,23 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 rotated_entrance = parse_i32(value).unwrap_or(0);
             }
             "exclusive" => {
-                exclusive = parse_bool(value);
+                exclusive = reflected_int!("Exclusive", parse_reflected_int(value)) != 0;
             }
             "prey" => {
-                prey = parse_bool(value);
+                prey = reflected_int!("Prey", parse_reflected_int(value)) != 0;
             }
             "edible" => {
-                edible = parse_bool(value);
+                edible = reflected_int!("Edible", parse_reflected_int(value)) != 0;
             }
             "chop" => {
-                chopable = parse_bool(value);
+                chopable = reflected_int!("Chop", parse_reflected_int(value)) != 0;
             }
             "attractlightning" => {
-                attract_lightning = parse_bool(value);
+                attract_lightning =
+                    reflected_int!("AttractLightning", parse_reflected_int(value)) != 0;
             }
             "nofight" => {
-                no_fight = parse_bool(value);
+                no_fight = reflected_int!("NoFight", parse_reflected_int(value)) != 0;
             }
             _ => {}
         }
@@ -1286,8 +1391,11 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         id,
         version,
         name,
+        require_defs,
         category,
+        max_user_select,
         crew_member,
+        no_standard_crew,
         value: object_value,
         rebuyable,
         base_auto_sell,
@@ -1297,8 +1405,10 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         pathfinder,
         no_transfer_zones,
         no_push_enter,
+        drag_image_picture,
         picture,
         color_by_owner,
+        color_by_material,
         allow_picture_stack,
         graphics_scale,
         blit_mode,
@@ -1327,6 +1437,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         collection_limit,
         fragile,
         projectile,
+        explosive,
         contact_incinerate,
         blast_incinerate,
         contain_blast,
@@ -1334,6 +1445,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         no_horizontal_move,
         no_burn_decay,
         no_breath,
+        temporary_crew,
+        smoke_rate,
         grab,
         float_line,
         line: line_type,
@@ -1359,9 +1472,12 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         upright_attach,
         rotated_solid_masks,
         auto_context_menu,
+        needed_gfx_mode,
         silent_commands,
         no_component_mass,
         no_stabilize,
+        hide_hud_bars,
+        hide_hud_elements,
         timer,
         timer_call,
         components,
@@ -1375,6 +1491,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         chopable,
         attract_lightning,
         no_fight,
+        reflected_ints,
     })
 }
 
@@ -1409,6 +1526,31 @@ fn parse_components(value: &str) -> Vec<DefComponent> {
             Some(DefComponent { id, count })
         })
         .collect()
+}
+
+fn parse_id_list(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| {
+            character == ';' || character == ',' || character.is_ascii_whitespace()
+        })
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn parse_named_bitfield(value: &str, names: &[(&str, i32)]) -> i32 {
+    value
+        .split(['|', ',', ';'])
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            names
+                .iter()
+                .find_map(|(name, value)| token.eq_ignore_ascii_case(name).then_some(*value))
+                .unwrap_or_else(|| parse_i32(token).unwrap_or(0))
+        })
+        .fold(0, |flags, value| flags | value)
 }
 
 fn normalize_line_connect_token(token: &str) -> String {
@@ -1451,9 +1593,9 @@ fn parse_line_connect(value: &str) -> Result<u32, DefinitionError> {
             "c4dliquidpump" => 1 << 6,
             "c4dconnectrope" => 1 << 7,
             "c4denergyholder" => 1 << 8,
-            other => {
-                return Err(DefinitionError::UnknownLineConnectFlag(other.to_string()));
-            }
+            other => parse_i32(token.trim())
+                .map(|value| value as u32)
+                .ok_or_else(|| DefinitionError::UnknownLineConnectFlag(other.to_string()))?,
         };
         flags |= bit;
     }
@@ -2365,6 +2507,10 @@ fn parse_bool(value: &str) -> bool {
     matches!(lower.as_str(), "1" | "true" | "yes" | "on")
 }
 
+fn parse_reflected_int(value: &str) -> i32 {
+    parse_i32(value).unwrap_or_else(|| i32::from(parse_bool(value)))
+}
+
 fn parse_u32(value: &str) -> Option<u32> {
     parse_i64(value).and_then(|num| if num < 0 { None } else { Some(num as u32) })
 }
@@ -2383,27 +2529,32 @@ fn fill_u32_array(value: &str, target: &mut [u32]) {
         *slot = 0;
     }
     for (slot, parsed) in target.iter_mut().zip(parse_int_array(value)) {
-        *slot = parsed.max(0) as u32;
+        *slot = parsed as u32;
     }
 }
 
-fn parse_int_array(value: &str) -> impl Iterator<Item = i32> + '_ {
-    value
-        .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
-        .map(|part| part.trim())
-        .filter(|part| !part.is_empty())
-        .filter_map(parse_i32)
+fn parse_int_array(value: &str) -> impl Iterator<Item = i32> {
+    let mut values = Vec::new();
+    for part in value.split([',', ';']) {
+        let part = part.trim();
+        if part.is_empty() {
+            values.push(0);
+            continue;
+        }
+        values.extend(
+            part.split_ascii_whitespace()
+                .map(|token| parse_i32(token).unwrap_or(0)),
+        );
+    }
+    values.into_iter()
 }
 
 fn parse_rect(value: &str) -> Option<PictureRect> {
-    let mut parts = value
-        .split([',', ';'])
-        .map(|part| part.trim())
-        .filter(|part| !part.is_empty());
-    let x = parse_i32(parts.next()?)?;
-    let y = parse_i32(parts.next()?)?;
-    let width = parse_i32(parts.next()?)?;
-    let height = parse_i32(parts.next()?)?;
+    let mut parts = parse_int_array(value);
+    let x = parts.next().unwrap_or(0);
+    let y = parts.next().unwrap_or(0);
+    let width = parts.next().unwrap_or(0);
+    let height = parts.next().unwrap_or(0);
     Some(PictureRect {
         x,
         y,
@@ -2413,16 +2564,13 @@ fn parse_rect(value: &str) -> Option<PictureRect> {
 }
 
 fn parse_target_rect(value: &str) -> Option<TargetRect> {
-    let mut parts = value
-        .split([',', ';'])
-        .map(|part| part.trim())
-        .filter(|part| !part.is_empty());
-    let x = parse_i32(parts.next()?)?;
-    let y = parse_i32(parts.next()?)?;
-    let width = parse_i32(parts.next()?)?;
-    let height = parse_i32(parts.next()?)?;
-    let target_x = parse_i32(parts.next()?)?;
-    let target_y = parse_i32(parts.next()?)?;
+    let mut parts = parse_int_array(value);
+    let x = parts.next().unwrap_or(0);
+    let y = parts.next().unwrap_or(0);
+    let width = parts.next().unwrap_or(0);
+    let height = parts.next().unwrap_or(0);
+    let target_x = parts.next().unwrap_or(0);
+    let target_y = parts.next().unwrap_or(0);
     Some(TargetRect {
         x,
         y,
@@ -2523,6 +2671,110 @@ const CATEGORY_FLAGS: &[(&str, i32)] = &[
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn parse_def_core_complete_reflection_only_entries_and_cpp_defaults() {
+        let parsed = parse_def_core(
+            br#"[DefCore]
+id=TST1
+RequireDef=REQ1;REQ2
+MaxUserSelect=7
+NoStandardCrew=-2
+ColorByMaterial=Granite
+Explosive=3
+DragImagePicture=4
+TemporaryCrew=5
+SmokeRate=88
+NeededGfxMode=6
+HideHUDBars=Energy|Breath
+HideHUDElements=Portrait|Inventory
+BurnTo=BURN
+SolidMask=1,2,3,4,5
+TopFace=6,7,8,9
+Value=-9
+ContactCalls=6
+Exclusive=7
+Rebuy=-2
+CollectionLimit=-4
+Vertices=-3
+Scale=4294967291
+NoGet=-8
+Version=5,,2
+VertexX=10,,30
+Entrance=1,2,,4
+"#,
+        )
+        .expect("complete reflection fields parse");
+
+        assert_eq!(parsed.require_defs, vec!["REQ1", "REQ2"]);
+        assert_eq!(parsed.max_user_select, 7);
+        assert_eq!(parsed.no_standard_crew, -2);
+        assert_eq!(parsed.color_by_material, "Granite");
+        assert_eq!(parsed.explosive, 3);
+        assert_eq!(parsed.drag_image_picture, 4);
+        assert_eq!(parsed.temporary_crew, 5);
+        assert_eq!(parsed.smoke_rate, 88);
+        assert_eq!(parsed.needed_gfx_mode, 6);
+        assert_eq!(parsed.hide_hud_bars, 5);
+        assert_eq!(parsed.hide_hud_elements, 33);
+        assert_eq!(parsed.burn_turn_to.as_deref(), Some("BURN"));
+        assert_eq!(parsed.reflected_ints.get("Value"), Some(&-9));
+        assert_eq!(parsed.reflected_ints.get("ContactCalls"), Some(&6));
+        assert_eq!(parsed.reflected_ints.get("Exclusive"), Some(&7));
+        assert_eq!(parsed.reflected_ints.get("Rebuy"), Some(&-2));
+        assert_eq!(parsed.reflected_ints.get("CollectionLimit"), Some(&-4));
+        assert_eq!(parsed.reflected_ints.get("Vertices"), Some(&-3));
+        assert_eq!(parsed.reflected_ints.get("Scale"), Some(&-5));
+        assert_eq!(parsed.reflected_ints.get("NoGet"), Some(&-8));
+        assert_eq!(parsed.version, [5, 0, 2, 0, 0]);
+        assert_eq!(parsed.vertex_slots[0].x, 10);
+        assert_eq!(parsed.vertex_slots[1].x, 0);
+        assert_eq!(parsed.vertex_slots[2].x, 30);
+        assert_eq!(
+            parsed.entrance,
+            Some(PictureRect {
+                x: 1,
+                y: 2,
+                width: 0,
+                height: 4,
+            })
+        );
+        assert_eq!(
+            parsed.solid_mask,
+            Some(TargetRect {
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4,
+                target_x: 5,
+                target_y: 0,
+            })
+        );
+        assert_eq!(
+            parsed.top_face,
+            Some(TargetRect {
+                x: 6,
+                y: 7,
+                width: 8,
+                height: 9,
+                target_x: 0,
+                target_y: 0,
+            })
+        );
+
+        let defaults = parse_def_core(b"[DefCore]\nid=DFLT\n").expect("defaults parse");
+        assert!(defaults.require_defs.is_empty());
+        assert_eq!(defaults.max_user_select, 0);
+        assert_eq!(defaults.no_standard_crew, 0);
+        assert_eq!(defaults.color_by_material, "");
+        assert_eq!(defaults.explosive, 0);
+        assert_eq!(defaults.drag_image_picture, 0);
+        assert_eq!(defaults.temporary_crew, 0);
+        assert_eq!(defaults.smoke_rate, 100);
+        assert_eq!(defaults.needed_gfx_mode, 0);
+        assert_eq!(defaults.hide_hud_bars, 0);
+        assert_eq!(defaults.hide_hud_elements, 0);
+    }
 
     // C4Def::CompileFunc maps Width/Height/Offset into Shape.Wdt/Hgt/x/y
     // (C4Def.cpp) — CR DefCores carry no combined Shape= key. The GoldRush
