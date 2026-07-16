@@ -401,8 +401,6 @@ pub enum Expr {
     PostDecrement(Box<Expr>),
     // Assignment as an expression (right-associative)
     Assignment(AssignmentTarget, Box<Expr>),
-    // Comma operator - sequence of expressions, evaluates all and returns last (lowest precedence)
-    Comma(Vec<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

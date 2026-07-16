@@ -975,8 +975,7 @@ impl<'a> Parser<'a> {
             // Parse one variable
             let (name, _) = self.expect_identifier("expected variable name")?;
             let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
-                // Use parse_assignment() instead of parse_expression() to avoid comma operator
-                // In variable declarations, commas separate variables, not comma expressions
+                // Commas in variable declarations separate declarators.
                 Some(self.parse_assignment()?)
             } else {
                 None
@@ -1022,9 +1021,7 @@ impl<'a> Parser<'a> {
                 return Ok(Stmt::Return(None));
             }
 
-            // Parse assignments here rather than parse_expression(): at this
-            // level commas delimit the legacy parameters instead of becoming
-            // the normal comma operator.
+            // At this level commas delimit the legacy return parameters.
             let mut exprs = vec![self.parse_assignment()?];
             while self.consume_if_symbol(Symbol::Comma)?.is_some() {
                 exprs.push(self.parse_assignment()?);
@@ -1219,8 +1216,7 @@ impl<'a> Parser<'a> {
             let (variable, _) = self.expect_identifier("expected variable name")?;
             let mut decls = Vec::new();
 
-            // Parse assignments below the comma-expression level: commas in
-            // this clause separate declarations.
+            // Commas in this clause separate declarations.
             let first_init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
                 Some(self.parse_assignment()?)
             } else {
@@ -1464,21 +1460,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-        self.parse_comma()
-    }
-
-    fn parse_comma(&mut self) -> Result<Expr, ParseError> {
-        let mut exprs = vec![self.parse_assignment()?];
-
-        while self.consume_if_symbol(Symbol::Comma)?.is_some() {
-            exprs.push(self.parse_assignment()?);
-        }
-
-        if exprs.len() == 1 {
-            Ok(exprs.into_iter().next().unwrap())
-        } else {
-            Ok(Expr::Comma(exprs))
-        }
+        self.parse_assignment()
     }
 
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
@@ -1628,9 +1610,7 @@ impl<'a> Parser<'a> {
 
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_and()?;
-        while self.consume_if_symbol(Symbol::OrOr)?.is_some()
-            || self.consume_if_identifier("or")?.is_some()
-        {
+        while self.consume_if_symbol(Symbol::OrOr)?.is_some() {
             let right = self.parse_and()?;
             expr = Expr::Binary(Box::new(expr), BinaryOp::Or, Box::new(right));
         }
@@ -1639,9 +1619,7 @@ impl<'a> Parser<'a> {
 
     fn parse_and(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_bit_or()?;
-        while self.consume_if_symbol(Symbol::AndAnd)?.is_some()
-            || self.consume_if_identifier("and")?.is_some()
-        {
+        while self.consume_if_symbol(Symbol::AndAnd)?.is_some() {
             let right = self.parse_bit_or()?;
             expr = Expr::Binary(Box::new(expr), BinaryOp::And, Box::new(right));
         }
@@ -1722,24 +1700,16 @@ impl<'a> Parser<'a> {
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_shift()?;
         loop {
-            if self.consume_if_symbol(Symbol::Less)?.is_some()
-                || self.consume_if_identifier("lt")?.is_some()
-            {
+            if self.consume_if_symbol(Symbol::Less)?.is_some() {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Less, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::LessEqual)?.is_some()
-                || self.consume_if_identifier("le")?.is_some()
-            {
+            } else if self.consume_if_symbol(Symbol::LessEqual)?.is_some() {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::LessEqual, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::Greater)?.is_some()
-                || self.consume_if_identifier("gt")?.is_some()
-            {
+            } else if self.consume_if_symbol(Symbol::Greater)?.is_some() {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Greater, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::GreaterEqual)?.is_some()
-                || self.consume_if_identifier("ge")?.is_some()
-            {
+            } else if self.consume_if_symbol(Symbol::GreaterEqual)?.is_some() {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::GreaterEqual, Box::new(right));
             } else {
@@ -1839,10 +1809,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
-        // Check for ! or "not" keyword
-        if self.consume_if_symbol(Symbol::Bang)?.is_some()
-            || self.consume_if_identifier("not")?.is_some()
-        {
+        if self.consume_if_symbol(Symbol::Bang)?.is_some() {
             // Preserve the existing speculative preflight for lexer-error
             // recovery until CLO-111 makes oversized integer tokens
             // rewindable. Its AST must never choose precedence: replay and
@@ -2056,8 +2023,7 @@ impl<'a> Parser<'a> {
                 args.push(Expr::Literal(Literal::Nil));
             } else {
                 // Parse regular expression argument
-                // Use parse_assignment() instead of parse_expression() to avoid comma operator
-                // In argument lists, commas separate arguments, not comma expressions
+                // Commas in argument lists separate arguments.
                 args.push(self.parse_assignment()?);
             }
 
@@ -2148,8 +2114,7 @@ impl<'a> Parser<'a> {
         }
         let mut elements = Vec::new();
         loop {
-            // Use parse_assignment() instead of parse_expression() to avoid comma operator
-            // In arrays, commas separate elements, not comma expressions
+            // Commas in arrays separate elements.
             elements.push(self.parse_assignment()?);
             if self.consume_if_symbol(Symbol::Comma)?.is_some() {
                 if self.consume_if_symbol(Symbol::RBracket)?.is_some() {
@@ -2171,8 +2136,7 @@ impl<'a> Parser<'a> {
         loop {
             let key = self.parse_proplist_key()?;
             self.expect_symbol(Symbol::Equal, "expected '=' after proplist key")?;
-            // Use parse_assignment() instead of parse_expression() to avoid comma operator
-            // In proplists, commas separate entries, not comma expressions
+            // Commas in proplists separate entries.
             let value = self.parse_assignment()?;
             entries.push((key, value));
 
@@ -2548,6 +2512,34 @@ fn static_const_multi_declarators_parse() {
     }
 
     #[test]
+    fn invented_word_operators_are_ordinary_identifiers() {
+        for expression in [
+            "1 lt 2",
+            "1 le 2",
+            "1 gt 2",
+            "1 ge 2",
+            "true and false",
+            "true or false",
+            "not false",
+        ] {
+            let source = format!("func Test() {{ if ({expression}) return 1; }}");
+            assert!(
+                parse_script(&source).is_err(),
+                "invented operator expression {expression:?} must fail"
+            );
+        }
+
+        parse_script(
+            "func Test() { \
+                 var lt, le, gt, ge, and, or, not; \
+                 lt = 1; le = 2; gt = 3; ge = 4; and = 5; or = 6; not = 7; \
+                 return [lt, le, gt, ge, and, or, not]; \
+             }",
+        )
+        .expect("operator-like words remain valid identifier names");
+    }
+
+    #[test]
     fn function_description_accepts_raw_localized_text() {
         // C4AulParse.cpp:1825-1853 raw-scans the bracket block immediately
         // after `{`; localized descriptions are not C4Script token streams.
@@ -2899,14 +2891,11 @@ fn static_const_multi_declarators_parse() {
     }
 
     #[test]
-    fn foreach_probe_leaves_c_style_comma_initializers_intact() {
+    fn foreach_probe_keeps_declaration_commas_but_not_comma_expressions() {
         let script = parse_script(
-            "func Test() { \
-                 for (var i = 0, j = 1; i < 3; ++i) {} \
-                 for (i = 0, j = 1; i < 3; ++i) {} \
-             }",
+            "func Test() { for (var i = 0, j = 1; i < 3; ++i) {} }",
         )
-        .expect("C-style loops with comma initializers still parse");
+        .expect("C-style declaration loop parses");
 
         assert!(matches!(
             &script.functions[0].body[0],
@@ -2915,12 +2904,9 @@ fn static_const_multi_declarators_parse() {
                 ..
             } if declarations.len() == 2
         ));
-        assert!(matches!(
-            &script.functions[0].body[1],
-            Stmt::For {
-                init: Some(crate::ast::ForInit::Expr(_)),
-                ..
-            }
-        ));
+        assert!(parse_script(
+            "func Test() { for (i = 0, j = 1; i < 3; ++i) {} }"
+        )
+        .is_err());
     }
 }

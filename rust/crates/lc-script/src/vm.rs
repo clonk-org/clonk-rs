@@ -3280,14 +3280,6 @@ impl<'a> Vm<'a> {
             Expr::Assignment(target, value_expr) => {
                 self.evaluate_assignment(target, value_expr, env, depth)
             }
-            Expr::Comma(exprs) => {
-                // Comma operator: evaluate all expressions left-to-right, return the last value
-                let mut result = Value::Nil;
-                for expr in exprs {
-                    result = self.evaluate(expr, env, depth)?;
-                }
-                Ok(result)
-            }
             Expr::PreIncrement(expr) => {
                 self.update_counter(expr, env, 1, false, "increment")
             }
@@ -3553,13 +3545,6 @@ impl<'a> Vm<'a> {
                         .map(TrackedValue::runtime);
                 }
                 self.evaluate_plain_assignment_tracked(target, value_expr, env, depth)
-            }
-            Expr::Comma(exprs) => {
-                let mut result = TrackedValue::runtime(Value::Nil);
-                for expr in exprs {
-                    result = self.evaluate_tracked(expr, env, depth)?;
-                }
-                Ok(result)
             }
             _ => self.evaluate(expr, env, depth).map(TrackedValue::runtime),
         }

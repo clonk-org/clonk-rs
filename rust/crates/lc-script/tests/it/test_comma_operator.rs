@@ -1,10 +1,26 @@
-// Test for comma operator support
+// C4Script has no generic comma operator. Commas remain delimiters, including
+// the legacy pre-STRICT2 `return(first, unused...)` compatibility form.
 
-use lc_script::{Engine, Value};
+use lc_script::{Engine, Script, Value};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
 };
+
+fn assert_function_quarantined(source: &str, function: &str) {
+    let script = Script::compile(source).expect("recoverable parse error keeps the script");
+    assert!(
+        !script.parse_diagnostics().is_empty(),
+        "expected a parse diagnostic for {source:?}"
+    );
+
+    let mut engine = Engine::new();
+    engine.add_script(script);
+    let error = engine
+        .call(function, &[])
+        .expect_err("invalid comma expression must quarantine its function");
+    assert!(error.to_string().contains("parse error"));
+}
 
 #[test]
 fn legacy_adjacent_return_parentheses_returns_first_and_evaluates_the_rest() {
@@ -94,18 +110,9 @@ fn comma_nested_inside_a_call_does_not_trigger_legacy_return_parameters() {
 
 #[test]
 fn strict2_does_not_enter_the_legacy_multi_parameter_return_path() {
-    // C++ rejects this because it has no generic comma operator. CLO-149
-    // tracks removing Rust's invented comma-expression grammar; CLO-99 only
-    // restores the pre-strict-2 return compatibility path and must not widen it.
-    let mut engine = Engine::new();
-    engine
-        .load_script("#strict 2\nfunc Probe() { return(0, 42); }")
-        .expect("strict-2 comma expression compiles");
-
-    assert_eq!(
-        engine.call("Probe", &[]).expect("Probe executes"),
-        Value::Int(42),
-        "#strict 2 must not enter the first-value legacy return path"
+    assert_function_quarantined(
+        "#strict 2\nfunc Probe() { return(0, 42); }",
+        "Probe",
     );
 }
 
@@ -188,67 +195,32 @@ fn comma_with_assignment() {
 }
 
 #[test]
-fn comma_in_variable_initializer() {
-    // var x = (expr1, expr2)
-    let source = r#"func Test() { var x = (0, 42); }"#;
-    let result = lc_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+fn generic_comma_expressions_in_assignments_are_rejected() {
+    assert_function_quarantined("func Test() { var x; x = (1, 2); }", "Test");
+    assert_function_quarantined("func Test() { var x = (0, 42); }", "Test");
 }
 
 #[test]
 fn comma_in_if_condition() {
-    // if ((expr1, expr2))
-    let source = r#"func Test() { var x; if ((x = 5, x > 0)) return 1; }"#;
-    let result = lc_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    assert_function_quarantined(
+        "func Test() { var x; if ((x = 5, x > 0)) return 1; }",
+        "Test",
+    );
 }
 
 #[test]
 fn comma_in_while_condition() {
-    // while ((expr1, expr2))
-    let source = r#"func Test() { var x; while ((x = x + 1, x < 10)) {} }"#;
-    let result = lc_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    assert_function_quarantined(
+        "func Test() { var x; while ((x = x + 1, x < 10)) {} }",
+        "Test",
+    );
 }
 
 #[test]
 fn nested_comma_expressions() {
-    // (a, (b, c))
-    let source = r#"func Test() { return (1, (2, 3)); }"#;
-    let result = lc_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+    // The outer comma is the legacy return delimiter; the nested comma is
+    // still an invalid generic expression.
+    assert_function_quarantined("func Test() { return (1, (2, 3)); }", "Test");
 }
 
 #[test]
@@ -312,12 +284,4 @@ fn comma_in_var_decl_without_parens_is_rejected_like_cpp() {
         lc_script::Script::compile(r#"func Test() { var a = 1, b = 2; return a + b; }"#).is_ok(),
         "standard multi-declarator var should compile (comma is a declarator separator)"
     );
-
-    // NOTE (pre-existing parity divergence, see PORT_STATUS.md): the Rust port
-    // currently ALSO accepts a parenthesized comma sequence such as
-    // `var x = (1, 2)`. C++ does NOT — its `(...)` parser (C4AulParse.cpp:2933)
-    // reads exactly one expression then matches `)`. In C++ a comma-sequence is
-    // only legal inside a `return (...)` statement (the `multi_params_hack`,
-    // C4AulParse.cpp:2069). So `var x = (1, 2)` should eventually be rejected for
-    // parity; it is not asserted here to avoid pinning the divergence as correct.
 }

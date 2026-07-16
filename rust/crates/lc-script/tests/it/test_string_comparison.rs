@@ -107,10 +107,10 @@ fn truthy_non_strings_raise_operator_type_errors_below_strict_two() {
 }
 
 #[test]
-fn strict_two_treats_adjacent_s_equal_as_assignment() {
+fn strict_two_treats_adjacent_s_operators_as_identifier_s() {
     assert_eq!(
-        eval("#strict 2\nfunc Test() { var S; S=1; return S; }"),
-        Value::Int(1)
+        eval("#strict 2\nfunc Test() { var S; S=1; return [S, S!=2, S<5]; }"),
+        Value::Array(vec![Value::Int(1), Value::Bool(true), Value::Bool(true)])
     );
 }
 

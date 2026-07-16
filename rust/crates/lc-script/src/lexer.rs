@@ -601,9 +601,8 @@ impl<'a> Lexer<'a> {
             // Type keywords are contextual - treated as identifiers here,
             // recognized as keywords only in type annotation contexts by parser
             // "int", "bool", "string", "object", "id", "array", "proplist", "effect"
-            // Keyword operators are also contextual - treated as identifiers here,
-            // recognized as operators in expression contexts by parser
-            // "eq", "ne", "lt", "le", "gt", "ge", "and", "or", "not"
+            // The legacy string operators `eq` and `ne` are contextual and
+            // remain identifiers at the lexer level.
             _ => {
                 // Check if it looks like a C4ID:
                 // - Exactly 4 characters
