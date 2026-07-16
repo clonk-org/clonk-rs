@@ -54860,7 +54860,7 @@ func Arm()
     }
 
     #[test]
-    fn set_r_dir_is_gated_by_rotateable_definition() {
+    fn set_r_dir_persists_for_non_rotateable_definition() {
         let mut engine = Engine::with_seed(2);
         let definition = Definition::from_script(
             "Fixed",
@@ -54868,6 +54868,7 @@ func Arm()
             r#"
             global func Initialize(state, random) { SetRDir(10); return nil; }
             global func Step(state, frame, random) { return nil; }
+            public func ReadRDir() { return GetRDir(); }
             "#,
         )
         .expect("script compiles");
@@ -54884,13 +54885,71 @@ func Arm()
             )
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
-        assert_eq!(engine.objects[idx].rotation_velocity.val(), 65536);
+        let expected_rdir = math::itofix_prec(10, 10);
+        let saved_fix_r = C4Fixed::from_raw(123_456);
+        engine.objects[idx].fixed_rotation = saved_fix_r;
+        assert_eq!(engine.objects[idx].rotation_velocity, expected_rdir);
+        assert!(engine.objects[idx].state.mobile);
 
-        let snapshot = engine.tick().expect("tick succeeds");
+        for frame in 1..=12 {
+            let snapshot = engine.tick().expect("tick succeeds");
+            assert_eq!(
+                snapshot.object(id).expect("object present").rotation,
+                0,
+                "frame {frame}"
+            );
+            let idx = engine.find_object_index(id).expect("object exists");
+            let object = &engine.objects[idx];
+            assert_eq!(object.rotation_velocity, expected_rdir, "frame {frame}");
+            assert_eq!(object.fixed_rotation, saved_fix_r, "frame {frame}");
+            assert!(object.state.mobile, "frame {frame}");
+        }
+
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "ReadRDir", Vec::new())
+                .expect("GetRDir executes"),
+            Value::Int(10)
+        );
+    }
+
+    #[test]
+    fn non_rotateable_static_movement_zeroes_rotation_without_resetting_fixed_state() {
+        let mut engine = Engine::with_seed(2);
+        let mut definition = Definition::from_script("FixedStatic", "Fixed static", "")
+            .expect("script compiles");
+        definition.set_no_stabilize(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 0, 0));
+
+        let saved_fix_r = C4Fixed::from_raw(4_654_321);
+        let saved_rdir = math::itofix_prec(30, 10);
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("FixedStatic")
+                    .with_loaded(true)
+                    .with_category(CATEGORY_OBJECT)
+                    .with_rotation(23)
+                    .with_fixed_rotation(saved_fix_r)
+                    .with_rotation_velocity(saved_rdir)
+                    .with_mobile(false),
+            )
+            .expect("loaded object spawns");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].state.rotation, 23);
+        assert_eq!(engine.objects[idx].fixed_rotation, saved_fix_r);
+        assert_eq!(engine.objects[idx].rotation_velocity, saved_rdir);
+        assert!(!engine.objects[idx].state.mobile);
+
+        let snapshot = engine.tick().expect("static movement executes");
         assert_eq!(snapshot.object(id).expect("object present").rotation, 0);
         let idx = engine.find_object_index(id).expect("object exists");
-        assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
-        assert_eq!(engine.objects[idx].fixed_rotation, C4Fixed::ZERO);
+        assert_eq!(engine.objects[idx].fixed_rotation, saved_fix_r);
+        assert_eq!(engine.objects[idx].rotation_velocity, saved_rdir);
+        assert!(!engine.objects[idx].state.mobile);
     }
 
     #[test]

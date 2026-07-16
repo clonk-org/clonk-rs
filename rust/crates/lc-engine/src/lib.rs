@@ -6115,10 +6115,11 @@ impl Object {
     }
 
     /// Accumulate angular velocity into the fixed rotation, mirroring the fixed
-    /// state pieces of C++ `C4Movement.cpp:373-436`: rotation only advances for
-    /// rotateable definitions, `fix_r += rdir * 5`, finite `Def->Rotateable`
-    /// ranges clamp `fix_r`/zero `rdir`, then contact-aware rotation walks one
-    /// degree at a time before the half-circle wrap projects the integer degree.
+    /// state pieces of C++ `C4Movement.cpp:373-436`: the rotation block is
+    /// skipped unchanged for non-rotateable definitions. Otherwise it applies
+    /// `fix_r += rdir * 5`; finite `Def->Rotateable` ranges clamp
+    /// `fix_r`/zero `rdir`, then contact-aware rotation walks one degree at a
+    /// time before the half-circle wrap projects the integer degree.
     fn advance_fixed_rotation(
         &mut self,
         landscape: Option<&Landscape>,
@@ -6129,10 +6130,7 @@ impl Object {
         solid_mask_removed: bool,
         mut on_contact: impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
     ) -> Result<(bool, u32), EngineError> {
-        if movement.rotateable <= 0 {
-            self.fixed_rotation = C4Fixed::ZERO;
-            self.rotation_velocity = C4Fixed::ZERO;
-            self.state.rotation = 0;
+        if movement.rotateable == 0 {
             return Ok((false, 0));
         }
         if !self.rotation_velocity.is_nonzero() {
@@ -24758,6 +24756,18 @@ impl Engine {
                         object.fixed_rotation = itofix(object.state.rotation);
                         object.state.mobile = true;
                     }
+                }
+
+                // C4Object::ExecMovement applies this raw assignment after
+                // both its mobile and static legs (C4Movement.cpp:596). It
+                // deliberately leaves fix_r, rdir, Shape, and OCF untouched,
+                // and reads the live Def after any movement callbacks.
+                let non_rotateable = self
+                    .definitions
+                    .get(&self.objects[idx].definition_id)
+                    .is_some_and(|definition| definition.rotateable() == 0);
+                if non_rotateable {
+                    self.objects[idx].state.rotation = 0;
                 }
             }
 
