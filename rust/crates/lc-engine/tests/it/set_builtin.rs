@@ -159,3 +159,59 @@ protected func Probe()
         ])
     );
 }
+
+#[test]
+fn dec_builtin_mutates_integer_refs_and_preserves_unconvertible_refs() {
+    let result = call_probe(
+        "DECB",
+        r#"#strict 3
+protected func Probe()
+{
+    var value = 5;
+    var dec_result = Dec(value, 2);
+    var text = "unchanged";
+    var text_result = Dec(text, 2);
+    var nil_diff_result = Dec(value, nil);
+    return [value, dec_result, text, text_result, nil_diff_result];
+}
+"#,
+    );
+
+    assert_eq!(
+        result,
+        Value::Array(vec![
+            Value::Int(3),
+            Value::Int(3),
+            Value::String("unchanged".to_string()),
+            Value::Nil,
+            Value::Int(3),
+        ])
+    );
+}
+
+#[test]
+fn dec_builtin_preserves_global_reference_dispatch_and_evaluates_lvalues_once() {
+    let result = call_probe(
+        "DECG",
+        r#"#strict 3
+protected func Probe()
+{
+    var values = [8, 10];
+    var index = 0;
+    var direct_result = Dec(values[index++], 2);
+    var global_result = global->Dec(values[index++], 3);
+    return [index, values, direct_result, global_result];
+}
+"#,
+    );
+
+    assert_eq!(
+        result,
+        Value::Array(vec![
+            Value::Int(2),
+            Value::Array(vec![Value::Int(6), Value::Int(7)]),
+            Value::Int(6),
+            Value::Int(7),
+        ])
+    );
+}

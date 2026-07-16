@@ -14113,6 +14113,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CreateArray", create_array);
     script.register_host_reference_function("Inc", [0], inc_reference);
     script.register_host_reference_function("Set", [0], set_reference);
+    script.register_host_reference_function("Dec", [0], dec_reference);
     script.register_host_reference_function("SetLength", [0], set_length);
     script.register_host_function("GetLength", get_length);
     // Keep tracked argument provenance even though neither parameter is a
@@ -15533,6 +15534,38 @@ fn set_reference(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
         return Err(RuntimeError::new("Set: variable reference expected"));
     }
     target.read()
+}
+
+/// FnDec (C4Script.cpp:3780-3788): convert the referenced value to an
+/// integer, subtract the optional difference, and write the integer result
+/// through the original reference. Failed target conversion returns nil
+/// without changing the referenced value; an unconvertible difference is 0.
+fn dec_reference(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
+    let target = args.first().ok_or_else(|| {
+        RuntimeError::new("call to \"Dec\" parameter 1: got \"nil\", but expected \"&\"!")
+    })?;
+    if !target.is_reference() {
+        return Err(RuntimeError::new(format!(
+            "call to \"Dec\" parameter 1: got \"{}\", but expected \"&\"!",
+            target.read()?.type_name()
+        )));
+    }
+
+    let Some(value) = target.read()?.as_c4_int() else {
+        return Ok(Value::Nil);
+    };
+    let difference = args
+        .get(1)
+        .map(HostCallArg::read)
+        .transpose()?
+        .unwrap_or(Value::Nil)
+        .as_c4_int()
+        .unwrap_or(0);
+    let result = Value::Int(value.wrapping_sub(difference));
+    if !target.write(result.clone())? {
+        return Err(RuntimeError::new("Dec: variable reference expected"));
+    }
+    Ok(result)
 }
 
 fn set_length(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
@@ -46934,6 +46967,7 @@ mod tests {
         "CustomMessage",
         "DeathAnnounce",
         "DebugLog",
+        "Dec",
         "DefinitionCall",
         "DigFree",
         "DigFreeRect",
