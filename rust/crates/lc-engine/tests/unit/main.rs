@@ -16269,6 +16269,31 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
             1,
             "native promotion emits one Trumpet"
         );
+
+        for expected_frame in 36..70 {
+            let snapshot = engine.tick().expect("post-promotion fight succeeds");
+            assert_eq!(snapshot.frame, expected_frame);
+            assert_eq!(
+                engine
+                    .crew_object_info(fighter_id)
+                    .expect("fighter keeps info")
+                    .experience,
+                1_000,
+                "experience stays fixed between Tick35 boundaries"
+            );
+        }
+
+        let second_award = engine.tick().expect("second Tick35 fight succeeds");
+        assert_eq!(second_award.frame, 70);
+        let info = engine
+            .crew_object_info(fighter_id)
+            .expect("fighter keeps info after the second award");
+        assert_eq!((info.experience, info.rank), (1_002, 1));
+        assert!(second_award.audio.iter().all(|command| !matches!(
+            command,
+            AudioCommand::PlaySound { name, target, .. }
+                if name == "Trumpet" && *target == Some(fighter_id)
+        )));
     }
 
     #[test]
