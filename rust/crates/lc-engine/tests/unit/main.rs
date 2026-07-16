@@ -18841,6 +18841,10 @@ func Trigger() {
         global func Poke(target) { return ObjectCall(target, "Secret", 21); }
         global func PokeProtected(target) { return ProtectedCall(target, "Secret", 5); }
         global func PokePrivate(target) { return PrivateCall(target, "Secret", 7); }
+        global func PokeGlobal(target) { return ObjectCall(target, "SomeGlobalOnlyFunc"); }
+        global func PokeGlobalProtected(target) { return ProtectedCall(target, "SomeGlobalOnlyFunc"); }
+        global func PokeGlobalPrivate(target) { return PrivateCall(target, "SomeGlobalOnlyFunc"); }
+        global func PokeGlobalArrow(target) { return target->SomeGlobalOnlyFunc(); }
         global func PokeNil() { return ObjectCall(0, "Secret"); }
         global func PokeMissing(target) { return ObjectCall(target, "NoSuch"); }
         "#;
@@ -18863,6 +18867,13 @@ func Trigger() {
                 Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
             )
             .expect("probe registers");
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/ObjectCall.c".to_string(),
+                "global func SomeGlobalOnlyFunc() { return GetID(); }".to_string(),
+            )]),
+            1
+        );
         let caller = engine
             .spawn_object(SpawnConfig::new("CLLR"))
             .expect("caller spawns");
@@ -18888,6 +18899,25 @@ func Trigger() {
             engine.objects[probe_idx].state.local_vars.get("tag"),
             Some(&Value::Int(33)),
             "the target's local-var writes committed (21 + 5 + 7)"
+        );
+
+        for function in ["PokeGlobal", "PokeGlobalProtected", "PokeGlobalPrivate"] {
+            let result = engine
+                .call_object_function(caller_idx, function, target_arg.clone())
+                .expect("global-only ObjectCall-family miss is not an error");
+            assert_eq!(
+                result,
+                Value::Nil,
+                "{function}: owner-scoped GetSFunc must not resolve a global"
+            );
+        }
+        let result = engine
+            .call_object_function(caller_idx, "PokeGlobalArrow", target_arg.clone())
+            .expect("arrow call retains its global fallback");
+        assert_eq!(
+            result,
+            Value::C4Id("PROB".into()),
+            "the global arrow callee runs in the target object's scope"
         );
 
         let result = engine

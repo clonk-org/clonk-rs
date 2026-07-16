@@ -12974,7 +12974,7 @@ fn object_call(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Nil);
     }
     let pars: Vec<Value> = args.iter().skip(2).take(8).cloned().collect();
-    call_world_object_script_function(target, name, &pars).unwrap_or(Ok(Value::Nil))
+    call_world_object_own_function(target, name, &pars).unwrap_or(Ok(Value::Nil))
 }
 
 /// The VM's cross-object LocalN cell supplier (FnLocalN by-reference
