@@ -32518,12 +32518,14 @@ func ControlUpSingle()
             fulfilled_goals: vec!["GOLD".to_string()],
             playing_time_seconds: 731,
             hide_settlement_score: true,
+            league_performance: -37,
             custom_evaluation_strings: "First line|Second line".to_string(),
             players: vec![RoundResultsPlayerState {
                 player_info_id: 41,
                 total_playing_time: 1_234,
                 score_old: 150,
                 score_new: Some(250),
+                league_performance: 0,
                 custom_evaluation_strings: "First note   Second note".to_string(),
             }],
         };
@@ -57905,6 +57907,7 @@ func OnOwnerChanged()
                     total_playing_time: 1_253,
                     score_old: 250,
                     score_new: Some(415),
+                    league_performance: 0,
                     custom_evaluation_strings: "Keep this".to_string(),
                 },
             ]

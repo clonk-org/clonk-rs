@@ -18,6 +18,11 @@ pub struct RoundResultsPlayerState {
     pub score_old: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_new: Option<i32>,
+    /// Scenario-defined league performance for this persistent player-info
+    /// ID. C++ deliberately omits this temporary value from
+    /// C4RoundResultsPlayer::CompileFunc, so serialized restores reset it.
+    #[serde(skip)]
+    pub league_performance: i32,
     /// Raw scenario-specific text consumed as one player-row label. C++
     /// appends multiple entries with exactly three spaces rather than a line
     /// separator (`C4RoundResults.cpp:94-98`).
@@ -32,6 +37,7 @@ impl Default for RoundResultsPlayerState {
             total_playing_time: 0,
             score_old: invalid_score(),
             score_new: None,
+            league_performance: 0,
             custom_evaluation_strings: String::new(),
         }
     }
@@ -54,6 +60,10 @@ pub struct RoundResultsState {
     /// (`C4RoundResults.cpp:240-245,362-369`).
     #[serde(default, skip_serializing_if = "is_false")]
     pub hide_settlement_score: bool,
+    /// Global scenario-defined league performance. Unlike the per-player
+    /// value, C4RoundResults::CompileFunc serializes this field.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub league_performance: i32,
     /// Raw global evaluation text. C++ concatenates entries with `|`, which
     /// its multiline GUI interprets as line separators
     /// (`C4RoundResults.cpp:346-354`).
@@ -69,6 +79,7 @@ impl RoundResultsState {
             && self.fulfilled_goals.is_empty()
             && self.playing_time_seconds == 0
             && !self.hide_settlement_score
+            && self.league_performance == 0
             && self.custom_evaluation_strings.is_empty()
             && self.players.is_empty()
     }
@@ -105,6 +116,37 @@ impl RoundResultsState {
         }
         player.custom_evaluation_strings.push_str(text);
     }
+
+    /// `C4RoundResults::SetLeaguePerformance`: zero selects the independent
+    /// global slot; nonzero IDs overwrite or append an exact player-info row.
+    pub fn set_league_performance(&mut self, score: i32, player_info_id: i32) {
+        if player_info_id == 0 {
+            self.league_performance = score;
+            return;
+        }
+        let index = self
+            .players
+            .iter()
+            .position(|player| player.player_info_id == player_info_id)
+            .unwrap_or_else(|| {
+                let index = self.players.len();
+                self.players.push(RoundResultsPlayerState {
+                    player_info_id,
+                    ..RoundResultsPlayerState::default()
+                });
+                index
+            });
+        self.players[index].league_performance = score;
+    }
+
+    /// C4RoundResultsPlayer::CompileFunc omits its temporary performance
+    /// field. Save-state construction must therefore clear it even when the
+    /// in-memory state is restored directly without a JSON round trip.
+    pub(crate) fn prepare_for_save(&mut self) {
+        for player in &mut self.players {
+            player.league_performance = 0;
+        }
+    }
 }
 
 const fn invalid_score() -> i32 {
@@ -138,6 +180,7 @@ mod tests {
         assert_eq!(player.total_playing_time, 0);
         assert_eq!(player.score_old, -1);
         assert_eq!(player.score_new, None);
+        assert_eq!(player.league_performance, 0);
         assert!(player.custom_evaluation_strings.is_empty());
 
         let decoded: RoundResultsPlayerState = serde_json::from_str("{}")
@@ -149,6 +192,11 @@ mod tests {
     fn dialog_metadata_keeps_nondefault_results_nonempty() {
         assert!(!RoundResultsState {
             hide_settlement_score: true,
+            ..RoundResultsState::default()
+        }
+        .is_empty());
+        assert!(!RoundResultsState {
+            league_performance: -1,
             ..RoundResultsState::default()
         }
         .is_empty());

@@ -532,6 +532,12 @@ pub enum PlayerCommand {
         player_info_id: i32,
         text: String,
     },
+    /// `C4RoundResults::SetLeaguePerformance`, keyed by persistent
+    /// C4PlayerInfo ID (zero is the independent global slot).
+    SetLeaguePerformance {
+        score: i32,
+        player_info_id: i32,
+    },
     /// `FnSetMaxPlayer`'s direct write to
     /// `C4GameParameters::MaxPlayers`. This is engine-global; like
     /// `LoadScenarioSection`, it uses the existing ordered player-command
@@ -11094,6 +11100,42 @@ fn add_evaluation_data(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// `FnSetLeaguePerformance` (C4Script.cpp:2852-2858): in league games,
+/// overwrite the global result slot (ID zero) or an exact persistent
+/// C4PlayerInfo row. Both typed integer conversions precede the league gate.
+fn set_league_performance(args: &[Value]) -> Result<Value, RuntimeError> {
+    let score = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetLeaguePerformance",
+        "score",
+    )?;
+    let player_info_id = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetLeaguePerformance",
+        "player info ID",
+    )?;
+    // C4Aul's typed two-parameter dispatch evaluates and discards surplus
+    // arguments before entering the native function.
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.world.league_game() {
+            return Ok(Value::Bool(false));
+        }
+        if player_info_id != 0 && !context.world.player_info_id_known(player_info_id) {
+            return Ok(Value::Bool(false));
+        }
+        context.record_player_command(PlayerCommand::SetLeaguePerformance {
+            score,
+            player_info_id,
+        });
+        Ok(Value::Bool(true))
+    })
+}
+
 fn c4id_to_definition(id: i32) -> Option<String> {
     if id == 0 {
         return None;
@@ -12194,6 +12236,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetScenarioVal", get_scenario_val);
     script.register_host_function("LoadScenarioSection", load_scenario_section);
     script.register_host_function("GetLeague", get_league);
+    script.register_host_function("SetLeaguePerformance", set_league_performance);
     script.register_host_function("DoScore", do_score);
     script.register_host_function("DoCrewExp", do_crew_exp);
     script.register_host_function("GetScore", get_score);
@@ -44005,6 +44048,7 @@ mod tests {
         "SetHostility",
         "SetKiller",
         "SetLandscapePixel",
+        "SetLeaguePerformance",
         "SetLength",
         "SetMass",
         "SetMatAdjust",
@@ -44597,6 +44641,133 @@ mod tests {
                 && retired == "retired"
                 && whitespace == "   "
         ));
+    }
+
+    #[test]
+    fn set_league_performance_gates_ids_orders_writes_and_matches_cpp_save() {
+        let error = set_league_performance(&[Value::String("not an int".into())])
+            .expect_err("typed score conversion precedes the league gate");
+        assert!(error.message().contains("expected int"));
+
+        let script = r#"#strict
+public func Apply(int active, int zero_score, int retired, int runtime_number)
+{
+    return [
+        SetLeaguePerformance(),
+        SetLeaguePerformance(5, 0),
+        SetLeaguePerformance(-3, 0),
+        SetLeaguePerformance(100, active),
+        SetLeaguePerformance(0, zero_score),
+        SetLeaguePerformance(7, retired),
+        SetLeaguePerformance(101, active),
+        SetLeaguePerformance(9, 99),
+        SetLeaguePerformance(8, -1),
+        SetLeaguePerformance(6, runtime_number)
+    ];
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_player(
+                crate::PlayerConfig::new(7, "Active").with_player_info_id(41),
+            )
+            .expect("active player registers");
+        engine
+            .register_player(
+                crate::PlayerConfig::new(8, "Zero score").with_player_info_id(43),
+            )
+            .expect("zero-score player registers");
+        engine.round_results.players.push(crate::RoundResultsPlayerState {
+            player_info_id: 57,
+            custom_evaluation_strings: "retained info".into(),
+            ..crate::RoundResultsPlayerState::default()
+        });
+        engine
+            .register_definition(
+                crate::Definition::from_script("CALL", "Caller", script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let caller = engine
+            .spawn_object(crate::SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        let args = vec![
+            Value::Int(41),
+            Value::Int(43),
+            Value::Int(57),
+            Value::Int(7),
+        ];
+
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "Apply", args.clone())
+                .expect("non-league probe runs"),
+            Value::Array(vec![Value::Bool(false); 10])
+        );
+        assert_eq!(engine.round_results.league_performance, 0);
+        assert_eq!(engine.round_results.players.len(), 1);
+        assert_eq!(engine.round_results.players[0].league_performance, 0);
+
+        engine.set_league_game(true);
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "Apply", args)
+                .expect("league probe runs"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(false),
+            ])
+        );
+        assert_eq!(engine.round_results.league_performance, -3);
+        assert_eq!(
+            engine
+                .round_results
+                .players
+                .iter()
+                .map(|player| (player.player_info_id, player.league_performance))
+                .collect::<Vec<_>>(),
+            vec![(57, 7), (41, 101), (43, 0)],
+            "existing rows keep position, new rows append, and zero scores still create"
+        );
+
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.round_results.players[0].league_performance, 7);
+        assert_eq!(snapshot.round_results.players[1].league_performance, 101);
+        let from_snapshot = crate::EngineState::from_snapshot(&snapshot);
+        assert_eq!(from_snapshot.round_results.league_performance, -3);
+        assert!(from_snapshot
+            .round_results
+            .players
+            .iter()
+            .all(|player| player.league_performance == 0));
+        let captured = engine.capture_state();
+        assert_eq!(captured.round_results.league_performance, -3);
+        assert!(captured
+            .round_results
+            .players
+            .iter()
+            .all(|player| player.league_performance == 0));
+        let restored = crate::EngineState::from_json_str(
+            &captured
+                .to_json_string()
+                .expect("league performance state serializes"),
+        )
+        .expect("league performance state deserializes");
+        assert_eq!(restored.round_results.league_performance, -3);
+        assert!(restored
+            .round_results
+            .players
+            .iter()
+            .all(|player| player.league_performance == 0));
     }
 
     #[test]

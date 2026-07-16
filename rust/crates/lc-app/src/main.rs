@@ -76549,6 +76549,7 @@ protected func InputCallback(string answer, int player)
                     total_playing_time: 3_661,
                     score_old: 10,
                     score_new: Some(110),
+                    league_performance: 0,
                     custom_evaluation_strings: String::new(),
                 },
                 lc_engine::RoundResultsPlayerState {
@@ -76556,6 +76557,7 @@ protected func InputCallback(string answer, int player)
                     total_playing_time: 9,
                     score_old: 900,
                     score_new: Some(901),
+                    league_performance: 0,
                     custom_evaluation_strings: "wrong runtime-number join".into(),
                 },
             ],

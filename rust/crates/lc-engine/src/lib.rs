@@ -8214,6 +8214,8 @@ impl EngineState {
                 player
             })
             .collect();
+        let mut round_results = snapshot.round_results.clone();
+        round_results.prepare_for_save();
 
         Self {
             frame: snapshot.frame,
@@ -8271,7 +8273,7 @@ impl EngineState {
             next_mission: NextMissionState::default(),
             scoreboard: snapshot.hud.scoreboard.clone(),
             game_over: snapshot.game_over,
-            round_results: snapshot.round_results.clone(),
+            round_results,
             landscape_insert_thrust: false,
             structures_snow_in: false,
             flag_removeable: false,
@@ -18367,6 +18369,7 @@ impl Engine {
                     total_playing_time,
                     score_old,
                     score_new: Some(score_new),
+                    league_performance: 0,
                     custom_evaluation_strings: String::new(),
                 }),
             }
@@ -20599,6 +20602,7 @@ impl Engine {
                     total_playing_time,
                     score_old,
                     score_new: Some(score_new),
+                    league_performance: 0,
                     custom_evaluation_strings: String::new(),
                 });
             }
@@ -27632,6 +27636,8 @@ impl Engine {
             })
             .collect();
         players.sort_unstable_by_key(|player| player.id);
+        let mut round_results = self.round_results.clone();
+        round_results.prepare_for_save();
 
         EngineState {
             frame: self.frame,
@@ -27676,7 +27682,7 @@ impl Engine {
             next_mission: self.next_mission.clone(),
             scoreboard: self.scoreboard.borrow().clone(),
             game_over: self.game_over_triggered,
-            round_results: self.round_results.clone(),
+            round_results,
             landscape_insert_thrust: self.landscape_insert_thrust,
             structures_snow_in: self.structures_snow_in,
             flag_removeable: self.flag_removeable,
@@ -29920,6 +29926,13 @@ impl Engine {
                 } => {
                     self.round_results
                         .add_custom_evaluation_string(&text, player_info_id);
+                }
+                PlayerCommand::SetLeaguePerformance {
+                    score,
+                    player_info_id,
+                } => {
+                    self.round_results
+                        .set_league_performance(score, player_info_id);
                 }
                 PlayerCommand::SetMaxPlayer { max_players } => {
                     self.max_players = Some(max_players);
