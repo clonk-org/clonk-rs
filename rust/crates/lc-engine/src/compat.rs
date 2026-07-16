@@ -5042,11 +5042,6 @@ fn get_player_type(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() > 1 {
-        return Err(RuntimeError::new(
-            "GetWealth expects at most 1 argument: player",
-        ));
-    }
     // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
     let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetWealth", "player")?;
     HOST_CONTEXT.with(|cell| {
@@ -5157,11 +5152,6 @@ fn set_player_hostility_declaration(player: &mut PlayerState, opponent: i32, hos
 /// player's declaration makes both directions hostile — while the third
 /// argument requests the directed declaration only.
 fn hostile(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() > 3 {
-        return Err(RuntimeError::new(
-            "Hostile expects at most 3 arguments: player, opponent, one-way flag",
-        ));
-    }
     let player = value_to_i32(args.first().unwrap_or(&Value::Nil), "Hostile", "player")?;
     let opponent = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "Hostile", "opponent")?;
     let one_way = value_to_bool(
@@ -11189,11 +11179,6 @@ pub(super) fn calculated_definition_value(
 /// `C4Object::GetValue` (CalcValue/CalcDefValue, construction percentage,
 /// then the containing base's CalcSellValue adjustment).
 pub(super) fn get_value(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() > 4 {
-        return Err(RuntimeError::new(
-            "GetValue expects at most 4 arguments: object, definition, base, player",
-        ));
-    }
     let target =
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "GetValue", "object")?;
     let definition = parse_native_c4id_argument(args.get(1), "GetValue")?;
@@ -11784,11 +11769,6 @@ fn edit_cursor(_args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() > 1 {
-        return Err(RuntimeError::new(
-            "GetViewCursor expects at most 1 argument: player",
-        ));
-    }
     // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
     let player_id = value_to_i32(
         args.first().unwrap_or(&Value::Nil),
@@ -19496,13 +19476,7 @@ fn set_wind(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_wind(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() > 3 {
-        return Err(RuntimeError::new(
-            "GetWind expects at most 3 arguments: x, y, global",
-        ));
-    }
-
-    for (index, arg) in args.iter().enumerate() {
+    for (index, arg) in args.iter().take(3).enumerate() {
         match arg {
             Value::Int(_) | Value::Nil => {}
             Value::Bool(_) if index == 2 => {}
@@ -20662,13 +20636,7 @@ fn set_temperature(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-fn get_temperature(args: &[Value]) -> Result<Value, RuntimeError> {
-    if !args.is_empty() {
-        return Err(RuntimeError::new(
-            "GetTemperature does not accept any arguments",
-        ));
-    }
-
+fn get_temperature(_args: &[Value]) -> Result<Value, RuntimeError> {
     ENVIRONMENT_CONTEXT.with(|cell| {
         let context = cell
             .borrow()
@@ -23154,11 +23122,6 @@ fn fx_fire_info(_args: &[Value]) -> Result<Value, RuntimeError> {
 /// caller; iCausedBy is the CALLING object's controller (NO_OWNER
 /// without one).
 fn incinerate(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() > 1 {
-        return Err(RuntimeError::new(
-            "Incinerate expects at most 1 argument: target",
-        ));
-    }
     let target_id = args
         .first()
         .map(|arg| parse_object_reference_argument(arg, "Incinerate", "target"))
@@ -23184,11 +23147,6 @@ fn incinerate(args: &[Value]) -> Result<Value, RuntimeError> {
 /// engine-internal "Int*" names (C4Fx_AnyFire/C4Fx_Internal,
 /// C4Effects.h:154-155).
 fn extinguish(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() > 1 {
-        return Err(RuntimeError::new(
-            "Extinguish expects at most 1 argument: target",
-        ));
-    }
     let target_id = args
         .first()
         .map(|arg| parse_object_reference_argument(arg, "Extinguish", "target"))
@@ -24416,19 +24374,11 @@ fn get_action_target(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_vertex_num(args: &[Value]) -> Result<Value, RuntimeError> {
-    let mut index = 0;
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(arg) = args.get(index) {
-        target_id = parse_object_reference_argument(arg, "GetVertexNum", "object")?;
-        index += 1;
-    }
-
-    if index < args.len() {
-        return Err(RuntimeError::new(
-            "GetVertexNum: additional arguments are not supported",
-        ));
-    }
+    let target_id = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "GetVertexNum", "object"))
+        .transpose()?
+        .flatten();
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -39429,11 +39379,6 @@ fn set_killer(args: &[Value]) -> Result<Value, RuntimeError> {
 /// mid-call (Game.CreateObject); the port registers a pending spawn, so
 /// its creation callbacks run at materialization within the same frame.
 fn incinerate_landscape(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() > 2 {
-        return Err(RuntimeError::new(
-            "IncinerateLandscape expects at most 2 arguments: x, y",
-        ));
-    }
     let mut x = parse_optional_i32(args.first(), "IncinerateLandscape", "x")?.unwrap_or(0);
     let mut y = parse_optional_i32(args.get(1), "IncinerateLandscape", "y")?.unwrap_or(0);
 

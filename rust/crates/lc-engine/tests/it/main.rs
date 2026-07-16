@@ -63,6 +63,7 @@ mod set_mat_adjust;
 mod set_material_color;
 mod set_picture;
 mod sim_flight;
+mod surplus_host_args;
 mod swim_movement;
 mod test_action_callback_return_value;
 mod test_construction_callback;
