@@ -334,7 +334,7 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
     assert_eq!(
         first_viewport_focus(player.engine(), owner),
         Some(valley),
-        "CATA::Fire keeps the synchronized player's view on its pushing CLNK until Projectile runs"
+        "CATA::Fire keeps the local player's view on its pushing CLNK until Projectile runs"
     );
     let firing = player
         .engine()
@@ -345,7 +345,7 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
     assert_eq!(
         firing.action.target2,
         Some(valley),
-        "synchronized C++ GetPlrViewMode returns -1, so CATA::Fire stores the pushing CLNK in action target 2 (C4Script.cpp:2579-2584; Catapult.c4d/Script.c:38-47)"
+        "local C++ GetPlrViewMode returns cursor mode 0, so CATA::Fire stores the pushing CLNK in action target 2 (C4Script.cpp:2579-2584; Catapult.c4d/Script.c:38-47)"
     );
     let pusher = player
         .engine()

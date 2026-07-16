@@ -26202,6 +26202,7 @@ impl GameApp {
         self.control_clients = ControlClientRegistry::default();
         self.control_clients.register(local_client_id, true, false);
         self.engine.set_control_host(true);
+        self.engine.set_network_control_mode(false);
     }
 
     fn publish_updated_host_join_snapshot(&mut self) {
@@ -31682,6 +31683,7 @@ impl GameApp {
             }
         }
         engine.set_network_game(network_game);
+        engine.set_network_control_mode(network_game);
         engine.set_recording_active(!network_game && self.recording_enabled);
         engine.set_replay_control(replay);
         engine.set_league_game(self.network_is_league);
@@ -32044,6 +32046,8 @@ impl GameApp {
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
+        self.engine
+            .set_network_control_mode(self.network.is_some());
         self.engine.set_league_game(self.network_is_league);
         seed_engine_player_info_parameters(
             &mut self.engine,
@@ -32286,6 +32290,8 @@ impl GameApp {
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
+        self.engine
+            .set_network_control_mode(self.network.is_some());
         self.engine.set_league_game(self.network_is_league);
         seed_engine_player_info_parameters(
             &mut self.engine,
@@ -78782,6 +78788,25 @@ protected func InputCallback(string answer, int player)
             app.engine.physics().gravity,
             77,
             "ChangeToLocal preserves Game.Parameters.IsNetworkGame"
+        );
+        let view_mode_script = format!("GetPlrViewMode({local_player})");
+        let view_mode = app
+            .engine
+            .execute_script_control(
+                &lc_engine::ScriptControlData {
+                    target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+                    strictness: lc_engine::ScriptStrictness::Strict3,
+                    script: lc_engine::LegacyCString::from_bytes(view_mode_script.into_bytes())
+                        .expect("view mode probe has no NUL"),
+                    by_client: 0,
+                },
+                ScriptControlPolicy::live(false),
+            )
+            .expect("local view mode probe executes");
+        assert_eq!(
+            view_mode,
+            Some(Value::Int(lc_engine::PLAYER_VIEW_MODE_CURSOR)),
+            "ChangeToLocal clears SyncMode while preserving IsNetworkGame"
         );
 
         app.update().expect("continue local simulation");

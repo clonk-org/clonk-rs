@@ -14219,6 +14219,9 @@ pub struct Engine {
     /// network session just as C++ copies `Game.NetworkActive` during
     /// parameter setup (C4GameParameters.cpp:429-434).
     network_game: bool,
+    /// Whether `C4GameControl::eMode == CM_Network`. Unlike `network_game`,
+    /// ChangeToLocal clears this while preserving Game.Parameters.
+    network_control_mode: bool,
     /// Whether recording is active or pre-armed for game initialization.
     /// C++ includes `pRecord` in `C4GameControl::SyncMode`; this process-local
     /// state deliberately does not enter synchronized snapshots.
@@ -16314,6 +16317,7 @@ impl Engine {
             allow_debug: true,
             debug_mode: false,
             network_game: false,
+            network_control_mode: false,
             recording_active: false,
             replay_control: false,
             league_game: false,
@@ -19571,6 +19575,17 @@ impl Engine {
         self.network_game = network_game;
     }
 
+    /// Set the process-local CM_Network gate independently from the preserved
+    /// IsNetwork game parameter (notably for ChangeToLocal).
+    #[doc(hidden)]
+    pub fn set_network_control_mode(&mut self, network_control_mode: bool) {
+        self.network_control_mode = network_control_mode;
+    }
+
+    fn control_sync_mode(&self) -> bool {
+        self.network_control_mode || self.replay_control || self.recording_active
+    }
+
     /// Set the process-local recording gate used by GetSmokeLevel. The app
     /// pre-arms it before initialization when it will attach a recorder.
     pub fn set_recording_active(&mut self, recording_active: bool) {
@@ -20844,6 +20859,7 @@ impl Engine {
                 .map(ScenarioScript::script_arc),
         )
         .with_network_game(self.network_game)
+        .with_control_sync_mode(self.control_sync_mode())
         .with_smoke_level(self.bubble_smoke_level())
         .with_max_players(self.max_players.unwrap_or_default())
         .with_fair_crew_parameters(self.use_fair_crew, self.fair_crew_strength)

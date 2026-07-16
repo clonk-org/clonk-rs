@@ -1786,6 +1786,9 @@ pub struct HostWorldContext {
     /// `Game.NetworkActive` session during parameter setup
     /// (C4GameParameters.cpp:429-434).
     network_game: bool,
+    /// `C4GameControl::SyncMode()`: network/replay control or an attached
+    /// recording hides process-local view state from synchronized scripts.
+    control_sync_mode: bool,
     /// Effective `GetSmokeLevel` for sync-relevant FXU1 creation: 150 in
     /// network/recording sync mode, otherwise Config.Graphics.SmokeLevel.
     smoke_level: i32,
@@ -1913,6 +1916,7 @@ impl Default for HostWorldContext {
             player_info_league_scores: Rc::new(BTreeMap::new()),
             team_configuration: TeamConfiguration::default(),
             network_game: false,
+            control_sync_mode: false,
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
             max_players: 0,
             use_fair_crew: false,
@@ -2154,6 +2158,7 @@ impl HostWorldContext {
             player_info_league_scores: Rc::new(BTreeMap::new()),
             team_configuration: TeamConfiguration::default(),
             network_game: false,
+            control_sync_mode: false,
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
             max_players: 0,
             use_fair_crew: false,
@@ -2378,6 +2383,11 @@ impl HostWorldContext {
 
     pub(crate) fn with_network_game(mut self, network_game: bool) -> Self {
         self.network_game = network_game;
+        self
+    }
+
+    pub(crate) fn with_control_sync_mode(mut self, control_sync_mode: bool) -> Self {
+        self.control_sync_mode = control_sync_mode;
         self
     }
 
@@ -7974,17 +7984,24 @@ fn set_plr_view(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnGetPlrViewMode (C4Script.cpp:2579-2584): synchronized execution
-/// deliberately exposes no local viewport mode, even for a valid player.
-/// The Rust simulation is always synchronized/headless; keep this query
-/// independent from the presentation-only SetPlrView acknowledgement above.
+/// FnGetPlrViewMode (C4Script.cpp:2579-2584): local, non-recording games
+/// expose C4Player::ViewMode; synchronized control and invalid players return
+/// -1 because the process-local mode must not affect synchronized scripts.
 fn get_plr_view_mode(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _ = value_to_i32(
+    let player_id = value_to_i32(
         args.first().unwrap_or(&Value::Nil),
         "GetPlrViewMode",
         "player",
     )?;
-    Ok(Value::Int(-1))
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let mode = borrow
+            .as_ref()
+            .filter(|context| !context.world.control_sync_mode)
+            .and_then(|context| context.player_state(player_id))
+            .map_or(-1, |player| player.view_mode);
+        Ok(Value::Int(mode))
+    })
 }
 
 /// FnGetPlrView (C4Script.cpp:2586-2591): expose ViewTarget only while the
@@ -58359,6 +58376,61 @@ func Missing() { return ComponentAll(nil, WOOD); }
     }
 
     #[test]
+    fn get_plr_view_mode_exposes_scrolling_only_outside_control_sync_mode() {
+        let player = PlayerState {
+            id: 15,
+            view_mode: crate::PLAYER_VIEW_MODE_SCROLLING,
+            ..PlayerState::default()
+        };
+        let local = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let query = |world: HostWorldContext, player_id| {
+            let args = [Value::Int(player_id)];
+            let (result, _) =
+                with_effect_context(None, &[], world, 1, || get_plr_view_mode(&args));
+            result.expect("GetPlrViewMode succeeds")
+        };
+
+        assert_eq!(
+            query(local.clone(), 15),
+            Value::Int(crate::PLAYER_VIEW_MODE_SCROLLING)
+        );
+        assert_eq!(query(local.clone(), 99), Value::Int(-1));
+        assert_eq!(
+            query(local.with_control_sync_mode(true), 15),
+            Value::Int(-1),
+            "network, replay, and recording modes hide local view state"
+        );
+    }
+
+    #[test]
+    fn get_plr_view_mode_sync_projection_covers_network_recording_and_replay() {
+        let mut engine = crate::Engine::new();
+        assert!(!engine.host_world_context().control_sync_mode);
+
+        engine.set_network_game(true);
+        engine.set_network_control_mode(true);
+        assert!(engine.host_world_context().control_sync_mode);
+
+        engine.set_network_control_mode(false);
+        assert!(engine.host_world_context().network_game());
+        assert!(!engine.host_world_context().control_sync_mode);
+
+        engine.set_recording_active(true);
+        assert!(engine.host_world_context().control_sync_mode);
+
+        engine.set_recording_active(false);
+        assert!(!engine.host_world_context().control_sync_mode);
+
+        engine.set_network_game(false);
+        engine.set_control_host(false);
+        engine.set_replay_control(true);
+        assert!(engine.host_world_context().control_sync_mode);
+    }
+
+    #[test]
     fn set_plr_view_targets_the_viewport_without_changing_view_cursor() {
         // FnSetPlrView switches to C4PVM_Target/ViewTarget, which is distinct
         // from the saved ViewCursor pointer queried by GetViewCursor
@@ -58427,7 +58499,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 Value::Bool(true),
                 object_reference_value(next_view_cursor),
                 object_reference_value(view_target),
-                Value::Int(-1),
+                Value::Int(crate::PLAYER_VIEW_MODE_TARGET),
                 Value::Bool(false),
                 Value::Nil,
             ])
