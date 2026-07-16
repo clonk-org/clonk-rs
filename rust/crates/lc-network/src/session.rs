@@ -3264,6 +3264,9 @@ fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String>
             lc_engine::ControlPacket::MessageBoardAnswer(answer) => {
                 ("CID_MessageBoardAnswer", answer.by_client)
             }
+            lc_engine::ControlPacket::RemovePlayer(remove) => {
+                ("CID_RemovePlr", remove.by_client)
+            }
             control => {
                 let Some(set) = crate::LegacyControlSet::from_control_packet(control) else {
                     continue;
@@ -3511,6 +3514,7 @@ fn authenticated_single_control(
         lc_engine::ControlPacket::Synchronize(data) => data.by_client,
         lc_engine::ControlPacket::SyncCheck(data) => data.by_client,
         lc_engine::ControlPacket::JoinPlayer(data) => data.by_client,
+        lc_engine::ControlPacket::RemovePlayer(data) => data.by_client,
         lc_engine::ControlPacket::PlayerInfo(data) => data.by_client,
         lc_engine::ControlPacket::Vote(data) | lc_engine::ControlPacket::VoteEnd(data) => {
             data.by_client
@@ -7084,6 +7088,36 @@ mod tests {
         validate_queued_control_authors(&packet(7)).expect("matching queued author");
         let error = validate_queued_control_authors(&packet(0))
             .expect_err("queued client may not forge host CID_Set");
+        assert!(error.contains("claimed author 0"));
+        assert!(error.contains("authenticated author is 7"));
+    }
+
+    #[test]
+    fn remove_player_control_cannot_forge_host_author() {
+        let control = EngineControlPacket::RemovePlayer(
+            lc_engine::RemovePlayerControlData {
+                player: 4,
+                disconnected: false,
+                by_client: 0,
+            },
+        );
+        let payload = encode_control_entry_payload(&control).expect("encode CID_RemovePlr");
+        assert_eq!(
+            authenticated_single_control(&payload, 0).expect("host author matches"),
+            control
+        );
+        assert!(authenticated_single_control(&payload, 7).is_err());
+
+        let packet = encode_control_packet(&LegacyControlFrame {
+            client_id: 7,
+            tick: 12,
+            timestamp_ms: 0,
+            controls: vec![control],
+        })
+        .expect("encode queued CID_RemovePlr");
+        let error = validate_queued_control_authors(&packet)
+            .expect_err("queued client may not forge host CID_RemovePlr");
+        assert!(error.contains("queued CID_RemovePlr"));
         assert!(error.contains("claimed author 0"));
         assert!(error.contains("authenticated author is 7"));
     }

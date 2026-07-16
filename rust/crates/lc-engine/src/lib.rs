@@ -68,8 +68,8 @@ pub use control::{
     JoinPlayerControlData, JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData,
     NetworkResourceCore,
     PlayerCommandControlData, PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest,
-    PlayerSelectControlData, ScriptControlData, ScriptStrictness, SurrenderPlayerControlData,
-    SyncCheckPacket, SynchronizeControlData, VoteControlData,
+    PlayerSelectControlData, RemovePlayerControlData, ScriptControlData, ScriptStrictness,
+    SurrenderPlayerControlData, SyncCheckPacket, SynchronizeControlData, VoteControlData,
     CLIENT_UPDATE_ACTIVATE,
     CLIENT_UPDATE_SET_OBSERVER,
     CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
@@ -13907,6 +13907,11 @@ pub struct Engine {
     /// app/control path as every other join instead of mutating players from
     /// inside the script callback.
     player_info_updates: Rc<RefCell<Vec<PlayerInfoUpdateRequest>>>,
+    /// Host-side `Game.Input` requests produced by
+    /// `EliminatePlayer(plr, true)`. The app moves these into a later
+    /// synchronized control tick; applying the script callback must not
+    /// remove the player inline.
+    pending_remove_player_controls: Vec<RemovePlayerControlData>,
     /// Explicit client-local players. `None` is the standalone/headless
     /// default where every registered player has local control.
     local_players: Option<HashSet<i32>>,
@@ -15964,6 +15969,7 @@ impl Engine {
             league_game: false,
             control_host: true,
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
+            pending_remove_player_controls: Vec::new(),
             local_players: None,
             active_message_board_input: None,
             exec_list: Vec::new(),
@@ -19546,6 +19552,12 @@ impl Engine {
     /// issued, matching C4PlayerInfoList::DoPlayerInfoUpdate.
     pub fn take_script_player_info_updates(&mut self) -> Vec<PlayerInfoUpdateRequest> {
         self.player_info_updates.borrow_mut().drain(..).collect()
+    }
+
+    /// Drain host-authored `CID_RemovePlr` requests in script call order.
+    /// The embedding control layer assigns them to a not-yet-executed tick.
+    pub fn take_pending_remove_player_controls(&mut self) -> Vec<RemovePlayerControlData> {
+        std::mem::take(&mut self.pending_remove_player_controls)
     }
 
     pub fn set_local_players<I>(&mut self, players: I)
@@ -27704,6 +27716,9 @@ impl Engine {
                 ));
             }
         }
+        // Game.Input is not part of EngineState. A pre-load direct-removal
+        // request must not fire against players from the restored game.
+        self.pending_remove_player_controls.clear();
 
         self.frame = state.frame;
         self.game_time = state.game_time;
@@ -30225,7 +30240,12 @@ impl Engine {
                     }
                 }
                 PlayerCommand::Remove { player_id } => {
-                    self.remove_player(player_id)?;
+                    self.pending_remove_player_controls
+                        .push(RemovePlayerControlData {
+                            player: player_id,
+                            disconnected: false,
+                            by_client: 0,
+                        });
                 }
                 PlayerCommand::SetFogOfWar { player_id, enabled } => {
                     if let Some(player) = self.players.get_mut(&player_id) {

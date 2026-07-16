@@ -405,8 +405,12 @@ impl PlaybackHandle {
 
 impl RuntimeHandle {
     fn new() -> Self {
+        let mut engine = Engine::with_seed(0);
+        // Playback consumes the recorded control stream; it is never the
+        // control host that synthesizes new Game.Input packets.
+        engine.set_control_host(false);
         Self {
-            engine: Engine::with_seed(0),
+            engine,
             scenario_path: None,
             seed: 0,
             last_frame: 0,
@@ -457,6 +461,31 @@ impl RuntimeHandle {
                 }
                 ControlPacket::JoinPlayer(join) => {
                     self.handle_join_player(&join)?;
+                }
+                ControlPacket::RemovePlayer(remove) => {
+                    if remove.by_client != 0 {
+                        continue;
+                    }
+                    let Some(info_id) = self
+                        .engine
+                        .player(remove.player)
+                        .map(|player| player.player_info_id())
+                    else {
+                        continue;
+                    };
+                    self.engine
+                        .remove_player(remove.player)
+                        .map_err(|error| error.to_string())?;
+                    if info_id != 0 {
+                        if let Some(info) = self.player_infos.get_mut(&info_id) {
+                            info.flags |= crate::PLAYER_INFO_FLAG_JOINED
+                                | crate::PLAYER_INFO_FLAG_REMOVED;
+                            if remove.disconnected {
+                                info.flags |= crate::PLAYER_INFO_FLAG_DISCONNECTED;
+                            }
+                            info.game_part_frame = i32::try_from(frame).unwrap_or(i32::MAX);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -1929,6 +1958,7 @@ fn load_scenario_into_runtime(
     let scenario = Scenario::load_from_path_with_seed(path, &resolver, seed)
         .map_err(|error| format!("failed to load scenario: {error}"))?;
     runtime.engine = Engine::with_seed(seed);
+    runtime.engine.set_control_host(false);
     // The lc-app boot sequence: materials, then the engine-global
     // System.c4g scripts, then the scenario (which adds its own System.c4g).
     {
@@ -2114,6 +2144,7 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                         ControlPacket::SyncCheck(_) => "SyncCheck",
                         ControlPacket::Synchronize(_) => "Synchronize",
                         ControlPacket::JoinPlayer(_) => "JoinPlayer",
+                        ControlPacket::RemovePlayer(_) => "RemovePlayer",
                         ControlPacket::PlayerInfo(_) => "PlayerInfo",
                         ControlPacket::ClientJoin(_) => "ClientJoin",
                         ControlPacket::ClientUpdate(_) => "ClientUpdate",
@@ -2161,6 +2192,7 @@ pub extern "C" fn lc_engine_runtime_reset(
 
     let Some(path) = runtime.scenario_path.clone() else {
         runtime.engine = Engine::with_seed(runtime.seed);
+        runtime.engine.set_control_host(false);
         runtime.last_frame = runtime.engine.frame();
         runtime.control_log_strings.clear();
         runtime.control_packets.clear();
@@ -4613,6 +4645,62 @@ global func Step(state, frame, random)
             runtime.engine.player(0).is_some(),
             "frame-0 join executed before the 0 -> 1 tick"
         );
+    }
+
+    #[test]
+    fn replay_waits_for_recorded_remove_player_control() {
+        let mut runtime = RuntimeHandle::new();
+        runtime
+            .engine
+            .register_player(PlayerConfig::new(0, "Replay").with_player_info_id(7))
+            .expect("register replay player");
+        runtime.player_infos.insert(
+            7,
+            ControlPlayerInfoEntry {
+                id: 7,
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                ..Default::default()
+            },
+        );
+        runtime.control_packets.insert(
+            0,
+            vec![ControlPacket::Script(crate::ScriptControlData {
+                target_object: crate::SCRIPT_SCOPE_GLOBAL,
+                strictness: crate::ScriptStrictness::Strict3,
+                script: LegacyCString::from_bytes(b"EliminatePlayer(0, true)".to_vec())
+                    .expect("script has no NUL"),
+                by_client: 0,
+            })],
+        );
+
+        runtime
+            .apply_control_packets_for_frame(0)
+            .expect("recorded script executes");
+        assert!(runtime.engine.player(0).is_some());
+        assert!(runtime
+            .engine
+            .take_pending_remove_player_controls()
+            .is_empty());
+
+        runtime.control_packets.insert(
+            1,
+            vec![ControlPacket::RemovePlayer(
+                crate::RemovePlayerControlData {
+                    player: 0,
+                    disconnected: true,
+                    by_client: 0,
+                },
+            )],
+        );
+        runtime
+            .apply_control_packets_for_frame(1)
+            .expect("recorded RemovePlr executes");
+
+        assert!(runtime.engine.player(0).is_none());
+        let info = runtime.player_infos.get(&7).expect("history remains");
+        assert_ne!(info.flags & crate::PLAYER_INFO_FLAG_REMOVED, 0);
+        assert_ne!(info.flags & crate::PLAYER_INFO_FLAG_DISCONNECTED, 0);
+        assert_eq!(info.game_part_frame, 1);
     }
 
     #[test]

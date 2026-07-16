@@ -63,6 +63,9 @@ pub enum ControlPacket {
     /// Player join (`CID_JoinPlr`, C4Control.cpp:689-786): executes
     /// C4Game::JoinPlayer with the carried player file.
     JoinPlayer(JoinPlayerControlData),
+    /// Host-authored synchronized player removal (`CID_RemovePlr`,
+    /// C4Control.cpp:1290-1305).
+    RemovePlayer(RemovePlayerControlData),
     /// Player info update (`CID_PlrInfo`, C4Control.cpp:1264-1282):
     /// registers C4PlayerInfo entries before the join references them.
     PlayerInfo(PlayerInfoControlData),
@@ -198,6 +201,27 @@ pub struct ClientRemoveControlData {
     pub client_id: i32,
     pub reason: LegacyCString,
     pub by_client: i32,
+}
+
+/// Body of `C4ControlRemovePlr` (`CID_RemovePlr`).
+///
+/// The C++ compiler writes packed `Plr`, native bool `Disconnected`, then
+/// inherited packed `ByClient` (`src/C4Control.cpp:1290-1305`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemovePlayerControlData {
+    pub player: i32,
+    pub disconnected: bool,
+    pub by_client: i32,
+}
+
+impl Default for RemovePlayerControlData {
+    fn default() -> Self {
+        Self {
+            player: -1,
+            disconnected: false,
+            by_client: -1,
+        }
+    }
 }
 
 /// Body of `C4ControlScript` (`CID_Script`).
@@ -900,6 +924,7 @@ impl RawPacket {
         }
 
         const CID_JOIN_PLR: u8 = 0x91; // CID_First|0x11 (C4PacketBase.h:160)
+        const CID_REMOVE_PLR: u8 = 0x92; // CID_First|0x12 (C4PacketBase.h:161)
         const CID_PLR_INFO: u8 = 0x90; // CID_First|0x10 (C4PacketBase.h:159)
 
         if id == CID_SCRIPT {
@@ -1033,6 +1058,23 @@ impl RawPacket {
                 source: JoinPlayerSource::Embedded(player_data),
                 by_client,
             })));
+        }
+
+        if id == CID_REMOVE_PLR {
+            let player = parse_int_field_or(&self.fields, "Plr", -1)?;
+            let disconnected = self
+                .fields
+                .get("Disconnected")
+                .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
+                .unwrap_or(false);
+            let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
+            return Ok(Some(ControlPacket::RemovePlayer(
+                RemovePlayerControlData {
+                    player,
+                    disconnected,
+                    by_client,
+                },
+            )));
         }
 
         if id == CID_PLR_INFO {
@@ -1512,6 +1554,33 @@ mod tests {
             JoinPlayerSource::Embedded(vec![0xaa, 0xbb, 0xcc])
         );
         assert_eq!(join.by_client, 4);
+    }
+
+    #[test]
+    fn parses_remove_player_packet_fields_and_omitted_defaults() {
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=146\n\
+    [Remove Player]\n\
+      Plr=130\n\
+      Disconnected=true\n\
+      ByClient=0\n\
+  [IDPacket]\n\
+    ID=146\n\
+    [Remove Player]\n";
+
+        assert_eq!(
+            parse_control_ini(input).expect("parse RemovePlr controls"),
+            vec![
+                ControlPacket::RemovePlayer(RemovePlayerControlData {
+                    player: 130,
+                    disconnected: true,
+                    by_client: 0,
+                }),
+                ControlPacket::RemovePlayer(RemovePlayerControlData::default()),
+            ]
+        );
     }
 
     #[test]

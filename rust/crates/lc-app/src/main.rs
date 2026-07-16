@@ -25201,18 +25201,108 @@ impl GameApp {
             .filter(|player| info_ids.contains(&player.player_info_id))
             .map(|player| (player.id, player.player_info_id))
             .collect();
+        let game_part_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
         for (player_id, info_id) in runtime_players {
             match self.engine.remove_player(player_id) {
                 Ok(_) => {
                     self.local_controls.remove(player_id);
                     self.control_player_infos
-                        .mark_removed(info_id, disconnected);
+                        .mark_removed(info_id, disconnected, game_part_frame);
                 }
                 Err(error) => {
                     tracing::warn!(%player_id, %info_id, %error, "failed to remove client player");
                 }
             }
         }
+    }
+
+    /// Execute the host-only `CID_RemovePlr` body. Missing players are a
+    /// synchronized no-op; a successful removal updates the retained
+    /// C4PlayerInfo history after the engine has run the full removal cascade.
+    fn execute_remove_player_control(
+        &mut self,
+        control: lc_engine::RemovePlayerControlData,
+    ) -> Result<(), EngineError> {
+        if control.by_client != 0 {
+            return Ok(());
+        }
+        let Some(info_id) = self
+            .engine
+            .player(control.player)
+            .map(|player| player.player_info_id())
+        else {
+            return Ok(());
+        };
+        let game_part_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+        self.engine.remove_player(control.player)?;
+        self.local_controls.remove(control.player);
+        let mut host_snapshot_changed = false;
+        if info_id != 0 {
+            self.control_player_infos
+                .mark_removed(info_id, control.disconnected, game_part_frame);
+            if let Some(info) = self
+                .host_join_snapshot
+                .as_mut()
+                .and_then(|snapshot| {
+                    snapshot
+                        .parameters
+                        .player_infos
+                        .clients
+                        .iter_mut()
+                        .flat_map(|client| client.players.iter_mut())
+                        .find(|info| info.id == info_id)
+                })
+            {
+                info.flags |= lc_engine::PLAYER_INFO_FLAG_JOINED
+                    | lc_engine::PLAYER_INFO_FLAG_REMOVED;
+                if control.disconnected {
+                    info.flags |= lc_engine::PLAYER_INFO_FLAG_DISCONNECTED;
+                }
+                info.game_part_frame = game_part_frame;
+                host_snapshot_changed = true;
+            }
+        }
+        if host_snapshot_changed {
+            self.publish_updated_host_join_snapshot();
+        }
+        Ok(())
+    }
+
+    /// Move script-produced `CtrlRemove` requests into the next open host
+    /// control tick. Offline control executes only on the next cadence frame;
+    /// network hosts submit to the frame builder and wait for the resulting
+    /// complete control packet to return.
+    fn flush_pending_remove_player_controls(
+        &mut self,
+        execute_offline_control_frame: bool,
+    ) -> Result<(), EngineError> {
+        if self.network.is_none() {
+            let control_rate = u64::try_from(self.engine.control_rate())
+                .unwrap_or(1)
+                .max(1);
+            if !execute_offline_control_frame || self.engine.frame() % control_rate != 0 {
+                return Ok(());
+            }
+            let controls = self.engine.take_pending_remove_player_controls();
+            for control in controls {
+                self.execute_remove_player_control(control)?;
+            }
+            return Ok(());
+        }
+
+        let controls = self.engine.take_pending_remove_player_controls();
+        if controls.is_empty() {
+            return Ok(());
+        }
+        let tick = self.local_control_submission_tick();
+        for control in controls {
+            if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                network.submit_remove_player(tick, control.player, control.disconnected)
+            }) {
+                tracing::warn!(player = control.player, %error, "failed to queue RemovePlr");
+            }
+        }
+        Ok(())
     }
 
     fn remove_remote_runtime_players(&mut self, local_client_id: i32) {
@@ -25228,11 +25318,13 @@ impl GameApp {
             })
             .map(|player| (player.id, player.player_info_id))
             .collect::<Vec<_>>();
+        let game_part_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
         for (player_id, info_id) in runtime_players {
             match self.engine.remove_player(player_id) {
                 Ok(_) => {
                     self.local_controls.remove(player_id);
-                    self.control_player_infos.mark_removed(info_id, true);
+                    self.control_player_infos
+                        .mark_removed(info_id, true, game_part_frame);
                 }
                 Err(error) => {
                     tracing::warn!(%player_id, %info_id, %error, "failed to remove remote player");
@@ -25271,6 +25363,32 @@ impl GameApp {
         self.control_clients = ControlClientRegistry::default();
         self.control_clients.register(local_client_id, true, false);
         self.engine.set_control_host(true);
+    }
+
+    fn publish_updated_host_join_snapshot(&mut self) {
+        let Some(snapshot) = self.host_join_snapshot.clone() else {
+            return;
+        };
+        if let Some(network) = self.network.as_ref() {
+            if let Err(error) = network.publish_join_snapshot(snapshot.clone()) {
+                tracing::error!(%error, "failed to publish updated host JoinData");
+            }
+        }
+        if let Some(reference) = self.advertised_game_reference.as_ref() {
+            match reference.replacing_parameters(snapshot.parameters) {
+                Ok(updated) => {
+                    if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+                        if let Err(error) = advertiser.update_exact(&updated) {
+                            tracing::error!(%error, "failed to publish updated host reference");
+                        }
+                    }
+                    self.advertised_game_reference = Some(updated);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to rebuild updated host reference");
+                }
+            }
+        }
     }
 
     /// Execute the six C4ControlSet value types in packet order. Native
@@ -25429,28 +25547,7 @@ impl GameApp {
         }
 
         if host_snapshot_changed {
-            if let Some(snapshot) = self.host_join_snapshot.clone() {
-                if let Some(network) = self.network.as_ref() {
-                    if let Err(error) = network.publish_join_snapshot(snapshot.clone()) {
-                        tracing::error!(%error, "failed to publish updated host JoinData");
-                    }
-                }
-                if let Some(reference) = self.advertised_game_reference.as_ref() {
-                    match reference.replacing_parameters(snapshot.parameters) {
-                        Ok(updated) => {
-                            if let Some(advertiser) = self.network_game_advertiser.as_ref() {
-                                if let Err(error) = advertiser.update_exact(&updated) {
-                                    tracing::error!(%error, "failed to publish updated host reference");
-                                }
-                            }
-                            self.advertised_game_reference = Some(updated);
-                        }
-                        Err(error) => {
-                            tracing::error!(%error, "failed to rebuild updated host reference");
-                        }
-                    }
-                }
-            }
+            self.publish_updated_host_join_snapshot();
         }
     }
 
@@ -25473,6 +25570,9 @@ impl GameApp {
                     self.apply_join_player_control(join)
                         .map_err(map_runtime_flash_producer_engine_error)?;
                     Ok(())
+                }
+                NetworkControl::RemovePlayer(control) => {
+                    self.execute_remove_player_control(control)
                 }
                 NetworkControl::InitScenarioPlayer(control) => {
                     self.execute_init_scenario_player_control(control.player, control.team)
@@ -25578,6 +25678,13 @@ impl GameApp {
             {
                 break;
             }
+        }
+        // A script/control callback may have called
+        // EliminatePlayer(plr, true). While the current ready marker is live,
+        // local_control_submission_tick selects tick + 1, matching Game.Input.
+        let follow_up_result = self.flush_pending_remove_player_controls(false);
+        if result.is_ok() {
+            result = follow_up_result;
         }
         // Controls generated reentrantly above used tick + 1. Clear the
         // marker before propagating errors or returning after session state
@@ -26081,6 +26188,11 @@ impl GameApp {
                 if self.network.is_some() && !self.network_control_running {
                     return Ok(());
                 }
+                // Local Game.Input is taken only on cadence frames and only
+                // while execution is not halted. Network hosts may also have
+                // requests produced outside the previous update and can
+                // submit them before this tick is finalized.
+                self.flush_pending_remove_player_controls(true)?;
                 if self.network.is_some() {
                     let frame = self.engine.frame();
                     let control_tick = match self.network_control_clock {
@@ -26138,6 +26250,9 @@ impl GameApp {
                     .engine
                     .tick()
                     .map_err(map_runtime_flash_producer_engine_error)?;
+                // Requests made by simulation scripts belong to a later
+                // control tick, never to the frame that just executed them.
+                self.flush_pending_remove_player_controls(false)?;
                 self.handle_script_player_info_updates()?;
                 self.frames_since_second = self.frames_since_second.wrapping_add(1);
                 self.apply_scoreboard_presentation_requests();
@@ -58673,6 +58788,239 @@ protected func InputCallback(string answer, int player)
         assert!(app.engine.team_colors());
         assert!(!app.engine.debug_mode());
         assert!(!app.engine.allow_debug());
+    }
+
+    #[test]
+    fn host_direct_elimination_survives_current_frame_and_queues_next_control_tick() {
+        // FnEliminatePlayer(plr, true) appends CID_RemovePlr to Game.Input;
+        // it does not erase the player while the calling control/frame is
+        // still executing (C4Script.cpp:2823-2833; C4PlayerList.cpp:480-484).
+        let mut app = new_running_sandbox_app();
+        let player = app.local_owner;
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let tick = u32::try_from(app.engine.frame()).expect("frame fits control tick");
+        let script = format!("EliminatePlayer({player}, true)");
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: vec![NetworkControl::Script(lc_engine::ScriptControlData {
+                    target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+                    strictness: lc_engine::ScriptStrictness::Strict3,
+                    script: lc_engine::LegacyCString::from_bytes(script.into_bytes())
+                        .expect("script has no NUL"),
+                    by_client: 0,
+                })],
+            })
+            .expect("queue direct-elimination script");
+
+        app.update().expect("execute calling frame");
+
+        assert!(app.engine.player(player).is_some());
+        let remove = lc_engine::RemovePlayerControlData {
+            player,
+            disconnected: false,
+            by_client: 0,
+        };
+        assert_eq!(
+            commands.take_submitted_remove_players(),
+            vec![(tick.saturating_add(1), remove)]
+        );
+
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick: tick.saturating_add(1),
+                controls: vec![NetworkControl::RemovePlayer(remove)],
+            })
+            .expect("queue recorded RemovePlr");
+        app.update().expect("execute later removal control");
+
+        assert!(app.engine.player(player).is_none());
+    }
+
+    #[test]
+    fn non_control_host_direct_elimination_returns_success_without_queuing() {
+        let mut app = new_running_sandbox_app();
+        let player = app.local_owner;
+        app.engine.set_control_host(false);
+        let script = format!("EliminatePlayer({player}, true)");
+        let result = app
+            .engine
+            .execute_script_control(
+                &lc_engine::ScriptControlData {
+                    target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+                    strictness: lc_engine::ScriptStrictness::Strict3,
+                    script: lc_engine::LegacyCString::from_bytes(script.into_bytes())
+                        .expect("script has no NUL"),
+                    by_client: 0,
+                },
+                ScriptControlPolicy::live(false),
+            )
+            .expect("direct elimination call executes");
+
+        assert_eq!(result, Some(Value::Int(1)));
+        assert!(app.engine.take_pending_remove_player_controls().is_empty());
+        assert!(app.engine.player(player).is_some());
+    }
+
+    #[test]
+    fn offline_direct_elimination_waits_for_next_control_rate_frame() {
+        let mut app = new_running_sandbox_app();
+        let player = app.local_owner;
+        app.engine.set_control_rate(3);
+        app.snapshot = app.engine.tick().expect("advance past cadence frame zero");
+        let script = format!("EliminatePlayer({player}, true)");
+        app.engine
+            .execute_script_control(
+                &lc_engine::ScriptControlData {
+                    target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+                    strictness: lc_engine::ScriptStrictness::Strict3,
+                    script: lc_engine::LegacyCString::from_bytes(script.into_bytes())
+                        .expect("script has no NUL"),
+                    by_client: 0,
+                },
+                ScriptControlPolicy::live(false),
+            )
+            .expect("host direct elimination queues local input");
+
+        app.update().expect("frame one does not execute control");
+        assert!(app.engine.player(player).is_some());
+        app.update().expect("frame two does not execute control");
+        assert!(app.engine.player(player).is_some());
+        app.update().expect("frame three executes queued control");
+        assert!(app.engine.player(player).is_none());
+    }
+
+    #[test]
+    fn remove_player_control_is_host_only_and_propagates_disconnected() {
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        for (player, info_id) in [(17, 7), (18, 8)] {
+            app.engine
+                .register_player(
+                    PlayerConfig::new(player, format!("Player {player}"))
+                        .with_player_info_id(info_id),
+                )
+                .expect("register removable player");
+        }
+        let player_infos = vec![
+            lc_engine::ControlPlayerInfoEntry {
+                id: 7,
+                flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                game_part_frame: -99,
+                ..Default::default()
+            },
+            lc_engine::ControlPlayerInfoEntry {
+                id: 8,
+                flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                game_part_frame: -99,
+                ..Default::default()
+            },
+        ];
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: player_infos.clone(),
+                ..Default::default()
+            });
+        let mut host_snapshot = lc_network::HostConfig::default()
+            .initial_join_snapshot
+            .expect("default host JoinData");
+        host_snapshot.parameters.player_infos = lc_network::PlayerInfoListSnapshot {
+            last_player_id: 8,
+            clients: vec![lc_network::ClientPlayerInfosSnapshot {
+                client_id: 3,
+                flags: 0,
+                players: player_infos,
+            }],
+        };
+        app.host_join_snapshot = Some(host_snapshot);
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::RemovePlayer(
+                lc_engine::RemovePlayerControlData {
+                    player: 17,
+                    disconnected: true,
+                    by_client: 3,
+                },
+            )],
+        )
+        .expect("non-host removal is a synchronized no-op");
+        assert!(app.engine.player(17).is_some());
+        assert_eq!(
+            app.control_player_infos.get(7).expect("info retained").flags
+                & (lc_engine::PLAYER_INFO_FLAG_REMOVED
+                    | lc_engine::PLAYER_INFO_FLAG_DISCONNECTED),
+            0
+        );
+        assert_eq!(
+            app.control_player_infos
+                .get(7)
+                .expect("info retained")
+                .game_part_frame,
+            -99
+        );
+
+        app.apply_ready_controls(
+            1,
+            vec![
+                NetworkControl::RemovePlayer(lc_engine::RemovePlayerControlData {
+                    player: 17,
+                    disconnected: true,
+                    by_client: 0,
+                }),
+                NetworkControl::RemovePlayer(lc_engine::RemovePlayerControlData {
+                    player: 18,
+                    disconnected: false,
+                    by_client: 0,
+                }),
+            ],
+        )
+        .expect("host removals execute in packet order");
+
+        assert!(app.engine.player(17).is_none());
+        assert!(app.engine.player(18).is_none());
+        let disconnected = app.control_player_infos.get(7).expect("history retained");
+        assert_ne!(
+            disconnected.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED,
+            0
+        );
+        assert_ne!(
+            disconnected.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED,
+            0
+        );
+        assert_eq!(disconnected.game_part_frame, 0);
+        let ordinary = app.control_player_infos.get(8).expect("history retained");
+        assert_ne!(ordinary.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED, 0);
+        assert_eq!(ordinary.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED, 0);
+        assert_eq!(ordinary.game_part_frame, 0);
+        let published = commands.take_published_join_snapshots();
+        assert_eq!(published.len(), 2);
+        assert_eq!(published.last(), app.host_join_snapshot.as_ref());
+        let published_players = &published
+            .last()
+            .expect("latest JoinData")
+            .parameters
+            .player_infos
+            .clients[0]
+            .players;
+        assert_ne!(
+            published_players[0].flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED,
+            0
+        );
+        assert_eq!(
+            published_players[1].flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED,
+            0
+        );
+        assert_eq!(
+            published_players
+                .iter()
+                .map(|info| info.game_part_frame)
+                .collect::<Vec<_>>(),
+            vec![0, 0]
+        );
     }
 
     #[test]

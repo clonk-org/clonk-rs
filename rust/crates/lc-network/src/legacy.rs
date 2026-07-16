@@ -6,8 +6,8 @@ use lc_engine::{
     InitScenarioPlayerControlData, JoinPlayerControlData, JoinPlayerSource, LegacyCString,
     MessageBoardAnswerControlData, NetworkResourceCore, PlayerCommandControlData,
     PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest, PlayerSelectControlData,
-    ScriptControlData, ScriptStrictness, SurrenderPlayerControlData, SyncCheckPacket,
-    SynchronizeControlData, VoteControlData,
+    RemovePlayerControlData, ScriptControlData, ScriptStrictness, SurrenderPlayerControlData,
+    SyncCheckPacket, SynchronizeControlData, VoteControlData,
     CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
@@ -33,6 +33,7 @@ const CID_VOTE: u8 = 0x80 | 0x03;
 const CID_VOTE_END: u8 = 0x80 | 0x04;
 const CID_PLR_INFO: u8 = 0x80 | 0x10;
 const CID_JOIN_PLR: u8 = 0x80 | 0x11;
+const CID_REMOVE_PLR: u8 = 0x80 | 0x12;
 const CID_PLR_SELECT: u8 = 0x80 | 0x20;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
 const CID_PLR_COMMAND: u8 = 0x80 | 0x22;
@@ -634,6 +635,7 @@ fn decode_control(
         CID_VOTE_END => decode_vote_end(reader),
         CID_PLR_INFO => decode_player_info(reader),
         CID_JOIN_PLR => decode_join_player(reader),
+        CID_REMOVE_PLR => decode_remove_player(reader),
         CID_PLR_SELECT => decode_player_select(reader),
         CID_PLR_CONTROL => decode_player_control(reader),
         CID_PLR_COMMAND => decode_player_command(reader),
@@ -673,6 +675,16 @@ fn decode_control_set(reader: &mut Reader<'_>) -> Result<EngineControlPacket, Le
         by_client: reader.read_int32()?,
     }
     .into_control_packet())
+}
+
+fn decode_remove_player(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::RemovePlayer(RemovePlayerControlData {
+        player: reader.read_int32()?,
+        disconnected: reader.read_u8()? != 0,
+        by_client: reader.read_int32()?,
+    }))
 }
 
 fn decode_script(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
@@ -1573,6 +1585,13 @@ fn encode_control_set(buffer: &mut Vec<u8>, data: LegacyControlSet) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_remove_player(buffer: &mut Vec<u8>, data: &RemovePlayerControlData) {
+    buffer.push(CID_REMOVE_PLR);
+    append_int32(buffer, data.player);
+    buffer.push(u8::from(data.disconnected));
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_script(buffer: &mut Vec<u8>, data: &ScriptControlData) {
     buffer.push(CID_SCRIPT);
     append_raw_i32(buffer, data.target_object);
@@ -1627,6 +1646,10 @@ fn encode_control(
         }
         EngineControlPacket::PlayerInfo(data) => encode_player_info(buffer, data),
         EngineControlPacket::JoinPlayer(data) => encode_join_player(buffer, data),
+        EngineControlPacket::RemovePlayer(data) => {
+            encode_remove_player(buffer, data);
+            Ok(())
+        }
         EngineControlPacket::PlayerSelect(data) => encode_player_select(buffer, data),
         EngineControlPacket::PlayerControl(data) => {
             encode_player_control(buffer, data);
@@ -2003,6 +2026,21 @@ mod tests {
                 "unexpected result for {encoded:02x?}"
             );
         }
+    }
+
+    #[test]
+    fn remove_player_uses_cpp_control_codec() {
+        // C4ControlRemovePlr writes signed IntPack Plr, one native bool byte,
+        // then inherited signed IntPack ByClient (C4Control.cpp:1290-1305).
+        let expected = EngineControlPacket::RemovePlayer(RemovePlayerControlData {
+            player: 130,
+            disconnected: true,
+            by_client: 7,
+        });
+        let encoded = [0x92, 0x82, 0x01, 0x01, 0x07];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
     }
 
     #[test]

@@ -3345,7 +3345,12 @@ fn eliminate_player(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Int(0));
         };
         if remove_direct {
-            context.record_player_command(PlayerCommand::Remove { player_id });
+            // Every peer reports success for a valid player, but only the
+            // control host appends CID_RemovePlr to Game.Input
+            // (C4Script.cpp:2823-2833).
+            if context.world.control_host {
+                context.record_player_command(PlayerCommand::Remove { player_id });
+            }
             return Ok(Value::Int(1));
         }
         if player.status == crate::PlayerStatus::Eliminated {

@@ -513,6 +513,18 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_remove_players(
+        &mut self,
+    ) -> Vec<(Tick, lc_engine::RemovePlayerControlData)> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitRemovePlayer { tick, remove } = command {
+                submitted.push((tick, remove));
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn take_submitted_client_updates(
         &mut self,
     ) -> Vec<lc_engine::ClientUpdateControlData> {
@@ -763,6 +775,7 @@ pub enum NetworkControl {
     ClientRemove(lc_engine::ClientRemoveControlData),
     PlayerInfo(PlayerInfoControlData),
     JoinPlayer(JoinPlayerControlData),
+    RemovePlayer(lc_engine::RemovePlayerControlData),
     SurrenderPlayer(lc_engine::SurrenderPlayerControlData),
     Vote(lc_engine::VoteControlData),
     VoteEnd(lc_engine::VoteControlData),
@@ -793,6 +806,10 @@ enum NetworkCommand {
     SubmitJoinPlayer {
         tick: Tick,
         join: JoinPlayerControlData,
+    },
+    SubmitRemovePlayer {
+        tick: Tick,
+        remove: lc_engine::RemovePlayerControlData,
     },
     SubmitClientUpdate(lc_engine::ClientUpdateControlData),
     SubmitClientRemove(lc_engine::ClientRemoveControlData),
@@ -1267,6 +1284,28 @@ impl NetworkManager {
             .map_err(|_| anyhow!("network worker is not accepting JoinPlayer controls"))
     }
 
+    pub fn submit_remove_player(
+        &self,
+        tick: Tick,
+        player: i32,
+        disconnected: bool,
+    ) -> Result<()> {
+        if self.local_client_id != HOST_CLIENT_ID {
+            return Err(anyhow!("only the network host may submit RemovePlr"));
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitRemovePlayer {
+                tick,
+                remove: lc_engine::RemovePlayerControlData {
+                    player,
+                    disconnected,
+                    by_client: i32::try_from(HOST_CLIENT_ID)
+                        .map_err(|_| anyhow!("host client id exceeds the RemovePlr wire field"))?,
+                },
+            })
+            .map_err(|_| anyhow!("network worker is not accepting RemovePlr controls"))
+    }
+
     pub fn submit_sync_check(&self, tick: Tick, mut check: SyncCheckPacket) {
         if let Ok(id) = i32::try_from(self.local_client_id) {
             check.by_client = id;
@@ -1684,6 +1723,13 @@ async fn run_host_worker(
                             current_millis(),
                         );
                     }
+                    NetworkCommand::SubmitRemovePlayer { tick, remove } => {
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::RemovePlayer(remove),
+                            current_millis(),
+                        );
+                    }
                     NetworkCommand::SubmitClientUpdate(update) => {
                         let data = encode_control_entry_payload(
                             &lc_engine::ControlPacket::ClientUpdate(update),
@@ -2065,6 +2111,11 @@ async fn run_client_worker(
                     NetworkCommand::SubmitJoinPlayer { .. } => {
                         let _ = event_tx.send(NetworkEvent::Error(
                             "client attempted to submit authoritative JoinPlayer".to_string(),
+                        ));
+                    }
+                    NetworkCommand::SubmitRemovePlayer { .. } => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to submit authoritative RemovePlr".to_string(),
                         ));
                     }
                     NetworkCommand::SubmitClientUpdate(_) => {
@@ -2549,6 +2600,9 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
         lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
         lc_engine::ControlPacket::JoinPlayer(join) => Some(NetworkControl::JoinPlayer(join)),
+        lc_engine::ControlPacket::RemovePlayer(remove) => {
+            Some(NetworkControl::RemovePlayer(remove))
+        }
         lc_engine::ControlPacket::InitScenarioPlayer(selection) => {
             Some(NetworkControl::InitScenarioPlayer(selection))
         }
@@ -3151,6 +3205,29 @@ mod tests {
                 },
             )]
         );
+    }
+
+    #[test]
+    fn host_manager_queues_remove_player_with_host_authorship_and_tick() {
+        let (host, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        host.submit_remove_player(23, 4, true)
+            .expect("host queues RemovePlr");
+        assert_eq!(
+            commands.take_submitted_remove_players(),
+            vec![(
+                23,
+                lc_engine::RemovePlayerControlData {
+                    player: 4,
+                    disconnected: true,
+                    by_client: 0,
+                },
+            )]
+        );
+
+        let (client, _events, mut client_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        assert!(client.submit_remove_player(41, 9, false).is_err());
+        assert!(client_commands.take_submitted_remove_players().is_empty());
     }
 
     #[test]

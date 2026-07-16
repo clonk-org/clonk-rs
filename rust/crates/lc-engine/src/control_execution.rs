@@ -792,7 +792,12 @@ impl ControlPlayerInfoRegistry {
         true
     }
 
-    pub fn mark_removed(&mut self, info_id: i32, disconnected: bool) -> bool {
+    pub fn mark_removed(
+        &mut self,
+        info_id: i32,
+        disconnected: bool,
+        game_part_frame: i32,
+    ) -> bool {
         let Some(info) = self.get_mut(info_id) else {
             return false;
         };
@@ -800,6 +805,7 @@ impl ControlPlayerInfoRegistry {
         if disconnected {
             info.flags |= crate::PLAYER_INFO_FLAG_DISCONNECTED;
         }
+        info.game_part_frame = game_part_frame;
         true
     }
 
@@ -1769,13 +1775,14 @@ mod tests {
 
         assert_eq!(registry.client_info_ids(3), vec![7, 8]);
         assert!(registry.mark_joined(7));
-        assert!(registry.mark_removed(7, true));
+        assert!(registry.mark_removed(7, true, 42));
         registry.on_client_part(3);
 
         let retained = registry.get(7).expect("joined history remains");
         assert_ne!(retained.flags & PLAYER_INFO_FLAG_JOINED, 0);
         assert_ne!(retained.flags & PLAYER_INFO_FLAG_REMOVED, 0);
         assert_ne!(retained.flags & crate::PLAYER_INFO_FLAG_DISCONNECTED, 0);
+        assert_eq!(retained.game_part_frame, 42);
         assert!(registry.get(8).is_none());
     }
 
