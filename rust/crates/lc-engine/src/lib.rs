@@ -14115,6 +14115,14 @@ pub struct GameGoalMenuRequest {
     pub open_menu: bool,
 }
 
+/// Process-local pause action requested by the script `PauseGame` builtin.
+/// The embedding app owns the actual console/network pause transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseGameRequest {
+    Halt,
+    Toggle,
+}
+
 impl ScriptControlPolicy {
     pub const fn live(console_active: bool) -> Self {
         Self {
@@ -14261,6 +14269,9 @@ pub struct Engine {
     /// Runtime presentation requests produced after synchronized goal
     /// evaluation. This is deliberately excluded from EngineState.
     pending_game_goal_menu_requests: Vec<GameGoalMenuRequest>,
+    /// Process-local console pause requests emitted by `PauseGame`. Shared
+    /// into copied host contexts so nested calls preserve script call order.
+    pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
     /// Explicit client-local players. `None` is the standalone/headless
     /// default where every registered player has local control.
     local_players: Option<HashSet<i32>>,
@@ -16331,6 +16342,7 @@ impl Engine {
             player_info_league_progress_updates: Vec::new(),
             pending_remove_player_controls: Vec::new(),
             pending_game_goal_menu_requests: Vec::new(),
+            pause_game_requests: Rc::new(RefCell::new(Vec::new())),
             local_players: None,
             active_message_board_input: None,
             message_board_commands: vec![InitialNetworkMessageBoardCommand::speed()],
@@ -20552,6 +20564,12 @@ impl Engine {
         std::mem::take(&mut self.pending_game_goal_menu_requests)
     }
 
+    /// Drain process-local pause actions in script call order. Replay calls
+    /// are suppressed before they reach this app-owned request channel.
+    pub fn take_pause_game_requests(&mut self) -> Vec<PauseGameRequest> {
+        std::mem::take(&mut *self.pause_game_requests.borrow_mut())
+    }
+
     pub fn set_local_players<I>(&mut self, players: I)
     where
         I: IntoIterator<Item = i32>,
@@ -21011,6 +21029,10 @@ impl Engine {
         )
         .with_network_game(self.network_game)
         .with_control_sync_mode(self.control_sync_mode())
+        .with_pause_game_requests(
+            self.replay_control,
+            Rc::clone(&self.pause_game_requests),
+        )
         .with_smoke_level(self.bubble_smoke_level())
         .with_max_players(self.max_players.unwrap_or_default())
         .with_fair_crew_parameters(self.use_fair_crew, self.fair_crew_strength)

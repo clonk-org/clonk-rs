@@ -36,10 +36,10 @@ use crate::{
     Direction, DrawTransform, EnvironmentSettings, FULL_CON, FloatVector2, GraphicsOverlayMode,
     Landscape, MenuRequest, MenuRequestKind, OWNER_NONE, ObjectBaseGraphics,
     ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
-    ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicalsUpdate,
-    PhysicsSettings, PlayerControlState, PlayerState, PlayerStatus, QueuedCommand, RgbColor,
-    ScoreboardState, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig, TeamConfiguration,
-    TeamInfo, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
+    ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PauseGameRequest,
+    PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState, PlayerStatus, QueuedCommand,
+    RgbColor, ScoreboardState, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig,
+    TeamConfiguration, TeamInfo, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
     encode_bridge_action_data,
 };
 #[cfg(test)]
@@ -1789,6 +1789,11 @@ pub struct HostWorldContext {
     /// `C4GameControl::SyncMode()`: network/replay control or an attached
     /// recording hides process-local view state from synchronized scripts.
     control_sync_mode: bool,
+    /// Process-local `Game.Control.isReplay()` state. Unlike SyncMode this
+    /// excludes ordinary network and recording sessions.
+    replay_control: bool,
+    /// App-owned console pause requests produced by `PauseGame`.
+    pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
     /// Effective `GetSmokeLevel` for sync-relevant FXU1 creation: 150 in
     /// network/recording sync mode, otherwise Config.Graphics.SmokeLevel.
     smoke_level: i32,
@@ -1917,6 +1922,8 @@ impl Default for HostWorldContext {
             team_configuration: TeamConfiguration::default(),
             network_game: false,
             control_sync_mode: false,
+            replay_control: false,
+            pause_game_requests: Rc::new(RefCell::new(Vec::new())),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
             max_players: 0,
             use_fair_crew: false,
@@ -2159,6 +2166,8 @@ impl HostWorldContext {
             team_configuration: TeamConfiguration::default(),
             network_game: false,
             control_sync_mode: false,
+            replay_control: false,
+            pause_game_requests: Rc::new(RefCell::new(Vec::new())),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
             max_players: 0,
             use_fair_crew: false,
@@ -2388,6 +2397,16 @@ impl HostWorldContext {
 
     pub(crate) fn with_control_sync_mode(mut self, control_sync_mode: bool) -> Self {
         self.control_sync_mode = control_sync_mode;
+        self
+    }
+
+    pub(crate) fn with_pause_game_requests(
+        mut self,
+        replay_control: bool,
+        requests: Rc<RefCell<Vec<PauseGameRequest>>>,
+    ) -> Self {
+        self.replay_control = replay_control;
+        self.pause_game_requests = requests;
         self
     }
 
@@ -5683,6 +5702,34 @@ fn reload_def(args: &[Value]) -> Result<Value, RuntimeError> {
 fn reload_particle(args: &[Value]) -> Result<Value, RuntimeError> {
     let _name = parse_native_c4_string_argument(args.first(), "ReloadParticle", "name")?;
     Ok(Value::Int(0))
+}
+
+/// FnPauseGame (C4Script.cpp:6042-6051). Console pausing is process-local:
+/// suppress it during replay and otherwise hand the halt/toggle action to the
+/// embedding app without mutating synchronized engine state.
+fn pause_game(args: &[Value]) -> Result<Value, RuntimeError> {
+    let toggle = value_to_bool(
+        args.first().unwrap_or(&Value::Nil),
+        "PauseGame",
+        "toggle",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        if let Some(context) = borrow.as_ref() {
+            if !context.world.replay_control {
+                context
+                    .world
+                    .pause_game_requests
+                    .borrow_mut()
+                    .push(if toggle {
+                        PauseGameRequest::Toggle
+                    } else {
+                        PauseGameRequest::Halt
+                    });
+            }
+        }
+    });
+    Ok(Value::Nil)
 }
 
 fn get_plr_value(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -13464,6 +13511,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("DoCrewExp", do_crew_exp);
     script.register_host_function("ReloadDef", reload_def);
     script.register_host_function("ReloadParticle", reload_particle);
+    script.register_host_function("PauseGame", pause_game);
     script.register_host_function("GetScore", get_score);
     script.register_host_function("GetScoreboardString", get_scoreboard_string);
     script.register_host_function("GetScoreboardData", get_scoreboard_data);
@@ -45950,6 +45998,7 @@ mod tests {
         "OnMessageBoardAnswer",
         "Or",
         "PathFree",
+        "PauseGame",
         "PlaceAnimal",
         "PlaceVegetation",
         "PlayerMessage",
@@ -52268,6 +52317,81 @@ public func RejectConstruction(x, y, builder)
                 .expect("unnamed reload executes"),
             Value::Int(0)
         );
+    }
+
+    #[test]
+    fn pause_game_requests_halt_and_toggle_but_is_a_replay_noop() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func Halt() { PauseGame(); return 7; }\n\
+                 func Toggle() { PauseGame(true); return 8; }\n\
+                 func ReturnValue() { return PauseGame(false); }",
+            )
+            .expect("PauseGame probes compile");
+
+        let mut engine = crate::Engine::new();
+        let world = engine.host_world_context();
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            assert_eq!(
+                script.call("Halt", &[]).expect("halt probe executes"),
+                Value::Int(7)
+            );
+            assert_eq!(
+                script.call("Toggle", &[]).expect("toggle probe executes"),
+                Value::Int(8)
+            );
+            assert_eq!(
+                script
+                    .call("ReturnValue", &[])
+                    .expect("return-value probe executes"),
+                Value::Nil
+            );
+            Ok::<_, RuntimeError>(())
+        });
+        result.expect("live PauseGame probes execute");
+        assert_eq!(
+            engine.take_pause_game_requests(),
+            vec![
+                PauseGameRequest::Halt,
+                PauseGameRequest::Toggle,
+                PauseGameRequest::Halt,
+            ]
+        );
+        assert!(engine.take_pause_game_requests().is_empty());
+
+        engine.set_replay_control(true);
+        let replay_world = engine.host_world_context();
+        let (result, _) = with_effect_context(None, &[], replay_world, 1, || {
+            assert_eq!(
+                script.call("Halt", &[]).expect("replay halt probe executes"),
+                Value::Int(7)
+            );
+            assert_eq!(
+                script
+                    .call("Toggle", &[])
+                    .expect("replay toggle probe executes"),
+                Value::Int(8)
+            );
+            Ok::<_, RuntimeError>(())
+        });
+        result.expect("replay PauseGame probes execute");
+        assert!(engine.take_pause_game_requests().is_empty());
+
+        let sync_requests = Rc::new(RefCell::new(Vec::new()));
+        let sync_world = HostWorldContext::default()
+            .with_control_sync_mode(true)
+            .with_pause_game_requests(false, Rc::clone(&sync_requests));
+        let (result, _) = with_effect_context(None, &[], sync_world, 1, || {
+            script
+                .call("Halt", &[])
+                .expect("synchronized halt probe executes");
+            Ok::<_, RuntimeError>(())
+        });
+        result.expect("non-replay synchronized PauseGame executes");
+        assert_eq!(*sync_requests.borrow(), vec![PauseGameRequest::Halt]);
     }
 
     #[test]
