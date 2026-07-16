@@ -6391,7 +6391,10 @@ impl Object {
                 } else if !contact.has_vertex_cnat(CNAT_RIGHT) {
                     redirect_force(&mut self.fixed_velocity.y, &mut self.fixed_velocity.x, 1);
                 } else {
-                    if movement.rotateable > 0 && contact.count() == 1 && !self.state.alive {
+                    if self.state.ocf & crate::ocf::ROTATE != 0
+                        && contact.count() == 1
+                        && !self.state.alive
+                    {
                         redirect_force(
                             &mut self.fixed_velocity.y,
                             &mut self.rotation_velocity,
@@ -6710,8 +6713,8 @@ impl Object {
 
     /// Accumulate angular velocity into the fixed rotation, mirroring the fixed
     /// state pieces of C++ `C4Movement.cpp:373-436`: the rotation block is
-    /// skipped unchanged for non-rotateable definitions. Otherwise it applies
-    /// `fix_r += rdir * 5`; finite `Def->Rotateable` ranges clamp
+    /// gated by the cached OCF_Rotate bit. Otherwise it applies `fix_r +=
+    /// rdir * 5`; finite `Def->Rotateable` ranges clamp
     /// `fix_r`/zero `rdir`, then contact-aware rotation walks one degree at a
     /// time before the half-circle wrap projects the integer degree.
     fn advance_fixed_rotation(
@@ -6724,7 +6727,7 @@ impl Object {
         solid_mask_removed: bool,
         mut on_contact: impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
     ) -> Result<(bool, u32), EngineError> {
-        if movement.rotateable == 0 {
+        if self.state.ocf & crate::ocf::ROTATE == 0 {
             return Ok((false, 0));
         }
         if !self.rotation_velocity.is_nonzero() {

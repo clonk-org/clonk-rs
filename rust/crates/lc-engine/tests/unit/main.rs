@@ -57184,7 +57184,61 @@ protected func Initialize() {
         assert_eq!(engine.objects[idx].fixed_position, fixed_position);
     }
 
-    fn rotation_redirect_fixture(ydir: C4Fixed, rdir: C4Fixed) -> (Engine, ObjectId) {
+    #[test]
+    fn movement_rotation_entry_uses_cached_ocf_rotate_con_gate() {
+        let mut definition = simple_definition("ConstructionWheel");
+        definition.set_rotateable(360);
+
+        let mut engine = Engine::with_seed(61);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("construction wheel registers");
+        let spawn = |engine: &mut Engine, x, construction| {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("ConstructionWheel")
+                        .with_category(CATEGORY_OBJECT)
+                        .with_position(Vector2::new(x, 5))
+                        .with_construction(construction)
+                        .with_rotation_velocity(itofix(1))
+                        .with_mobile(true),
+                )
+                .expect("construction wheel spawns")
+        };
+        let minimum = spawn(&mut engine, 5, 100);
+        let rotateable = spawn(&mut engine, 15, 101);
+
+        engine.tick().expect("rotation gate tick succeeds");
+
+        let minimum = engine
+            .objects
+            .get(engine.find_object_index(minimum).expect("minimum wheel remains"))
+            .expect("minimum wheel exists");
+        assert_eq!(minimum.state.ocf & ocf::ROTATE, 0);
+        assert_eq!(minimum.state.rotation, 0);
+        assert_eq!(minimum.fixed_rotation, C4Fixed::ZERO);
+        assert_eq!(minimum.rotation_velocity, itofix(1));
+
+        let rotateable = engine
+            .objects
+            .get(
+                engine
+                    .find_object_index(rotateable)
+                    .expect("rotateable wheel remains"),
+            )
+            .expect("rotateable wheel exists");
+        assert_ne!(rotateable.state.ocf & ocf::ROTATE, 0);
+        assert_eq!(rotateable.state.rotation, 5);
+        assert_eq!(rotateable.fixed_rotation, itofix(5));
+        assert_eq!(rotateable.rotation_velocity, itofix(1));
+    }
+
+    fn rotation_redirect_fixture_at_con(
+        ydir: C4Fixed,
+        rdir: C4Fixed,
+        construction: i32,
+    ) -> (Engine, ObjectId) {
         let mut definition = simple_definition("RedirectWheel");
         definition.set_rotateable(360);
         definition
@@ -57212,14 +57266,22 @@ protected func Initialize() {
                     .with_fixed_position(FixedVec2::from_ints(30, 11))
                     .with_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, ydir))
                     .with_rotation_velocity(rdir)
+                    .with_construction(construction)
                     .with_mobile(true)
                     .with_loaded(true),
             )
             .expect("redirect wheel spawns");
         let idx = engine.find_object_index(id).expect("redirect wheel exists");
         assert!(!engine.objects[idx].state.alive);
-        assert_ne!(engine.objects[idx].state.ocf & ocf::ROTATE, 0);
+        assert_eq!(
+            engine.objects[idx].state.ocf & ocf::ROTATE != 0,
+            construction > 100
+        );
         (engine, id)
+    }
+
+    fn rotation_redirect_fixture(ydir: C4Fixed, rdir: C4Fixed) -> (Engine, ObjectId) {
+        rotation_redirect_fixture_at_con(ydir, rdir, FULL_CON)
     }
 
     fn exec_redirect_wheel_movement(engine: &mut Engine, id: ObjectId) {
@@ -57255,6 +57317,31 @@ protected func Initialize() {
         assert_eq!(object.fixed_rotation, C4Fixed::ZERO);
         assert_eq!(object.fixed_velocity.y, C4Fixed::ZERO);
         assert_eq!(object.rotation_velocity, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn vertical_redirect_uses_cached_ocf_rotate_con_gate() {
+        let (mut minimum, minimum_id) =
+            rotation_redirect_fixture_at_con(-itofix(1), fixed100(25), 100);
+        exec_redirect_wheel_movement(&mut minimum, minimum_id);
+        let minimum = &minimum.objects[minimum
+            .find_object_index(minimum_id)
+            .expect("minimum wheel remains")];
+        assert_eq!(minimum.fixed_velocity.y, C4Fixed::ZERO);
+        assert_eq!(minimum.rotation_velocity, fixed100(25));
+        assert_eq!(minimum.fixed_rotation, C4Fixed::ZERO);
+        assert_eq!(minimum.state.rotation, 0);
+
+        let (mut rotateable, rotateable_id) =
+            rotation_redirect_fixture_at_con(-itofix(1), fixed100(25), 101);
+        exec_redirect_wheel_movement(&mut rotateable, rotateable_id);
+        let rotateable = &rotateable.objects[rotateable
+            .find_object_index(rotateable_id)
+            .expect("rotateable wheel remains")];
+        assert_eq!(rotateable.fixed_velocity.y, C4Fixed::ZERO);
+        assert_eq!(rotateable.rotation_velocity, C4Fixed::ZERO);
+        assert_eq!(rotateable.fixed_rotation, C4Fixed::ZERO);
+        assert_eq!(rotateable.state.rotation, 0);
     }
 
     #[test]
