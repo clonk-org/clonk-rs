@@ -1,8 +1,107 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::support::real_scenario::load_installed_scenario;
-use lc_engine::{math, SpawnConfig, Vector2};
+use lc_engine::{math, Definition, DefinitionId, SpawnConfig, Vector2};
 use lc_script::Value;
+
+#[test]
+fn component_all_uses_the_instance_custom_recipe_and_calling_builder() {
+    const CUSTOM_SCRIPT: &str = r#"#strict 2
+local seen_builder, seen_instance;
+
+protected func GetCustomComponents(object builder)
+{
+    seen_builder = builder;
+    seen_instance = this();
+    return [WOOD, WOOD];
+}
+"#;
+    const BUILDER_SCRIPT: &str = r#"#strict 2
+public func Probe(object custom, object mixed, object pure)
+{
+    return [ComponentAll(custom, WOOD), ComponentAll(custom, METL),
+            ComponentAll(mixed, WOOD), ComponentAll(pure, WOOD)];
+}
+"#;
+    const GLOBAL_ONLY_SCRIPT: &str = r#"#strict 2
+global func GetCustomComponents(object builder)
+{
+    return [WOOD, WOOD];
+}
+"#;
+
+    let mut engine = lc_engine::Engine::new();
+    for (id, name, script) in [
+        ("WOOD", "Wood", ""),
+        ("METL", "Metal", ""),
+        ("CUST", "Custom recipe", CUSTOM_SCRIPT),
+        ("PLAI", "Plain recipe", GLOBAL_ONLY_SCRIPT),
+        ("BULD", "Builder", BUILDER_SCRIPT),
+    ] {
+        engine
+            .register_definition(
+                Definition::from_script(id, name, script).expect("definition compiles"),
+            )
+            .expect("definition registers");
+    }
+
+    let custom = engine
+        .spawn_object(
+            SpawnConfig::new("CUST")
+                .with_components(HashMap::from([(DefinitionId::from("METL"), 1)])),
+        )
+        .expect("custom-recipe object spawns with a conflicting instance ledger");
+    let mixed = engine
+        .spawn_object(SpawnConfig::new("PLAI").with_components(HashMap::from([
+            (DefinitionId::from("WOOD"), 1),
+            (DefinitionId::from("METL"), 1),
+        ])))
+        .expect("mixed fallback object spawns");
+    let pure = engine
+        .spawn_object(SpawnConfig::new("PLAI").with_components(HashMap::from([
+            (DefinitionId::from("WOOD"), 2),
+            (DefinitionId::from("METL"), 0),
+        ])))
+        .expect("pure fallback object spawns");
+    let builder = engine
+        .spawn_object(SpawnConfig::new("BULD"))
+        .expect("builder spawns");
+
+    let builder_index = engine.find_object_index(builder).expect("builder index");
+    assert_eq!(
+        engine
+            .call_object_function(
+                builder_index,
+                "Probe",
+                vec![
+                    Value::Object(custom.as_u64()),
+                    Value::Object(mixed.as_u64()),
+                    Value::Object(pure.as_u64()),
+                ],
+            )
+            .expect("ComponentAll probe executes"),
+        Value::Array(vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(true),
+        ])
+    );
+
+    let custom_state = engine
+        .object_snapshot(custom)
+        .expect("custom-recipe object remains");
+    assert_eq!(
+        custom_state.local_vars.get("seen_builder"),
+        Some(&Value::Object(builder.as_u64())),
+        "cthr->Obj is passed as the custom-recipe builder"
+    );
+    assert_eq!(
+        custom_state.local_vars.get("seen_instance"),
+        Some(&Value::Object(custom.as_u64())),
+        "the callback executes with the queried object as its instance"
+    );
+}
 
 #[test]
 fn dead_fish_embowel_uses_the_trappers_custom_components() {

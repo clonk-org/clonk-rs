@@ -5887,8 +5887,9 @@ fn get_needed_mat_str(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 /// FnComponentAll (C4Script.cpp:1873-1883): the explicit object is required;
-/// every positive-count component other than `component` makes the result
-/// false. Non-positive C4IDList entries are ignored.
+/// execute its definition's GetCustomComponents with the queried object as
+/// `this` and the caller as its builder argument before falling back to the
+/// live instance ledger, then reject every positive-count foreign component.
 fn component_all(args: &[Value]) -> Result<Value, RuntimeError> {
     let target = parse_object_reference_argument(
         args.first().unwrap_or(&Value::Nil),
@@ -5900,37 +5901,28 @@ fn component_all(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Nil);
     };
 
-    HOST_CONTEXT.with(|cell| {
+    // Capture Def and cthr->Obj before the callback. The overload may mutate
+    // either object, but C++ has already selected the recipe definition and
+    // builder passed to C4Def::GetComponents at that point.
+    let definition_and_builder = HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
-        let Some(object) = context.get_world_object(target) else {
-            return Ok(Value::Nil);
-        };
-        let components = context
-            .object_scope(target)
-            .and_then(|scope| scope.pending_update.components.clone())
-            .or_else(|| object.full_state().map(|state| state.components.clone()))
-            .unwrap_or_else(|| {
-                context
-                    .definition_metadata(object.definition_id())
-                    .map(|metadata| {
-                        metadata
-                            .components
-                            .iter()
-                            .map(|(id, count)| (DefinitionId::from(id.as_str()), *count))
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            });
-        Ok(Value::Bool(components.iter().all(|(id, count)| {
-            *count <= 0
-                || component
-                    .as_deref()
-                    .is_some_and(|component| id.as_str().eq_ignore_ascii_case(component))
-        })))
-    })
+        let context = borrow.as_ref()?;
+        Some((
+            context.object_effective_definition_id(target)?,
+            context.script_object_context,
+        ))
+    });
+    let Some((definition, builder)) = definition_and_builder else {
+        return Ok(Value::Nil);
+    };
+
+    let components = resolve_component_list(&definition, Some(target), builder)?;
+    Ok(Value::Bool(components.iter().all(|(id, count)| {
+        *count <= 0
+            || component
+                .as_deref()
+                .is_some_and(|component| id.eq_ignore_ascii_case(component))
+    })))
 }
 
 /// FnInLiquid (C4Script.cpp:1864-1868): reads the object's CACHED
@@ -35713,7 +35705,7 @@ fn resolve_component_list(
     });
     let builder = builder.map(object_reference_value).unwrap_or(Value::Nil);
     let custom = script
-        .filter(|script| script.has_function("GetCustomComponents"))
+        .filter(|script| script.has_local_function("GetCustomComponents"))
         .and_then(|script| {
             match instance {
                 Some(instance) => call_world_object_function_in_scope(
@@ -57118,6 +57110,10 @@ func ProbeBadIndex(id) {
             state.components = components
                 .iter()
                 .map(|(id, count)| (DefinitionId::from(*id), *count))
+                .collect();
+            state.component_order = components
+                .iter()
+                .map(|(id, _)| DefinitionId::from(*id))
                 .collect();
             HostWorldObject::new(
                 ObjectId::new(id),
