@@ -9,6 +9,14 @@ use serde::{Deserialize, Serialize};
 use crate::scenario::ScenarioError;
 use crate::{CrewPermanentPortrait, CrewPortrait, CrewPortraitState, DefinitionId};
 
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn default_crew_rank_name() -> String {
     "Clonk".to_string()
 }
@@ -39,6 +47,9 @@ pub struct CrewInfo {
     pub rank_name: String,
     /// `Experience` (default 0) — GetIdle prefers the highest.
     pub experience: i32,
+    /// Persistent number of rounds in which this crew info participated.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub rounds: i32,
     /// Persistent `C4ObjectInfoCore::Physical`, compiled from the sibling
     /// `[Physical]` section and promotion-updated for `rank` on load.
     #[serde(default)]
@@ -59,6 +70,10 @@ pub struct CrewInfo {
     pub participation: i32,
     /// Recruited this round (C4ObjectInfo::InAction).
     pub in_action: bool,
+    /// Sticky per-round participation bit (`C4ObjectInfo::WasInAction`).
+    /// Retiring or dying clears `in_action` but not this flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub was_in_action: bool,
     /// Game time at the last Recruit call; meaningful only in action.
     #[serde(default)]
     pub in_action_time: i32,
@@ -140,6 +155,7 @@ impl CrewInfo {
             rank,
             rank_name: entry("ObjectInfo", "RankName").unwrap_or_else(default_crew_rank_name),
             experience: int("ObjectInfo", "Experience", 0),
+            rounds: int("ObjectInfo", "Rounds", 0),
             physical,
             death_count: int("ObjectInfo", "DeathCount", 0),
             total_playing_time: int("ObjectInfo", "TotalPlayingTime", 0),
@@ -147,6 +163,7 @@ impl CrewInfo {
             age: int("ObjectInfo", "Age", 0),
             participation: int("ObjectInfo", "Participation", 1),
             in_action: false,
+            was_in_action: false,
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
@@ -246,6 +263,10 @@ pub struct PlayerFile {
     /// `[Player] Score`, the persistent settlement score
     /// (C4InfoCore.cpp:156; default 0).
     pub score: i32,
+    /// Persistent completed-round counters from `C4PlayerInfoCore`.
+    pub rounds: i32,
+    pub rounds_won: i32,
+    pub rounds_lost: i32,
     /// `[Player] TotalPlayingTime` in seconds
     /// (C4InfoCore.cpp:160; default 0).
     pub total_playing_time: i32,
@@ -279,6 +300,9 @@ impl Default for PlayerFile {
         Self {
             name: "Neuling".to_string(),
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             pref_color: 0,
             pref_color_dw: 0xff,
@@ -357,6 +381,9 @@ impl PlayerFile {
         Ok(Self {
             name: entry("Player", "Name").unwrap_or_else(|| "Neuling".to_string()),
             score: int("Player", "Score", 0),
+            rounds: int("Player", "Rounds", 0),
+            rounds_won: int("Player", "RoundsWon", 0),
+            rounds_lost: int("Player", "RoundsLost", 0),
             total_playing_time: int("Player", "TotalPlayingTime", 0),
             pref_color: int("Preferences", "Color", 0),
             pref_color_dw: entry("Preferences", "ColorDw")
@@ -579,7 +606,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("player dir");
         std::fs::write(
             root.join("Player.txt"),
-            "[Player]\nName=Tyler\nRank=3\nScore=250\nTotalPlayingTime=1234\n\n[Preferences]\nColor=4\nColorDw=12345678\nPosition=2\nControl=3\nMouse=0\nAutoStopControl=1\n",
+            "[Player]\nName=Tyler\nRank=3\nScore=250\nRounds=11\nRoundsWon=7\nRoundsLost=4\nTotalPlayingTime=1234\n\n[Preferences]\nColor=4\nColorDw=12345678\nPosition=2\nControl=3\nMouse=0\nAutoStopControl=1\n",
         )
         .expect("write core");
 
@@ -587,7 +614,7 @@ mod tests {
         std::fs::create_dir_all(&first).expect("info dir");
         std::fs::write(
             first.join("ObjectInfo.txt"),
-            "[ObjectInfo]\nid=COWB\nName=Wipf\nDeathMessage=@Gone // but remembered  \nPortraitFile=TRPR::Captain\nRank=2\nRankName=Lieutenant\nExperience=900\nDeathCount=7\nTotalPlayingTime=17999\nBirthday=123\nAge=7\nParticipation=1\n\n[Physical]\nWalk=80000\n",
+            "[ObjectInfo]\nid=COWB\nName=Wipf\nDeathMessage=@Gone // but remembered  \nPortraitFile=TRPR::Captain\nRank=2\nRankName=Lieutenant\nExperience=900\nRounds=6\nDeathCount=7\nTotalPlayingTime=17999\nBirthday=123\nAge=7\nParticipation=1\n\n[Physical]\nWalk=80000\n",
         )
         .expect("write info");
 
@@ -604,6 +631,7 @@ mod tests {
         // C4PlayerInfoCore::CompileFunc stores both values in [Player]
         // (C4InfoCore.cpp:148-161).
         assert_eq!(player.score, 250);
+        assert_eq!((player.rounds, player.rounds_won, player.rounds_lost), (11, 7, 4));
         assert_eq!(player.total_playing_time, 1_234);
         assert_eq!(player.pref_color, 4);
         assert_eq!(player.pref_color_dw, 12345678);
@@ -626,6 +654,7 @@ mod tests {
         assert_eq!(wipf.rank, 2);
         assert_eq!(wipf.rank_name, "Lieutenant");
         assert_eq!(wipf.experience, 900);
+        assert_eq!(wipf.rounds, 6);
         assert_eq!(wipf.physical.walk, 80_000);
         assert_eq!(wipf.physical.energy, 60_000);
         assert_eq!(wipf.physical.can_scale, 1);
@@ -652,6 +681,7 @@ mod tests {
         );
         assert_eq!(wipf.participation, 1);
         assert!(!wipf.in_action);
+        assert!(!wipf.was_in_action);
         assert!(!wipf.has_died);
         let zorro = player
             .crew

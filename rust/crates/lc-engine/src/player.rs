@@ -289,6 +289,12 @@ pub struct PlayerState {
     #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub score: i32,
     #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub rounds: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub rounds_won: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub rounds_lost: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub total_playing_time: i32,
     #[serde(default)]
     pub value: i32,
@@ -738,6 +744,9 @@ pub struct Player {
     wealth: i32,
     points: i32,
     score: i32,
+    rounds: i32,
+    rounds_won: i32,
+    rounds_lost: i32,
     total_playing_time: i32,
     /// `C4Player::GameJoinTime`: local runtime baseline, deliberately absent
     /// from PlayerState/save data (C4Player.h:78; C4Player.cpp:389-390).
@@ -833,6 +842,9 @@ impl Player {
             wealth: 0,
             points: 0,
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             game_join_time: 0,
             retire_delay: 0,
@@ -1082,6 +1094,9 @@ impl Player {
             wealth,
             points,
             score,
+            rounds,
+            rounds_won,
+            rounds_lost,
             total_playing_time,
             value,
             initial_value,
@@ -1121,6 +1136,9 @@ impl Player {
             wealth,
             points,
             score,
+            rounds,
+            rounds_won,
+            rounds_lost,
             total_playing_time,
             game_join_time: 0,
             retire_delay: 0,
@@ -1197,6 +1215,9 @@ impl Player {
             wealth,
             points,
             score,
+            rounds,
+            rounds_won,
+            rounds_lost,
             total_playing_time,
             value,
             initial_value,
@@ -1303,6 +1324,9 @@ impl Player {
             wealth,
             points,
             score,
+            rounds,
+            rounds_won,
+            rounds_lost,
             total_playing_time,
             game_join_time: 0,
             retire_delay: 0,
@@ -1379,6 +1403,9 @@ impl Player {
             wealth: self.wealth,
             points: self.points,
             score: self.score,
+            rounds: self.rounds,
+            rounds_won: self.rounds_won,
+            rounds_lost: self.rounds_lost,
             total_playing_time: self.total_playing_time,
             value: self.value,
             initial_value: self.initial_value,
@@ -1599,11 +1626,12 @@ impl Player {
         self.won = true;
     }
 
-    /// C4Player::Evaluate's cooperative settlement-score and profile-time
-    /// update. Returns the old/new score pair exactly once.
+    /// C4Player::Evaluate's settlement score, persistent round counters and
+    /// profile-time update. Returns the old/new score pair exactly once.
     pub(crate) fn evaluate(
         &mut self,
         average_value_gain: i32,
+        melee: bool,
         game_time: i32,
     ) -> Option<(i32, i32)> {
         if self.evaluated {
@@ -1615,8 +1643,19 @@ impl Player {
         ) && !self.surrendered;
         let score_old = self.score;
         let success_bonus = if self.won { 100 } else { 0 };
-        let final_score = average_value_gain.max(0).wrapping_add(success_bonus);
+        let settlement_score = if melee {
+            self.value_gain
+        } else {
+            average_value_gain
+        };
+        let final_score = settlement_score.max(0).wrapping_add(success_bonus);
         self.score = self.score.wrapping_add(final_score);
+        self.rounds = self.rounds.wrapping_add(1);
+        if self.won {
+            self.rounds_won = self.rounds_won.wrapping_add(1);
+        } else {
+            self.rounds_lost = self.rounds_lost.wrapping_add(1);
+        }
         self.total_playing_time = self
             .total_playing_time
             .wrapping_add(game_time.wrapping_sub(self.game_join_time));
@@ -1662,6 +1701,18 @@ impl Player {
 
     pub fn score(&self) -> i32 {
         self.score
+    }
+
+    pub fn rounds(&self) -> i32 {
+        self.rounds
+    }
+
+    pub fn rounds_won(&self) -> i32 {
+        self.rounds_won
+    }
+
+    pub fn rounds_lost(&self) -> i32 {
+        self.rounds_lost
     }
 
     pub fn total_playing_time(&self) -> i32 {
@@ -2156,6 +2207,9 @@ pub struct PlayerConfig {
     wealth: i32,
     points: i32,
     score: i32,
+    rounds: i32,
+    rounds_won: i32,
+    rounds_lost: i32,
     total_playing_time: i32,
     value: i32,
     initial_value: i32,
@@ -2186,6 +2240,9 @@ impl PlayerConfig {
             wealth: 0,
             points: 0,
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             value: 0,
             initial_value: 0,
@@ -2237,6 +2294,13 @@ impl PlayerConfig {
 
     pub fn with_score(mut self, score: i32) -> Self {
         self.score = score;
+        self
+    }
+
+    pub fn with_rounds(mut self, rounds: i32, rounds_won: i32, rounds_lost: i32) -> Self {
+        self.rounds = rounds;
+        self.rounds_won = rounds_won;
+        self.rounds_lost = rounds_lost;
         self
     }
 
@@ -2670,12 +2734,14 @@ mod tests {
         let player = PlayerConfig::new(2, "Profile")
             .with_player_info_id(41)
             .with_score(250)
+            .with_rounds(11, 7, 4)
             .with_total_playing_time(1_234)
             .build();
 
         let state = player.to_state();
         assert_eq!(state.player_info_id, 41);
         assert_eq!(state.score, 250);
+        assert_eq!((state.rounds, state.rounds_won, state.rounds_lost), (11, 7, 4));
         assert_eq!(state.total_playing_time, 1_234);
         assert_eq!(player.game_join_time(), 0);
 

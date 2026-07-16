@@ -19814,6 +19814,7 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                                 .unwrap_or("Clonk")
                                 .to_string(),
                             experience: 0,
+                            rounds: 0,
                             death_count: 0,
                             total_playing_time: 0,
                             birthday: 0,
@@ -20018,6 +20019,7 @@ fn relink_host_crew_info(
         }
     }
     entry.in_action = recruit;
+    entry.was_in_action |= recruit;
     let key = (link.player_id, entry.id.clone());
     if let Some(pool) = state.idle.get_mut(&key) {
         pool.retain(|(candidate, _)| *candidate != link);
@@ -20076,6 +20078,7 @@ fn recruit_or_create_crew_info(
         if let Some((link, _)) = picked.as_ref() {
             if let Some(entry) = state.entries.get_mut(link) {
                 entry.in_action = true;
+                entry.was_in_action = true;
             }
         }
         picked
@@ -20103,6 +20106,7 @@ fn recruit_or_create_crew_info(
             rank: entry.rank,
             rank_name: entry.rank_name.clone(),
             experience: entry.experience,
+            rounds: entry.rounds,
             death_count: entry.death_count,
             total_playing_time: entry.total_playing_time,
             birthday: entry.birthday,
@@ -20191,6 +20195,7 @@ fn recruit_or_create_crew_info(
             rank: 0,
             rank_name,
             experience: 0,
+            rounds: 0,
             physical,
             death_count: 0,
             total_playing_time: 0,
@@ -20198,6 +20203,7 @@ fn recruit_or_create_crew_info(
             age: 0,
             participation: 1,
             in_action: false,
+            was_in_action: false,
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
@@ -20214,6 +20220,7 @@ fn recruit_or_create_crew_info(
         rank: entry.rank,
         rank_name: entry.rank_name.clone(),
         experience: entry.experience,
+        rounds: entry.rounds,
         death_count: entry.death_count,
         total_playing_time: entry.total_playing_time,
         birthday: entry.birthday,
@@ -49010,6 +49017,9 @@ global func PreInitializePlayer(int player)
             name: "Player".into(),
             player_info_id: info.id,
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             team: None,
             color_dw: 0x00ff_ffff,
@@ -51467,6 +51477,7 @@ func RenameInfo(object target, string name, bool make_valid)
             rank: 0,
             rank_name: "Clonk".to_string(),
             experience,
+            rounds: 0,
             physical: crate::PhysicalInfo::default(),
             death_count: 0,
             total_playing_time: 0,
@@ -51474,6 +51485,7 @@ func RenameInfo(object target, string name, bool make_valid)
             age: 0,
             participation: 1,
             in_action: false,
+            was_in_action: false,
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
@@ -51484,6 +51496,9 @@ func RenameInfo(object target, string name, bool make_valid)
                 name: "Name owner".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -51863,6 +51878,7 @@ func Trigger(object pOther)
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
+                    rounds: 0,
                     death_count: 0,
                     total_playing_time: 0,
                     birthday: 0,
@@ -51899,6 +51915,9 @@ func Announce()
                 name: "Death message owner".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -51911,6 +51930,7 @@ func Announce()
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
+                    rounds: 0,
                     physical: crate::PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
@@ -51918,6 +51938,7 @@ func Announce()
                     age: 0,
                     participation: 1,
                     in_action: false,
+                    was_in_action: false,
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
@@ -58844,6 +58865,9 @@ func Probe(object crew, object info_less)
                 name: "Extra data owner".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -58856,6 +58880,7 @@ func Probe(object crew, object info_less)
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
+                    rounds: 0,
                     physical: crate::PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
@@ -58863,6 +58888,7 @@ func Probe(object crew, object info_less)
                     age: 0,
                     participation: 1,
                     in_action: false,
+                    was_in_action: false,
                     in_action_time: 0,
                     has_died: false,
                     extra_data: extra_data.clone(),
@@ -58976,6 +59002,9 @@ func Transfer(object donor, object recipient)
                 name: "Extra data owner".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -58988,6 +59017,7 @@ func Transfer(object donor, object recipient)
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
+                    rounds: 0,
                     physical: crate::PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
@@ -58995,6 +59025,7 @@ func Transfer(object donor, object recipient)
                     age: 0,
                     participation: 1,
                     in_action: false,
+                    was_in_action: false,
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),

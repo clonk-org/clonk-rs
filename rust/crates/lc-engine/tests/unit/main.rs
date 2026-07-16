@@ -1962,6 +1962,7 @@ func Ejection(object item)
                 rank: 0,
                 rank_name: "Clonk".to_string(),
                 experience: 0,
+                rounds: 0,
                 physical: PhysicalInfo::default(),
                 death_count: 4,
                 total_playing_time: 17,
@@ -1969,6 +1970,7 @@ func Ejection(object item)
                 age: 0,
                 participation: 1,
                 in_action: false,
+                was_in_action: false,
                 in_action_time: 0,
                 has_died: false,
                 extra_data: Vec::new(),
@@ -2062,6 +2064,7 @@ func Recruit() { return MakeCrewMember(this(), 0); }
             rank: 0,
             rank_name: "Clonk".to_string(),
             experience: 0,
+            rounds: 0,
             physical: PhysicalInfo::default(),
             death_count: 0,
             total_playing_time: 0,
@@ -2069,6 +2072,7 @@ func Recruit() { return MakeCrewMember(this(), 0); }
             age: 0,
             participation: 1,
             in_action: false,
+            was_in_action: false,
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
@@ -8789,6 +8793,9 @@ func FxUpperStart(pTarget, iNumber, iTemp)
                     name: name.to_string(),
                     player_info_id: 0,
                     score: 0,
+                    rounds: 0,
+                    rounds_won: 0,
+                    rounds_lost: 0,
                     total_playing_time: 0,
                     team: None,
                     color_dw: 0xff0000,
@@ -16567,6 +16574,9 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                 name: "Fighter owner".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -16579,6 +16589,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 998,
+                    rounds: 0,
                     physical: PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
@@ -16586,6 +16597,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                     age: 0,
                     participation: 1,
                     in_action: false,
+                    was_in_action: false,
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
@@ -18022,6 +18034,9 @@ public func RemoveCaptain(int player)
             name: "Captain owner".to_string(),
             player_info_id: 1,
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             team: Some(1),
             color_dw: 0x00f4_0000,
@@ -18035,6 +18050,7 @@ public func RemoveCaptain(int player)
                     rank: 1,
                     rank_name: "Ensign".to_string(),
                     experience: 1_000,
+                    rounds: 0,
                     physical: PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
@@ -18042,6 +18058,7 @@ public func RemoveCaptain(int player)
                     age: 0,
                     participation: 1,
                     in_action: false,
+                    was_in_action: false,
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
@@ -18054,6 +18071,7 @@ public func RemoveCaptain(int player)
                     rank: 5,
                     rank_name: "Lieutenant Colonel".to_string(),
                     experience: 5_000,
+                    rounds: 0,
                     physical: PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
@@ -18061,6 +18079,7 @@ public func RemoveCaptain(int player)
                     age: 0,
                     participation: 1,
                     in_action: false,
+                    was_in_action: false,
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
@@ -28799,6 +28818,9 @@ public func TrainTemporaryScale()
                 name: "Training owner".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -28811,6 +28833,7 @@ public func TrainTemporaryScale()
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
+                    rounds: 0,
                     physical: PhysicalInfo {
                         scale: 80_000,
                         ..PhysicalInfo::default()
@@ -28821,6 +28844,7 @@ public func TrainTemporaryScale()
                     age: 0,
                     participation: 1,
                     in_action: false,
+                    was_in_action: false,
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
@@ -29019,6 +29043,9 @@ public func TrainTemporaryScale()
                 name: "Info owner".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -29031,6 +29058,7 @@ public func TrainTemporaryScale()
                     rank: 2,
                     rank_name: "Lieutenant".to_string(),
                     experience: 3_000,
+                    rounds: 0,
                     physical: PhysicalInfo {
                         energy: 60_000,
                         walk: 80_000,
@@ -29047,6 +29075,7 @@ public func TrainTemporaryScale()
                     age: 0,
                     participation: 1,
                     in_action: false,
+                    was_in_action: false,
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
@@ -29113,6 +29142,9 @@ public func TrainTemporaryScale()
                 name: "Fair owner".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -29125,6 +29157,7 @@ public func TrainTemporaryScale()
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
+                    rounds: 0,
                     physical: PhysicalInfo {
                         scale: 99_000,
                         hangle: 99_000,
@@ -29138,6 +29171,7 @@ public func TrainTemporaryScale()
                     age: 0,
                     participation: 1,
                     in_action: false,
+                    was_in_action: false,
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
@@ -29259,6 +29293,9 @@ public func TrainTemporaryScale()
                     name: "Tester".into(),
                     player_info_id: 0,
                     score: 0,
+                    rounds: 0,
+                    rounds_won: 0,
+                    rounds_lost: 0,
                     total_playing_time: 0,
                     team: None,
                     color_dw: 0xff0000,
@@ -29293,6 +29330,9 @@ public func TrainTemporaryScale()
                     name: "Tester".into(),
                     player_info_id: 0,
                     score: 0,
+                    rounds: 0,
+                    rounds_won: 0,
+                    rounds_lost: 0,
                     total_playing_time: 0,
                     team: None,
                     color_dw: 0xff0000,
@@ -30143,6 +30183,9 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
             name: "Birthday player".to_string(),
             player_info_id: 1,
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             team: None,
             color_dw: 0xff0000,
@@ -30155,6 +30198,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
                 rank: 0,
                 rank_name: "Clonk".to_string(),
                 experience: 0,
+                rounds: 6,
                 physical: PhysicalInfo::default(),
                 death_count: 0,
                 total_playing_time: 17_999,
@@ -30162,6 +30206,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
                 age: 0,
                 participation: 1,
                 in_action: false,
+                was_in_action: false,
                 in_action_time: 0,
                 has_died: false,
                 extra_data: Vec::new(),
@@ -30176,6 +30221,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         let link = linked_state.crew_info_links[&crew_id];
         let roster_entry = &linked_state.crew_info_rosters[&link.player_id][link.roster_index];
         let expected_info_fields = (
+            roster_entry.rounds,
             roster_entry.total_playing_time,
             roster_entry.birthday,
             roster_entry.age,
@@ -30183,6 +30229,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         );
 
         let mut stale_info = linked_state.crew_object_infos[&crew_id].clone();
+        stale_info.rounds = -9;
         stale_info.total_playing_time = -1;
         stale_info.birthday = -2;
         stale_info.age = -3;
@@ -30198,6 +30245,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         let live_info = engine.crew_object_info(crew_id).unwrap();
         assert_eq!(
             (
+                live_info.rounds,
                 live_info.total_playing_time,
                 live_info.birthday,
                 live_info.age,
@@ -30209,6 +30257,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
 
         let mut legacy_state = engine.capture_state();
         let legacy_info = legacy_state.crew_object_infos.get_mut(&crew_id).unwrap();
+        legacy_info.rounds = -10;
         legacy_info.total_playing_time = -5;
         legacy_info.birthday = -6;
         legacy_info.age = -7;
@@ -30217,6 +30266,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         let restored_info = engine.crew_object_info(crew_id).unwrap();
         assert_eq!(
             (
+                restored_info.rounds,
                 restored_info.total_playing_time,
                 restored_info.birthday,
                 restored_info.age,
@@ -32603,6 +32653,9 @@ protected func CalcValue(object base, int player)
             name: name.to_string(),
             player_info_id: 1,
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             team: None,
             color_dw: 0xff0000,
@@ -32917,6 +32970,7 @@ global func InitializePlayer(int player)
                 }
                 .to_string(),
                 experience: 0,
+                rounds: 0,
                 physical: PhysicalInfo::default(),
                 death_count: 0,
                 total_playing_time: 0,
@@ -32924,6 +32978,7 @@ global func InitializePlayer(int player)
                 age: 0,
                 participation: 1,
                 in_action: false,
+                was_in_action: false,
                 in_action_time: 0,
                 has_died: false,
                 extra_data: Vec::new(),
@@ -33275,6 +33330,7 @@ func ControlUpSingle()
             rank: 0,
             rank_name: "Clonk".to_string(),
             experience: 0,
+            rounds: 0,
             physical: PhysicalInfo::default(),
             death_count: 0,
             total_playing_time: 0,
@@ -33282,6 +33338,7 @@ func ControlUpSingle()
             age: 0,
             participation: 1,
             in_action: false,
+            was_in_action: false,
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
@@ -33938,6 +33995,9 @@ func ControlUpSingle()
                 name: name.to_string(),
                 player_info_id,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: if pref_color == 0 { 0xff0000 } else { 0x0000ff },
@@ -34114,6 +34174,9 @@ func ControlUpSingle()
                 name: "Profile".to_string(),
                 player_info_id: 41,
                 score: 250,
+                rounds: 11,
+                rounds_won: 7,
+                rounds_lost: 4,
                 total_playing_time: 1_234,
                 team: None,
                 color_dw: 0xff0000,
@@ -34129,6 +34192,10 @@ func ControlUpSingle()
         let player = engine.player(joined.number()).expect("joined player");
         assert_eq!(player.player_info_id(), 41);
         assert_eq!(player.score(), 250);
+        assert_eq!(
+            (player.rounds(), player.rounds_won(), player.rounds_lost()),
+            (11, 7, 4)
+        );
         assert_eq!(player.total_playing_time(), 1_234);
         assert_eq!(
             player.game_join_time(),
@@ -34158,6 +34225,9 @@ public func ReadIDs(int first, int second)
             name: name.to_string(),
             player_info_id,
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             team: None,
             color_dw: 0x00ff_0000,
@@ -34248,6 +34318,9 @@ public func ReadIDs(int first, int second)
             name: name.to_string(),
             player_info_id,
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             team: None,
             color_dw: 0xff0000,
@@ -43881,6 +43954,9 @@ func RemoveAndRecruit(object target) {
                 name: "Duplicate info owner".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -43894,6 +43970,7 @@ func RemoveAndRecruit(object target) {
                         rank: 4,
                         rank_name: "Major".to_string(),
                         experience: 900,
+                        rounds: 0,
                         physical: PhysicalInfo::default(),
                         death_count: 0,
                         total_playing_time: 0,
@@ -43901,6 +43978,7 @@ func RemoveAndRecruit(object target) {
                         age: 0,
                         participation: 1,
                         in_action: false,
+                        was_in_action: false,
                         in_action_time: 0,
                         has_died: false,
                         extra_data: Vec::new(),
@@ -43913,6 +43991,7 @@ func RemoveAndRecruit(object target) {
                         rank: 4,
                         rank_name: "Major".to_string(),
                         experience: 900,
+                        rounds: 0,
                         physical: PhysicalInfo::default(),
                         death_count: 0,
                         total_playing_time: 0,
@@ -43920,6 +43999,7 @@ func RemoveAndRecruit(object target) {
                         age: 0,
                         participation: 1,
                         in_action: false,
+                        was_in_action: false,
                         in_action_time: 0,
                         has_died: false,
                         extra_data: Vec::new(),
@@ -44122,6 +44202,9 @@ func RemoveAndRecruit(object target) {
                 name: "Hazard trainee".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -44134,6 +44217,7 @@ func RemoveAndRecruit(object target) {
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
+                    rounds: 0,
                     physical: PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
@@ -44141,6 +44225,7 @@ func RemoveAndRecruit(object target) {
                     age: 0,
                     participation: 1,
                     in_action: false,
+                    was_in_action: false,
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
@@ -44221,6 +44306,9 @@ func AwardSelf(int amount) {
                 name: "Experience owner".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -44233,6 +44321,7 @@ func AwardSelf(int amount) {
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
+                    rounds: 0,
                     physical: PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 0,
@@ -44240,6 +44329,7 @@ func AwardSelf(int amount) {
                     age: 0,
                     participation: 1,
                     in_action: false,
+                    was_in_action: false,
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
@@ -44796,6 +44886,9 @@ func RemoveAndGrabSelf() {
                 name: "Identity owner".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -44808,6 +44901,7 @@ func RemoveAndGrabSelf() {
                     rank: 4,
                     rank_name: "Major".to_string(),
                     experience: 8_000,
+                    rounds: 0,
                     physical: PhysicalInfo::default(),
                     death_count: 0,
                     total_playing_time: 17,
@@ -44815,6 +44909,7 @@ func RemoveAndGrabSelf() {
                     age: 0,
                     participation: 3,
                     in_action: false,
+                    was_in_action: false,
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
@@ -60023,6 +60118,9 @@ public func QueryTypes(int user_player, int script_player)
                 name: "User".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0x00ff_0000,
@@ -60570,6 +60668,9 @@ func Probe() {
             name: "Chooser".to_string(),
             player_info_id: 1,
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             team: None,
             color_dw: 0xff0000,
@@ -61540,6 +61641,7 @@ func OnOwnerChanged()
             PlayerConfig::new(0, "Player")
                 .with_player_info_id(41)
                 .with_score(250)
+                .with_rounds(11, 7, 4)
                 .with_total_playing_time(1_234)
                 .with_initial_value(100),
         )?;
@@ -61572,6 +61674,7 @@ func OnOwnerChanged()
         assert!(player.won, "post-OnGameOver survivor is a winner");
         assert!(player.evaluated);
         assert_eq!(player.score, 415, "65 gain + 100 winner bonus");
+        assert_eq!((player.rounds, player.rounds_won, player.rounds_lost), (12, 8, 4));
         assert_eq!(player.total_playing_time, 1_253);
         assert_eq!(
             first.round_results.goals,
@@ -61614,6 +61717,7 @@ func OnOwnerChanged()
             .find(|player| player.id == 0)
             .expect("still-evaluated player");
         assert_eq!(player.score, 415, "second tick must not score again");
+        assert_eq!((player.rounds, player.rounds_won, player.rounds_lost), (12, 8, 4));
         assert_eq!(player.total_playing_time, 1_253);
         assert_eq!(
             second

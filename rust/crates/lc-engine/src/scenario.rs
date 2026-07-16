@@ -4200,6 +4200,34 @@ impl ScenarioValueStore {
         Self::from_core(&runtime)
     }
 
+    /// `C4SGame::IsMelee`: inspect the post-ConvertGoals C4IDList and use
+    /// the first exact MELE/MEL2 entry's count for each id.
+    pub(crate) fn is_melee(&self) -> bool {
+        let goals = self
+            .sections
+            .iter()
+            .find(|section| section.name == "Game")
+            .and_then(|section| section.entries.iter().find(|entry| entry.name == "Goals"))
+            .map(|entry| entry.values.as_slice())
+            .unwrap_or_default();
+
+        ["MELE", "MEL2"].into_iter().any(|wanted| {
+            goals.chunks(2).find_map(|pair| {
+                let ScenarioValue::C4Id(id) = pair.first()? else {
+                    return None;
+                };
+                (id == wanted).then(|| {
+                    pair.get(1)
+                        .and_then(|value| match value {
+                            ScenarioValue::Int(count) => Some(*count),
+                            _ => None,
+                        })
+                        .unwrap_or(0)
+                })
+            }).is_some_and(|count| count != 0)
+        })
+    }
+
     /// Mirrors C4ValueGetCompiler's traversal: with no section, same-name
     /// fields in successive sections contribute to one primitive stream;
     /// with a section, only that named C4Scenario child is traversed.
@@ -13664,12 +13692,16 @@ RandomTeamCount=2
             1,
             "C4IDList::GetIDCount uses the first duplicate"
         );
+        assert!(!ScenarioValueStore::from_runtime_core(&duplicate_melee.core, false).is_melee());
         let duplicate_melee_reversed =
             parse_legacy_scenario_text("[Head]\n\n[Game]\nGoals=MELE=1;MELE=0\n")
                 .expect("reversed duplicate goals parse");
         assert_eq!(
             legacy_effective_min_players(&duplicate_melee_reversed.core),
             2
+        );
+        assert!(
+            ScenarioValueStore::from_runtime_core(&duplicate_melee_reversed.core, false).is_melee()
         );
 
         let explicit =
@@ -13685,6 +13717,199 @@ RandomTeamCount=2
             configured_specification: "RoundLoader*".to_string(),
         };
         assert_eq!(custom_loader.effective_specification(), "RoundLoader*");
+    }
+
+    #[test]
+    fn evaluation_uses_melee_personal_gain_and_counts_profile_and_crew_rounds() {
+        fn crew_info(
+            name: &str,
+            rounds: i32,
+            total_playing_time: i32,
+            in_action: bool,
+            was_in_action: bool,
+            in_action_time: i32,
+        ) -> crate::player_file::CrewInfo {
+            crate::player_file::CrewInfo {
+                id: "CLNK".to_string(),
+                name: name.to_string(),
+                death_message: String::new(),
+                rank: 0,
+                rank_name: "Clonk".to_string(),
+                experience: 0,
+                rounds,
+                physical: Default::default(),
+                death_count: 0,
+                total_playing_time,
+                birthday: 0,
+                age: 0,
+                participation: 1,
+                in_action,
+                was_in_action,
+                in_action_time,
+                has_died: false,
+                extra_data: Vec::new(),
+                portraits: Default::default(),
+            }
+        }
+
+        fn evaluate(source: &str) -> Engine {
+            let parsed = parse_legacy_scenario_text(source).expect("scenario core parses");
+            let mut engine = Engine::new();
+            engine.set_scenario_values(ScenarioValueStore::from_runtime_core(
+                &parsed.core,
+                false,
+            ));
+            engine
+                .register_player(
+                    crate::PlayerConfig::new(0, "Winner")
+                        .with_score(250)
+                        .with_rounds(4, 2, 2)
+                        .with_initial_value(100),
+                )
+                .expect("winner registers");
+            engine
+                .register_player(
+                    crate::PlayerConfig::new(1, "Loser")
+                        .with_status(crate::PlayerStatus::Eliminated)
+                        .with_score(80)
+                        .with_rounds(7, 5, 2)
+                        .with_initial_value(100),
+                )
+                .expect("loser registers");
+            engine
+                .player_mut(0)
+                .expect("winner exists")
+                .update_asset_value(165, 0);
+            engine
+                .player_mut(1)
+                .expect("loser exists")
+                .update_asset_value(75, 0);
+            engine.game_time = 20;
+            engine.crew_rosters.insert(
+                0,
+                vec![
+                    crew_info("Active", 3, 10, true, true, 5),
+                    crew_info("Retired", 7, 17, false, true, 4),
+                    crew_info("Unused", 9, 30, false, false, 0),
+                ],
+            );
+            engine.evaluate_game().expect("game evaluates");
+            engine
+        }
+
+        let cooperative = evaluate("[Game]\n");
+        let coop_winner = cooperative.player(0).expect("co-op winner remains");
+        let coop_loser = cooperative.player(1).expect("co-op loser remains");
+        assert_eq!((coop_winner.score(), coop_loser.score()), (382, 112));
+        assert_eq!(
+            (
+                coop_winner.rounds(),
+                coop_winner.rounds_won(),
+                coop_winner.rounds_lost()
+            ),
+            (5, 3, 2)
+        );
+        assert_eq!(
+            (
+                coop_loser.rounds(),
+                coop_loser.rounds_won(),
+                coop_loser.rounds_lost()
+            ),
+            (8, 5, 3)
+        );
+
+        let mut melee = evaluate("[Game]\nMode=1\n");
+        assert!(melee.scenario_values.is_melee());
+        assert_eq!(melee.player(0).map(crate::Player::score), Some(415));
+        assert_eq!(melee.player(1).map(crate::Player::score), Some(80));
+        let roster = melee.crew_rosters.get(&0).expect("crew roster remains");
+        assert_eq!((roster[0].rounds, roster[0].total_playing_time), (4, 25));
+        assert!(!roster[0].in_action, "active crew is retired at evaluation");
+        assert_eq!((roster[1].rounds, roster[1].total_playing_time), (8, 17));
+        assert_eq!((roster[2].rounds, roster[2].total_playing_time), (9, 30));
+
+        let before = melee.capture_state();
+        melee.evaluate_game().expect("second evaluation is ignored");
+        assert_eq!(melee.capture_state().players, before.players);
+        assert_eq!(melee.capture_state().crew_info_rosters, before.crew_info_rosters);
+    }
+
+    #[test]
+    fn delayed_player_retirement_uses_the_same_melee_and_crew_evaluation() {
+        let parsed = parse_legacy_scenario_text("[Game]\nGoals=MELE=1\n")
+            .expect("melee core parses");
+        let mut engine = Engine::new();
+        engine.set_scenario_values(ScenarioValueStore::from_runtime_core(
+            &parsed.core,
+            false,
+        ));
+        engine
+            .register_player(
+                crate::PlayerConfig::new(3, "Retiring")
+                    .with_status(crate::PlayerStatus::Eliminated)
+                    .with_score(10)
+                    .with_rounds(2, 1, 1)
+                    .with_initial_value(100),
+            )
+            .expect("retiring player registers");
+        engine
+            .register_player(crate::PlayerConfig::new(4, "Peer").with_initial_value(100))
+            .expect("peer registers");
+        engine
+            .player_mut(3)
+            .expect("retiring player exists")
+            .update_asset_value(140, 0);
+        engine
+            .player_mut(4)
+            .expect("peer exists")
+            .update_asset_value(200, 0);
+        engine.game_time = 12;
+        engine.crew_rosters.insert(
+            3,
+            vec![crate::player_file::CrewInfo {
+                id: "CLNK".to_string(),
+                name: "Retiring crew".to_string(),
+                death_message: String::new(),
+                rank: 0,
+                rank_name: "Clonk".to_string(),
+                experience: 0,
+                rounds: 5,
+                physical: Default::default(),
+                death_count: 0,
+                total_playing_time: 3,
+                birthday: 0,
+                age: 0,
+                participation: 1,
+                in_action: true,
+                was_in_action: true,
+                in_action_time: 2,
+                has_died: false,
+                extra_data: Vec::new(),
+                portraits: Default::default(),
+            }],
+        );
+
+        let retired = engine.retire_player(3).expect("player retires");
+        assert_eq!(retired.score(), 50, "melee uses personal gain 40, not average 70");
+        assert_eq!(
+            (retired.rounds(), retired.rounds_won(), retired.rounds_lost()),
+            (3, 1, 2)
+        );
+        let info = &engine
+            .crew_rosters
+            .get(&3)
+            .expect("retired roster persists")[0];
+        assert_eq!((info.rounds, info.total_playing_time), (6, 13));
+        assert!(!info.in_action);
+        assert_eq!(
+            engine
+                .round_results
+                .players
+                .iter()
+                .find(|result| result.player_info_id == retired.player_info_id())
+                .and_then(|result| result.score_new),
+            Some(50)
+        );
     }
 
     #[test]
@@ -15757,6 +15982,9 @@ global func Step(state, frame, random)
                 name: "Tester".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -15806,6 +16034,9 @@ global func Step(state, frame, random)
                 name: "Tester".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -15818,6 +16049,7 @@ global func Step(state, frame, random)
                     rank: 1,
                     rank_name: "Ensign".to_string(),
                     experience: 120,
+                    rounds: 0,
                     physical: crate::PhysicalInfo {
                         energy: 55_000,
                         scale: 30_000,
@@ -15837,6 +16069,7 @@ global func Step(state, frame, random)
                     age: 0,
                     participation: 1,
                     in_action: false,
+                    was_in_action: false,
                     in_action_time: 0,
                     has_died: false,
                     extra_data: Vec::new(),
@@ -15965,6 +16198,9 @@ global func Step(state, frame, random)
                 name: "Tyler".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xf40000,
@@ -17200,6 +17436,9 @@ public func ActualizePhase(pClonk)
                 name: "Tester".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -17235,6 +17474,9 @@ public func ActualizePhase(pClonk)
                     name: "Remote".to_string(),
                     player_info_id: 41,
                     score: 0,
+                    rounds: 0,
+                    rounds_won: 0,
+                    rounds_lost: 0,
                     total_playing_time: 0,
                     team: None,
                     color_dw: 0x00ff_0000,
@@ -17276,6 +17518,9 @@ public func ActualizePhase(pClonk)
                     name: "Remote".to_string(),
                     player_info_id: 42,
                     score: 0,
+                    rounds: 0,
+                    rounds_won: 0,
+                    rounds_lost: 0,
                     total_playing_time: 0,
                     team: None,
                     color_dw: 0x0000_ff00,
@@ -17344,6 +17589,9 @@ public func ActualizePhase(pClonk)
                 name: "Chooser".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -17414,6 +17662,9 @@ public func ActualizePhase(pClonk)
                 name: "Chooser".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -17471,6 +17722,9 @@ public func ActualizePhase(pClonk)
                 name: "Chooser".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -17530,6 +17784,9 @@ public func ActualizePhase(pClonk)
             name: "Chooser".to_string(),
             player_info_id: 0,
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             team: None,
             color_dw: 0x0011_2233,
@@ -17606,6 +17863,9 @@ public func ActualizePhase(pClonk)
                 name: "Chooser".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0x0011_2233,
@@ -17651,6 +17911,9 @@ public func ActualizePhase(pClonk)
             name: "Chooser".to_string(),
             player_info_id: 0,
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             team: None,
             color_dw: 0x0011_2233,
@@ -17761,6 +18024,9 @@ public func ActualizePhase(pClonk)
                     name: name.to_string(),
                     player_info_id: 0,
                     score: 0,
+                    rounds: 0,
+                    rounds_won: 0,
+                    rounds_lost: 0,
                     total_playing_time: 0,
                     team: None,
                     color_dw: info_color,
@@ -17837,6 +18103,9 @@ public func ActualizePhase(pClonk)
                 name: "Solo".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0x0055_cc88,
@@ -17904,6 +18173,9 @@ public func ActualizePhase(pClonk)
                 name: "Chooser".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -18241,6 +18513,9 @@ public func ActualizePhase(pClonk)
                 name: "Tester".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -18418,6 +18693,9 @@ public func ActualizePhase(pClonk)
                 name: "Team player".to_string(),
                 player_info_id: 1,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: Some(7),
                 color_dw: 0,
@@ -18542,6 +18820,9 @@ public func ActualizePhase(pClonk)
                 name: "Tester".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -18982,6 +19263,9 @@ public func ActualizePhase(pClonk)
                 name: "Tester".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,
@@ -23389,6 +23673,9 @@ mod game_start_sync {
                 name: "Test".into(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 team: None,
                 color_dw: 0xff0000,

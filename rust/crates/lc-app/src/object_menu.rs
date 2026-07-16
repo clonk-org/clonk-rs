@@ -3491,6 +3491,9 @@ mod tests {
                 name: "Dragon Rock menu parity".to_string(),
                 player_info_id: 0,
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 // Drachenfels has an active custom team list. A C++ player
                 // with no selected team stops before ScenarioInit; this menu

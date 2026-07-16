@@ -1594,6 +1594,10 @@ pub struct JoinPlayerConfig {
     pub player_info_id: i32,
     /// Persistent C4PlayerInfoCore settlement score.
     pub score: i32,
+    /// Persistent C4PlayerInfoCore completed-round counters.
+    pub rounds: i32,
+    pub rounds_won: i32,
+    pub rounds_lost: i32,
     /// Persistent C4PlayerInfoCore total playing time in seconds.
     pub total_playing_time: i32,
     /// Team id (0/None when teamless).
@@ -1960,6 +1964,9 @@ pub struct CrewObjectInfo {
     #[serde(default = "default_crew_rank_name")]
     pub rank_name: String,
     pub experience: i32,
+    /// Persistent C4ObjectInfoCore participation-round tally.
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub rounds: i32,
     /// Persistent C4ObjectInfoCore death tally.
     #[serde(default)]
     pub death_count: i32,
@@ -17718,6 +17725,7 @@ impl Engine {
         let mut player_config = PlayerConfig::new(number, config.name.clone())
             .with_player_info_id(player_info_id)
             .with_score(config.score)
+            .with_rounds(config.rounds, config.rounds_won, config.rounds_lost)
             .with_total_playing_time(config.total_playing_time);
         if config.team.is_some() {
             player_config = player_config.with_team(config.team);
@@ -18667,6 +18675,7 @@ impl Engine {
                 rank: info.rank,
                 rank_name: info.rank_name.clone(),
                 experience: info.experience,
+                rounds: info.rounds,
                 death_count: info.death_count,
                 total_playing_time: info.total_playing_time,
                 birthday: info.birthday,
@@ -18756,6 +18765,7 @@ impl Engine {
                 );
                 let roster = self.crew_rosters.entry(number).or_default();
                 roster[index].in_action = true; // pHiExp->Recruit()
+                roster[index].was_in_action = true;
                 roster[index].in_action_time = self.game_time;
                 roster[index].rank_name = rank_name;
                 return Some((index, roster[index].clone()));
@@ -18907,6 +18917,7 @@ impl Engine {
             rank: 0,
             rank_name,
             experience: 0,
+            rounds: 0,
             physical,
             death_count: 0,
             total_playing_time: 0,
@@ -18914,6 +18925,7 @@ impl Engine {
             age: 0,
             participation: 1,
             in_action: false,
+            was_in_action: false,
             in_action_time: 0,
             has_died: false,
             extra_data: Vec::new(),
@@ -19364,22 +19376,7 @@ impl Engine {
             });
             sum / i32::try_from(self.players.len()).unwrap_or(i32::MAX)
         };
-        let evaluated = {
-            let player = self
-                .players
-                .get_mut(&id)
-                .ok_or(EngineError::UnknownPlayer(id))?;
-            player
-                .evaluate(average_value_gain, self.game_time)
-                .map(|(score_old, score_new)| {
-                    (
-                        player.player_info_id(),
-                        player.total_playing_time() as u32,
-                        score_old,
-                        score_new,
-                    )
-                })
-        };
+        let evaluated = self.evaluate_player(id, average_value_gain)?;
         if let Some((player_info_id, total_playing_time, score_old, score_new)) = evaluated {
             let league_progress_data = self
                 .player_info_league_progress_data
@@ -19410,6 +19407,73 @@ impl Engine {
             }
         }
         self.remove_player_internal(id, false)
+    }
+
+    /// C4Player::Evaluate plus its owned C4ObjectInfoList::Evaluate. Delayed
+    /// retirement and game-over evaluation must use this identical path.
+    fn evaluate_player(
+        &mut self,
+        id: i32,
+        average_value_gain: i32,
+    ) -> Result<Option<(i32, u32, i32, i32)>, EngineError> {
+        let melee = self.scenario_values.is_melee();
+        let evaluated = {
+            let player = self
+                .players
+                .get_mut(&id)
+                .ok_or(EngineError::UnknownPlayer(id))?;
+            player
+                .evaluate(average_value_gain, melee, self.game_time)
+                .map(|(score_old, score_new)| {
+                    (
+                        player.player_info_id(),
+                        player.total_playing_time() as u32,
+                        score_old,
+                        score_new,
+                    )
+                })
+        };
+        if evaluated.is_some() {
+            self.evaluate_player_crew_infos(id);
+        }
+        Ok(evaluated)
+    }
+
+    /// C4ObjectInfoList::Evaluate: retire active entries, then count the
+    /// round for each info whose sticky WasInAction bit was ever armed.
+    fn evaluate_player_crew_infos(&mut self, player_id: i32) {
+        let Some(roster) = self.crew_rosters.get_mut(&player_id) else {
+            return;
+        };
+        for entry in roster.iter_mut() {
+            if entry.in_action {
+                entry.total_playing_time = entry
+                    .total_playing_time
+                    .wrapping_add(self.game_time.wrapping_sub(entry.in_action_time));
+                entry.in_action = false;
+            }
+            if entry.was_in_action {
+                entry.rounds = entry.rounds.wrapping_add(1);
+            }
+        }
+
+        let linked = self
+            .crew_info_links
+            .iter()
+            .filter_map(|(&object_id, &link)| {
+                (link.player_id == player_id).then_some((object_id, link.roster_index))
+            })
+            .collect::<Vec<_>>();
+        let infos = Rc::make_mut(&mut self.crew_object_infos);
+        for (object_id, roster_index) in linked {
+            let Some(entry) = roster.get(roster_index) else {
+                continue;
+            };
+            if let Some(info) = infos.get_mut(&object_id) {
+                info.rounds = entry.rounds;
+                info.total_playing_time = entry.total_playing_time;
+            }
+        }
     }
 
     pub fn player(&self, id: i32) -> Option<&Player> {
@@ -22341,8 +22405,8 @@ impl Engine {
         }
 
         // Cooperative games award every player the average of all positive
-        // ValueGain values (C4PlayerList::AverageValueGain). A melee flag is
-        // not modeled yet, so do not infer one from goals or player count.
+        // ValueGain values; C4Player::Evaluate selects the player's own gain
+        // instead when the converted scenario goal list is melee.
         let average_value_gain = if self.players.is_empty() {
             0
         } else {
@@ -22355,22 +22419,7 @@ impl Engine {
         let mut player_numbers: Vec<_> = self.players.keys().copied().collect();
         player_numbers.sort_unstable();
         for number in player_numbers {
-            let evaluated = {
-                let player = self
-                    .players
-                    .get_mut(&number)
-                    .ok_or(EngineError::UnknownPlayer(number))?;
-                player
-                    .evaluate(average_value_gain, self.game_time)
-                    .map(|(score_old, score_new)| {
-                        (
-                            player.player_info_id(),
-                            player.total_playing_time() as u32,
-                            score_old,
-                            score_new,
-                        )
-                    })
-            };
+            let evaluated = self.evaluate_player(number, average_value_gain)?;
             let Some((player_info_id, total_playing_time, score_old, score_new)) = evaluated else {
                 continue;
             };
@@ -29922,6 +29971,13 @@ impl Engine {
         self.exec_cursor = None;
         self.note_objects_changed();
         self.crew_rosters = state.crew_info_rosters.clone();
+        // Older Rust states predate C4ObjectInfo::WasInAction. Active or
+        // already-dead entries prove participation and can be repaired.
+        for roster in self.crew_rosters.values_mut() {
+            for info in roster {
+                info.was_in_action |= info.in_action || info.has_died;
+            }
+        }
         self.crew_info_order = state.crew_info_order.clone();
         for (&player_id, roster) in &self.crew_rosters {
             let order = self.crew_info_order.entry(player_id).or_default();
@@ -29949,6 +30005,7 @@ impl Engine {
             if let Some(info) = Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id) {
                 info.death_message = entry.death_message.clone();
                 info.rank_name = entry.rank_name.clone();
+                info.rounds = entry.rounds;
                 info.total_playing_time = entry.total_playing_time;
                 info.birthday = entry.birthday;
                 info.age = entry.age;
@@ -31909,6 +31966,7 @@ impl Engine {
                         rank: entry.rank,
                         rank_name: entry.rank_name.clone(),
                         experience: entry.experience,
+                        rounds: entry.rounds,
                         death_count: entry.death_count,
                         total_playing_time: entry.total_playing_time,
                         birthday: entry.birthday,
@@ -32312,6 +32370,7 @@ impl Engine {
                             entry.has_died = has_died;
                             if recruit && !entry.in_action {
                                 entry.in_action = true;
+                                entry.was_in_action = true;
                                 entry.in_action_time = self.game_time;
                                 if let Some(rank_name) = recruited_rank_name.as_ref() {
                                     entry.rank_name = rank_name.clone();
@@ -32323,6 +32382,7 @@ impl Engine {
                             info.rank = entry.rank;
                             info.rank_name = entry.rank_name.clone();
                             info.experience = entry.experience;
+                            info.rounds = entry.rounds;
                             info.death_count = entry.death_count;
                             info.total_playing_time = entry.total_playing_time;
                             info.birthday = entry.birthday;

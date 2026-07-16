@@ -301,6 +301,9 @@ mod tests {
         let player_file = PlayerFile {
             name: "Alice".to_string(),
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             pref_color: 4,
             pref_color_dw: 0x12_34_56,
@@ -384,6 +387,9 @@ mod tests {
             PlayerFile {
                 name: "Runtime".to_string(),
                 score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
                 total_playing_time: 0,
                 pref_color: 4,
                 pref_color_dw: 0x65_43_21,
@@ -436,6 +442,9 @@ mod tests {
         let player = |name: &str| PlayerFile {
             name: name.to_string(),
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             pref_color: 0,
             pref_color_dw: 0x11_22_33,
@@ -520,6 +529,9 @@ mod tests {
         let player_file = |name: &str| PlayerFile {
             name: name.to_string(),
             score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
             total_playing_time: 0,
             pref_color: 0,
             pref_color_dw: 0x11_22_33,

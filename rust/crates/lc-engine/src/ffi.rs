@@ -705,6 +705,11 @@ impl RuntimeHandle {
         } else {
             let (
                 name,
+                score,
+                rounds,
+                rounds_won,
+                rounds_lost,
+                total_playing_time,
                 color_dw,
                 pref_color,
                 pref_position,
@@ -715,6 +720,11 @@ impl RuntimeHandle {
                 .map(|file| {
                     (
                         file.name,
+                        file.score,
+                        file.rounds,
+                        file.rounds_won,
+                        file.rounds_lost,
+                        file.total_playing_time,
                         file.pref_color_dw & 0xffffff,
                         file.pref_color,
                         file.pref_position,
@@ -727,6 +737,11 @@ impl RuntimeHandle {
                     let control_style = false;
                     (
                         "Neuling".to_string(),
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
                         0xff,
                         0,
                         0,
@@ -738,8 +753,11 @@ impl RuntimeHandle {
             crate::JoinPlayerConfig {
                 name,
                 player_info_id: 0,
-                score: 0,
-                total_playing_time: 0,
+                score,
+                rounds,
+                rounds_won,
+                rounds_lost,
+                total_playing_time,
                 team: None,
                 color_dw,
                 pref_color,
