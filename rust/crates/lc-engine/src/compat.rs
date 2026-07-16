@@ -5677,6 +5677,14 @@ fn reload_def(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(0))
 }
 
+/// FnReloadParticle (C4Script.cpp:4992-4996). Particle definitions are static
+/// in Rust, so retain the native nullable-string conversion and report the
+/// unsupported resource reload as C4ValueInt false.
+fn reload_particle(args: &[Value]) -> Result<Value, RuntimeError> {
+    let _name = parse_native_c4_string_argument(args.first(), "ReloadParticle", "name")?;
+    Ok(Value::Int(0))
+}
+
 fn get_plr_value(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
@@ -13455,6 +13463,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("DoScore", do_score);
     script.register_host_function("DoCrewExp", do_crew_exp);
     script.register_host_function("ReloadDef", reload_def);
+    script.register_host_function("ReloadParticle", reload_particle);
     script.register_host_function("GetScore", get_score);
     script.register_host_function("GetScoreboardString", get_scoreboard_string);
     script.register_host_function("GetScoreboardData", get_scoreboard_data);
@@ -45953,6 +45962,7 @@ mod tests {
         "PushParticles",
         "Random",
         "ReloadDef",
+        "ReloadParticle",
         "RemoveEffect",
         "RemoveObject",
         "RemoveUnusedTexMapEntries",
@@ -52232,6 +52242,30 @@ public func RejectConstruction(x, y, builder)
         );
         assert_eq!(
             script.call("Local", &[]).expect("local reload executes"),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn reload_particle_is_registered_and_returns_false_while_unsupported() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func Named() { return ReloadParticle(\"Smoke\"); }\n\
+                 func Unnamed() { return ReloadParticle(); }",
+            )
+            .expect("ReloadParticle probes compile");
+
+        assert_eq!(
+            script.call("Named", &[]).expect("named reload executes"),
+            Value::Int(0)
+        );
+        assert_eq!(
+            script
+                .call("Unnamed", &[])
+                .expect("unnamed reload executes"),
             Value::Int(0)
         );
     }
