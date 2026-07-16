@@ -43267,6 +43267,7 @@ func Explicit(object target) {
         let mut crew = Definition::from_script("CREW", "Crew", script)
             .expect("MakeCrewMember probe compiles");
         crew.set_crew_member(true);
+        crew.set_value(17);
         engine.register_definition(crew).expect("crew registers");
 
         let caller = engine
@@ -43321,6 +43322,16 @@ func Explicit(object target) {
         );
         assert_eq!(engine.player(1).expect("player one").crew(), &[target]);
         assert_eq!(engine.object_controller(target), Some(1));
+
+        engine
+            .update_player_asset_values()
+            .expect("cross-player crew values update");
+        let original_owner = engine.player(0).expect("original owner remains");
+        assert_eq!(original_owner.objects_owned(), 2);
+        assert_eq!(original_owner.value(), 34);
+        let recruiting_player = engine.player(1).expect("recruiting player remains");
+        assert_eq!(recruiting_player.objects_owned(), 0);
+        assert_eq!(recruiting_player.value(), 0);
     }
 
     #[test]
