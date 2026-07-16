@@ -7323,6 +7323,7 @@ public func Activate(object clonk)
         let roster_entry = |name: &str, experience: i32| crate::player_file::CrewInfo {
             id: "Test".to_string(),
             name: name.to_string(),
+            death_message: String::new(),
             rank: 0,
             rank_name: "Clonk".to_string(),
             experience,
@@ -7350,6 +7351,7 @@ public func Activate(object clonk)
                 CrewObjectInfo {
                     definition_id: "Test".into(),
                     name: name.to_string(),
+                    death_message: String::new(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience,

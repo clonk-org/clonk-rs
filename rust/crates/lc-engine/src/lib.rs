@@ -1548,6 +1548,14 @@ pub struct CrewObjectInfo {
     pub definition_id: DefinitionId,
     #[serde(with = "lc_script::c4_string_serde")]
     pub name: String,
+    /// Verbatim C4ObjectInfoCore death announcement; empty selects the
+    /// localized random fallback.
+    #[serde(
+        default,
+        with = "lc_script::c4_string_serde",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub death_message: String,
     pub rank: i32,
     /// Stored `C4ObjectInfoCore::sRankName`. Silent over-table promotions
     /// retain the preceding name (C4InfoCore.cpp:428-435).
@@ -18046,6 +18054,7 @@ impl Engine {
             CrewObjectInfo {
                 definition_id: definition_id.clone(),
                 name: info.name.clone(),
+                death_message: info.death_message.clone(),
                 rank: info.rank,
                 rank_name: info.rank_name.clone(),
                 experience: info.experience,
@@ -18284,6 +18293,7 @@ impl Engine {
         roster.push(player_file::CrewInfo {
             id: id.to_string(),
             name,
+            death_message: String::new(),
             rank: 0,
             rank_name,
             experience: 0,
@@ -28781,6 +28791,7 @@ impl Engine {
                 continue;
             };
             if let Some(info) = Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id) {
+                info.death_message = entry.death_message.clone();
                 info.rank_name = entry.rank_name.clone();
                 info.total_playing_time = entry.total_playing_time;
                 info.birthday = entry.birthday;
@@ -30734,6 +30745,7 @@ impl Engine {
                     let mut info = CrewObjectInfo {
                         definition_id: DefinitionId::from(entry.id.as_str()),
                         name: entry.name.clone(),
+                        death_message: entry.death_message.clone(),
                         rank: entry.rank,
                         rank_name: entry.rank_name.clone(),
                         experience: entry.experience,
@@ -31147,6 +31159,7 @@ impl Engine {
                             }
                             info.definition_id = DefinitionId::from(entry.id.as_str());
                             info.name = entry.name.clone();
+                            info.death_message = entry.death_message.clone();
                             info.rank = entry.rank;
                             info.rank_name = entry.rank_name.clone();
                             info.experience = entry.experience;

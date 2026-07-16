@@ -1858,6 +1858,7 @@ func Ejection(object item)
             vec![player_file::CrewInfo {
                 id: "DCRW".to_string(),
                 name: "Veteran".to_string(),
+                death_message: String::new(),
                 rank: 0,
                 rank_name: "Clonk".to_string(),
                 experience: 0,
@@ -1957,6 +1958,7 @@ func Recruit() { return MakeCrewMember(this(), 0); }
         let crew_info = |name: &str| player_file::CrewInfo {
             id: "DCRW".to_string(),
             name: name.to_string(),
+            death_message: String::new(),
             rank: 0,
             rank_name: "Clonk".to_string(),
             experience: 0,
@@ -16204,6 +16206,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                 crew: vec![player_file::CrewInfo {
                     id: "CREW".to_string(),
                     name: "Rookie".to_string(),
+                    death_message: String::new(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 998,
@@ -17659,6 +17662,7 @@ public func RemoveCaptain(int player)
                 player_file::CrewInfo {
                     id: "CREW".to_string(),
                     name: "Runner-up".to_string(),
+                    death_message: String::new(),
                     rank: 1,
                     rank_name: "Ensign".to_string(),
                     experience: 1_000,
@@ -17677,6 +17681,7 @@ public func RemoveCaptain(int player)
                 player_file::CrewInfo {
                     id: "CREW".to_string(),
                     name: "Captain".to_string(),
+                    death_message: String::new(),
                     rank: 5,
                     rank_name: "Lieutenant Colonel".to_string(),
                     experience: 5_000,
@@ -28191,6 +28196,7 @@ public func TrainTemporaryScale()
                 crew: vec![player_file::CrewInfo {
                     id: "TRNR".to_string(),
                     name: "Trainee".to_string(),
+                    death_message: String::new(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
@@ -28410,6 +28416,7 @@ public func TrainTemporaryScale()
                 crew: vec![player_file::CrewInfo {
                     id: "CLNK".to_string(),
                     name: "Trained".to_string(),
+                    death_message: String::new(),
                     rank: 2,
                     rank_name: "Lieutenant".to_string(),
                     experience: 3_000,
@@ -28503,6 +28510,7 @@ public func TrainTemporaryScale()
                 crew: vec![player_file::CrewInfo {
                     id: "OLDP".to_string(),
                     name: "Fair".to_string(),
+                    death_message: String::new(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
@@ -29532,6 +29540,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
             crew: vec![player_file::CrewInfo {
                 id: "BDAY".to_string(),
                 name: "Rookie".to_string(),
+                death_message: String::new(),
                 rank: 0,
                 rank_name: "Clonk".to_string(),
                 experience: 0,
@@ -32288,6 +32297,7 @@ global func InitializePlayer(int player)
             let crew_info = |id: &str, name: &str, rank: i32| player_file::CrewInfo {
                 id: id.to_string(),
                 name: name.to_string(),
+                death_message: String::new(),
                 rank,
                 rank_name: match rank {
                     5 => "Lieutenant Colonel",
@@ -32650,6 +32660,7 @@ func ControlUpSingle()
         let loaded_info = player_file::CrewInfo {
             id: "CRNW".to_string(),
             name: "Existing".to_string(),
+            death_message: String::new(),
             rank: 0,
             rank_name: "Clonk".to_string(),
             experience: 0,
@@ -42663,6 +42674,7 @@ func RemoveAndRecruit(object target) {
                     player_file::CrewInfo {
                         id: "CREW".to_string(),
                         name: "First pointer".to_string(),
+                        death_message: String::new(),
                         rank: 4,
                         rank_name: "Major".to_string(),
                         experience: 900,
@@ -42681,6 +42693,7 @@ func RemoveAndRecruit(object target) {
                     player_file::CrewInfo {
                         id: "CREW".to_string(),
                         name: "Second pointer".to_string(),
+                        death_message: String::new(),
                         rank: 4,
                         rank_name: "Major".to_string(),
                         experience: 900,
@@ -42901,6 +42914,7 @@ func RemoveAndRecruit(object target) {
                 crew: vec![player_file::CrewInfo {
                     id: "HZCK".to_string(),
                     name: "Rookie".to_string(),
+                    death_message: String::new(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
@@ -42999,6 +43013,7 @@ func AwardSelf(int amount) {
                 crew: vec![player_file::CrewInfo {
                     id: "CREW".to_string(),
                     name: "Rookie".to_string(),
+                    death_message: String::new(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
@@ -43573,6 +43588,7 @@ func RemoveAndGrabSelf() {
                 crew: vec![player_file::CrewInfo {
                     id: "DONR".to_string(),
                     name: "Veteran Ada".to_string(),
+                    death_message: String::new(),
                     rank: 4,
                     rank_name: "Major".to_string(),
                     experience: 8_000,

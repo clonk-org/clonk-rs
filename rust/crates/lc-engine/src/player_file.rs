@@ -25,6 +25,13 @@ pub struct CrewInfo {
     /// `Name` (default "Clonk").
     #[serde(with = "lc_script::c4_string_serde")]
     pub name: String,
+    /// `DeathMessage` (default empty), emitted verbatim by DeathAnnounce.
+    #[serde(
+        default,
+        with = "lc_script::c4_string_serde",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub death_message: String,
     /// `Rank` (default 0).
     pub rank: i32,
     /// Persisted `C4ObjectInfoCore::sRankName` (`RankName`, default "Clonk").
@@ -123,9 +130,13 @@ impl CrewInfo {
         let id = entry("ObjectInfo", "id").unwrap_or_default();
         let portrait_file = entry("ObjectInfo", "PortraitFile").unwrap_or_default();
         let portraits = loaded_portrait_state(&id, &portrait_file, has_custom_portrait);
+        let death_message = entry("ObjectInfo", "DeathMessage")
+            .map(normalize_death_message)
+            .unwrap_or_default();
         Self {
             id,
             name: entry("ObjectInfo", "Name").unwrap_or_else(|| "Clonk".to_string()),
+            death_message,
             rank,
             rank_name: entry("ObjectInfo", "RankName").unwrap_or_else(default_crew_rank_name),
             experience: int("ObjectInfo", "Experience", 0),
@@ -142,6 +153,21 @@ impl CrewInfo {
             portraits,
         }
     }
+}
+
+/// `C4ObjectInfoCore::DeathMessage` is a 75-byte C string. Compile replaces
+/// a leading `@` with a space so saved crew cannot make the announcement
+/// permanent (`C4InfoCore.cpp:526-559`).
+fn normalize_death_message(value: String) -> String {
+    let mut bytes = lc_script::c4_string_bytes(&value);
+    if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
+        bytes.truncate(nul);
+    }
+    bytes.truncate(75);
+    if bytes.first() == Some(&b'@') {
+        bytes[0] = b' ';
+    }
+    lc_script::c4_string_from_bytes(&bytes)
 }
 
 fn loaded_portrait_state(
@@ -375,7 +401,14 @@ fn collect_crew(group: &Group, crew: &mut Vec<CrewInfo>) -> Result<(), ScenarioE
                 let text = lc_script::c4_string_from_bytes(&bytes);
                 let sections = parse_ini_sections(&text);
                 let has_custom_portrait = custom_portrait_loads(&child);
-                crew.push(CrewInfo::from_sections(&sections, has_custom_portrait));
+                let mut info = CrewInfo::from_sections(&sections, has_custom_portrait);
+                // String-valued StdCompiler entries retain their payload;
+                // the generic INI projection trims/comments values for the
+                // numeric fields, so recover this verbatim field separately.
+                info.death_message = parse_object_info_death_message(&text)
+                    .map(normalize_death_message)
+                    .unwrap_or_default();
+                crew.push(info);
             }
         } else if entry.is_directory {
             subgroups.push(child);
@@ -385,6 +418,40 @@ fn collect_crew(group: &Group, crew: &mut Vec<CrewInfo>) -> Result<(), ScenarioE
         collect_crew(&child, crew)?;
     }
     Ok(())
+}
+
+/// Exact-case `[ObjectInfo] DeathMessage` payload. StdCompiler skips leading
+/// horizontal whitespace after `=`, but neither treats `//` as an inline
+/// comment nor strips trailing message bytes.
+fn parse_object_info_death_message(text: &str) -> Option<String> {
+    let mut object_info = false;
+    let mut object_info_seen = false;
+    for (line_index, raw_line) in text.lines().enumerate() {
+        let line = if line_index == 0 {
+            raw_line.trim_start_matches('\u{feff}')
+        } else {
+            raw_line
+        };
+        let line = line.trim_start_matches([' ', '\t']);
+        if let Some(section) = line.strip_prefix('[').and_then(|line| line.split_once(']')) {
+            if object_info {
+                break;
+            }
+            object_info = !object_info_seen && section.0 == "ObjectInfo";
+            object_info_seen |= object_info;
+            continue;
+        }
+        if !object_info {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key == "DeathMessage" {
+            return Some(value.trim_start_matches([' ', '\t']).to_string());
+        }
+    }
+    None
 }
 
 fn custom_portrait_loads(group: &Group) -> bool {
@@ -520,7 +587,7 @@ mod tests {
         std::fs::create_dir_all(&first).expect("info dir");
         std::fs::write(
             first.join("ObjectInfo.txt"),
-            "[ObjectInfo]\nid=COWB\nName=Wipf\nPortraitFile=TRPR::Captain\nRank=2\nRankName=Lieutenant\nExperience=900\nDeathCount=7\nTotalPlayingTime=17999\nBirthday=123\nAge=7\nParticipation=1\n\n[Physical]\nWalk=80000\n",
+            "[ObjectInfo]\nid=COWB\nName=Wipf\nDeathMessage=@Gone // but remembered  \nPortraitFile=TRPR::Captain\nRank=2\nRankName=Lieutenant\nExperience=900\nDeathCount=7\nTotalPlayingTime=17999\nBirthday=123\nAge=7\nParticipation=1\n\n[Physical]\nWalk=80000\n",
         )
         .expect("write info");
 
@@ -555,6 +622,7 @@ mod tests {
             .find(|info| info.name == "Wipf")
             .expect("Wipf parsed");
         assert_eq!(wipf.id, "COWB");
+        assert_eq!(wipf.death_message, " Gone // but remembered  ");
         assert_eq!(wipf.rank, 2);
         assert_eq!(wipf.rank_name, "Lieutenant");
         assert_eq!(wipf.experience, 900);
@@ -767,6 +835,7 @@ mod tests {
 
         assert_eq!(info.rank_name, "Clonk");
         assert_eq!(info.death_count, 0);
+        assert!(info.death_message.is_empty());
     }
 
     #[test]

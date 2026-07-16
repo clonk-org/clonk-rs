@@ -38645,6 +38645,7 @@ mod tests {
                 crew: vec![lc_engine::player_file::CrewInfo {
                     id: "CLNK".to_string(),
                     name: "Clonk".to_string(),
+                    death_message: String::new(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
@@ -55046,6 +55047,7 @@ mod tests {
             lc_engine::CrewObjectInfo {
                 definition_id,
                 name: raw_name,
+                death_message: String::new(),
                 rank: 0,
                 rank_name: "Clonk".to_string(),
                 experience: 0,
@@ -61293,6 +61295,7 @@ protected func InputCallback(string answer, int player)
                 crew: vec![lc_engine::player_file::CrewInfo {
                     id: "FCRW".to_string(),
                     name: "Henry".to_string(),
+                    death_message: String::new(),
                     rank: 1,
                     rank_name: "Ensign".to_string(),
                     experience: 120,

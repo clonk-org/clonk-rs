@@ -15170,41 +15170,83 @@ fn message(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnDeathAnnounce (C4Script.cpp:291-319): the default branch chooses one
-/// of seven localized object messages with SafeRandom and anchors it to the
-/// dying object. Crew-info custom death messages and Film suppression await
-/// those presentation fields; ordinary scenario crew take this exact path.
+/// FnDeathAnnounce (C4Script.cpp:303-318): Film suppresses the announcement,
+/// a live crew Info supplies a verbatim custom message, and only the fallback
+/// draws one of seven localized object messages with SafeRandom.
+fn active_death_message(value: &str) -> Option<String> {
+    let mut bytes = lc_script::c4_string_bytes(value);
+    if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
+        bytes.truncate(nul);
+    }
+    bytes.truncate(75);
+    (!bytes.is_empty()).then(|| lc_script::c4_string_from_bytes(&bytes))
+}
+
 fn death_announce(args: &[Value]) -> Result<Value, RuntimeError> {
     if !args.is_empty() {
         return Err(RuntimeError::new("DeathAnnounce expects no arguments"));
     }
-    let name = match get_name(&[])? {
-        Value::String(name) => name,
-        _ => return Ok(Value::Bool(false)),
+
+    // `script_object_context` is cthr->Obj. The mutable carrier scope can
+    // still exist for a definition-owned callback whose script object is
+    // null, and must not make DeathAnnounce succeed.
+    let state = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let target = context.script_object_context?;
+        let film = matches!(
+            context.world.scenario_value("Film", Some("Head"), 0),
+            Some(ScenarioValue::Int(value)) if *value != 0
+        );
+        if film {
+            return Some((target, true, None));
+        }
+        // An instantiated scope is authoritative even when a same-call
+        // GrabObjectInfo/retire operation cleared or replaced its Info.
+        let info = match context.object_scope(target) {
+            Some(scope) => scope.info_core(),
+            None => context.world.crew_infos.get(&target),
+        };
+        Some((
+            target,
+            false,
+            info.and_then(|info| active_death_message(&info.death_message)),
+        ))
+    });
+    let Some((target, film, custom_message)) = state else {
+        return Ok(Value::Bool(false));
     };
-    let choice = SCRIPT_SAFE_RNG.with(|rng| rng.borrow_mut().random(7)) as usize;
-    // planet/System.c4g/LanguageUS.txt IDS_OBJ_DEATH1..7. SafeRandom's
-    // result is intentionally not lockstep state, so tests pin the domain
-    // rather than a particular phrase.
-    const DEFAULT_MESSAGES: [&str; 7] = [
-        "{name} is dead.",
-        "{name} has|deceased.",
-        "{name}|rests in peace.",
-        "{name} is dead.",
-        "{name} has|deceased.",
-        "{name}|rests in peace.",
-        "{name} is dead.",
-    ];
-    let text = DEFAULT_MESSAGES[choice].replace("{name}", &name);
+    if film {
+        return Ok(Value::Bool(true));
+    }
+
+    let text = match custom_message {
+        Some(message) => message,
+        None => {
+            let choice = SCRIPT_SAFE_RNG.with(|rng| rng.borrow_mut().random(7)) as usize;
+            let name = match get_name(&[Value::Object(target.as_u64())])? {
+                Value::String(name) => name,
+                _ => return Ok(Value::Bool(false)),
+            };
+            // planet/System.c4g/LanguageUS.txt IDS_OBJ_DEATH1..7.
+            const DEFAULT_MESSAGES: [&str; 7] = [
+                "{name} is dead.",
+                "{name} has|deceased.",
+                "{name}|rests in peace.",
+                "{name} is dead.",
+                "{name} has|deceased.",
+                "{name}|rests in peace.",
+                "{name} is dead.",
+            ];
+            DEFAULT_MESSAGES[choice].replace("{name}", &name)
+        }
+    };
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("DeathAnnounce requires an active engine context"))?;
-        let Some(target) = context.object_context().map(|object| object.id()) else {
-            return Ok(Value::Bool(false));
-        };
         context.register_message(MessageCommand::Add(MessageSpec {
             kind: MessageKind::Target,
             text,
@@ -19118,6 +19160,7 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                                 .definition_metadata(definition)
                                 .map(|metadata| metadata.name.clone())
                                 .unwrap_or_else(|| "Clonk".to_string()),
+                            death_message: String::new(),
                             rank,
                             rank_name: default_rank_name(rank)
                                 .unwrap_or("Clonk")
@@ -19408,6 +19451,7 @@ fn recruit_or_create_crew_info(
         let info = CrewObjectInfo {
             definition_id: DefinitionId::from(entry.id.as_str()),
             name: entry.name.clone(),
+            death_message: entry.death_message.clone(),
             rank: entry.rank,
             rank_name: entry.rank_name.clone(),
             experience: entry.experience,
@@ -19495,6 +19539,7 @@ fn recruit_or_create_crew_info(
         let entry = crate::player_file::CrewInfo {
             id: definition_id.to_string(),
             name,
+            death_message: String::new(),
             rank: 0,
             rank_name,
             experience: 0,
@@ -19517,6 +19562,7 @@ fn recruit_or_create_crew_info(
     let info = CrewObjectInfo {
         definition_id: DefinitionId::from(entry.id.as_str()),
         name: entry.name.clone(),
+        death_message: entry.death_message.clone(),
         rank: entry.rank,
         rank_name: entry.rank_name.clone(),
         experience: entry.experience,
@@ -37172,6 +37218,9 @@ fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
         Ok(match entry.as_str() {
             "id" => Value::C4Id(info.definition_id.as_str().to_string()),
             "Name" => Value::String(info.name.clone()),
+            "DeathMessage" => Value::String(
+                active_death_message(&info.death_message).unwrap_or_default(),
+            ),
             "Rank" => Value::Int(info.rank),
             "RankName" => Value::String(info.rank_name.clone()),
             "Experience" => Value::Int(info.experience),
@@ -49370,6 +49419,7 @@ func RenameInfo(object target, string name, bool make_valid)
         let info = |name: &str, experience: i32| crate::player_file::CrewInfo {
             id: "CREW".to_string(),
             name: name.to_string(),
+            death_message: String::new(),
             rank: 0,
             rank_name: "Clonk".to_string(),
             experience,
@@ -49742,6 +49792,190 @@ func Trigger(object pOther)
     fn get_values_rejects_nil() {
         let error = get_values(&[Value::Nil]).expect_err("GetValues should fail for nil");
         assert_eq!(error.message(), "GetValues(): map expected, got 0");
+    }
+
+    fn death_announce_world(death_message: Option<&str>, film: i32) -> HostWorldContext {
+        let target = ObjectId::new(1);
+        let definitions = Rc::new(HashMap::from([(
+            DefinitionId::from("TEST"),
+            DefinitionMetadata {
+                name: "Fallback Clonk".to_string(),
+                ..DefinitionMetadata::default()
+            },
+        )]));
+        let mut world = HostWorldContext::from_objects([scenario_section_world_object(
+            target.as_u64(),
+            ObjectStatus::Normal,
+        )])
+        .with_definition_metadata(definitions)
+        .with_scenario_values(Rc::new(ScenarioValueStore::with_film_for_test(film)));
+        if let Some(death_message) = death_message {
+            world = world.with_crew_infos(Rc::new(HashMap::from([(
+                target,
+                CrewObjectInfo {
+                    definition_id: DefinitionId::from("TEST"),
+                    name: "Roster Clonk".to_string(),
+                    death_message: death_message.to_string(),
+                    rank: 0,
+                    rank_name: "Clonk".to_string(),
+                    experience: 0,
+                    death_count: 0,
+                    total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
+                    in_action_time: 0,
+                    extra_data: Vec::new(),
+                    portraits: CrewPortraitState::default(),
+                },
+            )])));
+        }
+        world
+    }
+
+    #[test]
+    fn death_announce_uses_live_crew_message_verbatim_without_safe_random() {
+        let script = r#"#strict 2
+func Announce()
+{
+    return [GetObjectInfoCoreVal("DeathMessage"), DeathAnnounce()];
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        let mut definition = crate::Definition::from_script("CREW", "Crew", script)
+            .expect("death-message fixture compiles");
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("death-message fixture registers");
+        let mut start = crate::scenario::PlayerStart::default();
+        start.ready_crew = vec![("CREW".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Death message owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![crate::player_file::CrewInfo {
+                    id: "CREW".to_string(),
+                    name: "Ada".to_string(),
+                    death_message: "Remember me // exactly  ".to_string(),
+                    rank: 0,
+                    rank_name: "Clonk".to_string(),
+                    experience: 0,
+                    physical: crate::PhysicalInfo::default(),
+                    death_count: 0,
+                    total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
+                    participation: 1,
+                    in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                    extra_data: Vec::new(),
+                    portraits: CrewPortraitState::default(),
+                }],
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("death-message owner joins");
+        let crew = engine.player(0).expect("player exists").crew()[0];
+        let crew_index = engine.find_object_index(crew).expect("crew remains live");
+
+        let initial_rng = crate::particles::SafeRng::new(224);
+        SCRIPT_SAFE_RNG.with(|rng| *rng.borrow_mut() = initial_rng.clone());
+        assert_eq!(
+            engine
+                .call_object_function(crew_index, "Announce", Vec::new())
+                .expect("DeathAnnounce succeeds"),
+            Value::Array(vec![
+                Value::String("Remember me // exactly  ".into()),
+                Value::Bool(true),
+            ])
+        );
+        let messages = engine
+            .snapshot()
+            .hud
+            .messages
+            .into_iter()
+            .filter(|message| message.target == Some(crew))
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].lines.join("|"), "Remember me // exactly  ");
+        SCRIPT_SAFE_RNG.with(|rng| assert_eq!(*rng.borrow(), initial_rng));
+    }
+
+    #[test]
+    fn death_announce_film_suppresses_messages_and_objectless_calls_still_fail() {
+        let initial_rng = crate::particles::SafeRng::new(225);
+        SCRIPT_SAFE_RNG.with(|rng| *rng.borrow_mut() = initial_rng.clone());
+        let (result, outcome) = with_object_host_context_with_world(
+            death_announce_world(Some("Must stay hidden"), 2),
+            || death_announce(&[]),
+        );
+        assert_eq!(result.expect("Film DeathAnnounce succeeds"), Value::Bool(true));
+        assert!(outcome.messages.is_empty());
+
+        let (objectless, outcome) = with_effect_context(
+            None,
+            &[],
+            death_announce_world(Some("Still hidden"), 2),
+            2,
+            || death_announce(&[]),
+        );
+        assert_eq!(
+            objectless.expect("objectless DeathAnnounce is a clean failure"),
+            Value::Bool(false)
+        );
+        assert!(outcome.messages.is_empty());
+        SCRIPT_SAFE_RNG.with(|rng| assert_eq!(*rng.borrow(), initial_rng));
+    }
+
+    #[test]
+    fn death_announce_info_less_fallback_keeps_all_seven_safe_random_choices() {
+        const MESSAGES: [&str; 7] = [
+            "Fallback Clonk is dead.",
+            "Fallback Clonk has|deceased.",
+            "Fallback Clonk|rests in peace.",
+            "Fallback Clonk is dead.",
+            "Fallback Clonk has|deceased.",
+            "Fallback Clonk|rests in peace.",
+            "Fallback Clonk is dead.",
+        ];
+        let mut seen = HashSet::new();
+        for seed in 1..=512 {
+            let initial_rng = crate::particles::SafeRng::new(seed);
+            let mut expected_rng = initial_rng.clone();
+            let choice = expected_rng.random(7) as usize;
+            SCRIPT_SAFE_RNG.with(|rng| *rng.borrow_mut() = initial_rng);
+
+            let (result, outcome) = with_object_host_context_with_world(
+                death_announce_world(None, 0),
+                || death_announce(&[]),
+            );
+            assert_eq!(result.expect("fallback succeeds"), Value::Bool(true));
+            assert!(matches!(
+                outcome.messages.as_slice(),
+                [MessageCommand::Add(MessageSpec {
+                    kind: MessageKind::Target,
+                    text,
+                    target: Some(target),
+                    player: None,
+                    ..
+                })] if text == MESSAGES[choice] && *target == ObjectId::new(1)
+            ));
+            SCRIPT_SAFE_RNG.with(|rng| assert_eq!(*rng.borrow(), expected_rng));
+            seen.insert(choice);
+            if seen.len() == 7 {
+                break;
+            }
+        }
+        assert_eq!(seen.len(), 7, "SafeRandom(7) retains every index");
     }
 
     #[test]
@@ -56228,6 +56462,7 @@ func Probe(object crew, object info_less)
                 crew: vec![crate::player_file::CrewInfo {
                     id: "CREW".to_string(),
                     name: "Ada".to_string(),
+                    death_message: String::new(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
@@ -56359,6 +56594,7 @@ func Transfer(object donor, object recipient)
                 crew: vec![crate::player_file::CrewInfo {
                     id: "CREW".to_string(),
                     name: "Ada".to_string(),
+                    death_message: String::new(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,

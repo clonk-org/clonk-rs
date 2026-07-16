@@ -3303,6 +3303,7 @@ mod tests {
         let crew = vec![crate::player_file::CrewInfo {
             id: "CLNK".to_string(),
             name: "Ada".to_string(),
+            death_message: String::new(),
             rank: 3,
             rank_name: "Captain".to_string(),
             experience: 50,

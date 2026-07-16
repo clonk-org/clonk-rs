@@ -240,6 +240,7 @@ impl ReplayCrewInfoV1 {
         CrewInfo {
             id: self.id.clone(),
             name: self.name.clone(),
+            death_message: String::new(),
             rank: self.rank,
             rank_name: "Clonk".to_string(),
             experience: self.experience,

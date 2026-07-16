@@ -3843,6 +3843,13 @@ impl Default for ScenarioValueStore {
 }
 
 impl ScenarioValueStore {
+    #[cfg(test)]
+    pub(crate) fn with_film_for_test(film: i32) -> Self {
+        let mut core = LegacyScenarioCore::default();
+        core.head.film = film;
+        Self::from_runtime_core(&core, false)
+    }
+
     fn entry(name: &'static str, values: Vec<ScenarioValue>) -> ScenarioValueEntry {
         ScenarioValueEntry {
             name: name.to_string(),
@@ -15638,6 +15645,7 @@ global func Step(state, frame, random)
                 crew: vec![crate::player_file::CrewInfo {
                     id: "CLNK".to_string(),
                     name: "Henry".to_string(),
+                    death_message: String::new(),
                     rank: 1,
                     rank_name: "Ensign".to_string(),
                     experience: 120,
