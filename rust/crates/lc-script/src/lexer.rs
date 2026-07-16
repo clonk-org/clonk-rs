@@ -663,11 +663,12 @@ impl<'a> Lexer<'a> {
     ) -> Result<Token, ParseError> {
         let mut end_idx = start_idx + first.len_utf8();
 
-        // Check for hexadecimal literal: 0x or 0X
+        // C4Aul enters hexadecimal mode only for a lowercase `x`. Uppercase
+        // `X` instead promotes the token to a digit-leading C4ID.
         if first == '0' {
             if let Some(ch) = self.peek_char() {
-                if ch == 'x' || ch == 'X' {
-                    // Consume the 'x' or 'X'
+                if ch == 'x' {
+                    // Consume the `x` transition character.
                     let (idx, consumed, _, _) = self.bump_char().unwrap();
                     end_idx = idx + consumed.len_utf8();
 
@@ -682,19 +683,21 @@ impl<'a> Lexer<'a> {
                         }
                     }
 
-                    // Check if we actually got any hex digits
-                    if end_idx == hex_start {
-                        return Err(ParseError::new(
-                            "hexadecimal literal has no digits".to_string(),
-                            line,
-                            column,
-                        ));
-                    }
-
-                    // Parse hex digits (skip "0x" prefix)
+                    // `%SCNxPTR` accepts the bare `0x` spelling as zero on
+                    // the supported C++ runtime. Scan at pointer width, then
+                    // intentionally truncate to C4ValueInt's signed 32 bits.
                     let hex_slice = &self.input[hex_start..end_idx];
-                    match i32::from_str_radix(hex_slice, 16) {
-                        Ok(value) => return Ok(Token::new(TokenKind::Number(value), line, column)),
+                    if hex_slice.is_empty() {
+                        return Ok(Token::new(TokenKind::Number(0), line, column));
+                    }
+                    match u64::from_str_radix(hex_slice, 16) {
+                        Ok(value) => {
+                            return Ok(Token::new(
+                                TokenKind::Number(value as i32),
+                                line,
+                                column,
+                            ))
+                        }
                         Err(_) => {
                             return Err(ParseError::new(
                                 format!("hexadecimal literal out of range: 0x{hex_slice}"),
@@ -721,6 +724,11 @@ impl<'a> Lexer<'a> {
         // when the first non-digit is uppercase or `_`. Hazard's HUD ids
         // (`1HUD`, `2HUD`, `3HUD`) depend on this path.
         if matches!(self.peek_char(), Some('A'..='Z' | '_')) {
+            // The state transition consumes its triggering character at the
+            // loop footer. Once in TGS_C4ID, only later alphanumerics extend
+            // the token; a second underscore terminates it.
+            let (idx, consumed, _, _) = self.bump_char().unwrap();
+            end_idx = idx + consumed.len_utf8();
             while let Some(ch) = self.peek_char() {
                 if ch.is_ascii_alphanumeric() {
                     let (idx, consumed, _, _) = self.bump_char().unwrap();
@@ -749,8 +757,8 @@ impl<'a> Lexer<'a> {
         }
 
         let slice = &self.input[start_idx..end_idx];
-        match slice.parse::<i32>() {
-            Ok(value) => Ok(Token::new(TokenKind::Number(value), line, column)),
+        match slice.parse::<i64>() {
+            Ok(value) => Ok(Token::new(TokenKind::Number(value as i32), line, column)),
             Err(_) => Err(ParseError::new(
                 format!("integer literal out of range: {slice}"),
                 line,
@@ -1180,12 +1188,19 @@ mod tests {
     }
 
     #[test]
-    fn digit_leading_c4id_does_not_consume_an_underscore_like_cpp() {
-        // TGS_Int enters TGS_C4ID when it sees `_`, but TGS_C4ID itself
-        // consumes only ASCII letters and digits; the partial token then
-        // fails LooksLikeID (C4AulParse.cpp:711-723,747-763). Preserve that
-        // historical asymmetry instead of accepting a new identifier form.
-        assert!(lex_all("1_AA").is_err());
+    fn c4_integer_literal_edges_consume_c4id_transition_underscore() {
+        let kinds = lex_all("1_AA 12_A")
+            .expect("transition underscores are part of digit-leading C4IDs")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::C4Id("1_AA".to_string()),
+                TokenKind::C4Id("12_A".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -1238,15 +1253,30 @@ mod tests {
     }
 
     #[test]
-    fn tokenizes_hex_literal_uppercase_x() {
-        let source = "0XFF";
-        let tokens = lex_all(source).unwrap();
-        assert_eq!(tokens.len(), 1);
-        if let TokenKind::Number(n) = tokens[0].kind {
-            assert_eq!(n, 0xFF);
-        } else {
-            panic!("Expected hex literal to be tokenized as Number");
-        }
+    fn c4_integer_literal_edges_uppercase_x_is_a_c4id() {
+        let kinds = lex_all("0XFF")
+            .expect("uppercase X takes the C4ID transition")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, vec![TokenKind::C4Id("0XFF".to_string())]);
+    }
+
+    #[test]
+    fn c4_integer_literal_edges_wrap_hex_and_decimal_to_i32() {
+        let kinds = lex_all("0xffffffff 4294967295 0xa0c0ff")
+            .expect("pointer-width integer scans truncate to C4ValueInt")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Number(-1),
+                TokenKind::Number(-1),
+                TokenKind::Number(0xa0c0ff),
+            ]
+        );
     }
 
     #[test]
@@ -1293,12 +1323,12 @@ mod tests {
     }
 
     #[test]
-    fn hex_literal_no_digits_error() {
-        let source = "0x";
-        let result = lex_all(source);
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.message().contains("no digits"));
-        }
+    fn c4_integer_literal_edges_allow_empty_hex_digits() {
+        let kinds = lex_all("0x")
+            .expect("bare lowercase hex prefix scans as zero")
+            .into_iter()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, vec![TokenKind::Number(0)]);
     }
 }
