@@ -8848,6 +8848,113 @@ func FxUpperStart(pTarget, iNumber, iTemp)
     }
 
     #[test]
+    fn clo_162_pow_nil_pads_the_exponent_and_wraps_overflow() {
+        let script = r#"#strict
+local short_result, overflow_result;
+
+func Initialize()
+{
+    short_result = Pow(5);
+    overflow_result = Pow(2, 31);
+}
+"#;
+        let definition =
+            Definition::from_script("P162", "Pow short arguments", script).expect("script compiles");
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let object = engine
+            .spawn_object(SpawnConfig::new("P162"))
+            .expect("short Pow calls do not abort Initialize");
+        let index = engine.find_object_index(object).expect("object exists");
+        let locals = &engine.objects[index].state.local_vars;
+
+        assert_eq!(locals.get("short_result"), Some(&Value::Int(1)));
+        assert_eq!(
+            locals.get("overflow_result"),
+            Some(&Value::Int(i32::MIN)),
+            "2^31 wraps to the signed int32 minimum like C++"
+        );
+    }
+
+    #[test]
+    fn clo_162_path_free_nil_pads_the_destination_to_zero_zero() {
+        let script = r#"#strict
+local short_path;
+
+func Initialize()
+{
+    short_path = PathFree(6, 6);
+}
+"#;
+        let definition = Definition::from_script("F162", "PathFree short arguments", script)
+            .expect("script compiles");
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        // The nil-padded destination is (0,0), so the (6,6)->(0,0) ray
+        // crosses the only solid pixel at (3,3).
+        let mut pixels = vec![0_u8; 7 * 7];
+        pixels[3 * 7 + 3] = 1;
+        let mut densities = vec![0_i32; 2];
+        densities[1] = 100;
+        let grid = landscape::PixelGrid::new(
+            7,
+            7,
+            pixels,
+            densities,
+            vec![None; 2],
+            vec![None; 2],
+        );
+        let mut landscape = Landscape::new(7, vec![0; 7]).expect("landscape builds");
+        landscape.set_world_height(7);
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+
+        let object = engine
+            .spawn_object(SpawnConfig::new("F162"))
+            .expect("short PathFree call does not abort Initialize");
+        let index = engine.find_object_index(object).expect("object exists");
+
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("short_path"),
+            Some(&Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn clo_162_object_distance_without_arguments_returns_nil() {
+        let script = r#"#strict
+local distance;
+
+func Initialize()
+{
+    distance = ObjectDistance();
+}
+"#;
+        let definition = Definition::from_script("D162", "ObjectDistance no arguments", script)
+            .expect("script compiles");
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let object = engine
+            .spawn_object(SpawnConfig::new("D162"))
+            .expect("empty ObjectDistance call does not abort Initialize");
+        let index = engine.find_object_index(object).expect("object exists");
+
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("distance"),
+            Some(&Value::Nil)
+        );
+    }
+
+    #[test]
     fn advances_actions_using_definition_map() {
         let mut definition = build_definition();
         let mut actions = HashMap::new();

@@ -20451,37 +20451,18 @@ fn scoreboard_col(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn pow_func(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 2 {
-        return Err(RuntimeError::new("Pow expects 2 arguments: base, exponent"));
-    }
-
-    let base = match &args[0] {
-        Value::Int(value) => *value,
-        Value::Nil => 0,
-        other => {
-            return Err(RuntimeError::new(format!(
-                "Pow: expected int for base, got {}",
-                other.type_name()
-            )));
-        }
-    };
-
-    let exponent = match &args[1] {
-        Value::Int(value) => *value,
-        Value::Nil => 0,
-        other => {
-            return Err(RuntimeError::new(format!(
-                "Pow: expected int for exponent, got {}",
-                other.type_name()
-            )));
-        }
-    };
+    let base = value_to_i32(args.first().unwrap_or(&Value::Nil), "Pow", "base")?;
+    let exponent = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "Pow",
+        "exponent",
+    )?;
 
     if exponent < 0 {
         return Ok(Value::Int(0)); // Match C++ behavior for negative exponents
     }
 
-    Ok(Value::Int(base.pow(exponent as u32)))
+    Ok(Value::Int(base.wrapping_pow(exponent as u32)))
 }
 
 fn bound_by_func(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -25867,16 +25848,10 @@ fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn path_free(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 4 {
-        return Err(RuntimeError::new(
-            "PathFree expects 4 arguments: x1, y1, x2, y2",
-        ));
-    }
-
-    let x1 = value_to_i32(&args[0], "PathFree", "x1")?;
-    let y1 = value_to_i32(&args[1], "PathFree", "y1")?;
-    let x2 = value_to_i32(&args[2], "PathFree", "x2")?;
-    let y2 = value_to_i32(&args[3], "PathFree", "y2")?;
+    let x1 = value_to_i32(args.first().unwrap_or(&Value::Nil), "PathFree", "x1")?;
+    let y1 = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "PathFree", "y1")?;
+    let x2 = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "PathFree", "x2")?;
+    let y2 = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "PathFree", "y2")?;
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -32521,21 +32496,20 @@ fn get_position_component(
 }
 
 fn object_distance(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.is_empty() || args.len() > 2 {
-        return Err(RuntimeError::new(
-            "ObjectDistance expects 1 or 2 arguments: other, object",
-        ));
-    }
-
-    let other_id = match parse_object_reference_argument(&args[0], "ObjectDistance", "other")? {
+    let other_id = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "ObjectDistance",
+        "other",
+    )?;
+    let reference_id = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "ObjectDistance",
+        "object",
+    )?;
+    let other_id = match other_id {
         Some(id) => id,
         None => return Ok(Value::Nil),
     };
-
-    let mut reference_id: Option<ObjectId> = None;
-    if let Some(arg) = args.get(1) {
-        reference_id = parse_object_reference_argument(arg, "ObjectDistance", "object")?;
-    }
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
