@@ -12727,6 +12727,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetSkyParallax", set_sky_parallax);
     script.register_host_function("SetSkyAdjust", set_sky_adjust);
     script.register_host_function("SetSkyColor", set_sky_color);
+    script.register_host_function("SetSkyFade", set_sky_fade);
     script.register_host_function("SetMatAdjust", set_mat_adjust);
     script.register_host_function("SetLandscapePixel", set_landscape_pixel);
     script.register_host_function("SetTextureIndex", set_texture_index);
@@ -24980,6 +24981,59 @@ fn set_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn apply_sky_color_modulation(
+    function: &str,
+    target: RgbColor,
+) -> Result<Value, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| {
+                RuntimeError::new(format!("{function} requires an active engine context"))
+            })?;
+        let adjustment =
+            SkyAdjustment::from_color_modulation(context.world.sky_fade[0], target);
+        context.sky_adjustment = adjustment;
+        context.register_landscape_operation(LandscapeOperation::SkyAdjust {
+            modulation: adjustment.modulation,
+            back_color: adjustment.back_color,
+        });
+        Ok(Value::Nil)
+    })
+}
+
+/// FnSetSkyFade (C4Script.cpp:3039-3044): NewGfx maps only the first RGB
+/// triple onto FadeClr1. The legacy destination triple remains a typed but
+/// otherwise ignored compatibility parameter.
+fn set_sky_fade(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = RgbColor::new(
+        value_to_i32(
+            args.first().unwrap_or(&Value::Nil),
+            "SetSkyFade",
+            "from red",
+        )? as u8,
+        value_to_i32(
+            args.get(1).unwrap_or(&Value::Nil),
+            "SetSkyFade",
+            "from green",
+        )? as u8,
+        value_to_i32(
+            args.get(2).unwrap_or(&Value::Nil),
+            "SetSkyFade",
+            "from blue",
+        )? as u8,
+    );
+    for (offset, parameter) in [(3, "to red"), (4, "to green"), (5, "to blue")] {
+        value_to_i32(
+            args.get(offset).unwrap_or(&Value::Nil),
+            "SetSkyFade",
+            parameter,
+        )?;
+    }
+    apply_sky_color_modulation("SetSkyFade", target)
+}
+
 /// FnSetSkyColor (C4Script.cpp:3046-3054): index zero maps the requested
 /// OldGfx RGB color onto FadeClr1 via GetClrModulation; other indices are
 /// silent no-ops.
@@ -25005,21 +25059,7 @@ fn set_sky_color(args: &[Value]) -> Result<Value, RuntimeError> {
     if index != 0 {
         return Ok(Value::Nil);
     }
-
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetSkyColor requires an active engine context"))?;
-        let adjustment =
-            SkyAdjustment::from_color_modulation(context.world.sky_fade[0], target);
-        context.sky_adjustment = adjustment;
-        context.register_landscape_operation(LandscapeOperation::SkyAdjust {
-            modulation: adjustment.modulation,
-            back_color: adjustment.back_color,
-        });
-        Ok(Value::Nil)
-    })
+    apply_sky_color_modulation("SetSkyColor", target)
 }
 
 /// FnGetSkyAdjust (C4Script.cpp:4632-4636) returns the raw sky modulation,
@@ -45058,6 +45098,7 @@ mod tests {
         "SetShape",
         "SetSkyAdjust",
         "SetSkyColor",
+        "SetSkyFade",
         "SetSkyParallax",
         "SetSolidMask",
         "SetTemperature",
@@ -52015,6 +52056,20 @@ public func RejectConstruction(x, y, builder)
             }
             other => panic!("unexpected landscape operation: {:?}", other),
         }
+    }
+
+    #[test]
+    fn set_sky_fade_converts_ignored_destination_arguments() {
+        let error = set_sky_fade(&[
+            Value::Int(96),
+            Value::Int(64),
+            Value::Int(200),
+            Value::Int(1),
+            Value::Int(2),
+            Value::String("ignored but typed".into()),
+        ])
+        .expect_err("SetSkyFade type-checks its ignored destination color");
+        assert!(error.message().contains("expected integer for to blue"));
     }
 
     #[test]

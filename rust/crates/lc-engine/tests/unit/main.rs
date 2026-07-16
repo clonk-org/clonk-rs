@@ -63343,6 +63343,46 @@ func ProbeSetSkyColor() {
     }
 
     #[test]
+    fn set_sky_fade_uses_only_the_from_color_like_newgfx() -> Result<(), EngineError> {
+        // FnSetSkyFade's NewGfx compatibility path ignores its second RGB
+        // triple after normal typed-parameter conversion.
+        let script = r#"#strict
+local result, modulation, back_color;
+
+func ProbeSetSkyFade() {
+    result = SetSkyFade(96, 64, 200, 1, 2, 3);
+    modulation = GetSkyAdjust();
+    back_color = GetSkyAdjust(1);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut settings = SkySettings::default();
+        settings.fade_top = RgbColor::new(64, 128, 200);
+        settings.fade_bottom = RgbColor::new(10, 20, 30);
+        engine.set_sky(settings);
+        engine.register_definition(
+            Definition::from_script("SKYF", "Sky fade probe", script)
+                .expect("probe compiles"),
+        )?;
+        let object_id = engine.spawn_object(SpawnConfig::new("SKYF"))?;
+        let object_index = engine.find_object_index(object_id).expect("probe exists");
+        engine.call_object_function(object_index, "ProbeSetSkyFade", Vec::new())?;
+
+        let locals = &engine.object_snapshot(object_id).expect("probe remains").local_vars;
+        assert_eq!(locals.get("result"), Some(&Value::Nil));
+        assert_eq!(locals.get("modulation"), Some(&Value::Int(0x20ff_80ff)));
+        assert_eq!(locals.get("back_color"), Some(&Value::Int(0x003f_42c8)));
+
+        let sky = engine.capture_state().sky.expect("sky state persists");
+        assert_eq!(sky.settings.fade_top, RgbColor::new(64, 128, 200));
+        assert_eq!(sky.settings.fade_bottom, RgbColor::new(10, 20, 30));
+        assert_eq!(sky.settings.modulation, Some(0x20ff_80ff));
+        assert_eq!(sky.settings.back_color_raw, 0x003f_42c8);
+        Ok(())
+    }
+
+    #[test]
     fn captures_and_restores_engine_state() -> Result<(), EngineError> {
         let mut engine = Engine::with_seed(0xBAD_F00D);
         engine.set_physics(PhysicsSettings::new(2, 9, -6));
