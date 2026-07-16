@@ -58,6 +58,7 @@ mod script_goto;
 mod set_builtin;
 mod set_landscape_pixel;
 mod set_mat_adjust;
+mod set_material_color;
 mod set_picture;
 mod sim_flight;
 mod swim_movement;

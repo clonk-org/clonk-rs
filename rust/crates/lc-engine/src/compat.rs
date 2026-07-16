@@ -5450,6 +5450,65 @@ fn get_material_color(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnSetMaterialColor (C4Script.cpp:4451-4465): emulate recoloring the
+/// material palette by installing the RGB-only modulation that transforms
+/// its first color into the requested one. The other two palette arguments
+/// are unused by native code, but all ten integer parameters are converted
+/// before the material-validity gate.
+fn set_material_color(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut values = [0i32; 10];
+    for (index, slot) in values.iter_mut().enumerate() {
+        *slot = value_to_i32(
+            args.get(index).unwrap_or(&Value::Nil),
+            "SetMaterialColor",
+            "parameter",
+        )?;
+    }
+    let [material_index, red, green, blue, _, _, _, _, _, _] = values;
+    let Some(material_id) = usize::try_from(material_index)
+        .ok()
+        .and_then(crate::material::MaterialId::new)
+    else {
+        return Ok(Value::Bool(false));
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("SetMaterialColor requires an active engine context")
+        })?;
+        let source = context
+            .world
+            .materials()
+            .and_then(|materials| materials.get_by_id(material_id))
+            .map(|material| {
+                let color = material.color();
+                RgbColor::new(
+                    color.first().copied().unwrap_or(0) as u8,
+                    color.get(1).copied().unwrap_or(0) as u8,
+                    color.get(2).copied().unwrap_or(0) as u8,
+                )
+            });
+        let Some(source) = source else {
+            return Ok(Value::Bool(false));
+        };
+        let target = RgbColor::new(red as u8, green as u8, blue as u8);
+        let modulation =
+            SkyAdjustment::from_color_modulation(source, target).modulation & 0x00ff_ffff;
+        let modulation = match modulation {
+            0 => 1,
+            0x00ff_ffff => 0,
+            modulation => modulation,
+        };
+
+        if let Some(landscape) = context.world.landscape.as_mut() {
+            Rc::make_mut(landscape).set_modulation(modulation);
+        }
+        context.register_landscape_operation(LandscapeOperation::MatAdjust { modulation });
+        Ok(Value::Bool(true))
+    })
+}
+
 /// FnGetMaterialCount (C4Script.cpp:2207-2213): invalid material indices
 /// return -1. Otherwise select the raw MatCount for fReal/materials without
 /// MinHeightCount, or the vertically filtered EffectiveMatCount.
@@ -12620,6 +12679,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("MaterialName", material_name);
     script.register_host_function("GetMaterialCount", get_material_count);
     script.register_host_function("GetMaterialColor", get_material_color);
+    script.register_host_function("SetMaterialColor", set_material_color);
     script.register_host_function("GetMaterialVal", get_material_val);
     script.register_host_function("ObjectSetAction", object_set_action);
     script.register_host_function("Smoke", smoke);
@@ -15281,8 +15341,8 @@ pub enum LandscapeOperation {
         modulation: u32,
         back_color: u32,
     },
-    /// FnSetMatAdjust (C4Script.cpp:4626-4630) ->
-    /// C4Landscape::SetModulation.
+    /// FnSetMatAdjust (C4Script.cpp:4626-4630) and FnSetMaterialColor
+    /// (C4Script.cpp:4451-4465) -> C4Landscape::SetModulation.
     MatAdjust {
         modulation: u32,
     },
@@ -44808,6 +44868,7 @@ mod tests {
         "SetLength",
         "SetMass",
         "SetMatAdjust",
+        "SetMaterialColor",
         "SetMaxPlayer",
         "SetMenuDecoration",
         "SetMenuSize",

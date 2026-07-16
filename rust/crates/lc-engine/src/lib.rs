@@ -45185,8 +45185,9 @@ impl Engine {
                         .apply_modulation(modulation, back_color);
                 }
                 LandscapeOperation::MatAdjust { modulation } => {
-                    // FnSetMatAdjust -> C4Landscape::SetModulation
-                    // (C4Script.cpp:4626-4630; C4Landscape.h:200-205).
+                    // FnSetMatAdjust/FnSetMaterialColor ->
+                    // C4Landscape::SetModulation (C4Script.cpp:4451-4465,
+                    // 4626-4630; C4Landscape.h:200-205).
                     if let Some(landscape) = &mut self.landscape {
                         landscape.set_modulation(modulation);
                     }
