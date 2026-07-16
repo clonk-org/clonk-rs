@@ -14903,6 +14903,7 @@ mod tests {
 
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.position = Vector2::new(6, 14);
+        builder.physical.can_chop = 1;
         builder.action_name = "Swim".into();
         builder.action_procedure = ActionProcedure::Swim;
         builder.command_direction = CommandDirection::Right;
@@ -15012,6 +15013,7 @@ mod tests {
 
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.position = Vector2::new(30, 0);
+        builder.physical.can_chop = 1;
         let builder_definition = builder.definition_id.clone();
 
         let mut target = snapshot_with_id(target_id.as_u64());
@@ -15075,12 +15077,78 @@ mod tests {
     }
 
     #[test]
+    fn chop_uses_physical_capability_and_moves_away_at_four_pixel_boundary() {
+        // C4Command::Chop reads GetPhysical()->CanChop independently of the
+        // ActMap. Outside Target::At, |dx| == 4 queues the ordinary +/-6
+        // approach and then the immediate +/-15 move-away command because
+        // the latter threshold is strictly less than 5 (C4Command.cpp:783-819).
+        let builder_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.position = Vector2::new(4, 0);
+        builder.physical.can_chop = 1;
+        let builder_definition = builder.definition_id.clone();
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::ZERO;
+        target.shape = DefinitionRect::new(-3, -3, 6, 6);
+        target.ocf = ocf::CHOP | ocf::AVAILABLE;
+
+        let objects = HashMap::from([(builder_id, builder), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::from([(
+            builder_definition,
+            CommandDefinitionSnapshot {
+                can_chop: false,
+                chop_action: None,
+                ..CommandDefinitionSnapshot::default()
+            },
+        )]);
+        let builder = objects.get(&builder_id).expect("builder present");
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = ChopState::from_request(
+            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 2);
+        match result.operations.as_slice() {
+            [CommandOperation::PushFront(approach), CommandOperation::PushFront(move_away)] => {
+                assert_eq!(approach.id, CommandId::MoveTo);
+                assert_eq!((approach.tx, approach.ty), (Some(6), Some(0)));
+                assert_eq!(approach.update_interval, 50);
+                assert_eq!(move_away.id, CommandId::MoveTo);
+                assert_eq!((move_away.tx, move_away.ty), (Some(15), Some(0)));
+                assert_eq!(move_away.update_interval, 50);
+            }
+            other => panic!("expected approach then move-away requests, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn chop_requests_ungrab_when_pushing() {
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.position = Vector2::new(30, 0);
+        builder.physical.can_chop = 1;
         builder.action_procedure = ActionProcedure::Push;
         builder.action_target = Some(ObjectId::new(99));
         let builder_definition = builder.definition_id.clone();
@@ -15145,6 +15213,7 @@ mod tests {
 
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.position = Vector2::new(6, 0);
+        builder.physical.can_chop = 1;
         let builder_definition = builder.definition_id.clone();
 
         let mut target = snapshot_with_id(target_id.as_u64());
@@ -15196,12 +15265,13 @@ mod tests {
     }
 
     #[test]
-    fn chop_fails_when_builder_cannot_chop() {
+    fn chop_fails_when_physical_can_chop_is_zero_despite_chop_action() {
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
 
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.position = Vector2::new(10, 0);
+        builder.physical.can_chop = 0;
         let builder_definition = builder.definition_id.clone();
 
         let mut target = snapshot_with_id(target_id.as_u64());
@@ -15218,7 +15288,7 @@ mod tests {
             builder_definition,
             CommandDefinitionSnapshot {
                 value: 0,
-                can_chop: false,
+                can_chop: true,
                 chop_action: Some("Chop".into()),
                 constructable: false,
                 grab: 0,
@@ -19866,11 +19936,8 @@ impl ChopState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        match ctx.definition(&ctx.object.definition_id) {
-            Some(definition) if definition.can_chop => {}
-            _ => {
-                return CommandStepResult::failed(None);
-            }
+        if ctx.object.physical.can_chop == 0 {
+            return CommandStepResult::failed(None);
         }
 
         let target_snapshot = match ctx.resolve(self.target) {
@@ -19917,6 +19984,7 @@ impl ChopState {
 
         const MIN_HORIZONTAL_RANGE: i32 = 4;
         const MAX_HORIZONTAL_RANGE: i32 = 9;
+        const MOVE_AWAY_HORIZONTAL_RANGE: i32 = 5;
 
         let at_target = ctx.object.container.is_none()
             && target_snapshot.container.is_none()
@@ -19957,7 +20025,7 @@ impl ChopState {
             .with_update_interval(50);
         operations.push(CommandOperation::PushFront(approach_request));
 
-        if dx.abs() < MIN_HORIZONTAL_RANGE {
+        if dx.abs() < MOVE_AWAY_HORIZONTAL_RANGE {
             let move_away_x = if ctx.position.x > target_snapshot.position.x {
                 target_snapshot.position.x + 15
             } else {
