@@ -10131,7 +10131,7 @@ mod tests {
     }
 
     #[test]
-    fn take2_requires_container() {
+    fn take2_uncontained_completes_without_recording_base_failure() {
         let crew_id = ObjectId::new(201);
 
         let mut crew = snapshot_with_id(crew_id.as_u64());
@@ -10159,17 +10159,22 @@ mod tests {
             rng: None,
         };
 
-        let mut state =
-            Take2State::from_request(&CommandRequest::new(CommandId::Take2)).expect("take2 state");
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
+            .expect("base command queues");
+        stack
+            .push_front(CommandRequest::new(CommandId::Take2).with_mode(CommandMode::SilentSub))
+            .expect("take2 command queues");
 
-        let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Failed);
+        let result = stack.step(&ctx).expect("take2 executes");
+        assert_eq!(result.status, CommandStatus::Completed);
         assert!(result.update.is_none());
         assert!(result.events.is_empty());
 
-        let second = state.step(&ctx);
-        assert_eq!(second.status, CommandStatus::Completed);
-        assert!(second.events.is_empty());
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 1);
+        assert_eq!(snapshot.commands[0].failures, 0);
     }
 
     #[test]
@@ -22204,13 +22209,13 @@ impl Take2State {
         self.executed = true;
 
         let Some(container_id) = ctx.object.container else {
-            return CommandStepResult::failed(None);
+            return CommandStepResult::completed(None);
         };
         let Some(container) = ctx.resolve(container_id) else {
-            return CommandStepResult::failed(None);
+            return CommandStepResult::completed(None);
         };
         if !container.is_active() {
-            return CommandStepResult::failed(None);
+            return CommandStepResult::completed(None);
         }
 
         let update = Self::update_to_stop(ctx);
