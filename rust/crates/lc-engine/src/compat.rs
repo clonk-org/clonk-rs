@@ -35589,7 +35589,7 @@ fn set_color_dw(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 /// FnSetPicture (C4Script.cpp:3708-3715): write the object's raw picture
-/// rectangle. A null explicit target falls back to the calling object; unlike
+/// rectangle. A null explicit target falls back to the calling object; like
 /// SetShape, C++ accepts any live object pointer supplied by script.
 fn set_picture(args: &[Value]) -> Result<Value, RuntimeError> {
     let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetPicture", "x")?;

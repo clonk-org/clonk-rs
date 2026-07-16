@@ -53969,6 +53969,69 @@ func RepositionAndGrow() { SetPosition(40, 300); DoCon(1); return GetY(); }
     }
 
     #[test]
+    fn script_setshape_updates_foreign_and_default_local_collision_rects() -> Result<(), EngineError>
+    {
+        // FnSetShape accepts any explicit object and calls UpdatePos after
+        // writing the live rect (C4Script.cpp:5183-5196).
+        let script = r#"#strict 3
+func Reshape(object target) {
+    return [SetShape(-7, -8, 70, 16, target), SetShape(-2, -3, 4, 6)];
+}
+"#;
+        let mut caller = Definition::from_script("CALL", "Shape caller", script)?;
+        caller.set_shape_rect(Some(DefinitionRect::new(0, 0, 10, 20)));
+        let mut target = Definition::from_script("TARG", "Shape target", "#strict 3")?;
+        target.set_shape_rect(Some(DefinitionRect::new(1, 2, 3, 4)));
+
+        let mut engine = Engine::with_seed(124);
+        engine.set_landscape(Landscape::flat(120, 120));
+        engine.register_definition(caller)?;
+        engine.register_definition(target)?;
+        let caller_id =
+            engine.spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(10, 20)))?;
+        let target_id =
+            engine.spawn_object(SpawnConfig::new("TARG").with_position(Vector2::new(20, 20)))?;
+        let caller_idx = engine.find_object_index(caller_id).expect("caller exists");
+        assert!(!engine
+            .sectors
+            .as_ref()
+            .expect("sectors initialized")
+            .shape_ids(SectorKey::Inside { x: 1, y: 0 })
+            .contains(&target_id));
+
+        assert_eq!(
+            engine.call_object_function(
+                caller_idx,
+                "Reshape",
+                vec![Value::Object(target_id.as_u64())],
+            )?,
+            Value::Array(vec![Value::Bool(true), Value::Bool(true)])
+        );
+
+        let caller_idx = engine
+            .find_object_index(caller_id)
+            .expect("caller survives");
+        assert_eq!(
+            engine.objects[caller_idx].current_shape_rect(),
+            Some(DefinitionRect::new(-2, -3, 4, 6))
+        );
+        let target_idx = engine
+            .find_object_index(target_id)
+            .expect("target survives");
+        assert_eq!(
+            engine.objects[target_idx].current_shape_rect(),
+            Some(DefinitionRect::new(-7, -8, 70, 16))
+        );
+        assert!(engine
+            .sectors
+            .as_ref()
+            .expect("sectors initialized")
+            .shape_ids(SectorKey::Inside { x: 1, y: 0 })
+            .contains(&target_id));
+        Ok(())
+    }
+
+    #[test]
     fn script_docon_update_shape_discards_setshape_override() -> Result<(), EngineError> {
         let script = r#"#strict 3
 func ResetShape() {
