@@ -7176,6 +7176,9 @@ struct GameApp {
     /// `Config.Graphics` display toggles loaded at process startup and driven
     /// by the Display submenu (C4MainMenu.cpp:855-884).
     display_flags: DisplayFlags,
+    /// Process-local `Config.Graphics.SmokeLevel`; object bubbles consult it
+    /// only outside network/recording sync mode, while particles always do.
+    graphics_smoke_level: i32,
     /// `C4Player::MouseControl` analogue: gates in-game mouse gameplay
     /// input (C4MainMenu.cpp:847-849).
     mouse_control: bool,
@@ -12357,6 +12360,17 @@ fn load_display_flags(paths: Option<&AppPaths>) -> DisplayFlags {
     flags
 }
 
+fn load_graphics_smoke_level(paths: Option<&AppPaths>) -> i32 {
+    paths
+        .and_then(|paths| Config::load(paths.config_file()).ok())
+        .and_then(|config| {
+            config
+                .get_in(Some("Graphics"), "SmokeLevel")
+                .and_then(|value| value.trim().parse::<i32>().ok())
+        })
+        .unwrap_or(lc_engine::DEFAULT_SMOKE_LEVEL)
+}
+
 fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
     let Some(paths) = paths else {
         return false;
@@ -13717,7 +13731,9 @@ impl GameApp {
         let sprite_cache = Arc::new(base_sprites.clone());
 
         // Engine starts with default materials; will be updated when boot loading finishes
+        let graphics_smoke_level = load_graphics_smoke_level(paths);
         let mut engine = Engine::new();
+        engine.set_smoke_level(graphics_smoke_level);
         engine.set_control_host(!matches!(
             network_mode.as_ref(),
             Some(NetworkMode::Client(_))
@@ -13858,6 +13874,7 @@ impl GameApp {
             ingame_menu_gfx: None,
             script_menu_presentation: None,
             display_flags: load_display_flags(paths),
+            graphics_smoke_level,
             mouse_control: true,
             mouse_control_allowed: true,
             save_browser: None,
@@ -30734,6 +30751,7 @@ impl GameApp {
     }
 
     fn start_recording_for(&mut self, scenario: &FrontendScenario) {
+        self.engine.set_recording_active(false);
         if !self.recording_enabled {
             self.recording = None;
             return;
@@ -30750,6 +30768,7 @@ impl GameApp {
             scenario.identifier.clone(),
             scenario.path.clone(),
         ));
+        self.engine.set_recording_active(true);
     }
 
     fn record_current_snapshot(&mut self) {
@@ -30762,6 +30781,7 @@ impl GameApp {
     }
 
     fn finish_recording(&mut self) {
+        self.engine.set_recording_active(false);
         let Some(session) = self.recording.take() else {
             return;
         };
@@ -30860,6 +30880,7 @@ impl GameApp {
         self.scoreboard_initial_reconcile_pending = false;
         self.scoreboard_close_pointer_capture = false;
         self.engine = Engine::new();
+        self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
         self.engine
             .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
@@ -31502,6 +31523,7 @@ impl GameApp {
             }
         }
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
+        engine.set_smoke_level(self.graphics_smoke_level);
         let (use_fair_crew, fair_crew_strength, fair_crew_forced, allow_debug) = prepared_fair_crew
             .unwrap_or_else(|| {
                 if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
@@ -31553,6 +31575,7 @@ impl GameApp {
             }
         }
         engine.set_network_game(network_game);
+        engine.set_recording_active(!network_game && self.recording_enabled);
         engine.set_league_game(self.network_is_league);
         seed_engine_player_info_parameters(
             &mut engine,
@@ -31910,6 +31933,7 @@ impl GameApp {
         self.finish_recording();
         self.loading_state = None;
         self.engine = Engine::new();
+        self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.engine.set_league_game(self.network_is_league);
@@ -32151,6 +32175,7 @@ impl GameApp {
 
         self.finish_recording();
         self.engine = Engine::new();
+        self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.engine.set_league_game(self.network_is_league);
@@ -32161,6 +32186,8 @@ impl GameApp {
         );
         self.engine
             .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
+        self.engine
+            .set_recording_active(self.recording_enabled);
         self.engine.set_fair_crew_forced(parameter_bootstrap.0);
         self.engine.set_allow_debug(parameter_bootstrap.1);
         self.engine.set_control_rate(parameter_bootstrap.2);
@@ -77211,6 +77238,36 @@ protected func InputCallback(string answer, int player)
             EngineError::ClassicMenuParityBoundary { .. }
         ));
         assert!(!app.runtime_help_visible);
+    }
+
+    #[test]
+    fn graphics_smoke_level_loads_legacy_default_and_configured_value() {
+        let _lock = env_lock().lock();
+        let install = tempdir().expect("smoke-level install fixture");
+        let user_data = tempdir().expect("smoke-level user fixture");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("fixture System.c4g directory");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover smoke-level fixture");
+        paths.ensure_user_dirs().expect("create fixture user dirs");
+
+        assert_eq!(
+            load_graphics_smoke_level(Some(&paths)),
+            lc_engine::DEFAULT_SMOKE_LEVEL
+        );
+        fs::write(paths.config_file(), "[Graphics]\nSmokeLevel=73\n")
+            .expect("write custom smoke level");
+        assert_eq!(load_graphics_smoke_level(Some(&paths)), 73);
+
+        fs::write(paths.config_file(), "[Graphics]\nSmokeLevel=invalid\n")
+            .expect("write invalid smoke level");
+        assert_eq!(
+            load_graphics_smoke_level(Some(&paths)),
+            lc_engine::DEFAULT_SMOKE_LEVEL
+        );
     }
 
     #[test]

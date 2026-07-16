@@ -236,7 +236,7 @@ impl Default for ParticleSystem {
             defs: Vec::new(),
             particles: Vec::new(),
             safe_rng: SafeRng::default(),
-            smoke_level: 200,
+            smoke_level: crate::DEFAULT_SMOKE_LEVEL,
         }
     }
 }

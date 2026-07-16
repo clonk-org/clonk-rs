@@ -1287,6 +1287,9 @@ pub struct HostWorldContext {
     /// `Game.NetworkActive` session during parameter setup
     /// (C4GameParameters.cpp:429-434).
     network_game: bool,
+    /// Effective `GetSmokeLevel` for sync-relevant FXU1 creation: 150 in
+    /// network/recording sync mode, otherwise Config.Graphics.SmokeLevel.
+    smoke_level: i32,
     /// Live `Game.Parameters.MaxPlayers`. Successful script writes update
     /// this preview before their deferred engine command is folded back.
     max_players: i32,
@@ -1410,6 +1413,7 @@ impl Default for HostWorldContext {
             player_info_league_progress_data: Rc::new(BTreeMap::new()),
             team_configuration: TeamConfiguration::default(),
             network_game: false,
+            smoke_level: crate::DEFAULT_SMOKE_LEVEL,
             max_players: 0,
             use_fair_crew: false,
             fair_crew_strength: 1_000,
@@ -1649,6 +1653,7 @@ impl HostWorldContext {
             player_info_league_progress_data: Rc::new(BTreeMap::new()),
             team_configuration: TeamConfiguration::default(),
             network_game: false,
+            smoke_level: crate::DEFAULT_SMOKE_LEVEL,
             max_players: 0,
             use_fair_crew: false,
             fair_crew_strength: 1_000,
@@ -1855,6 +1860,15 @@ impl HostWorldContext {
     pub(crate) fn with_network_game(mut self, network_game: bool) -> Self {
         self.network_game = network_game;
         self
+    }
+
+    pub(crate) fn with_smoke_level(mut self, smoke_level: i32) -> Self {
+        self.smoke_level = smoke_level;
+        self
+    }
+
+    fn smoke_level(&self) -> i32 {
+        self.smoke_level
     }
 
     pub(crate) fn with_max_players(mut self, max_players: i32) -> Self {
@@ -5539,8 +5553,8 @@ fn object_set_action(args: &[Value]) -> Result<Value, RuntimeError> {
 
 /// FnBubble (C4Script.cpp:2188-2192 + AddFunc :6718) -> BubbleOut
 /// (C4Effect.cpp:847-857): a bubble only from semi-solid (submerged)
-/// spots, capped at the sync-mode smoke level 150 (GetSmokeLevel,
-/// C4Effect.cpp:838-844); creates one FXU1 object.
+/// spots, capped by GetSmokeLevel (fixed at 150 in sync mode, otherwise
+/// Config.Graphics.SmokeLevel; C4Effect.cpp:838-844); creates one FXU1 object.
 fn bubble(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 2 {
         return Err(RuntimeError::new(
@@ -5588,7 +5602,7 @@ fn bubble(args: &[Value]) -> Result<Value, RuntimeError> {
                     .is_some()
             })
             .count();
-        if bubbles >= 150 {
+        if crate::bubble_cap_reached(bubbles, context.world.smoke_level()) {
             return Ok(Value::Nil);
         }
         let id = context.allocate_object_id();

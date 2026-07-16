@@ -542,6 +542,19 @@ const GAME_OVER_CHECK_INTERVAL: u8 = 35;
 pub const FIRE_DEFINITION_ID: &str = "FLAM";
 /// The bubble object BubbleOut creates (C4Effect.cpp:847-857).
 const BUBBLE_DEFINITION_ID: &str = "FXU1";
+/// `Config.Graphics.SmokeLevel` default (C4Config.cpp:452).
+pub const DEFAULT_SMOKE_LEVEL: i32 = 200;
+/// `GetSmokeLevel` while `C4GameControl::SyncMode` is active.
+const SYNC_SMOKE_LEVEL: i32 = 150;
+
+fn bubble_cap_reached(bubble_count: usize, smoke_level: i32) -> bool {
+    let Ok(smoke_level) = usize::try_from(smoke_level) else {
+        // C++ compares the nonnegative ObjectCount directly with the signed
+        // config value, so zero and negative limits reject every creation.
+        return true;
+    };
+    bubble_count >= smoke_level
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GraphicsOverlayMode {
@@ -14097,6 +14110,10 @@ pub struct Engine {
     /// network session just as C++ copies `Game.NetworkActive` during
     /// parameter setup (C4GameParameters.cpp:429-434).
     network_game: bool,
+    /// Whether recording is active or pre-armed for game initialization.
+    /// C++ includes `pRecord` in `C4GameControl::SyncMode`; this process-local
+    /// state deliberately does not enter synchronized snapshots.
+    recording_active: bool,
     /// `Game.Parameters::isLeague()` — specifically whether the synchronized
     /// LeagueAddress is non-empty. This is independent from network play:
     /// ordinary network games may still allow script-driven team switches.
@@ -16175,6 +16192,7 @@ impl Engine {
             allow_debug: true,
             debug_mode: false,
             network_game: false,
+            recording_active: false,
             league_game: false,
             league_name: Rc::new(Vec::new()),
             player_info_league_progress_data: Rc::new(BTreeMap::new()),
@@ -19383,6 +19401,21 @@ impl Engine {
         &self.particle_system
     }
 
+    /// Set process-local `Config.Graphics.SmokeLevel`. Def-based particles
+    /// consume the configured value directly; synchronized BubbleOut object
+    /// creation uses the fixed legacy cap instead.
+    pub fn set_smoke_level(&mut self, smoke_level: i32) {
+        self.particle_system.smoke_level = smoke_level;
+    }
+
+    fn bubble_smoke_level(&self) -> i32 {
+        if self.network_game || self.recording_active {
+            SYNC_SMOKE_LEVEL
+        } else {
+            self.particle_system.smoke_level
+        }
+    }
+
     pub fn set_physics(&mut self, physics: PhysicsSettings) {
         self.physics = physics;
         for object in &mut self.objects {
@@ -19392,6 +19425,12 @@ impl Engine {
 
     pub fn set_network_game(&mut self, network_game: bool) {
         self.network_game = network_game;
+    }
+
+    /// Set the process-local recording gate used by GetSmokeLevel. The app
+    /// pre-arms it before initialization when it will attach a recorder.
+    pub fn set_recording_active(&mut self, recording_active: bool) {
+        self.recording_active = recording_active;
     }
 
     pub fn set_max_players(&mut self, max_players: i32) {
@@ -20325,6 +20364,7 @@ impl Engine {
                 .map(ScenarioScript::script_arc),
         )
         .with_network_game(self.network_game)
+        .with_smoke_level(self.bubble_smoke_level())
         .with_max_players(self.max_players.unwrap_or_default())
         .with_fair_crew_parameters(self.use_fair_crew, self.fair_crew_strength)
         .with_control_host(self.control_host, Rc::clone(&self.player_info_updates))
@@ -48473,8 +48513,8 @@ impl Engine {
     }
 
     /// BubbleOut (C4Effect.cpp:847-857): a bubble only from semi-solid
-    /// (submerged) spots, capped at the sync-mode smoke level 150
-    /// (GetSmokeLevel, C4Effect.cpp:838-844).
+    /// (submerged) spots, capped by GetSmokeLevel — fixed at 150 in sync
+    /// mode, otherwise `Config.Graphics.SmokeLevel`.
     fn bubble_out(&mut self, tx: i32, ty: i32) -> Result<(), EngineError> {
         let semi_solid = self
             .landscape
@@ -48493,7 +48533,7 @@ impl Engine {
                     && !object.destroyed
             })
             .count();
-        if bubble_count >= 150 {
+        if bubble_cap_reached(bubble_count, self.bubble_smoke_level()) {
             return Ok(());
         }
         let config = SpawnConfig::new("FXU1")

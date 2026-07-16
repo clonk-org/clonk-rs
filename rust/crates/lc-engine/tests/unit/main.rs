@@ -4765,6 +4765,83 @@ func Incineration(iCause) { return 1; }
     }
 
     #[test]
+    fn bubble_cap_uses_sync_mode_or_configured_smoke_level() -> Result<(), EngineError> {
+        fn fixture(
+            smoke_level: Option<i32>,
+            network_game: bool,
+            recording_active: bool,
+            initial_bubbles: usize,
+        ) -> Result<(Engine, ObjectId), EngineError> {
+            let library = MaterialLibrary::parse(
+                r#"
+                [Material Water]
+                Name=Water
+                Density=25
+                Friction=0
+            "#,
+            )
+            .expect("material library parses");
+            let materials = MaterialSet::from_resource_library(&library);
+            let water = materials.id_of("Water").expect("water exists");
+            let mut engine = Engine::with_seed(212);
+            if let Some(smoke_level) = smoke_level {
+                engine.set_smoke_level(smoke_level);
+            }
+            engine.set_network_game(network_game);
+            engine.set_recording_active(recording_active);
+            engine.set_materials(materials);
+            let mut landscape = Landscape::flat_with_material(40, 30, None);
+            landscape
+                .set_liquid_column(10, vec![LiquidSegment::with_material(5, 12, Some(water))]);
+            engine.set_landscape(landscape);
+            engine.register_definition(simple_definition("FXU1"))?;
+            engine.register_definition(Definition::from_script(
+                "ACTR",
+                "Actor",
+                "#strict\nfunc Blub() { Bubble(10, 8); }\n",
+            )?)?;
+            let actor = engine.spawn_object(SpawnConfig::new("ACTR"))?;
+            for _ in 0..initial_bubbles {
+                engine.spawn_object(SpawnConfig::new("FXU1"))?;
+            }
+            Ok((engine, actor))
+        }
+
+        fn call_and_count(engine: &mut Engine, actor: ObjectId) -> Result<usize, EngineError> {
+            let actor_idx = engine.find_object_index(actor).expect("actor exists");
+            let _ = engine.call_object_function(actor_idx, "Blub", Vec::new())?;
+            Ok(engine
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "FXU1")
+                .count())
+        }
+
+        // Local non-record play uses Config.Graphics.SmokeLevel, whose
+        // default is 200 rather than the synchronized fixed limit 150.
+        let (mut local_default, actor) = fixture(None, false, false, 199)?;
+        assert_eq!(call_and_count(&mut local_default, actor)?, 200);
+        assert_eq!(call_and_count(&mut local_default, actor)?, 200);
+
+        // A custom local setting is consumed directly, including values
+        // below the sync limit.
+        let (mut local_custom, actor) = fixture(Some(3), false, false, 2)?;
+        assert_eq!(call_and_count(&mut local_custom, actor)?, 3);
+        assert_eq!(call_and_count(&mut local_custom, actor)?, 3);
+
+        // Network and active-recording sync modes both force 150 regardless
+        // of the process-local graphics setting.
+        let (mut network, actor) = fixture(Some(3), true, false, 149)?;
+        assert_eq!(call_and_count(&mut network, actor)?, 150);
+        assert_eq!(call_and_count(&mut network, actor)?, 150);
+
+        let (mut recording, actor) = fixture(Some(3), false, true, 149)?;
+        assert_eq!(call_and_count(&mut recording, actor)?, 150);
+        assert_eq!(call_and_count(&mut recording, actor)?, 150);
+        Ok(())
+    }
+
+    #[test]
     fn incinerate_in_extinguisher_leaves_fire_dead_until_execute() -> Result<(), EngineError> {
         // fxFireStart deny (C4Effect.cpp:574-607 + ctor :128-133): in
         // extinguishing material the Start returns -1 and the freshly
