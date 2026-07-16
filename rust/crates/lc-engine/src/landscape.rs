@@ -1250,6 +1250,56 @@ impl RuntimeTexMapState {
         slot as u8
     }
 
+    /// `C4Landscape::SetTextureIndex`'s defined texture-map mutation
+    /// (C4Landscape.cpp:2733-2808). `MoveIndex` is a copy despite its name:
+    /// the source slot remains occupied and material defaults are unchanged.
+    ///
+    /// The native insertion scan tests the non-null pointer returned by
+    /// `GetEntry`, rather than whether that entry is null. It consequently
+    /// rejects every safely representable insertion index before mutation.
+    /// Its remaining 126/127 paths write beyond `Entry[126]`; keep those
+    /// undefined cases contained instead of reproducing memory corruption.
+    pub(crate) fn set_texture_index(
+        &mut self,
+        material_texture: &str,
+        new_index: u8,
+        insert: bool,
+    ) -> bool {
+        if insert {
+            // At 127, the empty-input native path returns true before its
+            // out-of-bounds MoveIndex arms. Preserve that defined no-op.
+            return new_index == C4M_MAX_TEX_INDEX as u8 && material_texture.is_empty();
+        }
+
+        let new_slot = usize::from(new_index);
+        if material_texture.is_empty()
+            || !(1..C4M_MAX_TEX_INDEX).contains(&new_slot)
+            || self
+                .material_names
+                .get(new_slot)
+                .and_then(Option::as_ref)
+                .is_some()
+        {
+            return false;
+        }
+
+        let (material, texture) = match material_texture.split_once('-') {
+            Some((material, texture)) => (material, Some(texture)),
+            None => (material_texture, None),
+        };
+        let old_slot = usize::from(self.get_index(material, texture, false));
+        if old_slot == 0 {
+            return false;
+        }
+
+        self.densities[new_slot] = self.densities[old_slot];
+        self.material_names[new_slot] = self.material_names[old_slot].clone();
+        self.texture_names[new_slot] = self.texture_names[old_slot].clone();
+        self.match_texture_names[new_slot] = self.match_texture_names[old_slot].clone();
+        self.shapes[new_slot] = self.shapes[old_slot];
+        true
+    }
+
     /// C4TextureMap::GetIndexMatTex (C4Texture.cpp:346-369). An explicit
     /// `Material-Texture` first tries/allocates that pair. If it fails and
     /// there is no caller-supplied default texture, C++ looks up the ORIGINAL
@@ -1831,6 +1881,20 @@ impl Landscape {
         if let Some(pixels) = pixels {
             pixels.sync_runtime_texmap(state.texmap());
         }
+        true
+    }
+
+    /// Replace only the live `C4TextureMap::Entry` model. Pure
+    /// SetTextureIndex moves do not call `HandleTexMapUpdate`, so C++ leaves
+    /// Surface8 and its cached Pix2Mat/Pix2Dens tables untouched.
+    pub(crate) fn replace_runtime_texmap_entries_only(
+        &mut self,
+        texmap: RuntimeTexMapState,
+    ) -> bool {
+        let Some(state) = self.raster_state.as_mut() else {
+            return false;
+        };
+        *state.texmap_mut() = texmap;
         true
     }
 
@@ -4697,6 +4761,18 @@ impl crate::Engine {
             return false;
         };
         landscape.replace_runtime_texmap_state(texmap)
+    }
+
+    /// Fold a pure SetTextureIndex MoveIndex copy without the
+    /// HandleTexMapUpdate work that C++ deliberately omits.
+    pub(crate) fn replace_runtime_texmap_entries_only(
+        &mut self,
+        texmap: RuntimeTexMapState,
+    ) -> bool {
+        let Some(landscape) = self.landscape.as_mut() else {
+            return false;
+        };
+        landscape.replace_runtime_texmap_entries_only(texmap)
     }
 
     /// Persist DrawDefMap's in-place C4MapCreatorS2 mutation after the

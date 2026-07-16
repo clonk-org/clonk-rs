@@ -2085,6 +2085,12 @@ impl HostWorldContext {
                 };
                 let _ = landscape.replace_runtime_texmap_state(texmap.clone());
             }
+            LandscapeOperation::SetTextureIndex { texmap } => {
+                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                    return;
+                };
+                let _ = landscape.replace_runtime_texmap_entries_only(texmap.clone());
+            }
             LandscapeOperation::DrawMatChunks {
                 origin,
                 width,
@@ -12574,6 +12580,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetSkyAdjust", set_sky_adjust);
     script.register_host_function("SetMatAdjust", set_mat_adjust);
     script.register_host_function("SetLandscapePixel", set_landscape_pixel);
+    script.register_host_function("SetTextureIndex", set_texture_index);
     script.register_host_function("GetSkyAdjust", get_sky_adjust);
     script.register_host_function("SetGamma", set_gamma);
     script.register_host_function("ResetGamma", reset_gamma);
@@ -15062,6 +15069,12 @@ pub enum LandscapeOperation {
     /// Render(nullptr) finds no map. C++ retains that allocation despite the
     /// false DrawMap result (C4Landscape.cpp:2659-2663; C4Texture.cpp:319-369).
     SyncRuntimeTexMap {
+        texmap: crate::landscape::RuntimeTexMapState,
+    },
+    /// FnSetTextureIndex -> C4Landscape::SetTextureIndex. Pure MoveIndex
+    /// copies mutate C4TextureMap entries without refreshing Surface8's
+    /// cached material tables (C4Landscape.cpp:2733-2808).
+    SetTextureIndex {
         texmap: crate::landscape::RuntimeTexMapState,
     },
     BlastCircle {
@@ -24109,6 +24122,57 @@ fn get_texture(args: &[Value]) -> Result<Value, RuntimeError> {
             .and_then(Option::as_deref)
             .unwrap_or_default();
         Ok(Value::String(texture.to_string()))
+    })
+}
+
+/// FnSetTextureIndex/C4Landscape::SetTextureIndex (C4Script.cpp:5071-5075;
+/// C4Landscape.cpp:2733-2808). The wrapper admits 0..=255, then the landscape
+/// applies its narrower texture-slot rules. MoveIndex is synchronously visible
+/// through the live TextureMap even though Surface8 and Pix2* caches stay put.
+fn set_texture_index(args: &[Value]) -> Result<Value, RuntimeError> {
+    let material_texture =
+        parse_optional_string(args.first(), "SetTextureIndex", "material-texture")?
+            .unwrap_or_default();
+    let new_index = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetTextureIndex",
+        "new-index",
+    )?;
+    let insert = value_to_bool(
+        args.get(2).unwrap_or(&Value::Nil),
+        "SetTextureIndex",
+        "insert",
+    )?;
+    if !(0..=255).contains(&new_index) {
+        return Ok(Value::Int(0));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Int(0));
+        };
+        let Some(texmap) = context.runtime_texmap.as_mut() else {
+            return Ok(Value::Int(0));
+        };
+        let before = texmap.clone();
+        let succeeded = texmap.set_texture_index(
+            &material_texture,
+            new_index as u8,
+            insert,
+        );
+        let changed = *texmap != before;
+        let texmap = texmap.clone();
+
+        if changed {
+            let operation = LandscapeOperation::SetTextureIndex { texmap };
+            // C++ changes the live TextureMap before returning. Keep this
+            // callback's COW world coherent and carry the captured state to
+            // later effect callbacks and the authoritative fold.
+            context.world.preview_runtime_landscape_operation(&operation);
+            context.register_landscape_operation(operation);
+        }
+        Ok(Value::Int(i32::from(succeeded)))
     })
 }
 
@@ -44603,6 +44667,7 @@ mod tests {
         "SetSkyParallax",
         "SetSolidMask",
         "SetTemperature",
+        "SetTextureIndex",
         "SetTransferZone",
         "SetVar",
         "SetVertex",
@@ -49682,6 +49747,153 @@ public func RejectConstruction(x, y, builder)
                 Value::Nil,
             ])
         );
+    }
+
+    #[test]
+    fn set_texture_index_rejects_range_and_literal_insert_bug_paths() {
+        // FnSetTextureIndex rejects values outside the wrapper's 0..=255
+        // range before uint8 conversion. C4Landscape then rejects 128, and
+        // its insertion room scan always rejects ordinary 1..=125 slots:
+        // GetEntry returns a non-null pointer even for an empty entry
+        // (C4Script.cpp:5071-5075; C4Landscape.cpp:2733-2755;
+        // C4Texture.h:83).
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            draw_map_world(8, 7, 3, false),
+            1,
+            || {
+                Ok::<_, RuntimeError>(Value::Array(vec![
+                    set_texture_index(&[
+                        Value::String("Earth-Rough".to_string()),
+                        Value::Int(300),
+                        Value::Bool(false),
+                    ])?,
+                    set_texture_index(&[
+                        Value::String("Earth-Rough".to_string()),
+                        Value::Int(128),
+                        Value::Bool(false),
+                    ])?,
+                    set_texture_index(&[
+                        Value::String("Earth-Ridge".to_string()),
+                        Value::Int(2),
+                        Value::Bool(true),
+                    ])?,
+                    // This is the one defined index-127 insertion arm: an
+                    // empty mat/tex is a successful no-op. Nonempty 126/127
+                    // paths reach native one-past-array writes and are
+                    // deliberately contained.
+                    set_texture_index(&[
+                        Value::Nil,
+                        Value::Int(127),
+                        Value::Bool(true),
+                    ])?,
+                    get_texture(&[Value::Int(2), Value::Int(2)])?,
+                ]))
+            },
+        );
+
+        assert_eq!(
+            result.expect("SetTextureIndex rejection paths succeed"),
+            Value::Array(vec![
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(1),
+                Value::Nil,
+            ])
+        );
+        assert!(outcome.landscape.is_empty());
+    }
+
+    #[test]
+    fn set_texture_index_remap_is_live_copied_and_threaded_between_callbacks() {
+        // Slot 2 is deliberately absent from the texmap but present in
+        // Surface8 at (2,2). A successful MoveIndex makes GetTexture observe
+        // Earth-Rough there immediately, while both Surface8 bytes and the
+        // source slot stay unchanged (C4Landscape.cpp:2710-2731,2787-2808;
+        // C4Texture.cpp:313-317).
+        let mut replay_world = draw_map_world(8, 7, 3, false);
+        let initial_landscape = replay_world
+            .landscape_ref()
+            .expect("landscape exists")
+            .clone();
+        let (result, outcome) =
+            with_effect_context(None, &[], replay_world.clone(), 1, || {
+                Ok::<_, RuntimeError>(Value::Array(vec![
+                    get_texture(&[Value::Int(2), Value::Int(2)])?,
+                    set_texture_index(&[
+                        Value::String("Earth-Rough".to_string()),
+                        Value::Int(2),
+                        Value::Bool(false),
+                    ])?,
+                    get_texture(&[Value::Int(2), Value::Int(2)])?,
+                    get_texture(&[Value::Int(1), Value::Int(2)])?,
+                    set_texture_index(&[
+                        Value::String("Earth-Rough".to_string()),
+                        Value::Int(2),
+                        Value::Bool(false),
+                    ])?,
+                ]))
+            });
+
+        assert_eq!(
+            result.expect("SetTextureIndex and GetTexture succeed"),
+            Value::Array(vec![
+                Value::Nil,
+                Value::Int(1),
+                Value::String("Rough".to_string()),
+                Value::String("Rough".to_string()),
+                Value::Int(0),
+            ])
+        );
+        assert_eq!(outcome.landscape.len(), 1);
+        let LandscapeOperation::SetTextureIndex { texmap } = &outcome.landscape[0] else {
+            panic!("unexpected landscape operation: {:?}", outcome.landscape[0]);
+        };
+        for slot in [1, 2] {
+            assert_eq!(texmap.material_names[slot].as_deref(), Some("Earth"));
+            assert_eq!(texmap.texture_names[slot].as_deref(), Some("Rough"));
+            assert_eq!(
+                texmap.match_texture_names[slot].as_deref(),
+                Some("Rough")
+            );
+            assert_eq!(texmap.densities[slot], 100);
+            assert_eq!(texmap.shapes[slot], Some(crate::chunky::ChunkShape::Flat));
+        }
+        assert_eq!(texmap.default_material_entry("Earth"), Some(1));
+
+        // Effect callbacks are separate host contexts. Threading the first
+        // callback's captured entry state must make slot 2 visible to the
+        // next one before the authoritative Engine fold.
+        replay_world.preview_runtime_landscape_operation(&outcome.landscape[0]);
+        let (replayed, replayed_outcome) =
+            with_effect_context(None, &[], replay_world, 1, || {
+                Ok::<_, RuntimeError>((
+                    get_texture(&[Value::Int(2), Value::Int(2)])?,
+                    set_texture_index(&[
+                        Value::String("Earth-Rough".to_string()),
+                        Value::Int(2),
+                        Value::Bool(false),
+                    ])?,
+                ))
+            });
+        assert_eq!(
+            replayed.expect("replayed callback sees texmap"),
+            (Value::String("Rough".to_string()), Value::Int(0))
+        );
+        assert!(replayed_outcome.landscape.is_empty());
+
+        let mut engine = crate::Engine::new();
+        engine.set_landscape(initial_landscape);
+        engine.apply_landscape_operations(outcome.landscape);
+        let landscape = engine.landscape().expect("folded landscape exists");
+        assert_eq!(landscape.grid_byte_at(1, 2), Some(1 | 0x80));
+        assert_eq!(landscape.grid_byte_at(2, 2), Some(2));
+        let folded = landscape.raster_state().expect("raster state").texmap();
+        assert_eq!(folded.material_names[1].as_deref(), Some("Earth"));
+        assert_eq!(folded.material_names[2].as_deref(), Some("Earth"));
+        assert_eq!(folded.default_material_entry("Earth"), Some(1));
     }
 
     #[test]

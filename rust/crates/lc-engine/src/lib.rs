@@ -44800,6 +44800,9 @@ impl Engine {
                 LandscapeOperation::SyncRuntimeTexMap { texmap } => {
                     let _ = self.replace_runtime_texmap(texmap);
                 }
+                LandscapeOperation::SetTextureIndex { texmap } => {
+                    let _ = self.replace_runtime_texmap_entries_only(texmap);
+                }
                 LandscapeOperation::BlastCircle {
                     center,
                     radius,
