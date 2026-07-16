@@ -447,6 +447,14 @@ impl RuntimeHandle {
                         .execute_player_select(&data)
                         .map_err(|error| format!("{error} (player {})", data.player))?;
                 }
+                ControlPacket::EmMoveObject(data) => {
+                    self.engine
+                        .execute_em_move_object_control(
+                            &data,
+                            ScriptControlPolicy::replay(false),
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
                 ControlPacket::Script(data) => {
                     self.engine
                         .execute_script_control(&data, ScriptControlPolicy::replay(false))
@@ -2274,6 +2282,7 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                         ControlPacket::PlayerControl(_) => "PlayerControl",
                         ControlPacket::PlayerCommand(_) => "PlayerCommand",
                         ControlPacket::PlayerSelect(_) => "PlayerSelect",
+                        ControlPacket::EmMoveObject(_) => "EMMoveObject",
                         ControlPacket::Script(_) => "Script",
                         ControlPacket::MessageBoardAnswer(_) => "MessageBoardAnswer",
                         ControlPacket::CustomCommand(_) => "CustomCommand",
@@ -4962,6 +4971,44 @@ global func Step(state, frame, random)
                 .expect("rule marker reads"),
             lc_script::Value::Int(1)
         );
+    }
+
+    #[test]
+    fn replay_executes_em_move_object_before_the_frame_tick() {
+        let mut runtime = RuntimeHandle::new();
+        runtime
+            .engine
+            .register_definition(
+                Definition::from_script("MOVE", "Move", "").expect("definition compiles"),
+            )
+            .expect("definition registers");
+        let object = runtime
+            .engine
+            .spawn_object(
+                SpawnConfig::new("MOVE")
+                    .with_position(crate::Vector2::new(7, 11))
+                    .with_velocity(crate::Vector2::new(4, -3))
+                    .with_mobile(true),
+            )
+            .expect("object spawns");
+        let object_number = i32::try_from(object.as_u64()).expect("fixture id fits i32");
+        let controls = format!(
+            "[Control]\n\
+             [IDPacket]\nID=176\n[EM Move Obj]\nAction=0\ntx=3\nty=-2\nObjectNum=1\nStrict=3\nObjs={object_number}\nByClient=0\n"
+        );
+        runtime.control_packets.insert(
+            0,
+            parse_control_ini(&controls).expect("editor control parses"),
+        );
+        runtime
+            .apply_control_packets_for_frame(0)
+            .expect("editor control replays");
+
+        let index = runtime.engine.find_object_index(object).unwrap();
+        let object = &runtime.engine.objects[index];
+        assert_eq!(object.state.position, crate::Vector2::new(10, 9));
+        assert_eq!(object.state.velocity, crate::Vector2::ZERO);
+        assert!(!object.state.mobile);
     }
 
     #[test]

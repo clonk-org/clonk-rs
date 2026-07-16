@@ -26696,6 +26696,13 @@ impl GameApp {
                     self.engine.execute_surrender_player_control(control);
                     Ok(())
                 }
+                NetworkControl::EmMoveObject(control) => self
+                    .engine
+                    .execute_em_move_object_control(
+                        &control,
+                        ScriptControlPolicy::live(false),
+                    )
+                    .map(|_| ()),
                 NetworkControl::ActivateGameGoalMenu(control) => {
                     self.engine
                         .execute_activate_game_goal_menu_control(&control)?;

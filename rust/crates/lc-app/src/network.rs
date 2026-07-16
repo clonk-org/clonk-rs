@@ -817,6 +817,7 @@ pub enum NetworkControl {
     Script(ScriptControlData),
     MessageBoardAnswer(MessageBoardAnswerControlData),
     CustomCommand(lc_engine::CustomCommandControlData),
+    EmMoveObject(lc_engine::EmMoveObjectControlData),
     Player { owner: i32, event: ControlEvent },
     InitScenarioPlayer(lc_engine::InitScenarioPlayerControlData),
     Synchronize(lc_engine::SynchronizeControlData),
@@ -2727,6 +2728,7 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::CustomCommand(data) => {
             Some(NetworkControl::CustomCommand(data))
         }
+        lc_engine::ControlPacket::EmMoveObject(data) => Some(NetworkControl::EmMoveObject(data)),
         lc_engine::ControlPacket::Synchronize(data) => Some(NetworkControl::Synchronize(data)),
         lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
         lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
@@ -4894,6 +4896,27 @@ mod tests {
                 command.clone(),
             )),
             Some(NetworkControl::CustomCommand(command))
+        );
+    }
+
+    #[test]
+    fn decoded_em_move_object_is_retained_for_ordered_execution() {
+        let control = lc_engine::EmMoveObjectControlData {
+            action: lc_engine::EMMO_SCRIPT,
+            tx: -12,
+            ty: 34,
+            target_object: 42,
+            objects: vec![7, 9],
+            strictness: lc_engine::ScriptStrictness::Strict2,
+            script: lc_engine::LegacyCString::from_bytes(b"SetXDir(0)".to_vec())
+                .expect("script is NUL-free"),
+            by_client: 4,
+        };
+        assert_eq!(
+            network_control_for_packet(lc_engine::ControlPacket::EmMoveObject(
+                control.clone(),
+            )),
+            Some(NetworkControl::EmMoveObject(control))
         );
     }
 

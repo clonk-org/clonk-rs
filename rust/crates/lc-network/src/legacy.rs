@@ -4,12 +4,14 @@ use lc_engine::{
     ActivateGameGoalMenuControlData, ActivateGameGoalRuleControlData, ClientCoreControlData,
     ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
     ControlPacket as EngineControlPacket, ControlPacketId, ControlPlayerInfoEntry,
+    EmMoveObjectControlData,
     CustomCommandControlData, EliminatePlayerControlData, InitScenarioPlayerControlData,
     JoinPlayerControlData, JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData,
     NetworkResourceCore, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
     PlayerInfoUpdateRequest, PlayerSelectControlData, RemovePlayerControlData, ScriptControlData,
     ScriptStrictness, SetPlayerTeamControlData, SurrenderPlayerControlData, SyncCheckPacket,
     SynchronizeControlData, ToggleHostilityControlData, VoteControlData,
+    EMMO_SCRIPT,
     CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
@@ -39,6 +41,7 @@ const CID_REMOVE_PLR: u8 = 0x80 | 0x12;
 const CID_PLR_SELECT: u8 = 0x80 | 0x20;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
 const CID_PLR_COMMAND: u8 = 0x80 | 0x22;
+const CID_EM_MOVE_OBJECT: u8 = 0x80 | 0x30;
 const CID_INIT_SCENARIO_PLAYER: u8 = 0x80 | 0x52;
 const CID_SURRENDER_PLAYER: u8 = 0x80 | 0x55;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
@@ -70,6 +73,8 @@ pub enum LegacyControlError {
     InvalidScriptStrictness(u8),
     #[error("PlayerSelect object count {0} is negative")]
     PlayerSelectObjectCountOutOfRange(i32),
+    #[error("EMMoveObject object count {0} is negative")]
+    EmMoveObjectCountOutOfRange(i32),
     #[error("resource SHA contains an invalid hexadecimal byte")]
     InvalidResourceSha,
     #[error("JoinData C4ID is not exactly four uppercase letters, digits or underscores")]
@@ -116,6 +121,8 @@ pub enum LegacyEncodeError {
     PlayerInfoCountOutOfRange(usize),
     #[error("PlayerSelect object count {0} exceeds C++ int32")]
     PlayerSelectObjectCountTooLarge(usize),
+    #[error("EMMoveObject object count {0} exceeds C++ int32")]
+    EmMoveObjectCountTooLarge(usize),
     #[error("JoinData collection count {0} exceeds C++ int32")]
     JoinDataCollectionTooLarge(usize),
     #[error("JoinData client count {0} exceeds C++ uint32")]
@@ -647,6 +654,7 @@ fn decode_control(
         CID_PLR_SELECT => decode_player_select(reader),
         CID_PLR_CONTROL => decode_player_control(reader),
         CID_PLR_COMMAND => decode_player_command(reader),
+        CID_EM_MOVE_OBJECT => decode_em_move_object(reader),
         CID_INIT_SCENARIO_PLAYER => decode_init_scenario_player(reader),
         CID_SURRENDER_PLAYER => decode_surrender_player(reader),
         CID_SYNC_CHECK => decode_sync_check(reader),
@@ -1025,6 +1033,47 @@ fn decode_player_command(
         data: reader.read_raw_i32()?,
         add_mode: reader.read_int32()?,
         by_client: reader.read_int32()?,
+    }))
+}
+
+fn decode_em_move_object(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    let action = reader.read_u8()?;
+    let tx = reader.read_raw_i32()?;
+    let ty = reader.read_raw_i32()?;
+    let target_object = reader.read_raw_i32()?;
+    let object_count = reader.read_int32()?;
+    let strictness = reader.read_u8()?;
+    // C4ControlEMMoveObject checks strictness before allocating or compiling
+    // the object array, so retain that error precedence for truncated and
+    // malformed controls.
+    let strictness = ScriptStrictness::try_from(strictness)
+        .map_err(LegacyControlError::InvalidScriptStrictness)?;
+    if object_count < 0 {
+        return Err(LegacyControlError::EmMoveObjectCountOutOfRange(
+            object_count,
+        ));
+    }
+    let mut objects = Vec::new();
+    for _ in 0..object_count {
+        objects.push(reader.read_raw_i32()?);
+    }
+    let script = if action == EMMO_SCRIPT {
+        reader.read_c_string()?
+    } else {
+        LegacyCString::default()
+    };
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::EmMoveObject(EmMoveObjectControlData {
+        action,
+        tx,
+        ty,
+        target_object,
+        objects,
+        strictness,
+        script,
+        by_client,
     }))
 }
 
@@ -1588,6 +1637,29 @@ fn encode_player_command(buffer: &mut Vec<u8>, data: &PlayerCommandControlData) 
     append_int32(buffer, data.by_client);
 }
 
+fn encode_em_move_object(
+    buffer: &mut Vec<u8>,
+    data: &EmMoveObjectControlData,
+) -> Result<(), LegacyEncodeError> {
+    let object_count = i32::try_from(data.objects.len())
+        .map_err(|_| LegacyEncodeError::EmMoveObjectCountTooLarge(data.objects.len()))?;
+    buffer.push(CID_EM_MOVE_OBJECT);
+    buffer.push(data.action);
+    append_raw_i32(buffer, data.tx);
+    append_raw_i32(buffer, data.ty);
+    append_raw_i32(buffer, data.target_object);
+    append_int32(buffer, object_count);
+    buffer.push(data.strictness.raw());
+    for object in &data.objects {
+        append_raw_i32(buffer, *object);
+    }
+    if data.action == EMMO_SCRIPT {
+        append_c_string(buffer, &data.script);
+    }
+    append_int32(buffer, data.by_client);
+    Ok(())
+}
+
 fn encode_init_scenario_player(buffer: &mut Vec<u8>, data: &InitScenarioPlayerControlData) {
     buffer.push(CID_INIT_SCENARIO_PLAYER);
     append_int32(buffer, data.team);
@@ -1795,6 +1867,7 @@ fn encode_control(
             encode_player_command(buffer, data);
             Ok(())
         }
+        EngineControlPacket::EmMoveObject(data) => encode_em_move_object(buffer, data),
         EngineControlPacket::InitScenarioPlayer(data) => {
             encode_init_scenario_player(buffer, data);
             Ok(())
@@ -2099,6 +2172,100 @@ mod tests {
                     &complete[..end]
                 );
             }
+        }
+    }
+
+    #[test]
+    fn em_move_object_script_entry_matches_cpp_mixed_raw_and_packed_order() {
+        // C4ControlEMMoveObject writes raw Action/tx/ty/TargetObj, packed
+        // ObjectNum, raw Strict and object numbers, conditional Script, then
+        // inherited packed ByClient (src/C4Control.cpp:972-992,53-57).
+        let expected = EngineControlPacket::EmMoveObject(EmMoveObjectControlData {
+            action: EMMO_SCRIPT,
+            tx: 0x1122_3344,
+            ty: -2,
+            target_object: 0x0102_0304,
+            objects: vec![130, -4],
+            strictness: ScriptStrictness::Strict2,
+            script: LegacyCString::from_bytes(b"SetX();\x80".to_vec())
+                .expect("fixture is NUL-free"),
+            by_client: 130,
+        });
+        let encoded = [
+            0xb0, 0x03, 0x44, 0x33, 0x22, 0x11, 0xfe, 0xff, 0xff, 0xff, 0x04, 0x03, 0x02, 0x01,
+            0x02, 0x02, 0x82, 0x00, 0x00, 0x00, 0xfc, 0xff, 0xff, 0xff, b'S', b'e', b't', b'X',
+            b'(', b')', b';', 0x80, 0x00, 0x82, 0x01,
+        ];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
+    }
+
+    #[test]
+    fn em_move_object_keeps_unknown_action_raw_and_omits_non_script_string() {
+        let canonical = EngineControlPacket::EmMoveObject(EmMoveObjectControlData {
+            action: u8::MAX,
+            ..EmMoveObjectControlData::default()
+        });
+        let encoded = [
+            0xb0, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0x00, 0x03, 0xff,
+        ];
+        assert_eq!(
+            decode_control_entry_payload(&encoded),
+            Ok(canonical.clone())
+        );
+        assert_eq!(
+            encode_control_entry_payload(&canonical),
+            Ok(encoded.to_vec())
+        );
+
+        let with_unused_script = EngineControlPacket::EmMoveObject(EmMoveObjectControlData {
+            action: u8::MAX,
+            script: LegacyCString::from_bytes(b"ignored".to_vec()).expect("fixture is NUL-free"),
+            ..EmMoveObjectControlData::default()
+        });
+        assert_eq!(
+            encode_control_entry_payload(&with_unused_script),
+            Ok(encoded.to_vec())
+        );
+    }
+
+    #[test]
+    fn em_move_object_rejects_invalid_count_after_strictness_check() {
+        let mut encoded = vec![CID_EM_MOVE_OBJECT, lc_engine::EMMO_MOVE];
+        encoded.extend(0_i32.to_ne_bytes());
+        encoded.extend(0_i32.to_ne_bytes());
+        encoded.extend((-1_i32).to_ne_bytes());
+        encoded.push(0xff); // packed ObjectNum = -1
+        encoded.push(4); // invalid Strict
+
+        assert_eq!(
+            decode_control_entry_payload(&encoded),
+            Err(LegacyControlError::InvalidScriptStrictness(4))
+        );
+        *encoded.last_mut().expect("strictness byte") = 3;
+        assert_eq!(
+            decode_control_entry_payload(&encoded),
+            Err(LegacyControlError::EmMoveObjectCountOutOfRange(-1))
+        );
+    }
+
+    #[test]
+    fn em_move_object_rejects_every_truncated_script_body() {
+        let complete = [
+            0xb0, 0x03, 0x44, 0x33, 0x22, 0x11, 0xfe, 0xff, 0xff, 0xff, 0x04, 0x03, 0x02, 0x01,
+            0x02, 0x02, 0x82, 0x00, 0x00, 0x00, 0xfc, 0xff, 0xff, 0xff, b'S', 0x00, 0x82, 0x01,
+        ];
+        for end in 1..complete.len() {
+            assert_eq!(
+                decode_control_entry_payload(&complete[..end]),
+                Err(LegacyControlError::UnexpectedEof),
+                "unexpected result for {:02x?}",
+                &complete[..end]
+            );
         }
     }
 

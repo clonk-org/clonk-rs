@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 const MAX_PLAYER_SELECT_INI_OBJECTS: usize = 1_000_000;
+const MAX_EM_MOVE_OBJECT_INI_OBJECTS: usize = 1_000_000;
 
 /// Unique identifier for a control packet inside the control log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +53,9 @@ pub enum ControlPacket {
     PlayerControl(PlayerControlData),
     /// Mouse/object command (`CID_PlrCommand`, C4Control.cpp:405-439).
     PlayerCommand(PlayerCommandControlData),
+    /// Synchronized editor object manipulation (`CID_EMMoveObj`,
+    /// C4Control.cpp:865-992).
+    EmMoveObject(EmMoveObjectControlData),
     /// Queued team choice that resumes a player waiting in
     /// `PS_TeamSelectionPending` (`CID_InitScenarioPlayer`).
     InitScenarioPlayer(InitScenarioPlayerControlData),
@@ -347,6 +351,51 @@ pub struct PlayerCommandControlData {
     pub data: i32,
     pub add_mode: i32,
     pub by_client: i32,
+}
+
+/// Raw `C4ControlEMObjectAction` values serialized by
+/// `C4ControlEMMoveObject` (`src/C4Control.h:335-343`).
+///
+/// [`EmMoveObjectControlData::action`] deliberately remains a byte so unknown
+/// values survive network and replay round trips like the C++ enum adaptor.
+pub const EMMO_MOVE: u8 = 0;
+pub const EMMO_ENTER: u8 = 1;
+pub const EMMO_DUPLICATE: u8 = 2;
+pub const EMMO_SCRIPT: u8 = 3;
+pub const EMMO_REMOVE: u8 = 4;
+pub const EMMO_EXIT: u8 = 5;
+
+/// Body of `C4ControlEMMoveObject` (`CID_EMMoveObj`).
+///
+/// C++ writes the action byte, coordinates and target as fixed-width values,
+/// the object count as a packed integer, strictness as a byte, each object as
+/// a fixed-width value, an action-conditional script string, and inherited
+/// packed `ByClient` last (`src/C4Control.cpp:972-992`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmMoveObjectControlData {
+    pub action: u8,
+    pub tx: i32,
+    pub ty: i32,
+    pub target_object: i32,
+    pub objects: Vec<i32>,
+    pub strictness: ScriptStrictness,
+    pub script: LegacyCString,
+    pub by_client: i32,
+}
+
+impl Default for EmMoveObjectControlData {
+    fn default() -> Self {
+        Self {
+            action: EMMO_MOVE,
+            tx: 0,
+            ty: 0,
+            target_object: -1,
+            objects: Vec::new(),
+            strictness: ScriptStrictness::Strict3,
+            script: LegacyCString::default(),
+            by_client: -1,
+        }
+    }
 }
 
 /// Body of `C4ControlInitScenarioPlayer` and its control bases.
@@ -1064,6 +1113,7 @@ impl RawPacket {
         const CID_PLR_SELECT: u8 = 0xA0;
         const CID_PLR_CONTROL: u8 = 0xA1;
         const CID_PLR_COMMAND: u8 = 0xA2;
+        const CID_EM_MOVE_OBJECT: u8 = 0xB0;
 
         if id == PID_NONE {
             return Ok(None);
@@ -1235,6 +1285,96 @@ impl RawPacket {
                     by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
                 },
             )));
+        }
+
+        if id == CID_EM_MOVE_OBJECT {
+            // Action has no naming default in C++, while every subsequent
+            // field does. The enum is adapted through uint8_t but remains raw
+            // rather than being restricted to the six currently known
+            // editor actions.
+            let action_raw =
+                self.fields
+                    .get("Action")
+                    .ok_or_else(|| ControlParseError::MissingField {
+                        field: "Action".to_string(),
+                    })?;
+            let action =
+                action_raw
+                    .parse::<u8>()
+                    .map_err(|_| ControlParseError::InvalidIntegerField {
+                        field: "Action".to_string(),
+                        value: action_raw.clone(),
+                    })?;
+            let tx = parse_int_field_or(&self.fields, "tx", 0)?;
+            let ty = parse_int_field_or(&self.fields, "ty", 0)?;
+            let target_object = parse_int_field_or(&self.fields, "TargetObj", -1)?;
+            let object_count = parse_int_field_or(&self.fields, "ObjectNum", 0)?;
+            let strictness_value = parse_int_field_or(
+                &self.fields,
+                "Strict",
+                i32::from(ScriptStrictness::Strict3.raw()),
+            )?;
+            let strictness = ScriptStrictness::try_from(strictness_value)
+                .map_err(|value| ControlParseError::InvalidScriptStrictness { value })?;
+            let declared = usize::try_from(object_count).map_err(|_| {
+                ControlParseError::InvalidEmMoveObjectCount {
+                    value: object_count,
+                }
+            })?;
+            if declared > MAX_EM_MOVE_OBJECT_INI_OBJECTS {
+                return Err(ControlParseError::InvalidEmMoveObjectCount {
+                    value: object_count,
+                });
+            }
+            let mut objects = match self.fields.get("Objs") {
+                None => vec![-1; declared],
+                Some(raw) if raw.trim().is_empty() => vec![-1; declared],
+                Some(raw) => raw
+                    .split(',')
+                    .take(declared + 1)
+                    .map(|value| {
+                        value.trim().parse::<i32>().map_err(|_| {
+                            ControlParseError::InvalidIntegerField {
+                                field: "Objs".to_string(),
+                                value: value.trim().to_string(),
+                            }
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            };
+            if objects.len() > declared {
+                return Err(ControlParseError::EmMoveObjectCountMismatch {
+                    declared,
+                    actual: objects.len(),
+                });
+            }
+            if objects.len() < declared {
+                // The -1 default wraps the entire StdArrayAdapt. A missing
+                // later list element throws NotFound, so C++ assigns -1 to
+                // every slot rather than retaining a parsed prefix.
+                objects = vec![-1; declared];
+            }
+            let script = if action == EMMO_SCRIPT {
+                let script = self.fields.get("Script").cloned().unwrap_or_default();
+                LegacyCString::from_bytes(legacy_string_bytes(&script)).ok_or(
+                    ControlParseError::InteriorNulString {
+                        field: "Script".to_string(),
+                    },
+                )?
+            } else {
+                LegacyCString::default()
+            };
+            let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
+            return Ok(Some(ControlPacket::EmMoveObject(EmMoveObjectControlData {
+                action,
+                tx,
+                ty,
+                target_object,
+                objects,
+                strictness,
+                script,
+                by_client,
+            })));
         }
 
         if id == CID_PLR_SELECT {
@@ -1598,7 +1738,7 @@ impl RawPacket {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum ControlParseError {
     #[error("control log did not start with [Control] section")]
     MissingControlSection,
@@ -1636,6 +1776,12 @@ pub enum ControlParseError {
         "PlayerSelect declared {declared} objects but its INI array contained {actual} entries"
     )]
     PlayerSelectObjectCountMismatch { declared: usize, actual: usize },
+    #[error("EMMoveObject object count {value} is outside the supported INI range")]
+    InvalidEmMoveObjectCount { value: i32 },
+    #[error(
+        "EMMoveObject declared {declared} objects but its INI array contained {actual} entries"
+    )]
+    EmMoveObjectCountMismatch { declared: usize, actual: usize },
 }
 
 /// Parse the `.ini` control payload emitted by the C++ runtime into structured packets.
@@ -2360,6 +2506,126 @@ mod tests {
                 actual: 2,
             })
         ));
+    }
+
+    #[test]
+    fn parses_em_move_object_fields_conditional_script_and_cpp_defaults() {
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=176\n\
+    [EM Move Obj]\n\
+      Action=3\n\
+      tx=-25\n\
+      ty=40\n\
+      TargetObj=91\n\
+      ObjectNum=3\n\
+      Strict=2\n\
+      Objs=11,-2,0\n\
+      Script=\"SetX(GetX()+1);\"\n\
+      ByClient=7\n\
+  [IDPacket]\n\
+    ID=176\n\
+    [EM Move Obj]\n\
+      Action=0\n\
+      ObjectNum=3\n\
+      Script=\"not compiled for this action\"\n\
+  [IDPacket]\n\
+    ID=176\n\
+    [EM Move Obj]\n\
+      Action=1\n\
+      ObjectNum=3\n\
+      Objs=11\n\
+  [IDPacket]\n\
+    ID=176\n\
+    [EM Move Obj]\n\
+      Action=255\n";
+
+        assert_eq!(
+            parse_control_ini(input).expect("parse editor object controls"),
+            vec![
+                ControlPacket::EmMoveObject(EmMoveObjectControlData {
+                    action: EMMO_SCRIPT,
+                    tx: -25,
+                    ty: 40,
+                    target_object: 91,
+                    objects: vec![11, -2, 0],
+                    strictness: ScriptStrictness::Strict2,
+                    script: LegacyCString::from_bytes(b"SetX(GetX()+1);".to_vec())
+                        .expect("fixture is NUL-free"),
+                    by_client: 7,
+                }),
+                ControlPacket::EmMoveObject(EmMoveObjectControlData {
+                    action: EMMO_MOVE,
+                    objects: vec![-1, -1, -1],
+                    ..EmMoveObjectControlData::default()
+                }),
+                ControlPacket::EmMoveObject(EmMoveObjectControlData {
+                    action: EMMO_ENTER,
+                    objects: vec![-1, -1, -1],
+                    ..EmMoveObjectControlData::default()
+                }),
+                ControlPacket::EmMoveObject(EmMoveObjectControlData {
+                    action: u8::MAX,
+                    ..EmMoveObjectControlData::default()
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn em_move_object_ini_preserves_legacy_script_bytes() {
+        let input =
+            "[Control]\n[IDPacket]\nID=176\n[EM Move Obj]\nAction=3\nScript=\"\\200\\377\"\n";
+        let packets = parse_control_ini(input).expect("parse editor script bytes");
+        let ControlPacket::EmMoveObject(control) = &packets[0] else {
+            panic!("expected EmMoveObject, got {:?}", packets[0]);
+        };
+        assert_eq!(control.script.as_bytes(), &[0x80, 0xff]);
+    }
+
+    #[test]
+    fn rejects_invalid_em_move_object_ini_action_count_and_strictness() {
+        for (input, expected) in [
+            (
+                "[Control]\n[IDPacket]\nID=176\n[EM Move Obj]\n",
+                ControlParseError::MissingField {
+                    field: "Action".to_string(),
+                },
+            ),
+            (
+                "[Control]\n[IDPacket]\nID=176\n[EM Move Obj]\nAction=256\n",
+                ControlParseError::InvalidIntegerField {
+                    field: "Action".to_string(),
+                    value: "256".to_string(),
+                },
+            ),
+            (
+                "[Control]\n[IDPacket]\nID=176\n[EM Move Obj]\nAction=0\nObjectNum=-1\nStrict=4\n",
+                ControlParseError::InvalidScriptStrictness { value: 4 },
+            ),
+            (
+                "[Control]\n[IDPacket]\nID=176\n[EM Move Obj]\nAction=0\nObjectNum=-1\n",
+                ControlParseError::InvalidEmMoveObjectCount { value: -1 },
+            ),
+            (
+                "[Control]\n[IDPacket]\nID=176\n[EM Move Obj]\nAction=0\nObjectNum=2147483647\n",
+                ControlParseError::InvalidEmMoveObjectCount { value: i32::MAX },
+            ),
+            (
+                "[Control]\n[IDPacket]\nID=176\n[EM Move Obj]\nAction=0\nObjectNum=1\nObjs=11,12\n",
+                ControlParseError::EmMoveObjectCountMismatch {
+                    declared: 1,
+                    actual: 2,
+                },
+            ),
+            (
+                "[Control]\n[IDPacket]\nID=176\n[EM Move Obj]\nAction=0\nStrict=4\n",
+                ControlParseError::InvalidScriptStrictness { value: 4 },
+            ),
+        ] {
+            assert_eq!(parse_control_ini(input).unwrap_err(), expected);
+        }
     }
 
     #[test]

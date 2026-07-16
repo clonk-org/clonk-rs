@@ -65,7 +65,8 @@ pub use control::{
     ActivateGameGoalRuleControlData, ClientCoreControlData, ClientJoinControlData,
     ClientRemoveControlData, ClientUpdateControlData, CommandKind, ControlButton, ControlCommand,
     ControlEvent, ControlPacket, ControlPacketId, ControlPlayerInfoEntry, CustomCommandControlData,
-    EliminatePlayerControlData, InitScenarioPlayerControlData, JoinPlayerControlData,
+    EliminatePlayerControlData, EmMoveObjectControlData, InitScenarioPlayerControlData,
+    JoinPlayerControlData,
     JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData, NetworkResourceCore,
     PlayerCommandControlData, PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest,
     PlayerSelectControlData, RemovePlayerControlData, ScriptControlData, ScriptStrictness,
@@ -79,7 +80,8 @@ pub use control::{
     COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT,
     COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_PLAYER_MENU, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE,
     COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP, COM_WHEEL_DOWN, COM_WHEEL_UP,
-    C4MN_ADJUST_POSITION,
+    C4MN_ADJUST_POSITION, EMMO_DUPLICATE, EMMO_ENTER, EMMO_EXIT, EMMO_MOVE, EMMO_REMOVE,
+    EMMO_SCRIPT,
     NETWORK_RESOURCE_TYPE_NULL,
     PLAYER_INFO_FLAG_ATTRIBUTES_FIXED, PLAYER_INFO_FLAG_DISCONNECTED, PLAYER_INFO_FLAG_HAS_RESOURCE,
     PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_IN_SCENARIO_FILE, PLAYER_INFO_FLAG_JOINED,
@@ -19907,6 +19909,155 @@ impl Engine {
         };
         let argument = lc_script::c4_string_from_bytes(&argument);
         Self::sprintf_custom_command(&script, &argument, 's')
+    }
+
+    /// Execute one synchronized `CID_EMMoveObj` packet. The editor's local
+    /// selection/property-dialog updates are intentionally absent; every
+    /// simulation mutation and callback remains ordered exactly as carried
+    /// by the packet's object-number array.
+    pub fn execute_em_move_object_control(
+        &mut self,
+        control: &EmMoveObjectControlData,
+        script_policy: ScriptControlPolicy,
+    ) -> Result<bool, EngineError> {
+        if self.league_game {
+            return Ok(false);
+        }
+
+        let object_id = |number: i32| {
+            u64::try_from(number).ok().map(ObjectId::new)
+        };
+
+        match control.action {
+            EMMO_MOVE => {
+                for &number in &control.objects {
+                    let Some(index) = object_id(number)
+                        .and_then(|id| self.find_object_index(id))
+                        .filter(|&index| {
+                            !self.objects[index].destroyed
+                                && self.objects[index].state.status != ObjectStatus::Deleted
+                        })
+                    else {
+                        continue;
+                    };
+                    let position = self.objects[index].state.position;
+                    let target = Vector2::new(
+                        position.x.wrapping_add(control.tx),
+                        position.y.wrapping_add(control.ty),
+                    );
+                    self.force_object_position(index, target);
+                    if target != position {
+                        // ForcePosition updates a put solid mask only when
+                        // integer x/y changed; its same-position fast path
+                        // merely resynchronizes fixed coordinates.
+                        self.update_solid_mask(index);
+                    }
+                    let object = &mut self.objects[index];
+                    object.fixed_velocity = FixedVec2::ZERO;
+                    object.state.velocity = Vector2::ZERO;
+                    object.state.mobile = false;
+                }
+            }
+            EMMO_ENTER => {
+                // C++ resolves the target exactly once before iterating. The
+                // retained object remains addressable if an earlier callback
+                // marks it deleted; Enter performs its own live status gate.
+                let Some(target_id) = object_id(control.target_object).filter(|&id| {
+                    self.find_object_index(id).is_some_and(|index| {
+                        !self.objects[index].destroyed
+                            && self.objects[index].state.status != ObjectStatus::Deleted
+                    })
+                }) else {
+                    return Ok(true);
+                };
+                for &number in &control.objects {
+                    let Some(source_id) = object_id(number).filter(|&id| {
+                        self.find_object_index(id).is_some_and(|index| {
+                            !self.objects[index].destroyed
+                                && self.objects[index].state.status != ObjectStatus::Deleted
+                        })
+                    }) else {
+                        continue;
+                    };
+                    let _ = self.try_object_enter(source_id, target_id)?;
+                }
+            }
+            EMMO_DUPLICATE => {
+                for &number in &control.objects {
+                    let Some(source_id) = object_id(number) else {
+                        continue;
+                    };
+                    let Some((definition_id, owner, position, layer)) = self
+                        .find_object_index(source_id)
+                        .filter(|&index| {
+                            !self.objects[index].destroyed
+                                && self.objects[index].state.status != ObjectStatus::Deleted
+                        })
+                        .map(|index| {
+                            let source = &self.objects[index];
+                            (
+                                source.definition_id.clone(),
+                                source.state.owner,
+                                source.state.position,
+                                source.state.layer,
+                            )
+                        })
+                    else {
+                        continue;
+                    };
+                    let mut spawn = SpawnConfig::new(definition_id)
+                        .with_position(position)
+                        .with_owner(owner);
+                    if let Some(layer) = layer {
+                        spawn = spawn.with_layer(layer);
+                    }
+                    let _ = self.spawn_object_with_initial_lifecycle(spawn, Some(source_id))?;
+                }
+            }
+            EMMO_SCRIPT => {
+                // Unlike every other action, C4ControlScript receives each
+                // raw number without a SafeObjectPointer prefilter. Missing
+                // and deleted object numbers therefore execute in global
+                // fallback scope, and duplicate entries execute repeatedly.
+                for &target_object in &control.objects {
+                    let nested = ScriptControlData {
+                        target_object,
+                        strictness: control.strictness,
+                        script: control.script.clone(),
+                        by_client: control.by_client,
+                    };
+                    let _ = self.execute_script_control(&nested, script_policy)?;
+                }
+            }
+            EMMO_REMOVE => {
+                for &number in &control.objects {
+                    let Some(id) = object_id(number).filter(|&id| {
+                        self.find_object_index(id).is_some_and(|index| {
+                            !self.objects[index].destroyed
+                                && self.objects[index].state.status != ObjectStatus::Deleted
+                        })
+                    }) else {
+                        continue;
+                    };
+                    let _ = self.assign_object_removal(id)?;
+                }
+            }
+            EMMO_EXIT => {
+                for &number in &control.objects {
+                    let Some(id) = object_id(number).filter(|&id| {
+                        self.find_object_index(id).is_some_and(|index| {
+                            !self.objects[index].destroyed
+                                && self.objects[index].state.status != ObjectStatus::Deleted
+                        })
+                    }) else {
+                        continue;
+                    };
+                    let _ = self.exit_object_at_current_transform(id)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(true)
     }
 
     /// Execute one synchronized `CID_CustomCommand` packet. Player ownership
@@ -53512,6 +53663,269 @@ mod internal_player_script_control_parity {
             })
             .expect("spoof is rejected"));
         assert!(engine.take_game_goal_menu_requests().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod em_move_object_control_parity {
+    use super::*;
+
+    fn number(id: ObjectId) -> i32 {
+        i32::try_from(id.as_u64()).expect("fixture object number fits i32")
+    }
+
+    fn control(action: u8, objects: Vec<i32>) -> EmMoveObjectControlData {
+        EmMoveObjectControlData {
+            action,
+            tx: 0,
+            ty: 0,
+            target_object: -1,
+            objects,
+            strictness: ScriptStrictness::Strict3,
+            script: LegacyCString::default(),
+            by_client: 0,
+        }
+    }
+
+    fn register_definition(engine: &mut Engine, id: &str, script: &str) {
+        engine
+            .register_definition(
+                Definition::from_script(id, id, script).expect("fixture definition compiles"),
+            )
+            .expect("fixture definition registers");
+    }
+
+    #[test]
+    fn em_move_object_move_uses_live_array_order_and_league_gate() {
+        let mut engine = Engine::new();
+        register_definition(&mut engine, "MOVE", "");
+        let active = engine
+            .spawn_object(
+                SpawnConfig::new("MOVE")
+                    .with_position(Vector2::new(10, 20))
+                    .with_velocity(Vector2::new(3, -4))
+                    .with_mobile(true),
+            )
+            .expect("active object spawns");
+        let inactive = engine
+            .spawn_object(
+                SpawnConfig::new("MOVE")
+                    .with_position(Vector2::new(1, 2))
+                    .with_velocity(Vector2::new(-2, 5))
+                    .with_mobile(true)
+                    .with_status(ObjectStatus::Inactive),
+            )
+            .expect("inactive object spawns");
+        let mut packet = control(
+            EMMO_MOVE,
+            vec![number(active), number(active), number(inactive), -1, 999_999],
+        );
+        packet.tx = 2;
+        packet.ty = -3;
+
+        assert!(engine
+            .execute_em_move_object_control(&packet, ScriptControlPolicy::live(false))
+            .expect("move packet executes"));
+        let active_state = &engine.objects[engine.find_object_index(active).unwrap()];
+        assert_eq!(active_state.state.position, Vector2::new(14, 14));
+        assert_eq!(active_state.fixed_position, FixedVec2::from_ints(14, 14));
+        assert_eq!(active_state.state.velocity, Vector2::ZERO);
+        assert_eq!(active_state.fixed_velocity, FixedVec2::ZERO);
+        assert!(!active_state.state.mobile);
+        let inactive_state = &engine.objects[engine.find_object_index(inactive).unwrap()];
+        assert_eq!(inactive_state.state.position, Vector2::new(3, -1));
+        assert_eq!(inactive_state.fixed_velocity, FixedVec2::ZERO);
+        assert!(!inactive_state.state.mobile);
+
+        let before = engine.objects[engine.find_object_index(active).unwrap()]
+            .state
+            .position;
+        engine.set_league_game(true);
+        assert!(!engine
+            .execute_em_move_object_control(&packet, ScriptControlPolicy::live(false))
+            .expect("league packet is ignored"));
+        assert_eq!(
+            engine.objects[engine.find_object_index(active).unwrap()]
+                .state
+                .position,
+            before
+        );
+    }
+
+    #[test]
+    fn em_move_object_duplicate_uses_create_object_lifecycle_not_state_clone() {
+        let mut engine = Engine::new();
+        register_definition(&mut engine, "LAYR", "");
+        register_definition(
+            &mut engine,
+            "DUPL",
+            "#strict 3\nstatic Made;\nfunc Construction(creator) { if (Made == nil) Made = 0; Made = Made + 1; return true; }\nfunc ReadMade() { return Made; }",
+        );
+        let layer = engine
+            .spawn_object(SpawnConfig::new("LAYR"))
+            .expect("layer object spawns");
+        let source = engine
+            .spawn_object(
+                SpawnConfig::new("DUPL")
+                    .with_position(Vector2::new(23, 41))
+                    .with_velocity(Vector2::new(7, -5))
+                    .with_rotation(67)
+                    .with_owner(4)
+                    .with_layer(layer),
+            )
+            .expect("source object spawns");
+        let source_index = engine.find_object_index(source).unwrap();
+        assert_eq!(
+            engine
+                .call_object_function(source_index, "ReadMade", Vec::new())
+                .expect("creation count reads"),
+            Value::Int(1)
+        );
+
+        assert!(engine
+            .execute_em_move_object_control(
+                &control(EMMO_DUPLICATE, vec![number(source), number(source)]),
+                ScriptControlPolicy::live(false),
+            )
+            .expect("duplicate packet executes"));
+
+        let duplicates = engine
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "DUPL" && object.id != source)
+            .collect::<Vec<_>>();
+        assert_eq!(duplicates.len(), 2);
+        for duplicate in duplicates {
+            assert_eq!(duplicate.state.position, Vector2::new(23, 41));
+            assert_eq!(duplicate.state.owner, 4);
+            assert_eq!(duplicate.state.rotation, 0);
+            assert_eq!(duplicate.fixed_velocity, FixedVec2::ZERO);
+            assert_eq!(duplicate.state.layer, Some(layer));
+            assert_eq!(duplicate.state.construction, FULL_CON);
+        }
+        let source_index = engine.find_object_index(source).unwrap();
+        assert_eq!(
+            engine
+                .call_object_function(source_index, "ReadMade", Vec::new())
+                .expect("ordered lifecycle count reads"),
+            Value::Int(3)
+        );
+    }
+
+    #[test]
+    fn em_move_object_enter_exit_and_remove_use_native_object_paths() {
+        let mut engine = Engine::new();
+        register_definition(&mut engine, "CONT", "");
+        register_definition(&mut engine, "ITEM", "");
+        let container = engine
+            .spawn_object(
+                SpawnConfig::new("CONT")
+                    .with_position(Vector2::new(50, 60))
+                    .with_velocity(Vector2::new(2, 3)),
+            )
+            .expect("container spawns");
+        let child = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_position(Vector2::new(4, 5))
+                    .with_velocity(Vector2::new(8, -9))
+                    .with_rotation(27),
+            )
+            .expect("child spawns");
+        let mut enter = control(EMMO_ENTER, vec![number(child)]);
+        enter.target_object = number(container);
+        assert!(engine
+            .execute_em_move_object_control(&enter, ScriptControlPolicy::live(false))
+            .expect("enter executes"));
+        let child_index = engine.find_object_index(child).unwrap();
+        assert_eq!(engine.objects[child_index].state.container, Some(container));
+        assert_eq!(engine.objects[child_index].state.position, Vector2::new(50, 60));
+
+        assert!(engine
+            .execute_em_move_object_control(
+                &control(EMMO_EXIT, vec![number(child)]),
+                ScriptControlPolicy::live(false),
+            )
+            .expect("exit executes"));
+        let child_index = engine.find_object_index(child).unwrap();
+        assert_eq!(engine.objects[child_index].state.container, None);
+        assert_eq!(engine.objects[child_index].state.rotation, 27);
+        assert_eq!(engine.objects[child_index].fixed_velocity, FixedVec2::ZERO);
+        assert_eq!(engine.objects[child_index].rotation_velocity, C4Fixed::ZERO);
+        assert!(engine.objects[child_index].state.mobile);
+
+        let content = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(child))
+            .expect("nested content spawns");
+        assert!(engine
+            .execute_em_move_object_control(
+                &control(EMMO_REMOVE, vec![number(child), number(child)]),
+                ScriptControlPolicy::live(false),
+            )
+            .expect("remove executes"));
+        assert_eq!(
+            engine.objects[engine.find_object_index(child).unwrap()].state.status,
+            ObjectStatus::Deleted
+        );
+        assert_eq!(
+            engine.objects[engine.find_object_index(content).unwrap()].state.status,
+            ObjectStatus::Deleted
+        );
+    }
+
+    #[test]
+    fn em_move_object_script_preserves_raw_targets_fallbacks_and_policy() {
+        let mut engine = Engine::new();
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "EMGlobal.c".to_string(),
+                "static GlobalMarks; global func Mark() { if (GlobalMarks == nil) GlobalMarks = 0; GlobalMarks = GlobalMarks + 1; return true; }".to_string(),
+            )]),
+            1
+        );
+        register_definition(
+            &mut engine,
+            "SCRP",
+            "#strict 3\nlocal Marks;\nfunc Mark() { if (Marks == nil) Marks = 0; Marks = Marks + 1; return true; }\nfunc ReadMarks() { return Marks; }",
+        );
+        let object = engine
+            .spawn_object(SpawnConfig::new("SCRP"))
+            .expect("script object spawns");
+        let mut packet = control(
+            EMMO_SCRIPT,
+            vec![number(object), 999_999, number(object)],
+        );
+        packet.script = LegacyCString::from_bytes(b"Mark()".to_vec()).unwrap();
+        assert!(engine
+            .execute_em_move_object_control(&packet, ScriptControlPolicy::replay(false))
+            .expect("host-authored replay script executes"));
+        let index = engine.find_object_index(object).unwrap();
+        assert_eq!(
+            engine
+                .call_object_function(index, "ReadMarks", Vec::new())
+                .expect("object marks read"),
+            Value::Int(2)
+        );
+        let global = engine
+            .script_globals
+            .borrow()
+            .get("GlobalMarks")
+            .cloned()
+            .expect("global fallback marker exists");
+        assert_eq!(*global.borrow(), Value::Int(1));
+
+        packet.by_client = 7;
+        assert!(engine
+            .execute_em_move_object_control(&packet, ScriptControlPolicy::replay(false))
+            .expect("outer packet remains accepted"));
+        assert_eq!(*global.borrow(), Value::Int(1));
+        let index = engine.find_object_index(object).unwrap();
+        assert_eq!(
+            engine
+                .call_object_function(index, "ReadMarks", Vec::new())
+                .expect("suppressed marks read"),
+            Value::Int(2)
+        );
     }
 }
 
