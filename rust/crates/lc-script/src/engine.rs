@@ -1116,14 +1116,11 @@ impl Engine {
             .map_err(ScriptError::from)
     }
 
-    /// The host script's strict level — the max over its own functions
-    /// (C4AulScript::Strict is per script; every parsed function carries
-    /// it).
+    /// The destination host script's own parsed strict level. Included and
+    /// appended function copies retain their origin strictness, but never
+    /// change `C4AulScript::Strict` on the host receiving them.
     fn script_strict_level(&self) -> Option<u8> {
-        self.functions
-            .values()
-            .filter_map(|function| function.strict_level)
-            .max()
+        self.owner_strict_level.unwrap_or(None)
     }
 
     pub fn has_function(&self, name: &str) -> bool {
