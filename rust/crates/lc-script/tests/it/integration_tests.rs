@@ -63,8 +63,8 @@ fn supports_strings_and_concatenation() {
         &mut engine,
         r#"
         global func Greeting(name) {
-            var message = "Hello, " + name;
-            return message + "!";
+            var message = "Hello, " .. name;
+            return message .. "!";
         }
         "#,
     );

@@ -4119,35 +4119,17 @@ impl<'a> Vm<'a> {
     }
 
     fn eval_add(&self, left: Value, right: Value) -> Result<Value, RuntimeError> {
-        match (left, right) {
-            // String concatenation stands in for C4Script's `..` operator (the
-            // lexer does not yet tokenize `..`); keep it when either side is a
-            // string. C++'s own `+` (AB_Sum) is integer-only. String+String uses
-            // the raw inner text (to_string() would quote it).
-            (Value::String(mut a), Value::String(b)) => {
-                a.push_str(&b);
-                Ok(Value::String(a))
-            }
-            (Value::String(mut a), other) => {
-                a.push_str(&other.to_string());
-                Ok(Value::String(a))
-            }
-            (other, Value::String(b)) => {
-                let mut result = other.to_string();
-                result.push_str(&b);
-                Ok(Value::String(result))
-            }
-            // C++ AB_Sum (C4AulExec.cpp:538-545): integer add with `_getInt()`
-            // coercion (nil->0, bool->0/1). wrapping_add matches C++ 2's-complement
-            // overflow instead of panicking in debug builds.
-            (a, b) => match (a.as_c4_int(), b.as_c4_int()) {
-                (Some(x), Some(y)) => Ok(Value::Int(x.wrapping_add(y))),
-                _ => Err(RuntimeError::new(format!(
-                    "cannot apply '+' to operands of type {} and {}",
-                    a.type_name(),
-                    b.type_name()
-                ))),
-            },
+        // C++ AB_Sum (C4AulExec.cpp:538-545): integer add with `_getInt()`
+        // coercion (nil->0, bool->0/1). wrapping_add matches C++ 2's-complement
+        // overflow instead of panicking in debug builds. String concatenation
+        // belongs exclusively to AB_Concat (`..`).
+        match (left.as_c4_int(), right.as_c4_int()) {
+            (Some(x), Some(y)) => Ok(Value::Int(x.wrapping_add(y))),
+            _ => Err(RuntimeError::new(format!(
+                "cannot apply '+' to operands of type {} and {}",
+                left.type_name(),
+                right.type_name()
+            ))),
         }
     }
 
