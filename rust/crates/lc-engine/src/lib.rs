@@ -29942,6 +29942,9 @@ impl Engine {
                     self.round_results
                         .add_custom_evaluation_string(&text, player_info_id);
                 }
+                PlayerCommand::HideSettlementScore { hide } => {
+                    self.round_results.hide_settlement_score = hide;
+                }
                 PlayerCommand::SetLeaguePerformance {
                     score,
                     player_info_id,

@@ -532,6 +532,9 @@ pub enum PlayerCommand {
         player_info_id: i32,
         text: String,
     },
+    /// `C4RoundResults::HideSettlementScore`; this engine-global flag is
+    /// consumed when the evaluation player rows are built.
+    HideSettlementScore { hide: bool },
     /// `C4RoundResults::SetLeaguePerformance`, keyed by persistent
     /// C4PlayerInfo ID (zero is the independent global slot).
     SetLeaguePerformance {
@@ -11105,6 +11108,22 @@ fn add_evaluation_data(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// `FnHideSettlementScoreInEvaluation` (C4Script.cpp:5937-5940): overwrite
+/// the round-results presentation flag and return the native void value.
+fn hide_settlement_score_in_evaluation(args: &[Value]) -> Result<Value, RuntimeError> {
+    let hide = value_to_bool(
+        args.first().unwrap_or(&Value::Nil),
+        "HideSettlementScoreInEvaluation",
+        "hide",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.record_player_command(PlayerCommand::HideSettlementScore { hide });
+        }
+    });
+    Ok(Value::Nil)
+}
+
 /// `FnSetLeaguePerformance` (C4Script.cpp:2852-2858): in league games,
 /// overwrite the global result slot (ID zero) or an exact persistent
 /// C4PlayerInfo row. Both typed integer conversions precede the league gate.
@@ -12611,6 +12630,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("ScoreboardCol", scoreboard_col);
     script.register_host_function("SortScoreboard", sort_scoreboard);
     script.register_host_function("AddEvaluationData", add_evaluation_data);
+    script.register_host_function(
+        "HideSettlementScoreInEvaluation",
+        hide_settlement_score_in_evaluation,
+    );
     script.register_host_function("Pow", pow_func);
     script.register_host_function("BoundBy", bound_by_func);
     script.register_host_function("Sin", sin_func);
@@ -43959,6 +43982,7 @@ mod tests {
         "GrabContents",
         "GrabObjectInfo",
         "GreaterThan",
+        "HideSettlementScoreInEvaluation",
         "Hostile",
         "InLiquid",
         "Incinerate",
@@ -44648,6 +44672,71 @@ mod tests {
                 && retired == "retired"
                 && whitespace == "   "
         ));
+    }
+
+    #[test]
+    fn hide_settlement_score_in_evaluation_returns_nil_and_orders_writes() {
+        let script = r#"#strict
+public func Apply()
+{
+    return [
+        HideSettlementScoreInEvaluation(0),
+        HideSettlementScoreInEvaluation(-1),
+        HideSettlementScoreInEvaluation("", 123)
+    ];
+}
+
+public func UseDefault()
+{
+    return HideSettlementScoreInEvaluation();
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(
+                crate::Definition::from_script("CALL", "Caller", script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let caller = engine
+            .spawn_object(crate::SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "Apply", Vec::new())
+                .expect("hide sequence runs"),
+            Value::Array(vec![Value::Nil, Value::Nil, Value::Nil]),
+            "the void host function returns nil for every call"
+        );
+        assert!(
+            engine.round_results.hide_settlement_score,
+            "ordered writes leave the final truthy empty-string conversion visible"
+        );
+        assert!(
+            crate::EngineState::from_json_str(
+                &engine
+                    .capture_state()
+                    .to_json_string()
+                    .expect("hidden score state serializes"),
+            )
+            .expect("hidden score state deserializes")
+            .round_results
+            .hide_settlement_score,
+            "C4RoundResults serializes the flag"
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "UseDefault", Vec::new())
+                .expect("default hide call runs"),
+            Value::Nil
+        );
+        assert!(
+            !engine.round_results.hide_settlement_score,
+            "an omitted typed bool is nil-filled and converts to false"
+        );
     }
 
     #[test]
