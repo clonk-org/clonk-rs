@@ -1158,6 +1158,11 @@ pub struct RuntimeTexMapState {
     /// `(material name, texmap slot)` in C++ material-map order.
     #[serde(default)]
     pub(crate) default_material_entries: Vec<(String, u8)>,
+    /// Numeric `BlastShiftTo`, `BelowTempConvertTo`, and
+    /// `AboveTempConvertTo` slots captured by CrossMapMaterials. These remain
+    /// fixed when later texture-map edits create duplicate entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) material_crossmap_entries: Vec<u8>,
 }
 
 impl RuntimeTexMapState {
@@ -1298,6 +1303,46 @@ impl RuntimeTexMapState {
         self.match_texture_names[new_slot] = self.match_texture_names[old_slot].clone();
         self.shapes[new_slot] = self.shapes[old_slot];
         true
+    }
+
+    /// C4Landscape::RemoveUnusedTexMapEntries clears every texture-map entry
+    /// that is neither present in Surface8 nor held by one of the material
+    /// map's numeric texmap references (C4Landscape.cpp:2983-3007).
+    /// Returns the ascending slot list so callback-local worlds can preview
+    /// the synchronous removal without replacing unrelated state. The
+    /// authoritative fold recomputes this list at the operation's ordered
+    /// position because earlier deferred pixel writes may change usage.
+    pub(crate) fn remove_unused_entries(
+        &mut self,
+        mut texture_usage: [bool; 128],
+    ) -> Vec<u8> {
+        for &(_, slot) in &self.default_material_entries {
+            texture_usage[usize::from(slot & 0x7f)] = true;
+        }
+        for &slot in &self.material_crossmap_entries {
+            texture_usage[usize::from(slot & 0x7f)] = true;
+        }
+
+        let cleared_slots = (1..C4M_MAX_TEX_INDEX)
+            .filter(|&slot| !texture_usage[slot])
+            .map(|slot| slot as u8)
+            .collect::<Vec<_>>();
+        self.clear_entries(&cleared_slots);
+        cleared_slots
+    }
+
+    pub(crate) fn clear_entries(&mut self, slots: &[u8]) {
+        for &slot in slots {
+            let slot = usize::from(slot);
+            if !(1..C4M_MAX_TEX_INDEX).contains(&slot) {
+                continue;
+            }
+            self.densities[slot] = 0;
+            self.material_names[slot] = None;
+            self.texture_names[slot] = None;
+            self.match_texture_names[slot] = None;
+            self.shapes[slot] = None;
+        }
     }
 
     /// C4TextureMap::GetIndexMatTex (C4Texture.cpp:346-369). An explicit
@@ -1898,6 +1943,31 @@ impl Landscape {
         true
     }
 
+    /// Replay C4TextureMap::RemoveEntry without HandleTexMapUpdate: retained
+    /// entries change, but Surface8 and its Pix2* cache tables remain intact.
+    pub(crate) fn clear_runtime_texmap_entries(&mut self, slots: &[u8]) -> bool {
+        let Some(state) = self.raster_state.as_mut() else {
+            return false;
+        };
+        state.texmap_mut().clear_entries(slots);
+        true
+    }
+
+    /// Apply RemoveUnusedTexMapEntries against the authoritative Surface8 at
+    /// this exact fold position. Callback previews may not contain pixels
+    /// from earlier deferred writers, so their captured slot list cannot be
+    /// authoritative here.
+    pub(crate) fn remove_unused_runtime_texmap_entries(&mut self) -> bool {
+        let Some(texture_usage) = self.texture_index_usage() else {
+            return false;
+        };
+        let Some(state) = self.raster_state.as_mut() else {
+            return false;
+        };
+        state.texmap_mut().remove_unused_entries(texture_usage);
+        true
+    }
+
     pub(crate) fn replace_runtime_map_creator_state(
         &mut self,
         creator: crate::map_creator_s2::MapCreatorS2State,
@@ -2325,6 +2395,17 @@ impl Landscape {
 
     pub fn grid_byte_at(&self, x: i32, y: i32) -> Option<u8> {
         self.pixels.as_ref().and_then(|grid| grid.byte_at(x, y))
+    }
+
+    /// Texture-map indices present in C4Landscape::Surface8. The IFT bit is
+    /// presentation state and does not distinguish texture-map entries.
+    pub(crate) fn texture_index_usage(&self) -> Option<[bool; 128]> {
+        let pixels = self.pixels.as_ref()?;
+        let mut usage = [false; 128];
+        for &byte in pixels.bytes() {
+            usage[usize::from(byte & 0x7f)] = true;
+        }
+        Some(usage)
     }
 
     /// Raw packed C4 color explicitly written into the presentation-only
@@ -4775,6 +4856,13 @@ impl crate::Engine {
         landscape.replace_runtime_texmap_entries_only(texmap)
     }
 
+    pub(crate) fn remove_unused_runtime_texmap_entries(&mut self) -> bool {
+        let Some(landscape) = self.landscape.as_mut() else {
+            return false;
+        };
+        landscape.remove_unused_runtime_texmap_entries()
+    }
+
     /// Persist DrawDefMap's in-place C4MapCreatorS2 mutation after the
     /// callback-rendered bytes have been folded into the real landscape.
     pub(crate) fn replace_runtime_map_creator(
@@ -5196,6 +5284,7 @@ mod tests {
             }],
             texture_inventory: vec!["smooth".to_string()],
             default_material_entries: Vec::new(),
+            material_crossmap_entries: Vec::new(),
         };
         texmap.set_default_material_entry("Earth", 7);
 
@@ -5462,6 +5551,7 @@ mod tests {
             }],
             texture_inventory: vec!["Rough".to_string(), "Smooth".to_string()],
             default_material_entries: Vec::new(),
+            material_crossmap_entries: Vec::new(),
         };
         texmap.set_default_material_entry("Rock", 7);
 
@@ -5558,6 +5648,7 @@ mod tests {
             ],
             texture_inventory: Vec::new(),
             default_material_entries: Vec::new(),
+            material_crossmap_entries: Vec::new(),
         };
         texmap.set_default_material_entry("Earth", 1);
         texmap.set_default_material_entry("Vehicle", 2);

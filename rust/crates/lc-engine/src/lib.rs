@@ -44944,6 +44944,9 @@ impl Engine {
                 LandscapeOperation::SetTextureIndex { texmap } => {
                     let _ = self.replace_runtime_texmap_entries_only(texmap);
                 }
+                LandscapeOperation::RemoveUnusedTexMapEntries { .. } => {
+                    let _ = self.remove_unused_runtime_texmap_entries();
+                }
                 LandscapeOperation::BlastCircle {
                     center,
                     radius,

@@ -8119,6 +8119,7 @@ impl MapPixelClassifier {
                 materials: Vec::new(),
                 texture_inventory: Vec::new(),
                 default_material_entries: Vec::new(),
+                material_crossmap_entries: Vec::new(),
             },
             material_library: None,
         }
@@ -8150,6 +8151,7 @@ impl MapPixelClassifier {
                 materials,
                 texture_inventory,
                 default_material_entries: Vec::new(),
+                material_crossmap_entries: Vec::new(),
             },
             material_library: Some(library),
         }
@@ -8416,6 +8418,7 @@ pub(crate) fn build_map_pixel_classifier(
             materials: runtime_materials,
             texture_inventory,
             default_material_entries: Vec::new(),
+            material_crossmap_entries: Vec::new(),
         },
         material_library,
     };
@@ -8448,13 +8451,8 @@ pub(crate) fn build_map_pixel_classifier(
     // Second loop: the cross-ref specs (C4Material.cpp:474-484).
     for (_, _, specs) in &ordered {
         for spec in specs {
-            let (mat_name, tex_name) = match spec.split_once('-') {
-                Some((mat, tex)) => (mat, Some(tex.to_string())),
-                None => (spec.as_str(), None),
-            };
-            // GetIndexMatTex: exact pair first, then the material's
-            // default entry stands in (no further add).
-            classifier.get_index(mat_name, tex_name.as_deref(), true);
+            let entry = classifier.get_index_mat_tex(spec, None);
+            classifier.state.material_crossmap_entries.push(entry);
         }
     }
 
@@ -21814,7 +21812,46 @@ public func ActualizePhase(pClonk)
             MapPixelClassifier::from_slots([0; 128], names, textures, vec![None; 128]);
         classifier.state.set_default_material_entry("Earth", 30);
 
-        assert_eq!(classifier.get_index_mat_tex("Earth", None), 30);
+        let crossmap_entry = classifier.get_index_mat_tex("Earth", None);
+        classifier
+            .state
+            .material_crossmap_entries
+            .push(crossmap_entry);
+        assert_eq!(crossmap_entry, 30);
+        assert_eq!(classifier.state.material_crossmap_entries, vec![30]);
+    }
+
+    #[test]
+    fn material_crossmap_slots_survive_classifier_build_and_serialization() {
+        // CrossMapMaterials stores numeric slots in each C4Material. A later
+        // SetTextureIndex can create duplicate names, so save/restore must
+        // retain the originally resolved number rather than look it up again.
+        let dir = tempdir().expect("tempdir");
+        let materials = dir.path().join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(
+            materials.join("TexMap.txt"),
+            "4=Earth-Ridge\n30=Earth-Smooth\n",
+        )
+        .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\nTextureOverlay=Smooth\nBlastShiftTo=Earth\n",
+        )
+        .expect("write material");
+
+        let group = Group::open(dir.path()).expect("scenario group opens");
+        let resolver = FileSystemResolver { roots: Vec::new() };
+        let classifier = build_map_pixel_classifier(&group, &resolver)
+            .expect("classifier builds")
+            .expect("local texmap exists");
+        assert_eq!(classifier.state.default_material_entry("Earth"), Some(30));
+        assert_eq!(classifier.state.material_crossmap_entries, vec![30]);
+
+        let encoded = serde_json::to_string(&classifier.state).expect("texmap serializes");
+        let restored: RuntimeTexMapState =
+            serde_json::from_str(&encoded).expect("texmap restores");
+        assert_eq!(restored, classifier.state);
     }
 
     #[test]

@@ -2109,6 +2109,12 @@ impl HostWorldContext {
                 };
                 let _ = landscape.replace_runtime_texmap_entries_only(texmap.clone());
             }
+            LandscapeOperation::RemoveUnusedTexMapEntries { cleared_slots } => {
+                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                    return;
+                };
+                let _ = landscape.clear_runtime_texmap_entries(cleared_slots);
+            }
             LandscapeOperation::DrawMatChunks {
                 origin,
                 width,
@@ -12614,6 +12620,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetMatAdjust", set_mat_adjust);
     script.register_host_function("SetLandscapePixel", set_landscape_pixel);
     script.register_host_function("SetTextureIndex", set_texture_index);
+    script.register_host_function(
+        "RemoveUnusedTexMapEntries",
+        remove_unused_texmap_entries,
+    );
     script.register_host_function("GetSkyAdjust", get_sky_adjust);
     script.register_host_function("SetGamma", set_gamma);
     script.register_host_function("ResetGamma", reset_gamma);
@@ -15109,6 +15119,14 @@ pub enum LandscapeOperation {
     /// cached material tables (C4Landscape.cpp:2733-2808).
     SetTextureIndex {
         texmap: crate::landscape::RuntimeTexMapState,
+    },
+    /// FnRemoveUnusedTexMapEntries scans Surface8 and clears unreferenced
+    /// C4TextureMap entries without refreshing the Pix2* caches. The slots
+    /// captured here are for callback-local preview; the authoritative fold
+    /// rescans Surface8 at this operation's ordered position
+    /// (C4Landscape.cpp:2983-3007).
+    RemoveUnusedTexMapEntries {
+        cleared_slots: Vec<u8>,
     },
     BlastCircle {
         center: Vector2,
@@ -24206,6 +24224,38 @@ fn set_texture_index(args: &[Value]) -> Result<Value, RuntimeError> {
             context.register_landscape_operation(operation);
         }
         Ok(Value::Int(i32::from(succeeded)))
+    })
+}
+
+/// FnRemoveUnusedTexMapEntries/C4Landscape::RemoveUnusedTexMapEntries
+/// (C4Script.cpp:5077-5080; C4Landscape.cpp:2983-3007). Usage comes from the
+/// full-resolution Surface8 plane plus CrossMapMaterials' retained numeric
+/// references. Entry removal is live, but the native deliberately leaves the
+/// byte plane and its Pix2* lookup caches untouched.
+fn remove_unused_texmap_entries(_args: &[Value]) -> Result<Value, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        let Some(texture_usage) = context
+            .world
+            .landscape_ref()
+            .and_then(Landscape::texture_index_usage)
+        else {
+            return Ok(Value::Nil);
+        };
+        let Some(texmap) = context.runtime_texmap.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        let cleared_slots = texmap.remove_unused_entries(texture_usage);
+        let operation = LandscapeOperation::RemoveUnusedTexMapEntries { cleared_slots };
+        // Queue even an empty preview. Earlier deferred terrain operations
+        // can make entries newly used or unused before the authoritative
+        // fold reaches this point.
+        context.world.preview_runtime_landscape_operation(&operation);
+        context.register_landscape_operation(operation);
+        Ok(Value::Nil)
     })
 }
 
@@ -44619,6 +44669,7 @@ mod tests {
         "Random",
         "RemoveEffect",
         "RemoveObject",
+        "RemoveUnusedTexMapEntries",
         "RemoveVertex",
         "ResetGamma",
         "ResetPhysical",
@@ -49494,6 +49545,7 @@ public func RejectConstruction(x, y, builder)
             }],
             texture_inventory: Vec::new(),
             default_material_entries: Vec::new(),
+            material_crossmap_entries: Vec::new(),
         };
         texmap.set_default_material_entry("Water", 3);
         let mut landscape = Landscape::new(6, vec![6; 6]).expect("landscape builds");
@@ -49542,6 +49594,7 @@ public func RejectConstruction(x, y, builder)
             }],
             texture_inventory: vec!["Rough".to_string()],
             default_material_entries: Vec::new(),
+            material_crossmap_entries: Vec::new(),
         };
         texmap.set_default_material_entry("Vehicle", 2);
         let mut landscape = Landscape::new(16, vec![12; 16]).expect("landscape builds");
@@ -49620,6 +49673,7 @@ public func RejectConstruction(x, y, builder)
             }],
             texture_inventory: vec!["Rough".to_string(), "Smooth".to_string()],
             default_material_entries: Vec::new(),
+            material_crossmap_entries: Vec::new(),
         };
         // Deliberately differ from the first Earth slot: Mat2PixColDefault
         // must use DefaultMatTex, not a material-name scan.
@@ -49678,6 +49732,7 @@ public func RejectConstruction(x, y, builder)
             }],
             texture_inventory: vec!["Rough".to_string(), "Ridge".to_string()],
             default_material_entries: Vec::new(),
+            material_crossmap_entries: Vec::new(),
         };
         texmap.set_default_material_entry("Earth", 1);
 
@@ -49720,6 +49775,67 @@ public func RejectConstruction(x, y, builder)
         let mut raster = crate::landscape::LandscapeRasterState::new(zoom, 0, texmap);
         raster.set_map_creator(retain_creator.then_some(retained));
         landscape.set_raster_state(raster);
+        landscape.refresh_all_raster_columns();
+        HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        )
+    }
+
+    fn remove_unused_texmap_world() -> HostWorldContext {
+        let mut densities = vec![0; 128];
+        let mut material_names = vec![None; 128];
+        let mut texture_names = vec![None; 128];
+        let mut shapes = vec![None; 128];
+        for (slot, material, texture) in [
+            (1, "Earth", "Rough"),
+            (2, "Rock", "Rough"),
+            (3, "Earth", "Spots"),
+            (4, "Earth", "Ridge"),
+            (5, "Earth", "Smooth"),
+            (6, "Earth", "Cracked"),
+        ] {
+            densities[slot] = 100;
+            material_names[slot] = Some(material.to_string());
+            texture_names[slot] = Some(texture.to_string());
+            shapes[slot] = Some(crate::chunky::ChunkShape::Flat);
+        }
+        let mut texmap = crate::landscape::RuntimeTexMapState {
+            densities: densities.clone(),
+            material_names: material_names.clone(),
+            texture_names: texture_names.clone(),
+            match_texture_names: texture_names.clone(),
+            shapes,
+            materials: Vec::new(),
+            texture_inventory: Vec::new(),
+            default_material_entries: Vec::new(),
+            // Slot 3 models one of BlastShiftTo/BelowTempConvertTo/
+            // AboveTempConvertTo; it has no Surface8 pixel of its own.
+            material_crossmap_entries: vec![3],
+        };
+        texmap.set_default_material_entry("Earth", 1);
+        texmap.set_default_material_entry("Rock", 2);
+
+        // Surface8 protects slots 1 and 5. The latter carries IFT, which the
+        // native masks away while building its usage table.
+        let bytes = vec![1, 5 | 0x80, 0, 1, 5, 0x80];
+        let mut landscape = Landscape::new(3, vec![2; 3]).expect("landscape builds");
+        landscape.set_world_height(2);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            3,
+            2,
+            bytes,
+            densities,
+            material_names,
+            texture_names,
+        ));
+        landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
         landscape.refresh_all_raster_columns();
         HostWorldContext::with_landscape(
             Vec::<HostWorldObject>::new(),
@@ -49928,6 +50044,174 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(folded.material_names[1].as_deref(), Some("Earth"));
         assert_eq!(folded.material_names[2].as_deref(), Some("Earth"));
         assert_eq!(folded.default_material_entry("Earth"), Some(1));
+    }
+
+    #[test]
+    fn remove_unused_texmap_entries_prunes_live_entries_and_preserves_cpp_caches() {
+        // C4Landscape::RemoveUnusedTexMapEntries scans Surface8, strips IFT,
+        // protects numeric material references, then clears every other slot
+        // from 1 through 126 without HandleTexMapUpdate
+        // (C4Landscape.cpp:2983-3007).
+        let mut replay_world = remove_unused_texmap_world();
+        let initial_landscape = replay_world
+            .landscape_ref()
+            .expect("landscape exists")
+            .clone();
+        let initial_bytes = initial_landscape
+            .pixel_grid()
+            .expect("pixel grid")
+            .bytes()
+            .to_vec();
+        let initial_revision = initial_landscape
+            .pixel_grid()
+            .expect("pixel grid")
+            .revision();
+
+        let (result, outcome) =
+            with_effect_context(None, &[], replay_world.clone(), 1, || {
+                Ok::<_, RuntimeError>((
+                    remove_unused_texmap_entries(&[])?,
+                    // Slot 4 was Earth-Ridge but had neither a pixel nor a
+                    // material reference. Its removal is immediately live.
+                    set_texture_index(&[
+                        Value::String("Earth-Ridge".to_string()),
+                        Value::Int(7),
+                        Value::Bool(false),
+                    ])?,
+                    get_texture(&[Value::Int(1), Value::Int(0)])?,
+                ))
+            });
+        assert_eq!(
+            result.expect("RemoveUnusedTexMapEntries succeeds"),
+            (
+                Value::Nil,
+                Value::Int(0),
+                Value::String("Smooth".to_string()),
+            )
+        );
+        assert_eq!(outcome.landscape.len(), 1);
+        let LandscapeOperation::RemoveUnusedTexMapEntries { cleared_slots } =
+            &outcome.landscape[0]
+        else {
+            panic!("unexpected landscape operation: {:?}", outcome.landscape[0]);
+        };
+        assert_eq!(cleared_slots.len(), 122);
+        assert_eq!(cleared_slots.first(), Some(&4));
+        assert_eq!(cleared_slots.get(1), Some(&6));
+        assert_eq!(cleared_slots.last(), Some(&126));
+        assert!(!cleared_slots.contains(&5));
+        assert!(!cleared_slots.contains(&127));
+
+        // Separate effect callbacks clone the threaded HostWorldContext.
+        replay_world.preview_runtime_landscape_operation(&outcome.landscape[0]);
+        let replayed_landscape = replay_world.landscape_ref().expect("landscape exists");
+        let replayed_texmap = replayed_landscape
+            .raster_state()
+            .expect("raster state")
+            .texmap();
+        for slot in [1, 2, 3, 5] {
+            assert!(replayed_texmap.material_names[slot].is_some(), "slot {slot}");
+        }
+        for slot in [4, 6] {
+            assert!(replayed_texmap.material_names[slot].is_none(), "slot {slot}");
+            assert!(replayed_texmap.texture_names[slot].is_none(), "slot {slot}");
+            assert!(replayed_texmap.match_texture_names[slot].is_none(), "slot {slot}");
+            assert!(replayed_texmap.shapes[slot].is_none(), "slot {slot}");
+            assert_eq!(replayed_texmap.densities[slot], 0, "slot {slot}");
+        }
+        assert_eq!(replayed_texmap.default_material_entry("Rock"), Some(2));
+        assert_eq!(replayed_texmap.material_crossmap_entries, vec![3]);
+
+        let (replayed, replayed_outcome) =
+            with_effect_context(None, &[], replay_world, 1, || {
+                set_texture_index(&[
+                    Value::String("Earth-Ridge".to_string()),
+                    Value::Int(7),
+                    Value::Bool(false),
+                ])
+            });
+        assert_eq!(replayed.expect("replayed removal is live"), Value::Int(0));
+        assert!(replayed_outcome.landscape.is_empty());
+
+        let mut engine = crate::Engine::new();
+        engine.set_landscape(initial_landscape);
+        engine.apply_landscape_operations(outcome.landscape);
+        let landscape = engine.landscape().expect("folded landscape exists");
+        let folded = landscape.raster_state().expect("raster state").texmap();
+        assert!(folded.material_names[4].is_none());
+        assert!(folded.material_names[6].is_none());
+        let grid = landscape.pixel_grid().expect("pixel grid");
+        assert_eq!(grid.bytes(), initial_bytes);
+        assert_eq!(grid.revision(), initial_revision);
+        assert_eq!(
+            grid.material_names()[4].as_deref(),
+            Some("Earth"),
+            "RemoveEntry does not refresh C++ Pix2Mat-style caches"
+        );
+        assert_eq!(grid.texture_names()[4].as_deref(), Some("Ridge"));
+
+        // DrawMaterialQuad is one of the older deferred-preview writers. Its
+        // authoritative fold must run before RemoveUnused rescans Surface8;
+        // otherwise the callback's stale preview list would clear slot 4
+        // after the quad has written pixels that use it.
+        let ordered_world = remove_unused_texmap_world();
+        let ordered_initial = ordered_world
+            .landscape_ref()
+            .expect("landscape exists")
+            .clone();
+        let draw_args = [
+            Value::String("Earth-Ridge".to_string()),
+            Value::Int(1),
+            Value::Int(0),
+            Value::Int(2),
+            Value::Int(0),
+            Value::Int(2),
+            Value::Int(1),
+            Value::Int(1),
+            Value::Int(1),
+            Value::Bool(false),
+        ];
+        let (ordered_result, ordered_outcome) =
+            with_effect_context(None, &[], ordered_world, 1, || {
+                Ok::<_, RuntimeError>((
+                    draw_material_quad(&draw_args)?,
+                    remove_unused_texmap_entries(&[])?,
+                ))
+            });
+        assert_eq!(
+            ordered_result.expect("ordered operations succeed"),
+            (Value::Bool(true), Value::Nil)
+        );
+        assert_eq!(ordered_outcome.landscape.len(), 2);
+        let LandscapeOperation::RemoveUnusedTexMapEntries { cleared_slots } =
+            &ordered_outcome.landscape[1]
+        else {
+            panic!(
+                "unexpected ordered operation: {:?}",
+                ordered_outcome.landscape[1]
+            );
+        };
+        assert!(
+            cleared_slots.contains(&4),
+            "callback preview has not folded the earlier quad"
+        );
+
+        let mut ordered_engine = crate::Engine::new();
+        ordered_engine.set_landscape(ordered_initial);
+        ordered_engine.apply_landscape_operations(ordered_outcome.landscape);
+        let ordered_landscape = ordered_engine
+            .landscape()
+            .expect("ordered landscape remains");
+        assert_eq!(ordered_landscape.grid_byte_at(2, 0), Some(4));
+        assert_eq!(
+            ordered_landscape
+                .raster_state()
+                .expect("ordered raster state")
+                .texmap()
+                .material_names[4]
+                .as_deref(),
+            Some("Earth")
+        );
     }
 
     #[test]
