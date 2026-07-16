@@ -385,6 +385,7 @@ impl Engine {
 
     pub fn add_script(&mut self, mut script: Script) {
         for function in script.functions.values_mut() {
+            function.bind_source_host(self.host_identity);
             function.bind_global_link_host(self.host_identity);
         }
         if self.owner_strict_level.is_none() {
@@ -429,6 +430,7 @@ impl Engine {
     /// rebuilding an otherwise unchanged host.
     pub fn replace_script(&mut self, mut script: Script, register_declarations: bool) {
         for function in script.functions.values_mut() {
+            function.bind_source_host(self.host_identity);
             function.bind_global_link_host(self.host_identity);
         }
         self.owner_strict_level = Some(script.strict_level);
@@ -1216,6 +1218,18 @@ impl Engine {
         Some(ScriptFunctionResolution {
             scope,
             host_identity,
+            function: Arc::new(function.clone()),
+        })
+    }
+
+    /// Resolve only the engine-owned global script table. This is the
+    /// `GetFuncRecursive` starting point when the calling function's owner
+    /// is `Game.ScriptEngine`, so declaring-host locals must not shadow it.
+    pub fn resolve_global_function(&self, name: &str) -> Option<ScriptFunctionResolution> {
+        let function = self.global_functions.as_deref()?.get(name)?;
+        Some(ScriptFunctionResolution {
+            scope: ScriptFunctionScope::Global,
+            host_identity: function.global_link_host.unwrap_or(self.host_identity),
             function: Arc::new(function.clone()),
         })
     }

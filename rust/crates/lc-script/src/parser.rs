@@ -377,7 +377,7 @@ impl<'a> Parser<'a> {
         self.expect_keyword(Keyword::Func, "expected 'func' declaration")?;
         // Check for optional & indicating reference return type
         let returns_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
-        let (name, _) = self.expect_identifier("expected function name")?;
+        let (name, name_token) = self.expect_identifier("expected function name")?;
         self.expect_symbol(Symbol::LParen, "expected '(' after function name")?;
         let params = self.parse_parameter_list()?;
         self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
@@ -395,6 +395,10 @@ impl<'a> Parser<'a> {
             description,
             // Stamped with the script's #strict level in Script::from_ast.
             strict_level: None,
+            // C4Aul's SGetLine counts preceding newlines, while lexer
+            // diagnostics use conventional one-based lines.
+            source_line: name_token.line.saturating_sub(1),
+            source_host: None,
             // Bound to the destination ScriptEngine when the script is added.
             global_link_host: None,
             // Linked when a later script or an #include overload collides.
@@ -420,7 +424,7 @@ impl<'a> Parser<'a> {
         }
         self.expect_keyword(Keyword::Func, "expected 'func' declaration")?;
         let returns_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
-        let (name, _) = self.expect_identifier("expected function name")?;
+        let (name, name_token) = self.expect_identifier("expected function name")?;
         self.expect_symbol(Symbol::LParen, "expected '(' after function name")?;
         let params = self.parse_parameter_list()?;
         self.expect_symbol(Symbol::RParen, "expected ')' after parameter list")?;
@@ -462,6 +466,8 @@ impl<'a> Parser<'a> {
                 returns_reference,
                 description,
                 strict_level: None,
+                source_line: name_token.line.saturating_sub(1),
+                source_host: None,
                 global_link_host: None,
                 overloaded: None,
             },
@@ -501,6 +507,8 @@ impl<'a> Parser<'a> {
             returns_reference: false,
             description,
             strict_level: None,
+            source_line: name_token.line.saturating_sub(1),
+            source_host: None,
             global_link_host: None,
             overloaded: None,
         })
@@ -575,6 +583,8 @@ impl<'a> Parser<'a> {
                 returns_reference: false,
                 description,
                 strict_level: None,
+                source_line: name_token.line.saturating_sub(1),
+                source_host: None,
                 global_link_host: None,
                 overloaded: None,
             },

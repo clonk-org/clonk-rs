@@ -10461,7 +10461,7 @@ fn parse_native_c4_string_argument(
         lc_script::caller_origin_strictness(),
         lc_script::HostCallerStrictness::Strict(level) if level >= 3
     );
-    if eager_falsy_conversion && matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false)) {
+    if eager_falsy_conversion && !value.as_bool() {
         return Ok(None);
     }
     match value {
@@ -12936,6 +12936,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("PlrMessage", plr_message);
     script.register_host_function("Log", log_message);
     script.register_host_function("DebugLog", debug_log_message);
+    script.register_host_function("LocateFunc", locate_func);
     script.register_host_function("GameOver", game_over);
     script.register_host_function("GainMissionAccess", gain_mission_access);
     script.register_host_function("GetMissionAccess", get_mission_access);
@@ -13707,6 +13708,161 @@ fn log_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn debug_log_message(args: &[Value]) -> Result<Value, RuntimeError> {
     log_internal("DebugLog", args, LogLevel::Debug)
+}
+
+#[derive(Clone, Copy)]
+enum LocateFuncContextError {
+    InvalidDefinition,
+    NoValidContext,
+}
+
+fn parse_locate_func_object_argument(value: &Value) -> Result<Option<ObjectId>, RuntimeError> {
+    let eager_falsy_conversion = !matches!(
+        lc_script::caller_origin_strictness(),
+        lc_script::HostCallerStrictness::Strict(level) if level >= 3
+    );
+    if eager_falsy_conversion && !value.as_bool() {
+        return Ok(None);
+    }
+    match value {
+        Value::Nil => Ok(None),
+        Value::Object(_) | Value::Proplist(_) => Ok(object_id_from_value(value)),
+        other => Err(RuntimeError::new(format!(
+            "LocateFunc: expected object for object, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// FnLocateFunc (C4Script.cpp:4515-4575): select an object/definition/caller
+/// script, then print the active function and its `OwnerOverloaded` chain.
+/// This is intentionally diagnostic-only; a valid context returns true even
+/// when the requested function does not exist.
+fn locate_func(args: &[Value]) -> Result<Value, RuntimeError> {
+    // C4Aul applies all three native parameter conversions before entering
+    // FnLocateFunc, so validate the typed slots before the missing-name guard.
+    let function = parse_native_c4_string_argument(args.first(), "LocateFunc", "function")?;
+    let object = parse_locate_func_object_argument(args.get(1).unwrap_or(&Value::Nil))?;
+    let definition = parse_native_c4id_argument(args.get(2), "LocateFunc")?;
+
+    let Some(function) = function else {
+        error!(target: "lc-script", "No func name");
+        return Ok(Value::Bool(false));
+    };
+
+    let caller_host = lc_script::caller_host_identity();
+    let caller_uses_engine_scope = lc_script::caller_uses_engine_scope().unwrap_or(false);
+    let lookup = HOST_CONTEXT.with(|cell| {
+        let context = cell.borrow();
+        let Some(context) = context.as_ref() else {
+            return Err(if definition.is_some() {
+                LocateFuncContextError::InvalidDefinition
+            } else {
+                LocateFuncContextError::NoValidContext
+            });
+        };
+
+        // Explicit object wins over even an invalid explicit definition.
+        // Otherwise a non-empty ID wins over caller fallback.
+        let (script, engine_scope) = if let Some(object) = object {
+            let Some(definition) = context.object_effective_definition_id(object) else {
+                return Err(LocateFuncContextError::NoValidContext);
+            };
+            let Some(script) = context.world.definition_script(&definition).cloned() else {
+                return Err(LocateFuncContextError::NoValidContext);
+            };
+            (script, false)
+        } else if let Some(definition) = definition.as_deref() {
+            let Some(script) = context.world.definition_script(definition).cloned() else {
+                return Err(LocateFuncContextError::InvalidDefinition);
+            };
+            (script, false)
+        } else {
+            let Some(caller_host) = caller_host else {
+                return Err(LocateFuncContextError::NoValidContext);
+            };
+            let Some((_, _, script)) = context.world.script_for_host_identity(caller_host) else {
+                return Err(LocateFuncContextError::NoValidContext);
+            };
+            (script, caller_uses_engine_scope)
+        };
+
+        let resolution = if engine_scope {
+            script.resolve_global_function(&function)
+        } else {
+            script.resolve_function(&function, true)
+        };
+        let root_scope = resolution.as_ref().map(|resolution| resolution.scope);
+        let mut messages = Vec::new();
+        let mut seen = Vec::new();
+
+        let mut append_chain = |root: &lc_script::Function, engine_globals_only: bool| {
+            let mut current = Some(root);
+            while let Some(candidate) = current {
+                if (!engine_globals_only || candidate.is_global())
+                    && !seen.iter().any(|emitted| emitted == candidate)
+                {
+                    seen.push(candidate.clone());
+                    let suffix = candidate
+                        .source_host_identity()
+                        .and_then(|identity| {
+                            context
+                                .world
+                                .script_for_host_identity(identity)
+                                .map(|(name, _, _)| format!("{name}:{}", candidate.source_line()))
+                        })
+                        .unwrap_or_else(|| "no owner".to_string());
+                    messages.push(format!("{} ({suffix})", candidate.name));
+                }
+                current = candidate.overloaded.as_deref();
+            }
+        };
+
+        if let Some(resolution) = resolution.as_ref() {
+            append_chain(
+                resolution.function.as_ref(),
+                resolution.scope == lc_script::ScriptFunctionScope::Global,
+            );
+        }
+        // A definition-local chain falls through to Game.ScriptEngine. The
+        // VM keeps that global table separately, so reconstruct the tail for
+        // this diagnostic and suppress any node already linked explicitly.
+        if root_scope == Some(lc_script::ScriptFunctionScope::Local) {
+            if let Some(global) = script.resolve_global_function(&function) {
+                append_chain(global.function.as_ref(), true);
+            }
+        }
+        if script.has_host_function(&function) {
+            messages.push(format!("{function} (engine)"));
+        }
+
+        Ok((messages, resolution.is_some() || script.has_host_function(&function)))
+    });
+
+    let (messages, found) = match lookup {
+        Ok(result) => result,
+        Err(LocateFuncContextError::InvalidDefinition) => {
+            error!(target: "lc-script", "Invalid or unloaded def");
+            return Ok(Value::Bool(false));
+        }
+        Err(LocateFuncContextError::NoValidContext) => {
+            error!(target: "lc-script", "No valid script context");
+            return Ok(Value::Bool(false));
+        }
+    };
+
+    if !found {
+        error!(target: "lc-script", "Func {} not found", function);
+        return Ok(Value::Bool(true));
+    }
+    for (index, message) in messages.into_iter().enumerate() {
+        if index == 0 {
+            info!(target: "lc-script", "{}", message);
+        } else {
+            info!(target: "lc-script", "overloads {}", message);
+        }
+    }
+    Ok(Value::Bool(true))
 }
 
 fn game_over(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -44907,6 +45063,7 @@ mod tests {
         "LaunchVolcano",
         "LessThan",
         "LoadScenarioSection",
+        "LocateFunc",
         "Log",
         "MakeCrewMember",
         "Material",
@@ -50580,6 +50737,183 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(record.level, Level::DEBUG);
         assert_eq!(record.target, "lc-script");
         assert_eq!(record.message, "Debug 42");
+    }
+
+    #[test]
+    fn locate_func_lists_explicit_object_overload_sources_and_lines() {
+        let mut appended = ScriptEngine::new();
+        appended
+            .load_script("#appendto BASE\n\npublic func Initialize() { return 2; }")
+            .expect("append source compiles");
+
+        let mut base = ScriptEngine::new();
+        register_host_functions(&mut base);
+        base.load_script(
+            "public func Initialize() { return 1; }\n\
+             func Probe(object target) { return LocateFunc(\"Initialize\", target); }\n\
+             func ProbeDefinition() { return LocateFunc(\"Initialize\", nil, BASE); }\n\
+             func Log() { return true; }\n\
+             func ProbeNative(object target) { return LocateFunc(\"Log\", target); }",
+        )
+        .expect("base LocateFunc probe compiles");
+        base.append_overrides_from(&appended);
+
+        let appended = Arc::new(appended);
+        let base = Arc::new(base);
+        let world = HostWorldContext::from_objects(vec![resort_order_world_object(1, "BASE")])
+            .with_definition_scripts(HashMap::from([("BASE".into(), Arc::clone(&base))]))
+            .with_linked_script_hosts(vec![("APND".into(), Arc::clone(&appended))]);
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
+
+        let (result, _) = subscriber::with_default(subscriber, || {
+            with_effect_context(None, &[], world, 2, || {
+                let call = |name: &str, args: &[Value]| {
+                    base.call(name, args)
+                        .map_err(|error| RuntimeError::new(error.to_string()))
+                };
+                assert_eq!(call("Probe", &[Value::Object(1)])?, Value::Bool(true));
+                assert_eq!(call("ProbeDefinition", &[])?, Value::Bool(true));
+                call("ProbeNative", &[Value::Object(1)])
+            })
+        });
+        assert_eq!(
+            result.expect("LocateFunc probe succeeds"),
+            Value::Bool(true)
+        );
+
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 6);
+        assert!(records.iter().all(|record| record.level == Level::INFO));
+        assert!(records.iter().all(|record| record.target == "lc-script"));
+        assert_eq!(records[0].message, "Initialize (APND:2)");
+        assert_eq!(records[1].message, "overloads Initialize (BASE:0)");
+        assert_eq!(records[2].message, "Initialize (APND:2)");
+        assert_eq!(records[3].message, "overloads Initialize (BASE:0)");
+        assert_eq!(records[4].message, "Log (BASE:3)");
+        assert_eq!(records[5].message, "overloads Log (engine)");
+    }
+
+    #[test]
+    fn locate_func_global_caller_skips_declaring_host_local_chain_nodes() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "func Pick() { return 1; }\n\
+                 global func Pick() { return 2; }\n\
+                 global func Probe() { return LocateFunc(\"Pick\"); }",
+            )
+            .expect("mixed local/global LocateFunc probe compiles");
+        let globals = script
+            .global_access_functions()
+            .map(|(name, function)| (name.clone(), function.clone()))
+            .collect::<HashMap<_, _>>();
+        script.set_global_functions(Some(Arc::new(globals)));
+        let script = Arc::new(script);
+        let world = HostWorldContext::default().with_scenario_script(Some(Arc::clone(&script)));
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
+
+        let (result, _) = subscriber::with_default(subscriber, || {
+            with_effect_context(None, &[], world, 1, || {
+                script
+                    .call("Probe", &[])
+                    .map_err(|error| RuntimeError::new(error.to_string()))
+            })
+        });
+        assert_eq!(
+            result.expect("global LocateFunc caller succeeds"),
+            Value::Bool(true)
+        );
+
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].level, Level::INFO);
+        assert_eq!(records[0].target, "lc-script");
+        assert_eq!(records[0].message, "Pick (Game.Script:1)");
+    }
+
+    #[test]
+    fn locate_func_matches_name_context_missing_and_engine_diagnostics() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"
+                #strict 3
+                func MissingName() { return LocateFunc(); }
+                func EmptyName(object target) { return LocateFunc("", target); }
+                func MissingFunction(object target) { return LocateFunc("Missing", target); }
+                func EngineFunction(object target) { return LocateFunc("Log", target); }
+                func InvalidDefinition() { return LocateFunc("Anything", nil, BADD); }
+                func WrongName(object target) { return LocateFunc(false, target); }
+                func WrongObject() { return LocateFunc("Log", 0); }
+                "#,
+            )
+            .expect("LocateFunc validation probes compile");
+        let script = Arc::new(script);
+        let world = HostWorldContext::from_objects(vec![resort_order_world_object(1, "BASE")])
+            .with_definition_scripts(HashMap::from([("BASE".into(), Arc::clone(&script))]));
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
+
+        let (result, _) = subscriber::with_default(subscriber, || {
+            with_effect_context(None, &[], world, 2, || {
+                let call = |name: &str, args: &[Value]| {
+                    script
+                        .call(name, args)
+                        .map_err(|error| RuntimeError::new(error.to_string()))
+                };
+                assert_eq!(call("MissingName", &[])?, Value::Bool(false));
+                // An allocated empty C4String is not a missing C4String*.
+                assert_eq!(
+                    call("EmptyName", &[Value::Object(1)])?,
+                    Value::Bool(true)
+                );
+                assert_eq!(
+                    call("MissingFunction", &[Value::Object(1)])?,
+                    Value::Bool(true)
+                );
+                assert_eq!(
+                    call("EngineFunction", &[Value::Object(1)])?,
+                    Value::Bool(true)
+                );
+                assert_eq!(call("InvalidDefinition", &[])?, Value::Bool(false));
+                assert!(call("WrongName", &[Value::Object(1)])
+                    .expect_err("strict-3 bool must not convert to string")
+                    .to_string()
+                    .contains("expected string for function, got bool"));
+                assert!(call("WrongObject", &[])
+                    .expect_err("strict-3 integer zero must not convert to object")
+                    .to_string()
+                    .contains("expected object for object, got int"));
+                assert_eq!(
+                    locate_func(&[Value::String("Anything".into())])?,
+                    Value::Bool(false)
+                );
+                Ok::<_, RuntimeError>(())
+            })
+        });
+        result.expect("LocateFunc validation probes succeed");
+
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 6);
+        let diagnostics = records
+            .iter()
+            .map(|record| (record.level, record.target.as_str(), record.message.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            diagnostics,
+            [
+                (Level::ERROR, "lc-script", "No func name"),
+                (Level::ERROR, "lc-script", "Func  not found"),
+                (Level::ERROR, "lc-script", "Func Missing not found"),
+                (Level::INFO, "lc-script", "Log (engine)"),
+                (Level::ERROR, "lc-script", "Invalid or unloaded def"),
+                (Level::ERROR, "lc-script", "No valid script context"),
+            ]
+        );
     }
 
     #[test]

@@ -166,6 +166,14 @@ pub struct Function {
     /// owning script's strict level for `==`/`!=`, `Fn->pOrgScript->Strict`).
     /// `None` = no `#strict` directive (NONSTRICT). Stamped in `Script::from_ast`.
     pub strict_level: Option<u8>,
+    /// Script which originally declared this function (`pOrgScript` in
+    /// C4Aul). Include/append copies keep this identity even though their
+    /// destination owner changes. Bound when the parsed script is installed
+    /// in an [`Engine`](crate::Engine).
+    pub(crate) source_host: Option<crate::vm::ScriptHostIdentity>,
+    /// Zero-based source line of the function name, matching
+    /// `C4AulScriptFunc::SGetLine`.
+    pub(crate) source_line: usize,
     /// The script host referenced by a global function's C4Aul `LinkedTo`
     /// pointer. Global functions execute from the shared engine table, but
     /// native local-function lookup still starts in their declaring host.
@@ -199,6 +207,8 @@ impl Function {
                 && a.returns_reference == b.returns_reference
                 && a.description == b.description
                 && a.strict_level == b.strict_level
+                && a.source_host == b.source_host
+                && a.source_line == b.source_line
                 && a.global_link_host == b.global_link_host
         }
         let mut tail = &mut self.overloaded;
@@ -243,6 +253,32 @@ impl Function {
         if let Some(overloaded) = self.overloaded.as_mut() {
             std::sync::Arc::make_mut(overloaded).bind_global_link_host(host);
         }
+    }
+
+    /// Stamp the original declaring script on parsed functions. Linked
+    /// copies already carrying provenance deliberately retain it.
+    pub(crate) fn bind_source_host(&mut self, host: crate::vm::ScriptHostIdentity) {
+        if self.source_host.is_none() {
+            self.source_host = Some(host);
+        }
+        if let Some(overloaded) = self.overloaded.as_mut() {
+            std::sync::Arc::make_mut(overloaded).bind_source_host(host);
+        }
+    }
+
+    /// Original script host (`pOrgScript`) for diagnostic/source lookup.
+    pub fn source_host_identity(&self) -> Option<crate::vm::ScriptHostIdentity> {
+        self.source_host
+    }
+
+    /// Zero-based declaration line, matching C4Aul's `SGetLine` output.
+    pub fn source_line(&self) -> usize {
+        self.source_line
+    }
+
+    /// Whether this declaration lives in the engine-global function table.
+    pub fn is_global(&self) -> bool {
+        self.access == AccessLevel::Global
     }
 }
 
