@@ -22197,7 +22197,7 @@ impl Engine {
                         tracing::warn!(
                             script = %name,
                             %diagnostic,
-                            "global script parse error quarantined; continuing like C++"
+                            "global script compile diagnostic; continuing like C++"
                         );
                     }
                     // System/scenario System.c4g declarations participate in

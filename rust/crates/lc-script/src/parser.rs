@@ -29,9 +29,12 @@ pub struct Parser<'a> {
     /// depth. C4Aul's preparser registers these without emitting bytecode.
     script_var_decls: Vec<VarDecl>,
     /// System/global scripts have no definition owner. Their legacy
-    /// old-style bodies may not declare object-local names.
+    /// old-style `local` declarations produce a preparser diagnostic.
     global_script: bool,
     parsing_old_style_function: bool,
+    /// Preparser-only diagnostics that do not poison the retained function.
+    /// The recovering top-level loop drains these in source order.
+    non_fatal_diagnostics: Vec<ParseError>,
 }
 
 impl<'a> Parser<'a> {
@@ -47,6 +50,7 @@ impl<'a> Parser<'a> {
             script_var_decls: Vec::new(),
             global_script: false,
             parsing_old_style_function: false,
+            non_fatal_diagnostics: Vec::new(),
         }
     }
 
@@ -148,18 +152,15 @@ impl<'a> Parser<'a> {
             } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Local) {
                 // Parse local variable declarations
                 self.consume()?; // consume 'local'
-                let declarations = self.parse_var_decl_list(VarDeclKind::Local)?;
-                self.script_var_decls.extend(declarations);
+                self.parse_var_decl_list(VarDeclKind::Local)?;
             } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Static) {
                 // Parse static variable declarations
                 self.consume()?; // consume 'static'
                                  // Check for 'const' after 'static'
                 if self.consume_if_keyword(Keyword::Const)?.is_some() {
-                    let declarations = self.parse_var_decl_list(VarDeclKind::StaticConst)?;
-                    self.script_var_decls.extend(declarations);
+                    self.parse_var_decl_list(VarDeclKind::StaticConst)?;
                 } else {
-                    let declarations = self.parse_var_decl_list(VarDeclKind::Static)?;
-                    self.script_var_decls.extend(declarations);
+                    self.parse_var_decl_list(VarDeclKind::Static)?;
                 }
             } else {
                 // Must be a function
@@ -288,20 +289,18 @@ impl<'a> Parser<'a> {
                     }
                 } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Local) {
                     self.consume()?;
-                    let declarations = self.parse_var_decl_list(VarDeclKind::Local)?;
-                    self.script_var_decls.extend(declarations);
+                    self.parse_var_decl_list(VarDeclKind::Local)?;
                 } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Static) {
                     self.consume()?;
                     if self.consume_if_keyword(Keyword::Const)?.is_some() {
-                        let declarations = self.parse_var_decl_list(VarDeclKind::StaticConst)?;
-                        self.script_var_decls.extend(declarations);
+                        self.parse_var_decl_list(VarDeclKind::StaticConst)?;
                     } else {
-                        let declarations = self.parse_var_decl_list(VarDeclKind::Static)?;
-                        self.script_var_decls.extend(declarations);
+                        self.parse_var_decl_list(VarDeclKind::Static)?;
                     }
                 } else {
                     let (function, error) = self.parse_function_recovering()?;
                     functions.push(function);
+                    diagnostics.append(&mut self.non_fatal_diagnostics);
                     if let Some(error) = error {
                         diagnostics.push(error);
                     }
@@ -323,6 +322,7 @@ impl<'a> Parser<'a> {
             }
         }
 
+        diagnostics.append(&mut self.non_fatal_diagnostics);
         diagnostics.extend(self.lexer.take_diagnostics());
 
         (
@@ -888,19 +888,23 @@ impl<'a> Parser<'a> {
         }
         if let Some(token) = self.consume_if_keyword(Keyword::Local)? {
             if self.global_script && self.parsing_old_style_function {
-                return Err(ParseError::new(
+                self.non_fatal_diagnostics.push(ParseError::new(
                     "'local' variable declaration in global script",
                     token.line,
                     token.column,
                 ));
+                // C++ reports this in the PREPARSER, then recovery retries
+                // the same token as a top-level declaration and registers
+                // its names. The later PARSER pass still compiles the rest of
+                // the retained function.
+                self.parse_var_decl_list(VarDeclKind::Local)?;
+                return Ok(Stmt::Sequence(Vec::new()));
             }
-            let declarations = self.parse_var_decl_list(VarDeclKind::Local)?;
-            self.script_var_decls.extend(declarations);
+            self.parse_var_decl_list(VarDeclKind::Local)?;
             return Ok(Stmt::Sequence(Vec::new()));
         }
         if self.consume_if_keyword(Keyword::Static)?.is_some() {
-            let declarations = self.parse_var_decl_list(VarDeclKind::Static)?;
-            self.script_var_decls.extend(declarations);
+            self.parse_var_decl_list(VarDeclKind::Static)?;
             return Ok(Stmt::Sequence(Vec::new()));
         }
         if self.consume_if_keyword(Keyword::Return)?.is_some() {
@@ -2390,42 +2394,48 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_var_decl_list(&mut self, kind: VarDeclKind) -> Result<Vec<VarDecl>, ParseError> {
+    fn parse_var_decl_list(&mut self, kind: VarDeclKind) -> Result<(), ParseError> {
         // Parse a comma-separated name list. Static constants additionally
         // require an initializer for every name.
-        let mut decls = Vec::new();
-
         loop {
             // Parse variable name
             let (name, name_token) =
                 self.expect_identifier("expected variable name in declaration")?;
 
-            // Static constants alone accept initializers. Parse them BELOW
-            // the comma level so the declaration-list comma stays with this
-            // loop (`static const A = 5, B = 1;` declares two constants).
-            let init = if let Some(equal) = self.consume_if_symbol(Symbol::Equal)? {
-                if kind != VarDeclKind::StaticConst {
+            let init = if kind == VarDeclKind::StaticConst {
+                // Parse initializers BELOW the comma level so the declaration
+                // list owns its commas (`static const A = 5, B = 1;`).
+                if self.consume_if_symbol(Symbol::Equal)?.is_some() {
+                    Some(self.parse_assignment()?)
+                } else {
+                    return Err(ParseError::new(
+                        "static const declaration requires an initializer",
+                        name_token.line,
+                        name_token.column,
+                    ));
+                }
+            } else {
+                // The C++ preparser registers each name before validating its
+                // delimiter, so even `local value = 5;` retains `value` in
+                // declaration metadata before reporting the syntax error.
+                self.script_var_decls.push(VarDecl {
+                    kind,
+                    name: name.clone(),
+                    init: None,
+                });
+                if let Some(equal) = self.consume_if_symbol(Symbol::Equal)? {
                     return Err(ParseError::new(
                         "expected ',' or ';' after variable declaration",
                         equal.line,
                         equal.column,
                     ));
                 }
-                Some(self.parse_assignment()?)
-            } else {
                 None
             };
 
-            // static const requires an initializer
-            if kind == VarDeclKind::StaticConst && init.is_none() {
-                return Err(ParseError::new(
-                    "static const declaration requires an initializer",
-                    name_token.line,
-                    name_token.column,
-                ));
+            if kind == VarDeclKind::StaticConst {
+                self.script_var_decls.push(VarDecl { kind, name, init });
             }
-
-            decls.push(VarDecl { kind, name, init });
 
             // Check for comma (more declarations) or semicolon (end)
             if self.consume_if_symbol(Symbol::Comma)?.is_some() {
@@ -2438,7 +2448,7 @@ impl<'a> Parser<'a> {
         // Expect semicolon
         self.expect_symbol(Symbol::Semicolon, "expected ';' after variable declaration")?;
 
-        Ok(decls)
+        Ok(())
     }
 }
 

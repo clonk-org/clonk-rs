@@ -155,7 +155,8 @@ impl Script {
     }
 
     /// Compile a System/global script whose legacy old-style functions have
-    /// no definition owner. C++ rejects `local` declarations in those bodies.
+    /// no definition owner. C++ reports `local` declarations during preparse
+    /// without poisoning the retained function's later parser pass.
     pub fn compile_global(source: &str) -> Result<Self, ParseError> {
         let mut parser = Parser::new_global_script(source);
         let (ast, diagnostics) = parser.parse_script_recovering();

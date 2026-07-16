@@ -2,7 +2,7 @@ use lc_engine::{Definition, Engine, SpawnConfig};
 use lc_script::Value;
 
 #[test]
-fn global_script_quarantines_local_in_old_style_function() {
+fn global_script_reports_old_style_local_without_poisoning_the_function() {
     let mut engine = Engine::new();
     let loaded = engine.install_global_scripts(&[(
         "System.c4g/BodyDeclarations.c".to_string(),
@@ -41,7 +41,10 @@ global Healthy:
             .expect("the later healthy global function survives recovery"),
         Value::Int(7)
     );
-    engine
-        .call_object_function(index, "CallBroken", Vec::new())
-        .expect_err("the invalid old-style global function is quarantined");
+    assert_eq!(
+        engine
+            .call_object_function(index, "CallBroken", Vec::new())
+            .expect("the preparser-only diagnostic does not poison the function"),
+        Value::Int(9)
+    );
 }

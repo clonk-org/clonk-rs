@@ -138,7 +138,7 @@ fn local_and_static_initializers_are_rejected_in_every_declaration_position() {
 }
 
 #[test]
-fn global_old_style_function_rejects_local_declarations() {
+fn global_old_style_local_reports_without_poisoning_the_function() {
     let script = Script::compile_global(
         r#"#strict
 global Broken:
@@ -148,7 +148,7 @@ global Healthy:
     return(7);
 "#,
     )
-    .expect("the global script recovers after the invalid function");
+    .expect("the global script recovers after the preparser diagnostic");
     assert!(
         script.parse_diagnostics().iter().any(|error| {
             error
@@ -157,6 +157,23 @@ global Healthy:
         }),
         "unexpected diagnostics: {:?}",
         script.parse_diagnostics()
+    );
+    assert_eq!(
+        script
+            .var_decls()
+            .iter()
+            .map(|declaration| (declaration.kind, declaration.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(VarDeclKind::Local, "forbidden")],
+        "preparse recovery retries the declaration and registers its names"
+    );
+    let mut engine = Engine::new();
+    engine.add_script(script);
+    assert_eq!(
+        engine
+            .call("Broken", &[])
+            .expect("the later parser pass retains the function"),
+        Value::Int(9)
     );
 
     let new_style = Script::compile_global(
@@ -176,4 +193,40 @@ global Healthy:
             .collect::<Vec<_>>(),
         vec![(VarDeclKind::Local, "declared")]
     );
+
+    let malformed = Script::compile_global(
+        "#strict\nglobal Invalid:\n local value = 5;\n return(9);",
+    )
+    .expect("the malformed declaration is quarantined");
+    assert!(
+        malformed.parse_diagnostics().iter().any(|error| {
+            error
+                .message()
+                .contains("'local' variable declaration in global script")
+        }),
+        "the preparser diagnostic survives the later parser error: {:?}",
+        malformed.parse_diagnostics()
+    );
+    assert!(
+        malformed
+            .parse_diagnostics()
+            .iter()
+            .any(|error| error.message().contains("',' or ';'")),
+        "the parser pass still rejects an initializer: {:?}",
+        malformed.parse_diagnostics()
+    );
+    assert_eq!(
+        malformed
+            .var_decls()
+            .iter()
+            .map(|declaration| (declaration.kind, declaration.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(VarDeclKind::Local, "value")],
+        "preparse registers the name before rejecting its delimiter"
+    );
+    let mut engine = Engine::new();
+    engine.add_script(malformed);
+    engine
+        .call("Invalid", &[])
+        .expect_err("a parser-pass declaration error still poisons the function");
 }
