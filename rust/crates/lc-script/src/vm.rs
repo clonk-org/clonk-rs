@@ -3149,6 +3149,21 @@ impl<'a> Vm<'a> {
                                 .set_local_tracked(args, None, env, depth + 1)
                                 .map(|tracked| tracked.value);
                         }
+                        // FnSetGlobal writes the same engine-global numbered
+                        // cell returned by Global(index) and returns the value
+                        // after native parameter conversion (C4Script.cpp:
+                        // 3398-3402).
+                        if name == "SetGlobal"
+                            && !self.functions.contains_key(name)
+                            && !self
+                                .global_functions
+                                .is_some_and(|functions| functions.contains_key(name))
+                            && !self.has_host_function(name)
+                        {
+                            return self
+                                .set_global_tracked(args, *forward_rest, env, depth + 1)
+                                .map(|tracked| tracked.value);
+                        }
                         // `LocalN("name")` is a reference to the executing
                         // object's named local (FnLocalN, C4Script.cpp:4591-4605,
                         // pObj defaulting to cthr->Obj). The two-argument
@@ -3732,6 +3747,12 @@ impl<'a> Vm<'a> {
                         && !self.has_host_function(name)
                     {
                         return self.set_local_tracked(args, None, env, depth + 1);
+                    }
+                    if name == "SetGlobal"
+                        && function.is_none()
+                        && !self.has_host_function(name)
+                    {
+                        return self.set_global_tracked(args, *forward_rest, env, depth + 1);
                     }
                     if env.strict_level.unwrap_or(0) < 2
                         && function.is_none()
@@ -4675,7 +4696,15 @@ impl<'a> Vm<'a> {
     fn is_global_vm_builtin(name: &str) -> bool {
         matches!(
             name,
-            "this" | "Var" | "Local" | "SetLocal" | "LocalN" | "Global" | "GlobalN" | "eval"
+            "this"
+                | "Var"
+                | "Local"
+                | "SetLocal"
+                | "LocalN"
+                | "Global"
+                | "SetGlobal"
+                | "GlobalN"
+                | "eval"
         )
     }
 
@@ -4769,6 +4798,27 @@ impl<'a> Vm<'a> {
                 Ok(ReturnValue::Reference(
                     self.tracked_cell(self.numbered_global_cell(index)?),
                 ))
+            }
+            "SetGlobal" => {
+                let index = self.global_builtin_int_arg(name, args, 0)?;
+                let tracked = args
+                    .get(1)
+                    .map(CallArg::read_tracked)
+                    .transpose()?
+                    .unwrap_or_else(|| TrackedValue::runtime(Value::Nil));
+                // Native C4V_Any parameter conversion canonicalizes every
+                // falsy value to nil for callers below strict 3
+                // (C4AulExec.cpp:1435-1439).
+                let tracked = if env.strict_level.unwrap_or(0) < 3
+                    && !tracked.value.as_bool()
+                {
+                    TrackedValue::runtime(Value::Nil)
+                } else {
+                    tracked
+                };
+                self.tracked_cell(self.numbered_global_cell(index)?)
+                    .write_tracked(tracked.clone())?;
+                Ok(ReturnValue::Value(tracked))
             }
             "GlobalN" => {
                 let name = self.global_builtin_string_arg(name, args, 0, env.strict_level)?;
@@ -6428,6 +6478,25 @@ impl<'a> Vm<'a> {
         let cell = self.numbered_local_cell(env, index, target);
         self.tracked_cell(cell).write_tracked(tracked.clone())?;
         Ok(tracked)
+    }
+
+    fn set_global_tracked(
+        &self,
+        args: &[Expr],
+        forward_rest: bool,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<TrackedValue, RuntimeError> {
+        // Parse_Params evaluates every explicit argument before balancing the
+        // native two-parameter frame, so even ignored surplus arguments run
+        // before FnSetGlobal performs its write (C4AulParse.cpp:2311-2344).
+        let mut evaluated_args =
+            self.build_call_args(Some("SetGlobal"), None, args, env, depth)?;
+        if forward_rest {
+            Self::append_forwarded_args(&mut evaluated_args, env)?;
+        }
+        self.invoke_global_builtin_raw("SetGlobal", &evaluated_args, env, depth)?
+            .into_tracked()
     }
 
     fn expr_to_assignment_target(expr: &Expr) -> Result<AssignmentTarget, RuntimeError> {
