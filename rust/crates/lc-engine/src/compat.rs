@@ -27876,10 +27876,10 @@ fn find_first_with_sort(
 fn parse_criterions(args: &[Value]) -> Option<(FindCondition, Option<SortCriterion>)> {
     let mut conditions = Vec::new();
     let mut sorts = Vec::new();
-    for arg in args {
-        // The first nil parameter ends the criteria list
+    for arg in args.iter().take(10) {
+        // The first raw-falsy parameter ends the criteria list
         // (`if (!Data) break;`, C4Script.cpp:1996).
-        if matches!(arg, Value::Nil) {
+        if !arg.as_bool() {
             break;
         }
         match FindCondition::parse(arg) {
@@ -27902,6 +27902,34 @@ fn parse_criterions(args: &[Value]) -> Option<(FindCondition, Option<SortCriteri
         _ => Some(SortCriterion::Multiple(sorts)),
     };
     Some((condition, sort))
+}
+
+/// FindObject2/ObjectCount2 declare all ten native parameters as C4V_Array.
+/// C4Aul validates every slot before CreateCriterionsFromPars scans for its
+/// first falsy terminator; pre-strict-3 callers first normalize falsy values
+/// to nil, while strict-3 callers retain their concrete types.
+fn validate_array_criterion_args(function: &str, args: &[Value]) -> Result<(), RuntimeError> {
+    let strict_nil = matches!(
+        lc_script::caller_origin_strictness(),
+        lc_script::HostCallerStrictness::Strict(level) if level >= 3
+    );
+    for (index, arg) in args.iter().take(10).enumerate() {
+        let canonical_nil = matches!(arg, Value::Nil | Value::Object(0))
+            || matches!(arg, Value::C4Id(id) if cast_c4id_payload(id) == 0);
+        let converted = if canonical_nil || (!strict_nil && !arg.as_bool()) {
+            Value::Nil.convert_to(lc_script::C4VType::Array, true)
+        } else {
+            arg.convert_to(lc_script::C4VType::Array, true)
+        };
+        if !converted {
+            return Err(RuntimeError::new(format!(
+                "call to \"{function}\" parameter {}: got \"{}\", but expected \"array\"!",
+                index + 1,
+                arg.type_name()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The C++ bounded-vs-full walk decision (C4FindObject.cpp:315-328):
@@ -27954,6 +27982,7 @@ fn criterions_use_func(condition: &FindCondition, sort: Option<&SortCriterion>) 
 
 /// FnFindObject2 (C4Script.cpp:2052-2067).
 fn find_object2(args: &[Value]) -> Result<Value, RuntimeError> {
+    validate_array_criterion_args("FindObject2", args)?;
     let Some((condition, sort)) = parse_criterions(args) else {
         return Err(RuntimeError::new(
             "FindObject: No valid search criterions supplied!",
@@ -28052,6 +28081,7 @@ fn find_objects2(args: &[Value]) -> Result<Value, RuntimeError> {
 
 /// FnObjectCount2 (C4Script.cpp:2036-2050).
 fn object_count2(args: &[Value]) -> Result<Value, RuntimeError> {
+    validate_array_criterion_args("ObjectCount2", args)?;
     let Some((condition, _)) = parse_criterions(args) else {
         return Err(RuntimeError::new(
             "ObjectCount: No valid search criterions supplied!",
@@ -70336,28 +70366,114 @@ protected func Construction()
     }
 
     #[test]
-    fn criterion_parsing_stops_at_first_nil_par_like_cpp() {
-        // CreateCriterionsFromPars stops at the first nil parameter
+    fn criterion_parsing_stops_at_first_falsy_par_like_cpp() {
+        // CreateCriterionsFromPars stops at the first raw-falsy parameter
         // (`if (!Data) break;`, C4Script.cpp:1996): criteria after a nil
-        // argument are never parsed.
+        // integer zero, or false argument are never parsed.
         let world = HostWorldContext::from_objects(vec![
             find_world_object(1, "ROCK", 10, 10, 1),
             find_world_object(2, "TREE", 50, 10, 2),
             find_world_object(3, "ROCK", 90, 10, 2),
         ]);
-        // [ID ROCK], nil, [Owner 2]: C++ uses only the ROCK criterion, so
-        // the first rock (object 1) wins — not the owner-2 rock (object 3).
-        let args = vec![
-            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
-            Value::Nil,
-            Value::Array(vec![Value::Int(50), Value::Int(2)]),
-        ];
-        let (result, _) =
-            with_object_host_context_with_world(world.clone(), || find_object2(&args));
+        for terminator in [Value::Nil, Value::Int(0), Value::Bool(false)] {
+            // [ID ROCK], falsy, [Owner 2]: C++ uses only the ROCK criterion,
+            // so both rock objects remain in the FindObjects result.
+            let args = vec![
+                Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
+                terminator,
+                Value::Array(vec![Value::Int(50), Value::Int(2)]),
+            ];
+            let (result, _) =
+                with_object_host_context_with_world(world.clone(), || find_objects2(&args));
+            let Value::Array(values) = result.expect("FindObjects succeeds") else {
+                panic!("FindObjects should return an array");
+            };
+            assert_eq!(
+                values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+                vec![Some(ObjectId::new(1)), Some(ObjectId::new(3))]
+            );
+        }
+    }
+
+    #[test]
+    fn criterion_native_types_and_ten_parameter_cap_match_cpp() {
+        let mut first_rock = find_world_object(1, "ROCK", 10, 10, 1);
+        first_rock.category = crate::CATEGORY_LIVING;
+        let mut tree = find_world_object(2, "TREE", 50, 10, 2);
+        tree.category = crate::CATEGORY_STRUCTURE;
+        let mut second_rock = find_world_object(3, "ROCK", 90, 10, 2);
+        second_rock.category = crate::CATEGORY_STRUCTURE;
+        let world = HostWorldContext::from_objects(vec![first_rock, tree, second_rock]);
+
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"
+                #strict 3
+                func FalsyNil()   { return FindObjects(Find_ID(ROCK), nil, Find_Category(2)); }
+                func FalsyInt()   { return FindObjects(Find_ID(ROCK), 0, Find_Category(2)); }
+                func FalsyBool()  { return FindObjects(Find_ID(ROCK), false, Find_Category(2)); }
+                func TruthyAny()  { return FindObjects(Find_ID(ROCK), 1, Find_Category(2)); }
+                func BadFind()    { return FindObject2(Find_ID(ROCK), 1); }
+                func BadCount()   { return ObjectCount2(Find_ID(ROCK), false); }
+                func BadAfterNil(){ return FindObject2(Find_ID(ROCK), nil, 1); }
+                func Extra() {
+                    return FindObjects(
+                        Find_ID(ROCK), Find_ID(ROCK), Find_ID(ROCK), Find_ID(ROCK),
+                        Find_ID(ROCK), Find_ID(ROCK), Find_ID(ROCK), Find_ID(ROCK),
+                        Find_ID(ROCK), Find_ID(ROCK), Find_Category(2));
+                }
+                "#,
+            )
+            .expect("criterion conversion probes compile");
+
+        let call = |function: &str| {
+            with_object_host_context_with_world(world.clone(), || {
+                script.call(function, &[]).map_err(|error| match error {
+                    lc_script::ScriptError::Runtime(error) => error,
+                    other => RuntimeError::new(other.to_string()),
+                })
+            })
+            .0
+        };
+        let object_ids = |value: Value| {
+            let Value::Array(values) = value else {
+                panic!("FindObjects should return an array");
+            };
+            values
+                .iter()
+                .map(object_id_from_value)
+                .collect::<Vec<_>>()
+        };
+
+        for function in ["FalsyNil", "FalsyInt", "FalsyBool"] {
+            assert_eq!(
+                object_ids(call(function).expect("falsy criterion scan succeeds")),
+                vec![Some(ObjectId::new(1)), Some(ObjectId::new(3))],
+                "{function}"
+            );
+        }
         assert_eq!(
-            object_id_from_value(&result.expect("FindObject2 succeeds")),
-            Some(ObjectId::new(1))
+            object_ids(call("TruthyAny").expect("Any criterion slot accepts int")),
+            vec![Some(ObjectId::new(3))],
+            "truthy non-arrays in FindObjects' Any slots are skipped, not terminators"
         );
+        assert_eq!(
+            object_ids(call("Extra").expect("extra criterion call succeeds")),
+            vec![Some(ObjectId::new(1)), Some(ObjectId::new(3))],
+            "the eleventh filtering criterion is evaluated but not passed to the native"
+        );
+
+        for (function, parameter) in [("BadFind", 2), ("BadCount", 2), ("BadAfterNil", 3)] {
+            let error = call(function).expect_err("Array-typed native slot must reject scalar");
+            assert!(
+                error.message().contains(&format!("parameter {parameter}"))
+                    && error.message().contains("expected \"array\""),
+                "{function}: {}",
+                error.message()
+            );
+        }
     }
 
     fn parsed_condition(entries: Vec<Value>) -> FindCondition {
