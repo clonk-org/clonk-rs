@@ -494,6 +494,62 @@ impl InternalObjectMenuSafeCursor {
     }
 }
 
+/// A removal-safe forward C4ObjectList iterator for engine paths whose
+/// callbacks can unlink and reinsert contents. The link generation keeps a
+/// reinserted object distinct from the link that the registered C++ iterator
+/// was pointing at before removal.
+pub(crate) struct RemovalSafeContentsIterator {
+    _mutation_tracker: InternalObjectMenuMutationGuard,
+    cursor: InternalObjectMenuSafeCursor,
+    advance_before_next: bool,
+}
+
+impl RemovalSafeContentsIterator {
+    pub(crate) fn new(container: ObjectId, links: &[(ObjectId, u64)]) -> Self {
+        let token = next_internal_object_menu_refill_token();
+        let tracker = InternalObjectMenuMutationGuard::begin(token, container, 0, container);
+        let links = links
+            .iter()
+            .map(|&(object, generation)| InternalObjectMenuLink { object, generation })
+            .collect::<Vec<_>>();
+        let cursor = if links.is_empty() {
+            InternalObjectMenuSafeCursor::end(Some(token))
+        } else {
+            InternalObjectMenuSafeCursor::at(&links, 0, Some(token))
+        };
+        Self {
+            _mutation_tracker: tracker,
+            cursor,
+            advance_before_next: false,
+        }
+    }
+
+    pub(crate) fn next(&mut self, links: &[(ObjectId, u64)]) -> Option<ObjectId> {
+        let links = links
+            .iter()
+            .map(|&(object, generation)| InternalObjectMenuLink { object, generation })
+            .collect::<Vec<_>>();
+        let index = self.cursor.resolve(&links)?;
+        let index = if self.advance_before_next {
+            let next = index.checked_add(1)?;
+            if next >= links.len() {
+                self.cursor = InternalObjectMenuSafeCursor::end(self.cursor.tracker_token);
+                return None;
+            }
+            self.cursor = InternalObjectMenuSafeCursor::at(
+                &links,
+                next,
+                self.cursor.tracker_token,
+            );
+            next
+        } else {
+            index
+        };
+        self.advance_before_next = true;
+        Some(links[index].object)
+    }
+}
+
 fn internal_object_menu_links<S: InternalObjectMenuSource>(
     source: &S,
     contents: &[ObjectId],

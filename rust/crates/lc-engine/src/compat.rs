@@ -9249,6 +9249,64 @@ fn exit_object_at_position_with_full_motion_and_calls(
     }))
 }
 
+/// C4Object::ClearContentsAndContained. C4ObjectList::Remove advances every
+/// registered iterator that points at the removed link, and the C++ for-loop
+/// then advances it once more. Track link generations so callback-driven
+/// re-entry cannot make a new link alias the removed iterator position.
+fn clear_contents_and_contained_live(target: ObjectId, f_calls: bool) -> Result<(), RuntimeError> {
+    let initial_links = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Vec::new();
+        };
+        let Some(object) = context.get_world_object(target) else {
+            return Vec::new();
+        };
+        object
+            .contents()
+            .iter()
+            .copied()
+            .map(|child| (child, context.contents_link_generation(child)))
+            .collect::<Vec<_>>()
+    });
+    let mut iterator =
+        crate::direct_com::RemovalSafeContentsIterator::new(target, &initial_links);
+    loop {
+        let links_and_position = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            let object = context.get_world_object(target)?;
+            let links = object
+                .contents()
+                .iter()
+                .copied()
+                .map(|child| (child, context.contents_link_generation(child)))
+                .collect::<Vec<_>>();
+            Some((links, object.position))
+        });
+        let Some((links, position)) = links_and_position else {
+            break;
+        };
+        let Some(child) = iterator.next(&links) else {
+            break;
+        };
+        let _ = exit_object_at_position_with_calls(child, position, f_calls)?;
+    }
+
+    // C++ re-reads x/y after all content callbacks, so an Ejection or
+    // Departure callback that moves the object affects its own later Exit.
+    let contained_position = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let object = context.get_world_object(target)?;
+        object.container().map(|_| object.position)
+    });
+    if let Some(position) = contained_position {
+        let _ = exit_object_at_position_with_calls(target, position, f_calls)?;
+    }
+    Ok(())
+}
+
 /// Engine-internal exits normally retain the object's current coordinates.
 fn exit_object_at_current_position(target: ObjectId) -> Result<bool, RuntimeError> {
     let position = HOST_CONTEXT.with(|cell| {
@@ -9297,7 +9355,9 @@ fn enter_object_live_internal(
     f_calls: bool,
     reject_collect: bool,
 ) -> Result<bool, RuntimeError> {
-    if target == container || !object_is_present(target) || !object_is_present(container) {
+    // C4Object::Enter gates on raw Status truthiness after any old-container
+    // Exit. STATUS_Inactive is nonzero and remains a valid container.
+    if target == container || !object_has_status(target) || !object_has_status(container) {
         return Ok(false);
     }
     if call_object_own_fail_safe(
@@ -40144,18 +40204,23 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
         if current == status {
             return Ok((true, None, None));
         }
+        if status == ObjectStatus::Inactive {
+            // StatusDeactivate clears both front and back particle lists
+            // before it leaves the active object list.
+            context.register_particle(ParticleCommand::Clear {
+                definition_id: None,
+                scope: ParticleScope::Object(object_id),
+            });
+        }
         if let Some(object) = context.object_scope_mut(object_id) {
             object.set_status(status);
         }
         context.preview_object_status_change(object_id, status);
-        if status == ObjectStatus::Inactive {
-            // Both C++ StatusDeactivate branches clear transfer zones:
-            // true via Game.ClearPointers, false via the explicit
-            // TransferZones.ClearPointers call (C4Object.cpp:5987-6012).
+        if status == ObjectStatus::Inactive && !clear_pointers {
+            // The no-clear branch only clears transfer zones. Clear-mode
+            // does this later as part of Game.ClearPointers, after every
+            // Ejection and Departure callback has completed.
             context.register_transfer_zone_command(TransferZoneCommand::clear(object_id));
-        }
-        if status == ObjectStatus::Inactive && clear_pointers {
-            context.clear_object_action_and_command_pointers(object_id);
         }
         Ok((
             true,
@@ -40167,6 +40232,17 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     }
     if let Some(object_id) = clear_target {
+        // ClearContentsAndContained precedes Game.ClearPointers. In
+        // particular, callbacks must still observe action/command pointers
+        // and may create a transfer zone that the later sweep removes.
+        clear_contents_and_contained_live(object_id, true)?;
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            context.clear_object_action_and_command_pointers(object_id);
+        });
         clear_player_object_pointers_host(object_id);
         HOST_CONTEXT.with(|cell| {
             let mut borrow = cell.borrow_mut();
@@ -40178,6 +40254,7 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
                 object.set_crew_status_member(still_member);
             }
             context.record_crew_rosters();
+            context.register_transfer_zone_command(TransferZoneCommand::clear(object_id));
         });
     }
     if let Some(object_id) = activate_target {

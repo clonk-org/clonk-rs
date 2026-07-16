@@ -35437,6 +35437,317 @@ func Deactivate(object target, bool clear_pointers)
     }
 
     #[test]
+    fn status_deactivate_clear_exits_containment_before_clearing_pointers() {
+        let target_script = r#"#strict 2
+local callback_order, holder, pointers_visible, callback_status;
+
+public func Prepare(object pHolder)
+{
+    holder = pHolder;
+    return true;
+}
+
+public func Record(int step)
+{
+    callback_order = callback_order * 10 + step;
+    if (GetActionTarget(0, holder) == this()) pointers_visible += 1;
+    if (GetCommand(holder, 1) == this()) pointers_visible += 1;
+    callback_status = GetObjectStatus();
+    SetTransferZone(-1, -1, 2, 2);
+    return true;
+}
+
+protected func Ejection(object child)
+{
+    Record(1);
+    SetPosition(70, 80);
+    return true;
+}
+
+protected func Departure(object outer)
+{
+    Record(4);
+    return true;
+}
+"#;
+        let child_script = r#"#strict 2
+protected func Departure(object old_container)
+{
+    old_container->Record(2);
+    return true;
+}
+"#;
+        let outer_script = r#"#strict 2
+protected func Ejection(object item)
+{
+    item->Record(3);
+    return true;
+}
+"#;
+        let controller_script = r#"#strict 2
+public func Deactivate(object target)
+{
+    return SetObjectStatus(2, target, true);
+}
+"#;
+
+        let mut engine = Engine::with_seed(82);
+        for (id, name, script) in [
+            ("L82T", "Target", target_script),
+            ("L82C", "Child", child_script),
+            ("L82O", "Outer", outer_script),
+            ("L82R", "Controller", controller_script),
+            ("L82H", "Holder", "#strict 2\n"),
+        ] {
+            let mut definition =
+                Definition::from_script(id, name, script).expect("definition compiles");
+            definition.set_c4_callback_convention(true);
+            engine
+                .register_definition(definition)
+                .expect("definition registers");
+        }
+
+        let outer = engine
+            .spawn_object(SpawnConfig::new("L82O"))
+            .expect("outer spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("L82T")
+                    .with_loaded(true)
+                    .with_container(outer)
+                    .with_position(Vector2::new(40, 50))
+                    .with_fixed_velocity(FixedVec2::new(itofix(3), itofix(-4)))
+                    .with_rotation(37)
+                    .with_fixed_rotation(itofix(37))
+                    .with_rotation_velocity(itofix(2))
+                    .with_in_liquid(true)
+                    .with_mobile(false),
+            )
+            .expect("target spawns in the outer container");
+        let child = engine
+            .spawn_object(
+                SpawnConfig::new("L82C")
+                    .with_loaded(true)
+                    .with_container(target)
+                    .with_position(Vector2::new(7, 8))
+                    .with_fixed_velocity(FixedVec2::new(itofix(-5), itofix(6)))
+                    .with_rotation(23)
+                    .with_fixed_rotation(itofix(23))
+                    .with_rotation_velocity(itofix(-3))
+                    .with_in_liquid(true)
+                    .with_mobile(false),
+            )
+            .expect("child spawns in the target");
+        let mut holder_action = ActionState::new("Idle");
+        holder_action.target = Some(target);
+        let holder = engine
+            .spawn_object(SpawnConfig::new("L82H").with_action(holder_action))
+            .expect("holder spawns");
+        let holder_index = engine.find_object_index(holder).expect("holder exists");
+        engine.objects[holder_index]
+            .commands
+            .push_back(CommandRequest::new(CommandId::Follow).with_target(Some(target)))
+            .expect("holder command queues");
+        let controller = engine
+            .spawn_object(SpawnConfig::new("L82R"))
+            .expect("controller spawns");
+
+        let target_index = engine.find_object_index(target).expect("target exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    target_index,
+                    "Prepare",
+                    vec![object_reference_value(holder)],
+                )
+                .expect("target records the holder"),
+            Value::Bool(true)
+        );
+        engine
+            .set_transfer_zone(
+                target,
+                TransferZoneRect {
+                    x: 39,
+                    y: 49,
+                    width: 2,
+                    height: 2,
+                },
+            )
+            .expect("initial zone registers");
+
+        let controller_index = engine
+            .find_object_index(controller)
+            .expect("controller exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    controller_index,
+                    "Deactivate",
+                    vec![object_reference_value(target)],
+                )
+                .expect("clear-mode deactivation runs"),
+            Value::Bool(true)
+        );
+
+        let target_state = engine.object_snapshot(target).expect("target remains");
+        let child_state = engine.object_snapshot(child).expect("child remains");
+        let outer_state = engine.object_snapshot(outer).expect("outer remains");
+        assert_eq!(target_state.status, ObjectStatus::Inactive);
+        assert_eq!(target_state.container, None);
+        assert!(target_state.contents.is_empty());
+        assert!(!outer_state.contents.contains(&target));
+        assert_eq!(child_state.container, None);
+        assert_eq!(child_state.position, Vector2::new(40, 50));
+        assert_eq!(target_state.position, Vector2::new(70, 80));
+        assert_eq!(
+            target_state.local_vars.get("callback_order"),
+            Some(&Value::Int(1234)),
+            "child Ejection/Departure precede target Ejection/Departure"
+        );
+        assert_eq!(
+            target_state.local_vars.get("pointers_visible"),
+            Some(&Value::Int(8)),
+            "all four callbacks run before the object-pointer sweep"
+        );
+        assert_eq!(
+            target_state.local_vars.get("callback_status"),
+            Some(&Value::Int(ObjectStatus::Inactive.to_script_value()))
+        );
+
+        for id in [target, child] {
+            let index = engine.find_object_index(id).expect("exited object remains");
+            let object = &engine.objects[index];
+            assert_eq!(object.state.rotation, 0);
+            assert_eq!(object.fixed_rotation, C4Fixed::ZERO);
+            assert_eq!(object.fixed_velocity, FixedVec2::ZERO);
+            assert_eq!(object.state.velocity, Vector2::ZERO);
+            assert_eq!(object.rotation_velocity, C4Fixed::ZERO);
+            assert!(object.state.mobile);
+            assert!(!object.state.in_liquid);
+        }
+
+        let holder_index = engine.find_object_index(holder).expect("holder remains");
+        assert_eq!(engine.objects[holder_index].state.action.target, None);
+        assert_eq!(
+            engine.objects[holder_index]
+                .commands
+                .command_views()
+                .first()
+                .expect("holder command remains")
+                .target,
+            None
+        );
+        assert!(
+            engine
+                .snapshot()
+                .transfer_zones
+                .iter()
+                .all(|zone| zone.owner != target),
+            "Game.ClearPointers clears zones created by the exit callbacks"
+        );
+    }
+
+    #[test]
+    fn status_deactivate_clear_tracks_cpp_contents_iterator_across_reentry() {
+        let child_script = r#"#strict 2
+local reenter;
+
+public func Arm()
+{
+    reenter = true;
+    return true;
+}
+
+protected func Departure(object old_container)
+{
+    if (reenter) Enter(old_container);
+    return true;
+}
+"#;
+        let controller_script = r#"#strict 2
+public func Deactivate(object target)
+{
+    return SetObjectStatus(2, target, true);
+}
+"#;
+        let mut engine = Engine::with_seed(82);
+        for (id, name, script) in [
+            ("L8IT", "Target", "#strict 2\n"),
+            ("L8IC", "Child", child_script),
+            ("L8IR", "Controller", controller_script),
+        ] {
+            let mut definition =
+                Definition::from_script(id, name, script).expect("definition compiles");
+            definition.set_c4_callback_convention(true);
+            engine
+                .register_definition(definition)
+                .expect("definition registers");
+        }
+
+        let target = engine
+            .spawn_object(SpawnConfig::new("L8IT"))
+            .expect("target spawns");
+        let skipped = engine
+            .spawn_object(SpawnConfig::new("L8IC").with_container(target))
+            .expect("successor child spawns first");
+        let reentered = engine
+            .spawn_object(SpawnConfig::new("L8IC").with_container(target))
+            .expect("reentering child spawns second");
+        assert_eq!(
+            engine.object_snapshot(target).expect("target exists").contents,
+            [reentered, skipped],
+            "stContents inserts a same-definition child at the cluster head"
+        );
+        let reentered_index = engine
+            .find_object_index(reentered)
+            .expect("reentering child exists");
+        assert_eq!(
+            engine
+                .call_object_function(reentered_index, "Arm", vec![])
+                .expect("reentry arms"),
+            Value::Bool(true)
+        );
+        let controller = engine
+            .spawn_object(SpawnConfig::new("L8IR"))
+            .expect("controller spawns");
+        let controller_index = engine
+            .find_object_index(controller)
+            .expect("controller exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    controller_index,
+                    "Deactivate",
+                    vec![object_reference_value(target)],
+                )
+                .expect("deactivation runs"),
+            Value::Bool(true)
+        );
+
+        let target_state = engine.object_snapshot(target).expect("target remains");
+        assert_eq!(target_state.status, ObjectStatus::Inactive);
+        assert_eq!(
+            target_state.contents,
+            [reentered, skipped],
+            "the iterator stays on the original successor link: re-entry cannot alias the removed link"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(reentered)
+                .expect("reentered child remains")
+                .container,
+            Some(target)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(skipped)
+                .expect("skipped successor remains")
+                .container,
+            Some(target)
+        );
+    }
+
+    #[test]
     fn status_activate_relists_and_updates_position_before_update_transfer_zone() {
         let zone_script = r#"#strict 2
 local callback_status, callback_master, callback_sector;
@@ -35453,6 +35764,11 @@ func UpdateTransferZone()
 func SetStatus(object target, int status)
 {
     return SetObjectStatus(status, target, false);
+}
+
+func FindZones()
+{
+    return FindObjects(Find_ID(ZONE));
 }
 "#;
         let mut engine = Engine::with_seed(0);
@@ -35472,7 +35788,7 @@ func SetStatus(object target, int status)
         let target = engine
             .spawn_object(SpawnConfig::new("ZONE").with_position(Vector2::new(50, 50)))
             .expect("target spawns first");
-        let _peer = engine
+        let peer = engine
             .spawn_object(SpawnConfig::new("ZONE").with_position(Vector2::new(150, 150)))
             .expect("same-definition peer spawns second");
         let controller = engine
@@ -35529,6 +35845,19 @@ func SetStatus(object target, int status)
                 8,
                 6,
             )
+        );
+        let controller_index = engine
+            .find_object_index(controller)
+            .expect("controller remains");
+        assert_eq!(
+            engine
+                .call_object_function(controller_index, "FindZones", vec![])
+                .expect("post-fold FindObjects runs"),
+            Value::Array(vec![
+                object_reference_value(target),
+                object_reference_value(peer),
+            ]),
+            "the authoritative list keeps the fresh stMain insertion order"
         );
     }
 
