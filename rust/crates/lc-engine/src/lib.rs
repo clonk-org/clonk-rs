@@ -19863,6 +19863,13 @@ impl Engine {
             .as_ref()
             .map(SkyState::adjustment)
             .unwrap_or_default();
+        let sky_fade = self.sky.as_ref().map_or_else(
+            || {
+                let settings = SkySettings::default();
+                [settings.fade_top, settings.fade_bottom]
+            },
+            |sky| [sky.settings().fade_top, sky.settings().fade_bottom],
+        );
         HostWorldContext::with_landscape_shared(
             self.objects.iter().map(|object| {
                 let definition = self.definitions.get(&object.definition_id);
@@ -20088,6 +20095,7 @@ impl Engine {
             self.host_crew_info_state(),
         )
         .with_sky_adjustment(sky_adjustment)
+        .with_sky_fade(sky_fade[0], sky_fade[1])
     }
 
     /// The shared definition-script table host contexts carry (nested
@@ -48861,6 +48869,13 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         .as_ref()
         .map(|frame| SkyAdjustment::from_settings(&frame.settings))
         .unwrap_or_default();
+    let sky_fade = snapshot.sky.as_ref().map_or_else(
+        || {
+            let settings = SkySettings::default();
+            [settings.fade_top, settings.fade_bottom]
+        },
+        |frame| [frame.settings.fade_top, frame.settings.fade_bottom],
+    );
     HostWorldContext::with_landscape(
         snapshot.objects.iter().map(|object| {
             HostWorldObject::with_category(
@@ -48924,6 +48939,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         false,
     )
     .with_sky_adjustment(sky_adjustment)
+    .with_sky_fade(sky_fade[0], sky_fade[1])
     .with_scoreboard(Rc::new(RefCell::new(snapshot.hud.scoreboard.clone())))
     .with_local_players(snapshot.hud.local_players.iter().copied())
     .with_player_info_ids(

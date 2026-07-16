@@ -39,7 +39,7 @@ use crate::{
     ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer,
     ParticleScope, PathFinder, PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState,
     PlayerStatus,
-    QueuedCommand, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig, ScoreboardState,
+    QueuedCommand, RgbColor, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig, ScoreboardState,
     TeamConfiguration, TeamInfo, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
     C4D_BORDER_BOTTOM, C4D_BORDER_LAYER, C4D_BORDER_SIDES, C4D_BORDER_TOP, CATEGORY_SORT_LIMIT,
     CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY,
@@ -1363,11 +1363,19 @@ pub struct HostWorldContext {
     base_extinguish_enabled: bool,
     /// Raw `C4Sky::Modulation`/`BackClr` at callback entry.
     sky_adjustment: SkyAdjustment,
+    /// `C4Sky::FadeClr1`/`FadeClr2` at callback entry. GetSkyColor reads
+    /// these independently of the mutable sky-adjustment preview.
+    sky_fade: [RgbColor; 2],
     /// Engine-owned surrogate for process config `MissionAccess`, shared so
     /// grants are visible immediately to later and nested script calls.
     mission_access: Rc<RefCell<String>>,
     scoreboard: Rc<RefCell<ScoreboardState>>,
     scoreboard_presentations: Rc<RefCell<ScoreboardPresentationSink>>,
+}
+
+fn default_sky_fade() -> [RgbColor; 2] {
+    let settings = crate::SkySettings::default();
+    [settings.fade_top, settings.fade_bottom]
 }
 
 impl Default for HostWorldContext {
@@ -1433,6 +1441,7 @@ impl Default for HostWorldContext {
             base_reject_entrance_enabled: true,
             base_extinguish_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
+            sky_fade: default_sky_fade(),
             mission_access: Rc::new(RefCell::new(String::new())),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
             scoreboard_presentations: Rc::new(RefCell::new(
@@ -1667,6 +1676,7 @@ impl HostWorldContext {
             base_reject_entrance_enabled: true,
             base_extinguish_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
+            sky_fade: default_sky_fade(),
             mission_access: Rc::new(RefCell::new(String::new())),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
             scoreboard_presentations: Rc::new(RefCell::new(
@@ -1677,6 +1687,11 @@ impl HostWorldContext {
 
     pub(crate) fn with_sky_adjustment(mut self, adjustment: SkyAdjustment) -> Self {
         self.sky_adjustment = adjustment;
+        self
+    }
+
+    pub(crate) fn with_sky_fade(mut self, top: RgbColor, bottom: RgbColor) -> Self {
+        self.sky_fade = [top, bottom];
         self
     }
 
@@ -12692,6 +12707,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
         remove_unused_texmap_entries,
     );
     script.register_host_function("GetSkyAdjust", get_sky_adjust);
+    script.register_host_function("GetSkyColor", get_sky_color);
     script.register_host_function("SetGamma", set_gamma);
     script.register_host_function("ResetGamma", reset_gamma);
     script.register_host_function("GBackSolid", g_back_solid);
@@ -24952,6 +24968,41 @@ fn get_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
             context.sky_adjustment.modulation
         };
         Ok(Value::Int(raw as i32))
+    })
+}
+
+/// FnGetSkyColor (C4Script.cpp:3056-3069), retained for OldGfx scripts.
+/// Only palette index zero exists. Its alpha is zero, so C++ BltAlpha's
+/// inverted-alpha `/ 256` blend returns each nonzero FadeClr2 channel minus
+/// one; FadeClr1 contributes nothing.
+fn get_sky_color(args: &[Value]) -> Result<Value, RuntimeError> {
+    let index = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetSkyColor",
+        "index",
+    )?;
+    let channel = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GetSkyColor",
+        "channel",
+    )?;
+    if index != 0 || !(0..=2).contains(&channel) {
+        return Ok(Value::Int(0));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("GetSkyColor requires an active engine context"))?;
+        let color = context.world.sky_fade[1];
+        let component = match channel {
+            0 => color.r,
+            1 => color.g,
+            2 => color.b,
+            _ => unreachable!(),
+        };
+        Ok(Value::Int(i32::from(component.saturating_sub(1))))
     })
 }
 
@@ -44737,6 +44788,7 @@ mod tests {
         "GetSeason",
         "GetSelectCount",
         "GetSkyAdjust",
+        "GetSkyColor",
         "GetTaggedPlayerName",
         "GetTeamByIndex",
         "GetTeamColor",

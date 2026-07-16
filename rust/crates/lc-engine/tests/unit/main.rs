@@ -63163,6 +63163,54 @@ func ReadRestoredSky() {
     }
 
     #[test]
+    fn get_sky_color_matches_legacy_blt_alpha_palette_lookup() -> Result<(), EngineError> {
+        // FnGetSkyColor (C4Script.cpp:3056-3069) accepts only index zero.
+        // Its alpha is zero, but BltAlpha uses inverted alpha and shifts by
+        // eight, so FadeClr2 channels are multiplied by 255/256.
+        let script = r#"#strict
+local red, green, blue;
+local positive_index, negative_index, low_channel, high_channel;
+
+func ProbeSkyColor() {
+    red = GetSkyColor(0, 0);
+    green = GetSkyColor(0, 1);
+    blue = GetSkyColor(0, 2);
+    positive_index = GetSkyColor(1, 0);
+    negative_index = GetSkyColor(-1, 1);
+    low_channel = GetSkyColor(0, -1);
+    high_channel = GetSkyColor(0, 3);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut settings = SkySettings::default();
+        settings.fade_top = RgbColor::new(17, 34, 51);
+        settings.fade_bottom = RgbColor::new(1, 128, 255);
+        engine.set_sky(settings);
+        engine.register_definition(
+            Definition::from_script("SKYC", "Sky color probe", script)
+                .expect("probe compiles"),
+        )?;
+        let object_id = engine.spawn_object(SpawnConfig::new("SKYC"))?;
+        let object_index = engine.find_object_index(object_id).expect("probe exists");
+        engine.call_object_function(object_index, "ProbeSkyColor", Vec::new())?;
+
+        let locals = &engine.object_snapshot(object_id).expect("probe remains").local_vars;
+        assert_eq!(locals.get("red"), Some(&Value::Int(0)));
+        assert_eq!(locals.get("green"), Some(&Value::Int(127)));
+        assert_eq!(locals.get("blue"), Some(&Value::Int(254)));
+        for name in [
+            "positive_index",
+            "negative_index",
+            "low_channel",
+            "high_channel",
+        ] {
+            assert_eq!(locals.get(name), Some(&Value::Int(0)), "{name}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn captures_and_restores_engine_state() -> Result<(), EngineError> {
         let mut engine = Engine::with_seed(0xBAD_F00D);
         engine.set_physics(PhysicsSettings::new(2, 9, -6));
