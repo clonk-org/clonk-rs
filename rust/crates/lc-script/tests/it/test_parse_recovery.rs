@@ -121,3 +121,100 @@ Ok:
         Value::Int(2)
     );
 }
+
+#[test]
+fn stray_loop_control_warns_and_is_a_noop_below_strict_two() {
+    for strict_prefix in ["", "#strict\n"] {
+        for (keyword, expected_message) in [
+            ("break", "'break' is only allowed inside loops"),
+            ("continue", "'continue' is only allowed inside loops"),
+        ] {
+            let source = format!("{strict_prefix}func Probe() {{ {keyword}; return 7; }}");
+            let script = Script::compile(&source).expect("stray loop control only warns");
+            assert_eq!(script.parse_diagnostics().len(), 1, "source: {source}");
+            assert_eq!(
+                script.parse_diagnostics()[0].message(),
+                expected_message,
+                "source: {source}"
+            );
+
+            let mut engine = Engine::new();
+            engine.add_script(script);
+            assert_eq!(
+                engine
+                    .call("Probe", &[])
+                    .expect("warning leaves function executable"),
+                Value::Int(7),
+                "source: {source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn stray_loop_control_is_a_deferred_function_error_at_strict_two_or_higher() {
+    for strict_prefix in ["#strict 2\n", "#strict 3\n"] {
+        for (keyword, expected_message) in [
+            ("break", "'break' is only allowed inside loops"),
+            ("continue", "'continue' is only allowed inside loops"),
+        ] {
+            let source = format!(
+                "{strict_prefix}func Broken() {{ {keyword}; return 7; }}\nfunc Ok() {{ return 9; }}"
+            );
+            let script = Script::compile(&source).expect("the broken function is quarantined");
+            assert_eq!(script.parse_diagnostics().len(), 1, "source: {source}");
+            assert_eq!(
+                script.parse_diagnostics()[0].message(),
+                expected_message,
+                "source: {source}"
+            );
+
+            let mut engine = Engine::new();
+            engine.add_script(script);
+            assert_eq!(engine.call("Ok", &[]).unwrap(), Value::Int(9));
+            let error = engine
+                .call("Broken", &[])
+                .expect_err("strict loop control must reach the parse-error sentinel");
+            assert!(error.to_string().contains(expected_message), "{error}");
+        }
+    }
+}
+
+#[test]
+fn loop_control_inside_each_loop_shape_is_unchanged() {
+    let script = Script::compile(
+        r#"
+#strict 3
+func Probe()
+{
+    var i = 0, sum = 0;
+    while (1) break;
+    for (var declared = 0; declared < 2; ++declared)
+    {
+        if (declared == 0) continue;
+        sum = sum + declared;
+    }
+    for (i = 0; i < 3; ++i) if (i == 1) break;
+    for (var value in [3, 4])
+    {
+        sum = sum + value;
+        break;
+    }
+    return [sum, i];
+}
+"#,
+    )
+    .expect("loop controls parse in loop bodies");
+    assert!(
+        script.parse_diagnostics().is_empty(),
+        "unexpected diagnostics: {:?}",
+        script.parse_diagnostics()
+    );
+
+    let mut engine = Engine::new();
+    engine.add_script(script);
+    assert_eq!(
+        engine.call("Probe", &[]).unwrap(),
+        Value::Array(vec![Value::Int(4), Value::Int(1)])
+    );
+}

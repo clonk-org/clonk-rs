@@ -35,6 +35,9 @@ pub struct Parser<'a> {
     /// Preparser-only diagnostics that do not poison the retained function.
     /// The recovering top-level loop drains these in source order.
     non_fatal_diagnostics: Vec<ParseError>,
+    /// Active loop bodies in the current function. C4Aul only emits control
+    /// flow for `break`/`continue` while a loop parse context exists.
+    loop_depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -51,6 +54,7 @@ impl<'a> Parser<'a> {
             global_script: false,
             parsing_old_style_function: false,
             non_fatal_diagnostics: Vec::new(),
+            loop_depth: 0,
         }
     }
 
@@ -918,6 +922,13 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_loop_body(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        self.loop_depth += 1;
+        let body = self.parse_stmt_or_block_vec();
+        self.loop_depth -= 1;
+        body
+    }
+
     fn parse_statement(&mut self) -> Result<Stmt, ParseError> {
         if self.consume_if_keyword(Keyword::Var)?.is_some() {
             return self.parse_var_decl();
@@ -946,11 +957,37 @@ impl<'a> Parser<'a> {
         if self.consume_if_keyword(Keyword::Return)?.is_some() {
             return self.parse_return();
         }
-        if self.consume_if_keyword(Keyword::Break)?.is_some() {
+        if let Some(token) = self.consume_if_keyword(Keyword::Break)? {
+            if self.loop_depth == 0 {
+                let error = ParseError::new(
+                    "'break' is only allowed inside loops",
+                    token.line,
+                    token.column,
+                );
+                if self.strict_level >= 2 {
+                    return Err(error);
+                }
+                self.non_fatal_diagnostics.push(error);
+                self.expect_symbol(Symbol::Semicolon, "expected ';' after break")?;
+                return Ok(Stmt::Sequence(Vec::new()));
+            }
             self.expect_symbol(Symbol::Semicolon, "expected ';' after break")?;
             return Ok(Stmt::Break);
         }
-        if self.consume_if_keyword(Keyword::Continue)?.is_some() {
+        if let Some(token) = self.consume_if_keyword(Keyword::Continue)? {
+            if self.loop_depth == 0 {
+                let error = ParseError::new(
+                    "'continue' is only allowed inside loops",
+                    token.line,
+                    token.column,
+                );
+                if self.strict_level >= 2 {
+                    return Err(error);
+                }
+                self.non_fatal_diagnostics.push(error);
+                self.expect_symbol(Symbol::Semicolon, "expected ';' after continue")?;
+                return Ok(Stmt::Sequence(Vec::new()));
+            }
             self.expect_symbol(Symbol::Semicolon, "expected ';' after continue")?;
             return Ok(Stmt::Continue);
         }
@@ -1149,7 +1186,7 @@ impl<'a> Parser<'a> {
         self.expect_symbol(Symbol::RParen, "expected ')' after condition")?;
 
         // Parse either a single statement or a braced block for the loop body.
-        let body = self.parse_stmt_or_block_vec()?;
+        let body = self.parse_loop_body()?;
 
         Ok(Stmt::While { condition, body })
     }
@@ -1209,7 +1246,7 @@ impl<'a> Parser<'a> {
             self.expect_keyword(Keyword::In, "expected 'in' after foreach variables")?;
             let iterable = self.parse_expression()?;
             self.expect_symbol(Symbol::RParen, "expected ')' after for-in header")?;
-            let body = self.parse_stmt_or_block_vec()?;
+            let body = self.parse_loop_body()?;
 
             return Ok(Stmt::ForIn {
                 variable,
@@ -1257,7 +1294,7 @@ impl<'a> Parser<'a> {
                 Some(self.parse_expression()?)
             };
             self.expect_symbol(Symbol::RParen, "expected ')' after for-clauses")?;
-            let body = self.parse_stmt_or_block_vec()?;
+            let body = self.parse_loop_body()?;
 
             return Ok(Stmt::For {
                 init: Some(ForInit::VarDecls(decls)),
@@ -1296,7 +1333,7 @@ impl<'a> Parser<'a> {
         self.expect_symbol(Symbol::RParen, "expected ')' after for-clauses")?;
 
         // Parse body
-        let body = self.parse_stmt_or_block_vec()?;
+        let body = self.parse_loop_body()?;
 
         Ok(Stmt::For {
             init,
