@@ -10975,6 +10975,59 @@ mod tests {
     }
 
     #[test]
+    fn activate_type_lookup_waits_until_actor_enters_container() {
+        let actor_id = ObjectId::new(40);
+        let container_id = ObjectId::new(41);
+        let exiting_id = ObjectId::new(42);
+
+        let actor = snapshot_with_id(actor_id.as_u64());
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.ocf = ocf::ENTRANCE;
+        container.contents.push(exiting_id);
+        let mut exiting = snapshot_with_id(exiting_id.as_u64());
+        exiting.definition_id = "FLNT".into();
+        exiting.container = Some(container_id);
+        exiting.commands = vec![command_view(CommandId::Exit, None)];
+
+        let objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (container_id, container),
+            (exiting_id, exiting),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: actor.position,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = ActivateState::from_request(
+            &CommandRequest::new(CommandId::Activate)
+                .with_target2(Some(container_id))
+                .with_data(CommandData::Text("FLNT".into())),
+        )
+        .expect("Activate state");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(state.target, None, "type lookup remains live until entry");
+        assert!(matches!(
+            result.operations.as_slice(),
+            [CommandOperation::PushFront(request)]
+                if request.id == CommandId::Enter && request.target == Some(container_id)
+        ));
+    }
+
+    #[test]
     fn activate_sets_exit_command_on_target_inside_container() {
         let actor_id = ObjectId::new(5);
         let container_id = ObjectId::new(6);
@@ -11039,6 +11092,162 @@ mod tests {
             }
             other => panic!("unexpected event: {:?}", other),
         }
+    }
+
+    #[test]
+    fn activate_multi_count_releases_distinct_non_exiting_targets_in_one_execute() {
+        let actor_id = ObjectId::new(50);
+        let container_id = ObjectId::new(51);
+        let already_exiting_id = ObjectId::new(52);
+        let deeper_exit_id = ObjectId::new(53);
+        let empty_stack_id = ObjectId::new(54);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.controller = 23;
+        actor.container = Some(container_id);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.contents = vec![already_exiting_id, deeper_exit_id, empty_stack_id];
+
+        let mut already_exiting = snapshot_with_id(already_exiting_id.as_u64());
+        already_exiting.definition_id = "FLNT".into();
+        already_exiting.container = Some(container_id);
+        already_exiting.commands = vec![command_view(CommandId::Exit, None)];
+
+        let mut deeper_exit = snapshot_with_id(deeper_exit_id.as_u64());
+        deeper_exit.definition_id = "FLNT".into();
+        deeper_exit.container = Some(container_id);
+        deeper_exit.commands = vec![
+            command_view(CommandId::Wait, None),
+            command_view(CommandId::Exit, None),
+        ];
+
+        let mut empty_stack = snapshot_with_id(empty_stack_id.as_u64());
+        empty_stack.definition_id = "FLNT".into();
+        empty_stack.container = Some(container_id);
+
+        let objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (container_id, container),
+            (already_exiting_id, already_exiting),
+            (deeper_exit_id, deeper_exit),
+            (empty_stack_id, empty_stack),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: actor.position,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Activate)
+                    .with_target2(Some(container_id))
+                    .with_tx(Some(2))
+                    .with_data(CommandData::Text("FLNT".into())),
+            )
+            .expect("multi-count Activate queues");
+
+        let result = stack.step(&ctx).expect("Activate executes once");
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.operations.is_empty());
+        let released = result
+            .events
+            .iter()
+            .map(|event| match event {
+                CommandEvent::SetObjectCommand {
+                    object_id,
+                    controller,
+                    request,
+                } => {
+                    assert_eq!(*controller, Some(actor.controller));
+                    assert_eq!(request.id, CommandId::Exit);
+                    assert_eq!(request.mode, CommandMode::Base);
+                    *object_id
+                }
+                other => panic!("unexpected Activate event: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(released, [deeper_exit_id, empty_stack_id]);
+        assert!(
+            stack.is_empty(),
+            "Finish(true) removes Activate immediately"
+        );
+        assert_eq!(
+            stack.take_successful_finishes(),
+            [CommandId::Activate],
+            "the whole release loop has one successful finish"
+        );
+    }
+
+    #[test]
+    fn activate_multi_count_partial_failure_keeps_prior_release() {
+        let actor_id = ObjectId::new(60);
+        let container_id = ObjectId::new(61);
+        let target_id = ObjectId::new(62);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.controller = 9;
+        actor.container = Some(container_id);
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.contents.push(target_id);
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.definition_id = "FLNT".into();
+        target.container = Some(container_id);
+
+        let objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (container_id, container),
+            (target_id, target),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: actor.position,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+        let mut state = ActivateState::from_request(
+            &CommandRequest::new(CommandId::Activate)
+                .with_target2(Some(container_id))
+                .with_tx(Some(2))
+                .with_data(CommandData::Text("FLNT".into())),
+        )
+        .expect("Activate state");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert_eq!(state.remaining, 1);
+        assert_eq!(result.events.len(), 1);
+        assert!(matches!(
+            &result.events[0],
+            CommandEvent::SetObjectCommand {
+                object_id,
+                controller: Some(9),
+                request,
+            } if *object_id == target_id && request.id == CommandId::Exit
+        ));
     }
 
     #[test]
@@ -20417,27 +20626,71 @@ impl ActivateState {
         !minimum_con_activation_denied(target.category, target.construction)
     }
 
-    fn release_target(
+    fn find_release_candidate(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        container_id: ObjectId,
+        released: &HashSet<ObjectId>,
+    ) -> Option<ObjectId> {
+        let definition_id = self.definition_id.as_ref()?;
+        let container = ctx.resolve(container_id)?;
+        container.contents.iter().copied().find(|object_id| {
+            !released.contains(object_id)
+                && ctx.resolve(*object_id).is_some_and(|snapshot| {
+                    snapshot.is_status_active()
+                        && snapshot.definition_id == *definition_id
+                        && snapshot.container == Some(container_id)
+                        && snapshot
+                            .commands
+                            .first()
+                            .is_none_or(|command| command.name != CommandId::Exit.to_name())
+                })
+        })
+    }
+
+    fn release_targets(
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
-        target_id: ObjectId,
+        container_id: ObjectId,
         update: Option<ObjectUpdate>,
     ) -> CommandStepResult {
-        let mut result = if self.remaining > 1 {
-            self.remaining -= 1;
-            if self.definition_id.is_some() {
-                self.target = None;
-            }
-            CommandStepResult::running(update)
-        } else {
-            CommandStepResult::completed(update)
-        };
+        let mut result = CommandStepResult::completed(update);
+        let mut released = HashSet::new();
 
-        result.events.push(CommandEvent::SetObjectCommand {
-            object_id: target_id,
-            controller: Some(ctx.object.controller),
-            request: CommandRequest::new(CommandId::Exit).with_mode(CommandMode::Base),
-        });
+        while self.remaining > 0 {
+            let target_id = match self.target {
+                Some(target_id) => target_id,
+                None => {
+                    let Some(target_id) = self.find_release_candidate(ctx, container_id, &released)
+                    else {
+                        result.status = CommandStatus::Failed;
+                        return result;
+                    };
+                    self.target = Some(target_id);
+                    target_id
+                }
+            };
+            let Some(target) = ctx.resolve(target_id) else {
+                result.status = CommandStatus::Failed;
+                return result;
+            };
+            if !target.is_status_active()
+                || target.container != Some(container_id)
+                || !self.check_minimum_con(target)
+            {
+                result.status = CommandStatus::Failed;
+                return result;
+            }
+
+            result.events.push(CommandEvent::SetObjectCommand {
+                object_id: target_id,
+                controller: Some(ctx.object.controller),
+                request: CommandRequest::new(CommandId::Exit).with_mode(CommandMode::Base),
+            });
+            released.insert(target_id);
+            self.target = None;
+            self.remaining -= 1;
+        }
 
         result
     }
@@ -20518,57 +20771,34 @@ impl ActivateState {
             self.enter_requested = false;
         }
 
-        let target_id = if let Some(target_id) = self.target {
-            target_id
-        } else {
-            let Some(definition_id) = self.definition_id.clone() else {
-                return CommandStepResult::failed(update);
-            };
-            let Some(container_snapshot) = ctx.resolve(container_id) else {
-                return CommandStepResult::failed(None);
-            };
-            let mut candidate = None;
-            for object_id in &container_snapshot.contents {
-                if let Some(snapshot) = ctx.resolve(*object_id) {
-                    if snapshot.is_status_active()
-                        && snapshot.definition_id == definition_id
-                        && snapshot.container == Some(container_id)
-                    {
-                        candidate = Some(*object_id);
-                        break;
-                    }
-                }
-            }
-            let Some(candidate_id) = candidate else {
-                return CommandStepResult::failed(update);
-            };
-            self.target = Some(candidate_id);
-            candidate_id
-        };
-
-        let target_snapshot = match ctx.resolve(target_id) {
-            Some(snapshot) => snapshot,
-            None => return CommandStepResult::failed(update),
-        };
-
-        if !target_snapshot.is_status_active() {
-            return CommandStepResult::failed(update);
-        }
-
-        if target_snapshot.container.is_none() {
-            return CommandStepResult::completed(update);
-        }
-
-        if target_snapshot.container != Some(container_id) {
-            return CommandStepResult::failed(update);
-        }
-
-        if !self.check_minimum_con(target_snapshot) {
-            return CommandStepResult::failed(update);
-        }
-
         if ctx.object.id == container_id || ctx.object.container == Some(container_id) {
-            return self.release_target(ctx, target_id, update);
+            return self.release_targets(ctx, container_id, update);
+        }
+
+        // C++ resolves a Data/type-based target only inside the container.
+        // Keeping it unset while navigating also ensures that a candidate
+        // which starts exiting before entry is filtered from the live scan.
+        if let Some(target_id) = self.target {
+            let target_snapshot = match ctx.resolve(target_id) {
+                Some(snapshot) => snapshot,
+                None => return CommandStepResult::failed(update),
+            };
+
+            if !target_snapshot.is_status_active() {
+                return CommandStepResult::failed(update);
+            }
+
+            if target_snapshot.container.is_none() {
+                return CommandStepResult::completed(update);
+            }
+
+            if target_snapshot.container != Some(container_id) {
+                return CommandStepResult::failed(update);
+            }
+
+            if !self.check_minimum_con(target_snapshot) {
+                return CommandStepResult::failed(update);
+            }
         }
 
         if let Some(current_container) = ctx.object.container {
