@@ -14047,6 +14047,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GameCall", game_call);
     script.register_host_function("GameCallEx", game_call_ex);
     script.register_host_function("Format", format_string);
+    script.register_host_reference_function("Equal", std::iter::empty::<usize>(), equal);
     script.register_host_function("IsRef", is_ref);
     script.register_host_function("GetType", get_type);
     script.register_host_function("CreateArray", create_array);
@@ -15396,6 +15397,27 @@ fn create_array(args: &[Value]) -> Result<Value, RuntimeError> {
 /// so every script-visible argument reaches IsRef as a non-reference.
 fn is_ref(_args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(false))
+}
+
+/// FnEqual (C4Script.cpp:3172-3175): compare the dereferenced C4Value Data
+/// union without considering its type tag. The reference-aware host form with
+/// no writable parameters retains pointer provenance for heap-backed values.
+fn equal(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
+    let result = match (args.first(), args.get(1)) {
+        (Some(left), Some(right)) => left.c4_equals(right, 0)?,
+        (Some(value), None) | (None, Some(value)) => match value.read()? {
+            Value::Nil | Value::Int(0) | Value::Bool(false) | Value::Object(0) => true,
+            Value::C4Id(id) => cast_c4id_payload(&id) == 0,
+            Value::Int(_)
+            | Value::Bool(true)
+            | Value::Object(_)
+            | Value::String(_)
+            | Value::Array(_)
+            | Value::Proplist(_) => false,
+        },
+        (None, None) => true,
+    };
+    Ok(Value::Bool(result))
 }
 
 /// FnSet (C4Script.cpp:3764-3768): assign through the first native
@@ -46829,6 +46851,7 @@ mod tests {
         "EliminatePlayer",
         "EnergyCheck",
         "Enter",
+        "Equal",
         "ExecuteCommand",
         "Exit",
         "Extinguish",

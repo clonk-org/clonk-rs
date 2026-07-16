@@ -100,3 +100,35 @@ protected func Probe()
         ])
     );
 }
+
+#[test]
+fn equal_compares_raw_scalar_payloads_and_container_identity() {
+    let result = call_probe(
+        "EQUL",
+        r#"#strict 3
+protected func Probe()
+{
+    var array = [1, 2];
+    var alias = array;
+    var map = { x = 1 };
+    var map_alias = map;
+    return [Equal(1, 1), Equal(1, "1"), Equal(1, true),
+            Equal(array, alias), Equal(array, [1, 2]),
+            Equal(map, map_alias), Equal(map, { x = 1 })];
+}
+"#,
+    );
+
+    assert_eq!(
+        result,
+        Value::Array(vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(false),
+        ])
+    );
+}
