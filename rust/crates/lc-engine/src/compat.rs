@@ -13984,6 +13984,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("goto", script_goto);
     script.register_host_function("BlastFree", blast_free);
     script.register_host_function("BlastObject", blast_object);
+    script.register_host_function("BlastObjects", blast_objects);
     script.register_host_function("ShakeFree", shake_free);
     script.register_host_function("ShakeObjects", shake_objects);
     script.register_host_function("SetSkyParallax", set_sky_parallax);
@@ -22219,6 +22220,240 @@ fn dispatch_effects_do_damage(
     Some(change)
 }
 
+/// FnBlastObjects (C4Script.cpp:2269-2273) -> C4Game::BlastObjects
+/// (C4Game.cpp:1248-1296). Coordinates are already global. The calling
+/// object's layer restricts both contained children and outside victims;
+/// a null calling object selects the null layer.
+fn blast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "BlastObjects", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "BlastObjects", "y")?;
+    let level = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "BlastObjects", "level")?;
+    let in_object = parse_object_reference_argument(
+        args.get(3).unwrap_or(&Value::Nil),
+        "BlastObjects",
+        "container",
+    )?;
+    let caused_by_plus_one = value_to_i32(
+        args.get(4).unwrap_or(&Value::Nil),
+        "BlastObjects",
+        "caused by",
+    )?;
+
+    // Resolve both values before any blast callback. FnBlastObjects passes
+    // cthr->Obj as pByObj, and C4Game immediately replaces it with pLayer.
+    let (caused_by, blast_layer) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("BlastObjects requires an active engine context"))?;
+        let caller = context.script_object_context;
+        let caused_by = if caused_by_plus_one != 0 {
+            caused_by_plus_one.wrapping_sub(1)
+        } else {
+            caller
+                .and_then(|caller| {
+                    context
+                        .object_scope(caller)
+                        .map(ObjectScopeContext::controller)
+                        .or_else(|| {
+                            context
+                                .get_world_object(caller)
+                                .map(|object| object.controller())
+                        })
+                })
+                .unwrap_or(OWNER_NONE)
+        };
+        Ok::<_, RuntimeError>((
+            caused_by,
+            caller.and_then(|caller| context.object_layer(caller)),
+        ))
+    })?;
+
+    // Blast the container before obtaining Objects.First: its callbacks can
+    // change the children that the subsequent master-list scan observes.
+    if let Some(container) = in_object {
+        let _ = native_blast_object(container, level, caused_by)?;
+        let ids = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(EffectHostContext::master_object_ids)
+                .unwrap_or_default()
+        });
+        for id in ids {
+            let eligible = HOST_CONTEXT.with(|cell| {
+                let borrow = cell.borrow();
+                let Some(context) = borrow.as_ref() else {
+                    return false;
+                };
+                let Some(object) = context.get_world_object(id) else {
+                    return false;
+                };
+                let current_container = context
+                    .object_scope(id)
+                    .map(ObjectScopeContext::container)
+                    .unwrap_or_else(|| object.container());
+                context.object_status_active(id)
+                    && current_container == Some(container)
+                    && context.object_layer(id) == blast_layer
+            });
+            if eligible {
+                let _ = native_blast_object(id, level, caused_by)?;
+            }
+        }
+        return Ok(Value::Nil);
+    }
+
+    let ids = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(EffectHostContext::master_object_ids)
+            .unwrap_or_default()
+    });
+    for id in ids {
+        // Status/containment/layer are the outer C++ if-chain and are tested
+        // once. A direct Blast callback may mutate later shockwave inputs.
+        let direct_hit = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            let object = context.get_world_object(id)?;
+            let container = context
+                .object_scope(id)
+                .map(ObjectScopeContext::container)
+                .unwrap_or_else(|| object.container());
+            if !context.object_status_active(id)
+                || container.is_some()
+                || context.object_layer(id) != blast_layer
+            {
+                return None;
+            }
+            let position = context
+                .object_scope(id)
+                .map(ObjectScopeContext::effective_position)
+                .unwrap_or_else(|| object.position());
+            let shape = live_object_shape(context, id).unwrap_or_default();
+            let relative_x = x.wrapping_sub(position.x.wrapping_add(shape.x));
+            let relative_y = y.wrapping_sub(position.y.wrapping_add(shape.y));
+            Some(
+                relative_y >= -5
+                    && relative_y <= shape.height.wrapping_sub(1).wrapping_add(10)
+                    && relative_x >= -5
+                    && relative_x <= shape.width.wrapping_sub(1).wrapping_add(10),
+            )
+        });
+        let Some(direct_hit) = direct_hit else {
+            continue;
+        };
+        if direct_hit {
+            let _ = native_blast_object(id, level, caused_by)?;
+        }
+
+        // C++ stays inside the already-passed outer block but reads these
+        // fields after the direct Blast callback.
+        let living_shockwave = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            let object = context.get_world_object(id)?;
+            let scope = context.object_scope(id);
+            let category = scope
+                .map(ObjectScopeContext::category)
+                .unwrap_or_else(|| object.category());
+            if category
+                & (crate::CATEGORY_LIVING | crate::CATEGORY_OBJECT | crate::CATEGORY_VEHICLE)
+                == 0
+            {
+                return None;
+            }
+            let definition = context.object_effective_definition_id(id)?;
+            let metadata = context.definition_metadata(&definition)?;
+            if metadata.fire.no_horizontal_move != 0 {
+                return None;
+            }
+            let position = scope
+                .map(ObjectScopeContext::effective_position)
+                .unwrap_or_else(|| object.position());
+            if y.wrapping_sub(position.y).wrapping_abs() > level
+                || x.wrapping_sub(position.x).wrapping_abs() > level
+            {
+                return None;
+            }
+            let floating = scope
+                .map(|scope| scope.effective_action_procedure() == ActionProcedure::Float)
+                .unwrap_or_else(|| {
+                    object
+                        .procedure_name()
+                        .map(ActionProcedure::from_name)
+                        .is_some_and(|procedure| procedure == ActionProcedure::Float)
+                });
+            if metadata.fire.grab != 1
+                && (category & crate::CATEGORY_VEHICLE != 0 || floating)
+            {
+                return None;
+            }
+            Some(category & crate::CATEGORY_LIVING != 0)
+        });
+        let Some(living_shockwave) = living_shockwave else {
+            continue;
+        };
+
+        if living_shockwave {
+            let target = object_reference_value(id);
+            let _ = do_energy_with_cause_override(
+                &[
+                    Value::Int(level.wrapping_neg() / 2),
+                    target.clone(),
+                    Value::Bool(false),
+                    Value::Int(crate::C4FX_CALL_ENG_BLAST),
+                ],
+                Some(caused_by),
+            )?;
+            let _ = do_damage_with_cause_override(
+                &[
+                    Value::Int(level / 2),
+                    target,
+                    Value::Int(crate::C4FX_CALL_DMG_BLAST),
+                ],
+                Some(caused_by),
+            )?;
+        }
+
+        // Living damage callbacks precede both force calculations. p2 is
+        // evaluated before p1, and p1 alone consumes one Rnd3 value.
+        let force_state = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
+            let object = context.get_world_object(id)?;
+            let scope = context.object_scope(id);
+            Some((
+                scope
+                    .map(ObjectScopeContext::effective_position)
+                    .unwrap_or_else(|| object.position()),
+                scope
+                    .map(ObjectScopeContext::category)
+                    .unwrap_or_else(|| object.category()),
+                reflected_object_mass(context, id, &mut HashSet::new()),
+            ))
+        });
+        let Some((position, category, mass)) = force_state else {
+            continue;
+        };
+        let max_mass_divisor = if category & crate::CATEGORY_LIVING != 0 {
+            8
+        } else {
+            20
+        };
+        let mass_divisor = (mass / 10).clamp(4, max_mass_divisor);
+        let distance_y = y.wrapping_sub(position.y).wrapping_abs();
+        let y_force = itofix(distance_y.wrapping_sub(level)) / mass_divisor;
+        let rnd3 = draw_context_rnd3()?;
+        let distance_x = x.wrapping_sub(position.x).wrapping_abs();
+        let direction = position.x.wrapping_sub(x).wrapping_add(rnd3).signum();
+        let x_force = itofix(direction.wrapping_mul(level.wrapping_sub(distance_x)))
+            / mass_divisor;
+        native_fling(id, FixedVec2::new(x_force, y_force), true, caused_by)?;
+    }
+    Ok(Value::Nil)
+}
+
 /// FnBlastObject (C4Script.cpp:2281-2289) -> C4Object::Blast
 /// (C4Object.cpp:1414-1424): DoDamage(level, ..., C4FxCall_DmgBlast) with
 /// its synchronous ~Damage callback, then alive targets lose level/3
@@ -22238,40 +22473,59 @@ fn blast_object(args: &[Value]) -> Result<Value, RuntimeError> {
     let caused_by_plus_one =
         parse_optional_i32(args.get(2), "BlastObject", "caused by")?.unwrap_or(0);
 
-    let staged = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
+    let target_and_cause = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
         let context = borrow
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| RuntimeError::new("BlastObject requires an active engine context"))?;
         // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
         // (C4Script.cpp:2283) — resolved in the caller's scope.
         let caused_by = if caused_by_plus_one != 0 {
-            caused_by_plus_one - 1
+            caused_by_plus_one.wrapping_sub(1)
         } else {
             context
-                .object_context()
-                .map(|object| object.controller())
+                .script_object_context
+                .and_then(|caller| {
+                    context
+                        .object_scope(caller)
+                        .map(ObjectScopeContext::controller)
+                        .or_else(|| {
+                            context
+                                .get_world_object(caller)
+                                .map(|object| object.controller())
+                        })
+                })
                 .unwrap_or(OWNER_NONE)
         };
         // `if (!pObj) if (!(pObj = cthr->Obj)) return false` (C4Script.cpp:2284).
-        let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
-            return Ok(None);
-        };
+        Ok::<_, RuntimeError>(
+            target_id
+                .or(context.script_object_context)
+                .map(|target| (target, caused_by)),
+        )
+    })?;
+    let Some((target, caused_by)) = target_and_cause else {
+        return Ok(Value::Bool(false));
+    };
+    Ok(Value::Bool(native_blast_object(target, level, caused_by)?))
+}
+
+/// Exact-cause `C4Object::Blast` entry for engine helpers. An already-decoded
+/// `OWNER_NONE` must not be reinterpreted as encoded-zero caller fallback.
+fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<bool, RuntimeError> {
+    let alive = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("BlastObject requires an active engine context"))?;
         // `if (!pObj->Status) return false` (C4Script.cpp:2285).
-        let deleted = context
-            .get_world_object(target)
-            .map(|object| object.status() == ObjectStatus::Deleted)
-            .unwrap_or(true);
-        if deleted || !context.ensure_object_scope(target) {
+        if !context.object_status_present(target) || !context.ensure_object_scope(target) {
             return Ok(None);
         }
-        let Some(scope) = context.object_scope(target) else {
-            return Ok(None);
-        };
-        Ok(Some((target, caused_by, scope.alive())))
+        Ok(context.object_scope(target).map(ObjectScopeContext::alive))
     })?;
-    let Some((target, caused_by, alive)) = staged else {
-        return Ok(Value::Bool(false));
+    let Some(alive) = alive else {
+        return Ok(false);
     };
     // DoDamage leg (C4Object.cpp:1416): non-living targets ask their
     // effects first (C4Object.cpp:1282-1286); a zero chain outcome skips
@@ -22375,7 +22629,7 @@ fn blast_object(args: &[Value]) -> Result<Value, RuntimeError> {
     if incinerate {
         incinerate_target_blasted(target, caused_by)?;
     }
-    Ok(Value::Bool(true))
+    Ok(true)
 }
 
 /// The definition the world currently sees for `target`, honoring a
@@ -46969,6 +47223,7 @@ mod tests {
         "BitAnd",
         "BlastFree",
         "BlastObject",
+        "BlastObjects",
         "BoundBy",
         "Bubble",
         "Buy",

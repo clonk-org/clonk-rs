@@ -46846,6 +46846,128 @@ func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
         );
     }
 
+    // FnBlastObjects is an engine global even without System.c4g's
+    // same-named Explode.c helper (C4Script.cpp:2269-2275,6875). The native
+    // C4Game walk first applies a direct C4Object::Blast, then its living
+    // shockwave damage and mass-scaled fling (C4Game.cpp:1243-1296). An
+    // encoded caused-by zero inherits the calling object's Controller.
+    #[test]
+    fn blast_objects_bare_host_damages_flings_and_inherits_caller_controller() {
+        let caller_script = r#"#strict
+func Detonate() { return BlastObjects(50, 50, 20, nil, 0); }
+"#;
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_player(PlayerConfig::new(7, "Blaster"))
+            .expect("player registers");
+        engine
+            .register_definition(
+                Definition::from_script("BLST", "Blaster", caller_script)
+                    .expect("bare BlastObjects script compiles"),
+            )
+            .expect("caller registers");
+
+        let mut victim_definition = simple_definition("VCTM");
+        victim_definition.set_category(CATEGORY_LIVING | CATEGORY_OBJECT);
+        victim_definition.set_mass(80);
+        victim_definition.set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2)));
+        victim_definition.set_physical(PhysicalInfo {
+            energy: 100_000,
+            ..PhysicalInfo::default()
+        });
+        engine
+            .register_definition(victim_definition)
+            .expect("victim registers");
+
+        // BlastObjects coordinates are global (unlike BlastFree): keep the
+        // caller far away and place only the victim in the blast square.
+        let caller = engine
+            .spawn_object(
+                SpawnConfig::new("BLST")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(100, 100))
+                    .with_controller(7),
+            )
+            .expect("caller spawns");
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("VCTM")
+                    .with_category(CATEGORY_LIVING | CATEGORY_OBJECT)
+                    // Fresh creation treats the supplied y as the shape
+                    // bottom; this -1..+1 shape settles at center y=50.
+                    .with_position(Vector2::new(54, 51))
+                    .with_alive(true)
+                    .with_energy(100_000),
+            )
+            .expect("victim spawns");
+
+        let caller_idx = engine.find_object_index(caller).expect("caller exists");
+        assert_eq!(
+            engine
+                .call_object_function(caller_idx, "Detonate", Vec::new())
+                .expect("native BlastObjects executes"),
+            Value::Nil,
+            "FnBlastObjects is void"
+        );
+
+        let victim_idx = engine.find_object_index(victim).expect("victim remains");
+        let victim = &engine.objects[victim_idx];
+        assert_eq!(
+            victim.state.damage, 30,
+            "direct Blast(20) plus living shockwave DoDamage(10)"
+        );
+        assert_eq!(
+            victim.state.energy,
+            100_000 - (20 / 3 + 20 / 2) * (C4_MAX_PHYSICAL / 100),
+            "direct blast and shockwave energy losses both land"
+        );
+        assert_eq!(
+            victim.fixed_velocity,
+            FixedVec2::new(itofix(16) / 8, itofix(-20) / 8),
+            "level-distance force is divided by bounded mass/10"
+        );
+        assert_eq!(
+            victim.last_energy_loss_cause, 7,
+            "caused_by_plus_one=0 inherits the caller's controller"
+        );
+    }
+
+    #[test]
+    fn system_blast_objects_overload_shadows_the_native_host() {
+        let mut engine = Engine::with_seed(23);
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/Explode.c".to_string(),
+                "#strict\nglobal func BlastObjects(x, y, level, inobj, caused_by) { return 4242; }\n"
+                    .to_string(),
+            )]),
+            1,
+            "System.c4g overload installs"
+        );
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "BLST",
+                    "Blaster",
+                    "#strict\nfunc Detonate() { return BlastObjects(50, 50, 20); }\n",
+                )
+                .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("BLST").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let caller_idx = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(caller_idx, "Detonate", Vec::new())
+                .expect("System BlastObjects executes"),
+            Value::Int(4242),
+            "the System.c4g global overload wins over the engine host"
+        );
+    }
+
     // FnBlastObject (C4Script.cpp:2281-2289) -> C4Object::Blast
     // (C4Object.cpp:1414-1419): Damage rises by the blast level and an
     // alive target additionally loses level/3 energy percent points
