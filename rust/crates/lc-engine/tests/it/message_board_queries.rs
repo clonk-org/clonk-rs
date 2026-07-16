@@ -1,6 +1,6 @@
 use lc_engine::{
-    Definition, Engine, LegacyCString, MessageBoardAnswerControlData, ObjectId, ObjectStatus,
-    ObjectUpdate, PlayerAtClient, PlayerConfig, SpawnConfig,
+    Definition, EliminatePlayerControlData, Engine, LegacyCString, MessageBoardAnswerControlData,
+    ObjectId, ObjectStatus, ObjectUpdate, PlayerAtClient, PlayerConfig, PlayerStatus, SpawnConfig,
 };
 use lc_script::Value;
 
@@ -389,6 +389,139 @@ fn replacement_query_opens_once_and_abort_matches_active_and_pending_paths() {
         call(&mut engine, target, "AbortQuery", vec![Value::Int(PLAYER)],),
         Value::Bool(false),
         "AbortMessageBoard reports false after the one matching query is gone"
+    );
+}
+
+#[test]
+fn call_message_board_replacement_moves_target_to_list_tail() {
+    let (mut engine, first_target, second_target) = fixture();
+
+    assert_eq!(
+        open(&mut engine, first_target, false, "first prompt", PLAYER),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        open(&mut engine, second_target, false, "second prompt", PLAYER),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        open(
+            &mut engine,
+            first_target,
+            true,
+            "replacement prompt",
+            PLAYER,
+        ),
+        Value::Bool(true)
+    );
+
+    let queries = &engine
+        .player(PLAYER)
+        .expect("message-board player remains")
+        .to_state()
+        .message_board_queries;
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0].target, Some(second_target));
+    assert_eq!(queries[0].prompt, "second prompt");
+    assert_eq!(queries[1].target, Some(first_target));
+    assert_eq!(queries[1].prompt, "replacement prompt");
+    assert!(queries[1].uppercase);
+}
+
+#[test]
+fn restored_query_denumerates_a_missing_callback_object() {
+    let (mut engine, target, _) = fixture();
+
+    assert_eq!(
+        open(&mut engine, target, false, "saved prompt", PLAYER),
+        Value::Bool(true)
+    );
+    let mut state = engine.capture_state();
+    state
+        .objects
+        .retain(|object| object.snapshot.id != target);
+
+    engine
+        .restore_state(&state)
+        .expect("player state with a missing callback object restores");
+    let queries = engine
+        .player(PLAYER)
+        .expect("message-board player restores")
+        .message_board_queries();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].target, None);
+    assert_eq!(queries[0].prompt, "saved prompt");
+}
+
+#[test]
+fn eliminated_normal_player_still_opens_a_local_query_on_tick35() {
+    let (mut engine, target, _) = fixture();
+
+    assert_eq!(
+        open(&mut engine, target, false, "last prompt", PLAYER),
+        Value::Bool(true)
+    );
+    assert!(engine
+        .execute_eliminate_player_control(&EliminatePlayerControlData {
+            player: PLAYER,
+            by_client: 0,
+        })
+        .expect("host elimination control executes"));
+    assert_eq!(
+        engine
+            .player(PLAYER)
+            .expect("eliminated player remains during the retire delay")
+            .status(),
+        PlayerStatus::Eliminated
+    );
+
+    for frame in 1..=35 {
+        engine
+            .tick()
+            .unwrap_or_else(|error| panic!("eliminated query tick {frame} succeeds: {error}"));
+    }
+    assert_eq!(
+        engine
+            .active_message_board_input()
+            .expect("C++ PS_Normal remains true after elimination")
+            .target,
+        Some(target)
+    );
+}
+
+#[test]
+fn local_script_player_does_not_open_a_message_board_query() {
+    let (mut engine, target, _) = fixture();
+
+    assert_eq!(
+        open(&mut engine, target, false, "user-only prompt", PLAYER),
+        Value::Bool(true)
+    );
+    let mut state = engine.capture_state();
+    state
+        .players
+        .iter_mut()
+        .find(|player| player.id == PLAYER)
+        .expect("message-board player is saved")
+        .script_player = true;
+    engine
+        .restore_state(&state)
+        .expect("script-player state restores");
+
+    for frame in 1..=35 {
+        engine
+            .tick()
+            .unwrap_or_else(|error| panic!("script-player query tick {frame} succeeds: {error}"));
+    }
+    assert!(engine.active_message_board_input().is_none());
+    assert_eq!(
+        engine
+            .player(PLAYER)
+            .expect("script player remains")
+            .message_board_queries()
+            .len(),
+        1,
+        "the non-local query stays pending instead of opening"
     );
 }
 

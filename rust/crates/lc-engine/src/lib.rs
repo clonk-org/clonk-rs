@@ -25041,10 +25041,6 @@ impl Engine {
         self.update_player_view(id);
         self.execute_player_control_and_menu(id)?;
 
-        let message_query_status_normal = self
-            .players
-            .get(&id)
-            .is_some_and(|player| player.status() == PlayerStatus::Active);
         let normal_status = self.players.get(&id).is_some_and(|player| {
             matches!(
                 player.status(),
@@ -25103,7 +25099,7 @@ impl Engine {
         // C4Player::ExecMsgBoardQueries runs after Tick35 production/value/
         // elimination work, and only for a normal local player. One global
         // C4ChatInputDialog serializes prompts across all local players.
-        if self.frame % 35 == 0 && message_query_status_normal {
+        if self.frame % 35 == 0 && normal_status {
             self.open_next_message_board_input(id);
         }
 
@@ -25116,6 +25112,10 @@ impl Engine {
                 .local_players
                 .as_ref()
                 .is_some_and(|players| !players.contains(&player_id))
+            || self
+                .players
+                .get(&player_id)
+                .is_some_and(Player::is_script_player)
         {
             return;
         }
@@ -30151,13 +30151,17 @@ impl Engine {
             .iter()
             .cloned()
             .map(|mut state| {
-                // C4Player::DenumeratePointers resolves Cursor/ViewCursor
-                // and rebuilds Crew only after the object table is complete
+                // C4Player::DenumeratePointers resolves Cursor/ViewCursor,
+                // Captain, and every message-board callback object, then
+                // rebuilds Crew only after the object table is complete
                 // (C4Player.cpp:1789-1796). ViewTarget is NO-SAVE; viewport
                 // focus remains the presentation projection only.
                 denumerate_object_reference(&mut state.cursor, &object_numbers);
                 denumerate_object_reference(&mut state.view_cursor, &object_numbers);
                 denumerate_object_reference(&mut state.captain, &object_numbers);
+                for query in &mut state.message_board_queries {
+                    denumerate_object_reference(&mut query.target, &object_numbers);
+                }
                 for viewport in &mut state.viewports {
                     denumerate_object_reference(&mut viewport.focus, &object_numbers);
                 }

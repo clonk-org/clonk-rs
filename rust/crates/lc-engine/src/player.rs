@@ -412,7 +412,8 @@ pub struct PlayerState {
         with = "lc_script::c4_string_serde"
     )]
     pub message_buf: String,
-    /// Saved `C4Player::pMsgBoardQuery` list, in linked-list order.
+    /// `C4Player::pMsgBoardQuery` in linked-list order. Save preparation
+    /// retains only the head because the C++ query compiler omits `pNext`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub message_board_queries: Vec<MessageBoardQuery>,
     /// C4Player::ShowControlPos: tutorial-selected placement for the command
@@ -643,6 +644,10 @@ impl PlayerState {
 
     pub(crate) fn prepare_for_save(&mut self) {
         self.view_target = None;
+        // C4Player saves pMsgBoardQuery through one pointer adaptor, while
+        // C4MessageBoardQuery::CompileFunc does not compile pNext. Therefore
+        // only the list head survives a save/load cycle.
+        self.message_board_queries.truncate(1);
         for query in &mut self.message_board_queries {
             query.answered = false;
         }
@@ -2498,17 +2503,30 @@ mod tests {
     }
 
     #[test]
-    fn message_board_queries_save_without_the_answered_runtime_bit() {
-        let state = PlayerState {
+    fn message_board_query_save_keeps_only_the_head_without_the_answered_runtime_bit() {
+        let mut state = PlayerState {
             id: 2,
-            message_board_queries: vec![MessageBoardQuery {
-                target: Some(ObjectId::new(7)),
-                prompt: "Name?".to_string(),
-                uppercase: true,
-                answered: true,
-            }],
+            message_board_queries: vec![
+                MessageBoardQuery {
+                    target: Some(ObjectId::new(7)),
+                    prompt: "Name?".to_string(),
+                    uppercase: true,
+                    answered: true,
+                },
+                MessageBoardQuery {
+                    target: Some(ObjectId::new(8)),
+                    prompt: "Dropped tail".to_string(),
+                    answered: true,
+                    ..MessageBoardQuery::default()
+                },
+            ],
             ..PlayerState::default()
         };
+
+        state.prepare_for_save();
+        assert_eq!(state.message_board_queries.len(), 1);
+        assert_eq!(state.message_board_queries[0].prompt, "Name?");
+        assert!(!state.message_board_queries[0].answered);
 
         let encoded = serde_json::to_value(&state)
             .unwrap_or_else(|error| panic!("message-board query serializes: {error}"));
@@ -2521,10 +2539,6 @@ mod tests {
         let restored: PlayerState = serde_json::from_value(encoded)
             .unwrap_or_else(|error| panic!("message-board query restores: {error}"));
         assert!(!restored.message_board_queries[0].answered);
-
-        let mut captured = state;
-        captured.prepare_for_save();
-        assert!(!captured.message_board_queries[0].answered);
     }
 
     #[test]
