@@ -1530,12 +1530,10 @@ impl<'a> Vm<'a> {
                 && *value != self.this_value
         });
         if let Some(target) = foreign {
-            if let Some(cell) = self
+            return self
                 .local_cell_hook
                 .and_then(|hook| hook(&target, local_name))
-            {
-                return cell;
-            }
+                .unwrap_or_else(|| value_cell(Value::Nil));
         }
         env.object_state.named_local_cell(local_name)
     }
@@ -1553,7 +1551,13 @@ impl<'a> Vm<'a> {
             return None;
         }
         if target == &self.this_value {
-            Some(env.object_state.named_local_cell(name))
+            self.var_decls
+                .iter()
+                .any(|declaration| {
+                    declaration.kind == crate::ast::VarDeclKind::Local
+                        && declaration.name == name
+                })
+                .then(|| env.object_state.named_local_cell(name))
         } else {
             self.local_cell_hook.and_then(|hook| hook(target, name))
         }
@@ -3185,12 +3189,14 @@ impl<'a> Vm<'a> {
                 // an addressable Rust path live so the otherwise surprising
                 // empty `array[-1]` growth remains visible to the caller.
                 let collection_reference = self.existing_path_lvalue(target, env, depth)?;
-                let collection = if let Some(reference) = &collection_reference {
-                    reference.read()?
+                let (collection, idx) = if let Some(reference) = &collection_reference {
+                    let idx = self.evaluate(index, env, depth)?;
+                    (reference.read()?, idx)
                 } else {
-                    self.evaluate(target, env, depth)?
+                    let collection = self.evaluate(target, env, depth)?;
+                    let idx = self.evaluate(index, env, depth)?;
+                    (collection, idx)
                 };
-                let idx = self.evaluate(index, env, depth)?;
                 Self::grow_empty_negative_array(
                     collection_reference.as_ref(),
                     &collection,
@@ -3316,11 +3322,17 @@ impl<'a> Vm<'a> {
             }
             Expr::Index(target, index_expr) => {
                 let collection_reference = self.existing_path_lvalue(target, env, depth)?;
-                let mut collection = match &collection_reference {
-                    Some(reference) => reference.read_tracked()?,
-                    None => self.evaluate_tracked(target, env, depth)?,
+                let (mut collection, index) = match &collection_reference {
+                    Some(reference) => {
+                        let index = self.evaluate(index_expr, env, depth)?;
+                        (reference.read_tracked()?, index)
+                    }
+                    None => {
+                        let collection = self.evaluate_tracked(target, env, depth)?;
+                        let index = self.evaluate(index_expr, env, depth)?;
+                        (collection, index)
+                    }
                 };
-                let index = self.evaluate(index_expr, env, depth)?;
                 Self::grow_empty_negative_array(
                     collection_reference.as_ref(),
                     &collection.value,
@@ -5022,12 +5034,63 @@ impl<'a> Vm<'a> {
                 .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'"))),
             AssignmentTarget::Property(base, property) => {
                 let reference = self.assignment_target_to_lvalue(env, base, depth)?;
+                if !matches!(&reference, LValueRef::HostPath { .. }) {
+                    let collection = reference.read()?;
+                    match &collection {
+                        Value::Object(0) => {
+                            return Err(RuntimeError::new(
+                                "map access with .: map expected, but got nil!",
+                            ));
+                        }
+                        target @ Value::Object(_) => {
+                            return self
+                                .object_local_cell(env, target, property)
+                                .map(|cell| self.tracked_cell(cell))
+                                .ok_or_else(|| {
+                                    RuntimeError::new(
+                                        "this assignment target is a value, not a reference",
+                                    )
+                                });
+                        }
+                        _ => {}
+                    }
+                }
                 reference.detach_container_identity_if_shared();
                 Ok(reference.append(PathSegment::Property(property.clone())))
             }
             AssignmentTarget::Index(base, index_expr) => {
-                let index = self.evaluate(index_expr, env, depth)?;
                 let reference = self.assignment_target_to_lvalue(env, base, depth)?;
+                if !matches!(&reference, LValueRef::HostPath { .. }) {
+                    let index = self.evaluate(index_expr, env, depth)?;
+                    let collection = reference.read()?;
+                    match (&collection, &index) {
+                        (Value::Object(0), _) => {
+                            return Err(RuntimeError::new(
+                                "indexed access [index]: array, map or string expected, but got nil",
+                            ));
+                        }
+                        (target @ Value::Object(_), Value::String(name)) => {
+                            return self
+                                .object_local_cell(env, target, name)
+                                .map(|cell| self.tracked_cell(cell))
+                                .ok_or_else(|| {
+                                    RuntimeError::new(
+                                        "this assignment target is a value, not a reference",
+                                    )
+                                });
+                        }
+                        (Value::Object(_), _) => {
+                            return Err(RuntimeError::new(
+                                "indexed access on object: only string keys are allowed",
+                            ));
+                        }
+                        _ => {
+                            reference.detach_container_identity_if_shared();
+                            return Ok(reference.append(PathSegment::Index(index)));
+                        }
+                    }
+                }
+                let index = self.evaluate(index_expr, env, depth)?;
                 reference.detach_container_identity_if_shared();
                 Ok(reference.append(PathSegment::Index(index)))
             }
@@ -5392,8 +5455,8 @@ impl<'a> Vm<'a> {
                 let Some(reference) = self.existing_path_lvalue(base, env, depth)? else {
                     return Ok(None);
                 };
-                let collection = reference.read()?;
                 let index = self.evaluate(index_expr, env, depth)?;
+                let collection = reference.read()?;
                 if matches!(collection, Value::Object(0)) {
                     return Err(RuntimeError::new(
                         "indexed access [index]: array, map or string expected, but got nil",

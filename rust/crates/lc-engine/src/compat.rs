@@ -12039,9 +12039,22 @@ fn object_call(args: &[Value]) -> Result<Value, RuntimeError> {
 fn foreign_local_cell_hook(target: &Value, name: &str) -> Option<lc_script::ValueCell> {
     let target = object_id_from_value(target)?;
     HOST_CONTEXT.with(|cell| {
-        cell.borrow_mut()
-            .as_mut()
-            .map(|context| context.foreign_local_cell(target, name))
+        let mut context = cell.borrow_mut();
+        let context = context.as_mut()?;
+        if name
+            .strip_prefix("__local_")
+            .and_then(|index| index.parse::<i32>().ok())
+            .is_some_and(|index| index >= 0)
+        {
+            return Some(context.foreign_local_cell(target, name));
+        }
+        let definition = context.object_effective_definition_id(target)?;
+        let declared = context
+            .world
+            .definition_script(&definition)?
+            .local_variable_names()
+            .any(|local| local == name);
+        declared.then(|| context.foreign_local_cell(target, name))
     })
 }
 

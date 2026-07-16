@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use lc_script::{value_cell, Engine, Script, Value, ValueCell};
 
@@ -158,6 +159,123 @@ fn object_index_and_property_read_named_local_cells() {
             .to_string()
             .contains("indexed access on object: only string keys are allowed"),
         "got: {error}"
+    );
+}
+
+#[test]
+fn object_index_assignment_evaluates_base_key_then_rhs_once() {
+    let (mut engine, cells) = engine_with_stub_hook();
+    cells
+        .borrow_mut()
+        .insert((7, "money".to_string()), value_cell(Value::Nil));
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    for (name, marker, value) in [
+        ("MarkBase", 1, Value::Int(0)),
+        ("MarkKey", 2, Value::String("money".to_string())),
+        ("MarkRhs", 3, Value::Int(9)),
+    ] {
+        let trace = Arc::clone(&trace);
+        engine.register_host_function(name, move |_| {
+            trace.lock().expect("trace locks").push(marker);
+            Ok(value.clone())
+        });
+    }
+    engine.add_script(
+        Script::compile(
+            "#strict 3\n\
+             public func Assign(other) {\n\
+                 var targets = [other];\n\
+                 targets[MarkBase()][MarkKey()] = MarkRhs();\n\
+                 return other.money;\n\
+             }",
+        )
+        .expect("compiles"),
+    );
+
+    assert_eq!(
+        engine
+            .call("Assign", &[Value::Object(7)])
+            .expect("assignment succeeds"),
+        Value::Int(9),
+    );
+    assert_eq!(*trace.lock().expect("trace locks"), vec![1, 2, 3]);
+    assert_eq!(
+        cells
+            .borrow()
+            .get(&(7, "money".to_string()))
+            .map(|cell| cell.borrow().clone()),
+        Some(Value::Int(9)),
+    );
+}
+
+#[test]
+fn object_index_dereferences_the_base_after_key_side_effects() {
+    let (mut engine, cells) = engine_with_stub_hook();
+    cells.borrow_mut().extend([
+        ((7, "money".to_string()), value_cell(Value::Int(1))),
+        ((8, "money".to_string()), value_cell(Value::Int(2))),
+    ]);
+    engine.add_script(
+        Script::compile(
+            "#strict 3\n\
+             static current, replacement;\n\
+             private func SelectReplacement() {\n\
+                 current = replacement;\n\
+                 return \"money\";\n\
+             }\n\
+             public func ReadAfterSwitch(first, second) {\n\
+                 current = first;\n\
+                 replacement = second;\n\
+                 return current[SelectReplacement()] + 0;\n\
+             }\n\
+             public func ReadTrackedAfterSwitch(first, second) {\n\
+                 current = first;\n\
+                 replacement = second;\n\
+                 return current[SelectReplacement()];\n\
+             }\n\
+             public func WriteAfterSwitch(first, second) {\n\
+                 current = first;\n\
+                 replacement = second;\n\
+                 current[SelectReplacement()] = 9;\n\
+             }",
+        )
+        .expect("compiles"),
+    );
+
+    assert_eq!(
+        engine
+            .call("ReadAfterSwitch", &[Value::Object(7), Value::Object(8)])
+            .expect("read succeeds"),
+        Value::Int(2),
+        "the key expression replaced the retained base cell before it was dereferenced",
+    );
+    assert_eq!(
+        engine
+            .call(
+                "ReadTrackedAfterSwitch",
+                &[Value::Object(7), Value::Object(8)],
+            )
+            .expect("tracked read succeeds"),
+        Value::Int(2),
+    );
+    engine
+        .call("WriteAfterSwitch", &[Value::Object(7), Value::Object(8)])
+        .expect("write succeeds");
+    assert_eq!(
+        cells
+            .borrow()
+            .get(&(7, "money".to_string()))
+            .map(|cell| cell.borrow().clone()),
+        Some(Value::Int(1)),
+        "the stale pre-key object was not modified",
+    );
+    assert_eq!(
+        cells
+            .borrow()
+            .get(&(8, "money".to_string()))
+            .map(|cell| cell.borrow().clone()),
+        Some(Value::Int(9)),
+        "the post-key object received the write",
     );
 }
 

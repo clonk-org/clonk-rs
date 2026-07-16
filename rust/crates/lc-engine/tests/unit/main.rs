@@ -35204,6 +35204,92 @@ protected func Script1() { StartTheMovie(); }
         );
     }
 
+    #[test]
+    fn object_property_and_index_write_declared_foreign_named_locals() {
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "BANK",
+                    "Bank",
+                    "#strict 3\n\
+                     local money;\n\
+                     func ReadMoney() { return money; }",
+                )
+                .expect("bank compiles"),
+            )
+            .expect("bank registers");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "CLLR",
+                    "Caller",
+                    "#strict 3\n\
+                     func Write(other) {\n\
+                         other.money = 5;\n\
+                         other[\"money\"] += 2;\n\
+                         return [other.money, other[\"money\"]];\n\
+                     }\n\
+                     func ReadMissing(other) { return other.missing; }\n\
+                     func BadKey(other) { return other[42]; }",
+                )
+                .expect("caller compiles"),
+            )
+            .expect("caller registers");
+
+        let bank = engine
+            .spawn_object(SpawnConfig::new("BANK"))
+            .expect("bank spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CLLR"))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        let target = Value::Object(bank.as_u64());
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "Write", vec![target.clone()])
+                .expect("object-local writes succeed"),
+            Value::Array(vec![Value::Int(7), Value::Int(7)]),
+        );
+
+        let bank_index = engine.find_object_index(bank).expect("bank exists");
+        assert_eq!(
+            engine
+                .call_object_function(bank_index, "ReadMoney", Vec::new())
+                .expect("target reads the persisted local"),
+            Value::Int(7),
+        );
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "ReadMissing", vec![target.clone()])
+                .expect("missing local read succeeds"),
+            Value::Nil,
+        );
+        let bank_index = engine.find_object_index(bank).expect("bank exists");
+        assert!(
+            !engine.objects[bank_index]
+                .state
+                .local_vars
+                .contains_key("missing"),
+            "a missing object local reads nil without being materialized",
+        );
+
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        let error = engine
+            .call_object_function(caller_index, "BadKey", vec![target])
+            .expect_err("non-string object index must fail");
+        match error {
+            EngineError::Script { source, .. } => assert!(
+                source
+                    .to_string()
+                    .contains("indexed access on object: only string keys are allowed"),
+                "got: {source}",
+            ),
+            other => panic!("expected script error, got {other:?}"),
+        }
+    }
+
     // FnLocal (C4Script.cpp:3423-3433) returns `pObj->Local[iIndex].
     // GetRef()` — the two-argument form reads AND writes a FOREIGN
     // object's numbered Local slot through the reference. The GoldRush
@@ -45736,6 +45822,7 @@ public func Consume() { RemoveObject(); return(7); }
     #[test]
     fn foreign_action_reads_see_the_suspended_scopes_pending_action() {
         let holder_script = r#"#strict
+local sSeen, iSeenPhase;
 public func Boot() { AddEffect("Probe", this(), 1, 5, this()); return(1); }
 func FxProbeTimer(pThis, iNumber) {
   var pItem = FindContents(ITEM);
