@@ -5,17 +5,14 @@ use serde::{Deserialize, Serialize};
 pub enum EffectVarValue {
     Int(i32),
     Bool(bool),
-    String(String),
+    String(#[serde(with = "lc_script::c4_string_serde")] String),
     /// A definition identifier is a distinct C4Value type from String.
     /// EffectVar must preserve that distinction because scripts may use a
     /// stored id as an object-call target (`idMagic->~Callback()`).
-    C4Id(String),
+    C4Id(#[serde(with = "lc_script::c4_id_serde")] String),
     Object(u64),
     Array(Vec<EffectVarValue>),
-    Proplist(
-        #[serde(with = "effect_var_map_serde")]
-        Vec<(Value, EffectVarValue)>,
-    ),
+    Proplist(#[serde(with = "effect_var_map_serde")] Vec<(Value, EffectVarValue)>),
     #[default]
     Nil,
 }
@@ -40,14 +37,18 @@ mod effect_var_map_serde {
     {
         if entries
             .iter()
-            .all(|(key, _)| matches!(key, Value::String(_)))
+            .all(|(key, _)| {
+                matches!(key, Value::String(value) if String::from_utf8(lc_script::c4_string_bytes(value)).is_ok())
+            })
         {
             let mut map = serializer.serialize_map(Some(entries.len()))?;
             for (key, value) in entries {
                 let Value::String(key) = key else {
                     unreachable!("all keys were checked as strings");
                 };
-                map.serialize_entry(key, value)?;
+                let key = String::from_utf8(lc_script::c4_string_bytes(key))
+                    .expect("all string keys were checked as UTF-8");
+                map.serialize_entry(&key, value)?;
             }
             map.end()
         } else {
@@ -69,7 +70,12 @@ mod effect_var_map_serde {
         Ok(match Repr::deserialize(deserializer)? {
             Repr::Legacy(entries) => entries
                 .into_iter()
-                .map(|(key, value)| (Value::String(key), value))
+                .map(|(key, value)| {
+                    (
+                        Value::String(lc_script::c4_string_from_bytes(key.as_bytes())),
+                        value,
+                    )
+                })
                 .collect(),
             Repr::Entries(entries) => entries,
         })
@@ -82,13 +88,14 @@ pub struct EffectState {
     /// (max existing + 1). Zero = not yet allocated.
     #[serde(default)]
     pub number: i32,
+    #[serde(with = "lc_script::c4_string_serde")]
     pub name: String,
     pub priority: i32,
     pub interval: i32,
     pub timer: i32,
     #[serde(default)]
     pub command_target: Option<i32>,
-    #[serde(default)]
+    #[serde(default, with = "lc_script::c4_optional_id_serde")]
     pub command_id: Option<String>,
     #[serde(default)]
     pub vars: Vec<EffectVarValue>,
@@ -231,15 +238,23 @@ pub enum EffectCommand {
     Update(EffectState),
     /// Marks the selected live effect dead. C4Effect::Kill/SetDead leaves
     /// the node linked at priority zero until the next Execute walk.
-    Remove { name: String, no_callbacks: bool },
+    Remove {
+        name: String,
+        no_callbacks: bool,
+    },
     /// Identity-keyed death for callers that address an effect by its C++
     /// `iNumber`. Names are not unique, so folding this as `Remove { name }`
     /// can target the wrong same-name peer.
-    RemoveNumber { number: i32, no_callbacks: bool },
+    RemoveNumber {
+        number: i32,
+        no_callbacks: bool,
+    },
     /// Immediate structural unlink for constructor exception unwind and
     /// final object-list destruction. Ordinary effect removal must use one
     /// of the dead-marking variants above.
-    UnlinkNumber { number: i32 },
+    UnlinkNumber {
+        number: i32,
+    },
     Clear,
 }
 

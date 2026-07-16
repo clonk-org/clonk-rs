@@ -343,6 +343,7 @@ impl LeagueJoinResponse {
         player.league_rank = selected.map_or(0, |index| self.ranks[index]);
         player.league_rank_symbol = selected.map_or(0, |index| self.rank_symbols[index]);
         player.clan_tag = validate_name_allow_empty(self.clan_tag.clone());
+        player.league_progress_data_is_null = selected.is_none();
         player.league_progress_data = selected
             .map(|index| self.progress_data[index].clone())
             .unwrap_or_default();

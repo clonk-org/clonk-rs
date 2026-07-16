@@ -2260,6 +2260,7 @@ dependencies = [
  "encoding_rs",
  "flate2",
  "image",
+ "lc-script",
  "libc",
  "libz-sys",
  "serde",

@@ -30,7 +30,7 @@ mod settings;
 mod startup_player_files;
 
 use std::cmp::Ordering;
-use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map::DefaultHasher};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fs::{self, File};
@@ -40,14 +40,14 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::{
+    Arc, Mutex, OnceLock,
     atomic::{AtomicU64, Ordering as AtomicOrdering},
     mpsc::{self, Receiver, TryRecvError},
-    Arc, Mutex, OnceLock,
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use control_options::format_key_label;
 use game_over::{
@@ -65,29 +65,28 @@ use ingame_menu::{
 };
 use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
 use lc_app::{
+    ClientStartBarrier, ConfiguredClientPlayerSelection, SelectedClientPlayer,
     compose_client_network_scenario, load_snapshotted_client_players,
     publish_initial_configured_client_players, resolve_client_game_resources,
     resolve_client_scenario_resources, snapshot_configured_client_player_selection,
-    ClientStartBarrier, ConfiguredClientPlayerSelection, SelectedClientPlayer,
 };
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_core::{std_config::Config, std_markup::Markup};
 use lc_engine::command::CommandId;
 use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::{LegacyDefinitionResolver, ScenarioLoaderHead, ScenarioLobbyMetadata};
-use lc_engine::text_spec::{parse_text_spec, TextSpec, TextSpecIcon};
+use lc_engine::text_spec::{TextSpec, TextSpecIcon, parse_text_spec};
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlClientRegistry,
     ControlCommand, ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError,
-    EngineState, EnvironmentSettings, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet,
+    EngineState, EnvironmentSettings, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT,
+    FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER,
+    FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet,
     MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MouseDragSource,
-    MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData, PlayerConfig,
-    PlayerSelectControlData, Recorder, Recording, RgbColor, Scenario, ScenarioError,
+    MovementProfile, OWNER_NONE, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData,
+    PlayerConfig, PlayerSelectControlData, Recorder, Recording, RgbColor, Scenario, ScenarioError,
     ScoreboardPresentationRequest, ScriptControlPolicy, SimulationSnapshot, SkyConfig, SpawnConfig,
-    SyncCheckPacket,
-    TeamConfiguration, Vector2, FLAG_ALIGN_CENTER,
-    FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK,
-    FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
+    SyncCheckPacket, TeamConfiguration, Vector2,
 };
 use lc_frontend::context_menu::{
     ClassicContextMenu, ContextMenuDirection, ContextMenuEntry, ContextMenuEvent, ContextMenuIcon,
@@ -115,11 +114,11 @@ use lc_frontend::loader_screen::{
 };
 use lc_frontend::startup_plrsel::PlrSelPlayerContextCommand;
 use lc_frontend::{
-    default_owner_color, ActiveViewportProjection, ColorByOwnerMask, CrewOverlay, CursorAtlas,
-    DefinitionSprite, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData,
-    InputDispatcher, InventoryOverlay, KeyCode, MainMenuAction, MainMenuItem, MaterialRenderInfo,
-    PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu,
-    StartupMenuAction, ViewportInput, ViewportPointer,
+    ActiveViewportProjection, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
+    GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher,
+    InventoryOverlay, KeyCode, MainMenuAction, MainMenuItem, MaterialRenderInfo, PlayerOverlay,
+    ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction,
+    ViewportInput, ViewportPointer, default_owner_color,
 };
 use lc_graphics::{
     BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, Surface, TextFont,
@@ -129,9 +128,10 @@ use lc_gui::{ButtonTextures, Rect as GuiRect};
 use lc_network::{ClientId, ParticipantKind, Tick};
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
-    load_endeavour_font, scenario as resource_scenario, DefCore as ResourceDefCore,
-    DefinitionError as ResourceDefinitionError, GraphicsError, GraphicsImage, GraphicsResource,
-    Group, GroupError, ResourceDefinition as ResourceDefinitionData,
+    DefCore as ResourceDefCore, DefinitionError as ResourceDefinitionError, GraphicsError,
+    GraphicsImage, GraphicsResource, Group, GroupError,
+    ResourceDefinition as ResourceDefinitionData, load_endeavour_font,
+    scenario as resource_scenario,
 };
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
 use menu_controls::{map_menu_control_event, map_progressing_menu_control_event};
@@ -140,30 +140,30 @@ use network::{
     NetworkManager, NetworkMode,
 };
 use network_host_preparation::NetworkHostPreparation;
-use network_team_assignment::NetworkTeamAssignmentState;
+use network_team_assignment::{NetworkTeamAssignmentState, NetworkTeamControlError};
 use object_menu::{
-    definition_menu_picture, engine_script_menu_inline_image_specs,
-    engine_script_menu_pointer_target_with_info, render_engine_script_menu_with_gamma,
-    resolve_engine_script_menu_footer, validate_menu_decoration_for_area,
     EngineScriptMenuPointerTarget, MenuMode as AppObjectMenuMode, ObjectMenuAction,
-    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState,
+    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState, definition_menu_picture,
+    engine_script_menu_inline_image_specs, engine_script_menu_pointer_target_with_info,
+    render_engine_script_menu_with_gamma, resolve_engine_script_menu_footer,
+    validate_menu_decoration_for_area,
 };
 use offline_startup::{
-    offline_player_paths_identical, offline_player_real_path, OfflineStartupPlayers,
+    OfflineStartupPlayers, offline_player_paths_identical, offline_player_real_path,
 };
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
 use serde::{
+    Deserialize, Serialize,
     de::{self, Unexpected, Visitor},
     ser::Serializer,
-    Deserialize, Serialize,
 };
 use settings::{AudioOptions, DisplayMode, DisplayOptions};
 use startup_player_files::{
-    delete_player_file, discover_player_files, persist_activations, StartupPlayerFile,
+    StartupPlayerFile, delete_player_file, discover_player_files, persist_activations,
 };
-use time::{macros::format_description, OffsetDateTime};
+use time::{OffsetDateTime, macros::format_description};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
     ElementState, Event, KeyboardInput, ModifiersState, MouseButton, MouseScrollDelta, TouchPhase,
@@ -420,6 +420,7 @@ struct PreparedGoLoadingState {
     fair_crew_forced: bool,
     allow_debug: bool,
     team_configuration: TeamConfiguration,
+    team_registry: Vec<lc_engine::TeamInfo>,
 }
 
 #[derive(Debug)]
@@ -483,6 +484,7 @@ impl ScenarioLoadingState {
         fair_crew_forced: bool,
         allow_debug: bool,
         team_configuration: TeamConfiguration,
+        team_registry: Vec<lc_engine::TeamInfo>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
         let _ = sender.send(ScenarioLoadingEvent::Finished(Ok(data)));
@@ -502,6 +504,7 @@ impl ScenarioLoadingState {
                 fair_crew_forced,
                 allow_debug,
                 team_configuration,
+                team_registry,
             }),
             offline_startup_players: None,
         }
@@ -2944,15 +2947,17 @@ impl FrontendAssets {
         let next = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|scope| {
             for _ in 0..workers {
-                scope.spawn(|| loop {
-                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    // Failures surface (with logging) on the cache-miss
-                    // retry in `load`.
-                    match names.get(index) {
-                        Some(name) => {
-                            let _ = graphics.load_image(name);
+                scope.spawn(|| {
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // Failures surface (with logging) on the cache-miss
+                        // retry in `load`.
+                        match names.get(index) {
+                            Some(name) => {
+                                let _ = graphics.load_image(name);
+                            }
+                            None => break,
                         }
-                        None => break,
                     }
                 });
             }
@@ -6556,6 +6561,14 @@ fn initial_control_clients(
     network_mode: Option<&NetworkMode>,
 ) -> ControlClientRegistry {
     let mut clients = ControlClientRegistry::default();
+    if let Some(NetworkMode::Host(HostSettings {
+        prepared: Some(prepared),
+        ..
+    })) = network_mode
+    {
+        clients.replace_snapshot([prepared.host_config().local_core.clone()]);
+        return clients;
+    }
     let client_id = network
         .and_then(|network| i32::try_from(network.local_client_id()).ok())
         .unwrap_or(0);
@@ -6570,11 +6583,7 @@ fn initial_control_clients(
         lc_engine::LegacyCString::from_bytes(bytes).unwrap_or_default()
     };
     let name = match network_mode {
-        Some(NetworkMode::Host(settings)) => settings
-            .prepared
-            .as_ref()
-            .map(|prepared| prepared.host_config().local_core.name.clone())
-            .unwrap_or_else(|| string_name(&settings.player_name)),
+        Some(NetworkMode::Host(settings)) => string_name(&settings.player_name),
         Some(NetworkMode::Client(settings)) => string_name(&settings.player_name),
         None => string_name("Local"),
     };
@@ -6644,6 +6653,338 @@ fn synchronized_parameters_are_league(parameters: &lc_network::JoinGameParameter
     !parameters.league_address.is_empty()
 }
 
+fn synchronized_league_name(parameters: &lc_network::JoinGameParametersEnvelope) -> Vec<u8> {
+    parameters.league.as_bytes().to_vec()
+}
+
+fn seed_engine_player_info_parameters(
+    engine: &mut Engine,
+    league_name: &[u8],
+    player_infos: &ControlPlayerInfoRegistry,
+) {
+    engine.set_league_name(league_name.to_vec());
+    engine.replace_player_info_league_progress_data(player_infos.league_progress_data_snapshot());
+}
+
+fn game_over_host_reference(
+    template: &lc_network::HostGameReference,
+    parameters: lc_network::JoinGameParametersEnvelope,
+    clients: &ControlClientRegistry,
+    player_infos: &ControlPlayerInfoRegistry,
+    teams: &[lc_engine::TeamInfo],
+    max_players: i32,
+    snapshot: &SimulationSnapshot,
+) -> Result<lc_network::HostGameReference, lc_network::HostGameReferenceError> {
+    let winner_ids = snapshot
+        .players
+        .iter()
+        .filter(|player| player.won)
+        .map(|player| player.player_info_id)
+        .collect::<HashSet<_>>();
+    let parameters = live_host_reference_parameters(
+        parameters,
+        clients,
+        player_infos,
+        teams,
+        max_players,
+        Some(&winner_ids),
+    );
+    template.replacing_game_over(
+        parameters,
+        "Running",
+        snapshot.game_time,
+        i32::try_from(snapshot.frame).unwrap_or(i32::MAX),
+        false,
+        snapshot.round_results.league_performance,
+        snapshot
+            .round_results
+            .players
+            .iter()
+            .map(|player| (player.player_info_id, player.league_performance)),
+    )
+}
+
+fn running_host_reference(
+    template: &lc_network::HostGameReference,
+    parameters: lc_network::JoinGameParametersEnvelope,
+    clients: &ControlClientRegistry,
+    player_infos: &ControlPlayerInfoRegistry,
+    teams: &[lc_engine::TeamInfo],
+    max_players: i32,
+    state: &str,
+    join_allowed: bool,
+    snapshot: &SimulationSnapshot,
+) -> Result<lc_network::HostGameReference, lc_network::HostGameReferenceError> {
+    let parameters =
+        live_host_reference_parameters(parameters, clients, player_infos, teams, max_players, None);
+    template.replacing_runtime(
+        parameters,
+        state,
+        snapshot.game_time,
+        i32::try_from(snapshot.frame).unwrap_or(i32::MAX),
+        join_allowed,
+        snapshot.round_results.league_performance,
+    )
+}
+
+fn live_host_reference_parameters(
+    mut parameters: lc_network::JoinGameParametersEnvelope,
+    clients: &ControlClientRegistry,
+    player_infos: &ControlPlayerInfoRegistry,
+    teams: &[lc_engine::TeamInfo],
+    max_players: i32,
+    winner_ids: Option<&HashSet<i32>>,
+) -> lc_network::JoinGameParametersEnvelope {
+    parameters.max_players = max_players;
+    parameters.clients = lc_network::JoinClientRegistrySnapshot::new(clients.snapshot());
+    let (last_player_id, retained_rows) = player_infos.retained_rows_snapshot();
+    parameters.player_infos = lc_network::PlayerInfoListSnapshot {
+        last_player_id,
+        clients: retained_rows
+            .into_iter()
+            .map(|(client_id, flags, mut players)| {
+                for player in &mut players {
+                    if winner_ids.is_some_and(|winner_ids| winner_ids.contains(&player.id)) {
+                        player.flags |= lc_engine::PLAYER_INFO_FLAG_WON;
+                    }
+                }
+                lc_network::ClientPlayerInfosSnapshot {
+                    client_id,
+                    flags,
+                    players,
+                }
+            })
+            .collect(),
+    };
+    project_live_team_memberships(&mut parameters.teams, teams);
+    parameters
+}
+
+fn project_live_team_memberships(
+    target: &mut lc_network::JoinTeamListSnapshot,
+    teams: &[lc_engine::TeamInfo],
+) {
+    let mut matched = vec![false; teams.len()];
+    for target_team in &mut target.teams {
+        let Some((index, team)) = teams
+            .iter()
+            .enumerate()
+            .find(|(index, team)| !matched[*index] && team.id == target_team.id)
+        else {
+            target_team.player_ids.clear();
+            continue;
+        };
+        matched[index] = true;
+        target_team.player_ids.clone_from(&team.player_ids);
+    }
+    for (index, team) in teams.iter().enumerate() {
+        if matched[index] {
+            continue;
+        }
+        let c_string = |value: &str, max_bytes: Option<usize>| {
+            let mut bytes = lc_script::c4_string_bytes(value);
+            if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
+                bytes.truncate(nul);
+            }
+            if let Some(max_bytes) = max_bytes {
+                bytes.truncate(max_bytes);
+            }
+            lc_engine::LegacyCString::from_bytes(bytes)
+                .expect("truncating at the first NUL always yields a legacy C string")
+        };
+        target.teams.push(lc_network::JoinTeamSnapshot {
+            id: team.id,
+            name: c_string(&team.name, Some(30)),
+            player_start_index: team.player_start_index,
+            player_ids: team.player_ids.clone(),
+            color: team.color,
+            icon_spec: c_string(team.icon_spec.as_deref().unwrap_or_default(), None),
+            max_players: team.max_players,
+        });
+    }
+    target.last_team_id = target
+        .last_team_id
+        .max(teams.iter().map(|team| team.id).fold(0, i32::max));
+}
+
+fn runtime_teams_from_initial_metadata(
+    metadata: &lc_engine::InitialNetworkTeamMetadata,
+) -> Vec<lc_engine::TeamInfo> {
+    metadata
+        .teams
+        .iter()
+        .map(|team| {
+            lc_engine::TeamInfo::new(
+                team.id,
+                lc_script::c4_string_from_bytes(team.name.as_bytes()),
+                team.color,
+            )
+            .with_player_ids(team.player_ids.clone())
+            .with_player_start_index(team.player_start_index)
+            .with_max_players(team.max_players)
+            .with_icon_spec(lc_script::c4_string_from_bytes(team.icon_spec.as_bytes()))
+        })
+        .collect()
+}
+
+fn runtime_teams_from_join_snapshot(
+    snapshot: &lc_network::JoinTeamListSnapshot,
+) -> Vec<lc_engine::TeamInfo> {
+    snapshot
+        .teams
+        .iter()
+        .map(|team| {
+            lc_engine::TeamInfo::new(
+                team.id,
+                lc_script::c4_string_from_bytes(team.name.as_bytes()),
+                team.color,
+            )
+            .with_player_ids(team.player_ids.clone())
+            .with_player_start_index(team.player_start_index)
+            .with_max_players(team.max_players)
+            .with_icon_spec(lc_script::c4_string_from_bytes(team.icon_spec.as_bytes()))
+        })
+        .collect()
+}
+
+fn initial_team_from_runtime(team: &lc_engine::TeamInfo) -> lc_engine::InitialNetworkTeam {
+    let legacy = |value: &str, max_bytes: Option<usize>| {
+        let mut bytes = lc_script::c4_string_bytes(value);
+        if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
+            bytes.truncate(nul);
+        }
+        if let Some(max_bytes) = max_bytes {
+            bytes.truncate(max_bytes);
+        }
+        lc_engine::LegacyCString::from_bytes(bytes)
+            .expect("truncating at the first NUL always yields a legacy C string")
+    };
+    lc_engine::InitialNetworkTeam {
+        id: team.id,
+        name: legacy(&team.name, Some(30)),
+        player_start_index: team.player_start_index,
+        player_ids: team.player_ids.clone(),
+        color: team.color,
+        icon_spec: legacy(team.icon_spec.as_deref().unwrap_or_default(), None),
+        max_players: team.max_players,
+    }
+}
+
+fn initial_team_metadata_from_runtime(
+    configuration: TeamConfiguration,
+    teams: &[lc_engine::TeamInfo],
+) -> Option<lc_engine::InitialNetworkTeamMetadata> {
+    let team_distribution = match configuration.distribution {
+        0 => lc_engine::InitialNetworkTeamDistribution::Free,
+        1 => lc_engine::InitialNetworkTeamDistribution::Host,
+        2 => lc_engine::InitialNetworkTeamDistribution::None,
+        3 => lc_engine::InitialNetworkTeamDistribution::Random,
+        4 => lc_engine::InitialNetworkTeamDistribution::RandomInvisible,
+        _ => return None,
+    };
+    Some(lc_engine::InitialNetworkTeamMetadata {
+        active: configuration.active,
+        custom: configuration.custom,
+        allow_hostility_change: configuration.allow_hostility_change,
+        allow_team_switch: configuration.allow_team_switch,
+        auto_generate_teams: configuration.auto_generate_teams,
+        last_team_id: teams.iter().map(|team| team.id).fold(0, i32::max),
+        team_distribution,
+        team_colors: configuration.team_colors,
+        max_script_players: 0,
+        script_player_names: lc_engine::LegacyCString::default(),
+        random_team_count: 0,
+        teams: teams.iter().map(initial_team_from_runtime).collect(),
+    })
+}
+
+fn project_runtime_memberships_into_initial_metadata(
+    metadata: &mut lc_engine::InitialNetworkTeamMetadata,
+    runtime_teams: &[lc_engine::TeamInfo],
+) {
+    let mut matched = vec![false; runtime_teams.len()];
+    for team in &mut metadata.teams {
+        if let Some((index, runtime)) = runtime_teams
+            .iter()
+            .enumerate()
+            .find(|(index, runtime)| !matched[*index] && runtime.id == team.id)
+        {
+            matched[index] = true;
+            team.player_ids.clone_from(&runtime.player_ids);
+        }
+    }
+    metadata.teams.extend(
+        runtime_teams
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !matched[*index])
+            .map(|(_, team)| initial_team_from_runtime(team)),
+    );
+    metadata.last_team_id = metadata
+        .last_team_id
+        .max(runtime_teams.iter().map(|team| team.id).fold(0, i32::max));
+}
+
+fn ordered_control_player_team_memberships(
+    player_infos: &ControlPlayerInfoRegistry,
+) -> Vec<(i32, i32)> {
+    let (_, rows) = player_infos.retained_rows_snapshot();
+    let mut ids = rows
+        .iter()
+        .flat_map(|(_, _, players)| players)
+        .map(|player| player.id)
+        .filter(|id| *id > 0)
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.into_iter()
+        .filter_map(|id| {
+            player_infos.get(id).and_then(|player| {
+                (player.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED == 0)
+                    .then_some((id, player.team))
+            })
+        })
+        .collect()
+}
+
+fn recheck_one_team_membership(
+    team_id: i32,
+    player_ids: &mut Vec<i32>,
+    memberships: &[(i32, i32)],
+) {
+    player_ids.retain(|player_id| {
+        memberships
+            .iter()
+            .any(|(id, assigned_team)| id == player_id && *assigned_team == team_id)
+    });
+    for (player_id, _) in memberships
+        .iter()
+        .filter(|(_, assigned_team)| *assigned_team == team_id)
+    {
+        if !player_ids.contains(player_id) {
+            player_ids.push(*player_id);
+        }
+    }
+}
+
+fn recheck_runtime_team_memberships_from_infos(
+    teams: &mut [lc_engine::TeamInfo],
+    memberships: &[(i32, i32)],
+) {
+    for team in teams {
+        recheck_one_team_membership(team.id, &mut team.player_ids, memberships);
+    }
+}
+
+fn recheck_join_team_memberships_from_infos(
+    teams: &mut [lc_network::JoinTeamSnapshot],
+    memberships: &[(i32, i32)],
+) {
+    for team in teams {
+        recheck_one_team_membership(team.id, &mut team.player_ids, memberships);
+    }
+}
+
 fn synchronized_team_configuration(
     parameters: &lc_network::JoinGameParametersEnvelope,
 ) -> TeamConfiguration {
@@ -6670,6 +7011,34 @@ fn initial_network_is_league(network_mode: Option<&NetworkMode>) -> bool {
             .as_ref()
             .is_some_and(|snapshot| synchronized_parameters_are_league(&snapshot.parameters)),
         NetworkMode::Host(_) | NetworkMode::Client(_) => false,
+    })
+}
+
+fn initial_network_league_name(network_mode: Option<&NetworkMode>) -> Vec<u8> {
+    network_mode
+        .and_then(|mode| match mode {
+            NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            }) => prepared.host_config().initial_join_snapshot.as_ref(),
+            NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+        })
+        .map_or_else(Vec::new, |snapshot| {
+            synchronized_league_name(&snapshot.parameters)
+        })
+}
+
+fn initial_network_team_assignment(
+    network_mode: Option<&NetworkMode>,
+) -> Option<NetworkTeamAssignmentState> {
+    network_mode.and_then(|mode| match mode {
+        NetworkMode::Host(HostSettings {
+            prepared: Some(prepared),
+            ..
+        }) => Some(NetworkTeamAssignmentState::from_prepared_host(
+            prepared.runtime_team_metadata().clone(),
+        )),
+        NetworkMode::Host(_) | NetworkMode::Client(_) => None,
     })
 }
 
@@ -6784,6 +7153,9 @@ struct GameApp {
     startup_network_dialog: Option<lc_frontend::startup_netdlg::NetDlgController>,
     startup_game_search: Option<lc_network::StartupGameSearch>,
     network_game_advertiser: Option<lc_network::NetworkGameAdvertiser>,
+    /// Last validated exact host reference. This state advances independently
+    /// of optional listener I/O and is retained as the next InitLocal rebuild
+    /// template when advertising could not bind.
     advertised_game_reference: Option<lc_network::HostGameReference>,
     startup_player_dialog: Option<lc_frontend::startup_plrsel::PlrSelController>,
     startup_player_files: Vec<StartupPlayerFile>,
@@ -6858,9 +7230,17 @@ struct GameApp {
     network_ticks: NetworkTickGate,
     network_sync: NetworkSyncGate,
     network_control_running: bool,
+    /// Live host `Game.Network.Status` projection for periodic references.
+    /// This is distinct from the control barrier, which may still be waiting
+    /// after ChangeGameStatus has already switched Paused/Running.
+    host_reference_paused: bool,
     network_control_clock: Option<NetworkControlClock>,
     network_max_players: usize,
     network_is_league: bool,
+    /// Exact synchronized `Game.Parameters.League` bytes. This is distinct
+    /// from `network_is_league`, which models `isLeague()`'s LeagueAddress
+    /// test; GetLeagueProgressData gates on this name instead.
+    network_league_name: Vec<u8>,
     /// C4Game::FPS and cFPS, sampled/reset by the one-second timer.
     frames_per_second: i32,
     frames_since_second: i32,
@@ -8173,12 +8553,12 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic object-independent viewport camera is unavailable for a zero-object world; refusing both the solid navy empty-state fallback and an arbitrary first-object focus/selection"
             ),
-            Self::RunningViewport(ClassicViewportBoundary::LocalViewportUnavailable {
-                owner,
-            }) => write!(
-                f,
-                "declared local player {owner} has no authoritative local viewport; refusing the solid navy fallback and an arbitrary first-object focus/selection"
-            ),
+            Self::RunningViewport(ClassicViewportBoundary::LocalViewportUnavailable { owner }) => {
+                write!(
+                    f,
+                    "declared local player {owner} has no authoritative local viewport; refusing the solid navy fallback and an arbitrary first-object focus/selection"
+                )
+            }
             Self::RunningViewport(ClassicViewportBoundary::LocalFocusUnavailable {
                 owner,
                 slot,
@@ -9035,7 +9415,7 @@ impl NetworkLobbyState {
                     (
                         client_id,
                         LobbyParticipantState {
-                            name: client.name.to_string_lossy().into_owned(),
+                            name: legacy_presentation_text(client.name.as_bytes()),
                             ready: client.lobby_ready,
                             kind: if client.observer {
                                 ParticipantKind::Observer
@@ -9581,13 +9961,10 @@ impl MenuState {
         if count == 0 {
             return Vec::new();
         }
-        let current = self.menu.selected_index().unwrap_or_else(|| {
-            if delta.is_negative() {
-                count - 1
-            } else {
-                0
-            }
-        });
+        let current = self
+            .menu
+            .selected_index()
+            .unwrap_or_else(|| if delta.is_negative() { count - 1 } else { 0 });
         let next = current.saturating_add_signed(delta).min(count - 1);
         if next == current && self.menu.selected_index().is_some() {
             return Vec::new();
@@ -13100,6 +13477,26 @@ fn overlay_text_needs_update(current: &str, default_prefix: &str) -> bool {
     current.is_empty() || current.starts_with(default_prefix)
 }
 
+fn c4_presentation_text(text: &str) -> String {
+    legacy_presentation_text(&lc_script::c4_string_bytes(text))
+}
+
+fn legacy_presentation_text(bytes: &[u8]) -> String {
+    lc_resources::decode_legacy_script_text(bytes)
+}
+
+fn player_join_board_line(frame: u64, player_name: &str) -> (String, u64) {
+    const PREFIX: &str = "Player join: ";
+    let line = format!("{PREFIX}{}", c4_presentation_text(player_name));
+    let raw_len = PREFIX
+        .len()
+        .saturating_add(lc_script::c4_string_byte_len(player_name));
+    (
+        line,
+        frame.saturating_add(raw_len as u64).saturating_add(30),
+    )
+}
+
 fn build_game_over_dialog(
     snapshot: &SimulationSnapshot,
     local_owner: i32,
@@ -13148,7 +13545,7 @@ fn build_game_over_dialog(
                 name: if state.name.trim().is_empty() {
                     format!("Player {}", state.id)
                 } else {
-                    state.name.clone()
+                    c4_presentation_text(&state.name)
                 },
                 won: state.won,
                 color_dw: u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b),
@@ -13161,7 +13558,7 @@ fn build_game_over_dialog(
                 score_new: (!snapshot.round_results.hide_settlement_score)
                     .then_some(result.score_new)
                     .flatten(),
-                custom_evaluation_strings: result.custom_evaluation_strings.clone(),
+                custom_evaluation_strings: c4_presentation_text(&result.custom_evaluation_strings),
                 big_icon: None,
             });
         }
@@ -13272,6 +13669,9 @@ impl GameApp {
         let host_join_snapshot = initial_host_join_snapshot(network_mode.as_ref());
         let network_max_players = initial_network_max_players(network_mode.as_ref());
         let network_is_league = initial_network_is_league(network_mode.as_ref());
+        let network_league_name = initial_network_league_name(network_mode.as_ref());
+        let network_team_assignment = initial_network_team_assignment(network_mode.as_ref());
+        let control_player_infos = ControlPlayerInfoRegistry::default();
         // Scenario discovery only walks directories and reads scenario
         // groups; start it only after the process-global resource gate.
         let scenario_discovery = std::thread::spawn(load_frontend_scenarios);
@@ -13318,17 +13718,23 @@ impl GameApp {
 
         // Engine starts with default materials; will be updated when boot loading finishes
         let mut engine = Engine::new();
-        engine.set_control_host(!matches!(network_mode.as_ref(), Some(NetworkMode::Client(_))));
+        engine.set_control_host(!matches!(
+            network_mode.as_ref(),
+            Some(NetworkMode::Client(_))
+        ));
         engine.set_local_players([runtime.player_owner]);
         engine.set_max_players(i32::try_from(network_max_players).unwrap_or(i32::MAX));
+        seed_engine_player_info_parameters(
+            &mut engine,
+            &network_league_name,
+            &control_player_infos,
+        );
         if let Some(snapshot) = host_join_snapshot.as_ref() {
             engine.set_use_fair_crew(snapshot.parameters.use_fair_crew);
             engine.set_fair_crew_strength(snapshot.parameters.fair_crew_strength);
             engine.set_fair_crew_forced(snapshot.parameters.fair_crew_forced);
             engine.set_allow_debug(snapshot.parameters.allow_debug);
-            engine.set_team_distribution(i32::from(
-                snapshot.parameters.teams.team_distribution,
-            ));
+            engine.set_team_distribution(i32::from(snapshot.parameters.teams.team_distribution));
             engine.set_team_colors(snapshot.parameters.teams.team_colors != 0);
         }
         let snapshot = engine.snapshot();
@@ -13488,14 +13894,16 @@ impl GameApp {
             network_ticks: NetworkTickGate::default(),
             network_sync: NetworkSyncGate::default(),
             network_control_running,
+            host_reference_paused: false,
             network_control_clock,
             network_max_players,
             network_is_league,
+            network_league_name,
             frames_per_second: 0,
             frames_since_second: 0,
             control_clients,
-            control_player_infos: ControlPlayerInfoRegistry::default(),
-            network_team_assignment: None,
+            control_player_infos,
+            network_team_assignment,
             admission_resources: AdmissionResourceStore::default(),
             host_join_snapshot,
             pending_network_join_data: None,
@@ -14150,7 +14558,7 @@ impl GameApp {
         for player in players.iter_mut() {
             for crew in player.crew.iter_mut() {
                 if let Some(info) = self.engine.crew_object_info(crew.object_id) {
-                    crew.info_name = Some(info.name.clone());
+                    crew.info_name = Some(c4_presentation_text(&info.name));
                     crew.rank = info.rank;
                     crew.rank_name = Some(info.rank_name.clone());
                 }
@@ -14176,7 +14584,7 @@ impl GameApp {
         for player in players.iter_mut() {
             for crew in player.crew.iter_mut() {
                 if let Some(info) = self.engine.crew_object_info(crew.object_id) {
-                    crew.label = info.name.clone();
+                    crew.label = c4_presentation_text(&info.name);
                     crew.rank = info.rank;
                 }
                 let Some(object) = self.snapshot.object(crew.object_id) else {
@@ -16810,15 +17218,16 @@ impl GameApp {
                     .engine
                     .players()
                     .filter(|player| player.team() == Some(team.id))
-                    .map(|player| player.name().to_string())
+                    .map(|player| c4_presentation_text(player.name()))
                     .collect::<Vec<_>>();
                 if participants.is_empty() {
                     add_new_team = false;
                 }
+                let team_name = c4_presentation_text(&team.name);
                 let caption = if participants.is_empty() {
-                    team.name.clone()
+                    team_name
                 } else {
-                    format!("{} ({})", team.name, participants.join(", "))
+                    format!("{} ({})", team_name, participants.join(", "))
                 };
                 TeamSelectionEntry {
                     id: team.id,
@@ -16918,6 +17327,11 @@ impl GameApp {
         let initialized = self.engine.initialize_scenario_player(player, team)?;
         self.snapshot = self.engine.snapshot();
         if initialized.is_some() {
+            if self.refresh_current_player_info_teams() {
+                self.publish_current_host_player_infos();
+            } else {
+                self.publish_updated_host_join_snapshot();
+            }
             self.apply_focus_selection();
             self.snapshot = self.engine.snapshot();
             self.refresh_focus();
@@ -17679,7 +18093,7 @@ impl GameApp {
             .filter(|player| player.path.is_file() && !player.render_model.activated)
             .map(|player| NewPlayerEntry {
                 file: player.path.to_string_lossy().into_owned(),
-                name: player.player_file.name.clone(),
+                name: c4_presentation_text(&player.player_file.name),
             })
             .collect()
     }
@@ -18300,8 +18714,28 @@ impl GameApp {
         // SetMaxPlayer writes Game.Parameters.MaxPlayers inside the engine's
         // synchronized script call. Mirror that value before either the
         // queued CreateScriptPlayer admission or the empty fast path.
+        let mut host_snapshot_changed = false;
         if let Some(max_players) = self.engine.max_players() {
             self.network_max_players = usize::try_from(max_players).unwrap_or(0);
+            if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+                if snapshot.parameters.max_players != max_players {
+                    snapshot.parameters.max_players = max_players;
+                    host_snapshot_changed = true;
+                }
+            }
+        }
+        let progress_updates = self.engine.take_player_info_league_progress_updates();
+        let mut player_infos_changed = self.refresh_current_player_info_teams();
+        for (player_info_id, data) in progress_updates {
+            player_infos_changed |= self
+                .control_player_infos
+                .set_league_progress_data(player_info_id, data);
+        }
+        if player_infos_changed {
+            host_snapshot_changed |= self.refresh_current_host_player_infos();
+        }
+        if host_snapshot_changed {
+            self.publish_updated_host_join_snapshot();
         }
         let updates = self.engine.take_script_player_info_updates();
         if updates.is_empty() {
@@ -18328,6 +18762,12 @@ impl GameApp {
                     };
                     let client_id = info.client_id;
                     self.control_player_infos.apply(info);
+                    self.recheck_team_memberships_from_player_infos();
+                    seed_engine_player_info_parameters(
+                        &mut self.engine,
+                        &self.network_league_name,
+                        &self.control_player_infos,
+                    );
                     let joins = self
                         .control_player_infos
                         .issue_unjoined_local_players(client_id, |_| {
@@ -18480,7 +18920,7 @@ impl GameApp {
         .map_err(|error| error.to_string())?;
         validate_client_network_scenario(&scenario_data)?;
         self.client_material_resource_groups = Some(material_groups);
-        let title = join_data.parameters.title.to_string_lossy().into_owned();
+        let title = legacy_presentation_text(join_data.parameters.title.as_bytes());
         let scenario = FrontendScenario {
             identifier: combined_path
                 .file_name()
@@ -18510,6 +18950,7 @@ impl GameApp {
             allow_user_change: None,
             definition_modules: Vec::new(),
         };
+        let team_registry = runtime_teams_from_join_snapshot(&join_data.parameters.teams);
         self.loading_state = Some(ScenarioLoadingState::from_loaded(
             scenario,
             scenario_data,
@@ -18520,6 +18961,7 @@ impl GameApp {
             join_data.parameters.fair_crew_forced,
             join_data.parameters.allow_debug,
             synchronized_team_configuration(&join_data.parameters),
+            team_registry,
         ));
         self.pending_network_join_data = None;
         self.mode = AppMode::Loading;
@@ -18597,6 +19039,7 @@ impl GameApp {
             self.apply_ready_controls(target_tick, sync_controls)?;
         }
         if status.state == lc_network::NETWORK_STATE_GO {
+            self.host_reference_paused = false;
             if matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_))) {
                 for client_id in self.control_clients.activated_client_ids() {
                     self.issue_unjoined_joins_for_client(client_id);
@@ -18609,6 +19052,10 @@ impl GameApp {
                 self.mode = AppMode::Running;
             }
             self.network_control_running = true;
+            self.publish_running_host_reference();
+        } else if status.state == lc_network::NETWORK_STATE_PAUSE {
+            self.host_reference_paused = true;
+            self.publish_running_host_reference();
         }
         Ok(())
     }
@@ -18819,6 +19266,7 @@ impl GameApp {
                             .set_allow_debug(join_data.parameters.allow_debug);
                         self.network_is_league =
                             synchronized_parameters_are_league(&join_data.parameters);
+                        self.network_league_name = synchronized_league_name(&join_data.parameters);
                         self.network_control_clock = Some(NetworkControlClock::new(
                             join_data.start_control_tick,
                             join_data.parameters.control_rate,
@@ -18840,8 +19288,13 @@ impl GameApp {
                                     by_client: 0,
                                 }),
                         );
+                        seed_engine_player_info_parameters(
+                            &mut self.engine,
+                            &self.network_league_name,
+                            &self.control_player_infos,
+                        );
                         let scenario_title =
-                            join_data.parameters.title.to_string_lossy().into_owned();
+                            legacy_presentation_text(join_data.parameters.title.as_bytes());
                         if let Some(lobby) = self.network_lobby.as_mut() {
                             lobby.replace_participants_from_clients(
                                 &join_data.parameters.clients.clients,
@@ -18872,12 +19325,21 @@ impl GameApp {
                     }
                     NetworkEvent::ReadyCheck(packet) => {
                         if packet.data.vote_requested() {
+                            if self.control_clients.clear_nonhost_lobby_ready() {
+                                self.publish_updated_host_join_snapshot();
+                            }
                             self.handle_lobby_ready_check_request(packet)?;
                         } else {
+                            let ready_state_changed = self
+                                .control_clients
+                                .set_lobby_ready(packet.client_id, packet.data.is_ready());
                             let changed_client_id = self
                                 .network_lobby
                                 .as_mut()
                                 .and_then(|lobby| lobby.apply_ready_check(packet));
+                            if ready_state_changed {
+                                self.publish_updated_host_join_snapshot();
+                            }
                             if let Some(changed_client_id) = changed_client_id {
                                 self.on_lobby_client_ready_state_change(changed_client_id)?;
                             }
@@ -18978,7 +19440,9 @@ impl GameApp {
                     }
                     NetworkEvent::DirectControl(control) => match control {
                         NetworkControl::ClientJoin(join) => {
-                            self.control_clients.apply_join(&join);
+                            if self.control_clients.apply_join(&join) {
+                                self.publish_updated_host_join_snapshot();
+                            }
                         }
                         NetworkControl::SyncCheck(packet) => {
                             self.handle_sync_check(packet);
@@ -18986,6 +19450,13 @@ impl GameApp {
                         NetworkControl::PlayerInfo(info) => {
                             let client_id = info.client_id;
                             self.control_player_infos.apply(info);
+                            self.recheck_team_memberships_from_player_infos();
+                            seed_engine_player_info_parameters(
+                                &mut self.engine,
+                                &self.network_league_name,
+                                &self.control_player_infos,
+                            );
+                            self.publish_current_host_player_infos();
                             let should_issue_joins = self.mode == AppMode::Running
                                 && matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_)))
                                 && self.control_clients.contains(client_id)
@@ -20894,13 +21365,7 @@ impl GameApp {
                     object.as_u64() as i32,
                 )
             } else if let Some(command) = command {
-                (
-                    command,
-                    position.x,
-                    position.y,
-                    object.as_u64() as i32,
-                    0,
-                )
+                (command, position.x, position.y, object.as_u64() as i32, 0)
             } else {
                 continue;
             };
@@ -22992,6 +23457,15 @@ impl GameApp {
                             );
                             self.control_clients = control_clients;
                             self.host_join_snapshot = initial_host_join_snapshot(Some(&mode));
+                            self.network_is_league = initial_network_is_league(Some(&mode));
+                            self.network_league_name = initial_network_league_name(Some(&mode));
+                            seed_engine_player_info_parameters(
+                                &mut self.engine,
+                                &self.network_league_name,
+                                &self.control_player_infos,
+                            );
+                            self.network_team_assignment =
+                                initial_network_team_assignment(Some(&mode));
                             self.network_mode = Some(mode);
                             self.network = Some(manager);
                             self.network_control_running = false;
@@ -23017,6 +23491,7 @@ impl GameApp {
                                 NetworkMode::Host(_) | NetworkMode::Client(_) => {
                                     self.network_game_advertiser = None;
                                     self.advertised_game_reference = None;
+                                    self.host_reference_paused = false;
                                 }
                             }
                             self.network_max_players = initial_network_max_players(Some(&mode));
@@ -23025,6 +23500,15 @@ impl GameApp {
                             );
                             self.control_clients = control_clients;
                             self.host_join_snapshot = initial_host_join_snapshot(Some(&mode));
+                            self.network_is_league = initial_network_is_league(Some(&mode));
+                            self.network_league_name = initial_network_league_name(Some(&mode));
+                            seed_engine_player_info_parameters(
+                                &mut self.engine,
+                                &self.network_league_name,
+                                &self.control_player_infos,
+                            );
+                            self.network_team_assignment =
+                                initial_network_team_assignment(Some(&mode));
                             self.network_mode = Some(mode);
                             self.network = Some(manager);
                             self.network_control_running = false;
@@ -23062,11 +23546,18 @@ impl GameApp {
                     );
                     self.network_game_advertiser = None;
                     self.advertised_game_reference = None;
+                    self.host_reference_paused = false;
                     self.network_max_players = initial_network_max_players(Some(&mode));
                     self.engine.set_max_players(
                         i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
                     );
                     self.network_is_league = initial_network_is_league(Some(&mode));
+                    self.network_league_name = initial_network_league_name(Some(&mode));
+                    seed_engine_player_info_parameters(
+                        &mut self.engine,
+                        &self.network_league_name,
+                        &self.control_player_infos,
+                    );
                     self.network_control_clock = initial_network_control_clock(Some(&mode));
                     self.control_clients = initial_control_clients(Some(&manager), Some(&mode));
                     self.host_join_snapshot = initial_host_join_snapshot(Some(&mode));
@@ -23085,6 +23576,13 @@ impl GameApp {
                 self.network = None;
                 self.network_mode = None;
                 self.host_join_snapshot = None;
+                self.network_is_league = false;
+                self.network_league_name.clear();
+                seed_engine_player_info_parameters(
+                    &mut self.engine,
+                    &self.network_league_name,
+                    &self.control_player_infos,
+                );
                 self.network_control_running = true;
                 self.control_clients = initial_control_clients(None, None);
                 self.startup_view = StartupView::NetworkGame;
@@ -23102,6 +23600,13 @@ impl GameApp {
             self.network = None;
             self.network_mode = None;
             self.host_join_snapshot = None;
+            self.network_is_league = false;
+            self.network_league_name.clear();
+            seed_engine_player_info_parameters(
+                &mut self.engine,
+                &self.network_league_name,
+                &self.control_player_infos,
+            );
             self.network_control_running = true;
             self.control_clients = initial_control_clients(None, None);
             self.startup_view = StartupView::NetworkGame;
@@ -23124,19 +23629,147 @@ impl GameApp {
                 tracing::warn!(%error, "exact network game reference unavailable");
                 self.network_game_advertiser = None;
                 self.advertised_game_reference = None;
+                self.host_reference_paused = false;
                 return;
             }
         };
         let config = load_network_advertiser_settings(self.app_paths.as_ref());
+        self.start_network_game_advertiser_with_reference(config, reference);
+    }
+
+    fn start_network_game_advertiser_with_reference(
+        &mut self,
+        config: lc_network::NetworkGameAdvertiserConfig,
+        reference: lc_network::HostGameReference,
+    ) {
+        // The validated InitLocal value is game state, not socket state. Keep
+        // it even when the optional LAN/reference listener cannot bind so a
+        // later runtime or game-over rebuild never falls back to stale data.
+        self.advertised_game_reference = Some(reference.clone());
+        self.host_reference_paused = false;
         match lc_network::NetworkGameAdvertiser::start_exact(config, reference.clone()) {
             Ok(advertiser) => {
                 self.network_game_advertiser = Some(advertiser);
-                self.advertised_game_reference = Some(reference);
             }
             Err(error) => {
                 tracing::warn!(%error, "network game advertising unavailable");
                 self.network_game_advertiser = None;
-                self.advertised_game_reference = None;
+            }
+        }
+    }
+
+    fn publish_running_host_reference(&mut self) {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return;
+        }
+        let Some(template) = self.advertised_game_reference.clone() else {
+            return;
+        };
+        let parameters = self
+            .host_join_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.parameters.clone())
+            .unwrap_or_else(|| template.parameters().clone());
+        let max_players = self
+            .engine
+            .max_players()
+            .unwrap_or_else(|| i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
+        let join_allowed = self
+            .network_mode
+            .as_ref()
+            .and_then(|mode| match mode {
+                NetworkMode::Host(HostSettings {
+                    prepared: Some(prepared),
+                    ..
+                }) => Some(prepared.admission().runtime_join_allowed()),
+                NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+            })
+            .unwrap_or(template.summary().join_allowed);
+        let updated = match running_host_reference(
+            &template,
+            parameters,
+            &self.control_clients,
+            &self.control_player_infos,
+            self.engine.teams(),
+            max_players,
+            if self.host_reference_paused {
+                "Paused"
+            } else {
+                "Running"
+            },
+            join_allowed,
+            &self.snapshot,
+        ) {
+            Ok(reference) => reference,
+            Err(error) => {
+                tracing::error!(%error, "failed to rebuild running host reference");
+                return;
+            }
+        };
+
+        // Commit the validated state independently of advertiser I/O.
+        self.advertised_game_reference = Some(updated.clone());
+        if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+            if let Err(error) = advertiser.update_exact(&updated) {
+                tracing::error!(%error, "failed to update running host reference");
+            }
+        }
+    }
+
+    fn publish_game_over_host_reference(&mut self) {
+        let config = load_network_advertiser_settings(self.app_paths.as_ref());
+        self.publish_game_over_host_reference_with_config(config);
+    }
+
+    fn publish_game_over_host_reference_with_config(
+        &mut self,
+        config: lc_network::NetworkGameAdvertiserConfig,
+    ) {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return;
+        }
+        let Some(template) = self.advertised_game_reference.clone() else {
+            return;
+        };
+        let parameters = self
+            .host_join_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.parameters.clone())
+            .unwrap_or_else(|| template.parameters().clone());
+        let max_players = self
+            .engine
+            .max_players()
+            .unwrap_or_else(|| i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
+        let updated = match game_over_host_reference(
+            &template,
+            parameters,
+            &self.control_clients,
+            &self.control_player_infos,
+            self.engine.teams(),
+            max_players,
+            &self.snapshot,
+        ) {
+            Ok(reference) => reference,
+            Err(error) => {
+                tracing::error!(%error, "failed to rebuild game-over host reference");
+                return;
+            }
+        };
+
+        // The final reference is authoritative even if an optional listener
+        // update or one-shot rebind fails.
+        self.advertised_game_reference = Some(updated.clone());
+
+        if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+            if let Err(error) = advertiser.update_exact(&updated) {
+                tracing::error!(%error, "failed to update game-over host reference");
+            }
+        } else {
+            match lc_network::NetworkGameAdvertiser::start_exact(config, updated.clone()) {
+                Ok(advertiser) => self.network_game_advertiser = Some(advertiser),
+                Err(error) => {
+                    tracing::warn!(%error, "game-over network advertising unavailable");
+                }
             }
         }
     }
@@ -23878,6 +24511,7 @@ impl GameApp {
                 fair_crew_forced,
                 allow_debug,
                 team_configuration,
+                team_registry,
             )) = self
                 .host_join_snapshot
                 .as_ref()
@@ -23890,6 +24524,7 @@ impl GameApp {
                         snapshot.parameters.fair_crew_forced,
                         snapshot.parameters.allow_debug,
                         synchronized_team_configuration(&snapshot.parameters),
+                        runtime_teams_from_join_snapshot(&snapshot.parameters.teams),
                     )
                 })
             else {
@@ -23955,6 +24590,7 @@ impl GameApp {
                 fair_crew_forced,
                 allow_debug,
                 team_configuration,
+                team_registry,
             ));
             self.mode = AppMode::Loading;
             return Ok(());
@@ -24069,6 +24705,9 @@ impl GameApp {
                 }
             }
         }
+        if self.control_clients.clear_nonhost_lobby_ready() {
+            self.publish_updated_host_join_snapshot();
+        }
         if let Some(Err(error)) = self
             .network
             .as_ref()
@@ -24180,6 +24819,14 @@ impl GameApp {
                     } else {
                         lc_network::ReadyCheckData::NotReady
                     };
+                    if i32::try_from(changed_client_id)
+                        .ok()
+                        .is_some_and(|client_id| {
+                            self.control_clients.set_lobby_ready(client_id, ready)
+                        })
+                    {
+                        self.publish_updated_host_join_snapshot();
+                    }
                     if let Some(Err(error)) = self
                         .network
                         .as_ref()
@@ -25217,6 +25864,7 @@ impl GameApp {
         self.startup_game_search = None;
         self.network_game_advertiser = None;
         self.advertised_game_reference = None;
+        self.host_reference_paused = false;
         if self.startup_view == StartupView::NetworkLobby {
             self.network_lobby = None;
             self.classic_host_lobby = None;
@@ -25231,6 +25879,13 @@ impl GameApp {
             self.admission_resources.clear();
             self.executing_ready_tick = None;
             self.control_player_infos = ControlPlayerInfoRegistry::default();
+            self.network_is_league = false;
+            self.network_league_name.clear();
+            seed_engine_player_info_parameters(
+                &mut self.engine,
+                &self.network_league_name,
+                &self.control_player_infos,
+            );
             self.network_control_running = true;
             self.control_clients = initial_control_clients(None, None);
             self.scenario_game_options = GameOptionButtons::new(
@@ -25343,34 +25998,14 @@ impl GameApp {
         let game_part_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
         self.engine.remove_player(control.player)?;
         self.local_controls.remove(control.player);
-        let mut host_snapshot_changed = false;
-        if info_id != 0 {
-            self.control_player_infos
-                .mark_removed(info_id, control.disconnected, game_part_frame);
-            if let Some(info) = self
-                .host_join_snapshot
-                .as_mut()
-                .and_then(|snapshot| {
-                    snapshot
-                        .parameters
-                        .player_infos
-                        .clients
-                        .iter_mut()
-                        .flat_map(|client| client.players.iter_mut())
-                        .find(|info| info.id == info_id)
-                })
-            {
-                info.flags |= lc_engine::PLAYER_INFO_FLAG_JOINED
-                    | lc_engine::PLAYER_INFO_FLAG_REMOVED;
-                if control.disconnected {
-                    info.flags |= lc_engine::PLAYER_INFO_FLAG_DISCONNECTED;
-                }
-                info.game_part_frame = game_part_frame;
-                host_snapshot_changed = true;
-            }
-        }
-        if host_snapshot_changed {
-            self.publish_updated_host_join_snapshot();
+        if info_id != 0
+            && self.control_player_infos.mark_removed(
+                info_id,
+                control.disconnected,
+                game_part_frame,
+            )
+        {
+            self.publish_current_host_player_infos();
         }
         Ok(())
     }
@@ -25451,6 +26086,9 @@ impl GameApp {
         }
         self.network = None;
         self.network_mode = None;
+        self.network_game_advertiser = None;
+        self.advertised_game_reference = None;
+        self.host_reference_paused = false;
         self.host_join_snapshot = None;
         self.network_lobby = None;
         self.host_lobby_countdown = None;
@@ -25473,6 +26111,18 @@ impl GameApp {
     }
 
     fn publish_updated_host_join_snapshot(&mut self) {
+        let project_runtime_teams = matches!(self.mode, AppMode::Running);
+        let clients = lc_network::JoinClientRegistrySnapshot::new(self.control_clients.snapshot());
+        let teams = project_runtime_teams.then(|| self.engine.teams().to_vec());
+        if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+            // Game.Clients and Game.Teams are live aliases of their
+            // C4GameParameters counterparts in native. Materialize those
+            // aliases before any later-join or reference serialization.
+            snapshot.parameters.clients = clients;
+            if let Some(teams) = teams.as_deref() {
+                project_live_team_memberships(&mut snapshot.parameters.teams, teams);
+            }
+        }
         let Some(snapshot) = self.host_join_snapshot.clone() else {
             return;
         };
@@ -25481,8 +26131,25 @@ impl GameApp {
                 tracing::error!(%error, "failed to publish updated host JoinData");
             }
         }
-        if let Some(reference) = self.advertised_game_reference.as_ref() {
-            match reference.replacing_parameters(snapshot.parameters) {
+        if let Some(reference) = self.advertised_game_reference.clone() {
+            let rebuilt = if self.snapshot.game_over {
+                let max_players = self
+                    .engine
+                    .max_players()
+                    .unwrap_or_else(|| i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
+                game_over_host_reference(
+                    &reference,
+                    snapshot.parameters,
+                    &self.control_clients,
+                    &self.control_player_infos,
+                    self.engine.teams(),
+                    max_players,
+                    &self.snapshot,
+                )
+            } else {
+                reference.replacing_parameters(snapshot.parameters)
+            };
+            match rebuilt {
                 Ok(updated) => {
                     if let Some(advertiser) = self.network_game_advertiser.as_ref() {
                         if let Err(error) = advertiser.update_exact(&updated) {
@@ -25498,6 +26165,118 @@ impl GameApp {
         }
     }
 
+    /// C++ stores `Game.PlayerInfos` as a reference to
+    /// `Game.Parameters.PlayerInfos`, so every authoritative registry mutation
+    /// is automatically visible to later JoinData consumers
+    /// (src/C4Game.cpp:65-71; src/C4Network2.cpp:1820-1844).
+    fn refresh_current_host_player_infos(&mut self) -> bool {
+        if !matches!(self.runtime_network_role(), RuntimeNetworkRole::Host) {
+            return false;
+        }
+        let Some(snapshot) = self.host_join_snapshot.as_mut() else {
+            return false;
+        };
+        let (last_player_id, clients) = self.control_player_infos.retained_rows_snapshot();
+        snapshot.parameters.player_infos = lc_network::PlayerInfoListSnapshot {
+            last_player_id,
+            clients: clients
+                .into_iter()
+                .map(
+                    |(client_id, flags, players)| lc_network::ClientPlayerInfosSnapshot {
+                        client_id,
+                        flags,
+                        players,
+                    },
+                )
+                .collect(),
+        };
+        true
+    }
+
+    /// `C4Network2Players::HandlePlayerInfo` immediately rechecks the live
+    /// C4TeamList. Keep both the pre-activation registry and any retained
+    /// JoinData projection at that same direct-control boundary.
+    fn recheck_team_memberships_from_player_infos(&mut self) {
+        let memberships = ordered_control_player_team_memberships(&self.control_player_infos);
+        let exact_metadata = self.network_team_assignment.as_mut().map(|assignment| {
+            self.control_player_infos
+                .recheck_team_players(assignment.teams_mut());
+            assignment.teams().clone()
+        });
+
+        if let Some(metadata) = exact_metadata {
+            let runtime_teams = runtime_teams_from_initial_metadata(&metadata);
+            let snapshot = lc_network::join_team_list_snapshot(metadata);
+            self.engine.set_teams(runtime_teams.clone());
+            if let Some(prepared) = self
+                .loading_state
+                .as_mut()
+                .and_then(|loading| loading.prepared_go.as_mut())
+            {
+                prepared.team_registry = runtime_teams;
+            }
+            if let Some(join_data) = self.pending_network_join_data.as_mut() {
+                join_data.parameters.teams = snapshot.clone();
+            }
+            if let Some(host_snapshot) = self.host_join_snapshot.as_mut() {
+                host_snapshot.parameters.teams = snapshot;
+            }
+            return;
+        }
+
+        if let Some(prepared) = self
+            .loading_state
+            .as_mut()
+            .and_then(|loading| loading.prepared_go.as_mut())
+        {
+            recheck_runtime_team_memberships_from_infos(&mut prepared.team_registry, &memberships);
+        }
+        if let Some(join_data) = self.pending_network_join_data.as_mut() {
+            recheck_join_team_memberships_from_infos(
+                &mut join_data.parameters.teams.teams,
+                &memberships,
+            );
+        }
+        if matches!(self.mode, AppMode::Running) && !self.engine.teams().is_empty() {
+            let mut runtime_teams = self.engine.teams().to_vec();
+            recheck_runtime_team_memberships_from_infos(&mut runtime_teams, &memberships);
+            self.engine.set_teams(runtime_teams);
+        }
+    }
+
+    fn refresh_current_player_info_teams(&mut self) -> bool {
+        let updates = self
+            .engine
+            .players()
+            .filter_map(|player| {
+                let info_id = player.player_info_id();
+                (info_id != 0).then(|| {
+                    let color = player.color().map(|color| {
+                        (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+                    });
+                    (info_id, player.team().unwrap_or(0), color)
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some(maximum_id) = updates.iter().map(|(info_id, _, _)| *info_id).max() {
+            self.control_player_infos
+                .reserve_player_ids_through(maximum_id);
+        }
+        let mut changed = false;
+        for (info_id, team, color) in updates {
+            changed |= self
+                .control_player_infos
+                .set_team_and_color(info_id, team, color);
+        }
+        changed
+    }
+
+    fn publish_current_host_player_infos(&mut self) {
+        if self.refresh_current_host_player_infos() {
+            self.publish_updated_host_join_snapshot();
+        }
+    }
+
     /// Execute the six C4ControlSet value types in packet order. Native
     /// `HostControl` means exactly author 0; DisableDebug is the deliberate
     /// exception and may be sent by any client.
@@ -25507,6 +26286,11 @@ impl GameApp {
         }
 
         let mut host_snapshot_changed = false;
+        let runtime_network_role = self.runtime_network_role();
+        let executes_control_host_team_logic =
+            matches!(runtime_network_role, RuntimeNetworkRole::Host)
+                || (matches!(runtime_network_role, RuntimeNetworkRole::Offline)
+                    && self.engine.is_control_host());
         match set.value_type {
             // C4CVT_ControlRate
             0 => {
@@ -25563,6 +26347,35 @@ impl GameApp {
             }
             // C4CVT_TeamDistribution
             3 => {
+                let host_team_update = if executes_control_host_team_logic {
+                    let has_or_will_have_lobby = self.network.is_some()
+                        && !matches!(self.mode, AppMode::Running)
+                        && (self.network_lobby.is_some() || self.classic_host_lobby.is_some());
+                    let Some(team_assignment) = self.network_team_assignment.as_mut() else {
+                        let detail = "prepared host team state is unavailable for TeamDistribution";
+                        tracing::error!(detail, "cannot execute exact TeamDistribution control");
+                        self.status_text = detail.to_string();
+                        return;
+                    };
+                    let updates = match team_assignment.set_distribution(
+                        &mut self.control_player_infos,
+                        set.data,
+                        has_or_will_have_lobby,
+                    ) {
+                        Ok(updates) => updates,
+                        Err(NetworkTeamControlError::InvalidDistribution(_)) => return,
+                        Err(error) => {
+                            tracing::error!(%error, "cannot execute exact TeamDistribution control");
+                            self.status_text = format!(
+                                "TeamDistribution is unavailable without native team generation: {error}"
+                            );
+                            return;
+                        }
+                    };
+                    Some((team_assignment.teams().clone(), updates))
+                } else {
+                    None
+                };
                 if !self.engine.set_team_distribution(set.data) {
                     return;
                 }
@@ -25576,7 +26389,33 @@ impl GameApp {
                 if let Some(join_data) = self.pending_network_join_data.as_mut() {
                     join_data.parameters.teams.team_distribution = set.data as u8;
                 }
-                if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+                if let Some((metadata, updates)) = host_team_update {
+                    let runtime_teams = runtime_teams_from_initial_metadata(&metadata);
+                    let team_snapshot = lc_network::join_team_list_snapshot(metadata);
+                    self.engine.set_teams(runtime_teams.clone());
+                    if let Some(prepared) = self
+                        .loading_state
+                        .as_mut()
+                        .and_then(|loading| loading.prepared_go.as_mut())
+                    {
+                        prepared.team_registry = runtime_teams;
+                    }
+                    if let Some(join_data) = self.pending_network_join_data.as_mut() {
+                        join_data.parameters.teams = team_snapshot.clone();
+                    }
+                    if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+                        snapshot.parameters.teams = team_snapshot;
+                        host_snapshot_changed = true;
+                    }
+                    host_snapshot_changed |= self.refresh_current_host_player_infos();
+                    if let Some(network) = self.network.as_ref() {
+                        for update in updates {
+                            if let Err(error) = network.broadcast_player_info(update) {
+                                tracing::error!(%error, "failed to broadcast TeamDistribution PlayerInfo update");
+                            }
+                        }
+                    }
+                } else if let Some(snapshot) = self.host_join_snapshot.as_mut() {
                     snapshot.parameters.teams.team_distribution = set.data as u8;
                     host_snapshot_changed = true;
                 }
@@ -25584,6 +26423,47 @@ impl GameApp {
             // C4CVT_TeamColors
             4 => {
                 let enabled = set.data != 0;
+                let restore_players = self
+                    .host_join_snapshot
+                    .as_ref()
+                    .map(|snapshot| {
+                        snapshot
+                            .parameters
+                            .restore_player_infos
+                            .clients
+                            .iter()
+                            .flat_map(|client| client.players.iter().cloned())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let host_team_update = if executes_control_host_team_logic {
+                    let Some(team_assignment) = self.network_team_assignment.as_mut() else {
+                        let detail = "prepared host team state is unavailable for TeamColors";
+                        tracing::error!(detail, "cannot execute exact TeamColors control");
+                        self.status_text = detail.to_string();
+                        return;
+                    };
+                    if team_assignment.teams().team_colors == enabled {
+                        return;
+                    }
+                    let updates = match team_assignment.set_team_colors(
+                        &mut self.control_player_infos,
+                        enabled,
+                        &restore_players,
+                    ) {
+                        Ok(updates) => updates,
+                        Err(error) => {
+                            tracing::error!(%error, "cannot execute exact TeamColors control");
+                            self.status_text = format!(
+                                "TeamColors needs unavailable native color-conflict state: {error}"
+                            );
+                            return;
+                        }
+                    };
+                    Some((team_assignment.teams().clone(), updates))
+                } else {
+                    None
+                };
                 self.engine.set_team_colors(enabled);
                 if let Some(prepared) = self
                     .loading_state
@@ -25595,7 +26475,33 @@ impl GameApp {
                 if let Some(join_data) = self.pending_network_join_data.as_mut() {
                     join_data.parameters.teams.team_colors = u8::from(enabled);
                 }
-                if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+                if let Some((metadata, updates)) = host_team_update {
+                    let runtime_teams = runtime_teams_from_initial_metadata(&metadata);
+                    let team_snapshot = lc_network::join_team_list_snapshot(metadata);
+                    self.engine.set_teams(runtime_teams.clone());
+                    if let Some(prepared) = self
+                        .loading_state
+                        .as_mut()
+                        .and_then(|loading| loading.prepared_go.as_mut())
+                    {
+                        prepared.team_registry = runtime_teams;
+                    }
+                    if let Some(join_data) = self.pending_network_join_data.as_mut() {
+                        join_data.parameters.teams = team_snapshot.clone();
+                    }
+                    if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+                        snapshot.parameters.teams = team_snapshot;
+                        host_snapshot_changed = true;
+                    }
+                    host_snapshot_changed |= self.refresh_current_host_player_infos();
+                    if let Some(network) = self.network.as_ref() {
+                        for update in updates {
+                            if let Err(error) = network.broadcast_player_info(update) {
+                                tracing::error!(%error, "failed to broadcast TeamColors PlayerInfo update");
+                            }
+                        }
+                    }
+                } else if let Some(snapshot) = self.host_join_snapshot.as_mut() {
                     snapshot.parameters.teams.team_colors = u8::from(enabled);
                     host_snapshot_changed = true;
                 }
@@ -25671,6 +26577,13 @@ impl GameApp {
             result = match control {
                 NetworkControl::PlayerInfo(info) => {
                     self.control_player_infos.apply(info);
+                    self.recheck_team_memberships_from_player_infos();
+                    seed_engine_player_info_parameters(
+                        &mut self.engine,
+                        &self.network_league_name,
+                        &self.control_player_infos,
+                    );
+                    self.publish_current_host_player_infos();
                     Ok(())
                 }
                 NetworkControl::JoinPlayer(join) => {
@@ -25696,9 +26609,7 @@ impl GameApp {
                 NetworkControl::PlayerControl(data) => {
                     self.execute_player_control_failsafe(data.player, data.command, data.data)
                 }
-                NetworkControl::PlayerCommand(data) => {
-                    self.execute_player_command_failsafe(data)
-                }
+                NetworkControl::PlayerCommand(data) => self.execute_player_command_failsafe(data),
                 NetworkControl::PlayerSelect(data) => {
                     self.engine.execute_player_select(&data).map(|_| ())
                 }
@@ -25731,13 +26642,15 @@ impl GameApp {
                     Ok(())
                 }
                 NetworkControl::ClientUpdate(update) => {
-                    let removes_players = update.by_client == 0
+                    let host_authored = update.by_client == 0;
+                    let removes_players = host_authored
                         && update.update_type == lc_engine::CLIENT_UPDATE_SET_OBSERVER
                         && self.control_clients.contains(update.client_id)
                         && !self.control_clients.is_observer(update.client_id);
                     self.control_clients.apply_update(&update);
                     if removes_players && self.control_clients.is_observer(update.client_id) {
                         self.remove_runtime_players_at_client(update.client_id, false);
+                        self.refresh_current_host_player_infos();
                     }
                     if matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))) {
                         if let Some(Err(error)) = self
@@ -25748,10 +26661,15 @@ impl GameApp {
                             tracing::error!(%error, "failed to report executed client update");
                         }
                     }
+                    if host_authored {
+                        self.publish_updated_host_join_snapshot();
+                    }
                     Ok(())
                 }
                 NetworkControl::ClientJoin(join) => {
-                    self.control_clients.apply_join(&join);
+                    if self.control_clients.apply_join(&join) {
+                        self.publish_updated_host_join_snapshot();
+                    }
                     Ok(())
                 }
                 NetworkControl::ClientRemove(remove) => {
@@ -25774,6 +26692,12 @@ impl GameApp {
                         }
                         if self.control_clients.apply_remove(&remove) {
                             self.control_player_infos.on_client_part(remove.client_id);
+                            seed_engine_player_info_parameters(
+                                &mut self.engine,
+                                &self.network_league_name,
+                                &self.control_player_infos,
+                            );
+                            self.publish_current_host_player_infos();
                         }
                         Ok(())
                     }
@@ -25898,7 +26822,7 @@ impl GameApp {
     fn league_vote_client_name(&self, client_id: i32) -> String {
         self.control_clients
             .state(client_id)
-            .map(|client| client.name.to_string_lossy().into_owned())
+            .map(|client| legacy_presentation_text(client.name.as_bytes()))
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "???".to_string())
     }
@@ -26019,6 +26943,8 @@ impl GameApp {
             tracing::error!(%error, "failed to pause host for league vote");
         }
         self.league_votes.paused_for_vote = true;
+        self.host_reference_paused = true;
+        self.publish_running_host_reference();
     }
 
     fn finish_host_vote_pause(&mut self, result: lc_engine::VoteControlData) {
@@ -26047,6 +26973,8 @@ impl GameApp {
             tracing::error!(%error, "failed to restore host after league vote");
         }
         self.league_votes.paused_for_vote = false;
+        self.host_reference_paused = false;
+        self.publish_running_host_reference();
     }
 
     fn league_vote_control_mode(&self) -> i32 {
@@ -26138,7 +27066,7 @@ impl GameApp {
         let at_client_name = if self.network.is_none() && at_client.name.is_empty() {
             "Local".to_string()
         } else {
-            at_client.name.to_string_lossy().into_owned()
+            lc_script::c4_string_from_bytes(at_client.name.as_bytes())
         };
         let local_client_id = self
             .network
@@ -26230,7 +27158,14 @@ impl GameApp {
             ) {
             Ok(joined) if locally_controlled => {
                 debug_assert_eq!(joined.number(), predicted_owner);
-                self.control_player_infos.mark_joined(join.info_id);
+                let player_info_changed = self.control_player_infos.mark_joined(
+                    join.info_id,
+                    joined.number(),
+                    i32::try_from(self.engine.frame()).unwrap_or(i32::MAX),
+                );
+                if player_info_changed {
+                    self.publish_current_host_player_infos();
+                }
                 self.mouse_control = self.local_controls.mouse_owner().is_some();
                 let mut local_players = self.engine.snapshot().hud.local_players;
                 if !local_players.contains(&joined.number()) {
@@ -26248,8 +27183,15 @@ impl GameApp {
                 // message before the newly owned viewport is presented.
                 self.runtime_flash_message = None;
             }
-            Ok(_) => {
-                self.control_player_infos.mark_joined(join.info_id);
+            Ok(joined) => {
+                let player_info_changed = self.control_player_infos.mark_joined(
+                    join.info_id,
+                    joined.number(),
+                    i32::try_from(self.engine.frame()).unwrap_or(i32::MAX),
+                );
+                if player_info_changed {
+                    self.publish_current_host_player_infos();
+                }
             }
             Err(error @ EngineError::RuntimeFlashProducerBoundary { .. }) => {
                 if locally_controlled {
@@ -26416,6 +27358,11 @@ impl GameApp {
         self.frames_per_second = std::mem::take(&mut self.frames_since_second);
         if after != before {
             self.snapshot.game_time = after;
+        }
+        if matches!(self.mode, AppMode::Running) && !self.snapshot.game_over {
+            // Native refreshes the reference server throughout play rather
+            // than releasing its listener at the lobby boundary.
+            self.publish_running_host_reference();
         }
         Ok(lobby_countdown_changed
             || ready_check_changed
@@ -26656,6 +27603,19 @@ impl GameApp {
             .require_classic_game_over_resources()
             .map_err(report_classic_parity_boundary)
             .map_err(classic_parity_engine_error)?;
+        // DoGameOver calls C4Player::EvaluateLeague for every survivor,
+        // which sets PIF_Won on the linked live C4PlayerInfo before the
+        // reference or evaluation UI consumes it.
+        let winner_info_ids = self
+            .snapshot
+            .players
+            .iter()
+            .filter(|player| player.won && player.player_info_id != 0)
+            .map(|player| player.player_info_id)
+            .collect::<Vec<_>>();
+        for player_info_id in winner_info_ids {
+            self.control_player_infos.mark_winner(player_info_id);
+        }
         // C4GameOverDlg::OnShown hides the scoreboard and closes each
         // player's fullscreen C4MainMenu before evaluation becomes
         // interactive. The synchronized object/cursor menu survives
@@ -26700,6 +27660,7 @@ impl GameApp {
         };
         self.finish_recording();
         self.game_over_handled = true;
+        self.publish_game_over_host_reference();
         self.status_text = status_message;
         self.game_over_dialog = Some(dialog);
         Ok(())
@@ -27488,6 +28449,12 @@ impl GameApp {
         } else {
             lc_network::ReadyCheckData::NotReady
         };
+        if changed_client_id
+            .and_then(|client_id| i32::try_from(client_id).ok())
+            .is_some_and(|client_id| self.control_clients.set_lobby_ready(client_id, ready))
+        {
+            self.publish_updated_host_join_snapshot();
+        }
         if let Some(Err(error)) = self
             .network
             .as_ref()
@@ -29272,7 +30239,12 @@ impl GameApp {
             .clonk_fonts
             .clone()
             .context("classic C4GameMessage requires FontRegular")?;
-        let messages = self.snapshot.hud.messages.clone();
+        let mut messages = self.snapshot.hud.messages.clone();
+        for message in &mut messages {
+            for line in &mut message.lines {
+                *line = c4_presentation_text(line);
+            }
+        }
         let viewports = self.graphics.active_viewport_projections();
         for viewport in viewports {
             for message in &messages {
@@ -29516,7 +30488,8 @@ impl GameApp {
 
             let mut units = Vec::new();
             for (idx, line) in message.lines.iter().enumerate() {
-                let spans = parse_message_spans(line, base_color);
+                let line = c4_presentation_text(line);
+                let spans = parse_message_spans(&line, base_color);
                 for span in spans {
                     for segment in split_span_into_segments(span, font_ref, FONT_SIZE) {
                         if !segment.text.is_empty() {
@@ -29888,9 +30861,8 @@ impl GameApp {
         self.scoreboard_close_pointer_capture = false;
         self.engine = Engine::new();
         self.engine.set_local_players([self.local_owner]);
-        self.engine.set_max_players(
-            i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
-        );
+        self.engine
+            .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
@@ -29920,6 +30892,12 @@ impl GameApp {
         self.pending_network_join_data = None;
         self.initial_lobby_status_ack_pending = false;
         self.network_is_league = false;
+        self.network_league_name.clear();
+        seed_engine_player_info_parameters(
+            &mut self.engine,
+            &self.network_league_name,
+            &self.control_player_infos,
+        );
         self.client_start_barrier = ClientStartBarrier::default();
         self.pending_client_start_status = None;
         self.client_combined_scenario_path = None;
@@ -30463,6 +31441,11 @@ impl GameApp {
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| prepared.team_configuration);
+        let prepared_team_registry = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .map(|prepared| prepared.team_registry.clone());
         let prepared_fair_crew = self
             .loading_state
             .as_ref()
@@ -30480,20 +31463,47 @@ impl GameApp {
             .as_mut()
             .and_then(|loading| loading.offline_startup_players.take());
         let network_game = self.network.is_some();
+        let replay = scenario_data
+            .lobby_metadata()
+            .is_some_and(|metadata| metadata.head().is_replay());
+        let mut offline_team_metadata = if network_game || replay {
+            None
+        } else {
+            match scenario_data.initial_network_team_metadata() {
+                Ok(metadata) => Some(metadata),
+                Err(error) => {
+                    tracing::debug!(%error, "offline exact team metadata is unavailable");
+                    None
+                }
+            }
+        };
         if !network_game {
+            self.network_league_name = scenario_data
+                .lobby_metadata()
+                .map(|metadata| {
+                    metadata.embedded_game_parameter_values().map_or_else(
+                        || {
+                            metadata
+                                .game_parameter_defaults()
+                                .league()
+                                .as_bytes()
+                                .to_vec()
+                        },
+                        |parameters| parameters.league().as_bytes().to_vec(),
+                    )
+                })
+                .unwrap_or_default();
             if let Some(metadata) = scenario_data.lobby_metadata() {
-                let max_players = metadata
-                    .embedded_game_parameter_values()
-                    .map_or_else(
-                        || metadata.game_parameter_defaults().max_players(),
-                        |parameters| parameters.max_players(),
-                    );
+                let max_players = metadata.embedded_game_parameter_values().map_or_else(
+                    || metadata.game_parameter_defaults().max_players(),
+                    |parameters| parameters.max_players(),
+                );
                 self.network_max_players = usize::try_from(max_players).unwrap_or(0);
             }
         }
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
-        let (use_fair_crew, fair_crew_strength, fair_crew_forced, allow_debug) =
-            prepared_fair_crew.unwrap_or_else(|| {
+        let (use_fair_crew, fair_crew_strength, fair_crew_forced, allow_debug) = prepared_fair_crew
+            .unwrap_or_else(|| {
                 if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
                     // A client reaches activation only after JoinData installed
                     // prepared_go above. Keep standalone defaults for malformed
@@ -30525,9 +31535,7 @@ impl GameApp {
         engine.set_fair_crew_forced(fair_crew_forced);
         engine.set_allow_debug(allow_debug);
         engine.set_local_players([self.local_owner]);
-        engine.set_max_players(
-            i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
-        );
+        engine.set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
         if let Some(timing) = self
             .network_control_clock
             .filter(|_| network_game)
@@ -30546,7 +31554,18 @@ impl GameApp {
         }
         engine.set_network_game(network_game);
         engine.set_league_game(self.network_is_league);
+        seed_engine_player_info_parameters(
+            &mut engine,
+            &self.network_league_name,
+            &self.control_player_infos,
+        );
         self.apply_material_library_to(&mut engine);
+        if replay {
+            // C4GameControl::InitReplay sets fHost=false; replayed Set
+            // packets change the synchronized list flags but do not execute
+            // the host-only reassignment/attribute-update half.
+            engine.set_control_host(false);
+        }
 
         let sound_samples = configure_scenario_sound_samples(
             self.audio.as_mut(),
@@ -30555,16 +31574,26 @@ impl GameApp {
         );
         engine.configure_sound_samples(sound_samples);
 
-        let apply_result = match (network_game, prepared_team_configuration) {
-            (true, Some(configuration)) => scenario_data
+        let apply_result = match (
+            network_game,
+            prepared_team_configuration,
+            prepared_team_registry,
+        ) {
+            (true, Some(configuration), Some(teams)) => scenario_data
+                .apply_before_network_final_init_with_team_registry(
+                    &mut engine,
+                    teams,
+                    configuration,
+                ),
+            (true, Some(configuration), None) => scenario_data
                 .apply_before_network_final_init_with_team_configuration(
                     &mut engine,
                     configuration,
                 ),
-            (true, None) => scenario_data.apply_before_network_final_init(&mut engine),
-            (false, Some(configuration)) => scenario_data
+            (true, None, _) => scenario_data.apply_before_network_final_init(&mut engine),
+            (false, Some(configuration), _) => scenario_data
                 .apply_before_players_with_team_configuration(&mut engine, configuration),
-            (false, None) => scenario_data.apply_before_players(&mut engine),
+            (false, None, _) => scenario_data.apply_before_players(&mut engine),
         };
         if let Err(err) = apply_result {
             tracing::error!(
@@ -30720,7 +31749,11 @@ impl GameApp {
                     ) {
                         Ok(joined) => {
                             debug_assert_eq!(joined.number(), predicted_owner);
-                            self.control_player_infos.mark_joined(join.info_id);
+                            self.control_player_infos.mark_joined(
+                                join.info_id,
+                                joined.number(),
+                                i32::try_from(self.engine.frame()).unwrap_or(i32::MAX),
+                            );
                             local_players.push(joined.number());
                             if matches!(
                                 joined,
@@ -30811,6 +31844,18 @@ impl GameApp {
         if let Some(player_infos) = offline_player_infos {
             self.control_player_infos = player_infos;
         }
+        if !network_game && !replay {
+            self.refresh_current_player_info_teams();
+            self.network_team_assignment = offline_team_metadata.take().map(|mut metadata| {
+                project_runtime_memberships_into_initial_metadata(
+                    &mut metadata,
+                    self.engine.teams(),
+                );
+                NetworkTeamAssignmentState::from_prepared_host(metadata)
+            });
+        } else if replay {
+            self.network_team_assignment = None;
+        }
         self.open_initial_team_selection(self.local_owner);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
@@ -30868,9 +31913,13 @@ impl GameApp {
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.engine.set_league_game(self.network_is_league);
-        self.engine.set_max_players(
-            i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
+        seed_engine_player_info_parameters(
+            &mut self.engine,
+            &self.network_league_name,
+            &self.control_player_infos,
         );
+        self.engine
+            .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.local_controls = LocalControlRegistry::default();
@@ -30905,6 +31954,15 @@ impl GameApp {
         self.rebuild_definition_sprites();
         let fallback_ground = Self::derive_ground_height(&self.engine, DEFAULT_GROUND_HEIGHT);
         self.configure_running_state(scenario.title.clone(), fallback_ground);
+        if matches!(self.runtime_network_role(), RuntimeNetworkRole::Offline)
+            && self.engine.is_control_host()
+        {
+            self.network_team_assignment = initial_team_metadata_from_runtime(
+                self.engine.team_configuration(),
+                self.engine.teams(),
+            )
+            .map(NetworkTeamAssignmentState::from_prepared_host);
+        }
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
         self.arm_initial_scoreboard_reconcile();
@@ -31087,15 +32145,22 @@ impl GameApp {
             self.engine.allow_debug(),
             self.engine.control_rate(),
         );
+        if let Some(league_name) = save.engine_state.league_name.as_ref() {
+            self.network_league_name = league_name.clone();
+        }
 
         self.finish_recording();
         self.engine = Engine::new();
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
         self.engine.set_league_game(self.network_is_league);
-        self.engine.set_max_players(
-            i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
+        seed_engine_player_info_parameters(
+            &mut self.engine,
+            &self.network_league_name,
+            &self.control_player_infos,
         );
+        self.engine
+            .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
         self.engine.set_fair_crew_forced(parameter_bootstrap.0);
         self.engine.set_allow_debug(parameter_bootstrap.1);
         self.engine.set_control_rate(parameter_bootstrap.2);
@@ -31191,10 +32256,7 @@ impl GameApp {
             // state below supplies the already-initialized world.
             let apply_result = match save.engine_state.team_configuration {
                 Some(configuration) => scenario_data
-                    .apply_before_players_with_team_configuration(
-                        &mut self.engine,
-                        configuration,
-                    ),
+                    .apply_before_players_with_team_configuration(&mut self.engine, configuration),
                 None => scenario_data.apply_before_players(&mut self.engine),
             };
             apply_result.with_context(|| {
@@ -31258,6 +32320,15 @@ impl GameApp {
         }
         let networked = self.network.is_some();
         let authoritative_player_infos = self.control_player_infos.player_count() != 0;
+        if authoritative_player_infos {
+            // Savegame takeover keeps the freshly authenticated C4PlayerInfo
+            // league fields rather than copying stale saved values.
+            seed_engine_player_info_parameters(
+                &mut self.engine,
+                &self.network_league_name,
+                &self.control_player_infos,
+            );
+        }
         let recreation_players = self
             .control_player_infos
             .recreation_players()
@@ -31361,7 +32432,7 @@ impl GameApp {
                         .into_iter()
                         .find(|name| !name.is_empty())
                 })
-                .map(|name| name.to_string_lossy().into_owned())
+                .map(|name| lc_script::c4_string_from_bytes(name.as_bytes()))
                 .unwrap_or(saved_player_name);
             let no_elimination_check = current_info
                 .map(lc_engine::ControlPlayerInfoEntry::no_elimination_check)
@@ -31374,30 +32445,26 @@ impl GameApp {
                         .then(|| previous_local_controls_by_owner.get(&number).copied())
                         .flatten()
                 });
-            let (
-                preferred_control_set,
-                prefers_mouse,
-                pref_control_style,
-                pref_auto_context_menu,
-            ) = current_info
-                .and_then(|_| {
-                    previous_player_preferences_by_info
-                        .get(&player_info_id)
-                        .copied()
-                        .or_else(|| {
-                            (player_info_id == 0)
-                                .then(|| {
-                                    previous_player_preferences_by_owner.get(&number).copied()
-                                })
-                                .flatten()
-                        })
-                })
-                .unwrap_or((
-                    saved_preferred_control_set,
-                    saved_prefers_mouse,
-                    saved_pref_control_style,
-                    saved_pref_auto_context_menu,
-                ));
+            let (preferred_control_set, prefers_mouse, pref_control_style, pref_auto_context_menu) =
+                current_info
+                    .and_then(|_| {
+                        previous_player_preferences_by_info
+                            .get(&player_info_id)
+                            .copied()
+                            .or_else(|| {
+                                (player_info_id == 0)
+                                    .then(|| {
+                                        previous_player_preferences_by_owner.get(&number).copied()
+                                    })
+                                    .flatten()
+                            })
+                    })
+                    .unwrap_or((
+                        saved_preferred_control_set,
+                        saved_prefers_mouse,
+                        saved_pref_control_style,
+                        saved_pref_auto_context_menu,
+                    ));
             let locally_controlled = !script_player
                 && match linked_client_id {
                     Some(client_id) if networked => client_id == local_client_id,
@@ -31425,7 +32492,7 @@ impl GameApp {
                     if !networked && client.name.is_empty() {
                         "Local".to_string()
                     } else {
-                        client.name.to_string_lossy().into_owned()
+                        lc_script::c4_string_from_bytes(client.name.as_bytes())
                     }
                 })
                 .unwrap_or_else(|| {
@@ -31469,9 +32536,7 @@ impl GameApp {
                     pref_control_style,
                     pref_auto_context_menu,
                 )
-                .with_context(|| {
-                    format!("failed to reinitialize restored player {number}")
-                })?;
+                .with_context(|| format!("failed to reinitialize restored player {number}"))?;
         }
         self.local_controls = rebound_local_controls;
         if let Some(owner) = restored_primary_owner.or_else(|| local_players.first().copied()) {
@@ -31570,15 +32635,6 @@ impl GameApp {
         self.frames_per_second = 0;
         self.frames_since_second = 0;
         self.scenario_label = label;
-        if self.advertised_game_reference.is_some() {
-            // C++ invalidates and rebuilds the complete reference from the
-            // committed Go status and current parameters. Until that runtime
-            // rebuild is wired, stop serving the exact Lobby snapshot instead
-            // of relabeling stale metadata (src/C4Network2.cpp:1994-2002;
-            // src/C4Network2Reference.cpp:49-85).
-            self.network_game_advertiser = None;
-            self.advertised_game_reference = None;
-        }
         self.fallback_ground = fallback_ground;
         let width = self.graphics.surface().width();
         let height = self.graphics.surface().height();
@@ -31646,11 +32702,7 @@ impl GameApp {
             .players
             .iter()
             .find(|state| state.id == self.local_owner)
-            .map(|state| {
-                let line = format!("Player join: {}", state.name);
-                let expires = self.engine.frame() + line.len() as u64 + 30;
-                (line, expires)
-            });
+            .map(|state| player_join_board_line(self.engine.frame(), &state.name));
     }
 
     fn apply_focus_selection(&mut self) {
@@ -32165,9 +33217,9 @@ fn render_startup_frame(
                             && !definition_selector_open
                             && !game_option_input_open,
                     )?;
-                    let resources = assets.game_option_resources().with_context(|| {
-                        "classic scenario game-option resources are unavailable"
-                    })?;
+                    let resources = assets.game_option_resources().with_context(
+                        || "classic scenario game-option resources are unavailable",
+                    )?;
                     scenario_game_options.render(
                         surface,
                         &resources,
@@ -32256,9 +33308,9 @@ fn render_startup_frame(
                 context_menu.render(surface, Some(startup_gamma()))?;
             }
             if view == StartupView::ScenarioBrowser {
-                let resources = assets.game_option_resources().with_context(|| {
-                    "classic scenario game-option tooltip resources are unavailable"
-                })?;
+                let resources = assets.game_option_resources().with_context(
+                    || "classic scenario game-option tooltip resources are unavailable",
+                )?;
                 scenario_game_options.render_tooltip(
                     surface,
                     &resources,
@@ -32852,7 +33904,7 @@ fn collect_player_overlays(
                 if state.name.trim().is_empty() {
                     None
                 } else {
-                    Some(state.name.clone())
+                    Some(c4_presentation_text(&state.name))
                 }
             })
             .unwrap_or_else(|| format!("Player {}", player.owner));
@@ -34848,9 +35900,9 @@ mod tests {
     use lc_audio::decode_audio;
     use lc_engine::command::CommandData;
     use lc_engine::{
-        ActionState, CommandDirection, CommandStackSnapshot, Direction, EnvironmentFrame,
-        HudPlayerSnapshot, HudSnapshot, ObjectId, ObjectSnapshot, ObjectStatus, PlayerState,
-        PlayerStatus, ScriptError, SimulationSnapshot, Vector2, DEFAULT_CATEGORY,
+        ActionState, CommandDirection, CommandStackSnapshot, DEFAULT_CATEGORY, Direction,
+        EnvironmentFrame, HudPlayerSnapshot, HudSnapshot, ObjectId, ObjectSnapshot, ObjectStatus,
+        PlayerState, PlayerStatus, ScriptError, SimulationSnapshot, Vector2,
     };
     use lc_script::Value;
     use parking_lot::ReentrantMutex;
@@ -38680,6 +39732,20 @@ mod tests {
             "ENERGY "
         ));
         assert!(!overlay_text_needs_update("Paused", "ENERGY "));
+
+        assert_eq!(
+            c4_presentation_text(&lc_script::c4_string_from_bytes(&[0xe9])),
+            "\u{e9}"
+        );
+
+        let raw_name = lc_script::c4_string_from_bytes(&[0xe9]);
+        let (line, expires) = player_join_board_line(10, &raw_name);
+        assert_eq!(line, "Player join: \u{e9}");
+        assert_eq!(
+            expires,
+            10 + "Player join: ".len() as u64 + 1 + 30,
+            "message timing remains based on the native byte length"
+        );
     }
 
     /// Pump the app until asynchronous boot loading completes and the main menu
@@ -39955,6 +41021,8 @@ mod tests {
             game_time: 0,
             game_over: false,
             round_results: Default::default(),
+            league_name: Vec::new(),
+            player_info_league_progress_data: Default::default(),
             physics: None,
             objects,
             render_order: Vec::new(),
@@ -41628,6 +42696,8 @@ mod tests {
             game_time: 0,
             game_over: false,
             round_results: Default::default(),
+            league_name: Vec::new(),
+            player_info_league_progress_data: Default::default(),
             physics: None,
             objects,
             render_order: Vec::new(),
@@ -41739,6 +42809,16 @@ mod tests {
         assert!((other_entry.energy_fraction - 0.4).abs() < f32::EPSILON);
         assert_eq!(other_entry.object_id, teammate);
         assert!(other_entry.portrait.is_none());
+
+        let raw_name = lc_script::c4_string_from_bytes(&[0xe9]);
+        snapshot.players[0].name = raw_name;
+        let overlay = collect_player_overlays(&engine, &snapshot, Some(focus), &bindings);
+        assert_eq!(overlay[0].name, "\u{e9}");
+        assert_eq!(
+            lc_script::c4_string_bytes(&snapshot.players[0].name),
+            [0xe9],
+            "presentation decoding does not rewrite synchronized player state"
+        );
     }
 
     #[test]
@@ -42493,11 +43573,13 @@ mod tests {
                 definition_id: "BASE".to_string(),
                 symbol_size: 4,
                 base_graphics: None,
-                graphics_overlays: vec![lc_engine::ObjectGraphicsOverlay::new(
-                    1,
-                    lc_engine::GraphicsOverlayMode::Picture,
-                )
-                .with_definition(Some("OVRL".to_string()))],
+                graphics_overlays: vec![
+                    lc_engine::ObjectGraphicsOverlay::new(
+                        1,
+                        lc_engine::GraphicsOverlayMode::Picture,
+                    )
+                    .with_definition(Some("OVRL".to_string())),
+                ],
                 blit_mode: 0,
                 color: 0,
                 color_modulation: 0,
@@ -46954,6 +48036,31 @@ mod tests {
         app
     }
 
+    fn default_exact_host_reference()
+    -> (lc_network::HostJoinSnapshot, lc_network::HostGameReference) {
+        let host_config = lc_network::HostConfig::default();
+        let snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host JoinData");
+        let parameters = snapshot.parameters.clone();
+        let reference = lc_network::HostGameReference::new(
+            lc_network::NetworkGameReference {
+                title: "No title".to_string(),
+                host_name: "Host".to_string(),
+                host_nick: "Host".to_string(),
+                state: "Lobby".to_string(),
+                control_mode: host_config.initial_status.control_mode,
+                join_allowed: true,
+                max_players: parameters.max_players,
+                ..Default::default()
+            },
+            lc_network::HostGameReferenceMetadata::default(),
+            parameters,
+        )
+        .expect("valid exact host reference");
+        (snapshot, reference)
+    }
+
     fn new_menu_app_with_paths(width: u32, height: u32, paths: &AppPaths) -> GameApp {
         let mut app = GameApp::new(
             width,
@@ -48257,9 +49364,10 @@ mod tests {
         };
 
         let mut context = new_classic_menu_app(640, 480);
-        let entries: Vec<ContextMenuEntry<AppContextMenuCommand>> =
-            vec![ContextMenuEntry::new("Root")
-                .with_lazy_submenu(|| vec![ContextMenuEntry::new("Nested")])];
+        let entries: Vec<ContextMenuEntry<AppContextMenuCommand>> = vec![
+            ContextMenuEntry::new("Root")
+                .with_lazy_submenu(|| vec![ContextMenuEntry::new("Nested")]),
+        ];
         context
             .open_context_menu_at(entries, GuiPoint::new(100.0, 100.0))
             .expect("open recursive context menu");
@@ -52013,6 +53121,144 @@ mod tests {
             .expect("apply the committed Go barrier");
         assert!(matches!(app.mode, AppMode::Running));
         assert!(app.loading_state.is_none());
+        assert!(
+            app.network_game_advertiser.is_some(),
+            "native keeps the reference listener alive during play"
+        );
+        let running_reference = app
+            .advertised_game_reference
+            .as_ref()
+            .expect("running reference remains retained");
+        assert_eq!(running_reference.summary().state, "Running");
+        assert!(!running_reference.summary().join_allowed);
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 41,
+                    flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(lc_engine::NetworkResourceCore {
+                        resource_type: 3,
+                        id: 41 << 16,
+                        loadable: true,
+                        filename: lc_engine::LegacyCString::from_bytes(b"Player.c4p".to_vec())
+                            .expect("valid resource filename"),
+                        ..lc_engine::NetworkResourceCore::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        assert!(app.control_player_infos.mark_joined(41, 3, 77));
+        assert!(
+            app.control_clients
+                .apply_join(&lc_engine::ClientJoinControlData {
+                    core: lc_engine::ClientCoreControlData {
+                        client_id: 7,
+                        activated: true,
+                        name: lc_engine::LegacyCString::from_bytes(b"Remote".to_vec()).unwrap(),
+                        nick: lc_engine::LegacyCString::from_bytes(b"R".to_vec()).unwrap(),
+                        lobby_ready: true,
+                        ..Default::default()
+                    },
+                    by_client: 0,
+                })
+        );
+        app.engine.set_teams(vec![
+            lc_engine::TeamInfo::new(4, "Live team", 0x0012_3456).with_player_ids(vec![41]),
+        ]);
+        app.engine.set_max_players(13);
+        app.snapshot.game_time = 123;
+        app.snapshot.players = vec![lc_engine::PlayerState {
+            id: 3,
+            player_info_id: 41,
+            won: true,
+            ..Default::default()
+        }];
+        app.snapshot.round_results = lc_engine::RoundResultsState {
+            league_performance: -7,
+            players: vec![lc_engine::RoundResultsPlayerState {
+                player_info_id: 41,
+                league_performance: 19,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let final_reference = game_over_host_reference(
+            app.advertised_game_reference
+                .as_ref()
+                .expect("retained reference template"),
+            app.host_join_snapshot
+                .as_ref()
+                .expect("live host parameters")
+                .parameters
+                .clone(),
+            &app.control_clients,
+            &app.control_player_infos,
+            app.engine.teams(),
+            app.engine.max_players().expect("live maximum is set"),
+            &app.snapshot,
+        )
+        .expect("game-over reference projection validates");
+        assert_eq!(final_reference.summary().state, "Running");
+        assert!(!final_reference.summary().join_allowed);
+        assert_eq!(final_reference.metadata().time, 123);
+        assert_eq!(final_reference.metadata().league_performance, -7);
+        assert_eq!(final_reference.parameters().max_players, 13);
+        assert!(
+            final_reference
+                .parameters()
+                .clients
+                .clients
+                .iter()
+                .any(|client| {
+                    client.client_id == 7
+                        && client.name.as_bytes() == b"Remote"
+                        && client.lobby_ready
+                })
+        );
+        assert_eq!(
+            final_reference.parameters().teams.teams[0].player_ids,
+            vec![41]
+        );
+        let player_packet = &final_reference.parameters().player_infos.clients[0];
+        assert_eq!(
+            player_packet.flags,
+            lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL
+        );
+        let player = &player_packet.players[0];
+        assert_eq!(player.league_performance, 19);
+        assert_eq!((player.game_number, player.game_join_frame), (3, 77));
+        assert_ne!(player.flags & lc_engine::PLAYER_INFO_FLAG_WON, 0);
+        assert_eq!(player.flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+        assert!(player.resource.is_none());
+        app.advertised_game_reference = Some(final_reference);
+        app.snapshot.game_over = true;
+        assert!(app.control_clients.set_lobby_ready(7, false));
+        app.publish_updated_host_join_snapshot();
+        let republished_player = &app
+            .advertised_game_reference
+            .as_ref()
+            .expect("final reference survives a later live publication")
+            .parameters()
+            .player_infos
+            .clients[0]
+            .players[0];
+        assert_eq!(republished_player.league_performance, 19);
+        assert_ne!(
+            republished_player.flags & lc_engine::PLAYER_INFO_FLAG_WON,
+            0
+        );
+        let live_player = app
+            .control_player_infos
+            .get(41)
+            .expect("live PlayerInfo remains retained");
+        assert_ne!(
+            live_player.flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            0
+        );
+        assert!(live_player.resource.is_some());
         assert_eq!(
             join_gate_rx.recv_timeout(Duration::from_millis(100)),
             Ok(false),
@@ -52021,6 +53267,72 @@ mod tests {
         join_gate_worker
             .join()
             .expect("runtime join gate worker exits");
+    }
+
+    #[test]
+    fn reference_state_survives_initial_and_final_advertiser_bind_failure() {
+        // C4Network2Reference is rebuilt from game state independently of the
+        // optional reference server. A listener failure must not discard the
+        // template or leave its retained value at GS_Lobby.
+        let (snapshot, reference) = default_exact_host_reference();
+        let parameters = snapshot.parameters.clone();
+        let occupied = std::net::TcpListener::bind("[::]:0").expect("occupy a reference port");
+        let config = lc_network::NetworkGameAdvertiserConfig {
+            discovery_port: 0,
+            reference_port: occupied.local_addr().expect("occupied address").port(),
+        };
+        let mut app = new_menu_app(320, 200);
+
+        app.start_network_game_advertiser_with_reference(config, reference);
+
+        assert!(app.network_game_advertiser.is_none());
+        assert_eq!(
+            app.advertised_game_reference
+                .as_ref()
+                .expect("validated state survives bind failure")
+                .summary()
+                .state,
+            "Lobby"
+        );
+
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.host_join_snapshot = Some(snapshot);
+        app.control_clients
+            .replace_snapshot(parameters.clients.clients.clone());
+        app.engine.set_max_players(parameters.max_players);
+        app.snapshot.game_time = 37;
+        app.snapshot.frame = 91;
+
+        app.publish_game_over_host_reference_with_config(config);
+
+        assert!(app.network_game_advertiser.is_none());
+        let retained = app
+            .advertised_game_reference
+            .as_ref()
+            .expect("final state survives rebind failure");
+        assert_eq!(retained.summary().state, "Running");
+        assert!(!retained.summary().join_allowed);
+        assert_eq!(
+            (retained.metadata().time, retained.metadata().frame),
+            (37, 91)
+        );
+
+        let retained = retained.clone();
+        app.start_network_game_advertiser_with_reference(
+            lc_network::NetworkGameAdvertiserConfig {
+                discovery_port: 0,
+                reference_port: 0,
+            },
+            retained,
+        );
+        assert!(app.network_game_advertiser.is_some());
+        app.change_network_control_to_local(0);
+        assert!(app.network_game_advertiser.is_none());
+        assert!(app.advertised_game_reference.is_none());
     }
 
     #[test]
@@ -53579,6 +54891,66 @@ mod tests {
     }
 
     #[test]
+    fn portrait_crew_label_decodes_native_info_name_for_presentation() {
+        let mut app = new_running_sandbox_app();
+        let crew = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox player has cursor crew");
+        let raw_name = lc_script::c4_string_from_bytes(b"Ren\xe9");
+        let mut state = app.engine.capture_state();
+        let definition_id = app
+            .snapshot
+            .object(crew)
+            .expect("cursor object is visible")
+            .definition_id
+            .clone();
+        state.crew_object_infos.insert(
+            crew,
+            lc_engine::CrewObjectInfo {
+                definition_id,
+                name: raw_name,
+                rank: 0,
+                rank_name: "Clonk".to_string(),
+                experience: 0,
+                death_count: 0,
+                total_playing_time: 0,
+                birthday: 0,
+                age: 0,
+                in_action_time: 0,
+                extra_data: Vec::new(),
+            },
+        );
+        app.engine
+            .restore_state(&state)
+            .expect("native crew info restores");
+        app.snapshot = app.engine.snapshot();
+
+        let mut players =
+            collect_player_overlays(&app.engine, &app.snapshot, Some(crew), &app.bindings);
+        app.display_flags.portraits = true;
+        app.populate_crew_infos(&mut players);
+        app.populate_crew_portraits(&mut players);
+
+        let overlay = players
+            .iter()
+            .flat_map(|player| &player.crew)
+            .find(|overlay| overlay.object_id == crew)
+            .expect("cursor overlay exists");
+        assert_eq!(overlay.info_name.as_deref(), Some("Ren\u{e9}"));
+        assert_eq!(overlay.label, "Ren\u{e9}");
+        assert_eq!(
+            lc_script::c4_string_bytes(
+                &app.engine
+                    .crew_object_info(crew)
+                    .expect("crew info remains live")
+                    .name
+            ),
+            b"Ren\xe9"
+        );
+    }
+
+    #[test]
     fn sandbox_mouse_toggle_updates_registry_and_reflected_player_state() {
         let mut app = new_running_sandbox_app();
         let owner = app.local_owner;
@@ -53704,8 +55076,10 @@ mod tests {
         app.engine
             .replace_player_viewports(
                 secondary,
-                vec![lc_engine::PlayerViewport::new(secondary_position)
-                    .with_focus(Some(secondary_crew))],
+                vec![
+                    lc_engine::PlayerViewport::new(secondary_position)
+                        .with_focus(Some(secondary_crew)),
+                ],
             )
             .expect("set secondary viewport");
         app.engine.set_local_players([primary, secondary]);
@@ -53870,8 +55244,10 @@ mod tests {
         app.engine
             .replace_player_viewports(
                 secondary,
-                vec![lc_engine::PlayerViewport::new(secondary_position)
-                    .with_focus(Some(secondary_crew))],
+                vec![
+                    lc_engine::PlayerViewport::new(secondary_position)
+                        .with_focus(Some(secondary_crew)),
+                ],
             )
             .expect("set secondary viewport");
         app.engine.set_local_players([primary, secondary]);
@@ -54781,12 +56157,14 @@ mod tests {
         let mut snapshot = host_config
             .initial_join_snapshot
             .expect("default host publishes JoinData");
+        snapshot.parameters.title = lc_engine::LegacyCString::from_bytes(b"Caf\xe9 Arena".to_vec())
+            .expect("valid legacy scenario title");
         snapshot.parameters.clients = lc_network::JoinClientRegistrySnapshot {
             clients: vec![
                 lc_engine::ClientCoreControlData {
                     client_id: 0,
                     activated: true,
-                    name: lc_engine::LegacyCString::from_bytes(b"Exact host".to_vec())
+                    name: lc_engine::LegacyCString::from_bytes(b"Exact Andr\xe9".to_vec())
                         .expect("valid host name"),
                     lobby_ready: true,
                     ..Default::default()
@@ -54827,13 +56205,38 @@ mod tests {
             .expect("client remains in lobby")
             .participants;
         assert_eq!(participants.keys().copied().collect::<Vec<_>>(), [0, 7, 9]);
-        assert_eq!(participants[&0].name, "Exact host");
+        assert_eq!(participants[&0].name, "Exact Andr\u{e9}");
         assert!(participants[&0].ready);
         assert_eq!(participants[&7].name, "Exact local");
         assert!(!participants[&7].ready);
         assert_eq!(participants[&9].name, "Exact observer");
         assert_eq!(participants[&9].kind, ParticipantKind::Observer);
         assert!(!participants[&9].ready);
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("client remains in lobby")
+                .scenario_label(),
+            "Caf\u{e9} Arena"
+        );
+        assert_eq!(app.scenario_label, "Caf\u{e9} Arena");
+        assert_eq!(
+            app.control_clients
+                .state(0)
+                .expect("raw host core remains registered")
+                .name
+                .as_bytes(),
+            b"Exact Andr\xe9"
+        );
+        assert_eq!(
+            app.pending_network_join_data
+                .as_ref()
+                .expect("raw JoinData remains pending")
+                .parameters
+                .title
+                .as_bytes(),
+            b"Caf\xe9 Arena"
+        );
     }
 
     #[test]
@@ -54995,17 +56398,25 @@ mod tests {
             prepared: None,
         }));
         app.host_lobby_countdown = Some(HostLobbyCountdown::new());
+        for client_id in [0, 7, 9] {
+            app.control_clients.register(client_id, true, false);
+            assert!(app.control_clients.set_lobby_ready(client_id, true));
+        }
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
 
-        assert!(app
-            .request_lobby_ready_check_at(Instant::now())
-            .expect("host ready check starts"));
+        assert!(
+            app.request_lobby_ready_check_at(Instant::now())
+                .expect("host ready check starts")
+        );
 
         let lobby = app.network_lobby.as_ref().unwrap();
         assert!(lobby.participants[&0].ready);
         assert!(!lobby.participants[&7].ready);
         assert!(!lobby.participants[&9].ready);
+        assert!(app.control_clients.state(0).unwrap().lobby_ready);
+        assert!(!app.control_clients.state(7).unwrap().lobby_ready);
+        assert!(!app.control_clients.state(9).unwrap().lobby_ready);
         assert_eq!(lobby.countdown, None);
         assert!(app.host_lobby_countdown.is_none());
         assert_eq!(
@@ -55719,6 +57130,7 @@ mod tests {
         let mut lobby = NetworkLobbyState::new(7, "Local".to_string(), false);
         lobby.register_peer(9, "Remote".to_string(), ParticipantKind::Player);
         app.network_lobby = Some(lobby);
+        app.control_clients.register(9, true, false);
 
         event_tx
             .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
@@ -55731,6 +57143,7 @@ mod tests {
         let lobby = app.network_lobby.as_ref().unwrap();
         assert!(lobby.participants[&9].ready);
         assert!(!lobby.participants[&7].ready);
+        assert!(app.control_clients.state(9).unwrap().lobby_ready);
     }
 
     #[test]
@@ -56352,6 +57765,153 @@ mod tests {
     }
 
     #[test]
+    fn synchronized_team_selection_and_runtime_switch_refresh_live_parameters() {
+        let mut app = new_running_sandbox_app();
+        app.engine.set_team_colors(true);
+        app.engine.set_teams(vec![
+            lc_engine::TeamInfo::new(1, "Red", 0x00f4_0000),
+            lc_engine::TeamInfo::new(2, "Green", 0x0000_c800),
+        ]);
+        let chooser = app
+            .engine
+            .join_player_for_team_selection(JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 41,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x0012_3456,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 2,
+            })
+            .expect("chooser waits for team selection");
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 41,
+                    color: 0x0012_3456,
+                    original_color: 0x0012_3456,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (host_snapshot, reference) = default_exact_host_reference();
+        app.control_clients
+            .replace_snapshot(host_snapshot.parameters.clients.clients.clone());
+        app.host_join_snapshot = Some(host_snapshot);
+        app.advertised_game_reference = Some(reference);
+        let (manager, _events) = NetworkManager::test_stub_for_client_id(0);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+
+        app.execute_init_scenario_player_control(chooser, 2)
+            .expect("synchronized team choice executes");
+
+        let info = app
+            .control_player_infos
+            .get(41)
+            .expect("PlayerInfo retained");
+        assert_eq!(
+            (info.team, info.color, info.original_color),
+            (2, 0x0000_c800, 0x0012_3456)
+        );
+        assert_eq!(
+            app.engine
+                .teams()
+                .iter()
+                .find(|team| team.id == 2)
+                .expect("green team")
+                .player_ids,
+            vec![41]
+        );
+        let parameters = &app.host_join_snapshot.as_ref().unwrap().parameters;
+        assert_eq!(parameters.player_infos.clients[0].players[0].team, 2);
+        assert_eq!(parameters.teams.teams[1].player_ids, vec![41]);
+
+        app.engine
+            .set_player_team(chooser, Some(1))
+            .expect("script-style runtime team switch");
+        app.handle_script_player_info_updates()
+            .expect("post-script parameter refresh");
+
+        assert_eq!(app.control_player_infos.get(41).unwrap().team, 1);
+        let parameters = &app.host_join_snapshot.as_ref().unwrap().parameters;
+        assert_eq!(parameters.player_infos.clients[0].players[0].team, 1);
+        assert_eq!(parameters.teams.teams[0].player_ids, vec![41]);
+        assert!(parameters.teams.teams[1].player_ids.is_empty());
+    }
+
+    #[test]
+    fn team_selection_participant_names_decode_native_bytes_for_presentation() {
+        let mut app = new_running_sandbox_app();
+        let occupant = app.local_owner;
+        app.engine
+            .player_mut(occupant)
+            .expect("sandbox player remains")
+            .set_name(lc_script::c4_string_from_bytes(b"Andr\xe9"));
+        app.engine
+            .player_mut(occupant)
+            .expect("sandbox player remains")
+            .set_team(Some(1));
+        app.engine.set_teams(vec![lc_engine::TeamInfo::new(
+            1,
+            lc_script::c4_string_from_bytes(b"Bl\xe5"),
+            0x0000_00ff,
+        )]);
+        let chooser = app
+            .engine
+            .join_player_for_team_selection(JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x0000_00ff,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 2,
+            })
+            .expect("chooser waits for team selection");
+
+        app.open_initial_team_selection(chooser);
+        let item = app
+            .ingame_menu
+            .get(chooser)
+            .and_then(|menu| menu.items().first())
+            .expect("occupied team row");
+        assert_eq!(item.caption, "Bl\u{e5} (Andr\u{e9})");
+        assert_eq!(
+            item.info_caption.as_deref(),
+            Some("Join team Bl\u{e5} (Andr\u{e9})")
+        );
+        assert_eq!(
+            lc_script::c4_string_bytes(
+                app.engine
+                    .player(occupant)
+                    .expect("occupant remains")
+                    .name()
+            ),
+            b"Andr\xe9"
+        );
+        assert_eq!(
+            lc_script::c4_string_bytes(&app.engine.teams()[0].name),
+            b"Bl\xe5"
+        );
+    }
+
+    #[test]
     fn team_selection_execute_keeps_an_ambiguous_local_choice_open() {
         // With two joinable teams GetForcedTeamSelection returns zero;
         // C4Player::Execute leaves C4MN_TeamSelection active instead of
@@ -56714,6 +58274,22 @@ mod tests {
             lc_engine::LegacyCString::from_bytes(b"League".to_vec()).unwrap();
         snapshot.parameters.league_address =
             lc_engine::LegacyCString::from_bytes(b"https://league.invalid/".to_vec()).unwrap();
+        snapshot.parameters.player_infos = lc_network::PlayerInfoListSnapshot {
+            last_player_id: 41,
+            clients: vec![lc_network::ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 41,
+                    flags: lc_engine::PLAYER_INFO_FLAG_REMOVED,
+                    league_progress_data: lc_engine::LegacyCString::from_bytes(
+                        b"retained-progress".to_vec(),
+                    )
+                    .unwrap(),
+                    ..Default::default()
+                }],
+            }],
+        };
         snapshot
             .parameters
             .clients
@@ -56739,17 +58315,37 @@ mod tests {
         app.process_network_events().expect("apply league JoinData");
         app.pending_network_join_data = None;
 
+        assert_eq!(app.network_league_name, b"League");
+        assert_eq!(app.engine.snapshot().league_name, b"League");
+        assert_eq!(
+            app.engine
+                .snapshot()
+                .player_info_league_progress_data
+                .get(&41),
+            Some(&Some(b"retained-progress".to_vec()))
+        );
+
         let conditions = app.main_menu_conditions();
         assert!(conditions.is_league);
         let menu = IngameMenuState::main_menu(&conditions).expect("main menu has entries");
-        assert!(!menu
-            .items()
-            .iter()
-            .any(|item| item.action == MenuAction::ActivateNewPlayer));
+        assert!(
+            !menu
+                .items()
+                .iter()
+                .any(|item| item.action == MenuAction::ActivateNewPlayer)
+        );
 
         app.change_network_control_to_local(7);
         assert!(app.main_menu_conditions().is_league);
         assert_eq!(app.network_max_players, synchronized_max_players);
+        assert_eq!(app.engine.snapshot().league_name, b"League");
+        assert_eq!(
+            app.engine
+                .snapshot()
+                .player_info_league_progress_data
+                .get(&41),
+            Some(&Some(b"retained-progress".to_vec()))
+        );
     }
 
     #[test]
@@ -57788,6 +59384,95 @@ mod tests {
     }
 
     #[test]
+    fn host_direct_remote_player_info_refreshes_join_data_for_later_consumers() {
+        // Game.PlayerInfos aliases Game.Parameters.PlayerInfos, and SendJoinData
+        // copies those live parameters. A runtime admission therefore has to be
+        // present in the next client's JoinData after its direct control runs
+        // (src/C4Game.cpp:65-71; src/C4Network2.cpp:1820-1844;
+        // src/C4Network2Players.cpp:233-239).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.host_join_snapshot = lc_network::HostConfig::default().initial_join_snapshot;
+        event_tx
+            .send(NetworkEvent::PlayerInfoUpdateRequest {
+                origin: 9,
+                request: lc_network::PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        name: lc_engine::LegacyCString::from_bytes(b"Runtime Remote".to_vec())
+                            .expect("valid player name"),
+                        ..Default::default()
+                    }],
+                },
+                by_host: false,
+            })
+            .expect("queue runtime PlayerInfo request");
+        app.process_network_events()
+            .expect("admit runtime PlayerInfo request");
+        let broadcasts = commands.take_broadcast_player_infos();
+        let [authoritative] = broadcasts.as_slice() else {
+            panic!("expected one authoritative PlayerInfo control");
+        };
+        let authoritative = authoritative.clone();
+
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                authoritative,
+            )))
+            .expect("queue authoritative direct PlayerInfo");
+        app.process_network_events()
+            .expect("apply authoritative direct PlayerInfo");
+
+        let published = commands.take_published_join_snapshots();
+        let latest = published.last().expect("updated JoinData is published");
+        assert_eq!(published.len(), 1);
+        assert_eq!(latest.parameters.player_infos.last_player_id, 1);
+        let [client] = latest.parameters.player_infos.clients.as_slice() else {
+            panic!("runtime client row is retained in JoinData");
+        };
+        assert_eq!((client.client_id, client.flags), (3, 0));
+        let [player] = client.players.as_slice() else {
+            panic!("runtime player row is retained in JoinData");
+        };
+        assert_eq!(player.id, 1);
+        assert_eq!(player.name.as_bytes(), b"Runtime Remote");
+        assert_eq!(published.last(), app.host_join_snapshot.as_ref());
+    }
+
+    #[test]
+    fn host_synchronized_player_info_refreshes_join_data() {
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.host_join_snapshot = lc_network::HostConfig::default().initial_join_snapshot;
+        let authoritative = app
+            .control_player_infos
+            .admit_request(
+                lc_network::PlayerInfoUpdateRequest {
+                    client_id: 4,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+                },
+                app.network_max_players,
+            )
+            .expect("runtime PlayerInfo is admitted");
+
+        app.apply_ready_controls(7, vec![NetworkControl::PlayerInfo(authoritative)])
+            .expect("synchronized PlayerInfo executes");
+
+        let published = commands.take_published_join_snapshots();
+        let latest = published.last().expect("updated JoinData is published");
+        assert_eq!(latest.parameters.player_infos.last_player_id, 1);
+        assert_eq!(latest.parameters.player_infos.clients[0].client_id, 4);
+        assert_eq!(latest.parameters.player_infos.clients[0].players[0].id, 1);
+        assert_eq!(published.last(), app.host_join_snapshot.as_ref());
+    }
+
+    #[test]
     fn host_remote_player_info_assigns_the_unique_least_used_runtime_team() {
         // HandlePlayerInfoUpdRequest allocates the ID before AssignTeams, and
         // the host broadcasts that already-adjusted PlayerInfo. AddPlayer also
@@ -57967,6 +59652,12 @@ mod tests {
     #[test]
     fn offline_create_script_player_joins_through_player_info_control_path() {
         let mut app = new_running_sandbox_app();
+        let existing_player_info_id = app
+            .engine
+            .player(app.local_owner)
+            .expect("sandbox has a low-level local player")
+            .player_info_id();
+        assert!(existing_player_info_id > 0);
         app.engine
             .install_scenario_script_with_convention(
                 "CreateScriptPlayer fixture",
@@ -58003,6 +59694,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(infos.len(), 1, "script PlayerInfo is admitted exactly once");
         let info = infos[0];
+        assert_eq!(
+            info.id,
+            existing_player_info_id + 1,
+            "PlayerInfo admission reserves IDs already owned by live low-level players"
+        );
         assert_eq!(info.player_type, lc_engine::PLAYER_INFO_TYPE_SCRIPT);
         assert_eq!((info.color, info.original_color, info.team), (0x445566, 0x445566, 2));
         assert_eq!(info.extra_data, *b"__AI");
@@ -58033,6 +59729,133 @@ mod tests {
                 .iter()
                 .any(|player| player.player_info_id == info.id),
             "post-control app snapshot includes the joined player"
+        );
+    }
+
+    #[test]
+    fn script_league_progress_writes_mirror_null_and_empty_into_player_infos() {
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.host_join_snapshot = lc_network::HostConfig::default().initial_join_snapshot;
+        app.network_league_name = b"League".to_vec();
+        app.control_player_infos.replace_snapshot(
+            41,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 41,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        seed_engine_player_info_parameters(
+            &mut app.engine,
+            &app.network_league_name,
+            &app.control_player_infos,
+        );
+        app.engine
+            .install_scenario_script_with_convention(
+                "League progress fixture",
+                r#"#strict 3
+                global func WriteProgress() { return SetLeagueProgressData("data", 41); }
+                global func EmptyProgress() { return SetLeagueProgressData("", 41); }
+                global func ClearProgress() { return SetLeagueProgressData(nil, 41); }
+                global func SetLimit() { return SetMaxPlayer(5); }
+                "#,
+                true,
+            )
+            .expect("fixture script installs");
+
+        app.engine
+            .call_scenario_script_function("WriteProgress", Vec::new())
+            .expect("nonempty progress writes");
+        app.handle_script_player_info_updates()
+            .expect("nonempty progress mirrors");
+        let info = app
+            .control_player_infos
+            .get(41)
+            .expect("info remains retained");
+        assert!(!info.league_progress_data_is_null);
+        assert_eq!(info.league_progress_data.as_bytes(), b"data");
+        let published = commands.take_published_join_snapshots();
+        let info = &published
+            .last()
+            .expect("nonempty progress publishes JoinData")
+            .parameters
+            .player_infos
+            .clients[0]
+            .players[0];
+        assert!(!info.league_progress_data_is_null);
+        assert_eq!(info.league_progress_data.as_bytes(), b"data");
+
+        app.engine
+            .call_scenario_script_function("EmptyProgress", Vec::new())
+            .expect("empty progress writes");
+        app.handle_script_player_info_updates()
+            .expect("empty progress mirrors");
+        let info = app
+            .control_player_infos
+            .get(41)
+            .expect("info remains retained");
+        assert!(!info.league_progress_data_is_null);
+        assert!(info.league_progress_data.is_empty());
+        let published = commands.take_published_join_snapshots();
+        let info = &published
+            .last()
+            .expect("empty progress publishes JoinData")
+            .parameters
+            .player_infos
+            .clients[0]
+            .players[0];
+        assert!(!info.league_progress_data_is_null);
+        assert!(info.league_progress_data.is_empty());
+
+        app.engine
+            .call_scenario_script_function("ClearProgress", Vec::new())
+            .expect("nil progress clears");
+        app.handle_script_player_info_updates()
+            .expect("null progress mirrors");
+        let info = app
+            .control_player_infos
+            .get(41)
+            .expect("info remains retained");
+        assert!(info.league_progress_data_is_null);
+        assert!(info.league_progress_data.is_empty());
+        let published = commands.take_published_join_snapshots();
+        let info = &published
+            .last()
+            .expect("cleared progress publishes JoinData")
+            .parameters
+            .player_infos
+            .clients[0]
+            .players[0];
+        assert!(info.league_progress_data_is_null);
+        assert!(info.league_progress_data.is_empty());
+
+        app.engine
+            .call_scenario_script_function("SetLimit", Vec::new())
+            .expect("SetMaxPlayer executes without a player-info update");
+        app.handle_script_player_info_updates()
+            .expect("SetMaxPlayer mirrors into host parameters");
+        let published = commands.take_published_join_snapshots();
+        assert_eq!(
+            published
+                .last()
+                .expect("SetMaxPlayer publishes JoinData")
+                .parameters
+                .max_players,
+            5
+        );
+        assert_eq!(
+            app.host_join_snapshot
+                .as_ref()
+                .expect("host parameters remain retained")
+                .parameters
+                .max_players,
+            5
         );
     }
 
@@ -58680,10 +60503,7 @@ protected func InputCallback(string answer, int player)
         snapshot.parameters.fair_crew_forced = true;
         app.host_join_snapshot = Some(snapshot);
         app.engine.set_fair_crew_forced(false);
-        let before = (
-            app.engine.use_fair_crew(),
-            app.engine.fair_crew_strength(),
-        );
+        let before = (app.engine.use_fair_crew(), app.engine.fair_crew_strength());
 
         app.execute_control_set(lc_network::LegacyControlSet {
             value_type: 5,
@@ -58725,6 +60545,451 @@ protected func InputCallback(string answer, int player)
         let published = commands.take_published_join_snapshots();
         assert_eq!(published.len(), 6);
         assert_eq!(published.last(), app.host_join_snapshot.as_ref());
+    }
+
+    fn set_control_test_team(
+        id: i32,
+        player_ids: Vec<i32>,
+        max_players: i32,
+    ) -> lc_engine::InitialNetworkTeam {
+        lc_engine::InitialNetworkTeam {
+            id,
+            name: lc_engine::LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            player_start_index: 0,
+            player_ids,
+            color: if id == 1 { 0x00f4_0000 } else { 0x0000_00f4 },
+            icon_spec: lc_engine::LegacyCString::default(),
+            max_players,
+        }
+    }
+
+    fn set_control_test_metadata(
+        auto_generate_teams: bool,
+        teams: Vec<lc_engine::InitialNetworkTeam>,
+    ) -> lc_engine::InitialNetworkTeamMetadata {
+        lc_engine::InitialNetworkTeamMetadata {
+            active: true,
+            custom: false,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams,
+            last_team_id: teams.iter().map(|team| team.id).fold(0, i32::max),
+            team_distribution: lc_engine::InitialNetworkTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: lc_engine::LegacyCString::default(),
+            random_team_count: 0,
+            teams,
+        }
+    }
+
+    fn set_control_test_player(
+        id: i32,
+        team: i32,
+        flags: u16,
+    ) -> lc_engine::ControlPlayerInfoEntry {
+        lc_engine::ControlPlayerInfoEntry {
+            id,
+            team,
+            flags,
+            name: lc_engine::LegacyCString::from_bytes(format!("Player {id}").into_bytes())
+                .unwrap(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn network_host_distribution_reassigns_and_publishes_full_team_state() {
+        let mut app = new_running_sandbox_app();
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.host_join_snapshot = lc_network::HostConfig::default().initial_join_snapshot;
+        let metadata = set_control_test_metadata(
+            false,
+            vec![
+                set_control_test_team(1, vec![10, 20], 1),
+                set_control_test_team(2, Vec::new(), 0),
+            ],
+        );
+        app.engine
+            .set_teams(runtime_teams_from_initial_metadata(&metadata));
+        app.network_team_assignment =
+            Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+        app.control_player_infos.replace_snapshot(
+            20,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![
+                    set_control_test_player(20, 1, 0),
+                    set_control_test_player(10, 1, lc_engine::PLAYER_INFO_FLAG_JOINED),
+                ],
+                ..Default::default()
+            }],
+        );
+
+        app.execute_control_set(lc_network::LegacyControlSet {
+            value_type: 3,
+            data: 2,
+            by_client: 0,
+        });
+
+        assert_eq!(app.control_player_infos.get(20).unwrap().team, 2);
+        assert_eq!(app.engine.team_distribution(), 2);
+        let assignment = app.network_team_assignment.as_ref().unwrap().teams();
+        assert_eq!(assignment.teams[0].player_ids, vec![10]);
+        assert_eq!(assignment.teams[1].player_ids, vec![20]);
+        let snapshot = app.host_join_snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.parameters.teams.teams[0].player_ids, vec![10]);
+        assert_eq!(snapshot.parameters.teams.teams[1].player_ids, vec![20]);
+        assert_eq!(
+            snapshot.parameters.player_infos.clients[0].players[0].team,
+            2
+        );
+        let (player_infos, snapshots) = commands.take_team_control_updates();
+        assert_eq!(player_infos.len(), 1);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0], *snapshot);
+    }
+
+    #[test]
+    fn unavailable_generated_distribution_rolls_back_without_network_publication() {
+        let mut app = new_running_sandbox_app();
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.host_join_snapshot = lc_network::HostConfig::default().initial_join_snapshot;
+        let mut metadata =
+            set_control_test_metadata(true, vec![set_control_test_team(1, vec![20], 0)]);
+        metadata.random_team_count = 2;
+        app.network_team_assignment =
+            Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+        app.control_player_infos.replace_snapshot(
+            20,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![set_control_test_player(20, 1, 0)],
+                ..Default::default()
+            }],
+        );
+        let before_teams = app
+            .network_team_assignment
+            .as_ref()
+            .unwrap()
+            .teams()
+            .clone();
+        let before_infos = app.control_player_infos.retained_rows_snapshot();
+        let before_snapshot = app.host_join_snapshot.clone();
+        let before_distribution = app.engine.team_distribution();
+
+        app.execute_control_set(lc_network::LegacyControlSet {
+            value_type: 3,
+            data: 3,
+            by_client: 0,
+        });
+
+        assert_eq!(
+            app.network_team_assignment.as_ref().unwrap().teams(),
+            &before_teams
+        );
+        assert_eq!(
+            app.control_player_infos.retained_rows_snapshot(),
+            before_infos
+        );
+        assert_eq!(app.host_join_snapshot, before_snapshot);
+        assert_eq!(app.engine.team_distribution(), before_distribution);
+        assert!(app.status_text.contains("unavailable"));
+        assert_eq!(
+            commands.take_team_control_updates(),
+            (Vec::new(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn invalid_host_team_distribution_is_a_silent_no_op() {
+        let mut app = new_running_sandbox_app();
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.host_join_snapshot = lc_network::HostConfig::default().initial_join_snapshot;
+        let metadata = set_control_test_metadata(
+            false,
+            vec![
+                set_control_test_team(1, vec![10], 0),
+                set_control_test_team(2, vec![20], 0),
+            ],
+        );
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            metadata,
+        ));
+        app.control_player_infos.replace_snapshot(
+            20,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![set_control_test_player(20, 2, 0)],
+                ..Default::default()
+            }],
+        );
+        app.status_text = "unchanged".to_string();
+        let before_distribution = app.engine.team_distribution();
+        let before_teams = app.network_team_assignment.as_ref().unwrap().teams().clone();
+        let before_infos = app.control_player_infos.retained_rows_snapshot();
+        let before_snapshot = app.host_join_snapshot.clone();
+
+        app.execute_control_set(lc_network::LegacyControlSet {
+            value_type: 3,
+            data: 9,
+            by_client: 0,
+        });
+
+        assert_eq!(app.status_text, "unchanged");
+        assert_eq!(app.engine.team_distribution(), before_distribution);
+        assert_eq!(app.network_team_assignment.as_ref().unwrap().teams(), &before_teams);
+        assert_eq!(app.control_player_infos.retained_rows_snapshot(), before_infos);
+        assert_eq!(app.host_join_snapshot, before_snapshot);
+        assert_eq!(
+            commands.take_team_control_updates(),
+            (Vec::new(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn network_host_team_colors_broadcasts_attributes_and_full_join_data() {
+        let mut app = new_running_sandbox_app();
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.host_join_snapshot = lc_network::HostConfig::default().initial_join_snapshot;
+        let metadata = set_control_test_metadata(
+            false,
+            vec![
+                set_control_test_team(1, vec![10], 0),
+                set_control_test_team(2, vec![20], 0),
+            ],
+        );
+        app.engine
+            .set_teams(runtime_teams_from_initial_metadata(&metadata));
+        app.network_team_assignment =
+            Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+        let mut unjoined = set_control_test_player(20, 2, 0);
+        unjoined.color = 0x0000_c800;
+        unjoined.original_color = 0x0000_c800;
+        let mut joined = set_control_test_player(10, 1, lc_engine::PLAYER_INFO_FLAG_JOINED);
+        joined.color = 0x00f4_0000;
+        joined.original_color = 0x00f4_0000;
+        app.control_player_infos.replace_snapshot(
+            20,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![unjoined, joined],
+                ..Default::default()
+            }],
+        );
+
+        app.execute_control_set(lc_network::LegacyControlSet {
+            value_type: 4,
+            data: 1,
+            by_client: 0,
+        });
+
+        assert!(app.engine.team_colors());
+        assert!(
+            app.network_team_assignment
+                .as_ref()
+                .unwrap()
+                .teams()
+                .team_colors
+        );
+        assert_eq!(app.control_player_infos.get(20).unwrap().color, 0x0000_00f4);
+        let snapshot = app.host_join_snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.parameters.teams.team_colors, 1);
+        assert_eq!(snapshot.parameters.teams.teams.len(), 2);
+        assert_eq!(
+            snapshot.parameters.player_infos.clients[0].players[0].color,
+            0x0000_00f4
+        );
+        let (player_infos, snapshots) = commands.take_team_control_updates();
+        assert_eq!(player_infos.len(), 1);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0], *snapshot);
+    }
+
+    #[test]
+    fn unavailable_team_color_or_name_resolution_rolls_back_without_publication() {
+        for conflict_kind in ["color", "name"] {
+            let mut app = new_running_sandbox_app();
+            let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+            app.network = Some(manager);
+            app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+            app.host_join_snapshot = lc_network::HostConfig::default().initial_join_snapshot;
+            let metadata = set_control_test_metadata(
+                false,
+                vec![
+                    set_control_test_team(1, Vec::new(), 0),
+                    set_control_test_team(2, Vec::new(), 0),
+                ],
+            );
+            app.network_team_assignment =
+                Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+            let mut first = set_control_test_player(20, 0, 0);
+            let mut second = set_control_test_player(21, 0, 0);
+            if conflict_kind == "color" {
+                first.color = 0x00f4_0000;
+                first.original_color = 0x00f4_0000;
+                second.color = 0x00f4_0000;
+                second.original_color = 0x00f4_0000;
+            } else {
+                first.color = 0x00f4_0000;
+                first.original_color = 0x00f4_0000;
+                second.color = 0x0000_00f4;
+                second.original_color = 0x0000_00f4;
+                first.name = lc_engine::LegacyCString::from_bytes(b"Same".to_vec()).unwrap();
+                second.name = lc_engine::LegacyCString::from_bytes(b"same".to_vec()).unwrap();
+            }
+            app.control_player_infos.replace_snapshot(
+                21,
+                [lc_engine::PlayerInfoControlData {
+                    client_id: 3,
+                    players: vec![first, second],
+                    ..Default::default()
+                }],
+            );
+            let before_teams = app
+                .network_team_assignment
+                .as_ref()
+                .unwrap()
+                .teams()
+                .clone();
+            let before_infos = app.control_player_infos.retained_rows_snapshot();
+            let before_snapshot = app.host_join_snapshot.clone();
+
+            app.execute_control_set(lc_network::LegacyControlSet {
+                value_type: 4,
+                data: 1,
+                by_client: 0,
+            });
+
+            assert_eq!(
+                app.network_team_assignment.as_ref().unwrap().teams(),
+                &before_teams,
+                "{conflict_kind}"
+            );
+            assert_eq!(
+                app.control_player_infos.retained_rows_snapshot(),
+                before_infos,
+                "{conflict_kind}"
+            );
+            assert_eq!(app.host_join_snapshot, before_snapshot, "{conflict_kind}");
+            assert!(!app.engine.team_colors(), "{conflict_kind}");
+            assert_eq!(
+                commands.take_team_control_updates(),
+                (Vec::new(), Vec::new()),
+                "{conflict_kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn offline_host_reassigns_but_replay_only_changes_the_distribution_flag() {
+        let metadata = set_control_test_metadata(
+            false,
+            vec![
+                set_control_test_team(1, vec![10, 20], 1),
+                set_control_test_team(2, Vec::new(), 0),
+            ],
+        );
+        let packet = lc_engine::PlayerInfoControlData {
+            client_id: 0,
+            players: vec![
+                set_control_test_player(20, 1, 0),
+                set_control_test_player(10, 1, lc_engine::PLAYER_INFO_FLAG_JOINED),
+            ],
+            ..Default::default()
+        };
+
+        let mut offline = new_running_sandbox_app();
+        offline.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            metadata.clone(),
+        ));
+        offline
+            .control_player_infos
+            .replace_snapshot(20, [packet.clone()]);
+        offline.execute_control_set(lc_network::LegacyControlSet {
+            value_type: 3,
+            data: 2,
+            by_client: 0,
+        });
+        assert_eq!(offline.control_player_infos.get(20).unwrap().team, 2);
+
+        let mut replay = new_running_sandbox_app();
+        replay.engine.set_control_host(false);
+        replay.network_team_assignment = None;
+        replay.control_player_infos.replace_snapshot(20, [packet]);
+        replay.execute_control_set(lc_network::LegacyControlSet {
+            value_type: 3,
+            data: 3,
+            by_client: 0,
+        });
+        assert_eq!(replay.engine.team_distribution(), 3);
+        assert_eq!(replay.control_player_infos.get(20).unwrap().team, 1);
+    }
+
+    #[test]
+    fn client_player_info_rechecks_prepared_team_memberships_before_activation() {
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+        let (_sender, receiver) = mpsc::channel();
+        app.loading_state = Some(ScenarioLoadingState {
+            scenario: FrontendScenario::fallback(),
+            refreshed_resources: None,
+            refreshed_global_gui_overrides: None,
+            refresh_requested: false,
+            receiver,
+            finished: false,
+            prepared_go: Some(PreparedGoLoadingState {
+                status: lc_network::NetworkStatus {
+                    state: lc_network::NETWORK_STATE_GO,
+                    control_mode: 0,
+                    target_tick: 0,
+                },
+                local_reached: false,
+                random_seed: 0,
+                use_fair_crew: false,
+                fair_crew_strength: 0,
+                fair_crew_forced: false,
+                allow_debug: true,
+                team_configuration: TeamConfiguration::default(),
+                team_registry: vec![
+                    lc_engine::TeamInfo::new(1, "One", 0).with_player_ids(vec![20]),
+                    lc_engine::TeamInfo::new(2, "Two", 0),
+                ],
+            }),
+            offline_startup_players: None,
+        });
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 3,
+                    players: vec![set_control_test_player(20, 2, 0)],
+                    ..Default::default()
+                },
+            )))
+            .unwrap();
+
+        app.process_network_events().unwrap();
+
+        let teams = &app
+            .loading_state
+            .as_ref()
+            .unwrap()
+            .prepared_go
+            .as_ref()
+            .unwrap()
+            .team_registry;
+        assert!(teams[0].player_ids.is_empty());
+        assert_eq!(teams[1].player_ids, vec![20]);
     }
 
     #[test]
@@ -59083,6 +61348,7 @@ protected func InputCallback(string answer, int player)
         let mut app = new_running_sandbox_app();
         let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
         for (player, info_id) in [(17, 7), (18, 8)] {
             app.engine
                 .register_player(
@@ -59105,12 +61371,14 @@ protected func InputCallback(string answer, int player)
                 ..Default::default()
             },
         ];
-        app.control_player_infos
-            .apply(lc_engine::PlayerInfoControlData {
+        app.control_player_infos.replace_snapshot(
+            8,
+            [lc_engine::PlayerInfoControlData {
                 client_id: 3,
                 players: player_infos.clone(),
                 ..Default::default()
-            });
+            }],
+        );
         let mut host_snapshot = lc_network::HostConfig::default()
             .initial_join_snapshot
             .expect("default host JoinData");
@@ -60320,7 +62588,7 @@ protected func InputCallback(string answer, int player)
             },
             lc_engine::ClientCoreControlData {
                 client_id: at_client,
-                name: lc_engine::LegacyCString::from_bytes(b"Remote Client".to_vec())
+                name: lc_engine::LegacyCString::from_bytes(b"Remote Andr\xe9".to_vec())
                     .expect("valid remote client name"),
                 ..Default::default()
             },
@@ -60332,7 +62600,7 @@ protected func InputCallback(string answer, int player)
                     NetworkControl::PlayerInfo(lc_engine::PlayerInfoControlData {
                         client_id: at_client,
                         players: vec![lc_engine::ControlPlayerInfoEntry {
-                            name: lc_engine::LegacyCString::from_bytes(b"Remote Owner".to_vec())
+                            name: lc_engine::LegacyCString::from_bytes(b"Remote Ren\xe9".to_vec())
                                 .expect("valid legacy name"),
                             id: info_id,
                             ..Default::default()
@@ -60372,13 +62640,12 @@ protected func InputCallback(string answer, int player)
                 .at_client(),
             lc_engine::PlayerAtClient::new(at_client)
         );
+        let player = app.engine.player(joined.id).expect("runtime remote player");
         assert_eq!(
-            app.engine
-                .player(joined.id)
-                .expect("runtime remote player")
-                .at_client_name(),
-            "Remote Client"
+            lc_script::c4_string_bytes(player.at_client_name()),
+            b"Remote Andr\xe9"
         );
+        assert_eq!(lc_script::c4_string_bytes(player.name()), b"Remote Ren\xe9");
     }
 
     #[test]
@@ -68381,16 +70648,11 @@ protected func InputCallback(string answer, int player)
 
         let workshop =
             app_object_with_definition(&app, "WRKS").expect("Tutorial07 creates the player's WRKS");
-        advance_app_until(
-            &mut app,
-            "HUT3 restores after fifth GOLD sale",
-            30,
-            |app| {
-                app.engine
-                    .cursor_object_menu(owner)
-                    .is_some_and(|(_, menu)| menu.identification == context_identification)
-            },
-        );
+        advance_app_until(&mut app, "HUT3 restores after fifth GOLD sale", 30, |app| {
+            app.engine
+                .cursor_object_menu(owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+        });
         app_navigate_object_menu_to(&mut app, "Exit", |item| item.caption == "Exit");
         AppVirtualKeyboard::new(&mut app)
             .tap(VirtualKeyCode::A)
@@ -68777,9 +71039,9 @@ protected func InputCallback(string answer, int player)
             "horizontal tunnel clears the irregular crest seam",
             120,
             |app| {
-                app.engine.object_snapshot(clonk).is_some_and(|object| {
-                    object.action.name == "Dig" && object.position.x <= 635
-                })
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Dig" && object.position.x <= 635)
             },
         );
         AppVirtualKeyboard::new(&mut app)
@@ -73750,7 +76012,10 @@ protected func InputCallback(string answer, int player)
                     flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
                     name: text("Base name"),
                     forced_name: text("Forced name"),
-                    league_account: text("League name"),
+                    league_account: lc_engine::LegacyCString::from_bytes(
+                        b"League Ren\xe9".to_vec(),
+                    )
+                    .expect("valid native player name"),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -73788,7 +76053,8 @@ protected func InputCallback(string answer, int player)
         app.apply_loaded_game(save).expect("restore sandbox save");
 
         let player = app.engine.player(owner).expect("player is recreated");
-        assert_eq!(player.name(), "League name");
+        assert_eq!(lc_script::c4_string_bytes(player.name()), b"League Ren\xe9");
+        assert_eq!(player.at_client_name(), "Local");
         assert!(!player.is_script_player());
         assert!(!player.no_elimination_check());
         assert_eq!(player.control_style_preferences(), (false, false));
@@ -74496,8 +76762,10 @@ protected func InputCallback(string answer, int player)
                     .expect("open message"),
                 Layer::Context => {
                     app.open_context_menu_at(
-                        vec![ContextMenuEntry::<AppContextMenuCommand>::new("Root")
-                            .with_submenu(vec![ContextMenuEntry::new("Child")])],
+                        vec![
+                            ContextMenuEntry::<AppContextMenuCommand>::new("Root")
+                                .with_submenu(vec![ContextMenuEntry::new("Child")]),
+                        ],
                         GuiPoint::new(24.0, 24.0),
                     )
                     .expect("open context");
@@ -74663,9 +76931,12 @@ protected func InputCallback(string answer, int player)
         context.snapshot.hud.messages.clear();
         context
             .open_context_menu_at(
-                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Root")
-                    .with_submenu(vec![ContextMenuEntry::new("Child")
-                        .with_submenu(vec![ContextMenuEntry::new("Context above flash")])])],
+                vec![
+                    ContextMenuEntry::<AppContextMenuCommand>::new("Root").with_submenu(vec![
+                        ContextMenuEntry::new("Child")
+                            .with_submenu(vec![ContextMenuEntry::new("Context above flash")]),
+                    ]),
+                ],
                 GuiPoint::new(120.0, 55.0),
             )
             .expect("open overlapping recursive context");
@@ -76844,8 +79115,13 @@ protected func InputCallback(string answer, int player)
             .player_mut(pause_app.local_owner)
             .expect("host player")
             .set_at_client(lc_engine::PlayerAtClient::HOST);
+        let (pause_snapshot, pause_reference) = default_exact_host_reference();
         pause_app.control_clients = ControlClientRegistry::default();
-        pause_app.control_clients.register(0, true, false);
+        pause_app
+            .control_clients
+            .replace_snapshot(pause_snapshot.parameters.clients.clients.clone());
+        pause_app.host_join_snapshot = Some(pause_snapshot);
+        pause_app.advertised_game_reference = Some(pause_reference);
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
         pause_app.network = Some(manager);
         pause_app.network_mode = Some(NetworkMode::Host(HostSettings {
@@ -76867,8 +79143,26 @@ protected func InputCallback(string answer, int player)
         let pause_changes = commands.take_status_changes();
         assert_eq!(pause_changes.len(), 1);
         assert_eq!(pause_changes[0].state, lc_network::NETWORK_STATE_PAUSE);
+        assert_eq!(
+            pause_app
+                .advertised_game_reference
+                .as_ref()
+                .expect("pause refreshes the retained reference")
+                .summary()
+                .state,
+            "Paused"
+        );
         pause_app.execute_league_vote_end(pause);
         assert!(commands.take_status_changes().is_empty());
+        assert_eq!(
+            pause_app
+                .advertised_game_reference
+                .as_ref()
+                .expect("approved pause remains advertised")
+                .summary()
+                .state,
+            "Paused"
+        );
 
         let mut unpause_app = new_running_sandbox_app();
         unpause_app
@@ -76876,8 +79170,13 @@ protected func InputCallback(string answer, int player)
             .player_mut(unpause_app.local_owner)
             .expect("host player")
             .set_at_client(lc_engine::PlayerAtClient::HOST);
+        let (unpause_snapshot, unpause_reference) = default_exact_host_reference();
         unpause_app.control_clients = ControlClientRegistry::default();
-        unpause_app.control_clients.register(0, true, false);
+        unpause_app
+            .control_clients
+            .replace_snapshot(unpause_snapshot.parameters.clients.clients.clone());
+        unpause_app.host_join_snapshot = Some(unpause_snapshot);
+        unpause_app.advertised_game_reference = Some(unpause_reference);
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
         unpause_app.network = Some(manager);
         unpause_app.network_mode = Some(NetworkMode::Host(HostSettings {
@@ -76886,6 +79185,9 @@ protected func InputCallback(string answer, int player)
             prepared: None,
         }));
         unpause_app.network_control_running = false;
+        unpause_app.league_votes.paused_for_vote = true;
+        unpause_app.host_reference_paused = true;
+        unpause_app.publish_running_host_reference();
         let unpause = lc_engine::VoteControlData { data: 0, ..pause };
 
         unpause_app
@@ -76897,6 +79199,15 @@ protected func InputCallback(string answer, int player)
         let go_changes = commands.take_status_changes();
         assert_eq!(go_changes.len(), 1);
         assert_eq!(go_changes[0].state, lc_network::NETWORK_STATE_GO);
+        assert_eq!(
+            unpause_app
+                .advertised_game_reference
+                .as_ref()
+                .expect("GO request refreshes the retained reference")
+                .summary()
+                .state,
+            "Running"
+        );
     }
 
     #[test]
@@ -77084,6 +79395,7 @@ protected func InputCallback(string answer, int player)
                     total_playing_time: 3_661,
                     score_old: 10,
                     score_new: Some(110),
+                    league_progress_data: None,
                     league_performance: 0,
                     custom_evaluation_strings: String::new(),
                 },
@@ -77092,6 +79404,7 @@ protected func InputCallback(string answer, int player)
                     total_playing_time: 9,
                     score_old: 900,
                     score_new: Some(901),
+                    league_progress_data: None,
                     league_performance: 0,
                     custom_evaluation_strings: "wrong runtime-number join".into(),
                 },

@@ -45,7 +45,7 @@ impl SelectedClientPlayer {
         wire_name: LegacyCString,
         player_file: PlayerFile,
     ) -> Self {
-        let player_name = LegacyCString::from_bytes(player_file.name.as_bytes().to_vec());
+        let player_name = LegacyCString::from_bytes(lc_script::c4_string_bytes(&player_file.name));
         let network_color = player_file.normalized_preferred_color();
         Self {
             source_path: source_path.into(),
@@ -347,6 +347,24 @@ mod tests {
                     ..Default::default()
                 }],
             }
+        );
+    }
+
+    #[test]
+    fn selected_client_player_preserves_native_name_bytes_on_wire() {
+        let selected = super::SelectedClientPlayer::new(
+            "/installed/Players/Andre.c4p",
+            LegacyCString::from_bytes(b"Andre.c4p".to_vec()).expect("valid wire name"),
+            PlayerFile {
+                name: lc_script::c4_string_from_bytes(b"Andr\xe9"),
+                ..PlayerFile::default()
+            },
+        );
+
+        assert_eq!(selected.player_name().as_bytes(), b"Andr\xe9");
+        assert_eq!(
+            lc_script::c4_string_bytes(&selected.player_file().name),
+            b"Andr\xe9"
         );
     }
 

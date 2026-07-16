@@ -8,36 +8,35 @@
 use std::fs;
 use std::os::raw::c_int;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
-    assign_initial_host_player_teams, ClientCoreControlData, ControlPlayerInfoEntry,
+    CLIENT_PLAYER_INFO_FLAG_INITIAL, ClientCoreControlData, ControlPlayerInfoEntry,
     InitialHostTeamAssignmentOracle, InitialNetworkGameData, InitialNetworkTeam,
-    InitialNetworkTeamMetadata, LegacyCString, NetworkResourceCore, PlayerInfoControlData,
-    PlayerInfoUpdateRequest, Scenario, ScenarioError, CLIENT_PLAYER_INFO_FLAG_INITIAL,
-    PLAYER_INFO_FLAG_HAS_RESOURCE,
+    InitialNetworkTeamMetadata, LegacyCString, NetworkResourceCore, PLAYER_INFO_FLAG_HAS_RESOURCE,
+    PlayerInfoControlData, PlayerInfoUpdateRequest, Scenario, ScenarioError,
+    assign_initial_host_player_teams,
 };
 use lc_network::{
-    compose_initial_network_dynamic, fill_scenario_derived_join_parameters,
-    join_team_list_snapshot, publish_host_initial_resources, ClientPlayerInfosSnapshot, HostConfig,
+    CURRENT_GAME_BUILD, CURRENT_GAME_VERSION, ClientPlayerInfosSnapshot, HostConfig,
     HostGameReference, HostGameReferenceError, HostGameReferenceMetadata,
     HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
     HostInitialResourceSource, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
     InitialNetworkMetadataError, JoinClientRegistrySnapshot, JoinGameParametersEnvelope,
-    JoinTeamListSnapshot, NetworkAddress, NetworkGameReference, NetworkProtocol, NetworkStatus,
-    PlayerInfoListSnapshot, ResourceFileOwnership, CURRENT_GAME_BUILD, CURRENT_GAME_VERSION,
-    NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
-    NETWORK_STATE_PAUSE,
+    JoinTeamListSnapshot, NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY,
+    NETWORK_STATE_NONE, NETWORK_STATE_PAUSE, NetworkAddress, NetworkGameReference, NetworkProtocol,
+    NetworkStatus, PlayerInfoListSnapshot, ResourceFileOwnership, compose_initial_network_dynamic,
+    fill_scenario_derived_join_parameters, join_team_list_snapshot, publish_host_initial_resources,
 };
 use lc_resources::{Group, GroupError};
 use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::host_game_resource_sources::{
-    resolve_host_game_resource_sources, HostGameResourceSourceError,
+    HostGameResourceSourceError, resolve_host_game_resource_sources,
 };
 
 /// Configuration values C++ reads while loading parameters and initializing
@@ -267,29 +266,22 @@ impl PreparedHostBootstrap {
             state => return Err(PreparedHostReferenceError::UnsupportedStatus(state)),
         };
         let summary = NetworkGameReference {
-            title: parameters.title.to_string_lossy().into_owned(),
-            host_name: self
-                .host_config
-                .local_core
-                .name
-                .to_string_lossy()
-                .into_owned(),
-            host_nick: self
-                .host_config
-                .local_core
-                .nick
-                .to_string_lossy()
-                .into_owned(),
+            title: lc_resources::decode_legacy_script_text(parameters.title.as_bytes()),
+            host_name: lc_resources::decode_legacy_script_text(
+                self.host_config.local_core.name.as_bytes(),
+            ),
+            host_nick: lc_resources::decode_legacy_script_text(
+                self.host_config.local_core.nick.as_bytes(),
+            ),
             state: state.to_string(),
             control_mode: self.host_config.initial_status.control_mode,
             start_time: i64::from(self.start_time),
             join_allowed,
             password_needed: !self.host_config.password.is_empty(),
             official_server: false,
-            league_address: parameters
-                .league_address
-                .to_string_lossy()
-                .into_owned(),
+            league_address: lc_resources::decode_legacy_script_text(
+                parameters.league_address.as_bytes(),
+            ),
             max_players: parameters.max_players,
             game: "LegacyClonk".to_string(),
             version: CURRENT_GAME_VERSION,
@@ -303,7 +295,9 @@ impl PreparedHostBootstrap {
             )),
             netpuncher_ipv4: 0,
             netpuncher_ipv6: 0,
-            netpuncher_address: self.netpuncher_address.to_string_lossy().into_owned(),
+            netpuncher_address: lc_resources::decode_legacy_script_text(
+                self.netpuncher_address.as_bytes(),
+            ),
             tcp_addresses: addresses
                 .iter()
                 .filter(|address| address.protocol == NetworkProtocol::Tcp)
@@ -577,7 +571,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             }
         })
         .map(|(source, player)| {
-            validate_network_name("local player name", &player.name, false)?;
+            validate_c4_network_name("local player name", &player.name, false)?;
             Ok::<_, PrepareHostBootstrapError>((source, player))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -720,7 +714,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         .map(|((source, player), core)| {
             let color = player.normalized_preferred_color();
             ControlPlayerInfoEntry {
-                name: legacy_string(&player.name),
+                name: legacy_c4_string(&player.name),
                 filename: source.wire_name.clone(),
                 flags: PLAYER_INFO_FLAG_HAS_RESOURCE,
                 color,
@@ -906,16 +900,33 @@ fn validate_network_name(
     allow_empty: bool,
 ) -> Result<(), PrepareHostBootstrapError> {
     validate_ascii_text(field, value, allow_empty)?;
+    validate_network_name_bytes(field, value.as_bytes(), allow_empty)
+}
+
+fn validate_c4_network_name(
+    field: &'static str,
+    value: &str,
+    allow_empty: bool,
+) -> Result<(), PrepareHostBootstrapError> {
+    validate_network_name_bytes(field, &lc_script::c4_string_bytes(value), allow_empty)
+}
+
+fn validate_network_name_bytes(
+    field: &'static str,
+    value: &[u8],
+    allow_empty: bool,
+) -> Result<(), PrepareHostBootstrapError> {
     if value.is_empty() && allow_empty {
         return Ok(());
     }
-    let trimmed = value.trim_matches(|character: char| character.is_ascii_whitespace());
-    if trimmed != value
-        || trimmed.is_empty()
-        || trimmed.len() > 30
-        || trimmed.contains('{')
-        || trimmed.contains('<')
-        || trimmed.contains("}}")
+    if value.is_empty()
+        || value.contains(&0)
+        || value.first().is_some_and(u8::is_ascii_whitespace)
+        || value.last().is_some_and(u8::is_ascii_whitespace)
+        || value.len() > 30
+        || value.contains(&b'{')
+        || value.contains(&b'<')
+        || value.windows(2).any(|pair| pair == b"}}")
     {
         return Err(PrepareHostBootstrapError::UnsupportedText { field });
     }
@@ -1149,6 +1160,11 @@ fn normalize_network_work_path(value: &str) -> Result<String, PrepareHostBootstr
 fn legacy_string(value: &str) -> LegacyCString {
     LegacyCString::from_bytes(value.as_bytes().to_vec())
         .expect("validated supported text is NUL-free")
+}
+
+fn legacy_c4_string(value: &str) -> LegacyCString {
+    LegacyCString::from_bytes(lc_script::c4_string_bytes(value))
+        .expect("validated C4 text is NUL-free")
 }
 
 fn empty_team_snapshot() -> JoinTeamListSnapshot {

@@ -72,28 +72,18 @@ impl Default for PlayerAtClient {
     }
 }
 
-fn bounded_at_client_name(mut name: String) -> String {
+fn bounded_at_client_name(name: String) -> String {
     const C4_MAX_TITLE: usize = 512;
-    if name.len() > C4_MAX_TITLE {
-        let mut end = C4_MAX_TITLE;
-        while !name.is_char_boundary(end) {
-            end -= 1;
-        }
-        name.truncate(end);
-    }
-    name
+    let mut bytes = lc_script::c4_string_bytes(&name);
+    bytes.truncate(C4_MAX_TITLE);
+    lc_script::c4_string_from_bytes(&bytes)
 }
 
-fn bounded_message_buf(mut message: String) -> String {
+fn bounded_message_buf(message: String) -> String {
     const C4_MESSAGE_BUFFER_LENGTH: usize = 256;
-    if message.len() > C4_MESSAGE_BUFFER_LENGTH {
-        let mut end = C4_MESSAGE_BUFFER_LENGTH;
-        while !message.is_char_boundary(end) {
-            end -= 1;
-        }
-        message.truncate(end);
-    }
-    message
+    let mut bytes = lc_script::c4_string_bytes(&message);
+    bytes.truncate(C4_MESSAGE_BUFFER_LENGTH);
+    lc_script::c4_string_from_bytes(&bytes)
 }
 
 fn set_ordered_id_count<K: PartialEq>(
@@ -129,9 +119,7 @@ fn ordered_id_count<K: PartialEq>(entries: &[(K, i32)], id: &K, zero_default: i3
         .unwrap_or(0)
 }
 
-fn ordered_entries_from_unsigned_map(
-    map: &HashMap<DefinitionId, u32>,
-) -> Vec<(DefinitionId, i32)> {
+fn ordered_entries_from_unsigned_map(map: &HashMap<DefinitionId, u32>) -> Vec<(DefinitionId, i32)> {
     let mut entries = map
         .iter()
         .map(|(id, count)| (id.clone(), i32::try_from(*count).unwrap_or(i32::MAX)))
@@ -140,9 +128,7 @@ fn ordered_entries_from_unsigned_map(
     entries
 }
 
-fn unsigned_first_count_projection(
-    entries: &[(DefinitionId, i32)],
-) -> HashMap<DefinitionId, u32> {
+fn unsigned_first_count_projection(entries: &[(DefinitionId, i32)]) -> HashMap<DefinitionId, u32> {
     let mut projection = HashMap::new();
     for (id, count) in entries {
         projection
@@ -215,7 +201,11 @@ fn default_zoom() -> f32 {
 pub struct MessageBoardQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<ObjectId>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        with = "lc_script::c4_string_serde"
+    )]
     pub prompt: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub uppercase: bool,
@@ -260,7 +250,11 @@ pub struct PlayerState {
     /// Join-time snapshot of `C4Player::AtClientName`. `None` is the C++
     /// runtime default, `"Local"`; `Some("")` remains a real empty network
     /// client name rather than being conflated with that default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "lc_script::c4_optional_string_serde"
+    )]
     pub at_client_name: Option<String>,
     /// Stable C4PlayerInfo type used to recompute LocalControl on restore.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -270,7 +264,7 @@ pub struct PlayerState {
     /// authoritative player-info bit and reapply it during recreation.
     #[serde(default, skip_serializing_if = "is_false")]
     pub no_elimination_check: bool,
-    #[serde(default)]
+    #[serde(default, with = "lc_script::c4_string_serde")]
     pub name: String,
     #[serde(default)]
     pub status: PlayerStatus,
@@ -412,7 +406,11 @@ pub struct PlayerState {
     pub select_count: i32,
     #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub message_status: i32,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        with = "lc_script::c4_string_serde"
+    )]
     pub message_buf: String,
     /// Saved `C4Player::pMsgBoardQuery` list, in linked-list order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -449,11 +447,7 @@ pub struct PlayerState {
 impl PlayerState {
     pub(crate) fn exact_knowledge_entries(&self) -> Vec<(DefinitionId, i32)> {
         if self.knowledge_entries.is_empty() && !self.knowledge.is_empty() {
-            self.knowledge
-                .iter()
-                .cloned()
-                .map(|id| (id, 1))
-                .collect()
+            self.knowledge.iter().cloned().map(|id| (id, 1)).collect()
         } else {
             self.knowledge_entries.clone()
         }
@@ -461,11 +455,7 @@ impl PlayerState {
 
     pub(crate) fn exact_magic_entries(&self) -> Vec<(DefinitionId, i32)> {
         if self.magic_entries.is_empty() && !self.magic.is_empty() {
-            self.magic
-                .iter()
-                .cloned()
-                .map(|id| (id, 1))
-                .collect()
+            self.magic.iter().cloned().map(|id| (id, 1)).collect()
         } else {
             self.magic_entries.clone()
         }
@@ -561,26 +551,16 @@ impl PlayerState {
         if self.hostility_entries.is_empty() {
             self.hostility.contains(&opponent)
         } else {
-            ordered_id_count(
-                &self.hostility_entries,
-                &opponent.wrapping_add(1),
-                0,
-            ) != 0
+            ordered_id_count(&self.hostility_entries, &opponent.wrapping_add(1), 0) != 0
         }
     }
 
-    pub(crate) fn set_home_base_material_entries(
-        &mut self,
-        entries: Vec<(DefinitionId, i32)>,
-    ) {
+    pub(crate) fn set_home_base_material_entries(&mut self, entries: Vec<(DefinitionId, i32)>) {
         self.home_base_material = unsigned_first_count_projection(&entries);
         self.home_base_material_entries = entries;
     }
 
-    pub(crate) fn set_home_base_production_entries(
-        &mut self,
-        entries: Vec<(DefinitionId, i32)>,
-    ) {
+    pub(crate) fn set_home_base_production_entries(&mut self, entries: Vec<(DefinitionId, i32)>) {
         self.home_base_production = unsigned_first_count_projection(&entries);
         self.home_base_production_entries = entries;
     }
@@ -820,7 +800,8 @@ pub struct Player {
     action_count: i32,
     last_counted_control: Option<(CountedControlType, i32)>,
     /// Direct-com input state (C4Player.h:118-121).
-    #[doc(hidden)] pub control: PlayerControlState,
+    #[doc(hidden)]
+    pub control: PlayerControlState,
     /// C4Player::ExtraData named slots (Fn[Set/Get]PlrExtraData).
     pub(crate) extra_data: Vec<(String, lc_script::Value)>,
 }
@@ -1029,10 +1010,7 @@ impl Player {
         true
     }
 
-    pub(crate) fn mark_message_board_query_answered(
-        &mut self,
-        target: Option<ObjectId>,
-    ) -> bool {
+    pub(crate) fn mark_message_board_query_answered(&mut self, target: Option<ObjectId>) -> bool {
         let Some(query) = self
             .message_board_queries
             .iter_mut()
@@ -1111,20 +1089,12 @@ impl Player {
             production_unit,
             color,
         } = config;
-        let knowledge_entries = knowledge
-            .into_iter()
-            .map(|id| (id, 1))
-            .collect::<Vec<_>>();
-        let knowledge = knowledge_entries
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect();
+        let knowledge_entries = knowledge.into_iter().map(|id| (id, 1)).collect::<Vec<_>>();
+        let knowledge = knowledge_entries.iter().map(|(id, _)| id.clone()).collect();
         let magic_entries = magic.into_iter().map(|id| (id, 1)).collect::<Vec<_>>();
         let magic = magic_entries.iter().map(|(id, _)| id.clone()).collect();
-        let home_base_material_entries =
-            ordered_entries_from_unsigned_map(&home_base_material);
-        let home_base_production_entries =
-            ordered_entries_from_unsigned_map(&home_base_production);
+        let home_base_material_entries = ordered_entries_from_unsigned_map(&home_base_material);
+        let home_base_production_entries = ordered_entries_from_unsigned_map(&home_base_production);
         Self {
             id,
             player_info_id,
@@ -1272,34 +1242,27 @@ impl Player {
         } else {
             knowledge_entries
         };
-        let knowledge = knowledge_entries
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect();
+        let knowledge = knowledge_entries.iter().map(|(id, _)| id.clone()).collect();
         let magic_entries = if magic_entries.is_empty() && !magic.is_empty() {
             magic.into_iter().map(|id| (id, 1)).collect()
         } else {
             magic_entries
         };
         let magic = magic_entries.iter().map(|(id, _)| id.clone()).collect();
-        let home_base_material_entries = if home_base_material_entries.is_empty()
-            && !home_base_material.is_empty()
-        {
-            ordered_entries_from_unsigned_map(&home_base_material)
-        } else {
-            home_base_material_entries
-        };
-        let home_base_material =
-            unsigned_first_count_projection(&home_base_material_entries);
-        let home_base_production_entries = if home_base_production_entries.is_empty()
-            && !home_base_production.is_empty()
-        {
-            ordered_entries_from_unsigned_map(&home_base_production)
-        } else {
-            home_base_production_entries
-        };
-        let home_base_production =
-            unsigned_first_count_projection(&home_base_production_entries);
+        let home_base_material_entries =
+            if home_base_material_entries.is_empty() && !home_base_material.is_empty() {
+                ordered_entries_from_unsigned_map(&home_base_material)
+            } else {
+                home_base_material_entries
+            };
+        let home_base_material = unsigned_first_count_projection(&home_base_material_entries);
+        let home_base_production_entries =
+            if home_base_production_entries.is_empty() && !home_base_production.is_empty() {
+                ordered_entries_from_unsigned_map(&home_base_production)
+            } else {
+                home_base_production_entries
+            };
+        let home_base_production = unsigned_first_count_projection(&home_base_production_entries);
         let hostility_entries = if hostility_entries.is_empty() && !hostility.is_empty() {
             hostility
                 .into_iter()
@@ -1472,11 +1435,7 @@ impl Player {
     }
 
     pub fn is_hostile_towards(&self, opponent: i32) -> bool {
-        ordered_id_count(
-            &self.hostility_entries,
-            &opponent.wrapping_add(1),
-            0,
-        ) != 0
+        ordered_id_count(&self.hostility_entries, &opponent.wrapping_add(1), 0) != 0
     }
 
     pub(crate) fn hostility_entries(&self) -> &[(i32, i32)] {
@@ -1644,9 +1603,7 @@ impl Player {
         ) && !self.surrendered;
         let score_old = self.score;
         let success_bonus = if self.won { 100 } else { 0 };
-        let final_score = average_value_gain
-            .max(0)
-            .wrapping_add(success_bonus);
+        let final_score = average_value_gain.max(0).wrapping_add(success_bonus);
         self.score = self.score.wrapping_add(final_score);
         self.total_playing_time = self
             .total_playing_time
@@ -2056,8 +2013,7 @@ impl Player {
             updated,
             true,
         );
-        self.home_base_material =
-            unsigned_first_count_projection(&self.home_base_material_entries);
+        self.home_base_material = unsigned_first_count_projection(&self.home_base_material_entries);
         u32::try_from(updated).unwrap_or(0)
     }
 
@@ -2103,11 +2059,7 @@ impl Player {
                 continue;
             }
             if self.production_unit % frequency == 0 {
-                let current = ordered_id_count(
-                    &self.home_base_material_entries,
-                    &definition_id,
-                    0,
-                );
+                let current = ordered_id_count(&self.home_base_material_entries, &definition_id, 0);
                 if current < MAX_HOME_BASE_MATERIAL as i32 {
                     set_ordered_id_count(
                         &mut self.home_base_material_entries,
@@ -2538,7 +2490,10 @@ mod tests {
             "view_target",
             "message_board_queries",
         ] {
-            assert!(value.get(field).is_none(), "unexpected default field {field}");
+            assert!(
+                value.get(field).is_none(),
+                "unexpected default field {field}"
+            );
         }
     }
 
@@ -2615,12 +2570,52 @@ mod tests {
 
         let mut bounded = Player::new(4, "Player");
         bounded.set_at_client_name(format!("{}é", "x".repeat(511)));
-        assert_eq!(bounded.at_client_name().as_bytes().len(), 511);
+        assert_eq!(
+            lc_script::c4_string_bytes(bounded.at_client_name()),
+            [vec![b'x'; 511], vec![0xc3]].concat()
+        );
         let restored = Player::from_state(PlayerState {
             at_client_name: Some("x".repeat(513)),
             ..PlayerState::default()
         });
-        assert_eq!(restored.at_client_name().as_bytes().len(), 512);
+        assert_eq!(
+            lc_script::c4_string_byte_len(restored.at_client_name()),
+            512
+        );
+    }
+
+    #[test]
+    fn native_player_strings_survive_state_serialization() {
+        let state = PlayerState {
+            name: lc_script::c4_string_from_bytes(b"Andr\xe9"),
+            at_client_name: Some(lc_script::c4_string_from_bytes(b"M\xfcnchen")),
+            message_buf: lc_script::c4_string_from_bytes(b"Gr\xfc\xdfe"),
+            message_board_queries: vec![MessageBoardQuery {
+                prompt: lc_script::c4_string_from_bytes(b"W\xe4hlen"),
+                ..MessageBoardQuery::default()
+            }],
+            ..PlayerState::default()
+        };
+
+        let encoded = serde_json::to_value(&state).expect("serialize player state");
+        let restored: PlayerState =
+            serde_json::from_value(encoded).expect("deserialize player state");
+        assert_eq!(lc_script::c4_string_bytes(&restored.name), b"Andr\xe9");
+        assert_eq!(
+            restored
+                .at_client_name
+                .as_deref()
+                .map(lc_script::c4_string_bytes),
+            Some(b"M\xfcnchen".to_vec())
+        );
+        assert_eq!(
+            lc_script::c4_string_bytes(&restored.message_buf),
+            b"Gr\xfc\xdfe"
+        );
+        assert_eq!(
+            lc_script::c4_string_bytes(&restored.message_board_queries[0].prompt),
+            b"W\xe4hlen"
+        );
     }
 
     #[test]
@@ -2700,7 +2695,10 @@ mod tests {
         assert_eq!(player.select_count(), 4);
         assert_eq!(player.captain(), Some(captain));
         assert_eq!(player.crew_created(), 9);
-        assert_eq!(player.message_buf().as_bytes().len(), 255);
+        assert_eq!(
+            lc_script::c4_string_bytes(player.message_buf()),
+            [vec![b'x'; 255], vec![0xc3]].concat()
+        );
 
         player.clear_object_pointers(captain);
         assert_eq!(player.captain(), None);

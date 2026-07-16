@@ -523,6 +523,11 @@ pub struct ControlPlayerInfoEntry {
     pub league_projected_gain: i32,
     pub clan_tag: LegacyCString,
     pub league_performance: i32,
+    /// Whether `sLeagueProgressData` is a null `StdStrBuf`. The legacy wire
+    /// format only carries C-string bytes, but freshly constructed/in-memory
+    /// `C4PlayerInfo` values retain a distinct null state until compiled or
+    /// explicitly assigned an empty string.
+    pub league_progress_data_is_null: bool,
     pub league_progress_data: LegacyCString,
     pub resource: Option<NetworkResourceCore>,
 }
@@ -541,8 +546,7 @@ impl ControlPlayerInfoEntry {
     }
 
     pub fn is_joined(&self) -> bool {
-        self.flags & PLAYER_INFO_FLAG_JOINED != 0
-            && self.flags & PLAYER_INFO_FLAG_REMOVED == 0
+        self.flags & PLAYER_INFO_FLAG_JOINED != 0 && self.flags & PLAYER_INFO_FLAG_REMOVED == 0
     }
 }
 
@@ -571,6 +575,7 @@ impl Default for ControlPlayerInfoEntry {
             league_projected_gain: -1,
             clan_tag: LegacyCString::default(),
             league_performance: 0,
+            league_progress_data_is_null: true,
             league_progress_data: LegacyCString::default(),
             resource: None,
         }
@@ -974,16 +979,14 @@ impl RawPacket {
             // C4ControlScript::CompileFunc names the raw target object, raw
             // uint8 strictness, script string, and inherited packed author in
             // this order. The INI writer may omit all four defaults.
-            let target_object =
-                parse_int_field_or(&self.fields, "TargetObj", SCRIPT_SCOPE_GLOBAL)?;
+            let target_object = parse_int_field_or(&self.fields, "TargetObj", SCRIPT_SCOPE_GLOBAL)?;
             let strictness_value = parse_int_field_or(
                 &self.fields,
                 "Strict",
                 i32::from(ScriptStrictness::Strict3.raw()),
             )?;
-            let strictness = ScriptStrictness::try_from(strictness_value).map_err(|value| {
-                ControlParseError::InvalidScriptStrictness { value }
-            })?;
+            let strictness = ScriptStrictness::try_from(strictness_value)
+                .map_err(|value| ControlParseError::InvalidScriptStrictness { value })?;
             let script = self.fields.get("Script").cloned().unwrap_or_default();
             let script = LegacyCString::from_bytes(legacy_string_bytes(&script)).ok_or(
                 ControlParseError::InteriorNulString {
@@ -1061,13 +1064,11 @@ impl RawPacket {
                 });
             }
             let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
-            return Ok(Some(ControlPacket::PlayerSelect(
-                PlayerSelectControlData {
-                    player,
-                    objects,
-                    by_client,
-                },
-            )));
+            return Ok(Some(ControlPacket::PlayerSelect(PlayerSelectControlData {
+                player,
+                objects,
+                by_client,
+            })));
         }
 
         if id == CID_JOIN_PLR {
@@ -1127,13 +1128,11 @@ impl RawPacket {
             let player = parse_int_field_or(&self.fields, "Plr", -1)?;
             let disconnected = parse_bool_field_or(&self.fields, "Disconnected", false)?;
             let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
-            return Ok(Some(ControlPacket::RemovePlayer(
-                RemovePlayerControlData {
-                    player,
-                    disconnected,
-                    by_client,
-                },
-            )));
+            return Ok(Some(ControlPacket::RemovePlayer(RemovePlayerControlData {
+                player,
+                disconnected,
+                by_client,
+            })));
         }
 
         if id == CID_PLR_INFO {
@@ -1316,6 +1315,10 @@ impl RawPacket {
                             league_projected_gain: int(fields, "ProjectedGain", -1)?,
                             clan_tag: string(fields, "ClanTag")?,
                             league_performance: int(fields, "LeaguePerformance", 0)?,
+                            // Compilation materializes a C-string value; the
+                            // legacy wire shape cannot preserve StdStrBuf's
+                            // pre-compilation null/allocated-empty distinction.
+                            league_progress_data_is_null: false,
                             league_progress_data: string(fields, "LeagueProgressData")?,
                             resource,
                         })
@@ -1359,17 +1362,19 @@ impl RawPacket {
             let data = parse_int_field_or(&self.fields, "Data", 0)?;
             let add_mode = parse_int_field_or(&self.fields, "AddMode", 0)?;
             let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
-            return Ok(Some(ControlPacket::PlayerCommand(PlayerCommandControlData {
-                player,
-                command,
-                x,
-                y,
-                target,
-                target2,
-                data,
-                add_mode,
-                by_client,
-            })));
+            return Ok(Some(ControlPacket::PlayerCommand(
+                PlayerCommandControlData {
+                    player,
+                    command,
+                    x,
+                    y,
+                    target,
+                    target2,
+                    data,
+                    add_mode,
+                    by_client,
+                },
+            )));
         }
 
         Ok(Some(ControlPacket::Unknown {
@@ -2122,9 +2127,7 @@ mod tests {
 
         assert!(matches!(
             parse_control_ini(input),
-            Err(ControlParseError::InvalidPlayerSelectObjectCount {
-                value: i32::MAX
-            })
+            Err(ControlParseError::InvalidPlayerSelectObjectCount { value: i32::MAX })
         ));
     }
 

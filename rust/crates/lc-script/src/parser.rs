@@ -60,8 +60,26 @@ impl<'a> Parser<'a> {
         parser
     }
 
+    pub(crate) fn new_global_script_c4_string(source: &'a str) -> Self {
+        let mut parser = Self::new(source);
+        parser.lexer = Lexer::new_c4_string(source);
+        parser.global_script = true;
+        parser
+    }
+
     pub(crate) fn with_strict_level(source: &'a str, strict_level: Option<u8>) -> Self {
         let mut parser = Self::new(source);
+        parser.strict_level = strict_level.unwrap_or(0);
+        parser.lexer.set_strict_level(parser.strict_level);
+        parser
+    }
+
+    pub(crate) fn with_strict_level_c4_string(
+        source: &'a str,
+        strict_level: Option<u8>,
+    ) -> Self {
+        let mut parser = Self::new(source);
+        parser.lexer = Lexer::new_c4_string(source);
         parser.strict_level = strict_level.unwrap_or(0);
         parser.lexer.set_strict_level(parser.strict_level);
         parser

@@ -280,12 +280,13 @@ pub struct LobbyClientRow {
 
 impl LobbyClientRow {
     fn display_name(&self) -> String {
+        let name = crate::c4_presentation_text(&self.name);
         if !self.local && self.connected {
             if let Some(progress) = self.resource_progress {
-                return format!("({}%) {}", progress.min(100), self.name);
+                return format!("({}%) {}", progress.min(100), name);
             }
         }
-        self.name.clone()
+        name
     }
 }
 
@@ -2995,7 +2996,11 @@ impl GameLobby {
             HitTarget::RosterRow(index) | HitTarget::AddPlayer(index) | HitTarget::Team(index) => {
                 match self.rows.get(index) {
                     Some(LobbyRosterRow::Client(client)) => {
-                        format!("Client {} ({})", client.name, client.nick)
+                        format!(
+                            "Client {} ({})",
+                            crate::c4_presentation_text(&client.name),
+                            crate::c4_presentation_text(&client.nick)
+                        )
                     }
                     Some(LobbyRosterRow::Header(header)) => match header.kind {
                         LobbyRosterHeader::UnassignedSavegamePlayers => {
@@ -3453,12 +3458,13 @@ impl GameLobby {
             resources,
             gamma,
         )?;
+        let player_name = crate::c4_presentation_text(&player.name);
         draw_clipped_text(
             surface,
             &resources.fonts.text,
             row.rect.x + row.rect.h + ICON_LABEL_SPACING,
             row.rect.y + ICON_LABEL_SPACING,
-            &player.name,
+            &player_name,
             player.color,
             TextAlign::Left,
             gamma,
@@ -3479,6 +3485,9 @@ impl GameLobby {
         }
         if let Some(team_rect) = row.team {
             let team = player.team.as_ref();
+            let team_name = team
+                .map(|team| crate::c4_presentation_text(&team.name))
+                .unwrap_or_default();
             let selectable =
                 team.is_some_and(|team| team.selectable) && !self.countdown.is_locked();
             if selectable {
@@ -3500,7 +3509,7 @@ impl GameLobby {
                 &resources.fonts.text,
                 team_rect.x + 18,
                 team_rect.y + (team_rect.h - resources.fonts.text.line_height) / 2,
-                team.map_or("", |team| team.name.as_str()),
+                &team_name,
                 COLOR_WHITE,
                 TextAlign::Left,
                 gamma,

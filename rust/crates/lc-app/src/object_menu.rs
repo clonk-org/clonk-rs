@@ -1,21 +1,20 @@
 use std::collections::HashMap;
 
 use lc_engine::{
-    CommandKind, ContextMenuEntry, ControlCommand, DefinitionPictureImage, Engine, ObjectId,
-    ObjectMenuExtra, ObjectMenuSymbol, SimulationSnapshot, OWNER_NONE,
+    CommandKind, ContextMenuEntry, ControlCommand, DefinitionPictureImage, Engine, OWNER_NONE,
+    ObjectId, ObjectMenuExtra, ObjectMenuSymbol, SimulationSnapshot,
 };
 use lc_frontend::{
-    default_owner_color,
-    hud::{draw_command_image_cell_with_gamma, HudFont},
-    CommandImage, CommandOverlayIcon, GuiPoint,
+    CommandImage, CommandOverlayIcon, GuiPoint, default_owner_color,
+    hud::{HudFont, draw_command_image_cell_with_gamma},
 };
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, GammaRamp, PixelFormat, Rect, Surface, TextFont};
 use lc_gui::ImageData;
 
 use crate::ingame_menu::{
-    draw_3d_frame, draw_caption_bar, draw_command_key, draw_image_region, draw_image_region_aspect,
-    draw_ok_cancel, draw_tooltip, IngameMenuGraphics,
+    IngameMenuGraphics, draw_3d_frame, draw_caption_bar, draw_command_key, draw_image_region,
+    draw_image_region_aspect, draw_ok_cancel, draw_tooltip,
 };
 
 const BACKDROP_COLOR: Color = Color::new(0, 0, 0, 172);
@@ -157,6 +156,10 @@ impl MenuEntry for lc_engine::ObjectMenuItem {
     }
 }
 
+fn engine_script_presentation_text(text: &str) -> String {
+    lc_resources::decode_legacy_script_text(&lc_script::c4_string_bytes(text))
+}
+
 fn engine_script_menu_title(menu: &lc_engine::ObjectMenuState) -> String {
     let title = (menu.style == 0)
         .then(|| {
@@ -170,7 +173,7 @@ fn engine_script_menu_title(menu: &lc_engine::ObjectMenuState) -> String {
     if title.is_empty() {
         " ".to_string()
     } else {
-        title.to_string()
+        engine_script_presentation_text(title)
     }
 }
 
@@ -262,9 +265,10 @@ fn dialog_script_menu_layout_with_symbols(
     font_images: &HashMap<String, ImageData>,
 ) -> DialogMenuLayout {
     let line_height = font.line_height().max(1);
+    let menu_caption = engine_script_presentation_text(&menu.caption);
     let mut item_width = (area.width as i32 - 2 * CLASSIC_FRAME_WIDTH)
         .min(
-            text_spec_width(font, &menu.caption, font_images)
+            text_spec_width(font, &menu_caption, font_images)
                 .saturating_add(2 * CLASSIC_COMMAND_HEIGHT + CLASSIC_FRAME_WIDTH)
                 .max(CLASSIC_INFO_DEFAULT_WIDTH),
         )
@@ -296,7 +300,8 @@ fn dialog_script_menu_layout_with_symbols(
                     0
                 };
                 available_width = item_width.saturating_sub(symbol_width).max(1);
-                let text = layout_info_text(font, &item.caption, available_width, font_images);
+                let caption = engine_script_presentation_text(&item.caption);
+                let text = layout_info_text(font, &caption, available_width, font_images);
                 let height = line_height.saturating_mul(text.lines.len() as i32).max(1);
                 if symbol_width == 0 || height <= assumed_height {
                     break height;
@@ -435,21 +440,15 @@ fn dialog_script_menu_layout_with_symbols(
 }
 
 fn dialog_visible_caption(item: &lc_engine::ObjectMenuItem) -> String {
-    if item.text_display_progress < 0 {
-        return item.caption.clone();
-    }
-    let end = usize::try_from(item.text_display_progress)
-        .unwrap_or_default()
-        .min(item.caption.len());
-    let prefix = &item.caption.as_bytes()[..end];
-    match std::str::from_utf8(prefix) {
-        Ok(prefix) => prefix.to_string(),
-        Err(error) => {
-            let mut visible = String::from_utf8_lossy(&prefix[..error.valid_up_to()]).into_owned();
-            visible.push('?');
-            visible
-        }
-    }
+    let bytes = lc_script::c4_string_bytes(&item.caption);
+    let end = if item.text_display_progress < 0 {
+        bytes.len()
+    } else {
+        usize::try_from(item.text_display_progress)
+            .unwrap_or_default()
+            .min(bytes.len())
+    };
+    lc_resources::decode_legacy_script_text(&bytes[..end])
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1247,11 +1246,14 @@ pub(crate) fn engine_script_menu_inline_image_specs(
     menu: &lc_engine::ObjectMenuState,
 ) -> Vec<String> {
     let mut specs = Vec::new();
-    collect_inline_image_specs(&menu.caption, &mut specs);
+    collect_inline_image_specs(&engine_script_presentation_text(&menu.caption), &mut specs);
     collect_inline_image_specs(&engine_script_menu_title(menu), &mut specs);
     for item in &menu.items {
-        collect_inline_image_specs(&item.caption, &mut specs);
-        collect_inline_image_specs(&item.info_caption, &mut specs);
+        collect_inline_image_specs(&engine_script_presentation_text(&item.caption), &mut specs);
+        collect_inline_image_specs(
+            &engine_script_presentation_text(&item.info_caption),
+            &mut specs,
+        );
     }
     specs
 }
@@ -1281,14 +1283,16 @@ fn engine_script_menu_layout_with_images(
     let (item_width, item_height) = match menu.style {
         1 => {
             let item_height = font.line_height().max(CLASSIC_COMMAND_HEIGHT);
-            let title_width = text_spec_width(font, &menu.caption, font_images)
+            let title = engine_script_presentation_text(&menu.caption);
+            let title_width = text_spec_width(font, &title, font_images)
                 .saturating_add(item_height)
                 .saturating_add(CLASSIC_COMMAND_HEIGHT);
             let item_width = menu
                 .items
                 .iter()
                 .map(|item| {
-                    text_spec_width(font, &item.caption, font_images).saturating_add(item_height)
+                    let caption = engine_script_presentation_text(&item.caption);
+                    text_spec_width(font, &caption, font_images).saturating_add(item_height)
                 })
                 .fold(title_width, i32::max)
                 .saturating_add(3);
@@ -1299,7 +1303,8 @@ fn engine_script_menu_layout_with_images(
             // column (capped by the viewport), shrinks that column to the
             // widest actual title/line, adds 3px breathing room, and finally
             // appends a 64px picture column (C4Menu.cpp:666-693).
-            let mut largest_text_width = text_spec_width(font, &menu.caption, font_images)
+            let title = engine_script_presentation_text(&menu.caption);
+            let mut largest_text_width = text_spec_width(font, &title, font_images)
                 .saturating_add(2 * CLASSIC_COMMAND_HEIGHT)
                 .saturating_add(CLASSIC_FRAME_WIDTH);
             let wrap_width = (area.width as i32 - 2 * CLASSIC_FRAME_WIDTH)
@@ -1307,7 +1312,8 @@ fn engine_script_menu_layout_with_images(
                 .max(1);
             let mut text_height = 0;
             for item in &menu.items {
-                let text = layout_info_text(font, &item.info_caption, wrap_width, font_images);
+                let info_caption = engine_script_presentation_text(&item.info_caption);
+                let text = layout_info_text(font, &info_caption, wrap_width, font_images);
                 largest_text_width = largest_text_width.max(text.width);
                 text_height = text_height.max(font.line_height() * text.lines.len() as i32);
             }
@@ -1764,10 +1770,11 @@ fn render_engine_dialog_menu(
             })
             .unwrap_or(title_clip);
         surface.set_clip(nested_clip);
+        let title_text = engine_script_presentation_text(&menu.caption);
         render_text_spec(
             surface,
             font,
-            &menu.caption,
+            &title_text,
             &gfx.font_images,
             title.x + icon_indent + 5,
             title.y + (title_height - font.line_height()) / 2 - 1,
@@ -2065,11 +2072,13 @@ fn render_engine_normal_menu(
         if symbol_width > 0 {
             draw_command_image_cell_with_gamma(surface, &gfx.hud, symbol_cell, &image, gamma);
         }
+        let caption = engine_script_presentation_text(&item.caption);
+        let info_caption = engine_script_presentation_text(&item.info_caption);
         match menu.style {
             1 => render_text_spec(
                 surface,
                 font,
-                &item.caption,
+                &caption,
                 &gfx.font_images,
                 cell_x + symbol_width,
                 cell_y,
@@ -2093,7 +2102,7 @@ fn render_engine_normal_menu(
                 surface.set_clip(nested_clip);
                 let info_layout = layout_info_text(
                     font,
-                    &item.info_caption,
+                    &info_caption,
                     text_rect.width as i32,
                     &gfx.font_images,
                 );
@@ -2324,12 +2333,13 @@ fn render_engine_normal_menu(
             let slot = selection.saturating_sub(first_index);
             let cell_x = client_x + (slot as i32 % columns) * layout.item_width;
             let cell_y = client_y + (slot as i32 / columns) * layout.item_height;
+            let info_caption = engine_script_presentation_text(&item.info_caption);
             draw_text_spec_tooltip(
                 surface,
                 font,
                 cell_x,
                 cell_y,
-                &item.info_caption,
+                &info_caption,
                 &gfx.font_images,
                 gamma,
             );
@@ -2343,7 +2353,11 @@ struct ContextMenuItem {
 }
 
 impl ContextMenuItem {
-    fn new(entry: ContextMenuEntry) -> Self {
+    fn new(mut entry: ContextMenuEntry) -> Self {
+        entry.label = engine_script_presentation_text(&entry.label);
+        entry.description = entry
+            .description
+            .map(|description| engine_script_presentation_text(&description));
         Self { entry }
     }
 
@@ -3399,7 +3413,7 @@ fn draw_border(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&G
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lc_engine::scenario::{load_system_scripts, LegacyDefinitionResolver};
+    use lc_engine::scenario::{LegacyDefinitionResolver, load_system_scripts};
     use lc_engine::{
         CommandStackSnapshot, Definition, Engine, JoinPlayerConfig, MovementProfile,
         ObjectSnapshot, ObjectStatus, ObjectUpdate, PlayerConfig, Scenario, ScenarioError,
@@ -3583,6 +3597,8 @@ mod tests {
             game_time: 0,
             game_over: false,
             round_results: Default::default(),
+            league_name: Vec::new(),
+            player_info_league_progress_data: Default::default(),
             physics: None,
             objects,
             render_order: Vec::new(),
@@ -3797,6 +3813,22 @@ mod tests {
     }
 
     #[test]
+    fn context_menu_labels_decode_native_bytes_for_presentation() {
+        let raw_label = lc_script::c4_string_from_bytes(b"Wav\xe9");
+        let raw_description = lc_script::c4_string_from_bytes(b"Gr\xfc\xdfe");
+        let item = ContextMenuItem::new(ContextMenuEntry {
+            function: "MenuWave".into(),
+            label: raw_label.clone(),
+            description: Some(raw_description.clone()),
+        });
+
+        assert_eq!(item.label(), "Wav\u{e9}");
+        assert_eq!(item.description(), Some("Gr\u{fc}\u{df}e"));
+        assert_eq!(lc_script::c4_string_bytes(&raw_label), b"Wav\xe9");
+        assert_eq!(lc_script::c4_string_bytes(&raw_description), b"Gr\xfc\xdfe");
+    }
+
+    #[test]
     fn build_menu_lists_home_base_supplies() {
         let mut engine = Engine::new();
         engine
@@ -3820,9 +3852,10 @@ mod tests {
         assert_eq!(menu.build[0].available(), 3);
 
         // Switch to build mode.
-        assert!(menu
-            .handle_command(ControlCommand::MenuRight, CommandKind::Press)
-            .is_none());
+        assert!(
+            menu.handle_command(ControlCommand::MenuRight, CommandKind::Press)
+                .is_none()
+        );
         assert_eq!(menu.mode, MenuMode::Build);
         let action = menu
             .handle_command(ControlCommand::MenuSelect, CommandKind::Press)
@@ -4682,9 +4715,153 @@ mod tests {
 
         let mut unicode = menu.items[1].clone();
         unicode.text_display_progress = 1;
-        assert_eq!(dialog_visible_caption(&unicode), "?");
+        assert_eq!(dialog_visible_caption(&unicode), "Ã");
         unicode.text_display_progress = 2;
         assert_eq!(dialog_visible_caption(&unicode), "é");
+
+        unicode.caption = lc_script::c4_string_from_bytes(&[0xff, b'Z']);
+        unicode.text_display_progress = 1;
+        assert_eq!(
+            dialog_visible_caption(&unicode),
+            lc_resources::decode_legacy_script_text(&[0xff])
+        );
+        unicode.text_display_progress = -1;
+        assert_eq!(
+            dialog_visible_caption(&unicode),
+            lc_resources::decode_legacy_script_text(&[0xff, b'Z'])
+        );
+    }
+
+    #[test]
+    fn normal_menu_presentation_decodes_native_title_caption_and_tooltip_bytes() {
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "Title", 0, 1);
+            AddMenuItem("Entry", "Choose", MENU, this(), 0, 0, "Details");
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let mut raw = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        raw.caption = lc_script::c4_string_from_bytes(b"Tit\xe9");
+        raw.items[0].caption = lc_script::c4_string_from_bytes(b"Entr\xe9");
+        raw.items[0].info_caption = lc_script::c4_string_from_bytes(b"D\xe9tails");
+        raw.selection = 0;
+
+        let mut presented = raw.clone();
+        presented.caption = "Tit\u{e9}".into();
+        presented.items[0].caption = "Entr\u{e9}".into();
+        presented.items[0].info_caption = "D\u{e9}tails".into();
+
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let area = Rect::new(0, 0, 640, 480);
+        assert_eq!(engine_script_menu_title(&raw), "Tit\u{e9}");
+        assert_eq!(
+            engine_script_menu_layout(area, &font, &raw, false),
+            engine_script_menu_layout(area, &font, &presented, false)
+        );
+
+        let render = |menu: &lc_engine::ObjectMenuState| {
+            let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+            render_engine_script_menu(
+                &mut surface,
+                area,
+                &font,
+                &fallback,
+                None,
+                menu,
+                &IngameMenuGraphics::default(),
+                None,
+                &[None],
+                &[],
+                false,
+                90,
+            );
+            surface.snapshot()
+        };
+        assert_eq!(render(&raw), render(&presented));
+        assert_eq!(lc_script::c4_string_bytes(&raw.caption), b"Tit\xe9");
+        assert_eq!(
+            lc_script::c4_string_bytes(&raw.items[0].info_caption),
+            b"D\xe9tails"
+        );
+    }
+
+    #[test]
+    fn dialog_menu_presentation_decodes_native_title_and_row_bytes() {
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "Title", 0, 3);
+            AddMenuItem("Entry", "Choose", NONE, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let mut raw = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        raw.caption = lc_script::c4_string_from_bytes(b"Tit\xe9");
+        raw.items[0].caption = lc_script::c4_string_from_bytes(b"Entr\xff");
+        raw.items[0].text_display_progress = -1;
+
+        let mut presented = raw.clone();
+        presented.caption = "Tit\u{e9}".into();
+        presented.items[0].caption = "Entr\u{ff}".into();
+
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let area = Rect::new(0, 0, 640, 480);
+        assert_eq!(dialog_visible_caption(&raw.items[0]), "Entr\u{ff}");
+        assert_eq!(
+            dialog_script_menu_layout(area, &font, &raw, &[None]),
+            dialog_script_menu_layout(area, &font, &presented, &[None])
+        );
+
+        let render = |menu: &lc_engine::ObjectMenuState| {
+            let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+            render_engine_script_menu(
+                &mut surface,
+                area,
+                &font,
+                &fallback,
+                None,
+                menu,
+                &IngameMenuGraphics::default(),
+                None,
+                &[None],
+                &[],
+                false,
+                0,
+            );
+            surface.snapshot()
+        };
+        assert_eq!(render(&raw), render(&presented));
+        assert_eq!(lc_script::c4_string_bytes(&raw.caption), b"Tit\xe9");
+        assert_eq!(
+            lc_script::c4_string_bytes(&raw.items[0].caption),
+            b"Entr\xff"
+        );
     }
 
     #[test]
@@ -4869,34 +5046,38 @@ mod tests {
             Some(EngineScriptMenuPointerTarget::Item(0))
         );
 
-        assert!(validate_menu_decoration_for_area(
-            Rect::new(0, 0, 640, 480),
-            menu.decoration.as_ref().expect("decoration"),
-            Some(&image),
-        )
-        .is_ok());
-        assert!(validate_menu_decoration_for_area(
-            Rect::new(0, 0, 640, 480),
-            menu.decoration.as_ref().expect("decoration"),
-            None,
-        )
-        .is_err());
+        assert!(
+            validate_menu_decoration_for_area(
+                Rect::new(0, 0, 640, 480),
+                menu.decoration.as_ref().expect("decoration"),
+                Some(&image),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_menu_decoration_for_area(
+                Rect::new(0, 0, 640, 480),
+                menu.decoration.as_ref().expect("decoration"),
+                None,
+            )
+            .is_err()
+        );
         let mut background_only = menu.decoration.clone().expect("decoration");
         background_only.top = None;
         background_only.top_left = None;
-        assert!(validate_menu_decoration_for_area(
-            Rect::new(0, 0, 640, 480),
-            &background_only,
-            None,
-        )
-        .is_ok());
+        assert!(
+            validate_menu_decoration_for_area(Rect::new(0, 0, 640, 480), &background_only, None,)
+                .is_ok()
+        );
         menu.decoration.as_mut().expect("decoration").border_left = -1;
-        assert!(validate_menu_decoration_for_area(
-            Rect::new(0, 0, 640, 480),
-            menu.decoration.as_ref().expect("decoration"),
-            Some(&image),
-        )
-        .is_err());
+        assert!(
+            validate_menu_decoration_for_area(
+                Rect::new(0, 0, 640, 480),
+                menu.decoration.as_ref().expect("decoration"),
+                Some(&image),
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -11,7 +11,9 @@
 //! defined-or-not (no base-content def sets Method=); `Image=`/`Desc`
 //! descriptors fall back to the object's own picture (C4Object.cpp:4040).
 
-use lc_engine::{ocf, CommandDirection, DefinitionRect, ObjectId, ObjectSnapshot, SimulationSnapshot, FULL_CON};
+use lc_engine::{
+    CommandDirection, DefinitionRect, FULL_CON, ObjectId, ObjectSnapshot, SimulationSnapshot, ocf,
+};
 use lc_frontend::{CommandIcon, CommandImage, CommandOverlayIcon, ImageData};
 use lc_graphics::Color;
 
@@ -65,7 +67,11 @@ const COM_ORDER: [u8; 24] = [
 
 /// `ComName` (src/C4ObjectCom.cpp:800-855) for the coms ComOrder yields.
 fn com_name(com: u8) -> &'static str {
-    match (com & !(COM_SINGLE | COM_DOUBLE), com & COM_SINGLE != 0, com & COM_DOUBLE != 0) {
+    match (
+        com & !(COM_SINGLE | COM_DOUBLE),
+        com & COM_SINGLE != 0,
+        com & COM_DOUBLE != 0,
+    ) {
         (COM_LEFT, false, false) => "Left",
         (COM_LEFT, true, false) => "LeftSingle",
         (COM_LEFT, false, true) => "LeftDouble",
@@ -135,9 +141,7 @@ fn function_head(source: &str, function: &str) -> Option<usize> {
             continue;
         }
         let keyword_start = before.len() - "func".len();
-        if keyword_start > 0
-            && !source.as_bytes()[keyword_start - 1].is_ascii_whitespace()
-        {
+        if keyword_start > 0 && !source.as_bytes()[keyword_start - 1].is_ascii_whitespace() {
             continue;
         }
         let after = source[pos + function.len()..].trim_start();
@@ -243,7 +247,10 @@ fn draw_command_query(
     definition_id: &str,
     function: &str,
 ) -> bool {
-    snapshot.players.iter().any(|player| player.id == controller)
+    snapshot
+        .players
+        .iter()
+        .any(|player| player.id == controller)
         && ctx.def_has_function(definition_id, function)
 }
 
@@ -361,8 +368,10 @@ pub fn build_cursor_commands(
     // DrawCommand's default image chain (src/C4Object.cpp:4022-4068): the
     // function's Image= descriptor def (with phase), Image=Contents ->
     // first contents picture, else the receiver's own picture.
-    let function_image = |receiver_def: &str, receiver_contents: &[ObjectId], function: &str| {
-        match ctx.control_image(receiver_def, function) {
+    let function_image =
+        |receiver_def: &str, receiver_contents: &[ObjectId], function: &str| match ctx
+            .control_image(receiver_def, function)
+        {
             Some(ImageAnnotation::Def { id, phase }) => {
                 CommandImage::Picture(ctx.def_picture_phase(&id, phase))
             }
@@ -372,8 +381,7 @@ pub fn build_cursor_commands(
                     .or_else(|| ctx.def_picture(receiver_def)),
             ),
             None => CommandImage::Picture(ctx.def_picture(receiver_def)),
-        }
-    };
+        };
 
     // Build at a construction site (src/C4Object.cpp:2954-2963): standing
     // (ComDir Stop, DFA_WALK) on an OCF_Construct object; Jump'n'Run
@@ -407,10 +415,8 @@ pub fn build_cursor_commands(
             for cnt in (0..COM_ORDER.len()).rev() {
                 let com = COM_ORDER[cnt];
                 let function = format!("Control{}", com_name(com));
-                if draw_command_query(snapshot, ctx, controller, &target.definition_id, &function)
-                {
-                    let image =
-                        function_image(&target.definition_id, &target.contents, &function);
+                if draw_command_query(snapshot, ctx, controller, &target.definition_id, &function) {
+                    let image = function_image(&target.definition_id, &target.contents, &function);
                     icons.push(bottom(com, image));
                 } else if com == COM_DOWN | COM_DOUBLE {
                     // Let go (src/C4Object.cpp:2976-2979).
@@ -456,7 +462,13 @@ pub fn build_cursor_commands(
         for cnt in (0..COM_ORDER.len()).rev() {
             let com = COM_ORDER[cnt];
             let function = format!("Contained{}", com_name(com));
-            if draw_command_query(snapshot, ctx, controller, &container.definition_id, &function) {
+            if draw_command_query(
+                snapshot,
+                ctx,
+                controller,
+                &container.definition_id,
+                &function,
+            ) {
                 let image =
                     function_image(&container.definition_id, &container.contents, &function);
                 icons.push(bottom(com, image));
@@ -535,13 +547,13 @@ pub fn build_cursor_commands(
         }
     } else {
         // Contents activation (src/C4Object.cpp:3072-3081).
-        if procedure_is(cursor, "WALK") || procedure_is(cursor, "SWIM") || procedure_is(cursor, "DIG")
+        if procedure_is(cursor, "WALK")
+            || procedure_is(cursor, "SWIM")
+            || procedure_is(cursor, "DIG")
         {
             if let Some(thing) = first_contents(snapshot, &cursor.contents) {
-                if draw_command_query(snapshot, ctx, controller, &thing.definition_id, "Activate")
-                {
-                    let image =
-                        function_image(&thing.definition_id, &thing.contents, "Activate");
+                if draw_command_query(snapshot, ctx, controller, &thing.definition_id, "Activate") {
+                    let image = function_image(&thing.definition_id, &thing.contents, "Activate");
                     icons.push(bottom(COM_DIG | COM_DOUBLE, image));
                     contents_activation_override = true;
                 }
@@ -718,6 +730,8 @@ mod tests {
             game_time: 0,
             game_over: false,
             round_results: Default::default(),
+            league_name: Vec::new(),
+            player_info_league_progress_data: Default::default(),
             physics: None,
             objects,
             render_order: Vec::new(),
@@ -788,7 +802,10 @@ mod tests {
         assert!(source_defines_function(source, "ControlSpecial2"));
         assert!(!source_defines_function(source, "ControlDown"));
         // No substring hit: ControlSpecial must not match ControlSpecial2's head.
-        assert!(!source_defines_function("func ControlSpecial2() {}", "ControlSpecial"));
+        assert!(!source_defines_function(
+            "func ControlSpecial2() {}",
+            "ControlSpecial"
+        ));
     }
 
     #[test]

@@ -1522,12 +1522,13 @@ fn collect_script_files(
         let data = group
             .read_file(&entry.relative_path)
             .map_err(DefinitionError::Resources)?;
-        // Legacy C4Script files use Windows-1252 encoding (superset of ISO-8859-1)
-        // Convert to UTF-8 to ensure correct byte indices for position tracking
-        let (contents, _, _) = encoding_rs::WINDOWS_1252.decode(&data);
+        // C4ComponentHost::LoadAppend copies each matching component with
+        // SCopy, so a NUL terminates this file but does not suppress later
+        // Script*.c components appended to the same host.
+        let data = data.split(|byte| *byte == 0).next().unwrap_or_default();
         files.push(DefinitionScriptFile {
             path: relative_path,
-            contents: contents.into_owned(),
+            contents: lc_script::c4_string_from_bytes(data),
         });
     }
     Ok(())
@@ -3987,6 +3988,32 @@ Category=C4D_Object
             .files()
             .iter()
             .any(|file| file.path == Path::new("Script.c4d").join("Helpers").join("Util.c")));
+    }
+
+    #[test]
+    fn script_component_nul_truncates_only_its_own_file() {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("A.c"),
+            b"func Before() {}\0func Hidden() {}",
+        )
+        .unwrap();
+        fs::write(temp.path().join("B.c"), b"func After() {}\n").unwrap();
+
+        let group = Group::open(temp.path()).unwrap();
+        let script = load_scripts(&group).expect("script components load");
+        let combined = lc_script::c4_string_bytes(script.combined());
+
+        assert!(combined
+            .windows(b"func Before() {}".len())
+            .any(|window| window == b"func Before() {}"));
+        assert!(!combined
+            .windows(b"func Hidden() {}".len())
+            .any(|window| window == b"func Hidden() {}"));
+        assert!(combined
+            .windows(b"func After() {}".len())
+            .any(|window| window == b"func After() {}"));
+        assert!(!combined.contains(&0));
     }
 
     #[test]

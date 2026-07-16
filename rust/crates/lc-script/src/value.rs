@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -11,6 +12,323 @@ const C4V_C4OBJECT: usize = 4;
 const C4V_STRING: usize = 5;
 const C4V_ARRAY: usize = 6;
 const C4V_MAP: usize = 7;
+
+// Rust strings cannot contain arbitrary C4Script bytes. Keep ASCII as-is so
+// ordinary script literals compare naturally, and encode high raw bytes in a
+// supplementary private-use range. All byte-observing VM operations decode
+// this range back to the original byte.
+const C4_RAW_BYTE_ESCAPE_BASE: u32 = 0xF0000;
+const C4_RAW_BYTE_ESCAPE_END: u32 = C4_RAW_BYTE_ESCAPE_BASE + u8::MAX as u32;
+
+fn c4_raw_byte_escape(character: char) -> Option<u8> {
+    let scalar = u32::from(character);
+    (C4_RAW_BYTE_ESCAPE_BASE..=C4_RAW_BYTE_ESCAPE_END)
+        .contains(&scalar)
+        .then(|| (scalar - C4_RAW_BYTE_ESCAPE_BASE) as u8)
+}
+
+/// Build a script string that losslessly represents arbitrary native bytes.
+pub fn c4_string_from_bytes(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        if !text
+            .chars()
+            .any(|character| c4_raw_byte_escape(character).is_some())
+        {
+            return text.to_owned();
+        }
+    }
+    bytes
+        .iter()
+        .copied()
+        .map(|byte| {
+            if byte.is_ascii() {
+                char::from(byte)
+            } else {
+                char::from_u32(C4_RAW_BYTE_ESCAPE_BASE + u32::from(byte))
+                    .expect("private-use byte escape is a valid scalar")
+            }
+        })
+        .collect()
+}
+
+/// Recover the native byte buffer represented by a script string.
+pub fn c4_string_bytes(value: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(value.len());
+    for character in value.chars() {
+        if let Some(byte) = c4_raw_byte_escape(character) {
+            bytes.push(byte);
+        } else {
+            let mut encoded = [0; 4];
+            bytes.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+        }
+    }
+    bytes
+}
+
+pub fn c4_string_byte_len(value: &str) -> usize {
+    value
+        .chars()
+        .map(|character| {
+            if c4_raw_byte_escape(character).is_some() {
+                1
+            } else {
+                character.len_utf8()
+            }
+        })
+        .sum()
+}
+
+pub(crate) fn c4_string_from_literal(value: String) -> String {
+    if value.chars().any(|character| c4_raw_byte_escape(character).is_some()) {
+        c4_string_from_bytes(value.as_bytes())
+    } else {
+        value
+    }
+}
+
+fn c4_string_literal_query(value: &str) -> Option<Cow<'_, str>> {
+    if value
+        .chars()
+        .any(|character| c4_raw_byte_escape(character).is_some())
+    {
+        Some(Cow::Owned(c4_string_from_bytes(value.as_bytes())))
+    } else {
+        None
+    }
+}
+
+pub fn c4_string_byte(value: &str, index: usize) -> Option<u8> {
+    c4_string_bytes(value).get(index).copied()
+}
+
+pub fn c4_strings_equal(left: &str, right: &str) -> bool {
+    c4_string_bytes(left) == c4_string_bytes(right)
+}
+
+const C4_ID_RAW_PREFIX: &str = "\u{f0ffe}c4id:";
+
+// C++ defines C4ID as `unsigned long`. That is pointer-width on the supported
+// LP64 targets, but remains 32-bit on 64-bit Windows (LLP64).
+#[inline]
+fn c4_id_normalize_raw(raw: usize) -> usize {
+    #[cfg(target_os = "windows")]
+    {
+        raw & u32::MAX as usize
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        raw
+    }
+}
+
+/// Store an already-constructed C4ID payload without reparsing its bytes.
+/// This is required for CastC4ID, whose union payload can differ from the
+/// signed-char behavior of C4Id(string).
+pub fn c4_id_from_raw(raw: usize) -> String {
+    let raw = c4_id_normalize_raw(raw);
+    if raw == 0 {
+        return "NONE".to_owned();
+    }
+    if (1..=9999).contains(&raw) {
+        return format!("{raw:04}");
+    }
+
+    if raw <= u32::MAX as usize {
+        let bytes = (raw as u32).to_le_bytes();
+        if bytes != *b"NONE"
+            && !bytes.iter().all(u8::is_ascii_digit)
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+        {
+            return String::from_utf8(bytes.to_vec()).expect("C4ID text bytes are ASCII");
+        }
+    }
+
+    format!("{C4_ID_RAW_PREFIX}{raw:x}")
+}
+
+fn c4_id_tagged_raw(id: &str) -> Option<usize> {
+    let hex = id.strip_prefix(C4_ID_RAW_PREFIX)?;
+    (!hex.is_empty() && hex.len() <= std::mem::size_of::<usize>() * 2)
+        .then(|| usize::from_str_radix(hex, 16).ok())
+        .flatten()
+        .map(c4_id_normalize_raw)
+}
+
+/// C4IdText for an already-typed C4ID value.
+pub fn c4_id_text(id: &str) -> String {
+    let raw = c4_id_raw(id);
+    if raw == 0 {
+        return "NONE".to_owned();
+    }
+    let signed = raw as u32 as i32;
+    if (0..=9999).contains(&signed) {
+        return format!("{signed:04}");
+    }
+    let bytes = (raw as u32).to_le_bytes();
+    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    c4_string_from_bytes(&bytes[..end])
+}
+
+pub mod c4_id_serde {
+    use super::{c4_id_from_raw, c4_id_parse, c4_id_raw, c4_string_from_bytes};
+
+    pub fn serialize<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u64(c4_id_raw(value) as u64)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Raw(u64),
+            Legacy(String),
+        }
+
+        match <Repr as serde::Deserialize>::deserialize(deserializer)? {
+            Repr::Raw(raw) => usize::try_from(raw)
+                .map(c4_id_from_raw)
+                .map_err(serde::de::Error::custom),
+            Repr::Legacy(value) => {
+                let text = c4_string_from_bytes(value.as_bytes());
+                Ok(c4_id_from_raw(c4_id_parse(&text)))
+            }
+        }
+    }
+}
+
+pub mod c4_optional_id_serde {
+    use super::c4_id_raw;
+
+    struct Ref<'a>(&'a str);
+
+    impl serde::Serialize for Ref<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_u64(c4_id_raw(self.0) as u64)
+        }
+    }
+
+    pub fn serialize<S>(value: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match value {
+            Some(value) => serializer.serialize_some(&Ref(value)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct Wrapped(#[serde(with = "super::c4_id_serde")] String);
+
+        <Option<Wrapped> as serde::Deserialize>::deserialize(deserializer)
+            .map(|value| value.map(|value| value.0))
+    }
+}
+
+pub mod c4_string_serde {
+    use super::{c4_string_bytes, c4_string_from_bytes, c4_string_from_literal};
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Text(String),
+        Bytes { c4_bytes: Vec<u8> },
+    }
+
+    struct Ref<'a>(&'a str);
+
+    impl serde::Serialize for Ref<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let bytes = c4_string_bytes(self.0);
+            match String::from_utf8(bytes) {
+                Ok(text) => serializer.serialize_str(&text),
+                Err(error) => Repr::Bytes {
+                    c4_bytes: error.into_bytes(),
+                }
+                .serialize(serializer),
+            }
+        }
+    }
+
+    pub fn serialize<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serde::Serialize::serialize(&Ref(value), serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match <Repr as serde::Deserialize>::deserialize(deserializer)? {
+            Repr::Text(value) => Ok(c4_string_from_literal(value)),
+            Repr::Bytes { c4_bytes } => Ok(c4_string_from_bytes(&c4_bytes)),
+        }
+    }
+
+    pub fn serialize_ref<S>(value: &str, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serde::Serialize::serialize(&Ref(value), serializer)
+    }
+
+}
+
+pub mod c4_optional_string_serde {
+    use super::c4_string_serde;
+
+    struct Ref<'a>(&'a str);
+
+    impl serde::Serialize for Ref<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            c4_string_serde::serialize_ref(self.0, serializer)
+        }
+    }
+
+    pub fn serialize<S>(value: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match value {
+            Some(value) => serializer.serialize_some(&Ref(value)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct Wrapped(#[serde(with = "super::c4_string_serde")] String);
+
+        <Option<Wrapped> as serde::Deserialize>::deserialize(deserializer)
+            .map(|value| value.map(|value| value.0))
+    }
+}
 
 /// C4Script value type tag, mirroring the C++ `enum C4V_Type` (C4Value.h:37-54)
 /// for the entries that index `C4ScriptCnvMap` (`C4V_Any`..`C4V_pC4Value`, i.e.
@@ -172,19 +490,28 @@ impl ValueMap {
     /// String-property lookup (`map.foo` and the overwhelmingly common engine
     /// access pattern) without allocating a temporary [`Value::String`].
     pub fn get(&self, key: &str) -> Option<&Value> {
-        self.0.get(&StringQuery(key))
+        self.0.get(&StringQuery(key)).or_else(|| {
+            c4_string_literal_query(key)
+                .and_then(|key| self.0.get(&StringQuery(key.as_ref())))
+        })
     }
 
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
-        self.0.get_mut(&StringQuery(key))
+        if self.0.contains_key(&StringQuery(key)) {
+            return self.0.get_mut(&StringQuery(key));
+        }
+        let key = c4_string_literal_query(key)?;
+        self.0.get_mut(&StringQuery(key.as_ref()))
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
         self.0.contains_key(&StringQuery(key))
+            || c4_string_literal_query(key)
+                .is_some_and(|key| self.0.contains_key(&StringQuery(key.as_ref())))
     }
 
     pub fn insert(&mut self, key: String, value: Value) -> Option<Value> {
-        self.insert_key(Value::String(key), value)
+        self.insert_key(Value::from(key), value)
     }
 
     /// Assigns through a C4ValueHash-owned string slot. Nonnil -> nil erases
@@ -203,7 +530,11 @@ impl ValueMap {
     }
 
     pub fn shift_remove(&mut self, key: &str) -> Option<Value> {
-        self.0.shift_remove(&StringQuery(key))
+        if self.0.contains_key(&StringQuery(key)) {
+            return self.0.shift_remove(&StringQuery(key));
+        }
+        let key = c4_string_literal_query(key)?;
+        self.0.shift_remove(&StringQuery(key.as_ref()))
     }
 
     pub fn get_key(&self, key: &Value) -> Option<&Value> {
@@ -319,7 +650,9 @@ impl serde::Serialize for ValueMap {
     where
         S: serde::Serializer,
     {
-        if self.keys().all(|key| matches!(key, Value::String(_))) {
+        if self.keys().all(|key| {
+            matches!(key, Value::String(value) if String::from_utf8(c4_string_bytes(value)).is_ok())
+        }) {
             use serde::ser::SerializeMap;
 
             let mut map = serializer.serialize_map(Some(self.len()))?;
@@ -327,7 +660,9 @@ impl serde::Serialize for ValueMap {
                 let Value::String(key) = key else {
                     unreachable!("all map keys were checked as strings")
                 };
-                map.serialize_entry(key, value)?;
+                let canonical_key = String::from_utf8(c4_string_bytes(key))
+                    .expect("all string keys were checked as UTF-8");
+                map.serialize_entry(&canonical_key, value)?;
             }
             map.end()
         } else {
@@ -355,7 +690,10 @@ impl<'de> serde::Deserialize<'de> for ValueMap {
         }
 
         Ok(match <Repr as serde::Deserialize>::deserialize(deserializer)? {
-            Repr::Legacy(entries) => entries.into_iter().collect(),
+            Repr::Legacy(entries) => entries
+                .into_iter()
+                .map(|(key, value)| (c4_string_from_literal(key), value))
+                .collect(),
             Repr::Entries(entries) => entries.into_iter().collect(),
         })
     }
@@ -371,21 +709,39 @@ impl Hash for StringQuery<'_> {
 
 impl Equivalent<Value> for StringQuery<'_> {
     fn equivalent(&self, key: &Value) -> bool {
-        matches!(key, Value::String(value) if value == self.0)
+        matches!(key, Value::String(value) if c4_strings_equal(value, self.0))
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Int(i32),
     Bool(bool),
-    String(String),
-    C4Id(String),
+    String(#[serde(with = "c4_string_serde")] String),
+    C4Id(#[serde(with = "c4_id_serde")] String),
     Object(u64),
     Array(Vec<Value>),
     Proplist(ValueMap),
     Nil,
 }
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Int(left), Self::Int(right)) => left == right,
+            (Self::Bool(left), Self::Bool(right)) => left == right,
+            (Self::String(left), Self::String(right)) => c4_strings_equal(left, right),
+            (Self::C4Id(left), Self::C4Id(right)) => c4_id_raw(left) == c4_id_raw(right),
+            (Self::Object(left), Self::Object(right)) => left == right,
+            (Self::Array(left), Self::Array(right)) => left == right,
+            (Self::Proplist(left), Self::Proplist(right)) => left == right,
+            (Self::Nil, Self::Nil) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
 
 impl Hash for Value {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -395,13 +751,13 @@ impl Hash for Value {
 
 impl From<String> for Value {
     fn from(value: String) -> Self {
-        Self::String(value)
+        Self::String(c4_string_from_literal(value))
     }
 }
 
 impl From<&str> for Value {
     fn from(value: &str) -> Self {
-        Self::String(value.to_owned())
+        Self::String(c4_string_from_literal(value.to_owned()))
     }
 }
 
@@ -596,36 +952,51 @@ fn c4_hash_typed(type_hash: usize, value_hash: usize) -> usize {
 }
 
 fn c4_string_hash(value: &str) -> usize {
-    c4_hash_typed(C4V_STRING, cpp_string_view_hash(value.as_bytes()))
+    c4_hash_typed(C4V_STRING, cpp_string_view_hash(&c4_string_bytes(value)))
 }
 
 fn hash_i32(value: i32) -> usize {
     value as usize
 }
 
-pub(crate) fn c4_id_raw(id: &str) -> usize {
-    if id.len() < 4 || id == "NONE" {
+pub fn c4_id_raw(id: &str) -> usize {
+    if let Some(raw) = c4_id_tagged_raw(id) {
+        return raw;
+    }
+    c4_id_parse(id)
+}
+
+/// Parse a C4 string through `C4Id(std::string_view)` without recognizing
+/// the Rust-only typed-ID storage tag.
+pub fn c4_id_parse(id: &str) -> usize {
+    let bytes = c4_string_bytes(id);
+    // Script-facing C4Id receives a native C string (`FnStringPar`), so an
+    // embedded NUL terminates the argument before C4Id(std::string_view).
+    let bytes = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+    if bytes.len() < 4 || bytes == b"NONE" {
         return 0;
     }
 
     let mut raw = 0usize;
     let mut numeric = true;
-    for byte in id.bytes() {
+    for byte in bytes {
         if !byte.is_ascii_digit() {
             numeric = false;
             break;
         }
-        raw = raw.wrapping_mul(10).wrapping_add((byte - b'0') as usize);
+        raw = c4_id_normalize_raw(raw.wrapping_mul(10).wrapping_add((*byte - b'0') as usize));
     }
     if numeric {
         return raw;
     }
 
-    id.as_bytes()
-        .iter()
-        .take(4)
-        .rev()
-        .fold(0usize, |raw, byte| (raw << 8) | (*byte as usize))
+    bytes.iter().take(4).rev().fold(0usize, |raw, byte| {
+        // C4Id casts the platform's signed plain `char` directly to
+        // unsigned long. High bytes therefore sign-extend before the
+        // OR on every supported LegacyClonk target.
+        let byte = c4_id_normalize_raw(*byte as i8 as isize as usize);
+        c4_id_normalize_raw(raw.wrapping_shl(8) | byte)
+    })
 }
 
 // `std::hash<std::string_view>` in libc++ dispatches to Murmur2 on 32-bit and
@@ -924,7 +1295,7 @@ impl fmt::Display for Value {
             Value::Int(i) => write!(f, "{i}"),
             Value::Bool(b) => write!(f, "{b}"),
             Value::String(s) => write!(f, "\"{}\"", s),
-            Value::C4Id(id) => write!(f, "{id}"),
+            Value::C4Id(id) => write!(f, "{}", c4_id_text(id)),
             Value::Object(id) => write!(f, "<object {id}>"),
             Value::Array(values) => {
                 let mut first = true;
@@ -992,6 +1363,29 @@ mod map_tests {
     }
 
     #[test]
+    fn string_property_queries_canonicalize_reserved_marker_literals() {
+        let literal = char::from_u32(C4_RAW_BYTE_ESCAPE_BASE + 0x80)
+            .expect("reserved marker is a valid scalar")
+            .to_string();
+        let mut map = ValueMap::new();
+        map.insert(literal.clone(), Value::Int(1));
+
+        assert_eq!(map.get(&literal), Some(&Value::Int(1)));
+        assert!(map.contains_key(&literal));
+        *map.get_mut(&literal).expect("reserved-marker key is mutable") = Value::Int(2);
+        assert_eq!(map.shift_remove(&literal), Some(Value::Int(2)));
+        assert!(!map.contains_key(&literal));
+
+        let projected_byte = c4_string_from_bytes(&[0x80]);
+        map.insert_key(Value::String(projected_byte.clone()), Value::Int(3));
+        assert_eq!(map.get(&projected_byte), Some(&Value::Int(3)));
+        assert!(map.contains_key(&projected_byte));
+        *map.get_mut(&projected_byte)
+            .expect("projected-byte key is mutable") = Value::Int(4);
+        assert_eq!(map.shift_remove(&projected_byte), Some(Value::Int(4)));
+    }
+
+    #[test]
     fn map_equality_and_c4_hash_ignore_insertion_order() {
         let forward = Value::Proplist(ValueMap::from([
             (Value::Int(7), Value::String("seven".into())),
@@ -1040,6 +1434,124 @@ mod map_tests {
             decoded.keys().cloned().collect::<Vec<_>>(),
             map.keys().cloned().collect::<Vec<_>>()
         );
+    }
+}
+
+#[cfg(test)]
+mod c4_string_tests {
+    use super::*;
+
+    #[test]
+    fn raw_byte_projection_round_trips_high_bytes_without_rewriting_utf8_literals() {
+        let raw = [0, b'A', 0x7f, 0x80, 0xfe, 0xff];
+        let projected = c4_string_from_bytes(&raw);
+        assert_eq!(c4_string_bytes(&projected), raw);
+        assert_eq!(c4_string_byte_len(&projected), raw.len());
+        assert_eq!(c4_string_byte(&projected, 4), Some(0xfe));
+
+        let utf8_literal = "A\u{ff}";
+        assert_eq!(c4_string_bytes(utf8_literal), utf8_literal.as_bytes());
+        assert_ne!(projected, utf8_literal);
+        assert_eq!(c4_string_from_bytes("\u{ff}".as_bytes()), "\u{ff}");
+    }
+
+    #[test]
+    fn raw_byte_projection_keeps_equality_hashing_and_literal_collisions_byte_exact() {
+        let utf8_literal = Value::String("\u{ff}".into());
+        let equivalent_raw_bytes =
+            Value::String(c4_string_from_bytes("\u{ff}".as_bytes()));
+        let single_high_byte = Value::String(c4_string_from_bytes(&[0xff]));
+
+        assert_eq!(utf8_literal, equivalent_raw_bytes);
+        assert_ne!(utf8_literal, single_high_byte);
+        assert_eq!(
+            serde_json::to_string(&utf8_literal).expect("UTF-8 spelling serializes"),
+            serde_json::to_string(&equivalent_raw_bytes).expect("raw spelling serializes"),
+            "byte-equal strings have one canonical wire spelling"
+        );
+
+        let mut map = ValueMap::new();
+        map.insert_key(equivalent_raw_bytes, Value::Int(7));
+        assert_eq!(map.get_key(&utf8_literal), Some(&Value::Int(7)));
+        assert_eq!(map.get_key(&single_high_byte), None);
+        let encoded_map = serde_json::to_string(&map).expect("string-key map serializes");
+        let mut equivalent_map = ValueMap::new();
+        equivalent_map.insert_key(utf8_literal.clone(), Value::Int(7));
+        assert_eq!(
+            encoded_map,
+            serde_json::to_string(&equivalent_map).expect("equivalent map serializes")
+        );
+
+        let private_use_literal = char::from_u32(C4_RAW_BYTE_ESCAPE_BASE + 0xff)
+            .expect("private-use literal is a valid scalar")
+            .to_string();
+        let canonical_literal = c4_string_from_literal(private_use_literal.clone());
+        assert_eq!(
+            c4_string_bytes(&canonical_literal),
+            private_use_literal.as_bytes()
+        );
+        assert_ne!(Value::String(canonical_literal), single_high_byte);
+
+        let encoded = serde_json::to_string(&single_high_byte)
+            .expect("raw-byte string serializes");
+        let decoded: Value =
+            serde_json::from_str(&encoded).expect("raw-byte string deserializes");
+        assert_eq!(decoded, single_high_byte);
+        let Value::String(decoded) = decoded else {
+            panic!("round-trip preserves the string variant");
+        };
+        assert_eq!(c4_string_bytes(&decoded), [0xff]);
+    }
+
+    #[test]
+    fn c4id_payloads_use_signed_char_parsing_and_canonical_serde() {
+        assert_eq!(
+            c4_id_raw(&c4_string_from_bytes(&[0xff, b'A', b'B', b'C'])),
+            c4_id_normalize_raw(usize::MAX)
+        );
+        assert_eq!(
+            c4_id_parse(&c4_string_from_bytes(b"ABC\0D")),
+            0,
+            "FnC4Id sees only the native C-string prefix"
+        );
+        assert_eq!(c4_id_parse(&c4_string_from_bytes(b"1234\0suffix")), 1234);
+
+        #[cfg(all(not(target_os = "windows"), target_pointer_width = "64"))]
+        assert_eq!(c4_id_parse("4294967297"), 4_294_967_297);
+        #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+        {
+            assert_eq!(c4_id_parse("4294967297"), 1);
+            assert_eq!(c4_id_raw(&c4_id_from_raw(4_294_967_297)), 1);
+        }
+
+        let parsed_numeric = Value::C4Id("12345".into());
+        let typed_payload = Value::C4Id(c4_id_from_raw(12345));
+        assert_eq!(parsed_numeric, typed_payload);
+        assert_ne!(
+            c4_id_parse(match &typed_payload {
+                Value::C4Id(id) => id,
+                _ => unreachable!(),
+            }),
+            12345,
+            "ordinary string parsing must not recognize the typed-ID tag"
+        );
+        assert_eq!(c4_id_text("12345"), c4_string_from_bytes(b"90"));
+        assert_eq!(typed_payload.to_string(), "90");
+
+        let parsed_wire = serde_json::to_string(&parsed_numeric).expect("C4ID serializes");
+        let typed_wire = serde_json::to_string(&typed_payload).expect("C4ID serializes");
+        assert_eq!(parsed_wire, typed_wire);
+        let decoded: Value = serde_json::from_str(&parsed_wire).expect("C4ID deserializes");
+        assert_eq!(decoded, typed_payload);
+        let Value::C4Id(decoded) = decoded else {
+            panic!("round-trip preserves the C4ID variant");
+        };
+        assert_eq!(c4_id_raw(&decoded), 12345);
+
+        for raw in [u32::from_le_bytes(*b"NONE"), u32::from_le_bytes(*b"1111")] {
+            let stored = c4_id_from_raw(raw as usize);
+            assert_eq!(c4_id_raw(&stored), raw as usize);
+        }
     }
 }
 

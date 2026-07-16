@@ -18822,7 +18822,7 @@ func Trigger() {
         let caller_script = r#"
         global func Spawn(targetdef) { return DefinitionCall(targetdef, "Factory", 4); }
         global func SpawnMissing(targetdef) { return DefinitionCall(targetdef, "NoSuch"); }
-        global func SpawnBadId() { return DefinitionCall("XXXX", "Factory"); }
+        global func SpawnBadId() { return DefinitionCall(XXXX, "Factory"); }
         "#;
         let factory_script = r#"
         func Factory(n) {
@@ -21835,8 +21835,9 @@ func Trigger() {
         // (C4ObjectMenu::MenuCommand -> C4Object::MenuCommand DirectExec,
         // C4ObjectMenu.cpp:505-527 / C4Object.cpp:3756-3760).
         let script = r#"
-        local hit;
+        local hit, text;
         func Mark(a, b) { hit = a + b; return 7; }
+        func Keep(value) { text = value; return 1; }
         func OpenWith(cmd, par, style, perm) {
             CreateMenu(WIPF, this(), this(), 0, "Choose", 0, style, perm);
             AddMenuItem("A", cmd, WIPF, this(), 0, par);
@@ -21907,6 +21908,28 @@ func Trigger() {
         );
         assert!(engine.menu_user_enter(clonk, true).expect("enter runs"));
         assert_eq!(hit(&engine), Value::Int(41), "Mark(40,1) ran");
+
+        // MenuCommand's C4AulScript::DirectExec consumes the copied raw
+        // C4 string bytes. It must not reinterpret an invalid UTF-8 byte in
+        // the command as the UTF-8 encoding of our internal projection.
+        call(
+            &mut engine,
+            "OpenWith",
+            vec![
+                Value::String(lc_script::c4_string_from_bytes(&[
+                    b'K', b'e', b'e', b'p', b'(', b'\"', 0xff, b'\"', b')',
+                ])),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+            ],
+        );
+        assert!(engine.menu_user_enter(clonk, false).expect("enter runs"));
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("text"),
+            Some(&Value::String(lc_script::c4_string_from_bytes(&[0xff])))
+        );
 
         // A PERMANENT menu survives its own execution (C4Menu.cpp:517).
         call(
@@ -33053,6 +33076,7 @@ func ControlUpSingle()
                 total_playing_time: 1_234,
                 score_old: 150,
                 score_new: Some(250),
+                league_progress_data: None,
                 league_performance: 0,
                 custom_evaluation_strings: "First note   Second note".to_string(),
             }],
@@ -48136,7 +48160,7 @@ func Probe(target) {
         // spell def's FxBuffTimer drains the host object's energy.
         let host_script = r#"
         global func Initialize(state, random) {
-            AddEffect("Buff", state, 100, 2, 0, "SPEL");
+            AddEffect("Buff", state, 100, 2, 0, SPEL);
             return nil;
         }
 
@@ -58798,6 +58822,10 @@ func OnOwnerChanged()
                 .with_total_playing_time(1_234)
                 .with_initial_value(100),
         )?;
+        engine.replace_player_info_league_progress_data([(
+            41,
+            Some(vec![b'P', 0xff]),
+        )]);
         engine.game_time = 19;
         engine.round_results.players = vec![
             RoundResultsPlayerState {
@@ -58846,12 +58874,17 @@ func OnOwnerChanged()
                     total_playing_time: 1_253,
                     score_old: 250,
                     score_new: Some(415),
+                    league_progress_data: Some(vec![b'P', 0xff]),
                     league_performance: 0,
                     custom_evaluation_strings: "Keep this".to_string(),
                 },
             ]
         );
 
+        engine.replace_player_info_league_progress_data([(
+            41,
+            Some(b"changed".to_vec()),
+        )]);
         let second = engine.tick()?;
         assert_eq!(second.round_results, first.round_results);
         let player = second

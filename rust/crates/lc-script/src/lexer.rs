@@ -1,5 +1,8 @@
 use crate::error::ParseError;
 use crate::token::{Keyword, Symbol, Token, TokenKind};
+use crate::value::{
+    c4_string_byte_len, c4_string_bytes, c4_string_from_bytes, c4_string_from_literal,
+};
 
 // C4AUL_MAX_String (C4Aul.h): decoded string buffer bytes.
 const C4AUL_MAX_STRING: usize = 1024;
@@ -13,10 +16,15 @@ pub struct Lexer<'a> {
     just_saw_cr: bool,
     strict_level: u8,
     diagnostics: Vec<ParseError>,
+    input_is_c4_bytes: bool,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
+        // C4Script sources are native C strings. An embedded NUL terminates
+        // the source before tokenization, including when it cuts a token or
+        // string literal in half.
+        let input = input.split_once('\0').map_or(input, |(prefix, _)| prefix);
         Self {
             input,
             chars: input.char_indices(),
@@ -26,6 +34,14 @@ impl<'a> Lexer<'a> {
             just_saw_cr: false,
             strict_level: 0,
             diagnostics: Vec::new(),
+            input_is_c4_bytes: false,
+        }
+    }
+
+    pub(crate) fn new_c4_string(input: &'a str) -> Self {
+        Self {
+            input_is_c4_bytes: true,
+            ..Self::new(input)
         }
     }
 
@@ -47,7 +63,7 @@ impl<'a> Lexer<'a> {
             };
 
             match ch {
-                c if c.is_whitespace() => {
+                c if c <= ' ' => {
                     self.consume_whitespace(c);
                     continue;
                 }
@@ -497,7 +513,7 @@ impl<'a> Lexer<'a> {
                 _ => {}
             }
             match self.peek_char() {
-                Some(next) if next.is_whitespace() => {
+                Some(next) if next <= ' ' => {
                     current = next;
                     self.bump_char();
                 }
@@ -509,7 +525,7 @@ impl<'a> Lexer<'a> {
     fn consume_line_comment(&mut self) {
         self.bump_char(); // consume second '/'
         while let Some(ch) = self.peek_char() {
-            if ch == '\n' {
+            if ch == '\n' || ch == '\r' {
                 break;
             }
             self.bump_char();
@@ -543,7 +559,7 @@ impl<'a> Lexer<'a> {
     ) -> Token {
         let mut end_idx = start_idx + first.len_utf8();
         while let Some(ch) = self.peek_char() {
-            if ch.is_alphanumeric() || ch == '_' {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
                 let (idx, consumed, _, _) = self.bump_char().unwrap();
                 end_idx = idx + consumed.len_utf8();
             } else {
@@ -627,7 +643,7 @@ impl<'a> Lexer<'a> {
         // Start with '#', continue reading alphanumeric chars to form directive
         let mut end_idx = start_idx + first.len_utf8();
         while let Some(ch) = self.peek_char() {
-            if ch.is_alphanumeric() || ch == '_' {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
                 let (idx, consumed, _, _) = self.bump_char().unwrap();
                 end_idx = idx + consumed.len_utf8();
             } else {
@@ -751,14 +767,35 @@ impl<'a> Lexer<'a> {
         column: usize,
     ) -> Result<Token, ParseError> {
         let mut value = String::new();
+        let mut value_is_canonical_bytes = false;
         let mut warned_too_long = false;
         while let Some((_, ch, char_line, char_column)) = self.bump_char() {
             match ch {
                 '"' => {
-                    return Ok(Token::new(TokenKind::String(value), line, column));
+                    return Ok(Token::new(
+                        TokenKind::String(if value_is_canonical_bytes || self.input_is_c4_bytes {
+                            c4_string_from_bytes(&c4_string_bytes(&value))
+                        } else {
+                            c4_string_from_literal(value)
+                        }),
+                        line,
+                        column,
+                    ));
                 }
-                _ if value.len() >= C4AUL_MAX_STRING => {
+                _ if (if self.input_is_c4_bytes {
+                    c4_string_byte_len(&value)
+                } else {
+                    value.len()
+                }) >= C4AUL_MAX_STRING =>
+                {
                     self.handle_string_overflow(&mut warned_too_long, char_line, char_column)?;
+                }
+                '\r' | '\n' => {
+                    return Err(ParseError::new(
+                        "newline in string literal",
+                        char_line,
+                        char_column,
+                    ));
                 }
                 '\\' => {
                     match self.peek_char() {
@@ -787,13 +824,43 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
-                other if value.len() + other.len_utf8() <= C4AUL_MAX_STRING => {
+                other
+                    if (if self.input_is_c4_bytes {
+                        c4_string_byte_len(&value)
+                            + c4_string_byte_len(&other.to_string())
+                    } else {
+                        value.len() + other.len_utf8()
+                    }) <= C4AUL_MAX_STRING =>
+                {
                     value.push(other);
                 }
-                _ => {
+                other => {
                     // C++ counts raw bytes and can split a UTF-8 scalar at
-                    // the boundary. Rust strings cannot; retain whole scalars
-                    // while enforcing the same byte-length ceiling.
+                    // the boundary. Preserve the prefix through the same
+                    // reversible byte representation used by native strings.
+                    let current_len = if self.input_is_c4_bytes {
+                        c4_string_byte_len(&value)
+                    } else {
+                        value.len()
+                    };
+                    let remaining = C4AUL_MAX_STRING.saturating_sub(current_len);
+                    if remaining != 0 {
+                        if !value_is_canonical_bytes {
+                            value = if self.input_is_c4_bytes {
+                                c4_string_from_bytes(&c4_string_bytes(&value))
+                            } else {
+                                c4_string_from_literal(value)
+                            };
+                            value_is_canonical_bytes = true;
+                        }
+                        let bytes = if self.input_is_c4_bytes {
+                            c4_string_bytes(&other.to_string())
+                        } else {
+                            let mut encoded = [0; 4];
+                            other.encode_utf8(&mut encoded).as_bytes().to_vec()
+                        };
+                        value.push_str(&c4_string_from_bytes(&bytes[..remaining]));
+                    }
                     self.handle_string_overflow(&mut warned_too_long, char_line, char_column)?;
                 }
             }
@@ -948,6 +1015,21 @@ mod tests {
     }
 
     #[test]
+    fn nul_terminates_source_before_following_tokens() {
+        let tokens = lex_all("1\0+1").expect("NUL-terminated source lexes its prefix");
+        assert_eq!(
+            tokens.into_iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![TokenKind::Number(1)]
+        );
+    }
+
+    #[test]
+    fn nul_inside_string_leaves_literal_unterminated() {
+        let error = lex_all("\"open\0\"").expect_err("NUL cuts off the closing quote");
+        assert_eq!(error.message(), "unterminated string literal");
+    }
+
+    #[test]
     fn tracks_line_numbers_correctly() {
         let source = "var a = 1;\nvar b = 2;\nvar c = 3;";
         let tokens = lex_all(source).unwrap();
@@ -1043,6 +1125,29 @@ mod tests {
         } else {
             panic!("Expected string literal");
         }
+    }
+
+    #[test]
+    fn overlong_literal_keeps_the_first_byte_of_a_split_utf8_scalar() {
+        let source = format!("\"{}\u{e9}\"", "a".repeat(C4AUL_MAX_STRING - 1));
+        let tokens = lex_all(&source).expect("nonstrict overlong literal tokenizes");
+        let TokenKind::String(value) = &tokens[0].kind else {
+            panic!("expected string literal");
+        };
+        let bytes = crate::value::c4_string_bytes(value);
+        assert_eq!(bytes.len(), C4AUL_MAX_STRING);
+        assert_eq!(&bytes[..C4AUL_MAX_STRING - 1], vec![b'a'; 1023]);
+        assert_eq!(bytes[C4AUL_MAX_STRING - 1], 0xc3);
+    }
+
+    #[test]
+    fn nonstrict_full_string_ignores_a_following_line_break_like_cpp() {
+        let source = format!("\"{}\n\"", "a".repeat(C4AUL_MAX_STRING));
+        let tokens = lex_all(&source).expect("overflow bypasses the line-break check");
+        let TokenKind::String(value) = &tokens[0].kind else {
+            panic!("expected string literal");
+        };
+        assert_eq!(c4_string_byte_len(value), C4AUL_MAX_STRING);
     }
 
     #[test]

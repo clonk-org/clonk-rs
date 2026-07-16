@@ -503,6 +503,21 @@ impl TestNetworkCommands {
         snapshots
     }
 
+    pub(crate) fn take_team_control_updates(
+        &mut self,
+    ) -> (Vec<PlayerInfoControlData>, Vec<HostJoinSnapshot>) {
+        let mut player_infos = Vec::new();
+        let mut snapshots = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            match command {
+                NetworkCommand::BroadcastPlayerInfo(info) => player_infos.push(info),
+                NetworkCommand::PublishJoinSnapshot { snapshot } => snapshots.push(snapshot),
+                _ => {}
+            }
+        }
+        (player_infos, snapshots)
+    }
+
     pub(crate) fn take_submitted_join_players(&mut self) -> Vec<(Tick, JoinPlayerControlData)> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {

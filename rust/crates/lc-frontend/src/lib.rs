@@ -74,6 +74,11 @@ pub use startup_options::{ControlOptionItem, ControlOptionsAction, ControlOption
 
 const MIN_VIEWPORT_ZOOM: f32 = 0.125;
 const MAX_VIEWPORT_ZOOM: f32 = 4.0;
+
+fn c4_presentation_text(text: &str) -> String {
+    lc_resources::decode_legacy_script_text(&lc_script::c4_string_bytes(text))
+}
+
 /// `C4ViewportScrollBorder` (src/C4Constants.h:95).
 const VIEWPORT_SCROLL_BORDER: i32 = 40;
 /// `Config.General.ScrollSmooth` (src/C4Config.cpp:386). The C++ viewport
@@ -4765,12 +4770,13 @@ impl GraphicsSystem {
             );
 
             if player.show_startup {
+                let player_name = c4_presentation_text(&player.name);
                 hud::draw_player_startup_with_gamma(
                     &mut self.surface,
                     &font,
                     &self.hud_graphics,
                     rect,
-                    &player.name,
+                    &player_name,
                     player.owner_color,
                     gamma,
                 );
@@ -7001,6 +7007,13 @@ mod tests {
     }
 
     #[test]
+    fn player_startup_name_decodes_native_bytes_only_for_presentation() {
+        let raw = lc_script::c4_string_from_bytes(b"Andr\xe9");
+        assert_eq!(c4_presentation_text(&raw), "Andr\u{e9}");
+        assert_eq!(lc_script::c4_string_bytes(&raw), b"Andr\xe9");
+    }
+
+    #[test]
     fn renderer_resolves_raw_draw_dir_and_flip_dir_rows() {
         // C4Object::UpdateFlipDir keeps raw Action.Dir and computes
         // DrawDir=2*FlipDir-1-Dir for the mirrored half
@@ -7398,6 +7411,8 @@ mod tests {
             game_time: 0,
             game_over: false,
             round_results: Default::default(),
+            league_name: Vec::new(),
+            player_info_league_progress_data: Default::default(),
             physics: None,
             objects: vec![ObjectSnapshot {
                 id: ObjectId::new(1),

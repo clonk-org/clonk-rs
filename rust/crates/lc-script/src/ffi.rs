@@ -3,7 +3,7 @@ use std::os::raw::{c_char, c_int};
 use std::ptr;
 
 use crate::engine::Engine;
-use crate::value::{Value, ValueMap};
+use crate::value::{c4_string_bytes, c4_string_from_bytes, Value, ValueMap};
 
 pub struct EngineHandle(Engine);
 
@@ -77,8 +77,8 @@ pub extern "C" fn lc_script_engine_load(handle: *mut EngineHandle, source: *cons
     }
     let engine = unsafe { &mut *handle };
     let c_str = unsafe { CStr::from_ptr(source) };
-    let source = c_str.to_string_lossy();
-    engine.0.load_script(source.as_ref()).is_ok()
+    let source = c4_string_from_bytes(c_str.to_bytes());
+    engine.0.load_script_c4_string(&source).is_ok()
 }
 
 #[no_mangle]
@@ -145,14 +145,22 @@ fn lc_value_to_rust(value: &LcScriptValue) -> Result<Value, ()> {
                 return Err(());
             }
             let c_str = unsafe { CStr::from_ptr(value.string_value) };
-            Ok(Value::String(c_str.to_string_lossy().into_owned()))
+            Ok(Value::String(c4_string_from_bytes(c_str.to_bytes())))
         }
         LcScriptValueKind::C4Id => {
+            if value.object_id_value != 0 {
+                return Ok(Value::C4Id(crate::c4_id_from_raw(
+                    value.object_id_value as usize,
+                )));
+            }
             if value.string_value.is_null() {
                 return Err(());
             }
             let c_str = unsafe { CStr::from_ptr(value.string_value) };
-            Ok(Value::C4Id(c_str.to_string_lossy().into_owned()))
+            let text = c4_string_from_bytes(c_str.to_bytes());
+            Ok(Value::C4Id(crate::c4_id_from_raw(crate::c4_id_parse(
+                &text,
+            ))))
         }
         LcScriptValueKind::Object => Ok(Value::Object(value.object_id_value)),
         LcScriptValueKind::Array => {
@@ -174,6 +182,13 @@ fn lc_value_to_rust(value: &LcScriptValue) -> Result<Value, ()> {
     }
 }
 
+fn native_c_string_prefix(mut bytes: Vec<u8>) -> Vec<u8> {
+    if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
+        bytes.truncate(nul);
+    }
+    bytes
+}
+
 fn rust_value_to_lc(value: &Value) -> LcScriptValue {
     match value {
         Value::Nil => LcScriptValue::default(),
@@ -187,7 +202,7 @@ fn rust_value_to_lc(value: &Value) -> LcScriptValue {
             bool_value: *b,
             ..LcScriptValue::default()
         },
-        Value::String(s) => match CString::new(s.as_str()) {
+        Value::String(s) => match CString::new(native_c_string_prefix(c4_string_bytes(s))) {
             Ok(c_string) => LcScriptValue {
                 kind: LcScriptValueKind::String,
                 string_value: c_string.into_raw(),
@@ -195,10 +210,11 @@ fn rust_value_to_lc(value: &Value) -> LcScriptValue {
             },
             Err(_) => LcScriptValue::default(),
         },
-        Value::C4Id(id) => match CString::new(id.as_str()) {
+        Value::C4Id(id) => match CString::new(c4_string_bytes(&crate::c4_id_text(id))) {
             Ok(c_string) => LcScriptValue {
                 kind: LcScriptValueKind::C4Id,
                 string_value: c_string.into_raw(),
+                object_id_value: crate::c4_id_raw(id) as u64,
                 ..LcScriptValue::default()
             },
             Err(_) => LcScriptValue::default(),
@@ -314,11 +330,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn engine_load_preserves_raw_c_source_bytes() {
+        let handle = lc_script_engine_new();
+        let source = CString::new(b"func Probe() { return \"\xff\"; }".as_slice())
+            .expect("source has no interior NUL");
+        assert!(lc_script_engine_load(handle, source.as_ptr()));
+
+        let name = CString::new("Probe").expect("name has no NUL");
+        let mut out = LcScriptValue::default();
+        assert!(lc_script_engine_call(
+            handle,
+            name.as_ptr(),
+            std::ptr::null(),
+            0,
+            &mut out,
+        ));
+        assert_eq!(
+            lc_value_to_rust(&out),
+            Ok(Value::String(c4_string_from_bytes(&[0xff])))
+        );
+
+        lc_script_value_free(&mut out);
+        lc_script_engine_free(handle);
+    }
+
+    #[test]
+    fn string_ffi_round_trip_uses_the_native_c_string_prefix() {
+        let value = Value::String(c4_string_from_bytes(&[0xff, 0, b'X']));
+        let mut ffi_value = rust_value_to_lc(&value);
+
+        assert_eq!(ffi_value.kind, LcScriptValueKind::String);
+        assert_eq!(
+            unsafe { CStr::from_ptr(ffi_value.string_value) }.to_bytes(),
+            [0xff]
+        );
+        assert_eq!(
+            lc_value_to_rust(&ffi_value),
+            Ok(Value::String(c4_string_from_bytes(&[0xff])))
+        );
+
+        lc_script_value_free(&mut ffi_value);
+    }
+
+    #[test]
     fn rust_to_lc_preserves_arrays() {
         let value = Value::Array(vec![
             Value::Int(7),
             Value::Bool(true),
             Value::C4Id("ROCK".to_string()),
+            Value::C4Id(crate::c4_id_from_raw(12345)),
             Value::Object(42),
             Value::Array(vec![Value::String("nested".to_string())]),
             Value::Array(Vec::new()),

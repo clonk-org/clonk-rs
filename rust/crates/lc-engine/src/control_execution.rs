@@ -1,13 +1,13 @@
 use crate::{
-    player_file::PlayerFile, InitialNetworkTeam, InitialNetworkTeamDistribution,
-    InitialNetworkTeamMetadata, JoinPlayerConfig, JoinPlayerControlData, JoinPlayerSource,
-    LegacyCString, NetworkResourceCore, PlayerInfoUpdateRequest, ScenarioError,
-    PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
-    PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_USER,
+    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
+    CLIENT_PLAYER_INFO_FLAG_UPDATED, ControlPlayerInfoEntry, PlayerInfoControlData,
 };
 use crate::{
-    ControlPlayerInfoEntry, PlayerInfoControlData, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-    CLIENT_PLAYER_INFO_FLAG_INITIAL,
+    InitialNetworkTeam, InitialNetworkTeamDistribution, InitialNetworkTeamMetadata,
+    JoinPlayerConfig, JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore,
+    PLAYER_INFO_FLAG_ATTRIBUTES_FIXED, PLAYER_INFO_FLAG_JOINED,
+    PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_USER,
+    PlayerInfoUpdateRequest, ScenarioError, player_file::PlayerFile,
 };
 use std::collections::{BTreeMap, HashSet};
 
@@ -202,6 +202,47 @@ fn initial_random_smallest_team(
     lowest
 }
 
+fn player_info_uses_color(player: &ControlPlayerInfoEntry) -> bool {
+    player.flags & PLAYER_INFO_FLAG_REMOVED == 0 && player.savegame_player == 0
+}
+
+/// `IsColorConflict` from `C4PlayerInfoConflicts.cpp`, including the legacy
+/// monitor-gamma and CIE u'v' conversion constants.
+fn player_colors_conflict(first: u32, second: u32) -> bool {
+    fn linear(channel: u32) -> f64 {
+        (f64::from(channel) / 255.0).powf(1.0 / 2.2)
+    }
+    fn chromaticity(color: u32) -> (f64, f64, f64) {
+        let r = linear((color >> 16) & 0xff);
+        let g = linear((color >> 8) & 0xff);
+        let b = linear(color & 0xff);
+        let x_value = 0.412_453 * r + 0.357_580 * g + 0.180_423 * b;
+        let luminance = 0.212_671 * r + 0.715_160 * g + 0.072_169 * b;
+        let z_value = 0.019_334 * r + 0.119_193 * g + 0.950_227 * b;
+        let sum = x_value + luminance + z_value;
+        let (x, y) = if sum == 0.0 {
+            (0.3, 0.3)
+        } else {
+            (x_value / sum, luminance / sum)
+        };
+        let denominator = -2.0 * x + 12.0 * y + 3.0;
+        let (u, v) = if denominator == 0.0 {
+            (0.0, 0.0)
+        } else {
+            (4.0 * x / denominator, 9.0 * y / denominator)
+        };
+        (u, v, luminance)
+    }
+
+    let (u1, v1, y1) = chromaticity(first);
+    let (u2, v2, y2) = chromaticity(second);
+    let luminance = (y1 + y2) / 2.0;
+    let color_difference =
+        ((u2 - u1).powi(2) + (v2 - v1).powi(2)).sqrt() * luminance.powi(2) * 150.0;
+    let luminance_difference = ((y2 - y1).abs() / (luminance.powi(2) * 5.0).max(0.5)) / 0.10;
+    color_difference + luminance_difference < 1.0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlClientState {
     pub activated: bool,
@@ -306,6 +347,32 @@ impl ControlClientRegistry {
         self.clients.get(&client_id)
     }
 
+    /// Apply `C4PacketReadyCheck` to the synchronized client core. Returns
+    /// whether the serialized `LobbyReady` value actually changed.
+    pub fn set_lobby_ready(&mut self, client_id: i32, ready: bool) -> bool {
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return false;
+        };
+        if client.lobby_ready == ready {
+            return false;
+        }
+        client.lobby_ready = ready;
+        true
+    }
+
+    /// `C4PacketReadyCheck::Request` clears every non-host ready flag before
+    /// collecting the new responses.
+    pub fn clear_nonhost_lobby_ready(&mut self) -> bool {
+        let mut changed = false;
+        for (&client_id, client) in &mut self.clients {
+            if client_id != 0 && client.lobby_ready {
+                client.lobby_ready = false;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn is_activated(&self, client_id: i32) -> bool {
         self.clients
             .get(&client_id)
@@ -322,6 +389,22 @@ impl ControlClientRegistry {
         self.clients
             .iter()
             .filter_map(|(&client_id, client)| client.activated.then_some(client_id))
+            .collect()
+    }
+
+    /// Clone the live synchronized `C4ClientList` core values in client-ID
+    /// order for JoinData/reference serialization.
+    pub fn snapshot(&self) -> Vec<crate::ClientCoreControlData> {
+        self.clients
+            .iter()
+            .map(|(&client_id, client)| crate::ClientCoreControlData {
+                client_id,
+                activated: client.activated,
+                observer: client.observer,
+                name: client.name.clone(),
+                nick: client.nick.clone(),
+                lobby_ready: client.lobby_ready,
+            })
             .collect()
     }
 
@@ -363,17 +446,40 @@ impl ControlClientRegistry {
 }
 
 /// `C4PlayerInfoList`'s synchronized per-client player-info registry.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ControlPlayerInfoRegistry {
     clients: Vec<ClientPlayerInfos>,
     last_player_id: i32,
     issued_join_ids: HashSet<i32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ClientPlayerInfos {
     client_id: i32,
+    flags: u32,
     players: Vec<ControlPlayerInfoEntry>,
+}
+
+/// A TeamColors transition reached the part of
+/// `C4PlayerInfoList::ResolvePlayerAttributeConflicts` that depends on
+/// host-local `AlternateColorDw` or process-random replacement colors. Those
+/// values are deliberately not invented from the synchronized PlayerInfo.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TeamColorUpdateError {
+    #[error(
+        "player {player_id} needs alternate/random color conflict resolution against player {other_player_id}"
+    )]
+    ConflictResolutionUnavailable {
+        player_id: i32,
+        other_player_id: i32,
+    },
+    #[error(
+        "player {player_id} needs forced-name conflict resolution against player {other_player_id}"
+    )]
+    NameConflictResolutionUnavailable {
+        player_id: i32,
+        other_player_id: i32,
+    },
 }
 
 impl ControlPlayerInfoRegistry {
@@ -471,10 +577,9 @@ impl ControlPlayerInfoRegistry {
 
         let generated_team_count = teams.random_team_count.max(2);
         if teams.auto_generate_teams
-            && teams.teams.len()
-                != usize::try_from(generated_team_count).unwrap_or(usize::MAX)
+            && teams.teams.len() != usize::try_from(generated_team_count).unwrap_or(usize::MAX)
         {
-            self.reassign_all_random_teams(teams, generated_team_count, oracle);
+            let _ = self.reassign_all_teams(teams, oracle, true);
             return;
         }
 
@@ -484,12 +589,9 @@ impl ControlPlayerInfoRegistry {
             teams.teams.len()
         };
         loop {
-            let Some(lowest_team) = initial_random_smallest_team(
-                &teams.teams,
-                true,
-                teams.random_team_count,
-                oracle,
-            ) else {
+            let Some(lowest_team) =
+                initial_random_smallest_team(&teams.teams, true, teams.random_team_count, oracle)
+            else {
                 break;
             };
             let mut largest_team: Option<usize> = None;
@@ -542,12 +644,51 @@ impl ControlPlayerInfoRegistry {
         }
     }
 
-    fn reassign_all_random_teams(
+    /// Execute host-side `C4TeamList::ReassignAllTeams` after a synchronized
+    /// distribution change. Player infos are visited by ascending positive
+    /// ID, and every packet containing a resettable player is returned once
+    /// in registry order even when its final values happen to match. That is
+    /// the native `CIF_Updated`/`SendUpdatedPlayers` contract.
+    pub fn reassign_all_teams(
         &mut self,
         teams: &mut InitialNetworkTeamMetadata,
-        generated_team_count: i32,
         oracle: &mut impl InitialHostTeamAssignmentOracle,
-    ) {
+        has_or_will_have_lobby: bool,
+    ) -> Vec<PlayerInfoControlData> {
+        let mut touched_clients = HashSet::new();
+        let issued_join_ids = &self.issued_join_ids;
+        for client in &mut self.clients {
+            for player in &mut client.players {
+                if player.id <= 0
+                    || issued_join_ids.contains(&player.id)
+                    || player.flags & PLAYER_INFO_FLAG_JOINED != 0
+                {
+                    continue;
+                }
+                // Native marks the owning packet updated unconditionally,
+                // even when the old team was already zero.
+                player.team = 0;
+                touched_clients.insert(client.client_id);
+            }
+        }
+
+        // C4TeamList::RecheckPlayers removes reset/removed memberships before
+        // any optional generated-team rebuild or reassignment.
+        self.recheck_team_players(teams);
+
+        let generated_team_count = teams.random_team_count.max(2);
+        if matches!(
+            teams.team_distribution,
+            InitialNetworkTeamDistribution::Random
+                | InitialNetworkTeamDistribution::RandomInvisible
+        ) && teams.auto_generate_teams
+            && teams.teams.len() != usize::try_from(generated_team_count).unwrap_or(usize::MAX)
+        {
+            teams.teams.clear();
+            teams.last_team_id = 0;
+            initial_generate_teams_through(teams, generated_team_count, oracle);
+        }
+
         let mut player_ids = self
             .clients
             .iter()
@@ -556,22 +697,6 @@ impl ControlPlayerInfoRegistry {
             .collect::<Vec<_>>();
         player_ids.sort_unstable();
         player_ids.dedup();
-
-        for &player_id in &player_ids {
-            if self.issued_join_ids.contains(&player_id) {
-                continue;
-            }
-            let Some(player) = self.get_mut(player_id) else {
-                continue;
-            };
-            if player.flags & PLAYER_INFO_FLAG_JOINED == 0 {
-                player.team = 0;
-            }
-        }
-
-        teams.teams.clear();
-        teams.last_team_id = 0;
-        initial_generate_teams_through(teams, generated_team_count, oracle);
 
         for player_id in player_ids {
             if self.issued_join_ids.contains(&player_id) {
@@ -583,8 +708,274 @@ impl ControlPlayerInfoRegistry {
             if player.flags & PLAYER_INFO_FLAG_JOINED != 0 {
                 continue;
             }
-            assign_initial_player_teams(teams, std::slice::from_mut(player), oracle, true);
+            assign_initial_player_teams(
+                teams,
+                std::slice::from_mut(player),
+                oracle,
+                has_or_will_have_lobby,
+            );
         }
+
+        self.snapshot_client_packets(&touched_clients)
+    }
+
+    /// Apply the exactly modelled portion of
+    /// `C4PlayerInfoList::UpdatePlayerAttributes` for a TeamColors toggle.
+    ///
+    /// Joined players stay fixed. Unjoined savegame associations take their
+    /// restore color first; otherwise an enabled, existing team forces its
+    /// color. For ordinary unforced players the native resolver restores the
+    /// original color when it is conflict-free. If that original still
+    /// conflicts, native needs host-local `AlternateColorDw` or random color
+    /// generation, neither of which exists in the synchronized registry, so
+    /// this method fails before mutating live state.
+    pub fn update_team_colors(
+        &mut self,
+        teams: &InitialNetworkTeamMetadata,
+        enabled: bool,
+        restore_players: &[ControlPlayerInfoEntry],
+    ) -> Result<Vec<PlayerInfoControlData>, TeamColorUpdateError> {
+        let mut updated_clients = self.clients.clone();
+
+        for client in &mut updated_clients {
+            for player in &mut client.players {
+                if player.flags & PLAYER_INFO_FLAG_JOINED != 0 {
+                    continue;
+                }
+                let restore_color = (player.savegame_player != 0)
+                    .then(|| {
+                        restore_players
+                        .iter()
+                        .find(|restore| restore.id == player.savegame_player)
+                            .map(|restore| restore.color)
+                    })
+                    .flatten();
+                // A missing associated restore row is not an error. Native
+                // simply leaves the restore force unset and then tries the
+                // ordinary enabled team-color force.
+                let forced_color = restore_color.or_else(|| {
+                    enabled.then(|| {
+                        teams
+                            .teams
+                            .iter()
+                            .find(|team| team.id == player.team)
+                            .map(|team| team.color)
+                    })
+                    .flatten()
+                });
+                if let Some(color) = forced_color {
+                    player.color = color;
+                }
+            }
+        }
+
+        let mut resolver_players = Vec::new();
+        for (client_index, client) in updated_clients.iter().enumerate() {
+            for (player_index, player) in client.players.iter().enumerate() {
+                let forced_team_color =
+                    enabled && teams.teams.iter().any(|team| team.id == player.team);
+                if player.flags & (PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_ATTRIBUTES_FIXED) == 0
+                    && player.savegame_player == 0
+                    && !forced_team_color
+                {
+                    resolver_players.push((client_index, player_index));
+                }
+            }
+        }
+
+        // Native tests an original candidate against the other players'
+        // current colors before it changes anything. Ordered cases where a
+        // current color blocks a candidate may later resolve differently, so
+        // conservatively reject them instead of applying all originals at
+        // once and diverging from that traversal.
+        for &(client_index, player_index) in &resolver_players {
+            let player = &updated_clients[client_index].players[player_index];
+            let player_id = player.id;
+            let candidate = player.original_color;
+            let current_conflict = updated_clients
+                .iter()
+                .enumerate()
+                .flat_map(|(other_client_index, client)| {
+                    client.players.iter().enumerate().filter_map(
+                        move |(other_player_index, other)| {
+                            ((other_client_index, other_player_index)
+                                != (client_index, player_index)
+                                && (player_id == 0 || other.id != player_id)
+                                && player_info_uses_color(other)
+                                && player_colors_conflict(candidate, other.color))
+                            .then_some(other.id)
+                        },
+                    )
+                })
+                .chain(restore_players.iter().filter_map(|other| {
+                    ((player_id == 0 || other.id != player_id)
+                        && player_info_uses_color(other)
+                        && player_colors_conflict(candidate, other.color))
+                    .then_some(other.id)
+                }))
+                .next();
+            if let Some(other_player_id) = current_conflict {
+                return Err(TeamColorUpdateError::ConflictResolutionUnavailable {
+                    player_id,
+                    other_player_id,
+                });
+            }
+        }
+
+        // Every candidate is free against the current state. Install all
+        // originals, then also reject conflicts among the candidate results.
+        for &(client_index, player_index) in &resolver_players {
+            let player = &mut updated_clients[client_index].players[player_index];
+            player.color = player.original_color;
+        }
+        for &(client_index, player_index) in &resolver_players {
+            let player = &updated_clients[client_index].players[player_index];
+            let player_id = player.id;
+            let color = player.color;
+            let current_conflict = updated_clients
+                .iter()
+                .enumerate()
+                .flat_map(|(other_client_index, client)| {
+                    client.players.iter().enumerate().filter_map(
+                        move |(other_player_index, other)| {
+                            ((other_client_index, other_player_index)
+                                != (client_index, player_index)
+                                && (player_id == 0 || other.id != player_id)
+                                && player_info_uses_color(other)
+                                && player_colors_conflict(color, other.color))
+                            .then_some(other.id)
+                        },
+                    )
+                })
+                .chain(restore_players.iter().filter_map(|other| {
+                    ((player_id == 0 || other.id != player_id)
+                        && player_info_uses_color(other)
+                        && player_colors_conflict(color, other.color))
+                    .then_some(other.id)
+                }))
+                .next();
+            if let Some(other_player_id) = current_conflict {
+                return Err(TeamColorUpdateError::ConflictResolutionUnavailable {
+                    player_id,
+                    other_player_id,
+                });
+            }
+        }
+
+        // The same native resolver always checks names after colors. On the
+        // exactly modelled path, every mutable non-league player can return
+        // to its original name, represented by clearing ForcedName. Install
+        // all candidates first, then reject any original-name collision
+        // before committing the cloned registry. Colliding originals require
+        // the resolver's ordered "Name (n)" cascade, which is intentionally
+        // outside this synchronized subset.
+        let mut name_resolver_players = Vec::new();
+        for (client_index, client) in updated_clients.iter().enumerate() {
+            for (player_index, player) in client.players.iter().enumerate() {
+                if player.flags & (PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_ATTRIBUTES_FIXED) == 0
+                    && player.league_account.is_empty()
+                {
+                    name_resolver_players.push((client_index, player_index));
+                }
+            }
+        }
+        // Names have the same ordered-current hazard as colors. An original
+        // blocked by another current effective name needs the native ordered
+        // ForcedName cascade, so reject that state transactionally.
+        for &(client_index, player_index) in &name_resolver_players {
+            let player = &updated_clients[client_index].players[player_index];
+            let player_id = player.id;
+            let original_name = player.name.as_bytes();
+            let conflict = updated_clients
+                .iter()
+                .enumerate()
+                .flat_map(|(other_client_index, client)| {
+                    client.players.iter().enumerate().filter_map(
+                        move |(other_player_index, other)| {
+                            let other_name = if !other.forced_name.is_empty() {
+                                other.forced_name.as_bytes()
+                            } else {
+                                other.name.as_bytes()
+                            };
+                            ((other_client_index, other_player_index)
+                                != (client_index, player_index)
+                                && (player_id == 0 || other.id != player_id)
+                                && other.flags & PLAYER_INFO_FLAG_REMOVED == 0
+                                && other.league_account.is_empty()
+                                && original_name.eq_ignore_ascii_case(other_name))
+                            .then_some(other.id)
+                        },
+                    )
+                })
+                .next();
+            if let Some(other_player_id) = conflict {
+                return Err(TeamColorUpdateError::NameConflictResolutionUnavailable {
+                    player_id,
+                    other_player_id,
+                });
+            }
+        }
+        for &(client_index, player_index) in &name_resolver_players {
+            updated_clients[client_index].players[player_index].forced_name =
+                LegacyCString::default();
+        }
+        for &(client_index, player_index) in &name_resolver_players {
+            let player = &updated_clients[client_index].players[player_index];
+            let player_id = player.id;
+            let original_name = player.name.as_bytes();
+            let conflict = updated_clients
+                .iter()
+                .enumerate()
+                .flat_map(|(other_client_index, client)| {
+                    client.players.iter().enumerate().filter_map(
+                        move |(other_player_index, other)| {
+                            let other_name = if !other.forced_name.is_empty() {
+                                other.forced_name.as_bytes()
+                            } else {
+                                other.name.as_bytes()
+                            };
+                            ((other_client_index, other_player_index)
+                                != (client_index, player_index)
+                                && (player_id == 0 || other.id != player_id)
+                                && other.flags & PLAYER_INFO_FLAG_REMOVED == 0
+                                && other.league_account.is_empty()
+                                && original_name.eq_ignore_ascii_case(other_name))
+                            .then_some(other.id)
+                        },
+                    )
+                })
+                .next();
+            if let Some(other_player_id) = conflict {
+                return Err(TeamColorUpdateError::NameConflictResolutionUnavailable {
+                    player_id,
+                    other_player_id,
+                });
+            }
+        }
+
+        let touched_clients = self
+            .clients
+            .iter()
+            .zip(&updated_clients)
+            .filter_map(|(before, after)| {
+                (before.players != after.players).then_some(after.client_id)
+            })
+            .collect::<HashSet<_>>();
+        self.clients = updated_clients;
+        Ok(self.snapshot_client_packets(&touched_clients))
+    }
+
+    fn snapshot_client_packets(&self, client_ids: &HashSet<i32>) -> Vec<PlayerInfoControlData> {
+        self.clients
+            .iter()
+            .filter(|client| client_ids.contains(&client.client_id))
+            .map(|client| PlayerInfoControlData {
+                client_id: client.client_id,
+                flags: client.flags,
+                players: client.players.clone(),
+                by_client: 0,
+            })
+            .collect()
     }
 
     /// Admits a request and exposes its retained, ID-assigned players before
@@ -647,10 +1038,19 @@ impl ControlPlayerInfoRegistry {
             if flags & CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS != 0 {
                 existing.players.extend(players);
             } else {
+                existing.flags = flags & !CLIENT_PLAYER_INFO_FLAG_UPDATED;
                 existing.players = players;
             }
         } else {
-            self.clients.push(ClientPlayerInfos { client_id, players });
+            // C4PlayerInfoList::AddInfo clears CIF_AddPlayers when a packet
+            // establishes a new client row, and HandlePlayerInfo clears the
+            // transient CIF_Updated bit after applying the control.
+            self.clients.push(ClientPlayerInfos {
+                client_id,
+                flags: flags
+                    & !(CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS | CLIENT_PLAYER_INFO_FLAG_UPDATED),
+                players,
+            });
         }
     }
 
@@ -784,20 +1184,69 @@ impl ControlPlayerInfoRegistry {
             .any(|client| client.client_id == client_id)
     }
 
-    pub fn mark_joined(&mut self, info_id: i32) -> bool {
+    /// Clone the complete live PlayerInfo packets for a
+    /// game-parameter/reference snapshot, including packet flags, rows, and
+    /// the allocation high-water mark.
+    pub fn retained_rows_snapshot(&self) -> (i32, Vec<(i32, u32, Vec<ControlPlayerInfoEntry>)>) {
+        (
+            self.last_player_id,
+            self.clients
+                .iter()
+                .map(|client| (client.client_id, client.flags, client.players.clone()))
+                .collect(),
+        )
+    }
+
+    /// Advance `C4PlayerInfoList::iLastPlayerID` past a player that already
+    /// exists in the runtime engine. Ordinary C++ joins always have a
+    /// retained PlayerInfo row; this seam keeps low-level/synthetic engine
+    /// registrations from colliding with the next admitted zero-ID request.
+    pub fn reserve_player_ids_through(&mut self, player_info_id: i32) {
+        self.last_player_id = self.last_player_id.max(player_info_id);
+    }
+
+    /// Apply `C4PlayerInfo::SetJoined`: retain the runtime player number and
+    /// exact join frame together with the Joined bit.
+    pub fn mark_joined(&mut self, info_id: i32, game_number: i32, game_join_frame: i32) -> bool {
         let Some(info) = self.get_mut(info_id) else {
             return false;
         };
+        info.game_number = game_number;
+        info.game_join_frame = game_join_frame;
         info.flags |= PLAYER_INFO_FLAG_JOINED;
         true
     }
 
-    pub fn mark_removed(
-        &mut self,
-        info_id: i32,
-        disconnected: bool,
-        game_part_frame: i32,
-    ) -> bool {
+    /// Mirror `C4Team::AddPlayer(..., true)` into the retained PlayerInfo.
+    /// Team color replaces only the active color; OriginalColor remains the
+    /// player's pre-team preference.
+    pub fn set_team_and_color(&mut self, info_id: i32, team: i32, color: Option<u32>) -> bool {
+        let Some(info) = self.get_mut(info_id) else {
+            return false;
+        };
+        let mut changed = false;
+        if info.team != team {
+            info.team = team;
+            changed = true;
+        }
+        if let Some(color) = color.filter(|color| info.color != *color) {
+            info.color = color;
+            changed = true;
+        }
+        changed
+    }
+
+    /// Apply `C4PlayerInfo::SetWinner` after `DoGameOver` has marked a
+    /// surviving runtime player as the winner.
+    pub fn mark_winner(&mut self, info_id: i32) -> bool {
+        let Some(info) = self.get_mut(info_id) else {
+            return false;
+        };
+        info.flags |= crate::PLAYER_INFO_FLAG_WON;
+        true
+    }
+
+    pub fn mark_removed(&mut self, info_id: i32, disconnected: bool, game_part_frame: i32) -> bool {
         let Some(info) = self.get_mut(info_id) else {
             return false;
         };
@@ -814,6 +1263,41 @@ impl ControlPlayerInfoRegistry {
             .iter()
             .flat_map(|client| &client.players)
             .find(|player| player.id == info_id)
+    }
+
+    /// Apply `C4PlayerInfo::SetLeagueProgressData` to the retained row.
+    /// `None` clears the `StdStrBuf`; `Some([])` is an allocated empty string.
+    pub fn set_league_progress_data(&mut self, info_id: i32, data: Option<Vec<u8>>) -> bool {
+        let Some(info) = self.get_mut(info_id) else {
+            return false;
+        };
+        info.league_progress_data_is_null = data.is_none();
+        info.league_progress_data = LegacyCString::from_bytes(data.unwrap_or_default())
+            .expect("engine-normalized league progress data contains no interior NUL");
+        true
+    }
+
+    /// Deterministic script-visible projection of every retained
+    /// `C4PlayerInfo` row's league progress data.
+    ///
+    /// `GetPlayerInfoByID` returns the first matching row in packet storage
+    /// order. IDs are expected to be unique after host allocation, but keep
+    /// that first-row rule for malformed/imported snapshots and sort the
+    /// resulting projection by ID so engine bootstrap is deterministic.
+    /// Compiled strings, including empty ones, are allocated; freshly created
+    /// in-memory rows retain their explicit null provenance.
+    pub fn league_progress_data_snapshot(&self) -> Vec<(i32, Option<Vec<u8>>)> {
+        let mut entries = BTreeMap::new();
+        for player in self.clients.iter().flat_map(|client| &client.players) {
+            if player.id != 0 {
+                entries.entry(player.id).or_insert_with(|| {
+                    (!player.league_progress_data_is_null
+                        || !player.league_progress_data.is_empty())
+                    .then(|| player.league_progress_data.as_bytes().to_vec())
+                });
+            }
+        }
+        entries.into_iter().collect()
     }
 
     pub fn client_id_for_info(&self, info_id: i32) -> Option<i32> {
@@ -996,7 +1480,7 @@ pub fn prepare_join_player_config(
     ]
     .into_iter()
     .find(|name| !name.is_empty())
-    .map(|name| name.to_string_lossy().into_owned())
+    .map(|name| lc_script::c4_string_from_bytes(name.as_bytes()))
     .unwrap_or_default();
 
     Ok(JoinPlayerConfig {
@@ -1059,10 +1543,8 @@ mod tests {
             id: i32,
             existing_teams: &[crate::InitialNetworkTeam],
         ) -> crate::InitialNetworkTeam {
-            self.generation_calls.push((
-                id,
-                existing_teams.iter().map(|team| team.id).collect(),
-            ));
+            self.generation_calls
+                .push((id, existing_teams.iter().map(|team| team.id).collect()));
             crate::InitialNetworkTeam {
                 id,
                 name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
@@ -1123,18 +1605,16 @@ mod tests {
             outcomes: [].into(),
             ranges: Vec::new(),
         };
-        assign_initial_offline_player_teams(
-            &mut free_teams,
-            &mut free_players,
-            &mut free_oracle,
-        );
+        assign_initial_offline_player_teams(&mut free_teams, &mut free_players, &mut free_oracle);
 
         assert_eq!(free_players[0].team, 0);
         assert_eq!(free_players[0].color, 0x0011_1111);
-        assert!(free_teams
-            .teams
-            .iter()
-            .all(|team| team.player_ids.is_empty()));
+        assert!(
+            free_teams
+                .teams
+                .iter()
+                .all(|team| team.player_ids.is_empty())
+        );
         assert!(free_oracle.ranges.is_empty());
 
         let mut random_teams = initial_teams;
@@ -1502,6 +1982,86 @@ mod tests {
     }
 
     #[test]
+    fn retained_player_snapshot_keeps_packet_and_join_lifecycle_fields() {
+        // InitLocal copies the complete retained C4ClientPlayerInfos rows.
+        // SetJoined supplies both in-game fields, and DoGameOver adds Won
+        // before the reference is rebuilt (src/C4PlayerInfo.cpp:319-325;
+        // src/C4Game.cpp:3660-3675; src/C4Network2Reference.cpp:49-66).
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.replace_snapshot(
+            41,
+            [PlayerInfoControlData {
+                client_id: 7,
+                flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![player(41)],
+                ..Default::default()
+            }],
+        );
+
+        assert!(registry.mark_joined(41, 3, 77));
+        assert!(registry.mark_winner(41));
+
+        let (last_player_id, clients) = registry.retained_rows_snapshot();
+        assert_eq!(last_player_id, 41);
+        let [(client_id, flags, players)] = clients.as_slice() else {
+            panic!("expected one retained client packet");
+        };
+        assert_eq!((*client_id, *flags), (7, CLIENT_PLAYER_INFO_FLAG_INITIAL));
+        let [retained] = players.as_slice() else {
+            panic!("expected one retained player");
+        };
+        assert_eq!((retained.game_number, retained.game_join_frame), (3, 77));
+        assert_ne!(retained.flags & PLAYER_INFO_FLAG_JOINED, 0);
+        assert_ne!(retained.flags & crate::PLAYER_INFO_FLAG_WON, 0);
+    }
+
+    #[test]
+    fn league_progress_snapshot_is_sorted_and_keeps_retained_empty_rows() {
+        let mut first_nine = player(9);
+        first_nine.league_progress_data = LegacyCString::from_bytes(b"first".to_vec()).unwrap();
+        let mut five = player(5);
+        five.league_progress_data = LegacyCString::from_bytes(b"five".to_vec()).unwrap();
+        let mut duplicate_nine = player(9);
+        duplicate_nine.league_progress_data =
+            LegacyCString::from_bytes(b"duplicate".to_vec()).unwrap();
+        let mut retained_empty = player(2);
+        retained_empty.flags = PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_REMOVED;
+        retained_empty.league_progress_data_is_null = false;
+        let retained_null = player(3);
+
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![first_nine, retained_empty, retained_null],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 4,
+            players: vec![five, duplicate_nine],
+            ..Default::default()
+        });
+
+        assert_eq!(
+            registry.league_progress_data_snapshot(),
+            vec![
+                (2, Some(Vec::new())),
+                (3, None),
+                (5, Some(b"five".to_vec())),
+                (9, Some(b"first".to_vec())),
+            ]
+        );
+
+        assert!(registry.set_league_progress_data(3, Some(Vec::new())));
+        assert_eq!(
+            registry.league_progress_data_snapshot()[1],
+            (3, Some(Vec::new()))
+        );
+        assert!(registry.set_league_progress_data(3, None));
+        assert_eq!(registry.league_progress_data_snapshot()[1], (3, None));
+        assert!(!registry.set_league_progress_data(99, Some(b"missing".to_vec())));
+    }
+
+    #[test]
     fn recreation_order_contains_only_currently_joined_players() {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.apply(PlayerInfoControlData {
@@ -1567,6 +2127,18 @@ mod tests {
         assert!(local.observer);
         assert_eq!(local.name.as_bytes(), b"Local observer");
         assert!(local.lobby_ready);
+        let live_clients = clients.snapshot();
+        assert_eq!(
+            live_clients
+                .iter()
+                .map(|client| client.client_id)
+                .collect::<Vec<_>>(),
+            vec![0, 7]
+        );
+        assert!(live_clients[0].activated);
+        assert!(live_clients[1].observer);
+        assert_eq!(live_clients[1].name.as_bytes(), b"Local observer");
+        assert!(live_clients[1].lobby_ready);
 
         let mut players = ControlPlayerInfoRegistry::default();
         players.apply(PlayerInfoControlData {
@@ -1679,15 +2251,8 @@ mod tests {
         clients.register(0, true, false);
         clients.register(3, false, false);
 
-        let admitted = clients.activation_update_for_request(
-            3,
-            1_880,
-            2_000,
-            true,
-            true,
-            2_000,
-            36,
-        );
+        let admitted =
+            clients.activation_update_for_request(3, 1_880, 2_000, true, true, 2_000, 36);
         assert_eq!(
             admitted,
             Some(crate::ClientUpdateControlData {
@@ -1774,7 +2339,7 @@ mod tests {
         });
 
         assert_eq!(registry.client_info_ids(3), vec![7, 8]);
-        assert!(registry.mark_joined(7));
+        assert!(registry.mark_joined(7, 3, 17));
         assert!(registry.mark_removed(7, true, 42));
         registry.on_client_part(3);
 
@@ -1782,6 +2347,7 @@ mod tests {
         assert_ne!(retained.flags & PLAYER_INFO_FLAG_JOINED, 0);
         assert_ne!(retained.flags & PLAYER_INFO_FLAG_REMOVED, 0);
         assert_ne!(retained.flags & crate::PLAYER_INFO_FLAG_DISCONNECTED, 0);
+        assert_eq!((retained.game_number, retained.game_join_frame), (3, 17));
         assert_eq!(retained.game_part_frame, 42);
         assert!(registry.get(8).is_none());
     }
@@ -2217,6 +2783,349 @@ mod tests {
     }
 
     #[test]
+    fn full_reassignment_walks_player_ids_but_flushes_packets_in_registry_order() {
+        let team = |id, player_ids, color| crate::InitialNetworkTeam {
+            id,
+            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            player_start_index: 0,
+            player_ids,
+            color,
+            icon_spec: LegacyCString::default(),
+            max_players: 0,
+        };
+        let mut teams = crate::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 2,
+            team_distribution: crate::InitialNetworkTeamDistribution::Random,
+            team_colors: true,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: vec![
+                team(1, vec![2, 3, 4, 5], 0x00f4_0000),
+                team(2, vec![1], 0x0000_00f4),
+            ],
+        };
+        let info = |id, team, flags| ControlPlayerInfoEntry {
+            id,
+            team,
+            flags,
+            color: 0x0012_3456,
+            original_color: 0x0012_3456,
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 9,
+            players: vec![info(3, 1, 0), info(1, 2, PLAYER_INFO_FLAG_JOINED)],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![info(4, 1, 0), info(2, 1, PLAYER_INFO_FLAG_JOINED)],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 7,
+            players: vec![info(5, 1, 0)],
+            ..Default::default()
+        });
+        registry.issued_join_ids.insert(5);
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [1].into(),
+            ranges: Vec::new(),
+        };
+
+        let packets = registry.reassign_all_teams(&mut teams, &mut oracle, true);
+
+        assert_eq!(oracle.ranges, vec![2]);
+        assert_eq!(teams.teams[0].player_ids, vec![2, 5, 4]);
+        assert_eq!(teams.teams[1].player_ids, vec![1, 3]);
+        assert_eq!(registry.get(3).map(|player| player.team), Some(2));
+        assert_eq!(registry.get(4).map(|player| player.team), Some(1));
+        assert_eq!(registry.get(1).map(|player| player.team), Some(2));
+        assert_eq!(registry.get(2).map(|player| player.team), Some(1));
+        assert_eq!(registry.get(5).map(|player| player.team), Some(1));
+        assert_eq!(
+            packets
+                .iter()
+                .map(|packet| packet.client_id)
+                .collect::<Vec<_>>(),
+            vec![9, 3]
+        );
+    }
+
+    #[test]
+    fn team_color_update_clears_safe_forced_names_and_rolls_back_name_conflicts() {
+        let teams = crate::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 2,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: vec![
+                crate::InitialNetworkTeam {
+                    id: 1,
+                    name: LegacyCString::from_bytes(b"Red".to_vec()).unwrap(),
+                    player_start_index: 0,
+                    player_ids: vec![1],
+                    color: 0x00f4_0000,
+                    icon_spec: LegacyCString::default(),
+                    max_players: 0,
+                },
+                crate::InitialNetworkTeam {
+                    id: 2,
+                    name: LegacyCString::from_bytes(b"Blue".to_vec()).unwrap(),
+                    player_start_index: 0,
+                    player_ids: vec![2],
+                    color: 0x0000_00f4,
+                    icon_spec: LegacyCString::default(),
+                    max_players: 0,
+                },
+            ],
+        };
+        let named =
+            |id, team, name: &[u8], forced_name: &[u8], original_color| ControlPlayerInfoEntry {
+                id,
+                team,
+                name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+                forced_name: LegacyCString::from_bytes(forced_name.to_vec()).unwrap(),
+                color: original_color,
+                original_color,
+                ..Default::default()
+            };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 5,
+            players: vec![
+                named(1, 1, b"Alice", b"Alice (2)", 0x00f4_0000),
+                named(2, 2, b"Bob", b"", 0x0000_00f4),
+            ],
+            ..Default::default()
+        });
+
+        let packets = registry
+            .update_team_colors(&teams, true, &[])
+            .expect("distinct original names take the deterministic safe path");
+        assert_eq!(packets.len(), 1);
+        assert!(registry.get(1).unwrap().forced_name.is_empty());
+        assert_eq!(registry.get(1).unwrap().color, 0x00f4_0000);
+        assert_eq!(registry.get(2).unwrap().color, 0x0000_00f4);
+
+        let mut conflicting = registry.clone();
+        conflicting.get_mut(2).unwrap().name =
+            LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        conflicting.get_mut(1).unwrap().forced_name =
+            LegacyCString::from_bytes(b"Alias".to_vec()).unwrap();
+        let before = conflicting.retained_rows_snapshot();
+        let error = conflicting
+            .update_team_colors(&teams, false, &[])
+            .expect_err("colliding originals need native ordered forced-name generation");
+        assert!(matches!(
+            error,
+            TeamColorUpdateError::NameConflictResolutionUnavailable { .. }
+        ));
+        assert_eq!(conflicting.retained_rows_snapshot(), before);
+    }
+
+    #[test]
+    fn team_color_conflict_error_preserves_the_complete_registry() {
+        let teams = crate::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 0,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: Vec::new(),
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 4,
+            players: vec![
+                ControlPlayerInfoEntry {
+                    id: 1,
+                    name: LegacyCString::from_bytes(b"One".to_vec()).unwrap(),
+                    color: 0x00f4_0000,
+                    original_color: 0x00f4_0000,
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    id: 2,
+                    name: LegacyCString::from_bytes(b"Two".to_vec()).unwrap(),
+                    color: 0x00f4_0000,
+                    original_color: 0x00f4_0000,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        let before = registry.retained_rows_snapshot();
+
+        let error = registry
+            .update_team_colors(&teams, true, &[])
+            .expect_err("equal original colors need alternate/random native state");
+
+        assert!(matches!(
+            error,
+            TeamColorUpdateError::ConflictResolutionUnavailable { .. }
+        ));
+        assert_eq!(registry.retained_rows_snapshot(), before);
+    }
+
+    #[test]
+    fn ordered_current_attribute_blockers_fail_before_mutation() {
+        let teams = crate::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 0,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: Vec::new(),
+        };
+
+        let mut color_blocked = ControlPlayerInfoRegistry::default();
+        color_blocked.apply(PlayerInfoControlData {
+            client_id: 4,
+            players: vec![
+                ControlPlayerInfoEntry {
+                    id: 1,
+                    name: LegacyCString::from_bytes(b"One".to_vec()).unwrap(),
+                    color: 0x0000_f400,
+                    original_color: 0x00f4_0000,
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    id: 2,
+                    name: LegacyCString::from_bytes(b"Two".to_vec()).unwrap(),
+                    color: 0x00f4_0000,
+                    original_color: 0x0000_00f4,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        let color_before = color_blocked.retained_rows_snapshot();
+        assert!(matches!(
+            color_blocked.update_team_colors(&teams, true, &[]),
+            Err(TeamColorUpdateError::ConflictResolutionUnavailable { .. })
+        ));
+        assert_eq!(color_blocked.retained_rows_snapshot(), color_before);
+
+        let mut name_blocked = ControlPlayerInfoRegistry::default();
+        name_blocked.apply(PlayerInfoControlData {
+            client_id: 4,
+            players: vec![
+                ControlPlayerInfoEntry {
+                    id: 1,
+                    name: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                    forced_name: LegacyCString::from_bytes(b"Alias".to_vec()).unwrap(),
+                    color: 0x00f4_0000,
+                    original_color: 0x00f4_0000,
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    id: 2,
+                    name: LegacyCString::from_bytes(b"Bob".to_vec()).unwrap(),
+                    forced_name: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                    color: 0x0000_00f4,
+                    original_color: 0x0000_00f4,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        let name_before = name_blocked.retained_rows_snapshot();
+        assert!(matches!(
+            name_blocked.update_team_colors(&teams, true, &[]),
+            Err(TeamColorUpdateError::NameConflictResolutionUnavailable { .. })
+        ));
+        assert_eq!(name_blocked.retained_rows_snapshot(), name_before);
+    }
+
+    #[test]
+    fn missing_restore_color_falls_back_to_team_or_preserves_current_color() {
+        let team_color = 0x0000_00f4;
+        let teams = crate::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 1,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: vec![crate::InitialNetworkTeam {
+                id: 1,
+                name: LegacyCString::from_bytes(b"Blue".to_vec()).unwrap(),
+                player_start_index: 0,
+                player_ids: vec![1],
+                color: team_color,
+                icon_spec: LegacyCString::default(),
+                max_players: 0,
+            }],
+        };
+        let unchanged_color = 0x0012_3456;
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 4,
+            players: vec![
+                ControlPlayerInfoEntry {
+                    id: 1,
+                    name: LegacyCString::from_bytes(b"One".to_vec()).unwrap(),
+                    savegame_player: 91,
+                    team: 1,
+                    color: 0x00f4_0000,
+                    original_color: 0x00f4_0000,
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    id: 2,
+                    name: LegacyCString::from_bytes(b"Two".to_vec()).unwrap(),
+                    savegame_player: 92,
+                    team: 0,
+                    color: unchanged_color,
+                    original_color: 0x00f4_0000,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+
+        let packets = registry
+            .update_team_colors(&teams, true, &[])
+            .expect("missing restore rows follow native fallback semantics");
+
+        assert_eq!(packets.len(), 1);
+        assert_eq!(registry.get(1).unwrap().color, team_color);
+        assert_eq!(registry.get(2).unwrap().color, unchanged_color);
+    }
+
+    #[test]
     fn host_admission_rejects_an_empty_non_initial_request() {
         // HandlePlayerInfoUpdRequest drops an empty packet unless it carries
         // CIF_Initial, before ID assignment or direct PlayerInfo emission
@@ -2468,6 +3377,30 @@ mod tests {
         assert!(config.crew.is_empty());
         assert!(!config.control_style);
         assert!(!config.auto_context_menu);
+    }
+
+    #[test]
+    fn script_player_join_preserves_non_utf8_name_bytes() {
+        let info = ControlPlayerInfoEntry {
+            name: crate::LegacyCString::from_bytes(vec![0xff]).expect("name has no NUL"),
+            id: 9,
+            player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
+            ..Default::default()
+        };
+        let join = JoinPlayerControlData {
+            info_id: 9,
+            ..Default::default()
+        };
+
+        let config = prepare_join_player_config(JoinPlayerPreparation {
+            join: &join,
+            info: &info,
+            player_file: None,
+            startup_player_count: 1,
+        })
+        .expect("script player prepares without a file");
+
+        assert_eq!(lc_script::c4_string_bytes(&config.name), [0xff]);
     }
 
     #[test]

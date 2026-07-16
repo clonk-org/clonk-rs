@@ -4,6 +4,7 @@
 //! module couples that projection to the complete synchronized parameters so
 //! a host cannot advertise the former while silently dropping the latter.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::net::{SocketAddr, SocketAddrV6};
 
@@ -82,9 +83,71 @@ impl HostGameReference {
         parameters: JoinGameParametersEnvelope,
     ) -> Result<Self, HostGameReferenceError> {
         let mut summary = self.summary.clone();
-        summary.title = parameters.title.to_string_lossy().into_owned();
+        summary.title = lc_resources::decode_legacy_script_text(parameters.title.as_bytes());
         summary.max_players = parameters.max_players;
         Self::new(summary, self.metadata.clone(), parameters)
+    }
+
+    /// Rebuild the fields refreshed by `C4Network2Reference::InitLocal`
+    /// while a game is live. Per-player league performance remains untouched
+    /// until the game-over branch below.
+    pub fn replacing_runtime(
+        &self,
+        parameters: JoinGameParametersEnvelope,
+        state: impl Into<String>,
+        time: i32,
+        frame: i32,
+        join_allowed: bool,
+        league_performance: i32,
+    ) -> Result<Self, HostGameReferenceError> {
+        let mut summary = self.summary.clone();
+        summary.state = state.into();
+        summary.join_allowed = join_allowed;
+        summary.title = lc_resources::decode_legacy_script_text(parameters.title.as_bytes());
+        summary.max_players = parameters.max_players;
+        let mut metadata = self.metadata.clone();
+        metadata.time = time;
+        metadata.frame = frame;
+        metadata.league_performance = league_performance;
+        Self::new(summary, metadata, parameters)
+    }
+
+    /// Rebuild `C4Network2Reference::InitLocal`'s game-over projection.
+    /// C++ copies live parameters, then overlays the independent global
+    /// performance and one performance value per retained PlayerInfo ID.
+    pub fn replacing_game_over<I>(
+        &self,
+        parameters: JoinGameParametersEnvelope,
+        state: impl Into<String>,
+        time: i32,
+        frame: i32,
+        join_allowed: bool,
+        league_performance: i32,
+        player_league_performance: I,
+    ) -> Result<Self, HostGameReferenceError>
+    where
+        I: IntoIterator<Item = (i32, i32)>,
+    {
+        let performance = player_league_performance
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let mut parameters = parameters;
+        for player in parameters
+            .player_infos
+            .clients
+            .iter_mut()
+            .flat_map(|client| client.players.iter_mut())
+        {
+            player.league_performance = performance.get(&player.id).copied().unwrap_or(0);
+        }
+        self.replacing_runtime(
+            parameters,
+            state,
+            time,
+            frame,
+            join_allowed,
+            league_performance,
+        )
     }
 
     pub(crate) fn validate(&self) -> Result<(), HostGameReferenceError> {
@@ -237,7 +300,7 @@ fn validate_summary(
             parameters: parameters.max_players,
         });
     }
-    if legacy_charset_bytes(&summary.title) != parameters.title.as_bytes() {
+    if summary.title != lc_resources::decode_legacy_script_text(parameters.title.as_bytes()) {
         return Err(HostGameReferenceError::TitleMismatch);
     }
     let mut hosts = parameters
@@ -249,10 +312,10 @@ fn validate_summary(
         .next()
         .filter(|_| hosts.next().is_none())
         .ok_or(HostGameReferenceError::HostClientMissingOrDuplicate)?;
-    if legacy_charset_bytes(&summary.host_name) != host.name.as_bytes() {
+    if summary.host_name != lc_resources::decode_legacy_script_text(host.name.as_bytes()) {
         return Err(HostGameReferenceError::HostNameMismatch);
     }
-    if legacy_charset_bytes(&summary.host_nick) != host.nick.as_bytes() {
+    if summary.host_nick != lc_resources::decode_legacy_script_text(host.nick.as_bytes()) {
         return Err(HostGameReferenceError::HostNickMismatch);
     }
     if summary.addresses != metadata.addresses {
@@ -260,8 +323,8 @@ fn validate_summary(
     }
     if summary.netpuncher_ipv4 != metadata.netpuncher_ipv4
         || summary.netpuncher_ipv6 != metadata.netpuncher_ipv6
-        || legacy_charset_bytes(&summary.netpuncher_address)
-            != metadata.netpuncher_address.as_bytes()
+        || summary.netpuncher_address
+            != lc_resources::decode_legacy_script_text(metadata.netpuncher_address.as_bytes())
     {
         return Err(HostGameReferenceError::NetpuncherMetadataMismatch);
     }
@@ -860,11 +923,4 @@ fn team_distribution_name(value: u8) -> Option<&'static str> {
         4 => Some("RandomInv"),
         _ => None,
     }
-}
-
-fn legacy_charset_bytes(value: &str) -> Vec<u8> {
-    value
-        .chars()
-        .map(|character| u8::try_from(u32::from(character)).unwrap_or(b'?'))
-        .collect()
 }

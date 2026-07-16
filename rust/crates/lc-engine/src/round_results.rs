@@ -18,6 +18,11 @@ pub struct RoundResultsPlayerState {
     pub score_old: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_new: Option<i32>,
+    /// Progress bytes copied from the linked C4PlayerInfo at evaluation time.
+    /// This result-owned copy is persisted independently from later changes
+    /// to the live player-info row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub league_progress_data: Option<Vec<u8>>,
     /// Scenario-defined league performance for this persistent player-info
     /// ID. C++ deliberately omits this temporary value from
     /// C4RoundResultsPlayer::CompileFunc, so serialized restores reset it.
@@ -26,7 +31,11 @@ pub struct RoundResultsPlayerState {
     /// Raw scenario-specific text consumed as one player-row label. C++
     /// appends multiple entries with exactly three spaces rather than a line
     /// separator (`C4RoundResults.cpp:94-98`).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        with = "lc_script::c4_string_serde"
+    )]
     pub custom_evaluation_strings: String,
 }
 
@@ -37,6 +46,7 @@ impl Default for RoundResultsPlayerState {
             total_playing_time: 0,
             score_old: invalid_score(),
             score_new: None,
+            league_progress_data: None,
             league_performance: 0,
             custom_evaluation_strings: String::new(),
         }
@@ -67,7 +77,11 @@ pub struct RoundResultsState {
     /// Raw global evaluation text. C++ concatenates entries with `|`, which
     /// its multiline GUI interprets as line separators
     /// (`C4RoundResults.cpp:346-354`).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        with = "lc_script::c4_string_serde"
+    )]
     pub custom_evaluation_strings: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub players: Vec<RoundResultsPlayerState>,
@@ -145,6 +159,13 @@ impl RoundResultsState {
     pub(crate) fn prepare_for_save(&mut self) {
         for player in &mut self.players {
             player.league_performance = 0;
+            if player
+                .league_progress_data
+                .as_ref()
+                .is_some_and(Vec::is_empty)
+            {
+                player.league_progress_data = None;
+            }
         }
     }
 }
@@ -190,29 +211,37 @@ mod tests {
 
     #[test]
     fn dialog_metadata_keeps_nondefault_results_nonempty() {
-        assert!(!RoundResultsState {
-            hide_settlement_score: true,
-            ..RoundResultsState::default()
-        }
-        .is_empty());
-        assert!(!RoundResultsState {
-            league_performance: -1,
-            ..RoundResultsState::default()
-        }
-        .is_empty());
-        assert!(!RoundResultsState {
-            custom_evaluation_strings: "First|Second".to_string(),
-            ..RoundResultsState::default()
-        }
-        .is_empty());
-        assert!(!RoundResultsState {
-            players: vec![RoundResultsPlayerState {
-                custom_evaluation_strings: "First   Second".to_string(),
-                ..RoundResultsPlayerState::default()
-            }],
-            ..RoundResultsState::default()
-        }
-        .is_empty());
+        assert!(
+            !RoundResultsState {
+                hide_settlement_score: true,
+                ..RoundResultsState::default()
+            }
+            .is_empty()
+        );
+        assert!(
+            !RoundResultsState {
+                league_performance: -1,
+                ..RoundResultsState::default()
+            }
+            .is_empty()
+        );
+        assert!(
+            !RoundResultsState {
+                custom_evaluation_strings: "First|Second".to_string(),
+                ..RoundResultsState::default()
+            }
+            .is_empty()
+        );
+        assert!(
+            !RoundResultsState {
+                players: vec![RoundResultsPlayerState {
+                    custom_evaluation_strings: "First   Second".to_string(),
+                    ..RoundResultsPlayerState::default()
+                }],
+                ..RoundResultsState::default()
+            }
+            .is_empty()
+        );
     }
 
     #[test]
@@ -229,7 +258,10 @@ mod tests {
             results
                 .players
                 .iter()
-                .map(|player| (player.player_info_id, player.custom_evaluation_strings.as_str()))
+                .map(|player| (
+                    player.player_info_id,
+                    player.custom_evaluation_strings.as_str()
+                ))
                 .collect::<Vec<_>>(),
             vec![(17, "Kills: 3   Deaths: 1"), (9, "Other")]
         );

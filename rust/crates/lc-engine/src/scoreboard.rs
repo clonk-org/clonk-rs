@@ -57,7 +57,11 @@ impl ScoreboardPresentationSink {
 /// header cells; their `value` stores the corresponding lookup key.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScoreboardCell {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "lc_script::c4_optional_string_serde"
+    )]
     text: Option<String>,
     #[serde(default)]
     value: i32,
@@ -228,7 +232,35 @@ const fn is_zero(value: &i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScoreboardState, SCOREBOARD_CAPTION};
+    use super::{SCOREBOARD_CAPTION, ScoreboardState};
+
+    #[test]
+    fn native_text_bytes_survive_state_serialization() {
+        let mut scoreboard = ScoreboardState::default();
+        scoreboard.set_cell(
+            SCOREBOARD_CAPTION,
+            SCOREBOARD_CAPTION,
+            Some(lc_script::c4_string_from_bytes(b"Sc\xf6res")),
+            0,
+        );
+
+        let encoded = serde_json::to_value(&scoreboard).expect("serialize scoreboard");
+        assert_eq!(
+            encoded["rows"][0][0]["text"]["c4_bytes"],
+            serde_json::json!([83, 99, 246, 114, 101, 115])
+        );
+        let restored: ScoreboardState =
+            serde_json::from_value(encoded).expect("deserialize scoreboard");
+        assert_eq!(
+            lc_script::c4_string_bytes(
+                restored
+                    .cell(0, 0)
+                    .and_then(super::ScoreboardCell::text)
+                    .expect("title remains allocated")
+            ),
+            b"Sc\xf6res"
+        );
+    }
 
     #[test]
     fn user_and_script_visibility_use_distinct_refcount_thresholds() {

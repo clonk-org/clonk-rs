@@ -859,6 +859,8 @@ fn decode_player_info_entry(
         league_projected_gain,
         clan_tag,
         league_performance,
+        // Binary C4PlayerInfo compilation materializes even an empty string.
+        league_progress_data_is_null: false,
         league_progress_data,
         resource,
     })

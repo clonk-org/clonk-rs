@@ -474,7 +474,7 @@ fn message_board_answer_control_requires_the_players_exact_client() {
 }
 
 #[test]
-fn message_board_answer_control_preserves_escaped_and_cp1252_text_in_the_same_frame() {
+fn message_board_answer_control_preserves_escaped_and_raw_text_in_the_same_frame() {
     let (mut engine, target, _) = fixture();
     engine
         .player_mut(PLAYER)
@@ -509,10 +509,10 @@ fn message_board_answer_control_preserves_escaped_and_cp1252_text_in_the_same_fr
         .expect("callback target remains");
     assert_eq!(
         target_state.local_vars.get("callback_answer"),
-        Some(&Value::String(
-            "say \" ); SetGravity(99); // \\ €".to_string()
-        )),
-        "quote/backslash source escaping must be transparent and CP1252 must decode once"
+        Some(&Value::String(lc_script::c4_string_from_bytes(
+            b"say \" ); SetGravity(99); // \\ \x80"
+        ))),
+        "quote/backslash escaping must be transparent without transcoding packet bytes"
     );
     assert_eq!(
         engine.physics().gravity,

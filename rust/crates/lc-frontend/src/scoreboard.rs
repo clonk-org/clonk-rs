@@ -20,6 +20,10 @@ use crate::classic_gui::{
 };
 use crate::{ClonkFontSet, ImageData};
 
+fn presentation_text(text: &str) -> String {
+    crate::c4_presentation_text(text)
+}
+
 const X_INDENT: i32 = 4;
 const Y_INDENT: i32 = 4;
 const X_MARGIN: i32 = 3;
@@ -164,7 +168,7 @@ pub fn scoreboard_inline_image_specs(scoreboard: &ScoreboardState) -> Vec<String
     for row in 0..scoreboard.row_count() {
         for column in 0..scoreboard.column_count() {
             if let Some(text) = scoreboard.cell(row, column).and_then(|cell| cell.text()) {
-                collect_inline_image_specs(text, &mut specs);
+                collect_inline_image_specs(&presentation_text(text), &mut specs);
             }
         }
     }
@@ -217,9 +221,9 @@ pub fn scoreboard_layout(
             // The title corner is never part of the spreadsheet width scan.
             // An allocated empty StdStrBuf still participates, unlike null.
             if (row != 0 || column != 0) && cell.text().is_some() {
+                let text = presentation_text(cell.text().unwrap_or_default());
                 width = width.max(
-                    scoreboard_text_width(cell.text().unwrap_or_default(), font, images)
-                        .saturating_add(X_INDENT),
+                    scoreboard_text_width(&text, font, images).saturating_add(X_INDENT),
                 );
             }
         }
@@ -234,8 +238,9 @@ pub fn scoreboard_layout(
     let title = scoreboard.cell(0, 0).and_then(|cell| cell.text());
     // C++ tests the StdStrBuf pointer here, not whether the string is empty.
     if let Some(title) = title {
+        let title = presentation_text(title);
         width =
-            width.max(scoreboard_text_width(title, font, images).saturating_add(TITLE_EXTRA_WIDTH));
+            width.max(scoreboard_text_width(&title, font, images).saturating_add(TITLE_EXTRA_WIDTH));
     }
 
     // The constructor initially installs "nops". For an allocated-but-empty
@@ -343,6 +348,7 @@ pub fn render_scoreboard(
             else {
                 continue;
             };
+            let text = presentation_text(text);
             let anchor = layout
                 .cell_text_anchor(row, column)
                 .expect("layout and scoreboard dimensions match");
@@ -350,7 +356,7 @@ pub fn render_scoreboard(
                 surface,
                 anchor.x,
                 anchor.y,
-                text,
+                &text,
                 &resources.fonts.text,
                 resources.font_images(),
                 anchor.align,
@@ -363,6 +369,7 @@ pub fn render_scoreboard(
         layout.caption,
         scoreboard.cell(0, 0).and_then(|cell| cell.text()),
     ) {
+        let title = presentation_text(title);
         draw_bar(surface, caption, resources.caption, 32, gamma);
         if let Some(icon) = layout.title_icon {
             draw_icon_phase(surface, resources.icons, PLAYER_ICON_PHASE, icon, gamma)?;
@@ -385,7 +392,7 @@ pub fn render_scoreboard(
                 caption_surface,
                 caption.x + caption.h + 5 - dx,
                 text_y - dy,
-                title,
+                &title,
                 &resources.fonts.text,
                 resources.font_images(),
                 TextAlign::Left,
@@ -1321,6 +1328,43 @@ mod tests {
         let without_image = scoreboard_text_width("<c ff0000>A</c>B", &fonts.text, &images);
         assert!(with_image > without_image);
         assert!(layout.column_widths[0] >= with_image + X_INDENT);
+    }
+
+    #[test]
+    fn native_scoreboard_bytes_decode_at_layout_and_render_boundaries() {
+        let fonts = endeavour_font_set();
+        let caption = load_graphics_png("GUICaption.png");
+        let icons = load_graphics_png("GUIIcons.png");
+        let resources =
+            ScoreboardResources::new(&caption, &icons, fonts.as_ref()).expect("resources");
+        let raw = scoreboard(serde_json::json!([
+            [{"text":{"c4_bytes":[83,99,246,114,101,115]},"value":-1},{"text":"Points","value":1}],
+            [{"text":{"c4_bytes":[65,110,100,114,233]},"value":2},{"text":"7","value":7}]
+        ]));
+        let presented = scoreboard(serde_json::json!([
+            [{"text":"Sc\u{f6}res","value":-1},{"text":"Points","value":1}],
+            [{"text":"Andr\u{e9}","value":2},{"text":"7","value":7}]
+        ]));
+
+        assert_eq!(
+            scoreboard_layout(preferred(), &raw, &resources).expect("raw layout"),
+            scoreboard_layout(preferred(), &presented, &resources).expect("presented layout")
+        );
+        let render = |board: &ScoreboardState| {
+            let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+            render_scoreboard(&mut surface, preferred(), board, &resources, None)
+                .expect("scoreboard renders");
+            surface.snapshot()
+        };
+        assert_eq!(render(&raw), render(&presented));
+        assert_eq!(
+            lc_script::c4_string_bytes(
+                raw.cell(1, 0)
+                    .and_then(|cell| cell.text())
+                    .expect("raw player cell")
+            ),
+            b"Andr\xe9"
+        );
     }
 
     #[test]

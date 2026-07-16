@@ -421,7 +421,7 @@ mod tests {
     use crate::rng::LcgRng;
     use crate::{
         ActionState, CommandDirection, CommandStackSnapshot, Direction, EnvironmentFrame,
-        HudSnapshot, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2, OWNER_NONE,
+        HudSnapshot, OWNER_NONE, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2,
     };
     use std::collections::HashMap;
 
@@ -431,6 +431,8 @@ mod tests {
             game_time: 0,
             game_over: false,
             round_results: Default::default(),
+            league_name: Vec::new(),
+            player_info_league_progress_data: Default::default(),
             physics: None,
             objects: vec![ObjectSnapshot {
                 id: crate::ObjectId::new(1),

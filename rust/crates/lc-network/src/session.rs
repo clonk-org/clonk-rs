@@ -2406,7 +2406,7 @@ async fn handle_client_accepted(
         .event_tx
         .send(HostEvent::ClientJoined {
             client_id,
-            name: core.name.to_string_lossy().into_owned(),
+            name: lc_resources::decode_legacy_script_text(core.name.as_bytes()),
             kind,
         })
         .await;
@@ -3806,7 +3806,7 @@ where
                         }
                         Ok(ControlMessage::ConnectionReply(reply)) if !reply.ok => {
                             self.notify_disconnected(Some(
-                                reply.message.to_string_lossy().into_owned(),
+                                lc_resources::decode_legacy_script_text(reply.message.as_bytes()),
                             ))
                             .await;
                             break;
@@ -4290,7 +4290,9 @@ async fn run_client_loop_with_addresses<S>(
                     Ok(ControlMessage::ConnectionReply(reply)) if !reply.ok => {
                         let _ = event_tx
                             .send(ClientEvent::Disconnected {
-                                reason: Some(reply.message.to_string_lossy().into_owned()),
+                                reason: Some(lc_resources::decode_legacy_script_text(
+                                    reply.message.as_bytes(),
+                                )),
                             })
                             .await;
                         break;

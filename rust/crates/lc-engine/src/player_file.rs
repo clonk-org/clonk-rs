@@ -22,6 +22,7 @@ pub struct CrewInfo {
     /// C4ID_None loads stay unresolvable like C++).
     pub id: String,
     /// `Name` (default "Clonk").
+    #[serde(with = "lc_script::c4_string_serde")]
     pub name: String,
     /// `Rank` (default 0).
     pub rank: i32,
@@ -206,9 +207,9 @@ impl PlayerFile {
 
     pub fn load(group: &Group) -> Result<Self, ScenarioError> {
         let core_bytes = group.read_file("Player.txt")?;
-        // Legacy files are ISO-8859-1/Windows-1252; lossy decode like the
-        // other legacy readers.
-        let core_text = String::from_utf8_lossy(&core_bytes);
+        // Player core strings remain native C4 bytes until a presentation
+        // consumer decodes them.
+        let core_text = lc_script::c4_string_from_bytes(&core_bytes);
         let sections = parse_ini_sections(&core_text);
         let entry = |section: &str, key: &str| -> Option<String> {
             sections
@@ -292,7 +293,7 @@ fn collect_crew(group: &Group, crew: &mut Vec<CrewInfo>) -> Result<(), ScenarioE
         };
         if is_info {
             if let Ok(bytes) = child.read_file("ObjectInfo.txt") {
-                let text = String::from_utf8_lossy(&bytes);
+                let text = lc_script::c4_string_from_bytes(&bytes);
                 let sections = parse_ini_sections(&text);
                 crew.push(CrewInfo::from_sections(&sections));
             }
@@ -460,6 +461,35 @@ mod tests {
         assert_eq!(zorro.death_count, 0, "DeathCount defaults to 0");
         assert_eq!((zorro.birthday, zorro.age), (0, 0));
         assert_eq!(zorro.participation, 1, "Participation defaults to 1");
+    }
+
+    #[test]
+    fn native_player_and_crew_names_remain_raw_c4_bytes() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("Native.c4p");
+        std::fs::create_dir_all(&root).expect("player dir");
+        std::fs::write(
+            root.join("Player.txt"),
+            [b"[Player]\nName=Andr".as_slice(), &[0xe9], b"\n"].concat(),
+        )
+        .expect("write native player core");
+        let crew = root.join("Rene.c4i");
+        std::fs::create_dir_all(&crew).expect("crew dir");
+        std::fs::write(
+            crew.join("ObjectInfo.txt"),
+            [
+                b"[ObjectInfo]\nid=CLNK\nName=Ren".as_slice(),
+                &[0xe9],
+                b"\n",
+            ]
+            .concat(),
+        )
+        .expect("write native crew core");
+
+        let player = PlayerFile::load_from_path(&root).expect("player file loads");
+        assert_eq!(lc_script::c4_string_bytes(&player.name), b"Andr\xe9");
+        assert_eq!(player.crew.len(), 1);
+        assert_eq!(lc_script::c4_string_bytes(&player.crew[0].name), b"Ren\xe9");
     }
 
     #[test]

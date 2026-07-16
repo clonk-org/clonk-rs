@@ -270,6 +270,9 @@ async fn player_info_update_request_reaches_host_with_transport_origin() {
         flags: 1,
         players: vec![ControlPlayerInfoEntry {
             id: 0,
+            // C4PlayerInfo compilation always writes this StdStrBuf as a
+            // C-string, so decode materializes even an empty value.
+            league_progress_data_is_null: false,
             ..Default::default()
         }],
     };

@@ -135,6 +135,67 @@ fn cpp_reference_serializes_the_complete_game_parameters_snapshot_in_compile_ord
 }
 
 #[test]
+fn game_over_reference_projects_global_and_per_player_league_performance() {
+    let template =
+        HostGameReference::new(fixture_summary(), fixture_metadata(), complete_parameters())
+            .expect("fixture reference validates");
+    let mut live_parameters = complete_parameters();
+    let live_player = &mut live_parameters.player_infos.clients[0].players[0];
+    live_player.flags |= PLAYER_INFO_FLAG_HAS_RESOURCE;
+    live_player.resource = Some(player_resource(9));
+    let updated = template
+        .replacing_game_over(
+            live_parameters,
+            "Running",
+            321,
+            654,
+            false,
+            -17,
+            [(1, 42), (999, 88)],
+        )
+        .expect("game-over reference validates");
+
+    assert_eq!(updated.summary().state, "Running");
+    assert!(!updated.summary().join_allowed);
+    assert_eq!(
+        (
+            updated.metadata().time,
+            updated.metadata().frame,
+            updated.metadata().league_performance,
+        ),
+        (321, 654, -17)
+    );
+    let player = &updated.parameters().player_infos.clients[0].players[0];
+    assert_eq!(player.id, 1);
+    assert_eq!(player.league_performance, 42);
+    assert_eq!(player.flags & PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+    assert!(player.resource.is_none());
+
+    let encoded =
+        encode_host_game_reference_response(&updated).expect("game-over reference serializes");
+    let encoded = String::from_utf8(encoded).expect("fixture reference is ASCII");
+    assert!(encoded.contains("LeaguePerformance=-17\r\n"));
+    assert!(encoded.contains("      LeaguePerformance=42\r\n"));
+    assert!(!encoded.contains("        [Resource]\r\n"));
+}
+
+#[test]
+fn rebuilt_reference_decodes_native_title_only_in_the_summary_projection() {
+    let template =
+        HostGameReference::new(fixture_summary(), fixture_metadata(), complete_parameters())
+            .expect("fixture reference validates");
+    let mut parameters = complete_parameters();
+    parameters.title = legacy(b"Caf\xe9 Arena");
+
+    let updated = template
+        .replacing_parameters(parameters)
+        .expect("native title rebuild validates");
+
+    assert_eq!(updated.summary().title, "Caf\u{e9} Arena");
+    assert_eq!(updated.parameters().title.as_bytes(), b"Caf\xe9 Arena");
+}
+
+#[test]
 fn exact_host_reference_rejects_non_boolean_team_bytes_instead_of_canonicalizing_them() {
     // C4TeamList stores bools and StdCompilerINIWrite can only serialize true
     // or false. Raw noncanonical bytes are representable in the binary join

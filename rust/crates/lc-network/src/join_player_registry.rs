@@ -140,6 +140,8 @@ fn decode_player_info(
         league_projected_gain,
         clan_tag,
         league_performance,
+        // Binary C4PlayerInfo compilation materializes even an empty string.
+        league_progress_data_is_null: false,
         league_progress_data,
         resource,
     })
@@ -412,6 +414,8 @@ mod tests {
         assert_eq!(player.extra_data, *b"AB_1");
         assert_eq!(player.league_account.as_bytes(), b"League");
         assert_eq!(player.clan_tag.as_bytes(), b"TAG}");
+        assert!(!player.league_progress_data_is_null);
+        assert_eq!(player.league_progress_data.as_bytes(), b"p=1");
         assert_eq!(
             (
                 player.league_score,

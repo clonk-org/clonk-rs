@@ -28,13 +28,18 @@ pub fn localize_script_source<S: AsRef<str>>(
 ) -> Result<String, GroupError> {
     let (table, table_path) = load_script_string_table(group, languages)?;
     let entries = parse_string_table(&table);
-    Ok(replace_localization_keys(source, &entries, &table_path))
+    let source = lc_script::c4_string_bytes(source);
+    Ok(lc_script::c4_string_from_bytes(&replace_localization_keys(
+        &source,
+        &entries,
+        &table_path,
+    )))
 }
 
 fn load_script_string_table<S: AsRef<str>>(
     group: &Group,
     languages: &[S],
-) -> Result<(String, PathBuf), GroupError> {
+) -> Result<(Vec<u8>, PathBuf), GroupError> {
     let mut selected_name = None;
     let mut table = None;
     for candidate in std::iter::once("StringTbl.txt".to_string()).chain(
@@ -45,7 +50,15 @@ fn load_script_string_table<S: AsRef<str>>(
         if !group.exists(&candidate) {
             continue;
         }
-        table = Some(decode_legacy_script_text(&group.read_file(&candidate)?));
+        let bytes = group.read_file(&candidate)?;
+        // C4LangStringTable copies and scans this component as a native C
+        // string; entries after the first NUL are not part of the table.
+        let bytes = bytes
+            .split(|byte| *byte == 0)
+            .next()
+            .unwrap_or_default()
+            .to_vec();
+        table = Some(bytes);
         selected_name = Some(candidate);
         break;
     }
@@ -56,12 +69,13 @@ fn load_script_string_table<S: AsRef<str>>(
     Ok((table.unwrap_or_default(), table_path))
 }
 
-fn parse_string_table(table: &str) -> HashMap<&str, &str> {
+fn parse_string_table(table: &[u8]) -> HashMap<&[u8], &[u8]> {
     let mut entries = HashMap::new();
-    for line in table.split(['\r', '\n']) {
-        let Some((key, value)) = line.split_once('=') else {
+    for line in table.split(|byte| matches!(*byte, b'\r' | b'\n')) {
+        let Some(separator) = line.iter().position(|byte| *byte == b'=') else {
             continue;
         };
+        let (key, value) = (&line[..separator], &line[separator + 1..]);
         // C++ searches its entry vector from the front, so the first
         // duplicate wins.
         entries.entry(key).or_insert(value);
@@ -70,18 +84,24 @@ fn parse_string_table(table: &str) -> HashMap<&str, &str> {
 }
 
 fn replace_localization_keys(
-    source: &str,
-    entries: &HashMap<&str, &str>,
+    source: &[u8],
+    entries: &HashMap<&[u8], &[u8]>,
     table_path: &std::path::Path,
-) -> String {
-    let mut result = String::with_capacity(source.len());
+) -> Vec<u8> {
+    let mut result = Vec::with_capacity(source.len());
     let mut copied_through = 0;
     let mut search_from = 0;
 
-    while let Some(open_offset) = source[search_from..].find('$') {
+    while let Some(open_offset) = source[search_from..]
+        .iter()
+        .position(|byte| *byte == b'$')
+    {
         let open = search_from + open_offset;
         let key_start = open + 1;
-        let Some(close_offset) = source[key_start..].find('$') else {
+        let Some(close_offset) = source[key_start..]
+            .iter()
+            .position(|byte| *byte == b'$')
+        else {
             break;
         };
         let close = key_start + close_offset;
@@ -89,7 +109,7 @@ fn replace_localization_keys(
         search_from = close + 1;
 
         let valid = key.len() <= C4_MAX_NAME
-            && key.bytes().all(|byte| {
+            && key.iter().copied().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'~' | b'+' | b'-')
             });
         if !valid {
@@ -98,27 +118,63 @@ fn replace_localization_keys(
         let Some(value) = entries.get(key) else {
             tracing::warn!(
                 path = %table_path.display(),
-                key,
+                key = %String::from_utf8_lossy(key),
                 "string table entry not found"
             );
             continue;
         };
 
-        result.push_str(&source[copied_through..open]);
-        result.push_str(value);
+        result.extend_from_slice(&source[copied_through..open]);
+        result.extend_from_slice(value);
         copied_through = close + 1;
     }
 
     if copied_through == 0 {
-        return source.to_string();
+        return source.to_vec();
     }
-    result.push_str(&source[copied_through..]);
+    result.extend_from_slice(&source[copied_through..]);
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn script_localization_preserves_native_source_and_replacement_bytes() {
+        let directory = tempdir().expect("tempdir");
+        std::fs::write(
+            directory.path().join("StringTblUS.txt"),
+            [b"Raw=".as_slice(), &[0xe9, 0xff], b"\n"].concat(),
+        )
+        .expect("write raw string table");
+        let group = Group::open(directory.path()).expect("open group");
+        let source = lc_script::c4_string_from_bytes(&[
+            b'"', 0xff, b' ', b'$', b'R', b'a', b'w', b'$', b'"',
+        ]);
+
+        let localized = localize_script_source(&group, &source, &["US"]).expect("source localizes");
+        assert_eq!(
+            lc_script::c4_string_bytes(&localized),
+            [b'"', 0xff, b' ', 0xe9, 0xff, b'"']
+        );
+    }
+
+    #[test]
+    fn script_string_table_stops_at_the_native_nul_terminator() {
+        let directory = tempdir().expect("tempdir");
+        std::fs::write(
+            directory.path().join("StringTblUS.txt"),
+            b"Before=kept\0After=hidden\n",
+        )
+        .expect("write NUL-terminated string table");
+        let group = Group::open(directory.path()).expect("open group");
+
+        let localized =
+            localize_script_source(&group, "$Before$/$After$", &["US"]).expect("source localizes");
+        assert_eq!(localized, "kept/$After$");
+    }
 
     #[test]
     fn legacy_script_decoder_preserves_valid_utf8() {

@@ -9,12 +9,12 @@ freetype-rs = "0.38.0"
 lc-engine = { path = "../lc-engine" }
 lc-graphics = { path = "../lc-graphics" }
 lc-gui = { path = "../lc-gui" }
+lc-resources = { path = "../lc-resources" }
+lc-script = { path = "../lc-script" }
 
 [dev-dependencies]
 # Same feature set as lc-engine's image dep: a diverging dev-dep request makes
 # the test graph compile a second 18-codec flavor of image (openexr/webp/tiff).
 image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
-lc-resources = { path = "../lc-resources" }
-lc-script = { path = "../lc-script" }
 serde_json = "1.0"
 tempfile = "3"

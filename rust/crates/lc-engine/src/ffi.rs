@@ -1,16 +1,16 @@
 use crate::pathfinder::Path;
 use crate::rng::LcgRng;
 use crate::{
-    control::{
-        parse_control_ini, ControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData,
-        JoinPlayerSource, LegacyCString, PlayerCommandControlData, PlayerControlData,
-    },
     ActionState, CommandDirection, CommandStackSnapshot, CrewRole, CrewSelectionState, Direction,
     DrawTransform, EffectState, Engine, EngineState, EnvironmentFrame, FloatVector2,
     HudPlayerSnapshot, HudSnapshot, Landscape, NetworkPacketDirection, NetworkPacketSnapshot,
     ObjectBaseGraphics, ObjectId, ObjectSnapshot, ObjectStatus, ObjectVertex, ParticleLayer,
     ParticleSnapshot, Playback, Recorder, Recording, Scenario, ScriptControlPolicy,
     SimulationSnapshot, SurfaceSnapshot, Vector2,
+    control::{
+        ControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData, JoinPlayerSource,
+        LegacyCString, PlayerCommandControlData, PlayerControlData, parse_control_ini,
+    },
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
@@ -32,7 +32,7 @@ fn legacy_filename_path(filename: &LegacyCString) -> PathBuf {
     PathBuf::from(filename.to_string_lossy().as_ref())
 }
 
-use crate::math::{itofix, C4Fixed, FixedVec2};
+use crate::math::{C4Fixed, FixedVec2, itofix};
 
 #[repr(C)]
 pub struct LcEngineEffectSnapshot {
@@ -518,8 +518,8 @@ impl RuntimeHandle {
                         .map_err(|error| error.to_string())?;
                     if info_id != 0 {
                         if let Some(info) = self.player_infos.get_mut(&info_id) {
-                            info.flags |= crate::PLAYER_INFO_FLAG_JOINED
-                                | crate::PLAYER_INFO_FLAG_REMOVED;
+                            info.flags |=
+                                crate::PLAYER_INFO_FLAG_JOINED | crate::PLAYER_INFO_FLAG_REMOVED;
                             if remove.disconnected {
                                 info.flags |= crate::PLAYER_INFO_FLAG_DISCONNECTED;
                             }
@@ -1539,6 +1539,8 @@ unsafe fn make_snapshot(
         game_time: 0,
         game_over: false,
         round_results: Default::default(),
+        league_name: Vec::new(),
+        player_info_league_progress_data: Default::default(),
         physics: None,
         objects: snapshots,
         render_order: Vec::new(),
@@ -2071,17 +2073,18 @@ fn load_scenario_into_runtime(
                 .ok()
                 .and_then(|group| lc_resources::MaterialLibrary::from_group(&group).ok())
         };
-        let local_root = path.join("Material.c4g").exists().then(|| path.to_path_buf());
+        let local_root = path
+            .join("Material.c4g")
+            .exists()
+            .then(|| path.to_path_buf());
         let local = local_root.as_deref().and_then(open_library);
         let overload_materials = local_root
             .as_deref()
             .map(|root| {
                 std::fs::read(root.join("Material.c4g").join("TexMap.txt"))
                     .map(|bytes| {
-                        lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(
-                            &bytes,
-                        ))
-                        .overload_materials
+                        lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&bytes))
+                            .overload_materials
                     })
                     .unwrap_or(true)
             })
@@ -2094,8 +2097,10 @@ fn load_scenario_into_runtime(
                     .and_then(open_library)
             })
             .flatten();
-        let loads: Vec<&lc_resources::MaterialLibrary> =
-            [local.as_ref(), global.as_ref()].into_iter().flatten().collect();
+        let loads: Vec<&lc_resources::MaterialLibrary> = [local.as_ref(), global.as_ref()]
+            .into_iter()
+            .flatten()
+            .collect();
         if !loads.is_empty() {
             let merged = lc_resources::MaterialLibrary::from_overloaded_loads(&loads)
                 .map_err(|error| format!("failed to merge material libraries: {error}"))?;
@@ -2666,7 +2671,10 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
             {
                 let rng = runtime.engine.debug_rng_clone();
                 if std::env::var("LC_RUST_RNG_TRACE").is_ok() {
-                    eprintln!("RNGMARK frame={frame} rust_count={} cpp_count={rng_count}", rng.count);
+                    eprintln!(
+                        "RNGMARK frame={frame} rust_count={} cpp_count={rng_count}",
+                        rng.count
+                    );
                 }
                 if (rng.hold != rng_hold || rng.count != rng_count)
                     && !runtime.rng_mismatch_reported
@@ -3143,9 +3151,9 @@ pub extern "C" fn lc_engine_string_free(value: *mut c_char) {
 mod tests {
     use super::*;
     use crate::{
-        control::{COM_MENU_RIGHT, COM_MENU_SELECT, COM_RELEASE_OFFSET, COM_RIGHT},
         ActionSpec, Definition, EnvironmentSettings, ObjectMenuItem, ObjectMenuState, ObjectUpdate,
         PlayerConfig, PlayerSelectControlData, RgbColor, SpawnConfig, Vector2,
+        control::{COM_MENU_RIGHT, COM_MENU_SELECT, COM_RELEASE_OFFSET, COM_RIGHT},
     };
     use serde_json::Value;
     use std::{ffi::CString, ptr};
@@ -4771,10 +4779,12 @@ global func Step(state, frame, random)
             .apply_control_packets_for_frame(0)
             .expect("recorded script executes");
         assert!(runtime.engine.player(0).is_some());
-        assert!(runtime
-            .engine
-            .take_pending_remove_player_controls()
-            .is_empty());
+        assert!(
+            runtime
+                .engine
+                .take_pending_remove_player_controls()
+                .is_empty()
+        );
 
         runtime.control_packets.insert(
             1,

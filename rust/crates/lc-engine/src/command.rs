@@ -4,10 +4,10 @@ use crate::math::{self, FixedVec2};
 use crate::pathfinder::PathFinder;
 use crate::transfer::{TransferZone, TransferZoneTable};
 use crate::{
-    minimum_con_activation_denied, ocf, ActionProcedure, ActionUpdate, CommandDirection,
-    DefinitionId, DefinitionRect, Direction, ObjectId, ObjectStatus, ObjectUpdate, PlayerStatus,
-    Vector2, CATEGORY_SORT_LIMIT, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, CATEGORY_VEHICLE,
-    FULL_CON, LINE_CONNECT_POWER_INPUT, OWNER_NONE,
+    ActionProcedure, ActionUpdate, CATEGORY_SORT_LIMIT, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE,
+    CATEGORY_VEHICLE, CommandDirection, DefinitionId, DefinitionRect, Direction, FULL_CON,
+    LINE_CONNECT_POWER_INPUT, OWNER_NONE, ObjectId, ObjectStatus, ObjectUpdate, PlayerStatus,
+    Vector2, minimum_con_activation_denied, ocf,
 };
 use lc_resources::PhysicalInfo;
 use serde::{Deserialize, Serialize};
@@ -422,9 +422,7 @@ mod tests {
     fn c4_angle_inner_angle_matches_cpp_double_chain_exhaustively() {
         fn cpp_inner_angle(dx: i32, dy: i32) -> i32 {
             let radians = (dy as f32).atan2(dx as f32);
-            (180.0_f64
-                * f64::from(radians)
-                * f64::from(std::f32::consts::FRAC_1_PI)) as i32
+            (180.0_f64 * f64::from(radians) * f64::from(std::f32::consts::FRAC_1_PI)) as i32
         }
 
         for dx in 0..=512 {
@@ -434,6 +432,48 @@ mod tests {
                 assert_eq!(actual_inner, cpp_inner_angle(dx, dy), "dx={dx}, dy={dy}");
             }
         }
+    }
+
+    #[test]
+    fn command_definition_data_preserves_equal_looking_c4id_payloads() {
+        let packed_raw = u32::from_le_bytes(*b"1111");
+        let packed = command_data_to_definition_id(&CommandData::Integer(packed_raw as i32))
+            .expect("packed ID remains nonzero");
+        let numeric = command_data_to_definition_id(&CommandData::Integer(1111))
+            .expect("numeric ID remains nonzero");
+
+        assert_eq!(lc_script::c4_id_raw(&packed), packed_raw as usize);
+        assert_eq!(lc_script::c4_id_raw(&numeric), 1111);
+        assert_ne!(packed, numeric);
+        assert_eq!(lc_script::c4_id_text(&packed), "1111");
+        assert_eq!(lc_script::c4_id_text(&numeric), "1111");
+        assert_eq!(definition_id_to_c4id(&packed), Some(packed_raw as i32));
+        assert_eq!(definition_id_to_c4id(&numeric), Some(1111));
+
+        let definitions = HashMap::from([
+            (
+                packed.clone(),
+                CommandDefinitionSnapshot {
+                    value: 41,
+                    ..CommandDefinitionSnapshot::default()
+                },
+            ),
+            (
+                numeric.clone(),
+                CommandDefinitionSnapshot {
+                    value: 42,
+                    ..CommandDefinitionSnapshot::default()
+                },
+            ),
+        ]);
+        assert_eq!(
+            definitions.get(&packed).map(|definition| definition.value),
+            Some(41)
+        );
+        assert_eq!(
+            definitions.get(&numeric).map(|definition| definition.value),
+            Some(42)
+        );
     }
 
     fn snapshot_with_id(id: u64) -> CommandObjectSnapshot {
@@ -648,10 +688,7 @@ mod tests {
             (Vector2::new(0, -5), true, CommandStatus::Running),
             (Vector2::new(6, 0), false, CommandStatus::Running),
         ] {
-            let mut clonk = walking_jumper(Vector2::new(
-                target.x + offset.x,
-                target.y + offset.y,
-            ));
+            let mut clonk = walking_jumper(Vector2::new(target.x + offset.x, target.y + offset.y));
             clonk.shape = DefinitionRect::new(-5, -9, 10, 18);
             let objects = HashMap::new();
             let players = HashMap::new();
@@ -682,8 +719,8 @@ mod tests {
                 result.status, expected,
                 "offset={offset:?}, following_move_to={following_move_to}"
             );
-            let expected_len = usize::from(following_move_to)
-                + usize::from(expected == CommandStatus::Running);
+            let expected_len =
+                usize::from(following_move_to) + usize::from(expected == CommandStatus::Running);
             assert_eq!(stack.len(), expected_len);
         }
     }
@@ -694,9 +731,8 @@ mod tests {
         // C4Command::MoveTo asks C4PathFinder for a route and pushes its
         // intermediate points as 25-frame MoveTo subcommands, preserving the
         // parent command's Data (C4Command.cpp:193-255).
-        let mut landscape =
-            crate::Landscape::with_default_material(100, vec![100; 100], None)
-                .expect("cave landscape");
+        let mut landscape = crate::Landscape::with_default_material(100, vec![100; 100], None)
+            .expect("cave landscape");
         landscape.set_world_height(100);
         let mut bytes = vec![0; 100 * 100];
         for y in 45..55 {
@@ -780,9 +816,8 @@ mod tests {
         // same Execute (C4Command.cpp:236-248). This reversed line makes the
         // command-level PathFree sample (16,8), while C4PathFinder's ray
         // samples (16,7), deterministically reaching that direct-success arm.
-        let mut landscape =
-            crate::Landscape::with_default_material(40, vec![40; 40], None)
-                .expect("test landscape");
+        let mut landscape = crate::Landscape::with_default_material(40, vec![40; 40], None)
+            .expect("test landscape");
         landscape.set_world_height(40);
         let mut bytes = vec![0; 40 * 40];
         bytes[8 * 40 + 16] = 1;
@@ -798,11 +833,7 @@ mod tests {
         let start = Vector2::new(30, 10);
         let target = Vector2::new(2, 5);
         assert!(!command_path_free(
-            &landscape,
-            start.x,
-            start.y,
-            target.x,
-            target.y
+            &landscape, start.x, start.y, target.x, target.y
         ));
         let direct_path = PathFinder::new(&landscape, &[])
             .find(start, target)
@@ -824,7 +855,10 @@ mod tests {
         for execution in 1..=2 {
             let result = state.step(&ctx);
             assert_eq!(result.status, CommandStatus::Running);
-            assert!(result.update.is_none(), "execution {execution} must not steer");
+            assert!(
+                result.update.is_none(),
+                "execution {execution} must not steer"
+            );
             assert!(result.operations.is_empty(), "no intermediate waypoint");
             assert!(!state.path_checked, "direct success has no recheck delay");
             assert_eq!(
@@ -1265,10 +1299,7 @@ mod tests {
         assert_eq!(action.name.as_deref(), Some("Jump"));
         assert_eq!(
             update.fixed_velocity,
-            Some(FixedVec2::new(
-                math::itofix(1),
-                crate::C4Fixed::from_raw(0)
-            )),
+            Some(FixedVec2::new(math::itofix(1), crate::C4Fixed::from_raw(0))),
             "let-go launches with xdir +1, ydir 0 (C4ObjectCom.cpp:310-314)"
         );
     }
@@ -1370,10 +1401,7 @@ mod tests {
         );
         assert_eq!(
             update.fixed_velocity,
-            Some(FixedVec2::new(
-                math::itofix(0),
-                crate::C4Fixed::from_raw(0)
-            )),
+            Some(FixedVec2::new(math::itofix(0), crate::C4Fixed::from_raw(0))),
             "hangle drop has zero launch velocity (C4Command.cpp:390)"
         );
     }
@@ -1763,14 +1791,19 @@ mod tests {
         pusher_at_waypoint.position = Vector2::new(95, 160);
         let waypoint_ctx =
             move_to_ctx_at_frame(&pusher_at_waypoint, &objects, &players, &definitions, 2);
-        let waypoint = stack.step(&waypoint_ctx).expect("intermediate MoveTo completes");
+        let waypoint = stack
+            .step(&waypoint_ctx)
+            .expect("intermediate MoveTo completes");
         assert_eq!(waypoint.status, CommandStatus::Completed);
         assert_eq!(stack.command_names(), vec!["MoveTo"]);
 
         let final_ctx = move_to_ctx_at_frame(&pusher, &objects, &players, &definitions, 3);
         let final_result = stack.step(&final_ctx).expect("final MoveTo executes");
         assert_eq!(final_result.status, CommandStatus::Running);
-        assert!(final_result.operations.is_empty(), "PushTarget keeps the grab");
+        assert!(
+            final_result.operations.is_empty(),
+            "PushTarget keeps the grab"
+        );
         assert_eq!(
             final_result
                 .update
@@ -1920,7 +1953,10 @@ mod tests {
         let result = stack.execute_front(&ctx).expect("MoveTo executes");
         assert_eq!(result.status, CommandStatus::Failed);
         assert_eq!(stack.entries[1].failures, 1);
-        assert!(result.update.is_none(), "idle failure itself does not steer");
+        assert!(
+            result.update.is_none(),
+            "idle failure itself does not steer"
+        );
 
         // Native arrival precedes Action.Act<=ActIdle, so the same idle
         // object succeeds when it is already inside the target range.
@@ -1936,13 +1972,7 @@ mod tests {
         // the string, distinguishes it from the built-in inactive slot.
         let mut active_idle = idle.clone();
         active_idle.action_idle = false;
-        let ctx = move_to_ctx_at_frame(
-            &active_idle,
-            &objects,
-            &players,
-            &definitions,
-            1,
-        );
+        let ctx = move_to_ctx_at_frame(&active_idle, &objects, &players, &definitions, 1);
         let mut moving = evaluated_move_to(
             &CommandRequest::new(CommandId::MoveTo)
                 .with_tx(Some(200))
@@ -2047,11 +2077,7 @@ mod tests {
         hut.entrance_status = true;
         hut.category = CATEGORY_STRUCTURE;
 
-        let objects = HashMap::from([
-            (follower_id, follower),
-            (target_id, target),
-            (hut_id, hut),
-        ]);
+        let objects = HashMap::from([(follower_id, follower), (target_id, target), (hut_id, hut)]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let follower = objects.get(&follower_id).expect("follower present");
@@ -2154,7 +2180,9 @@ mod tests {
         let copy_result = follow.step(&ctx);
         assert!(copy_result.operations.is_empty());
         assert_eq!(
-            copy_result.update.and_then(|update| update.command_direction),
+            copy_result
+                .update
+                .and_then(|update| update.command_direction),
             Some(CommandDirection::Right)
         );
 
@@ -2258,13 +2286,9 @@ mod tests {
             "Follow reissues MoveTo on its next execution"
         );
 
-        objects
-            .get_mut(&target_id)
-            .expect("target present")
-            .status = ObjectStatus::Deleted;
+        objects.get_mut(&target_id).expect("target present").status = ObjectStatus::Deleted;
         let follower = objects.get(&follower_id).expect("follower present");
-        let removed_ctx =
-            move_to_ctx_at_frame(follower, &objects, &players, &definitions, 1);
+        let removed_ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 1);
         let removed = state.step(&removed_ctx);
         assert_eq!(removed.status, CommandStatus::Failed);
         assert!(removed.update.is_none());
@@ -2323,10 +2347,7 @@ mod tests {
 
         let mut stack = CommandStack::new();
         stack
-            .push_front(
-                CommandRequest::new(CommandId::MoveTo)
-                    .with_target(Some(target_id)),
-            )
+            .push_front(CommandRequest::new(CommandId::MoveTo).with_target(Some(target_id)))
             .expect("push");
 
         let ctx = move_to_ctx_at_frame(&walker, &objects, &players, &definitions, 1);
@@ -2353,8 +2374,7 @@ mod tests {
         let mut stack = CommandStack::new();
         stack
             .push_front(
-                CommandRequest::new(CommandId::Acquire)
-                    .with_data(CommandData::Text("WOOD".into())),
+                CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
             )
             .expect("push");
 
@@ -2516,10 +2536,7 @@ mod tests {
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
         let mut stack = CommandStack::new();
         stack
-            .push_front(
-                CommandRequest::new(CommandId::Wait)
-                    .with_data(CommandData::Integer(10)),
-            )
+            .push_front(CommandRequest::new(CommandId::Wait).with_data(CommandData::Integer(10)))
             .expect("Wait queues");
 
         for execution in 1..=10 {
@@ -2581,8 +2598,7 @@ mod tests {
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
-        let parent_request =
-            CommandRequest::new(CommandId::Get).with_target(Some(target_id));
+        let parent_request = CommandRequest::new(CommandId::Get).with_target(Some(target_id));
         let mut state = GetState::from_request(&parent_request).expect("state created");
         let result = state.step(&ctx);
 
@@ -2683,8 +2699,14 @@ mod tests {
             vec!["MoveTo", "MoveTo", "Drop", "Jump", "Get"]
         );
         let views = stack.command_views();
-        assert_eq!((views[0].tx, views[0].ty), (Some(expected_random_x), Some(60)));
-        assert_eq!((views[1].tx, views[1].ty), (Some(expected_side_x), Some(100)));
+        assert_eq!(
+            (views[0].tx, views[0].ty),
+            (Some(expected_random_x), Some(60))
+        );
+        assert_eq!(
+            (views[1].tx, views[1].ty),
+            (Some(expected_side_x), Some(100))
+        );
         assert_eq!(stack.entries[0].update_interval, 25);
         assert_eq!(stack.entries[1].update_interval, 50);
         assert_eq!(views[2].target, None, "CollectionLimit Drop is targetless");
@@ -3658,13 +3680,8 @@ mod tests {
             (empty_actor.id, empty_actor.clone()),
             (container_id, snapshot_with_id(container_id.as_u64())),
         ]);
-        let empty_ctx = move_to_ctx_at_frame(
-            &empty_actor,
-            &empty_objects,
-            &players,
-            &definitions,
-            1,
-        );
+        let empty_ctx =
+            move_to_ctx_at_frame(&empty_actor, &empty_objects, &players, &definitions, 1);
         let mut empty_state = PutState::from_request(
             &CommandRequest::new(CommandId::Put)
                 .with_target(Some(container_id))
@@ -3735,10 +3752,7 @@ mod tests {
         );
         state.put_pending = false; // the engine event resolver clears this
 
-        objects
-            .get_mut(&item_id)
-            .expect("item present")
-            .container = Some(container_id);
+        objects.get_mut(&item_id).expect("item present").container = Some(container_id);
         objects
             .get_mut(&actor_id)
             .expect("actor present")
@@ -4340,7 +4354,11 @@ mod tests {
         throws
             .push_front(CommandRequest::new(CommandId::Throw))
             .expect("outer Throw queues");
-        let outer_throw = throws.entries.front().expect("outer Throw remains").instance_id;
+        let outer_throw = throws
+            .entries
+            .front()
+            .expect("outer Throw remains")
+            .instance_id;
         let CommandState::Throw(state) = &mut throws.entries.front_mut().unwrap().state else {
             panic!("outer command should be Throw");
         };
@@ -4348,7 +4366,11 @@ mod tests {
         throws
             .push_front(CommandRequest::new(CommandId::Throw))
             .expect("inner Throw queues");
-        let inner_throw = throws.entries.front().expect("inner Throw remains").instance_id;
+        let inner_throw = throws
+            .entries
+            .front()
+            .expect("inner Throw remains")
+            .instance_id;
         let CommandState::Throw(state) = &mut throws.entries.front_mut().unwrap().state else {
             panic!("inner command should be Throw");
         };
@@ -4371,7 +4393,11 @@ mod tests {
         drops
             .push_front(CommandRequest::new(CommandId::Drop))
             .expect("outer Drop queues");
-        let outer_drop = drops.entries.front().expect("outer Drop remains").instance_id;
+        let outer_drop = drops
+            .entries
+            .front()
+            .expect("outer Drop remains")
+            .instance_id;
         let CommandState::Drop(state) = &mut drops.entries.front_mut().unwrap().state else {
             panic!("outer command should be Drop");
         };
@@ -4379,7 +4405,11 @@ mod tests {
         drops
             .push_front(CommandRequest::new(CommandId::Drop))
             .expect("inner Drop queues");
-        let inner_drop = drops.entries.front().expect("inner Drop remains").instance_id;
+        let inner_drop = drops
+            .entries
+            .front()
+            .expect("inner Drop remains")
+            .instance_id;
         let CommandState::Drop(state) = &mut drops.entries.front_mut().unwrap().state else {
             panic!("inner command should be Drop");
         };
@@ -4454,7 +4484,10 @@ mod tests {
         restored_legacy
             .push_front(CommandRequest::new(CommandId::Wait))
             .expect("post-migration command queues");
-        assert_ne!(restored_legacy.entries.front().unwrap().instance_id, migrated_id);
+        assert_ne!(
+            restored_legacy.entries.front().unwrap().instance_id,
+            migrated_id
+        );
     }
 
     #[test]
@@ -4629,10 +4662,12 @@ mod tests {
             )
             .expect("inner Throw resumes");
         assert_eq!(result.status, CommandStatus::Failed);
-        assert!(result
-            .events
-            .iter()
-            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
+        assert!(
+            result
+                .events
+                .iter()
+                .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. }))
+        );
 
         let mut skipped = CommandStack::new();
         skipped
@@ -4663,10 +4698,12 @@ mod tests {
             )
             .expect("detached inner Throw resumes");
         assert_eq!(result.status, CommandStatus::Failed);
-        assert!(result
-            .events
-            .iter()
-            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
+        assert!(
+            result
+                .events
+                .iter()
+                .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. }))
+        );
         let base1 = skipped
             .entries
             .iter()
@@ -4683,10 +4720,9 @@ mod tests {
 
     #[test]
     fn detached_base_modes_do_not_increment_an_unrelated_base() {
-        for (mode, expects_feedback) in [
-            (CommandMode::Base, true),
-            (CommandMode::SilentBase, false),
-        ] {
+        for (mode, expects_feedback) in
+            [(CommandMode::Base, true), (CommandMode::SilentBase, false)]
+        {
             let mut stack = CommandStack::new();
             stack
                 .push_front(CommandRequest::new(CommandId::Wait))
@@ -4696,10 +4732,9 @@ mod tests {
                 .iter()
                 .map(DetachedCommandBase::from)
                 .collect::<Vec<_>>();
-            let failed = ActiveCommand::from_request(
-                CommandRequest::new(CommandId::Throw).with_mode(mode),
-            )
-            .expect("failed command constructs");
+            let failed =
+                ActiveCommand::from_request(CommandRequest::new(CommandId::Throw).with_mode(mode))
+                    .expect("failed command constructs");
             assert_eq!(
                 stack
                     .record_detached_failure(&failed, &base_chain)
@@ -4719,10 +4754,7 @@ mod tests {
         digging.contents = vec![item_id];
         let mut item = snapshot_with_id(item_id.as_u64());
         item.container = Some(actor_id);
-        let initial_objects = HashMap::from([
-            (actor_id, digging.clone()),
-            (item_id, item.clone()),
-        ]);
+        let initial_objects = HashMap::from([(actor_id, digging.clone()), (item_id, item.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let initial_ctx = move_to_ctx_at_frame(
@@ -4734,9 +4766,7 @@ mod tests {
         );
         let mut stack = CommandStack::new();
         stack
-            .push_front(
-                CommandRequest::new(CommandId::Drop).with_target(Some(item_id)),
-            )
+            .push_front(CommandRequest::new(CommandId::Drop).with_target(Some(item_id)))
             .expect("Drop queues");
         let command_instance_id = stack.entries.front().unwrap().instance_id;
         let initial = stack.execute_front(&initial_ctx).expect("Drop starts");
@@ -5143,10 +5173,7 @@ mod tests {
         );
     }
 
-    fn step_dig_once(
-        actor: CommandObjectSnapshot,
-        request: CommandRequest,
-    ) -> CommandStepResult {
+    fn step_dig_once(actor: CommandObjectSnapshot, request: CommandRequest) -> CommandStepResult {
         let actor_id = actor.id;
         let mut objects = HashMap::new();
         objects.insert(actor_id, actor);
@@ -5383,9 +5410,7 @@ mod tests {
                 .with_ty(Some(127)),
         );
         assert_eq!(
-            below
-                .update
-                .and_then(|update| update.command_direction),
+            below.update.and_then(|update| update.command_direction),
             Some(CommandDirection::DownLeft),
             "cx == tx below the target is overwritten from Down to DownLeft"
         );
@@ -5404,9 +5429,7 @@ mod tests {
                     .with_tx(Some(target_x))
                     .with_ty(Some(73)),
             );
-            let emitted = result
-                .update
-                .and_then(|update| update.command_direction);
+            let emitted = result.update.and_then(|update| update.command_direction);
             assert_eq!(emitted, expected, "raw target x={target_x}");
             assert_ne!(emitted, Some(CommandDirection::Up));
         }
@@ -5992,19 +6015,12 @@ mod tests {
         let players = HashMap::new();
 
         for (grab, push_flag) in [(2, true), (1, false)] {
-            let (actor, objects, definitions) = enter_push_fixture(
-                grab,
-                vehicle_id,
-                Vector2::ZERO,
-                Vector2::new(100, 0),
-            );
+            let (actor, objects, definitions) =
+                enter_push_fixture(grab, vehicle_id, Vector2::ZERO, Vector2::new(100, 0));
             let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
-            let mut request =
-                CommandRequest::new(CommandId::Enter).with_target(Some(entrance_id));
+            let mut request = CommandRequest::new(CommandId::Enter).with_target(Some(entrance_id));
             if push_flag {
-                request = request.with_data(CommandData::Integer(
-                    COMMAND_FLAG_ENTER_PUSH_TARGET,
-                ));
+                request = request.with_data(CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
             }
             let mut state = EnterState::from_request(&request).expect("Enter state");
             assert_enter_requests_ungrab(&state.step(&ctx));
@@ -6014,12 +6030,8 @@ mod tests {
     #[test]
     fn enter_push_ungrabs_when_vehicle_is_the_entrance_target() {
         let entrance_id = ObjectId::new(42);
-        let (actor, objects, definitions) = enter_push_fixture(
-            1,
-            entrance_id,
-            Vector2::new(100, 0),
-            Vector2::ZERO,
-        );
+        let (actor, objects, definitions) =
+            enter_push_fixture(1, entrance_id, Vector2::new(100, 0), Vector2::ZERO);
         let players = HashMap::new();
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
         let request = CommandRequest::new(CommandId::Enter)
@@ -6039,12 +6051,8 @@ mod tests {
             .with_data(CommandData::Integer(COMMAND_FLAG_ENTER_PUSH_TARGET));
 
         // Actor inside but vehicle outside: the Enter must keep approaching.
-        let (actor, objects, definitions) = enter_push_fixture(
-            1,
-            vehicle_id,
-            Vector2::new(100, 0),
-            Vector2::ZERO,
-        );
+        let (actor, objects, definitions) =
+            enter_push_fixture(1, vehicle_id, Vector2::new(100, 0), Vector2::ZERO);
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
         let mut state = EnterState::from_request(&request).expect("Enter state");
         let outside = state.step(&ctx);
@@ -6063,12 +6071,8 @@ mod tests {
 
         // Actor outside but vehicle inside: assign Enter to the vehicle and
         // finish the actor's command without entering the actor itself.
-        let (actor, objects, definitions) = enter_push_fixture(
-            1,
-            vehicle_id,
-            Vector2::ZERO,
-            Vector2::new(100, 0),
-        );
+        let (actor, objects, definitions) =
+            enter_push_fixture(1, vehicle_id, Vector2::ZERO, Vector2::new(100, 0));
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 5);
         let mut state = EnterState::from_request(&request).expect("Enter state");
         let inside = state.step(&ctx);
@@ -6129,8 +6133,7 @@ mod tests {
             rng: None,
         };
 
-        let parent_request =
-            CommandRequest::new(CommandId::Enter).with_target(Some(target_id));
+        let parent_request = CommandRequest::new(CommandId::Enter).with_target(Some(target_id));
         let mut state = EnterState::from_request(&parent_request).expect("state created");
 
         let result = state.step(&ctx);
@@ -6220,7 +6223,10 @@ mod tests {
         stack.step(&ctx).expect("Enter reissues MoveTo");
         assert_eq!(stack.command_names(), vec!["MoveTo", "Enter"]);
         assert_eq!(
-            stack.entries.front().and_then(|entry| entry.request.clone()),
+            stack
+                .entries
+                .front()
+                .and_then(|entry| entry.request.clone()),
             Some(first_move)
         );
     }
@@ -6633,10 +6639,7 @@ mod tests {
         assert_eq!(stack.resolve_grab_attempt(target, true), Some(true));
         let snapshot = stack.snapshot();
         assert_eq!(snapshot.commands[0].mode, CommandMode::SilentBase);
-        assert_eq!(
-            snapshot.commands[0].finished,
-            Some(CommandStatus::Failed)
-        );
+        assert_eq!(snapshot.commands[0].finished, Some(CommandStatus::Failed));
         assert_eq!(snapshot.commands[0].failures, 0);
     }
 
@@ -6664,10 +6667,7 @@ mod tests {
         assert_eq!(stack.resolve_grab_attempt(target, true), Some(true));
         let snapshot = stack.snapshot();
         assert_eq!(snapshot.commands[0].mode, CommandMode::Sub);
-        assert_eq!(
-            snapshot.commands[0].finished,
-            Some(CommandStatus::Failed)
-        );
+        assert_eq!(snapshot.commands[0].finished, Some(CommandStatus::Failed));
         assert_eq!(snapshot.commands[1].failures, 1);
     }
 
@@ -6693,10 +6693,7 @@ mod tests {
         assert_eq!(snapshot.commands[0].state.id(), Some(CommandId::Wait));
         assert_eq!(snapshot.commands[0].finished, None);
         assert_eq!(snapshot.commands[1].state.id(), Some(CommandId::Grab));
-        assert_eq!(
-            snapshot.commands[1].finished,
-            Some(CommandStatus::Failed)
-        );
+        assert_eq!(snapshot.commands[1].finished, Some(CommandStatus::Failed));
         assert_eq!(snapshot.commands[1].mode, CommandMode::SilentBase);
     }
 
@@ -7061,8 +7058,7 @@ mod tests {
             rng: None,
         };
 
-        let mut state =
-            ConstructState::from_request(&CommandRequest::new(CommandId::Construct));
+        let mut state = ConstructState::from_request(&CommandRequest::new(CommandId::Construct));
         let result = state.step(&ctx);
 
         assert_eq!(result.status, CommandStatus::Completed);
@@ -7402,10 +7398,8 @@ mod tests {
             command_view(CommandId::Build, Some(construction_id)),
             command_view(CommandId::Construct, None),
         ];
-        let mut objects = HashMap::from([
-            (builder_id, builder.clone()),
-            (primary_id, primary.clone()),
-        ]);
+        let mut objects =
+            HashMap::from([(builder_id, builder.clone()), (primary_id, primary.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
@@ -7438,13 +7432,7 @@ mod tests {
         objects.insert(primary_id, primary.clone());
         let mut wider_builder = builder.clone();
         wider_builder.move_to_range = 6;
-        let wider_ctx = move_to_ctx_at_frame(
-            &wider_builder,
-            &objects,
-            &players,
-            &definitions,
-            1,
-        );
+        let wider_ctx = move_to_ctx_at_frame(&wider_builder, &objects, &players, &definitions, 1);
         let mut waiting = ConstructState::from_request(&request);
         let waited = waiting.step(&wider_ctx);
         assert_eq!(waited.status, CommandStatus::Running);
@@ -7585,19 +7573,19 @@ mod tests {
 
         let mut wider_builder = builder.clone();
         wider_builder.move_to_range = 6;
-        let wider_objects = HashMap::from([
-            (builder_id, wider_builder.clone()),
-            (kit_id, kit.clone()),
-        ]);
+        let wider_objects =
+            HashMap::from([(builder_id, wider_builder.clone()), (kit_id, kit.clone())]);
         let wider_ctx =
             move_to_ctx_at_frame(&wider_builder, &wider_objects, &players, &definitions, 1);
         let mut wider_state = ConstructState::from_request(&request);
         continue_construct_script(&mut wider_state);
         let spawned = wider_state.step(&wider_ctx);
-        assert!(spawned
-            .events
-            .iter()
-            .any(|event| matches!(event, CommandEvent::SpawnObject { .. })));
+        assert!(
+            spawned
+                .events
+                .iter()
+                .any(|event| matches!(event, CommandEvent::SpawnObject { .. }))
+        );
 
         let mut landscape = crate::Landscape::flat(200, 100);
         landscape.set_world_height(400);
@@ -7670,14 +7658,7 @@ mod tests {
         objects.insert(blocker_id, short_blocker);
         let ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 1);
         assert!(
-            !ConstructState::overlaps_construction_rect(
-                &ctx,
-                40,
-                30,
-                20,
-                20,
-                CATEGORY_STRUCTURE,
-            ),
+            !ConstructState::overlaps_construction_rect(&ctx, 40, 30, 20, 20, CATEGORY_STRUCTURE,),
             "the eighteen-pixel action-area expansion is not C4Object::Shape"
         );
     }
@@ -7956,10 +7937,12 @@ mod tests {
 
         // Changing the live shape after InitEvaluation must not re-ground
         // the stored destination on the handler Execute.
-        objects.get_mut(&actor_id).expect("actor present").shape_height = 40;
+        objects
+            .get_mut(&actor_id)
+            .expect("actor present")
+            .shape_height = 40;
         let taller_actor = objects.get(&actor_id).expect("actor present");
-        let mut ctx =
-            move_to_ctx_at_frame(taller_actor, &objects, &players, &definitions, 2);
+        let mut ctx = move_to_ctx_at_frame(taller_actor, &objects, &players, &definitions, 2);
         ctx.landscape = Some(&landscape);
         let handler = stack.step(&ctx).expect("PushTo handler executes");
         assert_eq!(handler.status, CommandStatus::Running);
@@ -7990,12 +7973,14 @@ mod tests {
                     .with_ty(Some(50)),
             )
             .expect("PushTo queues");
-        let mut ctx =
-            move_to_ctx_at_frame(&flyer, &flyer_objects, &players, &definitions, 1);
+        let mut ctx = move_to_ctx_at_frame(&flyer, &flyer_objects, &players, &definitions, 1);
         ctx.landscape = Some(&landscape);
         let _ = free_stack.step(&ctx).expect("free PushTo evaluates");
         assert_eq!(
-            (free_stack.command_views()[0].tx, free_stack.command_views()[0].ty),
+            (
+                free_stack.command_views()[0].tx,
+                free_stack.command_views()[0].ty
+            ),
             (Some(100), Some(50))
         );
     }
@@ -8474,16 +8459,14 @@ mod tests {
 
     #[test]
     fn throw_coordinate_sentinel_treats_each_missing_field_as_zero() {
-        let x_only = ThrowState::from_request(
-            &CommandRequest::new(CommandId::Throw).with_tx(Some(17)),
-        )
-        .expect("x-only Throw");
+        let x_only =
+            ThrowState::from_request(&CommandRequest::new(CommandId::Throw).with_tx(Some(17)))
+                .expect("x-only Throw");
         assert_eq!(x_only.throw_position(), Some(Vector2::new(17, 0)));
 
-        let y_only = ThrowState::from_request(
-            &CommandRequest::new(CommandId::Throw).with_ty(Some(-9)),
-        )
-        .expect("y-only Throw");
+        let y_only =
+            ThrowState::from_request(&CommandRequest::new(CommandId::Throw).with_ty(Some(-9)))
+                .expect("y-only Throw");
         assert_eq!(y_only.throw_position(), Some(Vector2::new(0, -9)));
 
         let zero = ThrowState::from_request(
@@ -8734,7 +8717,9 @@ mod tests {
         let result = state.resume_after_prelude(&ctx, gravity);
         assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty());
-        let update = result.update.expect("post-SetDir Throw stops command motion");
+        let update = result
+            .update
+            .expect("post-SetDir Throw stops command motion");
         assert_eq!(update.command_direction, Some(CommandDirection::Stop));
         assert!(update.action.is_none(), "the engine event gates SetAction");
         assert_eq!(update.direction, None);
@@ -9144,10 +9129,7 @@ mod tests {
         container.position = Vector2::new(17, 23);
         container.entrance_status = true;
 
-        let objects = HashMap::from([
-            (actor_id, actor.clone()),
-            (container_id, container.clone()),
-        ]);
+        let objects = HashMap::from([(actor_id, actor.clone()), (container_id, container.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
@@ -9165,7 +9147,10 @@ mod tests {
         assert_eq!(*object_id, actor_id);
         let action = update.action.as_ref().expect("attach changes to ActIdle");
         assert_eq!(action.name.as_deref(), Some("Idle"));
-        assert!(!action.force, "ObjectComCancelAttach uses ordinary SetAction");
+        assert!(
+            !action.force,
+            "ObjectComCancelAttach uses ordinary SetAction"
+        );
         assert!(update.command_direction.is_none());
         assert!(update.container.is_none());
         assert!(update.position.is_none());
@@ -9202,10 +9187,7 @@ mod tests {
         container.position = Vector2::new(80, 120);
         container.entrance_status = true;
 
-        let objects = HashMap::from([
-            (actor_id, actor.clone()),
-            (container_id, container.clone()),
-        ]);
+        let objects = HashMap::from([(actor_id, actor.clone()), (container_id, container.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::from([(
             container.definition_id.clone(),
@@ -9215,10 +9197,9 @@ mod tests {
             },
         )]);
         let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
-        let mut state = ExitState::from_request(
-            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
-        )
-        .expect("state created");
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
+                .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -9266,10 +9247,9 @@ mod tests {
             rng: None,
         };
 
-        let mut state = ExitState::from_request(
-            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
-        )
-        .expect("state created");
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
+                .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -9318,10 +9298,9 @@ mod tests {
             rng: None,
         };
 
-        let mut state = ExitState::from_request(
-            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
-        )
-        .expect("state created");
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
+                .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -9367,10 +9346,9 @@ mod tests {
             rng: None,
         };
 
-        let mut state = ExitState::from_request(
-            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
-        )
-        .expect("state created");
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
+                .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -9423,10 +9401,9 @@ mod tests {
             rng: None,
         };
 
-        let mut state = ExitState::from_request(
-            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
-        )
-        .expect("state created");
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
+                .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -9470,10 +9447,9 @@ mod tests {
             rng: None,
         };
 
-        let mut state = ExitState::from_request(
-            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
-        )
-        .expect("state created");
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
+                .expect("state created");
         let result = state.step(&ctx);
 
         assert_eq!(result.status, CommandStatus::Running);
@@ -9487,10 +9463,7 @@ mod tests {
             } => {
                 assert_eq!(*object_id, container_id);
                 assert_eq!(*caller, actor_id);
-                assert_eq!(
-                    on_result,
-                    &Some(CallResultAction::ResolveExitActivation)
-                );
+                assert_eq!(on_result, &Some(CallResultAction::ResolveExitActivation));
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -9585,10 +9558,9 @@ mod tests {
             rng: None,
         };
 
-        let mut state = ExitState::from_request(
-            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
-        )
-        .expect("state created");
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
+                .expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
@@ -9677,8 +9649,7 @@ mod tests {
             rng: None,
         };
 
-        let parent_request =
-            CommandRequest::new(CommandId::Attack).with_target(Some(target_id));
+        let parent_request = CommandRequest::new(CommandId::Attack).with_target(Some(target_id));
         let mut state = AttackState::from_request(&parent_request).expect("state created");
 
         let result = state.step(&ctx);
@@ -9779,10 +9750,8 @@ mod tests {
         let mut target = snapshot_with_id(target_id.as_u64());
         target.ocf |= ocf::CREW_MEMBER;
         target.container = Some(target_container);
-        let mut objects = HashMap::from([
-            (attacker_id, attacker.clone()),
-            (target_id, target.clone()),
-        ]);
+        let mut objects =
+            HashMap::from([(attacker_id, attacker.clone()), (target_id, target.clone())]);
         let players = HashMap::new();
         let definitions = HashMap::new();
         let request = CommandRequest::new(CommandId::Attack).with_target(Some(target_id));
@@ -10233,13 +10202,15 @@ mod tests {
             rng: None,
         };
 
-        let parent_request =
-            CommandRequest::new(CommandId::Transfer).with_target(Some(target_id));
+        let parent_request = CommandRequest::new(CommandId::Transfer).with_target(Some(target_id));
         let mut state = TransferState::from_request(&parent_request).expect("state created");
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
-        assert!(result.update.is_none(), "entry MoveTo leaves ComDir Right untouched");
+        assert!(
+            result.update.is_none(),
+            "entry MoveTo leaves ComDir Right untouched"
+        );
         assert_eq!(result.events.len(), 0);
         assert_eq!(result.operations.len(), 1);
         match &result.operations[0] {
@@ -10257,13 +10228,13 @@ mod tests {
             &ctx,
         );
 
-        let ctx_next = CommandRuntimeContext {
-            frame: 1,
-            ..ctx
-        };
+        let ctx_next = CommandRuntimeContext { frame: 1, ..ctx };
         let next = state.step(&ctx_next);
         assert_eq!(next.status, CommandStatus::Running);
-        assert!(next.update.is_none(), "reissued MoveTo leaves ComDir Right untouched");
+        assert!(
+            next.update.is_none(),
+            "reissued MoveTo leaves ComDir Right untouched"
+        );
         assert!(next.events.is_empty());
         assert_eq!(next.operations.len(), 1);
         match &next.operations[0] {
@@ -10708,8 +10679,7 @@ mod tests {
         );
 
         let mut stale = ActivateState::from_request(
-            &CommandRequest::new(CommandId::Activate)
-                .with_target2(Some(ObjectId::new(999))),
+            &CommandRequest::new(CommandId::Activate).with_target2(Some(ObjectId::new(999))),
         )
         .expect("stale activate state");
         let stale_result = stale.step(&ctx);
@@ -11443,8 +11413,7 @@ mod tests {
             transfer_zones: &EMPTY_TRANSFER_ZONES,
             rng: None,
         };
-        let parent_request =
-            CommandRequest::new(CommandId::Energy).with_target(Some(target_id));
+        let parent_request = CommandRequest::new(CommandId::Energy).with_target(Some(target_id));
         let mut state = EnergyState::from_request(&parent_request).expect("energy state");
 
         let result = state.step(&ctx);
@@ -11512,8 +11481,7 @@ mod tests {
         )
         .expect("energy state");
         let result = {
-            let mut ctx =
-                move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
+            let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 0);
             ctx.structures_need_energy = true;
             state.step(&ctx)
         };
@@ -11533,8 +11501,7 @@ mod tests {
         )
         .expect("energy state");
         let continued = {
-            let mut ctx =
-                move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 1);
+            let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 1);
             ctx.structures_need_energy = true;
             needs_energy_state.step(&ctx)
         };
@@ -11610,9 +11577,7 @@ mod tests {
         assert_eq!(result.status, CommandStatus::Running);
         assert_eq!(
             pushed_request(&result.operations, CommandId::Acquire).data,
-            CommandData::Integer(
-                definition_id_to_c4id(LINEKIT_DEFINITION).expect("linekit C4ID")
-            )
+            CommandData::Integer(definition_id_to_c4id(LINEKIT_DEFINITION).expect("linekit C4ID"))
         );
     }
 
@@ -11705,9 +11670,7 @@ mod tests {
             .events
             .iter()
             .find_map(|event| match event {
-                CommandEvent::ApplyObjectUpdate { object_id, update }
-                    if *object_id == line_id =>
-                {
+                CommandEvent::ApplyObjectUpdate { object_id, update } if *object_id == line_id => {
                     Some(update)
                 }
                 _ => None,
@@ -11740,13 +11703,8 @@ mod tests {
         )
         .expect("energy state");
         let moving = {
-            let mut ctx = move_to_ctx_at_frame(
-                &moving_builder,
-                &objects,
-                &players,
-                &definitions,
-                1,
-            );
+            let mut ctx =
+                move_to_ctx_at_frame(&moving_builder, &objects, &players, &definitions, 1);
             ctx.structures_need_energy = true;
             moving_state.step(&ctx)
         };
@@ -11757,25 +11715,23 @@ mod tests {
         );
         assert_eq!(moving_state.line, Some(line_id));
 
-        for stale_line in [
-            line_id,
-            later_same_kit_line_id,
-            earlier_other_kit_line_id,
-        ] {
+        for stale_line in [line_id, later_same_kit_line_id, earlier_other_kit_line_id] {
             objects
                 .get_mut(&stale_line)
                 .expect("line present")
                 .action_name = "Idle".into();
         }
         let resumed = {
-            let mut ctx =
-                move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 2);
+            let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 2);
             ctx.structures_need_energy = true;
             moving_state.step(&ctx)
         };
         assert_eq!(resumed.status, CommandStatus::Running);
         assert_eq!(moving_state.line, None);
-        assert!(resumed.events.is_empty(), "the disconnected kit is retained");
+        assert!(
+            resumed.events.is_empty(),
+            "the disconnected kit is retained"
+        );
         assert_eq!(
             pushed_request(&resumed.operations, CommandId::MoveTo).target,
             Some(far_endpoint_id),
@@ -11797,8 +11753,7 @@ mod tests {
         )
         .expect("energy state");
         let malformed = {
-            let mut ctx =
-                move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 3);
+            let mut ctx = move_to_ctx_at_frame(&builder, &objects, &players, &definitions, 3);
             ctx.structures_need_energy = true;
             malformed_state.step(&ctx)
         };
@@ -11925,9 +11880,7 @@ mod tests {
         let connected = state.step(&connected_ctx);
         assert_eq!(connected.status, CommandStatus::Completed);
         assert_eq!(
-            connected
-                .update
-                .and_then(|update| update.command_direction),
+            connected.update.and_then(|update| update.command_direction),
             Some(CommandDirection::Stop),
             "Energy stops only on the final connection"
         );
@@ -13252,9 +13205,7 @@ mod tests {
     fn grab_lost_clears_only_to_a_push_to_with_a_predecessor() {
         let target = ObjectId::new(7);
         let request = |id| match id {
-            CommandId::PushTo => {
-                CommandRequest::new(CommandId::PushTo).with_target(Some(target))
-            }
+            CommandId::PushTo => CommandRequest::new(CommandId::PushTo).with_target(Some(target)),
             other => CommandRequest::new(other),
         };
 
@@ -13532,7 +13483,10 @@ mod tests {
 
         let result = stack.execute_front(&ctx).expect("Call fails");
         assert_eq!(result.status, CommandStatus::Failed);
-        assert!(result.update.is_none(), "CallFailed must observe the old ComDir");
+        assert!(
+            result.update.is_none(),
+            "CallFailed must observe the old ComDir"
+        );
         let Some(CommandEvent::FailureFeedback {
             actor_id: event_actor,
             feedback,
@@ -13576,10 +13530,12 @@ mod tests {
         let result = stack.execute_front(&ctx).expect("Build fails");
         assert_eq!(result.status, CommandStatus::Failed);
         assert!(result.update.is_none());
-        assert!(result
-            .events
-            .iter()
-            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
+        assert!(
+            result
+                .events
+                .iter()
+                .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. }))
+        );
     }
 
     #[test]
@@ -13625,10 +13581,12 @@ mod tests {
         let result = get.execute_front(&ctx).expect("Get fails");
         assert_eq!(result.status, CommandStatus::Failed);
         assert!(result.update.is_none());
-        assert!(result
-            .events
-            .iter()
-            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
+        assert!(
+            result
+                .events
+                .iter()
+                .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. }))
+        );
     }
 
     #[test]
@@ -13804,11 +13762,13 @@ mod tests {
         unselected.crew_member = true;
         unselected.owner = 7;
         unselected.selected = false;
-        let unselected_ctx =
-            move_to_ctx_at_frame(&unselected, &objects, &players, &definitions, 0);
+        let unselected_ctx = move_to_ctx_at_frame(&unselected, &objects, &players, &definitions, 0);
         let mut follow = FollowState::from_request(&CommandRequest::new(CommandId::Follow))
             .expect("targetless Follow still links");
-        assert_eq!(follow.step(&unselected_ctx).status, CommandStatus::Completed);
+        assert_eq!(
+            follow.step(&unselected_ctx).status,
+            CommandStatus::Completed
+        );
 
         let mut push_to = CommandStack::new();
         push_to
@@ -13983,7 +13943,10 @@ mod tests {
         assert_eq!(middle_retry.status, CommandStatus::Running);
         let during_retry = stack.snapshot();
         assert_eq!(during_retry.commands.len(), 3);
-        assert!(matches!(during_retry.commands[0].state, CommandState::Retry(_)));
+        assert!(matches!(
+            during_retry.commands[0].state,
+            CommandState::Retry(_)
+        ));
         assert_eq!(during_retry.commands[1].failures, 0);
         assert_eq!(during_retry.commands[1].retries, 0);
         assert_eq!(during_retry.commands[2].failures, 0);
@@ -14025,9 +13988,7 @@ mod tests {
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(
-                CommandRequest::new(CommandId::Wait).with_mode(CommandMode::SilentSub),
-            )
+            .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::SilentSub))
             .expect("live tail queued");
         stack
             .push_front(CommandRequest::new(CommandId::Wait))
@@ -14125,10 +14086,7 @@ mod tests {
         assert!(stack.resolve_put_attempt(true).is_none());
 
         assert_eq!(stack.len(), 1, "Put finishes on the following execute");
-        objects
-            .get_mut(&item_id)
-            .expect("item present")
-            .container = Some(container_id);
+        objects.get_mut(&item_id).expect("item present").container = Some(container_id);
         objects
             .get_mut(&actor_id)
             .expect("actor present")
@@ -15267,7 +15225,10 @@ pub enum CommandOperation {
     /// ObjectComDrop's post-Exit assignment. This is an ordered command
     /// operation because a synchronous ExecuteCommand may run after an
     /// earlier SetCommand decrement in the same script call.
-    SetNoCollectDelay { value: i32, ocf: u32 },
+    SetNoCollectDelay {
+        value: i32,
+        ocf: u32,
+    },
     /// Replace the staged command stack after a synchronous
     /// `ExecuteCommand` host call. The command's mutable evaluation state
     /// must cross the copy-in/copy-out script boundary with the stack.
@@ -15597,12 +15558,18 @@ pub enum CommandEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CallResultAction {
-    CompleteCommandOnFalse { command: CommandId },
-    CompleteCommandOnTrue { command: CommandId },
+    CompleteCommandOnFalse {
+        command: CommandId,
+    },
+    CompleteCommandOnTrue {
+        command: CommandId,
+    },
     /// Legacy queued-event form retained for save compatibility. Native
     /// entrance activation now uses ResolveExitActivation so newly emitted
     /// events resolve the exact in-flight Exit synchronously.
-    FailCommandOnFalse { command: CommandId },
+    FailCommandOnFalse {
+        command: CommandId,
+    },
     /// Resolve only the Exit which emitted a native ActivateEntrance event.
     /// Callback-side command replacement must not inherit its result.
     ResolveExitActivation,
@@ -15678,35 +15645,13 @@ impl CommandStepResult {
 }
 
 fn c4id_to_definition_string(id: i32) -> Option<DefinitionId> {
-    if id == 0 {
-        return None;
-    }
-    if (0..=9999).contains(&id) {
-        return Some(format!("{id:04}"));
-    }
-    let bytes = id.to_le_bytes();
-    let mut end = bytes.len();
-    while end > 0 && bytes[end - 1] == 0 {
-        end -= 1;
-    }
-    if end == 0 {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
+    let raw = id as u32 as usize;
+    (raw != 0).then(|| lc_script::c4_id_from_raw(raw))
 }
 
 pub(crate) fn definition_id_to_c4id(definition: &str) -> Option<i32> {
-    if definition.is_empty() {
-        return None;
-    }
-    if definition.chars().all(|ch| ch.is_ascii_digit()) && definition.len() <= 4 {
-        return definition.parse::<i32>().ok();
-    }
-    let mut bytes = [0u8; 4];
-    for (idx, ch) in definition.chars().take(4).enumerate() {
-        bytes[idx] = ch as u8;
-    }
-    Some(i32::from_le_bytes(bytes))
+    let raw = lc_script::c4_id_raw(definition);
+    (raw != 0).then(|| raw as u32 as i32)
 }
 
 fn command_data_to_definition_id(data: &CommandData) -> Option<DefinitionId> {
@@ -15760,13 +15705,11 @@ impl<'a> CommandRuntimeContext<'a> {
         if first == second {
             return false;
         }
-        let (Some(first_player), Some(second_player)) =
-            (self.player(first), self.player(second))
+        let (Some(first_player), Some(second_player)) = (self.player(first), self.player(second))
         else {
             return false;
         };
-        first_player.is_hostile_towards(second)
-            || second_player.is_hostile_towards(first)
+        first_player.is_hostile_towards(second) || second_player.is_hostile_towards(first)
     }
 
     pub fn definition(&self, id: &str) -> Option<&CommandDefinitionSnapshot> {
@@ -16102,11 +16045,7 @@ impl CommandStack {
                 self.detached_throw_preludes
                     .push_back(DetachedThrowPrelude {
                         entry: entry.clone(),
-                        base_chain: self
-                            .entries
-                            .iter()
-                            .map(DetachedCommandBase::from)
-                            .collect(),
+                        base_chain: self.entries.iter().map(DetachedCommandBase::from).collect(),
                     });
             }
         }
@@ -16115,15 +16054,10 @@ impl CommandStack {
     fn remember_detached_drop_prelude(&mut self, entry: &ActiveCommand) {
         if let CommandState::Drop(state) = &entry.state {
             if !state.continuations.is_empty() {
-                self.detached_drop_preludes
-                    .push_back(DetachedDropPrelude {
-                        entry: entry.clone(),
-                        base_chain: self
-                            .entries
-                            .iter()
-                            .map(DetachedCommandBase::from)
-                            .collect(),
-                    });
+                self.detached_drop_preludes.push_back(DetachedDropPrelude {
+                    entry: entry.clone(),
+                    base_chain: self.entries.iter().map(DetachedCommandBase::from).collect(),
+                });
             }
         }
     }
@@ -16378,8 +16312,7 @@ impl CommandStack {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        self.detached_throw_preludes
-            .extend(detached_throw_preludes);
+        self.detached_throw_preludes.extend(detached_throw_preludes);
         let retained_drop_ids = snapshot
             .commands
             .iter()
@@ -16477,14 +16410,8 @@ impl CommandStack {
 
     /// Execute the live front while retaining a finished entry for
     /// C4Object::ExecuteCommand's callback/clear tail.
-    pub fn execute_front(
-        &mut self,
-        ctx: &CommandRuntimeContext<'_>,
-    ) -> Option<CommandStepResult> {
-        self.execute_front_with_gravity(
-            ctx,
-            crate::PhysicsSettings::default().gravity_as_c4fixed(),
-        )
+    pub fn execute_front(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<CommandStepResult> {
+        self.execute_front_with_gravity(ctx, crate::PhysicsSettings::default().gravity_as_c4fixed())
     }
 
     /// Engine execution supplies the live scenario gravity separately from
@@ -16496,8 +16423,8 @@ impl CommandStack {
         ctx: &CommandRuntimeContext<'_>,
         gravity: crate::C4Fixed,
     ) -> Option<CommandStepResult> {
-        let next_is_move_to = self.entries.get(1).and_then(ActiveCommand::id)
-            == Some(CommandId::MoveTo);
+        let next_is_move_to =
+            self.entries.get(1).and_then(ActiveCommand::id) == Some(CommandId::MoveTo);
         let mut result = {
             let front = self.entries.front_mut()?;
             if front.finished.is_some() {
@@ -16929,11 +16856,10 @@ impl CommandStack {
     pub fn finish_pending_drop(&mut self, command_instance_id: u64) -> bool {
         let Some(entry) = self.entries.iter_mut().find(|entry| {
             (command_instance_id == 0 || entry.instance_id == command_instance_id)
-                &&
-            matches!(
-                &entry.state,
-                CommandState::Drop(state) if state.completion_pending
-            )
+                && matches!(
+                    &entry.state,
+                    CommandState::Drop(state) if state.completion_pending
+                )
         }) else {
             return false;
         };
@@ -16951,11 +16877,10 @@ impl CommandStack {
     pub(crate) fn finish_pending_throw(&mut self, command_instance_id: u64) -> bool {
         let Some(entry) = self.entries.iter_mut().find(|entry| {
             (command_instance_id == 0 || entry.instance_id == command_instance_id)
-                &&
-            matches!(
-                &entry.state,
-                CommandState::Throw(state) if state.put_take_pending
-            )
+                && matches!(
+                    &entry.state,
+                    CommandState::Throw(state) if state.put_take_pending
+                )
         }) else {
             return false;
         };
@@ -16978,19 +16903,17 @@ impl CommandStack {
         let entry = match command {
             CommandId::Throw => self.entries.iter_mut().find(|entry| {
                 (command_instance_id == 0 || entry.instance_id == command_instance_id)
-                    &&
-                matches!(
-                    &entry.state,
-                    CommandState::Throw(state) if state.put_take_pending
-                )
+                    && matches!(
+                        &entry.state,
+                        CommandState::Throw(state) if state.put_take_pending
+                    )
             }),
             CommandId::Drop => self.entries.iter_mut().find(|entry| {
                 (command_instance_id == 0 || entry.instance_id == command_instance_id)
-                    &&
-                matches!(
-                    &entry.state,
-                    CommandState::Drop(state) if state.completion_pending
-                )
+                    && matches!(
+                        &entry.state,
+                        CommandState::Drop(state) if state.completion_pending
+                    )
             }),
             _ => None,
         };
@@ -17034,11 +16957,7 @@ impl CommandStack {
                 .iter()
                 .rposition(|attempt| attempt.target == target)
             {
-                return Some(
-                    self.detached_grab_attempts
-                        .remove(index)
-                        .target_retained,
-                );
+                return Some(self.detached_grab_attempts.remove(index).target_retained);
             }
             return None;
         };
@@ -17148,9 +17067,9 @@ impl CommandStack {
         &mut self,
         disposition: GetAttemptDisposition,
     ) -> Option<GetAttemptResolution> {
-        let index = self.entries.iter().position(|entry| {
-            matches!(&entry.state, CommandState::Get(state) if state.enter_pending)
-        })?;
+        let index = self.entries.iter().position(
+            |entry| matches!(&entry.state, CommandState::Get(state) if state.enter_pending),
+        )?;
         if let CommandState::Get(state) = &mut self.entries[index].state {
             state.enter_pending = false;
         }
@@ -17331,9 +17250,9 @@ impl CommandStack {
         &mut self,
         succeeded: bool,
     ) -> Option<CommandFailureFeedback> {
-        let index = self.entries.iter().position(|entry| {
-            matches!(&entry.state, CommandState::Put(state) if state.put_pending)
-        })?;
+        let index = self.entries.iter().position(
+            |entry| matches!(&entry.state, CommandState::Put(state) if state.put_pending),
+        )?;
         if let CommandState::Put(state) = &mut self.entries[index].state {
             state.put_pending = false;
         }
@@ -17583,9 +17502,7 @@ impl CommandStack {
         base_chain: &[DetachedCommandBase],
     ) -> Option<CommandFailureFeedback> {
         let execute_feedback = match entry.mode {
-            CommandMode::SilentSub => {
-                self.increment_detached_base_failure(base_chain).is_none()
-            }
+            CommandMode::SilentSub => self.increment_detached_base_failure(base_chain).is_none(),
             CommandMode::Sub => self
                 .increment_detached_base_failure(base_chain)
                 .unwrap_or(true),
@@ -17629,15 +17546,10 @@ fn inside(value: i32, lo: i32, hi: i32) -> bool {
 fn c4_angle(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
     let dy = (y1 - y2).abs() as f32;
     let dx = (x1 - x2).abs() as f32;
-    let angle = (180.0_f64
-        * f64::from(dy.atan2(dx))
-        * f64::from(std::f32::consts::FRAC_1_PI)) as i32;
+    let angle =
+        (180.0_f64 * f64::from(dy.atan2(dx)) * f64::from(std::f32::consts::FRAC_1_PI)) as i32;
     if x2 > x1 {
-        if y2 < y1 {
-            90 - angle
-        } else {
-            90 + angle
-        }
+        if y2 < y1 { 90 - angle } else { 90 + angle }
     } else if y2 < y1 {
         270 + angle
     } else {
@@ -17739,26 +17651,18 @@ fn adjust_solid_offset(
         return false;
     }
     for offset in 1..y_offset {
-        if landscape.is_solid_at(*x, *y + offset)
-            && !landscape.is_solid_at(*x, *y - offset)
-        {
+        if landscape.is_solid_at(*x, *y + offset) && !landscape.is_solid_at(*x, *y - offset) {
             *y -= 1;
         }
-        if landscape.is_solid_at(*x, *y - offset)
-            && !landscape.is_solid_at(*x, *y + offset)
-        {
+        if landscape.is_solid_at(*x, *y - offset) && !landscape.is_solid_at(*x, *y + offset) {
             *y += 1;
         }
     }
     for offset in 1..x_offset {
-        if landscape.is_solid_at(*x + offset, *y)
-            && !landscape.is_solid_at(*x - offset, *y)
-        {
+        if landscape.is_solid_at(*x + offset, *y) && !landscape.is_solid_at(*x - offset, *y) {
             *x -= 1;
         }
-        if landscape.is_solid_at(*x - offset, *y)
-            && !landscape.is_solid_at(*x + offset, *y)
-        {
+        if landscape.is_solid_at(*x - offset, *y) && !landscape.is_solid_at(*x + offset, *y) {
             *x += 1;
         }
     }
@@ -17930,7 +17834,13 @@ impl MoveToState {
                 let free_move = ctx.object.action_procedure == ActionProcedure::Float
                     || ctx.object.physical.can_fly != 0;
                 let (mut x, mut y) = (tx, ty);
-                adjust_move_to_target(landscape, &mut x, &mut y, free_move, ctx.object.shape.height);
+                adjust_move_to_target(
+                    landscape,
+                    &mut x,
+                    &mut y,
+                    free_move,
+                    ctx.object.shape.height,
+                );
                 self.tx = Some(x);
                 self.ty = Some(y);
             }
@@ -18000,11 +17910,8 @@ impl MoveToState {
                         Some(path) if path.waypoints.len() > 2 => {
                             let waypoint_count = path.waypoints.len();
                             let mut operations = Vec::with_capacity(waypoint_count - 2);
-                            for waypoint in path
-                                .waypoints
-                                .into_iter()
-                                .skip(1)
-                                .take(waypoint_count - 2)
+                            for waypoint in
+                                path.waypoints.into_iter().skip(1).take(waypoint_count - 2)
                             {
                                 let request =
                                     if let Some(transfer_target) = waypoint.transfer_target {
@@ -18118,14 +18025,7 @@ impl MoveToState {
             ]);
         }
 
-        self.step_after_procedure(
-            ctx,
-            position,
-            target,
-            target_range,
-            next_is_move_to,
-            false,
-        )
+        self.step_after_procedure(ctx, position, target, target_range, next_is_move_to, false)
     }
 
     fn resume_after_stop(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -18163,15 +18063,14 @@ impl MoveToState {
         } else {
             base_target_range
         };
-        let (range_factor_side, range_factor_top, range_factor_bottom) =
-            if next_is_move_to
-                && ctx.object.ocf & ocf::CREW_MEMBER != 0
-                && ctx.object.action_procedure != ActionProcedure::Scale
-            {
-                (3, 3, 2)
-            } else {
-                (1, 1, 1)
-            };
+        let (range_factor_side, range_factor_top, range_factor_bottom) = if next_is_move_to
+            && ctx.object.ocf & ocf::CREW_MEMBER != 0
+            && ctx.object.action_procedure != ActionProcedure::Scale
+        {
+            (3, 3, 2)
+        } else {
+            (1, 1, 1)
+        };
         let offset_x = position.x - target.x;
         let offset_y = position.y - target.y;
         if inside(
@@ -18270,8 +18169,8 @@ impl MoveToState {
             ActionProcedure::Float => {
                 let mut fixed_dx = math::itofix(target.x) - ctx.object.fixed_position.x;
                 let mut fixed_dy = math::itofix(target.y) - ctx.object.fixed_position.y;
-                let scale = math::fixed100(ctx.object.physical.float)
-                    / fixed_dx.abs().max(fixed_dy.abs());
+                let scale =
+                    math::fixed100(ctx.object.physical.float) / fixed_dx.abs().max(fixed_dy.abs());
                 fixed_dx *= scale;
                 fixed_dy *= scale;
                 fixed_dx -= ctx.object.fixed_velocity.x;
@@ -18286,17 +18185,11 @@ impl MoveToState {
                     CommandDirection::Down
                 } else if fixed_dx.abs() * 3 < -fixed_dy {
                     CommandDirection::Up
-                } else if fixed_dx > crate::C4Fixed::ZERO
-                    && fixed_dy > crate::C4Fixed::ZERO
-                {
+                } else if fixed_dx > crate::C4Fixed::ZERO && fixed_dy > crate::C4Fixed::ZERO {
                     CommandDirection::DownRight
-                } else if fixed_dx < crate::C4Fixed::ZERO
-                    && fixed_dy > crate::C4Fixed::ZERO
-                {
+                } else if fixed_dx < crate::C4Fixed::ZERO && fixed_dy > crate::C4Fixed::ZERO {
                     CommandDirection::DownLeft
-                } else if fixed_dx > crate::C4Fixed::ZERO
-                    && fixed_dy < crate::C4Fixed::ZERO
-                {
+                } else if fixed_dx > crate::C4Fixed::ZERO && fixed_dy < crate::C4Fixed::ZERO {
                     CommandDirection::UpRight
                 } else {
                     CommandDirection::UpLeft
@@ -18329,8 +18222,7 @@ impl MoveToState {
         // DFA_HANGLE let-go control (C4Command.cpp:388-390): drop off the
         // ceiling once the target angle leaves the hangling sector.
         if ctx.object.action_procedure == ActionProcedure::Hang
-            && c4_angle(position.x, position.y, target.x, target.y).abs()
-                > LET_GO_HANGLE_ANGLE
+            && c4_angle(position.x, position.y, target.x, target.y).abs() > LET_GO_HANGLE_ANGLE
         {
             return CommandStepResult::running(Some(let_go_update(steer, 0)));
         }
@@ -18605,9 +18497,8 @@ impl EnterState {
         let in_entrance_range = ctx.object.container.is_none()
             && target_snapshot.container.is_none()
             && target_snapshot.at_point(position.x, position.y)
-            && entrance_area.is_some_and(|entrance| {
-                entrance.contains_point(position.x, position.y)
-            });
+            && entrance_area
+                .is_some_and(|entrance| entrance.contains_point(position.x, position.y));
         if in_entrance_range {
             let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
             if let Some(pushed_id) = pushed_target {
@@ -18895,8 +18786,7 @@ impl BuildState {
         if Self::object_contains_linekit(ctx.object, ctx) {
             return true;
         }
-        !ctx
-            .objects
+        !ctx.objects
             .values()
             .filter(|object| !object.destroyed && object.status.is_active())
             .any(|object| {
@@ -19083,8 +18973,7 @@ impl ConstructState {
         ctx.object.contents.iter().copied().find(|id| {
             ctx.resolve(*id)
                 .map(|snapshot| {
-                    snapshot.definition_id == CONKIT_DEFINITION
-                        && snapshot.is_status_active()
+                    snapshot.definition_id == CONKIT_DEFINITION && snapshot.is_status_active()
                 })
                 .unwrap_or(false)
         })
@@ -19102,10 +18991,7 @@ impl ConstructState {
         dx.abs() <= approach_horizontal && dy.abs() <= APPROACH_VERTICAL
     }
 
-    fn find_command(
-        object: &CommandObjectSnapshot,
-        command: CommandId,
-    ) -> Option<&CommandView> {
+    fn find_command(object: &CommandObjectSnapshot, command: CommandId) -> Option<&CommandView> {
         object
             .commands
             .iter()
@@ -19150,14 +19036,7 @@ impl ConstructState {
                 height,
                 20,
                 |x, y, width, height| {
-                    Self::overlaps_construction_rect(
-                        ctx,
-                        x,
-                        y,
-                        width,
-                        height,
-                        definition.category,
-                    )
+                    Self::overlaps_construction_rect(ctx, x, y, width, height, definition.category)
                 },
             )
             .map(|(x, y)| Vector2::new(x, y))
@@ -19179,9 +19058,7 @@ impl ConstructState {
             .unwrap_or((20, 40));
         let width = raw_width.max(1);
         let height = raw_height.max(1);
-        let effective_height = height
-            .saturating_sub(definition.construction_offset)
-            .max(1);
+        let effective_height = height.saturating_sub(definition.construction_offset).max(1);
         let left = site.x - width / 2;
         let top = site.y - effective_height;
 
@@ -19255,13 +19132,13 @@ impl ConstructState {
         }
 
         let Some(definition_id) = self.definition_id.clone() else {
-            return CommandStepResult::completed(None).with_events(vec![
-                CommandEvent::OpenMenu(MenuRequest {
+            return CommandStepResult::completed(None).with_events(vec![CommandEvent::OpenMenu(
+                MenuRequest {
                     crew_id: ctx.object.id,
                     owner: ctx.object.owner,
                     kind: MenuRequestKind::Construction,
-                }),
-            ]);
+                },
+            )]);
         };
 
         if let Some(target_id) = self.target {
@@ -19445,8 +19322,7 @@ impl ConstructState {
         }
 
         if self.construction_id.is_none() {
-            if let Some(construction_id) =
-                self.find_spawned_construction(ctx, &definition_id, site)
+            if let Some(construction_id) = self.find_spawned_construction(ctx, &definition_id, site)
             {
                 self.construction_id = Some(construction_id);
             } else {
@@ -19749,9 +19625,7 @@ impl ChopState {
                 .with_phase(0)
                 .with_ticks(0)
                 .with_force(false);
-            let update = update
-                .unwrap_or_default()
-                .with_action_update(action_update);
+            let update = update.unwrap_or_default().with_action_update(action_update);
             return CommandStepResult::running(Some(update));
         }
 
@@ -19848,10 +19722,7 @@ impl DigState {
     }
 
     fn adjusted_target(&self, ctx: &CommandRuntimeContext<'_>) -> Vector2 {
-        Vector2::new(
-            self.target.x,
-            self.target.y + ctx.object.shape_top + 3,
-        )
+        Vector2::new(self.target.x, self.target.y + ctx.object.shape_top + 3)
     }
 
     fn move_to_range(&self, ctx: &CommandRuntimeContext<'_>) -> i32 {
@@ -19862,11 +19733,7 @@ impl DigState {
         }
     }
 
-    fn desired_direction(
-        &self,
-        position: Vector2,
-        target: Vector2,
-    ) -> Option<CommandDirection> {
+    fn desired_direction(&self, position: Vector2, target: Vector2) -> Option<CommandDirection> {
         let mut direction = None;
 
         // C4Command::Dig (C4Command.cpp:478-484) deliberately uses seven
@@ -20049,12 +19916,10 @@ impl GrabState {
             ActionProcedure::Build | ActionProcedure::Chop | ActionProcedure::Dig
         ) {
             self.reject_pending = true;
-            return CommandStepResult::running(None).with_events(vec![
-                CommandEvent::AttemptGrab {
-                    actor_id: ctx.object.id,
-                    target_id: self.target,
-                },
-            ]);
+            return CommandStepResult::running(None).with_events(vec![CommandEvent::AttemptGrab {
+                actor_id: ctx.object.id,
+                target_id: self.target,
+            }]);
         }
 
         if ctx.object.action_procedure == ActionProcedure::Push
@@ -20095,12 +19960,10 @@ impl GrabState {
             // Stop/Push must not be staged ahead of RejectGrabbed. The live
             // event also performs ObjectComStop and Scale/Hangle's let-go.
             self.reject_pending = true;
-            return CommandStepResult::running(None).with_events(vec![
-                CommandEvent::AttemptGrab {
-                    actor_id: ctx.object.id,
-                    target_id: self.target,
-                },
-            ]);
+            return CommandStepResult::running(None).with_events(vec![CommandEvent::AttemptGrab {
+                actor_id: ctx.object.id,
+                target_id: self.target,
+            }]);
         }
 
         let request = CommandRequest::new(CommandId::MoveTo)
@@ -20235,18 +20098,19 @@ impl ActivateState {
             let Some(container) = self.container else {
                 return CommandStepResult::failed(None);
             };
-            if !ctx.resolve(container).is_some_and(|target| {
-                !target.destroyed && target.status != ObjectStatus::Deleted
-            }) {
+            if !ctx
+                .resolve(container)
+                .is_some_and(|target| !target.destroyed && target.status != ObjectStatus::Deleted)
+            {
                 return CommandStepResult::failed(None);
             }
-            return CommandStepResult::completed(None).with_events(vec![
-                CommandEvent::OpenMenu(MenuRequest {
+            return CommandStepResult::completed(None).with_events(vec![CommandEvent::OpenMenu(
+                MenuRequest {
                     crew_id: ctx.object.id,
                     owner: ctx.object.controller,
                     kind: MenuRequestKind::ActivateTarget { container },
-                }),
-            ]);
+                },
+            )]);
         }
 
         if let Some(target_id) = self.target {
@@ -20390,7 +20254,13 @@ impl PushToState {
         if let Some(landscape) = ctx.landscape {
             let free_move = ctx.object.action_procedure == ActionProcedure::Float
                 || ctx.object.physical.can_fly != 0;
-            adjust_move_to_target(landscape, &mut x, &mut y, free_move, ctx.object.shape_height);
+            adjust_move_to_target(
+                landscape,
+                &mut x,
+                &mut y,
+                free_move,
+                ctx.object.shape_height,
+            );
         }
         self.tx = Some(x);
         self.ty = Some(y);
@@ -20446,8 +20316,8 @@ impl PushToState {
                     ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
                 let mut result = CommandStepResult::completed(Some(completion_update));
                 let mut operations = Vec::new();
-                let ungrab_request = CommandRequest::new(CommandId::UnGrab)
-                    .with_mode(CommandMode::SilentSub);
+                let ungrab_request =
+                    CommandRequest::new(CommandId::UnGrab).with_mode(CommandMode::SilentSub);
                 operations.push(CommandOperation::PushFront(ungrab_request));
                 let wait_request = CommandRequest::new(CommandId::Wait)
                     .with_update_interval(10)
@@ -20526,12 +20396,10 @@ impl UnGrabState {
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         self.completion_pending = true;
-        CommandStepResult::running(None).with_events(vec![
-            CommandEvent::ObjectComUnGrabCommand {
-                actor_id: ctx.object.id,
-                command_instance_id: 0,
-            },
-        ])
+        CommandStepResult::running(None).with_events(vec![CommandEvent::ObjectComUnGrabCommand {
+            actor_id: ctx.object.id,
+            command_instance_id: 0,
+        }])
     }
 }
 
@@ -20720,10 +20588,7 @@ impl PutState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        self.step_with_gravity(
-            ctx,
-            crate::PhysicsSettings::default().gravity_as_c4fixed(),
-        )
+        self.step_with_gravity(ctx, crate::PhysicsSettings::default().gravity_as_c4fixed())
     }
 
     fn step_with_gravity(
@@ -20853,12 +20718,8 @@ impl PutState {
                                 gravity,
                             )
                             .is_some_and(|position| {
-                                c4_distance(
-                                    position.x,
-                                    position.y,
-                                    ctx.position.x,
-                                    ctx.position.y,
-                                ) < target_distance
+                                c4_distance(position.x, position.y, ctx.position.x, ctx.position.y)
+                                    < target_distance
                             })
                     })
                 });
@@ -20988,22 +20849,14 @@ impl DropState {
         self.step_after_object_com_stop(ctx)
     }
 
-    fn resume_after_prelude(
-        &mut self,
-        ctx: &CommandRuntimeContext<'_>,
-    ) -> CommandStepResult {
+    fn resume_after_prelude(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         match self.continuations.pop() {
-            Some(DropContinuation::AfterObjectComStop) => {
-                self.step_after_object_com_stop(ctx)
-            }
+            Some(DropContinuation::AfterObjectComStop) => self.step_after_object_com_stop(ctx),
             None => CommandStepResult::running(None),
         }
     }
 
-    fn step_after_object_com_stop(
-        &mut self,
-        ctx: &CommandRuntimeContext<'_>,
-    ) -> CommandStepResult {
+    fn step_after_object_com_stop(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         // Plain outside Drop preserves Action.ComDir. Only ObjectComStop's
         // ObjectActionStand and the targeted at-position branch stop it
         // (C4Command.cpp:988-1049).
@@ -21208,8 +21061,7 @@ impl GetState {
         let container_snapshot = ctx.resolve(container_id)?;
         for item_id in &container_snapshot.contents {
             if let Some(item_snapshot) = ctx.resolve(*item_id) {
-                if item_snapshot.is_status_active()
-                    && item_snapshot.definition_id == definition_id
+                if item_snapshot.is_status_active() && item_snapshot.definition_id == definition_id
                 {
                     self.target = Some(*item_id);
                     return self.target;
@@ -21317,10 +21169,7 @@ impl GetState {
         CommandStepResult::failed(update)
     }
 
-    fn dig_out_position(
-        landscape: &crate::Landscape,
-        target_position: Vector2,
-    ) -> Option<Vector2> {
+    fn dig_out_position(landscape: &crate::Landscape, target_position: Vector2) -> Option<Vector2> {
         let mut staging_position =
             landscape.find_closest_free(target_position, -120, 120, -1, -1)?;
         if let Some(good_angle_position) =
@@ -21390,21 +21239,19 @@ impl GetState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        if let (Some(identification), Some(container)) =
-            (self.menu_identification, self.target)
-        {
+        if let (Some(identification), Some(container)) = (self.menu_identification, self.target) {
             let kind = if identification == 18 {
                 MenuRequestKind::Contents { container }
             } else {
                 MenuRequestKind::Get { container }
             };
-            return CommandStepResult::completed(None).with_events(vec![
-                CommandEvent::OpenMenu(MenuRequest {
+            return CommandStepResult::completed(None).with_events(vec![CommandEvent::OpenMenu(
+                MenuRequest {
                     crew_id: ctx.object.id,
                     owner: ctx.object.owner,
                     kind,
-                }),
-            ]);
+                },
+            )]);
         }
 
         let update = self.prepare_update(ctx);
@@ -21520,9 +21367,11 @@ impl GetState {
                         .and_then(|definition| definition.collection_limit)
                         .is_some_and(|limit| ctx.object.contents.len() >= limit as usize);
                     if collection_limit_reached {
-                        result.operations.push(CommandOperation::PushFront(
-                            CommandRequest::new(CommandId::Drop),
-                        ));
+                        result
+                            .operations
+                            .push(CommandOperation::PushFront(CommandRequest::new(
+                                CommandId::Drop,
+                            )));
                     }
                     result.operations.push(CommandOperation::PushFront(
                         CommandRequest::new(CommandId::MoveTo)
@@ -21622,13 +21471,11 @@ impl FollowState {
             if follower.action_procedure == ActionProcedure::Push
                 && follower.action_target == target.action_target
             {
-                let update = (follower.command_direction != target.command_direction).then(|| {
-                    ObjectUpdate::new().with_command_direction(target.command_direction)
-                });
+                let update = (follower.command_direction != target.command_direction)
+                    .then(|| ObjectUpdate::new().with_command_direction(target.command_direction));
                 return CommandStepResult::running(update);
             }
-            let request =
-                CommandRequest::new(CommandId::Grab).with_target(target.action_target);
+            let request = CommandRequest::new(CommandId::Grab).with_target(target.action_target);
             return CommandStepResult::running(None)
                 .with_operations(vec![CommandOperation::PushFront(request)]);
         } else if follower.action_procedure == ActionProcedure::Push {
@@ -21694,10 +21541,7 @@ impl ThrowState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        self.step_with_gravity(
-            ctx,
-            crate::PhysicsSettings::default().gravity_as_c4fixed(),
-        )
+        self.step_with_gravity(ctx, crate::PhysicsSettings::default().gravity_as_c4fixed())
     }
 
     fn step_with_gravity(
@@ -21727,7 +21571,6 @@ impl ThrowState {
         ctx: &CommandRuntimeContext<'_>,
         gravity: crate::C4Fixed,
     ) -> CommandStepResult {
-
         if let Some(target_id) = self.target {
             if !ctx.object.contents.contains(&target_id) {
                 let get_request = CommandRequest::new(CommandId::Get)
@@ -21868,9 +21711,8 @@ impl ThrowState {
         ctx: &CommandRuntimeContext<'_>,
         targeted: bool,
     ) -> CommandStepResult {
-        let update = targeted.then(|| {
-            ObjectUpdate::new().with_command_direction(CommandDirection::Stop)
-        });
+        let update =
+            targeted.then(|| ObjectUpdate::new().with_command_direction(CommandDirection::Stop));
 
         // ObjectActionThrow changes the Clonk action, then immediately exits
         // the selected (or first) content. Keep that ordered operation in the
@@ -21960,8 +21802,7 @@ impl AttackState {
             .with_tx(Some(target.position.x))
             .with_ty(Some(target.position.y))
             .with_update_interval(10);
-        CommandStepResult::running(None)
-            .with_operations(vec![CommandOperation::PushFront(request)])
+        CommandStepResult::running(None).with_operations(vec![CommandOperation::PushFront(request)])
     }
 }
 
@@ -22514,13 +22355,13 @@ impl SellState {
         };
 
         if self.definition_id.is_empty() {
-            return CommandStepResult::completed(None).with_events(vec![
-                CommandEvent::OpenMenu(MenuRequest {
+            return CommandStepResult::completed(None).with_events(vec![CommandEvent::OpenMenu(
+                MenuRequest {
                     crew_id: ctx.object.id,
                     owner: ctx.object.owner,
                     kind: MenuRequestKind::Sell { base: base_id },
-                }),
-            ]);
+                },
+            )]);
         }
 
         let base_snapshot = match ctx.resolve(base_id) {
@@ -22529,9 +22370,7 @@ impl SellState {
         };
 
         let base_owner = base_snapshot.base;
-        if ctx.player(base_owner).is_none()
-            || ctx.players_hostile(ctx.object.owner, base_owner)
-        {
+        if ctx.player(base_owner).is_none() || ctx.players_hostile(ctx.object.owner, base_owner) {
             return CommandStepResult::failed(None);
         }
 
@@ -22593,7 +22432,8 @@ impl BuyState {
         }
 
         let buyer_owner = ctx.object.owner;
-        let target = ctx.objects
+        let target = ctx
+            .objects
             .values()
             .filter(|snapshot| {
                 snapshot.is_status_active()
@@ -22632,13 +22472,13 @@ impl BuyState {
         };
 
         if self.definition_id.is_empty() {
-            return CommandStepResult::completed(None).with_events(vec![
-                CommandEvent::OpenMenu(MenuRequest {
+            return CommandStepResult::completed(None).with_events(vec![CommandEvent::OpenMenu(
+                MenuRequest {
                     crew_id: ctx.object.id,
                     owner: ctx.object.owner,
                     kind: MenuRequestKind::Buy { base: base_id },
-                }),
-            ]);
+                },
+            )]);
         }
 
         let base_snapshot = match ctx.resolve(base_id) {
@@ -22749,8 +22589,7 @@ impl HomeState {
         };
 
         let request = CommandRequest::new(CommandId::Enter).with_target(Some(base_id));
-        CommandStepResult::running(None)
-            .with_operations(vec![CommandOperation::PushFront(request)])
+        CommandStepResult::running(None).with_operations(vec![CommandOperation::PushFront(request)])
     }
 }
 
@@ -22857,11 +22696,7 @@ impl EnergyState {
             .min_by_key(|snapshot| {
                 let dx = i64::from(snapshot.position.x - target.position.x);
                 let dy = i64::from(snapshot.position.y - target.position.y);
-                (
-                    dx * dx + dy * dy,
-                    snapshot.master_list_order,
-                    snapshot.id,
-                )
+                (dx * dx + dy * dy, snapshot.master_list_order, snapshot.id)
             })?
             .id;
         self.source = Some(source);
@@ -22985,14 +22820,12 @@ impl EnergyState {
             }
 
             self.line_spawn_requested = true;
-            return CommandStepResult::running(None).with_events(vec![
-                CommandEvent::CreateLine {
-                    definition_id: POWERLINE_DEFINITION.into(),
-                    owner: ctx.object.owner,
-                    from: source_id,
-                    to: linekit_id,
-                },
-            ]);
+            return CommandStepResult::running(None).with_events(vec![CommandEvent::CreateLine {
+                definition_id: POWERLINE_DEFINITION.into(),
+                owner: ctx.object.owner,
+                from: source_id,
+                to: linekit_id,
+            }]);
         }
 
         if !target_snapshot.at_point(ctx.position.x, ctx.position.y) {
@@ -23257,9 +23090,8 @@ impl CommandState {
     }
 
     fn clear_object_reference(&mut self, removed: ObjectId) -> bool {
-        let clear = |reference: &mut Option<ObjectId>| {
-            clear_matching_object_reference(reference, removed)
-        };
+        let clear =
+            |reference: &mut Option<ObjectId>| clear_matching_object_reference(reference, removed);
         match self {
             CommandState::Follow(state) => clear(&mut state.target),
             CommandState::MoveTo(state) => clear(&mut state.target),
@@ -23274,12 +23106,8 @@ impl CommandState {
                     | clear(&mut state.target2)
                     | clear(&mut state.construction_id)
             }
-            CommandState::Activate(state) => {
-                clear(&mut state.target) | clear(&mut state.container)
-            }
-            CommandState::PushTo(state) => {
-                clear(&mut state.target) | clear(&mut state.container)
-            }
+            CommandState::Activate(state) => clear(&mut state.target) | clear(&mut state.container),
+            CommandState::PushTo(state) => clear(&mut state.target) | clear(&mut state.container),
             CommandState::Put(state) => clear(&mut state.requested_item),
             CommandState::Drop(state) => {
                 clear(&mut state.requested_item) | clear(&mut state.delegated_container)
@@ -23292,9 +23120,7 @@ impl CommandState {
             CommandState::Acquire(state) => {
                 clear(&mut state.target) | clear(&mut state.ignore_container)
             }
-            CommandState::Sell(state) => {
-                clear(&mut state.target) | clear(&mut state.preferred)
-            }
+            CommandState::Sell(state) => clear(&mut state.target) | clear(&mut state.preferred),
             CommandState::Buy(state) => clear(&mut state.target),
             CommandState::Home(state) => clear(&mut state.target),
             CommandState::Energy(state) => {
@@ -23336,10 +23162,7 @@ impl CommandState {
     }
 }
 
-fn denumerate_object_reference(
-    reference: &mut Option<ObjectId>,
-    object_numbers: &HashSet<u64>,
-) {
+fn denumerate_object_reference(reference: &mut Option<ObjectId>, object_numbers: &HashSet<u64>) {
     if reference.is_some_and(|id| !object_numbers.contains(&id.as_u64())) {
         *reference = None;
     }
@@ -23376,39 +23199,43 @@ impl ActiveCommand {
     fn from_request(request: CommandRequest) -> Result<Self, CommandError> {
         let state = (|| -> Result<CommandState, CommandError> {
             Ok(match request.id {
-            CommandId::Follow => CommandState::Follow(FollowState::from_request(&request)?),
-            CommandId::MoveTo => CommandState::MoveTo(MoveToState::from_request(&request)),
-            CommandId::Enter => CommandState::Enter(EnterState::from_request(&request)?),
-            CommandId::Exit => CommandState::Exit(ExitState::from_request(&request)?),
-            CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
-            CommandId::Construct => {
-                CommandState::Construct(ConstructState::from_request(&request))
-            }
-            CommandId::Transfer => CommandState::Transfer(TransferState::from_request(&request)?),
-            CommandId::Chop => CommandState::Chop(ChopState::from_request(&request)?),
-            CommandId::Grab => CommandState::Grab(GrabState::from_request(&request)?),
-            CommandId::Throw => CommandState::Throw(ThrowState::from_request(&request)?),
-            CommandId::UnGrab => CommandState::UnGrab(UnGrabState::from_request(&request)),
-            CommandId::Jump => CommandState::Jump(JumpState::from_request(&request)),
-            CommandId::Wait => CommandState::Wait(WaitState::from_request(&request)),
-            CommandId::Put => CommandState::Put(PutState::from_request(&request)?),
-            CommandId::Drop => CommandState::Drop(DropState::from_request(&request)),
-            CommandId::Get => CommandState::Get(GetState::from_request(&request)?),
-            CommandId::Dig => CommandState::Dig(DigState::from_request(&request)?),
-            CommandId::Activate => CommandState::Activate(ActivateState::from_request(&request)?),
-            CommandId::PushTo => CommandState::PushTo(PushToState::from_request(&request)?),
-            CommandId::Retry => CommandState::Retry(RetryState::from_request(&request)),
-            CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
-            CommandId::Call => CommandState::Call(CallState::from_request(&request)?),
-            CommandId::Context => CommandState::Context(ContextState::from_request(&request)?),
-            CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
-            CommandId::Sell => CommandState::Sell(SellState::from_request(&request)?),
-            CommandId::Take => CommandState::Take(TakeState::from_request(&request)?),
-            CommandId::Take2 => CommandState::Take2(Take2State::from_request(&request)?),
-            CommandId::Acquire => CommandState::Acquire(AcquireState::from_request(&request)?),
-            CommandId::Home => CommandState::Home(HomeState::from_request(&request)?),
-            CommandId::Energy => CommandState::Energy(EnergyState::from_request(&request)?),
-            _ => CommandState::Malformed(request.id),
+                CommandId::Follow => CommandState::Follow(FollowState::from_request(&request)?),
+                CommandId::MoveTo => CommandState::MoveTo(MoveToState::from_request(&request)),
+                CommandId::Enter => CommandState::Enter(EnterState::from_request(&request)?),
+                CommandId::Exit => CommandState::Exit(ExitState::from_request(&request)?),
+                CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
+                CommandId::Construct => {
+                    CommandState::Construct(ConstructState::from_request(&request))
+                }
+                CommandId::Transfer => {
+                    CommandState::Transfer(TransferState::from_request(&request)?)
+                }
+                CommandId::Chop => CommandState::Chop(ChopState::from_request(&request)?),
+                CommandId::Grab => CommandState::Grab(GrabState::from_request(&request)?),
+                CommandId::Throw => CommandState::Throw(ThrowState::from_request(&request)?),
+                CommandId::UnGrab => CommandState::UnGrab(UnGrabState::from_request(&request)),
+                CommandId::Jump => CommandState::Jump(JumpState::from_request(&request)),
+                CommandId::Wait => CommandState::Wait(WaitState::from_request(&request)),
+                CommandId::Put => CommandState::Put(PutState::from_request(&request)?),
+                CommandId::Drop => CommandState::Drop(DropState::from_request(&request)),
+                CommandId::Get => CommandState::Get(GetState::from_request(&request)?),
+                CommandId::Dig => CommandState::Dig(DigState::from_request(&request)?),
+                CommandId::Activate => {
+                    CommandState::Activate(ActivateState::from_request(&request)?)
+                }
+                CommandId::PushTo => CommandState::PushTo(PushToState::from_request(&request)?),
+                CommandId::Retry => CommandState::Retry(RetryState::from_request(&request)),
+                CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
+                CommandId::Call => CommandState::Call(CallState::from_request(&request)?),
+                CommandId::Context => CommandState::Context(ContextState::from_request(&request)?),
+                CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
+                CommandId::Sell => CommandState::Sell(SellState::from_request(&request)?),
+                CommandId::Take => CommandState::Take(TakeState::from_request(&request)?),
+                CommandId::Take2 => CommandState::Take2(Take2State::from_request(&request)?),
+                CommandId::Acquire => CommandState::Acquire(AcquireState::from_request(&request)?),
+                CommandId::Home => CommandState::Home(HomeState::from_request(&request)?),
+                CommandId::Energy => CommandState::Energy(EnergyState::from_request(&request)?),
+                _ => CommandState::Malformed(request.id),
             })
         })();
         let state = match state {
@@ -23456,9 +23283,10 @@ impl ActiveCommand {
             ) {
                 state.legacy_update_interval()
             } else {
-                request
-                    .as_ref()
-                    .map_or_else(|| state.legacy_update_interval(), |request| request.update_interval)
+                request.as_ref().map_or_else(
+                    || state.legacy_update_interval(),
+                    |request| request.update_interval,
+                )
             }
         });
         Self {

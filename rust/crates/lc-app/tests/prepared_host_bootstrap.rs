@@ -512,6 +512,40 @@ fn one_selected_player_is_published_after_dynamic_and_installed_before_admission
 }
 
 #[test]
+fn selected_native_player_name_is_preserved_in_the_initial_host_packet() {
+    let fixture = minimal_install(None);
+    let player_path = fixture.install_roots[0].join("Players.c4f/Andre.c4p");
+    fs::create_dir_all(&player_path).unwrap();
+    fs::write(
+        player_path.join("Player.txt"),
+        [b"[Player]\nName=Andr".as_slice(), &[0xe9], b"\n"].concat(),
+    )
+    .unwrap();
+
+    let prepared = prepare(
+        &fixture,
+        &[player_source(player_path, b"Players.c4f/Andre.c4p")],
+    )
+    .expect("native C4 player names remain valid for the host");
+    let player = &prepared.initial_host_player_info_control().players[0];
+    assert_eq!(player.name.as_bytes(), b"Andr\xe9");
+    assert_eq!(
+        prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters
+            .player_infos
+            .clients[0]
+            .players[0]
+            .name
+            .as_bytes(),
+        b"Andr\xe9"
+    );
+}
+
+#[test]
 fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
     // C++ loads Teams.txt before parameters, snapshots Dynamic before local
     // players exist, then allocates player IDs and uses process-global

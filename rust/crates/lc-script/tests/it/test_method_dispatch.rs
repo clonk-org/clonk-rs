@@ -76,16 +76,20 @@ fn falsy_target_is_an_error_even_for_failsafe_calls() {
     // C4AulExec.cpp:1224-1226: "Object call: target is zero!" — the ~ only
     // covers a MISSING FUNCTION, not a missing target.
     let source = r#"
-        global func Probe() { return nil->~Maybe(); }
+        global func Probe(target) { return target->~Maybe(); }
     "#;
     let mut engine = Engine::new();
     engine.add_script(Script::compile(source).expect("script compiles"));
     engine.register_method_dispatch(Arc::new(|_: &[Value]| Ok(Value::Nil)));
-    let error = engine.call("Probe", &[]).expect_err("falsy target throws");
-    assert!(
-        error.to_string().contains("target is zero"),
-        "got: {error}"
-    );
+    for target in [Value::Nil, Value::C4Id("00000".into())] {
+        let error = engine
+            .call("Probe", &[target])
+            .expect_err("falsy target throws");
+        assert!(
+            error.to_string().contains("target is zero"),
+            "got: {error}"
+        );
+    }
 }
 
 #[test]

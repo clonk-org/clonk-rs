@@ -163,6 +163,22 @@ impl Script {
         Ok(Self::from_ast(ast, diagnostics))
     }
 
+    #[doc(hidden)]
+    pub fn compile_c4_string(source: &str) -> Result<Self, ParseError> {
+        let mut parser = Parser::with_strict_level_c4_string(source, None);
+        let (ast, diagnostics) = parser.parse_script_recovering();
+        Ok(Self::from_ast(ast, diagnostics))
+    }
+
+    /// Compile a byte-projected System/global script while retaining the
+    /// ownerless parsing rules used by C4Aul's global script table.
+    #[doc(hidden)]
+    pub fn compile_global_c4_string(source: &str) -> Result<Self, ParseError> {
+        let mut parser = Parser::new_global_script_c4_string(source);
+        let (ast, diagnostics) = parser.parse_script_recovering();
+        Ok(Self::from_ast(ast, diagnostics))
+    }
+
     fn from_ast(ast: AstScript, parse_diagnostics: Vec<ParseError>) -> Self {
         let mut functions: HashMap<String, Function> = HashMap::new();
         for mut function in ast.functions {
@@ -356,6 +372,13 @@ impl Engine {
 
     pub fn load_script(&mut self, source: &str) -> Result<(), ScriptError> {
         let script = Script::compile(source)?;
+        self.add_script(script);
+        Ok(())
+    }
+
+    #[cfg(feature = "ffi")]
+    pub(crate) fn load_script_c4_string(&mut self, source: &str) -> Result<(), ScriptError> {
+        let script = Script::compile_c4_string(source)?;
         self.add_script(script);
         Ok(())
     }

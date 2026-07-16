@@ -1,7 +1,7 @@
 // C++ S=/eq/ne run CheckOpPars with String operands before comparing the raw
 // bytes (C4AulExec.cpp:289-299,691-707; C4AulParse.cpp:456-458).
 
-use lc_script::{Engine, ScriptError, Value};
+use lc_script::{c4_string_from_bytes, Engine, ScriptError, Value};
 
 fn eval(source: &str) -> Value {
     let mut engine = Engine::new();
@@ -36,6 +36,13 @@ fn falsy_operands_compare_as_empty_below_strict_two() {
             "{expression}"
         );
     }
+
+    let mut engine = Engine::new();
+    engine.register_host_function("ZeroId", |_| Ok(Value::C4Id("00000".into())));
+    engine
+        .load_script("func Test() { return ZeroId() S= \"\"; }")
+        .expect("script loads");
+    assert_eq!(engine.call("Test", &[]).expect("comparison runs"), Value::Bool(true));
 }
 
 #[test]
@@ -46,6 +53,30 @@ fn string_comparison_is_case_sensitive_and_uses_raw_text() {
     );
     assert_eq!(
         eval("func Test() { return \"a\" eq \"A\"; }"),
+        Value::Bool(false)
+    );
+}
+
+#[test]
+fn string_comparison_stops_at_the_native_nul_terminator() {
+    let left = c4_string_from_bytes(b"same\0left");
+    let right = c4_string_from_bytes(b"same\0right");
+    let mut engine = Engine::new();
+    engine.register_host_function("Left", move |_| Ok(Value::String(left.clone())));
+    engine.register_host_function("Right", move |_| Ok(Value::String(right.clone())));
+    engine
+        .load_script(
+            "func Equal() { return Left() eq Right(); }\n\
+             func NotEqual() { return Left() ne Right(); }",
+        )
+        .expect("script loads");
+
+    assert_eq!(
+        engine.call("Equal", &[]).expect("comparison succeeds"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        engine.call("NotEqual", &[]).expect("comparison succeeds"),
         Value::Bool(false)
     );
 }

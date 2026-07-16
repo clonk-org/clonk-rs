@@ -10,7 +10,10 @@ use crate::ast::{
 use crate::debugger::DebuggerHooks;
 use crate::engine::{GlobalCallContextHook, HostFunction, HostReferenceFunction};
 use crate::error::RuntimeError;
-use crate::value::{C4VType, Literal, Value, ValueMap};
+use crate::value::{
+    c4_id_text, c4_string_bytes, c4_string_from_bytes, c4_strings_equal, C4VType, Literal, Value,
+    ValueMap,
+};
 
 /// Maximum script call-stack depth, matching C++ `MAX_CONTEXT_STACK`
 /// (C4AulExec.cpp:62). A script recursing within this bound runs; beyond it the
@@ -42,7 +45,7 @@ fn concat_string(value: &Value) -> Option<String> {
         Value::String(s) => Some(s.clone()),
         Value::Int(value) => Some(value.to_string()),
         Value::Bool(value) => Some(i32::from(*value).to_string()),
-        Value::C4Id(value) => Some(value.clone()),
+        Value::C4Id(value) => Some(c4_id_text(value)),
         _ => None,
     }
 }
@@ -512,7 +515,7 @@ impl PartialEq for RawIdentity {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (RawIdentity::InternedString(left), RawIdentity::InternedString(right)) => {
-                left == right
+                c4_strings_equal(left, right)
             }
             (RawIdentity::Heap(left), RawIdentity::Heap(right)) => Rc::ptr_eq(left, right),
             _ => false,
@@ -904,9 +907,8 @@ fn array_index(index: &Value) -> Result<usize, RuntimeError> {
 }
 
 /// AB_ARRAYA_R/V's string branch (C4AulExec.cpp:923-947). Classic strings
-/// are byte buffers. Rust's public string value is UTF-8, so project the
-/// selected byte onto the same-valued Latin-1 scalar to keep the one-character
-/// result representable without switching the entire value model to bytes.
+/// are byte buffers. High native bytes use the reversible private-use
+/// representation defined in `value` so indexing remains exact.
 fn string_index(text: &str, index: &Value) -> Result<Value, RuntimeError> {
     let index = index.as_c4_int().ok_or_else(|| {
         RuntimeError::new(format!(
@@ -914,18 +916,19 @@ fn string_index(text: &str, index: &Value) -> Result<Value, RuntimeError> {
             index.type_name()
         ))
     })?;
-    let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
+    let bytes = c4_string_bytes(text);
+    let len = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
     let mut index = i64::from(index);
     if index < 0 {
         index += len;
     }
     let Some(byte) = usize::try_from(index)
         .ok()
-        .and_then(|index| text.as_bytes().get(index))
+        .and_then(|index| bytes.get(index))
     else {
         return Ok(Value::Nil);
     };
-    Ok(Value::String(char::from(*byte).to_string()))
+    Ok(Value::String(c4_string_from_bytes(&[*byte])))
 }
 
 fn read_path(value: &Value, segments: &[PathSegment]) -> Result<Value, RuntimeError> {
@@ -1202,7 +1205,9 @@ fn c4_operator_equal(left: &Value, right: &Value) -> bool {
         Value::C4Id(left) => matches!(right, Value::Nil | Value::Int(_) | Value::C4Id(_))
             && c4_scalar_payload(right) == Some(crate::value::c4_id_raw(left) as u64),
         Value::Object(left) => matches!(right, Value::Object(right) if left == right),
-        Value::String(left) => matches!(right, Value::String(right) if left == right),
+        Value::String(left) => {
+            matches!(right, Value::String(right) if c4_strings_equal(left, right))
+        }
         Value::Array(left) => matches!(right, Value::Array(right) if c4_array_operator_equal(left, right)),
         Value::Proplist(left) => matches!(right, Value::Proplist(right) if c4_map_operator_equal(left, right)),
     }
@@ -1222,7 +1227,7 @@ fn c4_typed_equal(left: &Value, right: &Value) -> bool {
             crate::value::c4_id_raw(left) == crate::value::c4_id_raw(right)
         }
         (Value::Object(left), Value::Object(right)) => left == right,
-        (Value::String(left), Value::String(right)) => left == right,
+        (Value::String(left), Value::String(right)) => c4_strings_equal(left, right),
         (Value::Array(left), Value::Array(right)) => c4_array_operator_equal(left, right),
         (Value::Proplist(left), Value::Proplist(right)) => c4_map_operator_equal(left, right),
         _ => false,
@@ -1831,8 +1836,9 @@ impl<'a> Vm<'a> {
         strict_level: Option<u8>,
     ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
         let object_state = ObjectState::from_local_vars(local_vars);
-        let Ok(expr) = crate::parser::Parser::with_strict_level(source, strict_level)
-            .parse_direct_exec_expression()
+        let Ok(expr) =
+            crate::parser::Parser::with_strict_level_c4_string(source, strict_level)
+                .parse_direct_exec_expression()
         else {
             return Ok((Value::Nil, object_state.to_local_vars(self.var_decls)));
         };
@@ -1855,8 +1861,9 @@ impl<'a> Vm<'a> {
         cells: &LocalCells,
         strict_level: Option<u8>,
     ) -> Result<Value, RuntimeError> {
-        let Ok(expr) = crate::parser::Parser::with_strict_level(source, strict_level)
-            .parse_direct_exec_expression()
+        let Ok(expr) =
+            crate::parser::Parser::with_strict_level_c4_string(source, strict_level)
+                .parse_direct_exec_expression()
         else {
             return Ok(Value::Nil);
         };
@@ -2977,9 +2984,11 @@ impl<'a> Vm<'a> {
                                 // 1693-1699).
                                 _ => return Ok(Value::Nil),
                             };
-                            let Ok(expr) =
-                                crate::parser::Parser::with_strict_level(&code, env.strict_level)
-                                    .parse_direct_exec_expression()
+                            let Ok(expr) = crate::parser::Parser::with_strict_level_c4_string(
+                                &code,
+                                env.strict_level,
+                            )
+                            .parse_direct_exec_expression()
                             else {
                                 // Parse errors log and yield C4VNull
                                 // (DirectExec's catch, C4AulExec.cpp:1693).
@@ -4175,7 +4184,7 @@ impl<'a> Vm<'a> {
                 ))),
             },
             left => {
-                let mut s = concat_string(&left).ok_or_else(|| {
+                let left = concat_string(&left).ok_or_else(|| {
                     RuntimeError::new(format!(
                         "operator \"{operator}\" left side: can not convert \"{}\" to \"string\", \"array\" or \"map\"!",
                         concat_type_name(&left)
@@ -4187,8 +4196,9 @@ impl<'a> Vm<'a> {
                         concat_type_name(&right)
                     ))
                 })?;
-                s.push_str(&right);
-                Ok(Value::String(s))
+                let mut bytes = c4_string_bytes(&left);
+                bytes.extend(c4_string_bytes(&right));
+                Ok(Value::String(c4_string_from_bytes(&bytes)))
             }
         }
     }
@@ -4261,7 +4271,7 @@ impl<'a> Vm<'a> {
         symbol: &str,
     ) -> Result<Value, RuntimeError>
     where
-        F: Fn(&str, &str) -> bool,
+        F: Fn(&[u8], &[u8]) -> bool,
     {
         // CheckOpPars for S=/eq/ne converts the left operand first, then the
         // right (C4AulExec.cpp:289-299,691-707). At the supported NONSTRICT
@@ -4270,9 +4280,7 @@ impl<'a> Vm<'a> {
         let convert = |value: Value, side: &str| {
             let canonical_nil = match &value {
                 Value::Nil | Value::Object(0) => true,
-                Value::C4Id(id) => {
-                    id.len() < 4 || id == "NONE" || id.bytes().all(|byte| byte == b'0')
-                }
+                Value::C4Id(id) => crate::value::c4_id_raw(id) == 0,
                 _ => false,
             };
             let typed_falsy = matches!(&value, Value::Int(0) | Value::Bool(false));
@@ -4290,7 +4298,15 @@ impl<'a> Vm<'a> {
         };
         let left_str = convert(left, "left")?;
         let right_str = convert(right, "right")?;
-        Ok(Value::Bool(cmp(&left_str, &right_str)))
+        let mut left_bytes = c4_string_bytes(&left_str);
+        let mut right_bytes = c4_string_bytes(&right_str);
+        if let Some(nul) = left_bytes.iter().position(|byte| *byte == 0) {
+            left_bytes.truncate(nul);
+        }
+        if let Some(nul) = right_bytes.iter().position(|byte| *byte == 0) {
+            right_bytes.truncate(nul);
+        }
+        Ok(Value::Bool(cmp(&left_bytes, &right_bytes)))
     }
 
     /// `==` per `C4Value::Equals` (C4Value.cpp:823-919). NONSTRICT/STRICT1
@@ -4768,6 +4784,9 @@ impl<'a> Vm<'a> {
         }
         match &target {
             Value::Nil | Value::Int(0) | Value::Bool(false) => Err(RuntimeError::new(
+                "Object call: target is zero!".to_string(),
+            )),
+            Value::C4Id(id) if crate::value::c4_id_raw(id) == 0 => Err(RuntimeError::new(
                 "Object call: target is zero!".to_string(),
             )),
             Value::Object(_) | Value::C4Id(_) if self.method_dispatch.is_some() =>
@@ -5554,7 +5573,9 @@ impl<'a> Vm<'a> {
                         }
                     }
                 }
-                if matches!(target, Value::Nil | Value::Int(0) | Value::Bool(false)) {
+                if matches!(target, Value::Nil | Value::Int(0) | Value::Bool(false))
+                    || matches!(&target, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
+                {
                     return Err(RuntimeError::new("Object call: target is zero!"));
                 }
 
@@ -6872,6 +6893,117 @@ mod tests {
                 Value::String("b".into()),
                 Value::String("b".into()),
             ])
+        );
+    }
+
+    #[test]
+    fn dynamic_eval_reads_internal_byte_projection_as_source_bytes() {
+        let source = "func Probe(string code) { return eval(code); }";
+        let code = c4_string_from_bytes(&[b'\"', 0xff, b'\"']);
+        assert_eq!(
+            execute_script(source, "Probe", &[Value::String(code)])
+                .expect("projected source evaluates"),
+            Value::String(c4_string_from_bytes(&[0xff]))
+        );
+
+        assert_eq!(
+            execute_script(
+                source,
+                "Probe",
+                &[Value::String(c4_string_from_bytes(b"1\0+1"))],
+            )
+            .expect("NUL-terminated source evaluates its prefix"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            execute_script(
+                source,
+                "Probe",
+                &[Value::String(c4_string_from_bytes(b"\"open\0\""))],
+            )
+            .expect("a literal truncated by NUL is a DirectExec parse failure"),
+            Value::Nil
+        );
+
+        assert_eq!(
+            execute_script(
+                source,
+                "Probe",
+                &[Value::String(c4_string_from_bytes(b"1\x1f+1"))],
+            )
+            .expect("all C++ control-byte whitespace is skipped"),
+            Value::Int(2)
+        );
+        assert_eq!(
+            execute_script(
+                source,
+                "Probe",
+                &[Value::String(c4_string_from_bytes(b"1\xc2\xa0+1"))],
+            )
+            .expect("non-ASCII whitespace is a DirectExec parse failure"),
+            Value::Nil
+        );
+        assert_eq!(
+            execute_script(
+                source,
+                "Probe",
+                &[Value::String(c4_string_from_bytes(b"\"a\nb\""))],
+            )
+            .expect("a raw newline in a string is a DirectExec parse failure"),
+            Value::Nil
+        );
+        assert_eq!(
+            execute_script(
+                source,
+                "Probe",
+                &[Value::String(c4_string_from_bytes(b"true\xc3\xbf"))],
+            )
+            .expect("the non-ASCII source byte causes a DirectExec parse failure"),
+            Value::Nil
+        );
+        assert_eq!(
+            execute_script(
+                source,
+                "Probe",
+                &[Value::String(c4_string_from_bytes(b"1//comment\r+1"))],
+            )
+            .expect("a carriage return ends a C++ line comment"),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn host_direct_exec_reads_internal_byte_projection_as_source_bytes() {
+        let functions = HashMap::new();
+        let host_functions = HashMap::new();
+        let var_decls = Vec::new();
+        let vm = Vm::new(&functions, &host_functions, &var_decls, None);
+        let source = c4_string_from_bytes(&[b'\"', 0xff, b'\"']);
+        let expected = Value::String(c4_string_from_bytes(&[0xff]));
+
+        let (value, _) = vm
+            .direct_exec_with_locals(&source, &HashMap::new(), None)
+            .expect("projected source executes with copied locals");
+        assert_eq!(value, expected);
+
+        let cells = LocalCells::default();
+        assert_eq!(
+            vm.direct_exec_with_cells(&source, &cells, None)
+                .expect("projected source executes with live cells"),
+            expected
+        );
+
+        let nul_terminated = c4_string_from_bytes(b"1\0+1");
+        let (value, _) = vm
+            .direct_exec_with_locals(&nul_terminated, &HashMap::new(), None)
+            .expect("NUL-terminated host source evaluates its prefix");
+        assert_eq!(value, Value::Int(1));
+
+        let truncated_literal = c4_string_from_bytes(b"\"open\0\"");
+        assert_eq!(
+            vm.direct_exec_with_cells(&truncated_literal, &cells, None)
+                .expect("a host literal truncated by NUL is a parse failure"),
+            Value::Nil
         );
     }
 

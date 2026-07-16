@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use lc_core::std_config::Config;
 use lc_engine::player_file::PlayerFile;
-use lc_frontend::{startup_plrsel::PlrSelPlayer, ImageData};
+use lc_frontend::{ImageData, startup_plrsel::PlrSelPlayer};
 use lc_platform::AppPaths;
 use lc_resources::Group;
 use png::{ColorType, Transformations};
@@ -138,7 +138,7 @@ pub fn discover_player_files_in(
                 .unwrap_or(&file_name)
                 .to_string()
         } else {
-            player_file.name.clone()
+            lc_resources::decode_legacy_script_text(&lc_script::c4_string_bytes(&player_file.name))
         };
         let render_model = PlrSelPlayer {
             name: render_name,
@@ -250,7 +250,7 @@ impl PlayerRenderMetadata {
         let Ok(bytes) = group.read_file("Player.txt") else {
             return Self::default();
         };
-        let text = String::from_utf8_lossy(&bytes);
+        let text = lc_resources::decode_legacy_script_text(&bytes);
         let mut metadata = Self::default();
         let mut in_player_section = false;
         for raw_line in text.lines() {
@@ -415,6 +415,35 @@ mod tests {
         assert_eq!(players[0].render_model.comment, "Alpha comment");
         assert!(players[0].render_model.big_icon.is_none());
         assert!(players[0].render_model.portrait.is_none());
+    }
+
+    #[test]
+    fn discovery_decodes_native_player_text_only_for_presentation() {
+        let install = tempdir().expect("install root");
+        let player = install.path().join("Native.c4p");
+        fs::create_dir_all(&player).expect("create player group");
+        fs::write(
+            player.join("Player.txt"),
+            [
+                b"[Player]\nName=Andr".as_slice(),
+                &[0xe9],
+                b"\nComment=Gr",
+                &[0xfc, 0xdf],
+                b"e\n",
+            ]
+            .concat(),
+        )
+        .expect("write native player core");
+
+        let players = discover_player_files_in(install.path(), &Config::new())
+            .expect("discover native player");
+        assert_eq!(players.len(), 1);
+        assert_eq!(
+            lc_script::c4_string_bytes(&players[0].player_file.name),
+            b"Andr\xe9"
+        );
+        assert_eq!(players[0].render_model.name, "Andr\u{e9}");
+        assert_eq!(players[0].render_model.comment, "Gr\u{fc}\u{df}e");
     }
 
     #[test]
