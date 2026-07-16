@@ -14149,8 +14149,6 @@ fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_mut()
             .ok_or_else(|| RuntimeError::new("PlayerMessage requires an active engine context"))?;
 
-        let resolved_player = resolve_target_player(context, player_id);
-
         let played_speech = extract_speech_segment(&raw_message).is_some_and(|sound| {
             let speech_target = target_raw
                 .map(ObjectId::new)
@@ -14169,17 +14167,20 @@ fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
             let formatted =
                 format_script_string("PlayerMessage", &raw_message, format_args)?;
             let text = extract_message_text(&formatted);
-            let kind = match (target_raw.is_some(), resolved_player.is_some()) {
-                (true, true) => MessageKind::TargetPlayer,
-                (true, false) => MessageKind::Target,
-                (false, true) => MessageKind::GlobalPlayer,
-                (false, false) => MessageKind::Global,
+            // FnPlayerMessage carries iPlayer into C4GM_*Player verbatim;
+            // unlike FnPlrMessage, it never gates the message through
+            // ValidPlr. An id with no matching viewport therefore displays
+            // nowhere.
+            let kind = if target_raw.is_some() {
+                MessageKind::TargetPlayer
+            } else {
+                MessageKind::GlobalPlayer
             };
             let spec = MessageSpec {
                 kind,
                 text,
                 target: target_raw.map(ObjectId::new),
-                player: resolved_player,
+                player: Some(player_id),
                 offset: Vector2::ZERO,
                 color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
                 flags: 0,
@@ -48684,6 +48685,50 @@ public func CheckGoals()
                 assert_eq!(spec.player, Some(1));
                 assert_eq!(spec.text, "Hi there");
             }
+        }
+    }
+
+    #[test]
+    fn player_message_preserves_missing_player_scope() {
+        // FnPlayerMessage has no ValidPlr branch: GameMsgPlayer and
+        // GameMsgObjectPlayer retain the raw id, so C4GameMessage::Draw's
+        // player equality check renders raw id 42 to no normal viewport.
+        let target = ObjectId::new(1);
+        let (result, outcome) = with_object_host_context(|| {
+            Ok::<_, RuntimeError>((
+                player_message(&[Value::Int(42), Value::String("Global secret".into())])?,
+                player_message(&[
+                    Value::Int(42),
+                    Value::String("Target secret".into()),
+                    object_reference_value(target),
+                ])?,
+            ))
+        });
+
+        assert_eq!(
+            result.expect("PlayerMessage succeeds for a missing player"),
+            (Value::Bool(true), Value::Bool(true))
+        );
+        assert_eq!(outcome.messages.len(), 2);
+        for (command, expected_kind, expected_target, expected_text) in [
+            (
+                &outcome.messages[0],
+                MessageKind::GlobalPlayer,
+                None,
+                "Global secret",
+            ),
+            (
+                &outcome.messages[1],
+                MessageKind::TargetPlayer,
+                Some(target),
+                "Target secret",
+            ),
+        ] {
+            let MessageCommand::Add(spec) = command;
+            assert_eq!(spec.kind, expected_kind);
+            assert_eq!(spec.target, expected_target);
+            assert_eq!(spec.player, Some(42));
+            assert_eq!(spec.text, expected_text);
         }
     }
 

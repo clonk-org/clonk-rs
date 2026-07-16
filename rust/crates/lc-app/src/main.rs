@@ -40746,6 +40746,55 @@ mod tests {
     }
 
     #[test]
+    fn missing_player_scoped_messages_are_not_drawable() {
+        // C4GameMessage::Draw compares C4GM_*Player's raw Player field to
+        // each viewport owner. FnPlayerMessage(42, ...) therefore reaches no
+        // normal viewport when player 42 is absent (C4GameMessage.cpp:104,180).
+        let app = new_running_sandbox_app();
+        let viewports = [ActiveViewportProjection {
+            index: 0,
+            owner: app.local_owner,
+            rect: Rect::new(0, 0, 320, 200),
+            content_rect: Rect::new(0, 0, 320, 200),
+            target_x: 0,
+            target_y: 0,
+            logical_width: 320,
+            logical_height: 200,
+            content_origin_x: 0.0,
+            content_origin_y: 0.0,
+            zoom: 1.0,
+        }];
+        assert_ne!(viewports[0].owner, 42);
+
+        let mut message = lc_engine::MessageSnapshot {
+            id: 1,
+            kind: MessageKind::GlobalPlayer,
+            lines: vec!["Secret".to_string()],
+            target: None,
+            player: Some(42),
+            offset: Vector2::ZERO,
+            color: 0xffff_ffff,
+            flags: 0,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        };
+        assert_eq!(
+            app.hud_message_drawability(&message, &viewports),
+            HudMessageDrawability::NotDrawable
+        );
+
+        message.kind = MessageKind::TargetPlayer;
+        message.target = app.snapshot.objects.first().map(|object| object.id);
+        assert!(message.target.is_some());
+        assert_eq!(
+            app.hud_message_drawability(&message, &viewports),
+            HudMessageDrawability::NotDrawable
+        );
+    }
+
+    #[test]
     fn real_tutorial01_renders_cpp_decorated_portrait_message() {
         // TutorialMessage reaches C4GameMessage::Draw as a permanent
         // player-global message with DECO framing and an SCLK portrait
