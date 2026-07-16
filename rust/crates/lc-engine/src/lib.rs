@@ -14272,6 +14272,9 @@ pub struct Engine {
     /// Process-local console pause requests emitted by `PauseGame`. Shared
     /// into copied host contexts so nested calls preserve script call order.
     pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
+    /// Process-local `Console.EditCursor.Target`. The developer console owns
+    /// this pointer; synchronized state and snapshots deliberately do not.
+    edit_cursor_target: Option<ObjectId>,
     /// Explicit client-local players. `None` is the standalone/headless
     /// default where every registered player has local control.
     local_players: Option<HashSet<i32>>,
@@ -16343,6 +16346,7 @@ impl Engine {
             pending_remove_player_controls: Vec::new(),
             pending_game_goal_menu_requests: Vec::new(),
             pause_game_requests: Rc::new(RefCell::new(Vec::new())),
+            edit_cursor_target: None,
             local_players: None,
             active_message_board_input: None,
             message_board_commands: vec![InitialNetworkMessageBoardCommand::speed()],
@@ -20570,6 +20574,12 @@ impl Engine {
         std::mem::take(&mut *self.pause_game_requests.borrow_mut())
     }
 
+    /// Update the process-local developer-console target queried by the
+    /// script `EditCursor` builtin. Unknown or removed objects read as nil.
+    pub fn set_edit_cursor_target(&mut self, target: Option<ObjectId>) {
+        self.edit_cursor_target = target;
+    }
+
     pub fn set_local_players<I>(&mut self, players: I)
     where
         I: IntoIterator<Item = i32>,
@@ -21029,6 +21039,7 @@ impl Engine {
         )
         .with_network_game(self.network_game)
         .with_control_sync_mode(self.control_sync_mode())
+        .with_edit_cursor_target(self.edit_cursor_target)
         .with_pause_game_requests(
             self.replay_control,
             Rc::clone(&self.pause_game_requests),
@@ -28918,6 +28929,7 @@ impl Engine {
         }
         self.message_board_commands = state.message_board_commands.clone();
         self.debug_mode = false;
+        self.edit_cursor_target = None;
         self.time_go = false;
         self.physics = state.physics;
         self.environment = state.environment;

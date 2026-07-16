@@ -1789,6 +1789,9 @@ pub struct HostWorldContext {
     /// `C4GameControl::SyncMode()`: network/replay control or an attached
     /// recording hides process-local view state from synchronized scripts.
     control_sync_mode: bool,
+    /// Process-local `Console.EditCursor.Target`; absent when no developer
+    /// console/edit cursor exists.
+    edit_cursor_target: Option<ObjectId>,
     /// Process-local `Game.Control.isReplay()` state. Unlike SyncMode this
     /// excludes ordinary network and recording sessions.
     replay_control: bool,
@@ -1922,6 +1925,7 @@ impl Default for HostWorldContext {
             team_configuration: TeamConfiguration::default(),
             network_game: false,
             control_sync_mode: false,
+            edit_cursor_target: None,
             replay_control: false,
             pause_game_requests: Rc::new(RefCell::new(Vec::new())),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
@@ -2166,6 +2170,7 @@ impl HostWorldContext {
             team_configuration: TeamConfiguration::default(),
             network_game: false,
             control_sync_mode: false,
+            edit_cursor_target: None,
             replay_control: false,
             pause_game_requests: Rc::new(RefCell::new(Vec::new())),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
@@ -2397,6 +2402,11 @@ impl HostWorldContext {
 
     pub(crate) fn with_control_sync_mode(mut self, control_sync_mode: bool) -> Self {
         self.control_sync_mode = control_sync_mode;
+        self
+    }
+
+    pub(crate) fn with_edit_cursor_target(mut self, target: Option<ObjectId>) -> Self {
+        self.edit_cursor_target = target;
         self
     }
 
@@ -11568,6 +11578,33 @@ fn get_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnEditCursor (C4Script.cpp:3537-3541): process-local developer-console
+/// state is hidden from every synchronized control mode. The C++ cursor
+/// clears its raw pointer when an object is removed; mirror that guarantee
+/// when a copied host context observes same-call removal.
+fn edit_cursor(_args: &[Value]) -> Result<Value, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        if context.world.control_sync_mode {
+            return Ok(Value::Nil);
+        }
+        let Some(target) = context.world.edit_cursor_target else {
+            return Ok(Value::Nil);
+        };
+        if context.removed_object_references.contains(&target)
+            || !context
+                .get_world_object(target)
+                .is_some_and(|object| object.is_present())
+        {
+            return Ok(Value::Nil);
+        }
+        Ok(object_reference_value(target))
+    })
+}
+
 fn get_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
@@ -13585,6 +13622,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetCrewStatus", set_crew_status);
     script.register_host_function("UnselectCrew", unselect_crew_host);
     script.register_host_function("GetViewCursor", get_view_cursor);
+    script.register_host_function("EditCursor", edit_cursor);
     script.register_host_function("GetCaptain", get_captain);
     script.register_host_function("SetViewCursor", set_view_cursor);
     script.register_host_function("GetSelectCount", get_select_count);
@@ -45786,6 +45824,7 @@ mod tests {
         "DrawMatChunks",
         "DrawMaterialQuad",
         "DrawVolcanoBranch",
+        "EditCursor",
         "EffectCall",
         "EffectVar",
         "EliminatePlayer",
@@ -58346,6 +58385,54 @@ func Missing() { return ComponentAll(nil, WOOD); }
             result.expect("GetCursor succeeds"),
             object_reference_value(cursor)
         );
+    }
+
+    #[test]
+    fn edit_cursor_returns_local_target_and_hides_it_in_sync_mode() {
+        let target = ObjectId::new(906);
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script("#strict 3\nfunc Probe() { return EditCursor(); }")
+            .expect("EditCursor probe compiles");
+
+        let query = |world| {
+            let (result, _) = with_effect_context(None, &[], world, 1, || {
+                Ok::<_, RuntimeError>(
+                    script.call("Probe", &[]).expect("EditCursor probe executes"),
+                )
+            });
+            result.expect("EditCursor host context succeeds")
+        };
+
+        assert_eq!(
+            script
+                .call("Probe", &[])
+                .expect("missing-console probe executes"),
+            Value::Nil
+        );
+        let local = HostWorldContext::from_objects([scenario_section_world_object(
+            target.as_u64(),
+            ObjectStatus::Normal,
+        )])
+        .with_edit_cursor_target(Some(target));
+        assert_eq!(query(local.clone()), object_reference_value(target));
+        assert_eq!(
+            query(local.with_control_sync_mode(true)),
+            Value::Nil,
+            "network, replay, and recording modes hide the local editor target"
+        );
+        assert_eq!(
+            query(HostWorldContext::default().with_edit_cursor_target(Some(target))),
+            Value::Nil,
+            "a stale or unknown target behaves like C++ ClearPointers"
+        );
+
+        let mut engine = crate::Engine::new();
+        engine.set_edit_cursor_target(Some(target));
+        assert_eq!(engine.host_world_context().edit_cursor_target, Some(target));
+        engine.set_edit_cursor_target(None);
+        assert_eq!(engine.host_world_context().edit_cursor_target, None);
     }
 
     #[test]
