@@ -11916,8 +11916,16 @@ protected func ControlCommand(command, target, tx, ty, target2, data, seventh) {
 
     /// Crew contained in a hut that is player `base`'s home base.
     fn contained_base_fixture(engine: &mut Engine, base: i32) -> (ObjectId, ObjectId) {
+        contained_base_fixture_with_script(engine, base, "#strict\n")
+    }
+
+    fn contained_base_fixture_with_script(
+        engine: &mut Engine,
+        base: i32,
+        base_script: &str,
+    ) -> (ObjectId, ObjectId) {
         register_clonk(engine, "CLNK", "#strict\n");
-        let hut_def = Definition::from_script("HUT1", "Hut", "#strict\n").expect("hut compiles");
+        let hut_def = Definition::from_script("HUT1", "Hut", base_script).expect("hut compiles");
         engine.register_definition(hut_def).expect("register");
         engine
             .register_player(PlayerConfig::new(1, "Test"))
@@ -12263,6 +12271,172 @@ protected func ControlCommand(command, target, tx, ty, target2, data, seventh) {
             .expect("eliminate base owner");
         execute_buy_command(&mut engine, crew, hut, "ITEM", 1);
         assert_unchanged(&engine);
+    }
+
+    #[test]
+    fn buy_command_recruits_crew_and_runs_both_price_hooks_before_purchase() {
+        let mut engine = Engine::with_seed(0);
+        let base_script = r#"#strict 2
+protected func CalcBuyValue(id definition, int value)
+{
+    if (definition == CREW) return value + 3;
+    return value;
+}
+"#;
+        let (actor, hut) = contained_base_fixture_with_script(&mut engine, 2, base_script);
+        let crew_script = r#"#strict 2
+local order, purchase_wealth, purchase_stock, purchase_base;
+protected func CalcDefValue(object base, int player)
+{
+    if (!base) return 1000;
+    return 10 * player;
+}
+public func Recruitment(int player)
+{
+    order = player;
+    return true;
+}
+public func Purchase(int player, object base)
+{
+    order = order * 10 + player;
+    purchase_wealth = GetWealth(player);
+    purchase_stock = GetHomebaseMaterial(player, CREW);
+    purchase_base = base;
+    return true;
+}
+"#;
+        let mut recruit =
+            Definition::from_script("CREW", "Recruit", crew_script).expect("crew compiles");
+        recruit.set_value(99);
+        recruit.set_category(crate::CATEGORY_LIVING);
+        recruit.set_crew_member(true);
+        engine.register_definition(recruit).expect("register crew");
+        engine.set_player_wealth(2, 100).expect("payer wealth");
+        engine
+            .set_player_home_base_material(2, HashMap::from([("CREW".to_string(), 1)]))
+            .expect("payer stock");
+        engine.set_standard_names(Some("Twonky\n".to_owned()));
+        let rng_count_before = engine.debug_rng_clone().count;
+
+        execute_buy_command(&mut engine, actor, hut, "CREW", 1);
+
+        assert_eq!(engine.player(2).expect("payer remains").wealth(), 77);
+        assert_eq!(
+            engine
+                .player(2)
+                .expect("payer remains")
+                .home_base_material()
+                .get("CREW"),
+            Some(&0),
+            "CalcDefValue(20) then CalcBuyValue(+3) is charged before Purchase"
+        );
+        let bought = engine
+            .snapshot()
+            .objects
+            .into_iter()
+            .find(|object| object.definition_id == "CREW" && object.status.is_active())
+            .expect("purchase creates the recruit")
+            .id;
+        let snapshot = engine.object_snapshot(bought).expect("recruit survives");
+        assert!(snapshot.crew_member);
+        assert_eq!(snapshot.owner, 1);
+        assert_eq!(snapshot.container, Some(hut));
+        assert_eq!(snapshot.local_vars.get("order"), Some(&Value::Int(12)));
+        assert_eq!(
+            snapshot.local_vars.get("purchase_wealth"),
+            Some(&Value::Int(77))
+        );
+        assert_eq!(
+            snapshot.local_vars.get("purchase_stock"),
+            Some(&Value::Int(0))
+        );
+        assert_eq!(
+            snapshot.local_vars.get("purchase_base"),
+            Some(&Value::Object(hut.as_u64()))
+        );
+        assert!(
+            engine
+                .player(1)
+                .expect("recipient remains")
+                .crew()
+                .contains(&bought),
+            "native MakeCrewMember joins the recipient's crew"
+        );
+        assert_eq!(
+            engine
+                .crew_object_info(bought)
+                .expect("native MakeCrewMember creates C4ObjectInfo before Recruitment")
+                .name,
+            "Twonky"
+        );
+        assert_eq!(
+            engine.debug_rng_clone().count,
+            rng_count_before + 1,
+            "fresh crew info consumes the synchronized name draw"
+        );
+    }
+
+    #[test]
+    fn buy_command_purchase_removal_stops_after_the_committed_iteration() {
+        let mut engine = Engine::new();
+        let base_script = r#"#strict 2
+local purchase_count, purchase_wealth, purchase_stock;
+public func RecordPurchase(int wealth, int stock)
+{
+    purchase_count++;
+    purchase_wealth = wealth;
+    purchase_stock = stock;
+    return true;
+}
+"#;
+        let (actor, hut) = contained_base_fixture_with_script(&mut engine, 1, base_script);
+        let item_script = r#"#strict 2
+public func Purchase(int player, object base)
+{
+    base->RecordPurchase(GetWealth(player), GetHomebaseMaterial(player, ITEM));
+    RemoveObject();
+    return true;
+}
+"#;
+        let mut item =
+            Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
+        item.set_value(10);
+        engine.register_definition(item).expect("register item");
+        engine.set_player_wealth(1, 30).expect("buyer wealth");
+        engine
+            .set_player_home_base_material(1, HashMap::from([("ITEM".to_string(), 2)]))
+            .expect("buyer stock");
+
+        execute_buy_command(&mut engine, actor, hut, "ITEM", 2);
+
+        assert_eq!(engine.player(1).expect("buyer remains").wealth(), 20);
+        assert_eq!(
+            engine
+                .player(1)
+                .expect("buyer remains")
+                .home_base_material()
+                .get("ITEM"),
+            Some(&1),
+            "the removed result is null, so the second Buy2Base iteration does not run"
+        );
+        let base = engine.object_snapshot(hut).expect("base survives");
+        assert_eq!(base.local_vars.get("purchase_count"), Some(&Value::Int(1)));
+        assert_eq!(
+            base.local_vars.get("purchase_wealth"),
+            Some(&Value::Int(20))
+        );
+        assert_eq!(
+            base.local_vars.get("purchase_stock"),
+            Some(&Value::Int(1))
+        );
+        assert!(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .all(|object| object.definition_id != "ITEM" || !object.status.is_active()),
+            "Purchase removes the bought object before Buy can return it"
+        );
     }
 
     #[test]
