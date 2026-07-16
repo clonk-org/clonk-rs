@@ -20032,6 +20032,7 @@ impl Engine {
                 .map(ScenarioScript::script_arc),
         )
         .with_network_game(self.network_game)
+        .with_max_players(self.max_players.unwrap_or_default())
         .with_fair_crew_parameters(self.use_fair_crew, self.fair_crew_strength)
         .with_control_host(self.control_host, Rc::clone(&self.player_info_updates))
         .with_local_players(local_players)

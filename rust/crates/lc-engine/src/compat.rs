@@ -1290,6 +1290,9 @@ pub struct HostWorldContext {
     /// `Game.NetworkActive` session during parameter setup
     /// (C4GameParameters.cpp:429-434).
     network_game: bool,
+    /// Live `Game.Parameters.MaxPlayers`. Successful script writes update
+    /// this preview before their deferred engine command is folded back.
+    max_players: i32,
     /// Live fair-crew round parameters used by C4Object::GetPhysical in
     /// synchronous and nested script callbacks.
     use_fair_crew: bool,
@@ -1398,6 +1401,7 @@ impl Default for HostWorldContext {
             league_game: false,
             team_configuration: TeamConfiguration::default(),
             network_game: false,
+            max_players: 0,
             use_fair_crew: false,
             fair_crew_strength: 1_000,
             control_host: true,
@@ -1633,6 +1637,7 @@ impl HostWorldContext {
             league_game: false,
             team_configuration: TeamConfiguration::default(),
             network_game: false,
+            max_players: 0,
             use_fair_crew: false,
             fair_crew_strength: 1_000,
             control_host: true,
@@ -1790,6 +1795,19 @@ impl HostWorldContext {
     pub(crate) fn with_network_game(mut self, network_game: bool) -> Self {
         self.network_game = network_game;
         self
+    }
+
+    pub(crate) fn with_max_players(mut self, max_players: i32) -> Self {
+        self.max_players = max_players;
+        self
+    }
+
+    fn max_players(&self) -> i32 {
+        self.max_players
+    }
+
+    fn set_max_players(&mut self, max_players: i32) {
+        self.max_players = max_players;
     }
 
     pub(crate) fn with_fair_crew_parameters(
@@ -3179,6 +3197,19 @@ fn is_network(_args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// `FnGetMaxPlayer` (C4Script.cpp:3693-3696): return the exact live
+/// `Game.Parameters.MaxPlayers` integer, including a successful setter
+/// earlier in the same VM call.
+fn get_max_player(_args: &[Value]) -> Result<Value, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        Ok(Value::Int(
+            cell.borrow()
+                .as_ref()
+                .map_or(0, |context| context.world.max_players()),
+        ))
+    })
+}
+
 /// `FnSetMaxPlayer` (C4Script.cpp:3698-3706): nonnegative values directly
 /// replace `Game.Parameters.MaxPlayers`; negative values fail without a
 /// write. The C++ host function returns `C4ValueInt`, not a script bool.
@@ -3194,6 +3225,7 @@ fn set_max_player(args: &[Value]) -> Result<Value, RuntimeError> {
 
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
+            context.world.set_max_players(max_players);
             context.record_player_command(PlayerCommand::SetMaxPlayer { max_players });
         }
     });
@@ -12419,6 +12451,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerInfoCoreVal", get_player_info_core_val);
     script.register_host_function("GetPlayerTeam", get_player_team);
     script.register_host_function("SetPlayerTeam", set_player_team);
+    script.register_host_function("GetMaxPlayer", get_max_player);
     script.register_host_function("SetMaxPlayer", set_max_player);
     script.register_host_function("CallMessageBoard", call_message_board);
     script.register_host_function("AbortMessageBoard", abort_message_board);
@@ -44455,6 +44488,7 @@ mod tests {
         "GetMaterial",
         "GetMaterialCount",
         "GetMaterialVal",
+        "GetMaxPlayer",
         "GetMenu",
         "GetMenuSelection",
         "GetMissionAccess",

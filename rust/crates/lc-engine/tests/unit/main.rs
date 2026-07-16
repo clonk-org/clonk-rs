@@ -42312,12 +42312,12 @@ func RemoveAndRecruit(object target) {
     }
 
     #[test]
-    fn set_max_player_returns_cpp_integers_and_only_applies_nonnegative_values() {
-        // FnSetMaxPlayer is registered as a C4ValueInt host function: failure
-        // is integer zero, success is integer one. A negative request must
-        // leave Game.Parameters.MaxPlayers untouched; zero is a valid limit
-        // value and uses the same success path as a positive limit
-        // (C4Script.cpp:3698-3706,6919).
+    fn get_and_set_max_player_use_the_live_cpp_integer_parameter() {
+        // FnGetMaxPlayer reads the exact live round parameter. FnSetMaxPlayer
+        // returns integer zero/one and mutates that parameter synchronously,
+        // so a Get later in the same VM call observes successful writes while
+        // a rejected negative write leaves the old value visible
+        // (C4Script.cpp:3693-3706,6918-6919).
         let mut engine = Engine::with_seed(0);
         engine.set_max_players(7);
         engine
@@ -42326,7 +42326,10 @@ func RemoveAndRecruit(object target) {
                     "MPLR",
                     "Max-player probe",
                     r#"#strict 2
-                    func SetLimit(int limit) { return SetMaxPlayer(limit); }
+                    func ReadLimit() { return GetMaxPlayer(); }
+                    func SetAndRead(int limit) {
+                        return [SetMaxPlayer(limit), GetMaxPlayer()];
+                    }
                     "#,
                 )
                 .expect("max-player probe compiles"),
@@ -42341,9 +42344,15 @@ func RemoveAndRecruit(object target) {
 
         assert_eq!(
             engine
-                .call_object_function(probe_index, "SetLimit", vec![Value::Int(-1)])
-                .expect("negative SetMaxPlayer call completes"),
-            Value::Int(0)
+                .call_object_function(probe_index, "ReadLimit", Vec::new())
+                .expect("GetMaxPlayer call completes"),
+            Value::Int(7)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(probe_index, "SetAndRead", vec![Value::Int(-1)])
+                .expect("negative SetMaxPlayer/GetMaxPlayer call completes"),
+            Value::Array(vec![Value::Int(0), Value::Int(7)])
         );
         assert_eq!(
             engine.max_players(),
@@ -42353,9 +42362,9 @@ func RemoveAndRecruit(object target) {
 
         assert_eq!(
             engine
-                .call_object_function(probe_index, "SetLimit", vec![Value::Int(0)])
-                .expect("zero SetMaxPlayer call completes"),
-            Value::Int(1)
+                .call_object_function(probe_index, "SetAndRead", vec![Value::Int(0)])
+                .expect("zero SetMaxPlayer/GetMaxPlayer call completes"),
+            Value::Array(vec![Value::Int(1), Value::Int(0)])
         );
         assert_eq!(
             engine.max_players(),
@@ -42365,9 +42374,9 @@ func RemoveAndRecruit(object target) {
 
         assert_eq!(
             engine
-                .call_object_function(probe_index, "SetLimit", vec![Value::Int(2)])
-                .expect("positive SetMaxPlayer call completes"),
-            Value::Int(1)
+                .call_object_function(probe_index, "SetAndRead", vec![Value::Int(2)])
+                .expect("positive SetMaxPlayer/GetMaxPlayer call completes"),
+            Value::Array(vec![Value::Int(1), Value::Int(2)])
         );
         assert_eq!(engine.max_players(), Some(2));
     }
