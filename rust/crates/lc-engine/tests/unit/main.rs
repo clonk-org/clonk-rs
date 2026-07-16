@@ -57675,19 +57675,78 @@ func ReadTeam(int player) { return GetPlayerTeam(player); }
 func Probe(int player, int eliminated)
 {
     return [SurrenderPlayer(99), SurrenderPlayer(eliminated),
-            SurrenderPlayer(player), SurrenderPlayer(player)];
+            SurrenderPlayer(player),
+            GetPlayerVal("Eliminated", nil, player),
+            GetPlayerVal("Surrendered", nil, player),
+            GetPlayerVal("Status", nil, player),
+            EliminatePlayer(player), SurrenderPlayer(player)];
 }
+"#;
+        let scenario_script = r#"#strict 2
+global func RemovePlayer(int player, int team)
+{
+    SetGravity(1);
+    if (player == 7 && team == 3
+        && GetPlayerVal("Evaluated", nil, player)
+        && GetPlayerVal("Eliminated", nil, player)
+        && GetPlayerVal("Surrendered", nil, player)
+        && GetCrewCount(player) == 1)
+        SetGravity(73);
+    return true;
+}
+"#;
+        let crew_script = r#"#strict 2
+local destruction_calls;
+protected func Destruction() { destruction_calls++; return true; }
+"#;
+        let item_script = r#"#strict 2
+local departure_calls;
+protected func Departure(object old_container) { departure_calls++; return true; }
 "#;
         let mut engine = Engine::new();
         engine.register_definition(
             Definition::from_script("SURR", "Surrender probe", script)
                 .expect("surrender probe compiles"),
         )?;
+        let mut crew_definition =
+            Definition::from_script("CREW", "Departing crew", crew_script)?;
+        crew_definition.set_crew_member(true);
+        engine.register_definition(crew_definition)?;
+        engine.register_definition(Definition::from_script(
+            "ITEM",
+            "Ejected item",
+            item_script,
+        )?)?;
+        engine.install_scenario_script_with_convention(
+            "Scenario",
+            scenario_script,
+            true,
+        )?;
         let caller = engine.spawn_object(SpawnConfig::new("SURR"))?;
-        engine.register_player(PlayerConfig::new(7, "Surrendering"))?;
+        engine.register_player(
+            PlayerConfig::new(7, "Surrendering")
+                .with_player_info_id(41)
+                .with_team(Some(3))
+                .with_score(250),
+        )?;
         engine.register_player(
             PlayerConfig::new(8, "Eliminated").with_status(PlayerStatus::Eliminated),
         )?;
+        let crew = engine.spawn_object(
+            SpawnConfig::new("CREW")
+                .with_owner(7)
+                .with_alive(true)
+                .with_crew_member(true)
+                .with_position(Vector2::new(40, 50)),
+        )?;
+        let item = engine.spawn_object(SpawnConfig::new("ITEM").with_container(crew))?;
+        assert_eq!(
+            engine.player(7).expect("player exists").crew(),
+            &[crew],
+            "the removal cascade follows the stored player Crew list"
+        );
+        engine.select_crew(7, [crew])?;
+        engine.set_crew_cursor(7, Some(crew))?;
         let caller_index = engine.find_object_index(caller).expect("caller exists");
 
         assert_eq!(
@@ -57700,19 +57759,72 @@ func Probe(int player, int eliminated)
                 Value::Bool(false),
                 Value::Bool(false),
                 Value::Bool(true),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(1),
+                Value::Int(0),
                 Value::Bool(false),
             ])
         );
         let surrendered = engine.player(7).expect("surrendered player remains");
         assert_eq!(surrendered.status(), PlayerStatus::Surrendered);
         assert!(surrendered.surrendered());
+        assert!(engine.is_owner_eliminated(7));
+
+        // ObjectCom/ObjectCommand reject the eliminated flag immediately,
+        // before hiding ShowStartup or mutating the selected crew object.
+        assert!(surrendered.show_startup());
+        engine.player_direct_com(7, COM_UP, 0)?;
+        assert!(engine.player(7).expect("player remains").show_startup());
+        assert!(!engine.player_object_command(7, CommandId::Wait, None, 0, 0)?);
+        assert!(engine.player(7).expect("player remains").show_startup());
+        assert!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew remains")
+                .command_stack
+                .is_empty()
+        );
 
         for _ in 0..59 {
             engine.tick_player_systems()?;
         }
         assert!(engine.player(7).is_some(), "retirement waits for frame 60");
+        assert_eq!(
+            engine.object_snapshot(item).and_then(|item| item.container),
+            Some(crew),
+            "crew contents stay contained until retirement"
+        );
         engine.tick_player_systems()?;
         assert!(engine.player(7).is_none(), "player retires on frame 60");
+        assert_eq!(
+            engine.physics().gravity,
+            73,
+            "Evaluate precedes RemovePlayer while the player and Crew stay live"
+        );
+
+        let removed_crew = engine.object_snapshot(crew).expect("crew tombstone remains");
+        assert_eq!(removed_crew.status, ObjectStatus::Deleted);
+        assert_eq!(
+            removed_crew.local_vars.get("destruction_calls"),
+            Some(&Value::Int(1)),
+            "RemoveCrewObjects uses the full AssignRemoval callback path"
+        );
+        let ejected_item = engine.object_snapshot(item).expect("contained item survives");
+        assert_eq!(ejected_item.container, None);
+        assert_eq!(ejected_item.position, Vector2::new(40, 50));
+        assert_eq!(
+            ejected_item.local_vars.get("departure_calls"),
+            Some(&Value::Int(1)),
+            "AssignRemoval(true) exits rather than recursively deleting contents"
+        );
+        let result = engine
+            .round_results
+            .players
+            .iter()
+            .find(|result| result.player_info_id == 41)
+            .expect("surrender evaluation is recorded");
+        assert_eq!((result.score_old, result.score_new), (250, Some(250)));
         Ok(())
     }
 

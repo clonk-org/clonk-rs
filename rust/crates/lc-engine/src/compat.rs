@@ -3525,7 +3525,11 @@ fn eliminate_player(args: &[Value]) -> Result<Value, RuntimeError> {
             }
             return Ok(Value::Int(1));
         }
-        if player.status == crate::PlayerStatus::Eliminated {
+        if matches!(
+            player.status,
+            crate::PlayerStatus::Eliminated | crate::PlayerStatus::Surrendered
+        ) || player.surrendered
+        {
             return Ok(Value::Int(0));
         }
         if let Some(player) = context.player_state_mut(player_id) {
@@ -3767,8 +3771,8 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "ID" => Value::Int(player.player_info_id),
             "Eliminated" => Value::Int(i32::from(matches!(
                 player.status,
-                crate::PlayerStatus::Eliminated
-            ))),
+                crate::PlayerStatus::Eliminated | crate::PlayerStatus::Surrendered
+            ) || player.surrendered)),
             "Surrendered" => Value::Int(i32::from(
                 player.surrendered || matches!(player.status, crate::PlayerStatus::Surrendered),
             )),

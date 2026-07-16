@@ -18327,17 +18327,7 @@ impl Engine {
             self.active_message_board_input = None;
         }
         for crew in departing_crew {
-            if self.find_object_index(crew).is_some_and(|index| {
-                self.objects[index].state.status != ObjectStatus::Deleted
-                    && !self.objects[index].destroyed
-            }) {
-                self.apply_object_update(
-                    crew,
-                    ObjectUpdate::new()
-                        .with_status(ObjectStatus::Deleted)
-                        .with_alive(false),
-                )?;
-            }
+            let _ = self.assign_object_removal_with_contents(crew, true)?;
         }
         self.crew_selection.remove(&id);
         self.crew_roles.remove(&id);
@@ -18466,8 +18456,19 @@ impl Engine {
         id: i32,
         surrendered: bool,
     ) -> Result<(), EngineError> {
-        let player = self.player_mut(id)?;
-        player.set_surrendered(surrendered);
+        let eliminated = {
+            let player = self.player_mut(id)?;
+            player.set_surrendered(surrendered);
+            matches!(
+                player.status(),
+                PlayerStatus::Eliminated | PlayerStatus::Surrendered
+            ) || player.surrendered()
+        };
+        if eliminated {
+            self.eliminated_crew_owners.insert(id);
+        } else {
+            self.eliminated_crew_owners.remove(&id);
+        }
         Ok(())
     }
 
@@ -20960,6 +20961,12 @@ impl Engine {
 
     pub fn is_owner_eliminated(&self, owner: i32) -> bool {
         self.eliminated_crew_owners.contains(&owner)
+            || self.players.get(&owner).is_some_and(|player| {
+                matches!(
+                    player.status(),
+                    PlayerStatus::Eliminated | PlayerStatus::Surrendered
+                ) || player.surrendered()
+            })
     }
 
     pub fn selected_crew(&self, owner: i32) -> Vec<ObjectId> {
@@ -30404,8 +30411,8 @@ impl Engine {
                     }
                 }
                 PlayerCommand::Surrender { player_id } => {
-                    if let Some(player) = self.players.get_mut(&player_id) {
-                        player.set_surrendered(true);
+                    if self.players.contains_key(&player_id) {
+                        self.set_player_surrendered(player_id, true)?;
                     }
                 }
                 PlayerCommand::Remove { player_id } => {
@@ -38493,11 +38500,21 @@ impl Engine {
         !horizontal_parallax && x < -width
     }
 
-    /// Engine-owned `C4Object::AssignRemoval(false)`: callbacks and effect
-    /// cleanup run while the object is live, Status becomes Deleted before
-    /// recursively removing contents, and the container link is removed
-    /// last (C4Object.cpp:240-309).
+    /// Engine-owned `C4Object::AssignRemoval(false)`.
     fn assign_object_removal(&mut self, object_id: ObjectId) -> Result<bool, EngineError> {
+        self.assign_object_removal_with_contents(object_id, false)
+    }
+
+    /// Callbacks and effect cleanup run while the object is live, Status
+    /// becomes Deleted before contents are handled, and the container link
+    /// is removed last. `AssignRemoval(true)` exits direct contents at the
+    /// removed object's position; the default recursively removes them
+    /// instead (C4Object.cpp:240-309).
+    fn assign_object_removal_with_contents(
+        &mut self,
+        object_id: ObjectId,
+        exit_contents: bool,
+    ) -> Result<bool, EngineError> {
         let Some(index) = self.find_object_index(object_id) else {
             return Ok(false);
         };
@@ -38608,6 +38625,7 @@ impl Engine {
             return Ok(true);
         };
         let previous_status = self.objects[index].state.status;
+        let exit_position = self.objects[index].state.position;
         let _ = self.objects[index].mark_destroyed();
         self.update_inactive_list_for_status_change(
             object_id,
@@ -38624,6 +38642,17 @@ impl Engine {
                 .find_object_index(object_id)
                 .and_then(|index| self.objects[index].state.contents.first().copied());
             let Some(child) = child else { break };
+            if exit_contents {
+                if !self.exit_object_at_position_with_zero_motion(
+                    child,
+                    object_id,
+                    exit_position,
+                    0,
+                )? {
+                    break;
+                }
+                continue;
+            }
             if let Some(index) = self.find_object_index(object_id) {
                 self.track_contents_link_removal(object_id, child);
                 self.objects[index]
