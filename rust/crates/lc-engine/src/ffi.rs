@@ -385,6 +385,9 @@ pub struct RuntimeHandle {
     /// C4PlayerInfo registry (Game.PlayerInfos): CID_PlrInfo fills it,
     /// CID_JoinPlr resolves `InfoID` against it (C4Control.cpp:716-722).
     player_infos: HashMap<i32, ControlPlayerInfoEntry>,
+    /// Player-info IDs in each C4ClientPlayerInfos list, used to distinguish
+    /// AddPlayers append packets from replacement packets.
+    player_info_clients: HashMap<i32, Vec<i32>>,
     /// One-shot latch for the RNG-ledger divergence report.
     rng_mismatch_reported: bool,
 }
@@ -417,6 +420,7 @@ impl RuntimeHandle {
             control_log_strings: BTreeMap::new(),
             control_packets: BTreeMap::new(),
             player_infos: HashMap::new(),
+            player_info_clients: HashMap::new(),
             rng_mismatch_reported: false,
         }
     }
@@ -452,11 +456,47 @@ impl RuntimeHandle {
                         .execute_message_board_answer_control(&data)
                         .map_err(|error| error.to_string())?;
                 }
+                ControlPacket::Synchronize(data) => {
+                    // C4Control::Execute preserves packet order. Execute the
+                    // re-fix inline so later packets in this same recorded
+                    // frame observe the fresh RNG ledger.
+                    self.engine
+                        .execute_synchronize_control(
+                            data.save_player_files,
+                            data.sync_clearance,
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+                ControlPacket::SyncCheck(_) => {
+                    // The FFI comparator checks the live snapshot and RNG
+                    // ledger after each frame; the recorded digest itself
+                    // has no simulation side effects.
+                }
                 ControlPacket::PlayerInfo(info) => {
                     // C4ControlPlayerInfo::Execute adds the infos to
                     // Game.PlayerInfos (C4Control.cpp:1264-1282).
+                    let add = info.flags & crate::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS != 0;
+                    if !add {
+                        if let Some(previous) = self
+                            .player_info_clients
+                            .insert(info.client_id, Vec::new())
+                        {
+                            for id in previous {
+                                self.player_infos.remove(&id);
+                            }
+                        }
+                    }
+                    let client_entries = self
+                        .player_info_clients
+                        .entry(info.client_id)
+                        .or_default();
                     for entry in info.players {
-                        self.player_infos.insert(entry.id, entry);
+                        let id = entry.id;
+                        if add && self.player_infos.contains_key(&id) {
+                            continue;
+                        }
+                        self.player_infos.insert(id, entry);
+                        client_entries.push(id);
                     }
                 }
                 ControlPacket::JoinPlayer(join) => {
@@ -487,7 +527,48 @@ impl RuntimeHandle {
                         }
                     }
                 }
-                _ => {}
+                ControlPacket::Unknown { id, name, .. } => {
+                    let name = name.unwrap_or_else(|| "unnamed".to_string());
+                    return Err(format!(
+                        "unsupported replay control packet 0x{:02x} ({}, {name}) at frame {frame}",
+                        id.0, id.0
+                    ));
+                }
+                ControlPacket::ClientJoin(_) => {
+                    return Err(format!(
+                        "unsupported replay control packet ClientJoin at frame {frame}"
+                    ));
+                }
+                ControlPacket::ClientUpdate(_) => {
+                    return Err(format!(
+                        "unsupported replay control packet ClientUpdate at frame {frame}"
+                    ));
+                }
+                ControlPacket::ClientRemove(_) => {
+                    return Err(format!(
+                        "unsupported replay control packet ClientRemove at frame {frame}"
+                    ));
+                }
+                ControlPacket::Vote(_) => {
+                    return Err(format!(
+                        "unsupported replay control packet Vote at frame {frame}"
+                    ));
+                }
+                ControlPacket::VoteEnd(_) => {
+                    return Err(format!(
+                        "unsupported replay control packet VoteEnd at frame {frame}"
+                    ));
+                }
+                ControlPacket::InitScenarioPlayer(_) => {
+                    return Err(format!(
+                        "unsupported replay control packet InitScenarioPlayer at frame {frame}"
+                    ));
+                }
+                ControlPacket::SurrenderPlayer(_) => {
+                    return Err(format!(
+                        "unsupported replay control packet SurrenderPlayer at frame {frame}"
+                    ));
+                }
             }
         }
         Ok(())
@@ -504,100 +585,101 @@ impl RuntimeHandle {
         // then joins from the player file core (the same data the C++ info
         // was built from, C4PlayerInfo::SetAsUserPlayer).
         let info = self.player_infos.get(&join.info_id).cloned();
-        if let Some(info) = info.as_ref() {
-            if info.is_script_player() || info.no_scenario_init() {
-                // Script players skip ScenarioInit (C4Player.cpp:327-343);
-                // not ported yet.
-                tracing::warn!(
-                    info_id = join.info_id,
-                    "script-player / NoScenarioInit join not supported yet; skipped"
-                );
-                return Ok(());
-            }
-        }
 
-        let file = {
-            let path = legacy_filename_path(&join.filename);
-            if !join.filename.is_empty() && path.exists() {
-                crate::player_file::PlayerFile::load_from_path(&path)
-                    .map_err(|error| format!("player file {} failed: {error}", path.display()))
-                    .ok()
-            } else {
-                match &join.source {
-                    JoinPlayerSource::Embedded(player_data) if !player_data.is_empty() => {
-                        lc_resources::Group::from_memory(path, player_data.clone())
-                            .and_then(|group| {
-                                crate::player_file::PlayerFile::load(&group).map_err(|error| {
-                                    lc_resources::GroupError::InvalidGroup(error.to_string())
-                                })
+        let file = match &join.source {
+            JoinPlayerSource::Resource(core) => self
+                .scenario_path
+                .as_ref()
+                .and_then(|scenario| {
+                    let resource_path = legacy_filename_path(&core.filename);
+                    let basename = resource_path.file_name()?;
+                    let mut recorded_name = std::ffi::OsString::from(format!("{}-", core.id));
+                    recorded_name.push(basename);
+                    Some(scenario.join(recorded_name))
+                })
+                .and_then(|path| {
+                    crate::player_file::PlayerFile::load_from_path(&path)
+                        .map_err(|error| {
+                            tracing::warn!(path = %path.display(), %error, "recorded player resource failed to parse");
+                            error
+                        })
+                        .ok()
+                }),
+            JoinPlayerSource::Embedded(player_data) => {
+                let path = legacy_filename_path(&join.filename);
+                if !join.filename.is_empty() && path.exists() {
+                    crate::player_file::PlayerFile::load_from_path(&path)
+                        .map_err(|error| {
+                            format!("player file {} failed: {error}", path.display())
+                        })
+                        .ok()
+                } else if !player_data.is_empty() {
+                    lc_resources::Group::from_memory(path, player_data.clone())
+                        .and_then(|group| {
+                            crate::player_file::PlayerFile::load(&group).map_err(|error| {
+                                lc_resources::GroupError::InvalidGroup(error.to_string())
                             })
-                            .map_err(|error| {
-                                tracing::warn!(%error, "embedded PlrData failed to parse");
-                                error
-                            })
-                            .ok()
-                    }
-                    JoinPlayerSource::Embedded(_) | JoinPlayerSource::Resource(_) => None,
+                        })
+                        .map_err(|error| {
+                            tracing::warn!(%error, "embedded PlrData failed to parse");
+                            error
+                        })
+                        .ok()
+                } else {
+                    None
                 }
             }
         };
-        let (
-            file_name,
-            file_color_dw,
-            pref_color,
-            pref_position,
-            control_style,
-            auto_context_menu,
-            crew,
-        ) = file
-            .map(|file| {
-                (
-                    file.name,
-                    file.pref_color_dw & 0xffffff,
-                    file.pref_color,
-                    file.pref_position,
-                    file.pref_control_style,
-                    file.pref_auto_context_menu,
-                    file.crew,
-                )
-            })
-            .unwrap_or_else(|| {
-                let control_style = false;
-                (
-                    "Neuling".to_string(),
-                    0xff,
-                    0,
-                    0,
-                    control_style,
-                    control_style,
-                    Vec::new(),
-                )
-            });
-
-        let name = info
-            .as_ref()
-            .map(|info| info.name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or(file_name);
-        let color_dw = info
-            .as_ref()
-            .map(|info| info.color & 0xffffff)
-            .unwrap_or(file_color_dw);
-        let team = info
-            .as_ref()
-            .map(|info| info.team)
-            .filter(|&team| team != 0);
         // StartupPlayerCount: the number of players at game start
         // (C4GameParameters); approximated by the infos seen so far.
         let startup_player_count = self.player_infos.len().max(1) as i32;
-        let outcome = self
-            .engine
-            .join_player(crate::JoinPlayerConfig {
+        let config = if let Some(info) = info.as_ref() {
+            crate::prepare_join_player_config(crate::JoinPlayerPreparation {
+                join,
+                info,
+                player_file: file.as_ref(),
+                startup_player_count,
+            })
+            .map_err(|error| format!("join preparation failed: {error}"))?
+        } else {
+            let (
+                name,
+                color_dw,
+                pref_color,
+                pref_position,
+                control_style,
+                auto_context_menu,
+                crew,
+            ) = file
+                .map(|file| {
+                    (
+                        file.name,
+                        file.pref_color_dw & 0xffffff,
+                        file.pref_color,
+                        file.pref_position,
+                        file.pref_control_style,
+                        file.pref_auto_context_menu,
+                        file.crew,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    let control_style = false;
+                    (
+                        "Neuling".to_string(),
+                        0xff,
+                        0,
+                        0,
+                        control_style,
+                        control_style,
+                        Vec::new(),
+                    )
+                });
+            crate::JoinPlayerConfig {
                 name,
                 player_info_id: 0,
                 score: 0,
                 total_playing_time: 0,
-                team,
+                team: None,
                 color_dw,
                 pref_color,
                 pref_position,
@@ -605,8 +687,26 @@ impl RuntimeHandle {
                 startup_player_count,
                 control_style,
                 auto_context_menu,
-            })
-            .map_err(|error| format!("join failed: {error}"))?;
+            }
+        };
+        let outcome = match info.as_ref() {
+            Some(info) => self.engine.join_player_at_client_with_info(
+                config,
+                crate::PlayerAtClient::new(join.at_client),
+                info,
+            ),
+            None => self
+                .engine
+                .join_player_at_client(config, crate::PlayerAtClient::new(join.at_client)),
+        }
+        .map_err(|error| format!("join failed: {error}"))?;
+        if let Some(info) = self.player_infos.get_mut(&join.info_id) {
+            // C4PlayerInfo::SetJoined only ORs Joined; a malformed/reused
+            // Removed history entry keeps its other synchronized flags.
+            info.flags |= crate::PLAYER_INFO_FLAG_JOINED;
+            info.game_number = outcome.number();
+            info.game_join_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+        }
         if let Some(joined) = outcome.initialized() {
             tracing::info!(
                 number = joined.number,
@@ -2030,10 +2130,7 @@ fn load_scenario_into_runtime(
     runtime.control_log_strings.clear();
     runtime.control_packets.clear();
     runtime.player_infos.clear();
-    runtime.player_infos.clear();
-    runtime.player_infos.clear();
-    runtime.player_infos.clear();
-    runtime.player_infos.clear();
+    runtime.player_info_clients.clear();
     Ok(())
 }
 
@@ -2197,10 +2294,7 @@ pub extern "C" fn lc_engine_runtime_reset(
         runtime.control_log_strings.clear();
         runtime.control_packets.clear();
         runtime.player_infos.clear();
-        runtime.player_infos.clear();
-        runtime.player_infos.clear();
-        runtime.player_infos.clear();
-        runtime.player_infos.clear();
+        runtime.player_info_clients.clear();
         return true;
     };
 
@@ -4701,6 +4795,231 @@ global func Step(state, frame, random)
         assert_ne!(info.flags & crate::PLAYER_INFO_FLAG_REMOVED, 0);
         assert_ne!(info.flags & crate::PLAYER_INFO_FLAG_DISCONNECTED, 0);
         assert_eq!(info.game_part_frame, 1);
+    }
+
+    #[test]
+    fn replay_synchronize_refixes_rng_at_its_frame_and_preserves_packet_order() {
+        let script_random = || {
+            ControlPacket::Script(crate::ScriptControlData {
+                target_object: crate::SCRIPT_SCOPE_GLOBAL,
+                strictness: crate::ScriptStrictness::Strict3,
+                script: LegacyCString::from_bytes(b"Random(100)".to_vec())
+                    .expect("script has no NUL"),
+                by_client: 0,
+            })
+        };
+        let mut runtime = RuntimeHandle::new();
+        runtime
+            .control_packets
+            .insert(1, vec![script_random(), script_random()]);
+        runtime
+            .advance_to_frame(1)
+            .expect("advance stops before frame-one control");
+        assert_eq!(runtime.engine.debug_rng_clone().count, 500);
+        runtime
+            .advance_to_frame(2)
+            .expect("frame-one controls execute at frame one");
+        assert_eq!(runtime.engine.debug_rng_clone().count, 502);
+
+        runtime.control_packets.insert(
+            2,
+            vec![
+                ControlPacket::Synchronize(crate::SynchronizeControlData {
+                    save_player_files: false,
+                    sync_clearance: false,
+                    by_client: 91,
+                }),
+                script_random(),
+            ],
+        );
+        assert_eq!(
+            runtime.engine.debug_rng_clone().count,
+            502,
+            "frame-two Synchronize does not execute before advancing past frame two"
+        );
+        runtime
+            .advance_to_frame(3)
+            .expect("recorded frame-two controls execute");
+
+        let mut expected = crate::rng::LcgRng::seed_from_u64(0);
+        expected.random(100);
+        assert_eq!(runtime.engine.debug_rng_clone(), expected);
+    }
+
+    #[test]
+    fn unknown_replay_control_fails_loudly() {
+        let packets = parse_control_ini(
+            "[Control]\n  [IDPacket]\n    ID=135\n    [Set]\n      Type=5\n      Data=1\n",
+        )
+        .expect("unknown Set packet still parses structurally");
+        let mut runtime = RuntimeHandle::new();
+        runtime.control_packets.insert(9, packets);
+
+        let error = runtime
+            .apply_control_packets_for_frame(9)
+            .expect_err("unsupported simulation control must not be dropped");
+        assert!(error.contains("0x87"), "missing hex CID: {error}");
+        assert!(error.contains("135"), "missing decimal CID: {error}");
+        assert!(error.contains("Set"), "missing packet name: {error}");
+        assert!(error.contains("frame 9"), "missing frame: {error}");
+    }
+
+    #[test]
+    fn fileless_no_scenario_init_script_player_replays_join() {
+        let packets = parse_control_ini(
+            "[Control]\n\
+             [IDPacket]\n\
+             ID=144\n\
+             [Player Info]\n\
+             ID=7\n\
+             [Player]\n\
+             Name=Script Bot\n\
+             Flags=NoScenarioInit|NoEliminationCheck\n\
+             ID=42\n\
+             Type=Script\n\
+             Color=1193046\n\
+             ByClient=0\n\
+             [IDPacket]\n\
+             ID=145\n\
+             [Join Player]\n\
+             AtClient=7\n\
+             InfoID=42\n\
+             ByClient=0\n",
+        )
+        .expect("script-player record controls parse");
+        let mut runtime = RuntimeHandle::new();
+        runtime.control_packets.insert(0, packets);
+
+        runtime
+            .apply_control_packets_for_frame(0)
+            .expect("fileless script player joins");
+
+        let player = runtime.engine.player(0).expect("script player exists");
+        assert_eq!(player.name(), "Script Bot");
+        assert_eq!(player.player_info_id(), 42);
+        assert_eq!(player.at_client(), crate::PlayerAtClient::new(7));
+        assert!(player.is_script_player());
+        assert!(player.no_elimination_check());
+        let info = runtime.player_infos.get(&42).expect("player info retained");
+        assert_ne!(info.flags & crate::PLAYER_INFO_FLAG_JOINED, 0);
+        assert_eq!((info.game_number, info.game_join_frame), (0, 0));
+    }
+
+    #[test]
+    fn replay_player_info_replaces_or_appends_per_client() {
+        let packet = |client_id, flags, ids: &[i32]| {
+            ControlPacket::PlayerInfo(crate::PlayerInfoControlData {
+                client_id,
+                flags,
+                players: ids
+                    .iter()
+                    .map(|id| ControlPlayerInfoEntry {
+                        id: *id,
+                        ..ControlPlayerInfoEntry::default()
+                    })
+                    .collect(),
+                by_client: 0,
+            })
+        };
+        let mut runtime = RuntimeHandle::new();
+        runtime.control_packets.insert(
+            0,
+            vec![packet(7, 0, &[1]), packet(8, 0, &[9])],
+        );
+        runtime
+            .apply_control_packets_for_frame(0)
+            .expect("initial player infos apply");
+        runtime.control_packets.insert(
+            1,
+            vec![packet(
+                7,
+                crate::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                &[2],
+            )],
+        );
+        runtime
+            .apply_control_packets_for_frame(1)
+            .expect("add packet appends");
+        assert!(runtime.player_infos.contains_key(&1));
+        assert!(runtime.player_infos.contains_key(&2));
+
+        runtime
+            .control_packets
+            .insert(2, vec![packet(7, 0, &[3])]);
+        runtime
+            .apply_control_packets_for_frame(2)
+            .expect("replacement packet replaces one client");
+        assert!(!runtime.player_infos.contains_key(&1));
+        assert!(!runtime.player_infos.contains_key(&2));
+        assert!(runtime.player_infos.contains_key(&3));
+        assert!(
+            runtime.player_infos.contains_key(&9),
+            "another client's list survives"
+        );
+    }
+
+    #[test]
+    fn replay_resource_join_prefers_recorded_scenario_copy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let raw_player = dir.path().join("Raw.c4p");
+        let scenario = dir.path().join("Replay.c4s");
+        let recorded_player = scenario.join("17-Tyler.c4p");
+        std::fs::create_dir_all(&raw_player).expect("raw player dir");
+        std::fs::create_dir_all(&recorded_player).expect("recorded player dir");
+        std::fs::write(
+            raw_player.join("Player.txt"),
+            "[Player]\nName=Raw\nScore=1\n",
+        )
+        .expect("raw player core");
+        std::fs::write(
+            recorded_player.join("Player.txt"),
+            "[Player]\nName=Recorded\nScore=99\n",
+        )
+        .expect("recorded player core");
+
+        let resource = crate::NetworkResourceCore {
+            resource_type: 3,
+            id: 17,
+            filename: LegacyCString::from_bytes(b"Players/Tyler.c4p".to_vec())
+                .expect("resource filename"),
+            ..crate::NetworkResourceCore::default()
+        };
+        let mut runtime = RuntimeHandle::new();
+        runtime.scenario_path = Some(scenario);
+        runtime.control_packets.insert(
+            0,
+            vec![
+                ControlPacket::PlayerInfo(crate::PlayerInfoControlData {
+                    client_id: 7,
+                    flags: 0,
+                    players: vec![ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Info".to_vec()).expect("info name"),
+                        id: 42,
+                        flags: crate::PLAYER_INFO_FLAG_HAS_RESOURCE
+                            | crate::PLAYER_INFO_FLAG_NO_SCENARIO_INIT
+                            | crate::PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
+                        resource: Some(resource.clone()),
+                        ..ControlPlayerInfoEntry::default()
+                    }],
+                    by_client: 0,
+                }),
+                ControlPacket::JoinPlayer(JoinPlayerControlData {
+                    filename: LegacyCString::from_bytes(
+                        raw_player.as_os_str().to_string_lossy().as_bytes().to_vec(),
+                    )
+                    .expect("raw filename"),
+                    at_client: 7,
+                    info_id: 42,
+                    source: JoinPlayerSource::Resource(resource),
+                    by_client: 0,
+                }),
+            ],
+        );
+        runtime
+            .apply_control_packets_for_frame(0)
+            .expect("resource join applies");
+
+        assert_eq!(runtime.engine.player(0).expect("player joined").score(), 99);
     }
 
     #[test]
