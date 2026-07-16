@@ -22708,23 +22708,21 @@ fn get_color_dw(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnGetChar (C4Script.cpp:4367-4376): the byte at the index, 0 past/// FnGetChar (C4Script.cpp:4367-4376): the byte at the index, 0 past
-/// the end, nil without a string.
+/// FnGetChar (C4Script.cpp:4361-4370): the unsigned legacy character at the
+/// index and 0 past the end or without a string. Rust stores decoded legacy
+/// bytes as Unicode scalars, so index characters rather than UTF-8 storage
+/// bytes. C++'s forward loop leaves every negative index at offset zero.
 fn get_char(args: &[Value]) -> Result<Value, RuntimeError> {
-    let Some(Value::String(text)) = args.first() else {
-        return Ok(Value::Nil);
-    };
-    let index = match args.get(1) {
-        Some(Value::Int(value)) => *value,
-        _ => 0,
-    };
-    if index < 0 {
-        return Ok(Value::Int(0));
-    }
+    let text = parse_optional_string(args.first(), "GetChar", "string")?.unwrap_or_default();
+    let index = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GetChar",
+        "index",
+    )?;
     Ok(Value::Int(
-        text.as_bytes()
-            .get(index as usize)
-            .map(|byte| i32::from(*byte))
+        text.chars()
+            .nth(usize::try_from(index).unwrap_or(0))
+            .map(|character| u32::from(character) as i32)
             .unwrap_or(0),
     ))
 }
@@ -49288,6 +49286,42 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(
             error.message(),
             "func \"GetLength\" par 0 cannot be converted to string or array or map"
+        );
+    }
+
+    #[test]
+    fn get_char_indexes_decoded_legacy_characters_and_keeps_cpp_bounds() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"
+                #strict
+                func Probe() {
+                    return [
+                        GetChar("äb", 0), GetChar("äb", 1),
+                        GetChar("abc", -1), GetChar("abc"), GetChar("abc", true),
+                        GetChar("abc", 2), GetChar("abc", 3), GetChar("", -1),
+                        GetChar(nil, 0)
+                    ];
+                }
+                "#,
+            )
+            .expect("GetChar fixture compiles");
+
+        assert_eq!(
+            script.call("Probe", &[]).expect("GetChar probe executes"),
+            Value::Array(vec![
+                Value::Int(228),
+                Value::Int(98),
+                Value::Int(97),
+                Value::Int(97),
+                Value::Int(98),
+                Value::Int(99),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+            ])
         );
     }
 
