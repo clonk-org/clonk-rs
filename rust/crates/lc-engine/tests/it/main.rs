@@ -38,6 +38,7 @@ mod manifest_definitions;
 mod message_board_queries;
 mod object_visibility;
 mod optional_int_strictness;
+mod path_free2;
 mod real_clonk_hangle;
 mod real_scenario_harness;
 mod real_tutorial01_virtual_play;

@@ -13988,6 +13988,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CheckEnergyNeedChain", check_energy_need_chain);
     script.register_host_function("GetContact", get_contact);
     script.register_host_function("PathFree", path_free);
+    script.register_host_reference_function("PathFree2", 0..2, path_free2);
     script.register_host_function("GetPath", get_path);
     script.register_host_function("SetTransferZone", set_transfer_zone);
     script.register_host_function("DigFree", dig_free);
@@ -25899,6 +25900,90 @@ fn path_free(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         Ok(Value::Bool(clear))
     })
+}
+
+fn path_free2_native_int(value: &Value, parameter: &str) -> Result<i32, RuntimeError> {
+    // Native dispatch eagerly resets falsy typed arguments to nil for callers
+    // below #strict 3 before converting the C4ValueInt slots.
+    let eager_falsy_conversion = match lc_script::caller_origin_strictness() {
+        lc_script::HostCallerStrictness::NoCaller => false,
+        lc_script::HostCallerStrictness::NonStrict => true,
+        lc_script::HostCallerStrictness::Strict(level) => level < 3,
+    };
+    if eager_falsy_conversion && !value.as_bool() {
+        return Ok(0);
+    }
+    value_to_i32(value, "PathFree2", parameter)
+}
+
+/// FnPathFree2 (C4Script.cpp:3132-3146): PathFree with native reference
+/// parameters for the start point and blocked-pixel writeback.
+fn path_free2(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
+    let x_arg = args.first().ok_or_else(|| {
+        RuntimeError::new(
+            "call to \"PathFree2\" parameter 1: got \"nil\", but expected \"&\"!",
+        )
+    })?;
+    if !x_arg.is_reference() {
+        return Err(RuntimeError::new(format!(
+            "call to \"PathFree2\" parameter 1: got \"{}\", but expected \"&\"!",
+            x_arg.read()?.type_name()
+        )));
+    }
+    let y_arg = args.get(1).ok_or_else(|| {
+        RuntimeError::new(
+            "call to \"PathFree2\" parameter 2: got \"nil\", but expected \"&\"!",
+        )
+    })?;
+    if !y_arg.is_reference() {
+        return Err(RuntimeError::new(format!(
+            "call to \"PathFree2\" parameter 2: got \"{}\", but expected \"&\"!",
+            y_arg.read()?.type_name()
+        )));
+    }
+
+    let x2_value = args
+        .get(2)
+        .map(HostCallArg::read)
+        .transpose()?
+        .unwrap_or(Value::Nil);
+    let y2_value = args
+        .get(3)
+        .map(HostCallArg::read)
+        .transpose()?
+        .unwrap_or(Value::Nil);
+    let x2 = path_free2_native_int(&x2_value, "x2")?;
+    let y2 = path_free2_native_int(&y2_value, "y2")?;
+
+    // Native dispatch converts x2/y2 before FnPathFree2 runs. The body then
+    // uses GetRefVal().getInt(), preserving each reference while an
+    // unconvertible referent contributes zero.
+    let x1 = x_arg.read()?.as_c4_int().unwrap_or(0);
+    let y1 = y_arg.read()?.as_c4_int().unwrap_or(0);
+
+    let hit = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let landscape = context.landscape_ref()?;
+        Some(match context.world.materials() {
+            Some(materials) => {
+                crate::path_free_exact_hit(landscape, materials, &[], x1, y1, x2, y2)
+            }
+            None => crate::for_line_first_blocker(x1, y1, x2, y2, |x, y| {
+                landscape.is_solid_at(x, y)
+            }),
+        })
+    });
+    let hit = hit.flatten();
+
+    if let Some(hit) = hit {
+        let wrote_x = x_arg.write(Value::Int(hit.x))?;
+        let wrote_y = y_arg.write(Value::Int(hit.y))?;
+        debug_assert!(wrote_x && wrote_y, "validated PathFree2 reference disappeared");
+        Ok(Value::Bool(false))
+    } else {
+        Ok(Value::Bool(true))
+    }
 }
 
 fn get_path(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -47238,6 +47323,7 @@ mod tests {
         "OnMessageBoardAnswer",
         "Or",
         "PathFree",
+        "PathFree2",
         "PauseGame",
         "PlaceAnimal",
         "PlaceVegetation",

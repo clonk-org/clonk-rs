@@ -15838,8 +15838,35 @@ pub(crate) fn path_free_exact(
     x2: i32,
     y2: i32,
 ) -> bool {
-    let solid =
-        |x: i32, y: i32| movement_density_at(landscape, materials, solid_masks, None, x, y) >= 50;
+    path_free_exact_hit(landscape, materials, solid_masks, x1, y1, x2, y2).is_none()
+}
+
+/// The blocking-coordinate form of SCRIPT PathFree used by FnPathFree2.
+/// C++ ForLine normalizes traversal toward the increasing major axis, so the
+/// reported blocker is not necessarily the one nearest the caller's start.
+pub(crate) fn path_free_exact_hit(
+    landscape: &Landscape,
+    materials: &MaterialSet,
+    solid_masks: &[SolidMaskRect],
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+) -> Option<Vector2> {
+    for_line_first_blocker(x1, y1, x2, y2, |x, y| {
+        movement_density_at(landscape, materials, solid_masks, None, x, y) >= 50
+    })
+}
+
+/// C4Landscape.cpp ForLine (lines 1670-1738), including endpoint swapping,
+/// tie handling, and the exact point passed back through `lastx`/`lasty`.
+pub(crate) fn for_line_first_blocker(
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    mut blocked: impl FnMut(i32, i32) -> bool,
+) -> Option<Vector2> {
     let (mut x1, mut y1, mut x2, mut y2) = (x1, y1, x2, y2);
     if (x2 - x1).abs() < (y2 - y1).abs() {
         if y1 > y2 {
@@ -15853,8 +15880,8 @@ pub(crate) fn path_free_exact(
         let aincr = 2 * (dx - dy);
         let bincr = 2 * dx;
         let mut x = x1;
-        if solid(x, y1) {
-            return false;
+        if blocked(x, y1) {
+            return Some(Vector2::new(x, y1));
         }
         for y in (y1 + 1)..=y2 {
             if d >= 0 {
@@ -15863,8 +15890,8 @@ pub(crate) fn path_free_exact(
             } else {
                 d += bincr;
             }
-            if solid(x, y) {
-                return false;
+            if blocked(x, y) {
+                return Some(Vector2::new(x, y));
             }
         }
     } else {
@@ -15879,8 +15906,8 @@ pub(crate) fn path_free_exact(
         let aincr = 2 * (dy - dx);
         let bincr = 2 * dy;
         let mut y = y1;
-        if solid(x1, y) {
-            return false;
+        if blocked(x1, y) {
+            return Some(Vector2::new(x1, y));
         }
         for x in (x1 + 1)..=x2 {
             if d >= 0 {
@@ -15889,12 +15916,12 @@ pub(crate) fn path_free_exact(
             } else {
                 d += bincr;
             }
-            if solid(x, y) {
-                return false;
+            if blocked(x, y) {
+                return Some(Vector2::new(x, y));
             }
         }
     }
-    true
+    None
 }
 
 fn shape_contact_check(
