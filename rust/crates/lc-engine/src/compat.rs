@@ -14111,6 +14111,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("IsRef", is_ref);
     script.register_host_function("GetType", get_type);
     script.register_host_function("CreateArray", create_array);
+    script.register_host_reference_function("Inc", [0], inc_reference);
     script.register_host_reference_function("Set", [0], set_reference);
     script.register_host_reference_function("SetLength", [0], set_length);
     script.register_host_function("GetLength", get_length);
@@ -15478,6 +15479,37 @@ fn equal(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
         (None, None) => true,
     };
     Ok(Value::Bool(result))
+}
+
+/// FnInc (C4Script.cpp:3770-3778): convert the referenced value to an
+/// integer, add the optional difference, and write and return the result.
+/// Failed target conversion returns nil without changing the reference.
+fn inc_reference(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
+    let target = args.first().ok_or_else(|| {
+        RuntimeError::new("call to \"Inc\" parameter 1: got \"nil\", but expected \"&\"!")
+    })?;
+    if !target.is_reference() {
+        return Err(RuntimeError::new(format!(
+            "call to \"Inc\" parameter 1: got \"{}\", but expected \"&\"!",
+            target.read()?.type_name()
+        )));
+    }
+
+    let Some(value) = target.read()?.as_c4_int() else {
+        return Ok(Value::Nil);
+    };
+    let difference = args
+        .get(1)
+        .map(HostCallArg::read)
+        .transpose()?
+        .unwrap_or(Value::Nil)
+        .as_c4_int()
+        .unwrap_or(0);
+    let result = Value::Int(value.wrapping_add(difference));
+    if !target.write(result.clone())? {
+        return Err(RuntimeError::new("Inc: variable reference expected"));
+    }
+    Ok(result)
 }
 
 /// FnSet (C4Script.cpp:3764-3768): assign through the first native
@@ -47096,6 +47128,7 @@ mod tests {
         "HideSettlementScoreInEvaluation",
         "Hostile",
         "InLiquid",
+        "Inc",
         "Incinerate",
         "IncinerateLandscape",
         "InitScenarioPlayer",

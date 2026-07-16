@@ -80,6 +80,33 @@ protected func Probe()
 }
 
 #[test]
+fn inc_builtin_mutates_integer_refs_and_preserves_unconvertible_refs() {
+    let result = call_probe(
+        "INCB",
+        r#"#strict 3
+protected func Probe()
+{
+    var value = 5;
+    var inc_result = Inc(value, 3);
+    var text = "unchanged";
+    var text_result = Inc(text, 3);
+    return [value, inc_result, text, text_result];
+}
+"#,
+    );
+
+    assert_eq!(
+        result,
+        Value::Array(vec![
+            Value::Int(8),
+            Value::Int(8),
+            Value::String("unchanged".to_string()),
+            Value::Nil,
+        ])
+    );
+}
+
+#[test]
 fn is_ref_matches_cpp_any_parameter_dereference() {
     let result = call_probe(
         "ISRF",
