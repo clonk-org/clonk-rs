@@ -49496,6 +49496,82 @@ global func PreInitializePlayer(int player)
     }
 
     #[test]
+    fn fire_potion_varn_rotation_loop_matches_cpp() {
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+        engine
+            .load_script(
+                r#"
+                #strict 3
+                func Probe() {
+                    var pitch = 90, yaw = 90, roll = 90;
+                    var zoom = 14;
+
+                    var point1x = -zoom, point1y = 0, point1z = 0;
+                    var point2x = +zoom, point2y = 0, point2z = 0;
+                    var point3x = 0, point3y = -zoom, point3z = 0;
+                    var point4x = 0, point4y = +zoom, point4z = 0;
+                    var point5x = 0, point5y = 0, point5z = +zoom;
+                    var point6x = 0, point6y = 0, point6z = -zoom;
+
+                    for (var i = 1; i <= 6; i++) {
+                        var tempx = VarN(Format("point%dx", i));
+                        var tempy = VarN(Format("point%dy", i));
+                        VarN(Format("point%dx", i)) = Cos(roll, tempx) - Sin(roll, tempy);
+                        VarN(Format("point%dy", i)) = Cos(roll, tempy) + Sin(roll, tempx);
+                    }
+                    for (var i = 1; i <= 6; i++) {
+                        var tempy = VarN(Format("point%dy", i));
+                        var tempz = VarN(Format("point%dz", i));
+                        VarN(Format("point%dy", i)) = Cos(pitch, tempy) - Sin(pitch, tempz);
+                        VarN(Format("point%dz", i)) = Cos(pitch, tempz) + Sin(pitch, tempy);
+                    }
+                    for (var i = 1; i <= 6; i++) {
+                        var tempx = VarN(Format("point%dx", i));
+                        var tempz = VarN(Format("point%dz", i));
+                        VarN(Format("point%dx", i)) = Cos(yaw, tempx) - Sin(yaw, tempz);
+                        VarN(Format("point%dz", i)) = Cos(yaw, tempz) + Sin(yaw, tempx);
+                    }
+
+                    return [
+                        point1x, point1y, point1z,
+                        point2x, point2y, point2z,
+                        point3x, point3y, point3z,
+                        point4x, point4y, point4z,
+                        point5x, point5y, point5z,
+                        point6x, point6y, point6z
+                    ];
+                }
+                "#,
+            )
+            .expect("reduced Fire potion rotation loop compiles");
+
+        assert_eq!(
+            engine.call("Probe", &[]).expect("Fire rotation loop runs"),
+            Value::Array(vec![
+                Value::Int(14),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(-14),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(14),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(-14),
+                Value::Int(0),
+                Value::Int(-14),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(14),
+                Value::Int(0),
+            ])
+        );
+    }
+
+    #[test]
     fn script_sin_and_cos_use_the_cpp_fixed_point_table() {
         // FnSin/FnCos convert the angle with itofix(angle, precision), use
         // C4Fixed's shared SineTable, then fixtoi(result, radius)
