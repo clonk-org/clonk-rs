@@ -63293,6 +63293,56 @@ func ProbeSkyColor() {
     }
 
     #[test]
+    fn set_sky_color_matches_cpp_and_ignores_other_indices() -> Result<(), EngineError> {
+        // FnSetSkyColor (C4Script.cpp:3046-3054) is an index-zero-only
+        // compatibility shim. Its writes are immediately visible to script
+        // and then persist through C4Sky::SetModulation.
+        let script = r#"#strict
+local noop_result, noop_mod, noop_back;
+local changed_result, changed_mod, changed_back;
+
+func ProbeSetSkyColor() {
+    noop_result = SetSkyColor(1, 200, 210, 220);
+    noop_mod = GetSkyAdjust();
+    noop_back = GetSkyAdjust(1);
+    changed_result = SetSkyColor(0, 96, 64, 200);
+    changed_mod = GetSkyAdjust();
+    changed_back = GetSkyAdjust(1);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut settings = SkySettings::default();
+        settings.fade_top = RgbColor::new(64, 128, 200);
+        settings.modulation = Some(0x0011_2233);
+        settings.back_color = None;
+        settings.back_color_raw = 0x0044_5566;
+        engine.set_sky(settings);
+        engine.register_definition(
+            Definition::from_script("SKYS", "Sky setter probe", script)
+                .expect("probe compiles"),
+        )?;
+        let object_id = engine.spawn_object(SpawnConfig::new("SKYS"))?;
+        let object_index = engine.find_object_index(object_id).expect("probe exists");
+        engine.call_object_function(object_index, "ProbeSetSkyColor", Vec::new())?;
+
+        let locals = &engine.object_snapshot(object_id).expect("probe remains").local_vars;
+        assert_eq!(locals.get("noop_result"), Some(&Value::Nil));
+        assert_eq!(locals.get("noop_mod"), Some(&Value::Int(0x0011_2233)));
+        assert_eq!(locals.get("noop_back"), Some(&Value::Int(0x0044_5566)));
+        assert_eq!(locals.get("changed_result"), Some(&Value::Nil));
+        assert_eq!(locals.get("changed_mod"), Some(&Value::Int(0x20ff_80ff)));
+        assert_eq!(locals.get("changed_back"), Some(&Value::Int(0x003f_42c8)));
+
+        let sky = engine.capture_state().sky.expect("sky state persists");
+        assert_eq!(sky.settings.fade_top, RgbColor::new(64, 128, 200));
+        assert_eq!(sky.settings.modulation, Some(0x20ff_80ff));
+        assert_eq!(sky.settings.back_color, Some(0x003f_42c8));
+        assert_eq!(sky.settings.back_color_raw, 0x003f_42c8);
+        Ok(())
+    }
+
+    #[test]
     fn captures_and_restores_engine_state() -> Result<(), EngineError> {
         let mut engine = Engine::with_seed(0xBAD_F00D);
         engine.set_physics(PhysicsSettings::new(2, 9, -6));

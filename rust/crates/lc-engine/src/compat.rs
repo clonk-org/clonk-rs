@@ -12699,6 +12699,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("ShakeObjects", shake_objects);
     script.register_host_function("SetSkyParallax", set_sky_parallax);
     script.register_host_function("SetSkyAdjust", set_sky_adjust);
+    script.register_host_function("SetSkyColor", set_sky_color);
     script.register_host_function("SetMatAdjust", set_mat_adjust);
     script.register_host_function("SetLandscapePixel", set_landscape_pixel);
     script.register_host_function("SetTextureIndex", set_texture_index);
@@ -24947,6 +24948,48 @@ fn set_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
         context.register_landscape_operation(LandscapeOperation::SkyAdjust {
             modulation,
             back_color,
+        });
+        Ok(Value::Nil)
+    })
+}
+
+/// FnSetSkyColor (C4Script.cpp:3046-3054): index zero maps the requested
+/// OldGfx RGB color onto FadeClr1 via GetClrModulation; other indices are
+/// silent no-ops.
+fn set_sky_color(args: &[Value]) -> Result<Value, RuntimeError> {
+    let index = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetSkyColor",
+        "index",
+    )?;
+    let target = RgbColor::new(
+        value_to_i32(args.get(1).unwrap_or(&Value::Nil), "SetSkyColor", "red")? as u8,
+        value_to_i32(
+            args.get(2).unwrap_or(&Value::Nil),
+            "SetSkyColor",
+            "green",
+        )? as u8,
+        value_to_i32(
+            args.get(3).unwrap_or(&Value::Nil),
+            "SetSkyColor",
+            "blue",
+        )? as u8,
+    );
+    if index != 0 {
+        return Ok(Value::Nil);
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetSkyColor requires an active engine context"))?;
+        let adjustment =
+            SkyAdjustment::from_color_modulation(context.world.sky_fade[0], target);
+        context.sky_adjustment = adjustment;
+        context.register_landscape_operation(LandscapeOperation::SkyAdjust {
+            modulation: adjustment.modulation,
+            back_color: adjustment.back_color,
         });
         Ok(Value::Nil)
     })
@@ -44952,6 +44995,7 @@ mod tests {
         "SetSeason",
         "SetShape",
         "SetSkyAdjust",
+        "SetSkyColor",
         "SetSkyParallax",
         "SetSolidMask",
         "SetTemperature",

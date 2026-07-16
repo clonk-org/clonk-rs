@@ -129,6 +129,43 @@ impl SkyAdjustment {
             },
         }
     }
+
+    /// `GetClrModulation` (StdColors.h:245-278): derive the packed sky
+    /// modulation/back-mask pair that transforms `source` into `target`.
+    pub(crate) fn from_color_modulation(source: RgbColor, target: RgbColor) -> Self {
+        let diff_r = i32::from(target.r) - i32::from(source.r);
+        let diff_g = i32::from(target.g) - i32::from(source.g);
+        let diff_b = i32::from(target.b) - i32::from(source.b);
+        let alpha = diff_r.max(diff_g).max(diff_b).max(0);
+
+        let combine = |source: u8, target: u8| -> u32 {
+            (u32::from(target) * 256 / u32::from(source).max(1)).min(0xff)
+        };
+        let modulation = ((alpha as u32) << 24)
+            | (combine(source.r, target.r) << 16)
+            | (combine(source.g, target.g) << 8)
+            | combine(source.b, target.b);
+
+        let back_color = if alpha > 0 {
+            let back = |base: u8, component_diff: i32| -> u32 {
+                (i32::from(base) + component_diff * 0xff / alpha) as u8 as u32
+            };
+            // Current C++ starts green from dstG rather than srcG. Preserve
+            // that observable legacy quirk exactly (StdColors.h:262).
+            (back(source.r, diff_r) << 16)
+                | (back(target.g, diff_g) << 8)
+                | back(source.b, diff_b)
+        } else {
+            // Native `back` is uninitialized in this branch, but modulation
+            // alpha zero disables the back fill. Use a deterministic raw zero.
+            0
+        };
+
+        Self {
+            modulation,
+            back_color,
+        }
+    }
 }
 
 impl Default for SkyAdjustment {
