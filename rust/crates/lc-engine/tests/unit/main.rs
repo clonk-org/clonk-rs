@@ -25890,6 +25890,78 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
     }
 
     #[test]
+    fn zero_obj_hit_energy_runs_the_head_damage_effect_once_like_cpp() {
+        // C4Effect::DoDamage is a do/while (C4Effect.cpp:427-437): an
+        // initial zero still visits the list head once. EngObjHit is the
+        // documented zero-change DoEnergy case and records its striker
+        // before the effect turns that zero into a real raw-energy change.
+        let script = r#"#strict
+local iDamageCalls, iSeenChange, iSeenCause, iSeenBy;
+public func Arm()
+{
+  iDamageCalls = 0;
+  return AddEffect("Amplifier", this(), 100, 0, this());
+}
+func FxAmplifierDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
+{
+  iDamageCalls = iDamageCalls + 1;
+  iSeenChange = iChange + 1;
+  iSeenCause = iCause;
+  iSeenBy = iCausedBy;
+  return -1000;
+}
+"#;
+        let mut definition =
+            Definition::from_script("PING", "Zero-hit amplifier", script)
+                .expect("definition compiles");
+        definition.set_category(CATEGORY_LIVING);
+        definition.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(144);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("PING")
+                    .with_category(CATEGORY_LIVING)
+                    .with_alive(true)
+                    .with_energy(50_000),
+            )
+            .expect("object spawns");
+        let index = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine
+                .call_object_function(index, "Arm", Vec::new())
+                .expect("effect installs"),
+            Value::Int(1)
+        );
+
+        engine
+            .change_object_energy(index, 0, C4FX_CALL_ENG_OBJ_HIT, 9)
+            .expect("zero-hit DoEnergy succeeds");
+
+        let index = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[index].state.energy, 49_000);
+        assert_eq!(engine.objects[index].last_energy_loss_cause, 9);
+        let locals = &engine.objects[index].state.local_vars;
+        assert_eq!(locals.get("iDamageCalls"), Some(&Value::Int(1)));
+        assert_eq!(
+            locals.get("iSeenChange"),
+            Some(&Value::Int(1)),
+            "the callback received C4Script's falsy zero change"
+        );
+        assert_eq!(
+            locals.get("iSeenCause"),
+            Some(&Value::Int(C4FX_CALL_ENG_OBJ_HIT))
+        );
+        assert_eq!(locals.get("iSeenBy"), Some(&Value::Int(9)));
+    }
+
+    #[test]
     fn do_energy_clamps_to_physical_energy_ceiling() {
         let script = r#"
         global func Initialize(state, random) {
