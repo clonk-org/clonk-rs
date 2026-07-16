@@ -61,6 +61,42 @@ protected func InputCallback(string answer, int player)
 }
 "#;
 
+const GLOBAL_QUERY_SCRIPT: &str = r#"#strict 2
+func OpenGlobal(int player)
+{
+    CallMessageBoard(0, false, "global query", player);
+}
+
+func AnswerGlobal(string answer, int player)
+{
+    if (!OnMessageBoardAnswer(0, player, answer)) SetGravity(88);
+}
+
+func ClearGlobal(int player)
+{
+    if (!OnMessageBoardAnswer(0, player)) SetGravity(99);
+}
+
+func AnswerGlobalEmpty(int player)
+{
+    if (!OnMessageBoardAnswer(0, player, "")) SetGravity(77);
+}
+
+protected func InputCallback(string answer, int player)
+{
+    SetGravity(100 + GetLength(answer) + player);
+    return 1;
+}
+"#;
+
+const ENGINE_GLOBAL_CALLBACK_SCRIPT: &str = r#"#strict 2
+global func InputCallback(string answer, int player)
+{
+    SetGravity(313);
+    return 1;
+}
+"#;
+
 fn fixture() -> (Engine, ObjectId, ObjectId) {
     let mut engine = Engine::new();
     engine
@@ -486,6 +522,141 @@ fn message_board_answer_reaches_the_target_input_callback_exactly_once() {
         Some(&Value::Int(1)),
         "the rejected doubled answer must not invoke InputCallback again"
     );
+}
+
+#[test]
+fn ownerless_answer_dispatches_game_script_and_no_answer_only_clears_query() {
+    let (mut engine, _, driver) = fixture();
+    engine
+        .install_scenario_script_with_convention(
+            "Message-board global query",
+            GLOBAL_QUERY_SCRIPT,
+            true,
+        )
+        .expect("the global query scenario script installs");
+    assert_eq!(
+        engine.install_global_scripts(&[(
+            "MessageBoardGlobal.c".into(),
+            ENGINE_GLOBAL_CALLBACK_SCRIPT.into(),
+        )]),
+        1,
+        "the engine-global fallback probe installs"
+    );
+    let call_global = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+        engine
+            .call_scenario_script_function(name, args)
+            .unwrap_or_else(|error| panic!("{name} succeeds: {error}"))
+    };
+
+    call_global(&mut engine, "OpenGlobal", vec![Value::Int(PLAYER)]);
+    assert_eq!(
+        engine
+            .player(PLAYER)
+            .expect("message-board player remains")
+            .message_board_queries()
+            .len(),
+        1
+    );
+    call_global(
+        &mut engine,
+        "AnswerGlobal",
+        vec![Value::String("global answer".into()), Value::Int(PLAYER)],
+    );
+    assert!(engine
+        .player(PLAYER)
+        .expect("message-board player remains")
+        .message_board_queries()
+        .is_empty());
+    assert_eq!(
+        engine.physics().gravity,
+        114,
+        "Game.Script InputCallback receives the 13-byte answer and player 1"
+    );
+
+    call_global(
+        &mut engine,
+        "AnswerGlobal",
+        vec![Value::String("duplicate".into()), Value::Int(PLAYER)],
+    );
+    assert_eq!(
+        engine.physics().gravity,
+        88,
+        "the consumed ownerless query returns false on a doubled answer"
+    );
+
+    call_global(&mut engine, "OpenGlobal", vec![Value::Int(PLAYER)]);
+    call_global(&mut engine, "ClearGlobal", vec![Value::Int(PLAYER)]);
+    assert!(engine
+        .player(PLAYER)
+        .expect("message-board player remains")
+        .message_board_queries()
+        .is_empty());
+    assert_eq!(
+        engine.physics().gravity,
+        88,
+        "an omitted answer clears the query without another callback"
+    );
+
+    call_global(&mut engine, "OpenGlobal", vec![Value::Int(PLAYER)]);
+    call_global(&mut engine, "AnswerGlobalEmpty", vec![Value::Int(PLAYER)]);
+    assert!(engine
+        .player(PLAYER)
+        .expect("message-board player remains")
+        .message_board_queries()
+        .is_empty());
+    assert_eq!(
+        engine.physics().gravity,
+        101,
+        "an explicit empty string still reaches Game.Script InputCallback"
+    );
+
+    engine
+        .register_definition(
+            Definition::from_script("MBQN", "Message-board no-callback probe", "#strict 2\n")
+                .expect("no-callback probe compiles"),
+        )
+        .expect("no-callback probe registers");
+    let no_callback_target = engine
+        .spawn_object(SpawnConfig::new("MBQN"))
+        .expect("no-callback probe spawns");
+    assert_eq!(
+        call(
+            &mut engine,
+            driver,
+            "OpenFor",
+            vec![
+                Value::Object(no_callback_target.as_u64()),
+                Value::Bool(false),
+                Value::String("object-local callback only".into()),
+                Value::Int(PLAYER),
+            ],
+        ),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        call(
+            &mut engine,
+            driver,
+            "Answer",
+            vec![
+                Value::Object(no_callback_target.as_u64()),
+                Value::String("no global fallback".into()),
+                Value::Int(PLAYER),
+            ],
+        ),
+        Value::Bool(false),
+        "an object without InputCallback does not fall back to Game.Script"
+    );
+    assert_eq!(
+        engine.physics().gravity,
+        101,
+        "the engine-global callback is not considered for an object-owned query"
+    );
+    assert!(engine
+        .player(PLAYER)
+        .expect("message-board player remains")
+        .message_board_queries()
+        .is_empty());
 }
 
 #[test]

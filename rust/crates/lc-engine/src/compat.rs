@@ -3905,7 +3905,8 @@ fn abort_message_board(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 /// `FnOnMessageBoardAnswer` (C4Script.cpp:3599-3613): consume exactly one
-/// query before dispatching `InputCallback(answer, player)`.
+/// query before dispatching `InputCallback(answer, player)`. An omitted/null
+/// answer only clears the query, while an explicit empty string is delivered.
 fn on_message_board_answer(args: &[Value]) -> Result<Value, RuntimeError> {
     let target = parse_object_reference_argument(
         args.first().unwrap_or(&Value::Nil),
@@ -3917,8 +3918,7 @@ fn on_message_board_answer(args: &[Value]) -> Result<Value, RuntimeError> {
         "OnMessageBoardAnswer",
         "player",
     )?;
-    let answer =
-        parse_optional_string(args.get(2), "OnMessageBoardAnswer", "answer")?.unwrap_or_default();
+    let answer = parse_optional_string(args.get(2), "OnMessageBoardAnswer", "answer")?;
 
     let removed = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -3939,13 +3939,13 @@ fn on_message_board_answer(args: &[Value]) -> Result<Value, RuntimeError> {
     if !removed {
         return Ok(Value::Bool(false));
     }
-    if answer.is_empty() {
+    let Some(answer) = answer else {
         return Ok(Value::Bool(true));
-    }
+    };
 
     let callback_args = [Value::String(answer), Value::Int(player_id)];
     let callback = match target {
-        Some(target) => call_world_object_script_function(target, "InputCallback", &callback_args),
+        Some(target) => call_world_object_own_function(target, "InputCallback", &callback_args),
         None => {
             let script = HOST_CONTEXT.with(|cell| {
                 cell.borrow()
