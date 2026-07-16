@@ -52754,6 +52754,72 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
     }
 
     #[test]
+    fn layer_border_bound_uses_half_construction_live_shape() {
+        // Mirrors src/C4Movement.cpp:185-196 with a stretch-growth layer at
+        // Con=50%. C++ UpdateShape scales (-2,-2,12,12) to (-1,-1,6,6), so
+        // the non-static right bound is 20-1+6+0=25. Using the definition
+        // rect instead would produce 30 and let the mover travel too far.
+        let mut layer_definition = simple_definition("HalfLayer");
+        layer_definition.set_shape_rect(Some(DefinitionRect::new(-2, -2, 12, 12)));
+        layer_definition.set_stretch_growth(true);
+        layer_definition.set_border_bound(C4D_BORDER_LAYER);
+
+        let mut mover_definition = simple_definition("HalfLayerMover");
+        mover_definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        mover_definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+
+        let mut engine = Engine::with_seed(129);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine
+            .register_definition(layer_definition)
+            .expect("layer definition registers");
+        engine
+            .register_definition(mover_definition)
+            .expect("mover definition registers");
+
+        let layer_id = engine
+            .spawn_object(
+                SpawnConfig::new("HalfLayer")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(20, 10))
+                    .with_construction(FULL_CON / 2),
+            )
+            .expect("layer spawns");
+        assert_eq!(
+            engine.object_current_shape_rect(layer_id),
+            Some(DefinitionRect::new(-1, -1, 6, 6))
+        );
+
+        let mover_id = engine
+            .spawn_object(
+                SpawnConfig::new("HalfLayerMover")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(24, 10))
+                    .with_layer(layer_id),
+            )
+            .expect("mover spawns");
+        let idx = engine.find_object_index(mover_id).expect("mover exists");
+        engine.objects[idx]
+            .set_fixed_velocity(FixedVec2::new(itofix(5), C4Fixed::ZERO));
+        engine.objects[idx].state.mobile = true;
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        assert_eq!(
+            snapshot.object(mover_id).expect("mover present").position.x,
+            25
+        );
+
+        let idx = engine.find_object_index(mover_id).expect("mover exists");
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(29));
+        assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
+    }
+
+    #[test]
     fn inverted_layer_bounds_clamp_low_then_high_like_cpp() {
         use std::sync::{Arc, Mutex};
 
