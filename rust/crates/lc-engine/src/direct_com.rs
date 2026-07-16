@@ -11864,6 +11864,58 @@ protected func ControlCommand(command, target, tx, ty, target2, data, seventh) {
     }
 
     #[test]
+    fn non_rebuyable_sell_still_syncs_the_base_owners_material_list() {
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 2);
+        engine.set_teams(vec![
+            crate::TeamInfo::new(1, "Team", 0).with_player_ids(vec![1, 2]),
+        ]);
+        engine
+            .set_player_team(1, Some(1))
+            .expect("seller joins team");
+        engine
+            .set_player_team(2, Some(1))
+            .expect("base owner joins team");
+        engine.set_team_home_base_rule(true);
+
+        let mut item =
+            Definition::from_script("ITEM", "Item", "#strict 2\n").expect("item compiles");
+        item.set_value(5);
+        engine.register_definition(item).expect("register item");
+        engine
+            .player_mut(1)
+            .expect("seller remains")
+            .set_home_base_material_entries(vec![("OLD1".into(), 9)]);
+        engine
+            .player_mut(2)
+            .expect("base owner remains")
+            .set_home_base_material_entries(vec![("KEEP".into(), 3)]);
+        let sold = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(hut))
+            .expect("spawn item");
+
+        execute_sell_command(&mut engine, crew, hut, "ITEM", 1);
+
+        assert!(
+            engine
+                .object_snapshot(sold)
+                .is_none_or(|object| !object.status.is_active()),
+            "the non-Rebuyable item is still sold"
+        );
+        assert_eq!(engine.player(2).expect("base owner remains").wealth(), 5);
+        for player in [1, 2] {
+            assert_eq!(
+                engine
+                    .player(player)
+                    .expect("team member remains")
+                    .home_base_material_entries(),
+                &[("KEEP".into(), 3)],
+                "a valid SellTo definition always runs team material sync"
+            );
+        }
+    }
+
+    #[test]
     fn explicit_buy_obeys_the_global_buy_gate() {
         // C4Command::Buy checks BASEFUNC_Buy before either its implicit or
         // explicit-target paths. In particular, an explicit target must not
@@ -12061,12 +12113,18 @@ public func Purchase(int player, object base)
         let mut engine = Engine::new();
         register_clonk(&mut engine, "CLNK", "#strict 2\n");
         let hut_script = r#"#strict 2
-local sale_order, sale_players;
+local sale_order, sale_players, lifecycle_order;
 protected func CalcSellValue(object item, int value) { return value + 1; }
 public func RecordSale(int marker, int player)
 {
     sale_order = sale_order * 10 + marker;
     sale_players = sale_players * 10 + player;
+    lifecycle_order = lifecycle_order * 10 + marker;
+    return true;
+}
+public func RecordDestruction(int marker)
+{
+    lifecycle_order = lifecycle_order * 10 + marker + 2;
     return true;
 }
 "#;
@@ -12103,6 +12161,7 @@ public func CalcValue(object base, int player)
 }}
 public func SellTo(int player) {{ return RMAP; }}
 public func Sale(int player) {{ return sale_base->RecordSale({marker}, player); }}
+protected func Destruction() {{ return sale_base->RecordDestruction({marker}); }}
 "#
             )
         };
@@ -12170,6 +12229,11 @@ public func Sale(int player) {{ return sale_base->RecordSale({marker}, player); 
         let locals = &engine.objects[hut_index].state.local_vars;
         assert_eq!(locals.get("sale_order"), Some(&Value::Int(1212)));
         assert_eq!(locals.get("sale_players"), Some(&Value::Int(2222)));
+        assert_eq!(
+            locals.get("lifecycle_order"),
+            Some(&Value::Int(13_241_324)),
+            "each child and parent fires Sale immediately before Destruction"
+        );
         for sold in [child1, parent1, child2, parent2] {
             assert!(
                 engine.find_object_index(sold).is_none_or(|index| {
@@ -12241,7 +12305,43 @@ public func Sale(int player) {{ return sale_base->RecordSale({marker}, player); 
     }
 
     #[test]
-    fn auto_sell_checks_elimination_before_exiting_the_candidate() {
+    fn sell_refuses_hostile_and_surrendered_base_owners_without_side_effects() {
+        let mut engine = Engine::new();
+        let (crew, hut) = contained_base_fixture(&mut engine, 2);
+        let mut item =
+            Definition::from_script("ITEM", "Item", "#strict 2\n").expect("item compiles");
+        item.set_value(20);
+        item.set_rebuyable(true);
+        engine.register_definition(item).expect("register item");
+        let item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(hut))
+            .expect("spawn item");
+
+        let assert_unchanged = |engine: &Engine| {
+            let item = engine.object_snapshot(item).expect("item remains");
+            assert!(item.status.is_active());
+            assert_eq!(item.container, Some(hut));
+            let owner = engine.player(2).expect("base owner remains");
+            assert_eq!(owner.wealth(), 0);
+            assert!(owner.home_base_material().is_empty());
+        };
+
+        engine.set_hostility(1, 2, true).expect("set hostility");
+        execute_sell_command(&mut engine, crew, hut, "ITEM", 1);
+        assert_unchanged(&engine);
+
+        engine
+            .set_hostility(1, 2, false)
+            .expect("clear hostility");
+        engine
+            .set_player_surrendered(2, true)
+            .expect("surrender base owner");
+        execute_sell_command(&mut engine, crew, hut, "ITEM", 1);
+        assert_unchanged(&engine);
+    }
+
+    #[test]
+    fn auto_sell_checks_elimination_and_surrender_before_exiting_the_candidate() {
         let mut engine = Engine::new();
         engine
             .register_definition(
@@ -12272,6 +12372,20 @@ public func Sale(int player) {{ return sale_base->RecordSale({marker}, player); 
             .expect("eliminated auto-sell check succeeds");
 
         let gold = engine.object_snapshot(gold).expect("gold remains");
+        assert!(gold.status.is_active());
+        assert_eq!(gold.container, Some(hut));
+
+        engine
+            .set_player_status(1, PlayerStatus::Active)
+            .expect("reactivate player");
+        engine
+            .set_player_surrendered(1, true)
+            .expect("surrender player");
+        engine
+            .auto_sell_base_contents(hut_index, 1)
+            .expect("surrendered auto-sell check succeeds");
+
+        let gold = engine.object_snapshot(gold.id).expect("gold still remains");
         assert!(gold.status.is_active());
         assert_eq!(gold.container, Some(hut));
     }

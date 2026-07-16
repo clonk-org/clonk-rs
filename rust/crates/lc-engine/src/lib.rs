@@ -30269,6 +30269,9 @@ impl Engine {
                 } => {
                     self.adjust_player_home_base_material(player_id, definition_id, delta)?;
                 }
+                PlayerCommand::SyncHomeBaseMaterialToTeam { player_id } => {
+                    self.sync_team_home_base_from_player(player_id);
+                }
                 PlayerCommand::AdjustHomeBaseProduction {
                     player_id,
                     definition_id,
@@ -37810,7 +37813,12 @@ impl Engine {
     fn player_can_sell_objects(&self, player: i32) -> bool {
         self.players
             .get(&player)
-            .is_some_and(|player| player.status() != PlayerStatus::Eliminated)
+            .is_some_and(|player| {
+                !matches!(
+                    player.status(),
+                    PlayerStatus::Eliminated | PlayerStatus::Surrendered
+                ) && !player.surrendered()
+            })
     }
 
     fn object_is_base_auto_sell(&self, object_id: ObjectId) -> bool {
@@ -43344,7 +43352,12 @@ impl Engine {
             || self
                 .players
                 .get(&base_owner)
-                .is_none_or(|player| player.status() == PlayerStatus::Eliminated)
+                .is_none_or(|player| {
+                    matches!(
+                        player.status(),
+                        PlayerStatus::Eliminated | PlayerStatus::Surrendered
+                    ) || player.surrendered()
+                })
             || self.players_hostile(seller, base_owner)
         {
             return None;

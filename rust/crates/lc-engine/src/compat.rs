@@ -625,6 +625,10 @@ pub enum PlayerCommand {
         definition_id: DefinitionId,
         delta: i32,
     },
+    /// `C4Player::SyncHomebaseMaterialToTeam` without a preceding list
+    /// mutation. Sell2Home still performs this sync for a valid mapped
+    /// non-Rebuyable definition that has no existing material entry.
+    SyncHomeBaseMaterialToTeam { player_id: i32 },
     AdjustHomeBaseProduction {
         player_id: i32,
         definition_id: DefinitionId,
@@ -8737,12 +8741,53 @@ fn can_sell_object_live(target: ObjectId, player: i32) -> bool {
         };
         let player_active = context
             .player_state(player)
-            .is_some_and(|state| state.status != crate::PlayerStatus::Eliminated);
+            .is_some_and(|state| {
+                !matches!(
+                    state.status,
+                    crate::PlayerStatus::Eliminated | crate::PlayerStatus::Surrendered
+                ) && !state.surrendered
+            });
         player_active
             && context.get_world_object(target).is_some_and(|object| {
                 object.is_present() && object.ocf() & ocf::CREW_MEMBER == 0
             })
     })
+}
+
+fn sync_homebase_material_to_team_live(player: i32) {
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        if !context.team_home_base_rule() {
+            return;
+        }
+        let Some((team, material)) = context.player_state(player).and_then(|state| {
+            state
+                .team
+                .map(|team| (team, state.exact_home_base_material_entries()))
+        }) else {
+            return;
+        };
+        let teammates = context
+            .player_ids()
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                *candidate != player
+                    && context.player_state(*candidate).and_then(|state| state.team) == Some(team)
+            })
+            .collect::<Vec<_>>();
+        for teammate in teammates {
+            if let Some(state) = context.player_state_mut(teammate) {
+                state.set_home_base_material_entries(material.clone());
+            }
+        }
+        context.record_player_command(PlayerCommand::SyncHomeBaseMaterialToTeam {
+            player_id: player,
+        });
+    });
 }
 
 pub(super) fn sell_object_to_home_live(
@@ -8842,16 +8887,19 @@ pub(super) fn sell_object_to_home_live(
         }
     };
     if let Some(definition) = stock_definition {
-        let should_stock = HOST_CONTEXT.with(|cell| {
+        let (valid_definition, should_stock) = HOST_CONTEXT.with(|cell| {
             let borrow = cell.borrow();
             let Some(context) = borrow.as_ref() else {
-                return false;
+                return (false, false);
             };
-            context.world.definition_known(definition.as_str()) != Some(false)
+            let valid_definition =
+                context.world.definition_known(definition.as_str()) != Some(false);
+            let should_stock = valid_definition
                 && (context.world.definition_rebuyable(definition.as_str())
                     || context
                         .player_state(player)
-                        .is_some_and(|state| state.home_base_material.contains_key(&definition)))
+                        .is_some_and(|state| state.home_base_material.contains_key(&definition)));
+            (valid_definition, should_stock)
         });
         if should_stock {
             let _ = do_homebase_material(&[
@@ -8859,6 +8907,8 @@ pub(super) fn sell_object_to_home_live(
                 Value::C4Id(definition.as_str().to_owned()),
                 Value::Int(1),
             ])?;
+        } else if valid_definition {
+            sync_homebase_material_to_team_live(player);
         }
     }
 
@@ -29248,7 +29298,11 @@ fn preview_evaluate_sell(
                 context.player_state(seller)?,
                 context.player_state(base_owner)?,
             );
-            if base_player.status == crate::PlayerStatus::Eliminated {
+            if matches!(
+                base_player.status,
+                crate::PlayerStatus::Eliminated | crate::PlayerStatus::Surrendered
+            ) || base_player.surrendered
+            {
                 return None;
             }
             let hostile = seller != base_owner
