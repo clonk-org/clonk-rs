@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{hash_map::Entry, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::rc::Rc;
@@ -1286,6 +1286,12 @@ pub struct HostWorldContext {
     /// `C4GameParameters::isLeague`: league games forbid every scripted
     /// team switch, including an otherwise successful same-team no-op.
     league_game: bool,
+    /// Process-local `Application.iGameTickDelay`. Script callbacks share
+    /// the live cell so SetGameSpeed takes effect synchronously like C++.
+    game_tick_delay_ms: Rc<Cell<u64>>,
+    /// Replaced with a fresh token on every successful SetGameSpeed, including
+    /// equal-delay calls, because C++ unconditionally restarts its timer.
+    game_tick_delay_revision: Rc<Cell<u64>>,
     /// Complete live `Game.Teams` configuration. Empty team lists cannot be
     /// used to infer these flags because present-empty and missing Teams.txt
     /// take different C++ paths.
@@ -1411,6 +1417,8 @@ impl Default for HostWorldContext {
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
             league_game: false,
+            game_tick_delay_ms: Rc::new(Cell::new(crate::DEFAULT_GAME_TICK_DELAY_MS)),
+            game_tick_delay_revision: Rc::new(Cell::new(0)),
             team_configuration: TeamConfiguration::default(),
             network_game: false,
             max_players: 0,
@@ -1648,6 +1656,8 @@ impl HostWorldContext {
             team_home_base_rule,
             needed_material_strings: Rc::new(crate::NeededMaterialStrings::default()),
             league_game: false,
+            game_tick_delay_ms: Rc::new(Cell::new(crate::DEFAULT_GAME_TICK_DELAY_MS)),
+            game_tick_delay_revision: Rc::new(Cell::new(0)),
             team_configuration: TeamConfiguration::default(),
             network_game: false,
             max_players: 0,
@@ -1791,6 +1801,22 @@ impl HostWorldContext {
 
     fn league_game(&self) -> bool {
         self.league_game
+    }
+
+    pub(crate) fn with_game_tick_delay(
+        mut self,
+        delay: Rc<Cell<u64>>,
+        revision: Rc<Cell<u64>>,
+    ) -> Self {
+        self.game_tick_delay_ms = delay;
+        self.game_tick_delay_revision = revision;
+        self
+    }
+
+    fn restart_game_tick_delay_ms(&self, delay: u64) {
+        self.game_tick_delay_ms.set(delay);
+        self.game_tick_delay_revision
+            .set(crate::next_game_tick_delay_revision());
     }
 
     fn auto_generate_teams(&self) -> bool {
@@ -12619,6 +12645,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetPlrView", set_plr_view);
     script.register_host_function("GetPlrViewMode", get_plr_view_mode);
     script.register_host_function("GetPlrView", get_plr_view);
+    script.register_host_function("SetGameSpeed", set_game_speed);
     script.register_host_function("SetPreSend", set_pre_send);
     script.register_host_function("FrameCounter", frame_counter);
     script.register_host_function("LandscapeWidth", landscape_width);
@@ -37547,6 +37574,40 @@ fn set_view_offset(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnSetGameSpeed (C4Script.cpp:5219-5231): a zero/unfilled speed restores
+/// the legacy 38 FPS default, nonzero values must be in 1..=1000, and league
+/// games reject calls whose caller is a DirectExec temporary script.
+fn set_game_speed(args: &[Value]) -> Result<Value, RuntimeError> {
+    let requested = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetGameSpeed",
+        "speed",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Bool(false));
+        };
+        if context.world.league_game()
+            && lc_script::caller_is_temporary_script() != Some(false)
+        {
+            return Ok(Value::Bool(false));
+        }
+        let speed = if requested == 0 {
+            38
+        } else if (1..=1000).contains(&requested) {
+            requested
+        } else {
+            return Ok(Value::Bool(false));
+        };
+        context
+            .world
+            .restart_game_tick_delay_ms((1000 / speed) as u64);
+        Ok(Value::Bool(true))
+    })
+}
+
 /// FnSetPreSend (C4Script.cpp:5695-5709): negative values fail before the
 /// network test, while every nonnegative offline call succeeds without
 /// inspecting the optional client-name filter. The network mutation owns a
@@ -44951,6 +45012,7 @@ mod tests {
         "SetDir",
         "SetEntrance",
         "SetFoW",
+        "SetGameSpeed",
         "SetGamma",
         "SetGraphics",
         "SetGravity",

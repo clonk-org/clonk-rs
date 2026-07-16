@@ -182,6 +182,9 @@ pub(crate) struct ScriptCallerContext {
     /// source-sensitive native conversions and script-function parameter
     /// conversion. Includes/appends retain source strictness here.
     origin_strict_level: Option<u8>,
+    /// `C4AulScript::TemporaryScript` on the immediate caller frame.
+    /// DirectExec/eval expressions set this; ordinary function calls do not.
+    temporary_script: bool,
 }
 
 /// Process-local identity of one compiled script host. It is meaningful only
@@ -258,6 +261,17 @@ pub fn caller_host_identity() -> Option<ScriptHostIdentity> {
 /// invocation with no suspended script caller.
 pub fn caller_uses_engine_scope() -> Option<bool> {
     HOST_CALLER_CONTEXT.with(|cell| cell.borrow().as_ref().map(|context| context.engine_scope))
+}
+
+/// Whether the script frame immediately calling the current native host
+/// function is a C4Aul DirectExec/eval temporary script. `None` means the
+/// native was entered without a suspended script caller.
+pub fn caller_is_temporary_script() -> Option<bool> {
+    HOST_CALLER_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| context.temporary_script)
+    })
 }
 
 /// The calling script function's numbered `Var(n)` slots, exposed to host
@@ -1811,6 +1825,7 @@ impl<'a> Vm<'a> {
             return Ok((Value::Nil, object_state.to_local_vars(self.var_decls)));
         };
         let mut env = Environment::new_with_params(&[], &[], strict_level, object_state.clone())?;
+        env.temporary_script = true;
         for var_decl in self.var_decls {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
@@ -1835,6 +1850,7 @@ impl<'a> Vm<'a> {
         };
         let mut env =
             Environment::new_with_params(&[], &[], strict_level, cells.state.clone())?;
+        env.temporary_script = true;
         for var_decl in self.var_decls {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
@@ -2963,6 +2979,7 @@ impl<'a> Vm<'a> {
                                 env.strict_level,
                                 env.object_state.clone(),
                             )?;
+                            exec_env.temporary_script = true;
                             for var_decl in self.var_decls {
                                 let cell = exec_env.object_state.named_local_cell(&var_decl.name);
                                 exec_env.define_object_local(
@@ -4508,6 +4525,7 @@ impl<'a> Vm<'a> {
                     ObjectState::default(),
                 )?;
                 exec_env.engine_scope = true;
+                exec_env.temporary_script = true;
                 self.evaluate_tracked(&expr, &mut exec_env, depth + 1)
                     .map(ReturnValue::Value)
             }
@@ -6292,6 +6310,9 @@ struct Environment {
     /// `LinkedTo` script. This is enabled only when the VM is that exact
     /// retained host; otherwise execution remains engine-table-only.
     linked_host_lookup: bool,
+    /// DirectExec/eval expression frames are backed by temporary scripts;
+    /// ordinary function invocation leaves this false.
+    temporary_script: bool,
 }
 
 impl Environment {
@@ -6338,6 +6359,7 @@ impl Environment {
             function_name: String::new(),
             engine_scope: false,
             linked_host_lookup: false,
+            temporary_script: false,
         })
     }
 
@@ -6348,6 +6370,7 @@ impl Environment {
             engine_scope: self.engine_scope,
             owner_strict_level: self.caller_owner_strict_level,
             origin_strict_level: self.strict_level,
+            temporary_script: self.temporary_script,
         }
     }
 

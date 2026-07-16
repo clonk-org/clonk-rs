@@ -175,6 +175,7 @@ use winit::window::{Fullscreen, Window, WindowBuilder};
 const PLAYER_OWNER: i32 = 1;
 const STARTUP_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const INGAME_FRAME_INTERVAL: Duration = Duration::from_millis(28);
+const MAX_REFRESH_INTERVAL: Duration = Duration::from_millis(30);
 const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp backlog to avoid runaway catch-up
 const GAME_SECOND_INTERVAL: Duration = Duration::from_secs(1);
 const FALLBACK_SCENARIO_TITLE: &str = "Rust Sandbox";
@@ -4521,7 +4522,11 @@ fn main() -> Result<()> {
     let mut previous_instant = Instant::now();
     let mut accumulator = Duration::ZERO;
     let mut game_clock_accumulator = Duration::ZERO;
-    let mut frame_interval = frame_interval_for_mode(app.mode);
+    let mut frame_schedule = frame_schedule_for_mode(
+        app.mode,
+        app.engine.game_tick_delay_ms(),
+        app.engine.game_tick_delay_revision(),
+    );
 
     event_loop.run(move |event, _, control_flow| {
         match event {
@@ -4570,13 +4575,15 @@ fn main() -> Result<()> {
                 // (C4Application.cpp:510-531; C4Game.cpp:443).
                 accumulate_frame_time_for_mode(
                     app.mode,
-                    &mut frame_interval,
+                    app.engine.game_tick_delay_ms(),
+                    app.engine.game_tick_delay_revision(),
+                    &mut frame_schedule,
                     &mut accumulator,
                     frame_time,
                 );
 
-                while accumulator >= frame_interval {
-                    let executed_interval = frame_interval;
+                while accumulator >= frame_schedule.simulation_interval {
+                    let executed_interval = frame_schedule.simulation_interval;
                     if let Err(err) = app.update() {
                         // Script errors during the simulation tick show in
                         // the log and the game keeps running, like the C++
@@ -4593,20 +4600,30 @@ fn main() -> Result<()> {
                     accumulator -= executed_interval;
                     did_update = true;
 
-                    if synchronize_frame_interval(
+                    if synchronize_frame_schedule(
                         app.mode,
-                        &mut frame_interval,
+                        app.engine.game_tick_delay_ms(),
+                        app.engine.game_tick_delay_revision(),
+                        &mut frame_schedule,
                         &mut accumulator,
                     ) {
                         break;
                     }
                 }
 
-                if did_update {
+                if did_update
+                    || (app.mode == AppMode::Running
+                        && frame_schedule.refresh_interval
+                            < frame_schedule.simulation_interval)
+                {
                     window.request_redraw();
                 }
 
-                let wait_duration = frame_interval.saturating_sub(accumulator);
+                let wait_duration = frame_schedule.refresh_interval.min(
+                    frame_schedule
+                        .simulation_interval
+                        .saturating_sub(accumulator),
+                );
                 *control_flow = ControlFlow::WaitUntil(now + wait_duration);
             }
             Event::RedrawRequested(id) if id == window.id() => {
@@ -8361,36 +8378,87 @@ fn classic_object_menu_error(kind: ClassicObjectMenuBoundary) -> EngineError {
     ))
 }
 
-fn frame_interval_for_mode(mode: AppMode) -> Duration {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameSchedule {
+    simulation_interval: Duration,
+    refresh_interval: Duration,
+    /// `None` denotes the startup timer. Running timers carry the unique
+    /// engine/SetGameSpeed reset token even when their duration is unchanged.
+    running_revision: Option<u64>,
+}
+
+fn frame_schedule_for_mode(
+    mode: AppMode,
+    game_tick_delay_ms: u64,
+    game_tick_delay_revision: u64,
+) -> FrameSchedule {
     match mode {
-        AppMode::Running => INGAME_FRAME_INTERVAL,
-        AppMode::Menu | AppMode::Loading => STARTUP_FRAME_INTERVAL,
+        AppMode::Menu | AppMode::Loading => FrameSchedule {
+            simulation_interval: STARTUP_FRAME_INTERVAL,
+            refresh_interval: STARTUP_FRAME_INTERVAL,
+            running_revision: None,
+        },
+        AppMode::Running => {
+            let game_tick_delay_ms = game_tick_delay_ms.max(1);
+            let max_refresh_ms = MAX_REFRESH_INTERVAL.as_millis() as u64;
+            // C4Application::SetGameTickDelay keeps graphics/input wakeups
+            // responsive at slow game speeds by choosing a divisor no larger
+            // than Config.Graphics.MaxRefreshDelay (default 30 ms).
+            let refresh_ms = if game_tick_delay_ms < max_refresh_ms {
+                game_tick_delay_ms
+            } else {
+                game_tick_delay_ms
+                    / game_tick_delay_ms.div_ceil(max_refresh_ms)
+            };
+            FrameSchedule {
+                simulation_interval: Duration::from_millis(game_tick_delay_ms),
+                refresh_interval: Duration::from_millis(refresh_ms.max(1)),
+                running_revision: Some(game_tick_delay_revision),
+            }
+        }
     }
 }
 
-fn synchronize_frame_interval(
+fn synchronize_frame_schedule(
     mode: AppMode,
-    frame_interval: &mut Duration,
+    game_tick_delay_ms: u64,
+    game_tick_delay_revision: u64,
+    frame_schedule: &mut FrameSchedule,
     accumulator: &mut Duration,
 ) -> bool {
-    let next_interval = frame_interval_for_mode(mode);
-    if next_interval == *frame_interval {
+    let next_schedule = frame_schedule_for_mode(
+        mode,
+        game_tick_delay_ms,
+        game_tick_delay_revision,
+    );
+    if next_schedule == *frame_schedule {
         return false;
     }
-    *frame_interval = next_interval;
+    *frame_schedule = next_schedule;
     *accumulator = Duration::ZERO;
     true
 }
 
 fn accumulate_frame_time_for_mode(
     mode: AppMode,
-    frame_interval: &mut Duration,
+    game_tick_delay_ms: u64,
+    game_tick_delay_revision: u64,
+    frame_schedule: &mut FrameSchedule,
     accumulator: &mut Duration,
     elapsed: Duration,
 ) {
-    let clamped = elapsed.min(MAX_ACCUMULATED_TIME);
-    *accumulator = (*accumulator + clamped).min(MAX_ACCUMULATED_TIME);
-    synchronize_frame_interval(mode, frame_interval, accumulator);
+    // A speed of 1 means a full 1000 ms tick. Keep the runaway-catch-up cap,
+    // but never clamp below one complete simulation interval.
+    let accumulated_limit = MAX_ACCUMULATED_TIME.max(frame_schedule.simulation_interval);
+    let clamped = elapsed.min(accumulated_limit);
+    *accumulator = (*accumulator + clamped).min(accumulated_limit);
+    synchronize_frame_schedule(
+        mode,
+        game_tick_delay_ms,
+        game_tick_delay_revision,
+        frame_schedule,
+        accumulator,
+    );
 }
 
 struct MenuState {
@@ -38728,28 +38796,33 @@ mod tests {
         // C4Application starts and returns to startup at 16 ms, while
         // C4Game::Init switches the running simulation to 28 ms
         // (C4Application.cpp:44,234; C4Game.cpp:63,443).
+        let startup = FrameSchedule {
+            simulation_interval: STARTUP_FRAME_INTERVAL,
+            refresh_interval: STARTUP_FRAME_INTERVAL,
+            running_revision: None,
+        };
+        assert_eq!(frame_schedule_for_mode(AppMode::Menu, 28, 1), startup);
+        assert_eq!(frame_schedule_for_mode(AppMode::Loading, 28, 1), startup);
         assert_eq!(
-            frame_interval_for_mode(AppMode::Menu),
-            Duration::from_millis(16)
-        );
-        assert_eq!(
-            frame_interval_for_mode(AppMode::Loading),
-            Duration::from_millis(16)
-        );
-        assert_eq!(
-            frame_interval_for_mode(AppMode::Running),
-            Duration::from_millis(28)
+            frame_schedule_for_mode(AppMode::Running, 28, 1),
+            FrameSchedule {
+                simulation_interval: INGAME_FRAME_INTERVAL,
+                refresh_interval: INGAME_FRAME_INTERVAL,
+                running_revision: Some(1),
+            }
         );
 
-        let mut interval = STARTUP_FRAME_INTERVAL;
+        let mut schedule = startup;
         let mut accumulator = Duration::from_millis(15);
         accumulate_frame_time_for_mode(
             AppMode::Running,
-            &mut interval,
+            28,
+            1,
+            &mut schedule,
             &mut accumulator,
             Duration::from_millis(10),
         );
-        assert_eq!(interval, INGAME_FRAME_INTERVAL);
+        assert_eq!(schedule.simulation_interval, INGAME_FRAME_INTERVAL);
         assert_eq!(
             accumulator,
             Duration::ZERO,
@@ -38758,19 +38831,51 @@ mod tests {
 
         accumulate_frame_time_for_mode(
             AppMode::Running,
-            &mut interval,
+            28,
+            1,
+            &mut schedule,
             &mut accumulator,
             Duration::from_millis(27),
         );
         assert_eq!(accumulator, Duration::from_millis(27));
 
+        assert!(synchronize_frame_schedule(
+            AppMode::Running,
+            28,
+            2,
+            &mut schedule,
+            &mut accumulator,
+        ));
+        assert_eq!(accumulator, Duration::ZERO);
+
+        assert!(synchronize_frame_schedule(
+            AppMode::Running,
+            1_000,
+            3,
+            &mut schedule,
+            &mut accumulator,
+        ));
+        assert_eq!(schedule.simulation_interval, Duration::from_millis(1_000));
+        assert_eq!(schedule.refresh_interval, Duration::from_millis(29));
+        accumulate_frame_time_for_mode(
+            AppMode::Running,
+            1_000,
+            3,
+            &mut schedule,
+            &mut accumulator,
+            Duration::from_millis(1_000),
+        );
+        assert_eq!(accumulator, Duration::from_millis(1_000));
+
         accumulate_frame_time_for_mode(
             AppMode::Menu,
-            &mut interval,
+            1_000,
+            3,
+            &mut schedule,
             &mut accumulator,
             Duration::from_millis(1),
         );
-        assert_eq!(interval, STARTUP_FRAME_INTERVAL);
+        assert_eq!(schedule, startup);
         assert_eq!(accumulator, Duration::ZERO);
     }
 

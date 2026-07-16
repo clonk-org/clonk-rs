@@ -343,6 +343,20 @@ use transfer::{TransferZoneCommand, TransferZoneRect, TransferZoneState, Transfe
 pub type DefinitionId = String;
 
 pub const OWNER_NONE: i32 = -1;
+/// C4Game::OpenGame's normal application timer before SetGameSpeed changes it.
+pub const DEFAULT_GAME_TICK_DELAY_MS: u64 = 28;
+
+pub(crate) fn next_game_tick_delay_revision() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
+    NEXT_REVISION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .expect("game tick timer revision space exhausted")
+}
+
 pub const FULL_CON: i32 = 100_000;
 pub const VIS_ALL: i32 = 0;
 pub const VIS_NONE: i32 = 1;
@@ -13988,6 +14002,11 @@ pub struct Engine {
     /// or after it still execute this frame.
     exec_cursor: Option<usize>,
     #[doc(hidden)] pub frame: u64,
+    /// Process-local C4Application timer state. It is deliberately excluded
+    /// from save/sync snapshots; synchronized custom commands update every
+    /// peer's application timer independently.
+    game_tick_delay_ms: Rc<std::cell::Cell<u64>>,
+    game_tick_delay_revision: Rc<std::cell::Cell<u64>>,
     /// `C4Game::Time` seconds, advanced only by `sec1_timer`.
     #[doc(hidden)] pub game_time: i32,
     /// Runtime-only one-second latch (`C4Game::TimeGo`), never serialized.
@@ -16025,6 +16044,10 @@ impl Engine {
             pending_object_order_commands: Vec::new(),
             exec_cursor: None,
             frame: 0,
+            game_tick_delay_ms: Rc::new(std::cell::Cell::new(DEFAULT_GAME_TICK_DELAY_MS)),
+            game_tick_delay_revision: Rc::new(std::cell::Cell::new(
+                next_game_tick_delay_revision(),
+            )),
             game_time: 0,
             time_go: false,
             landscape: None,
@@ -19265,6 +19288,19 @@ impl Engine {
         self.control_rate
     }
 
+    /// Current process-local delay between simulation ticks. SetGameSpeed
+    /// stores integer-truncated `1000 / fps` milliseconds here.
+    pub fn game_tick_delay_ms(&self) -> u64 {
+        self.game_tick_delay_ms.get()
+    }
+
+    /// Changes on every successful SetGameSpeed, even when the delay is
+    /// unchanged, so the embedding scheduler can mirror ResetTimer.
+    #[doc(hidden)]
+    pub fn game_tick_delay_revision(&self) -> u64 {
+        self.game_tick_delay_revision.get()
+    }
+
     pub fn set_league_game(&mut self, league_game: bool) {
         self.league_game = league_game;
         if league_game {
@@ -19972,6 +20008,10 @@ impl Engine {
         )
         .with_teams(Rc::clone(&self.teams))
         .with_team_runtime_options(self.team_configuration, self.league_game)
+        .with_game_tick_delay(
+            Rc::clone(&self.game_tick_delay_ms),
+            Rc::clone(&self.game_tick_delay_revision),
+        )
         .with_movement_solid_masks(self.ocf_solid_mask_overlay())
         .with_definition_order(Rc::clone(&self.runtime_definition_order))
         .with_color_by_owner_definitions(
@@ -50666,6 +50706,134 @@ mod dig_out_material_cast_tick5_regression {
                 frame_index + 1
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod set_game_speed_regression {
+    use super::*;
+
+    fn speed_engine() -> Engine {
+        let mut engine = Engine::new();
+        engine
+            .load_scenario_script_with_convention(
+                "SetGameSpeed.c",
+                r#"
+#strict
+func SetSpeed(int speed) { return SetGameSpeed(speed); }
+func ResetSpeed() { return SetGameSpeed(); }
+func Helper() { return SetGameSpeed(38); }
+func EvalSpeed() { return eval("SetGameSpeed(76)"); }
+"#,
+                true,
+            )
+            .expect("SetGameSpeed probe compiles");
+        engine
+    }
+
+    fn call(engine: &mut Engine, function: &str, args: Vec<Value>) -> Value {
+        engine
+            .call_scenario_script_value(function, &args)
+            .expect("speed probe executes")
+            .expect("speed probe function exists")
+    }
+
+    #[test]
+    fn set_game_speed_validates_and_restarts_the_application_timer() {
+        let mut engine = speed_engine();
+        assert_eq!(engine.game_tick_delay_ms(), DEFAULT_GAME_TICK_DELAY_MS);
+
+        assert_eq!(
+            call(&mut engine, "SetSpeed", vec![Value::Int(76)]),
+            Value::Bool(true)
+        );
+        assert_eq!(engine.game_tick_delay_ms(), 13);
+        let first_revision = engine.game_tick_delay_revision();
+
+        assert_eq!(
+            call(&mut engine, "SetSpeed", vec![Value::Int(76)]),
+            Value::Bool(true)
+        );
+        assert_eq!(engine.game_tick_delay_ms(), 13);
+        assert_ne!(engine.game_tick_delay_revision(), first_revision);
+
+        for invalid in [-5, 1001] {
+            let revision = engine.game_tick_delay_revision();
+            assert_eq!(
+                call(&mut engine, "SetSpeed", vec![Value::Int(invalid)]),
+                Value::Bool(false)
+            );
+            assert_eq!(engine.game_tick_delay_ms(), 13);
+            assert_eq!(engine.game_tick_delay_revision(), revision);
+        }
+
+        assert_eq!(
+            call(&mut engine, "ResetSpeed", Vec::new()),
+            Value::Bool(true)
+        );
+        assert_eq!(engine.game_tick_delay_ms(), 26);
+
+        for (speed, delay) in [(1, 1000), (1000, 1)] {
+            assert_eq!(
+                call(&mut engine, "SetSpeed", vec![Value::Int(speed)]),
+                Value::Bool(true)
+            );
+            assert_eq!(engine.game_tick_delay_ms(), delay);
+        }
+    }
+
+    #[test]
+    fn league_rejects_only_an_immediate_temporary_script_caller() {
+        let mut engine = speed_engine();
+        engine.set_league_game(true);
+
+        assert_eq!(
+            call(&mut engine, "SetSpeed", vec![Value::Int(76)]),
+            Value::Bool(true)
+        );
+        assert_eq!(engine.game_tick_delay_ms(), 13);
+
+        assert_eq!(
+            engine
+                .direct_exec_script_control_global(
+                    "SetGameSpeed(38)",
+                    "internal script",
+                    Some(3),
+                )
+                .expect("direct league expression executes its false branch"),
+            Value::Bool(false)
+        );
+        assert_eq!(engine.game_tick_delay_ms(), 13);
+
+        assert_eq!(
+            engine
+                .direct_exec_scenario_script("Helper()", "internal script", Some(3))
+                .expect("ordinary helper called from DirectExec is allowed"),
+            Value::Bool(true)
+        );
+        assert_eq!(engine.game_tick_delay_ms(), 26);
+
+        assert_eq!(
+            call(&mut engine, "EvalSpeed", Vec::new()),
+            Value::Bool(false)
+        );
+        assert_eq!(engine.game_tick_delay_ms(), 26);
+    }
+
+    #[test]
+    fn synthesized_speed_command_resolves_through_direct_exec() {
+        let mut engine = speed_engine();
+        let source = InitialNetworkMessageBoardCommand::speed()
+            .script
+            .replace("%d", "76");
+        assert_eq!(source, "SetGameSpeed(76)");
+        assert_eq!(
+            engine
+                .direct_exec_script_control_global(&source, "internal script", Some(3))
+                .expect("stock speed command executes"),
+            Value::Bool(true)
+        );
+        assert_eq!(engine.game_tick_delay_ms(), 13);
     }
 }
 

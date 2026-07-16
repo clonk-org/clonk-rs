@@ -18,9 +18,9 @@ pub use crate::engine::{
     ScriptFunctionScope,
 };
 pub use crate::vm::{
-    caller_host_identity, caller_origin_strictness, caller_strictness, caller_uses_engine_scope,
-    caller_var_slots, value_cell, CallerVarSlots, HostCallArg, HostCallerStrictness, LocalCells,
-    ScriptHostIdentity, ValueCell,
+    caller_host_identity, caller_is_temporary_script, caller_origin_strictness, caller_strictness,
+    caller_uses_engine_scope, caller_var_slots, value_cell, CallerVarSlots, HostCallArg,
+    HostCallerStrictness, LocalCells, ScriptHostIdentity, ValueCell,
     ValueReference,
 };
 pub use crate::error::{ParseError, RuntimeError, ScriptError};
