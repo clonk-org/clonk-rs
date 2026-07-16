@@ -41650,12 +41650,11 @@ public func Swap() { return(ChangeDef(NEWD)); }
         engine.register_definition(beam).expect("registers");
         let mut anchor_def =
             Definition::from_script("ANCR", "Anchor", "#strict\n").expect("compiles");
-        anchor_def.set_shape_vertices(vec![ObjectVertex {
-            x: -3,
-            y: -5,
-            cnat: 0,
-            friction: 50,
-        }]);
+        anchor_def.set_shape_vertices(vec![
+            ObjectVertex::new(-3, -5).with_friction(50),
+            ObjectVertex::new(6, -7),
+            ObjectVertex::new(9, 4),
+        ]);
         engine.register_definition(anchor_def).expect("registers");
 
         let horse = engine
@@ -41677,7 +41676,11 @@ public func Swap() { return(ChangeDef(NEWD)); }
                 SpawnConfig::new("BEAM")
                     .with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(28, 250))
-                    .with_action(ActionState::new("Connect")),
+                    .with_action(ActionState::new("Connect"))
+                    .with_local_vars(HashMap::from([
+                        ("__local_2".to_string(), Value::Int(1)),
+                        ("__local_3".to_string(), Value::Int(2)),
+                    ])),
             )
             .expect("beam spawns");
 
@@ -41703,14 +41706,30 @@ public func Swap() { return(ChangeDef(NEWD)); }
         let vertices = &engine.objects[idx].state.vertices;
         assert_eq!(
             (vertices[0].x, vertices[0].y),
-            (74, 245),
-            "first vertex = Target position + its vertex 0 (C4Object.cpp:5361-5363)"
+            (83, 243),
+            "first vertex = Target position + its Local[2]-selected vertex"
         );
         assert_eq!(
             (vertices[1].x, vertices[1].y),
-            (25, 245),
-            "last vertex = Target2 position + its vertex 0 (C4Object.cpp:5389-5391)"
+            (37, 254),
+            "last vertex = Target2 position + its Local[3]-selected vertex"
         );
+
+        // GetVertexX/Y return zero for negative and too-large indices
+        // (C4Shape.cpp:409-419), so invalid locals attach at object origin.
+        engine.objects[idx]
+            .state
+            .local_vars
+            .insert("__local_2".to_string(), Value::Int(-1));
+        engine.objects[idx]
+            .state
+            .local_vars
+            .insert("__local_3".to_string(), Value::Int(99));
+        engine.tick().expect("invalid vertex indices tick");
+        let idx = engine.find_object_index(beam_id).expect("beam exists");
+        let vertices = &engine.objects[idx].state.vertices;
+        assert_eq!((vertices[0].x, vertices[0].y), (77, 250));
+        assert_eq!((vertices[1].x, vertices[1].y), (28, 250));
 
         // Removing a target breaks the line on the next exec.
         {
@@ -41839,6 +41858,10 @@ public func Swap() { return(ChangeDef(NEWD)); }
                     .with_category(CATEGORY_OBJECT)
                     .with_loaded(true)
                     .with_action(action)
+                    .with_local_vars(HashMap::from([
+                        ("__local_2".to_string(), Value::Int(99)),
+                        ("__local_3".to_string(), Value::Int(-1)),
+                    ]))
                     .with_vertices(vec![ObjectVertex::new(2, 5), ObjectVertex::new(10, 5)]),
             )
             .expect("shipped PWRL spawns");

@@ -35573,6 +35573,14 @@ impl Engine {
         }
         let line_vertex = definition.line() == 8; // C4D_Line_Vertex
         let line_intersect = definition.line_intersect();
+        let vertex_indices = ["__local_2", "__local_3"].map(|name| {
+            self.objects[idx]
+                .state
+                .local_vars
+                .get(name)
+                .and_then(Value::as_c4_int)
+                .unwrap_or(0)
+        });
 
         let mut broke = false;
         let mut points = [None, None];
@@ -35594,23 +35602,16 @@ impl Engine {
                 Some(target_idx) => {
                     let target = &self.objects[target_idx];
                     let point = if line_vertex {
-                        // Local[2]/Local[3] vertex indices are numbered
-                        // script locals; content (CHBM) leaves them 0.
-                        let vertex =
-                            target
-                                .state
-                                .vertices
-                                .first()
-                                .copied()
-                                .unwrap_or(ObjectVertex {
-                                    x: 0,
-                                    y: 0,
-                                    cnat: 0,
-                                    friction: 0,
-                                });
+                        // C4Shape::GetVertexX/Y return zero for every index
+                        // outside the active vertex range.
+                        let (vertex_x, vertex_y) = usize::try_from(vertex_indices[slot])
+                            .ok()
+                            .and_then(|index| target.state.vertices.get(index))
+                            .map(|vertex| (vertex.x, vertex.y))
+                            .unwrap_or((0, 0));
                         Vector2::new(
-                            target.state.position.x + vertex.x,
-                            target.state.position.y + vertex.y,
+                            target.state.position.x + vertex_x,
+                            target.state.position.y + vertex_y,
                         )
                     } else {
                         let height = target
