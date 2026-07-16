@@ -66130,17 +66130,65 @@ protected func Departure(pContainer)
     /// A CanBeBase hut and a FLAG definition with the FlyBase action
     /// (Flag.c4d ActMap) for the ExecBase tests.
     fn base_fixture(engine: &mut Engine) -> Result<(ObjectId, ObjectId), EngineError> {
-        let mut hut = Definition::from_script("HUT1", "Hut", BASIC_OBJECT_SCRIPT)?;
+        let mut hut = Definition::from_script(
+            "HUT1",
+            "Hut",
+            r#"#strict 2
+protected func Ejection(object flag)
+{
+  flag->RecordExecBaseEjection();
+  return(1);
+}
+"#,
+        )?;
+        hut.set_c4_callback_convention(true);
         hut.set_can_be_base(true);
         engine.register_definition(hut)?;
         let mut flag = Definition::from_script(
             "FLAG",
             "Flag",
-            r#"#strict
-local flyBaseStartTarget;
+            r#"#strict 2
+local callback_order;
+local ejection_x, ejection_y, ejection_r, ejection_xdir, ejection_ydir, ejection_rdir;
+local ejection_container, ejection_action;
+local departure_x, departure_y, departure_r, departure_xdir, departure_ydir, departure_rdir;
+local departure_container, departure_action;
+local flyBaseStartTarget, flyBaseStartAction, flyBaseStartOwner;
+
+public func RecordExecBaseEjection()
+{
+  callback_order = callback_order * 10 + 1;
+  ejection_x = GetX();
+  ejection_y = GetY();
+  ejection_r = GetR();
+  ejection_xdir = GetXDir(100);
+  ejection_ydir = GetYDir(100);
+  ejection_rdir = GetRDir(100);
+  ejection_container = Contained();
+  ejection_action = GetAction();
+  return(1);
+}
+
+protected func Departure(object old_container)
+{
+  callback_order = callback_order * 10 + 2;
+  departure_x = GetX();
+  departure_y = GetY();
+  departure_r = GetR();
+  departure_xdir = GetXDir(100);
+  departure_ydir = GetYDir(100);
+  departure_rdir = GetRDir(100);
+  departure_container = Contained();
+  departure_action = GetAction();
+  return(1);
+}
+
 protected func FlyBaseStart()
 {
+  callback_order = callback_order * 10 + 3;
   flyBaseStartTarget = GetActionTarget();
+  flyBaseStartAction = GetAction();
+  if (flyBaseStartOwner) SetOwner(flyBaseStartOwner);
   return(1);
 }
 "#,
@@ -66158,7 +66206,16 @@ protected func FlyBaseStart()
         engine.register_player(PlayerConfig::new(1, "Test"))?;
         let hut = engine.spawn_object(SpawnConfig::new("HUT1"))?;
         let flag = engine.spawn_object(
-            SpawnConfig::new("FLAG").with_owner(1).with_container(hut),
+            SpawnConfig::new("FLAG")
+                .with_owner(1)
+                .with_position(Vector2::new(17, 29))
+                .with_fixed_velocity(FixedVec2::new(itofix(3), itofix(-2)))
+                .with_rotation(19)
+                .with_fixed_rotation(itofix(19))
+                .with_rotation_velocity(itofix(4))
+                .with_in_liquid(true)
+                .with_mobile(false)
+                .with_container(hut),
         )?;
         Ok((hut, flag))
     }
@@ -66295,15 +66352,24 @@ protected func Entrance(pTarget)
         let mut landscape = Landscape::new(7, vec![7; 7]).expect("landscape builds");
         landscape.set_pixel_grid(grid);
         engine.set_landscape(landscape);
-        engine.spawn_object(
+        let structure = engine.spawn_object(
             SpawnConfig::new("HUT1")
                 .with_position(Vector2::new(3, 3))
                 .with_category(CATEGORY_STRUCTURE),
         )?;
-
         for _ in 0..34 {
             engine.tick()?;
         }
+        let structure_index = engine
+            .find_object_index(structure)
+            .expect("structure remains");
+        engine.objects[structure_index].fixed_rotation = C4Fixed::from_raw(1);
+        assert_eq!(engine.objects[structure_index].state.rotation, 0);
+        assert_ne!(
+            engine.objects[structure_index].fixed_rotation,
+            C4Fixed::ZERO,
+            "sub-degree fix_r distinguishes the integer-r C++ gate"
+        );
         assert_eq!(engine.landscape().unwrap().material_at(2, 2), Some(snow));
         assert_eq!(
             engine.landscape().unwrap().material_at(4, 3),
@@ -66392,11 +66458,13 @@ protected func Entrance(pTarget)
     }
 
     #[test]
-    fn exec_base_flybase_start_call_sees_base_target() -> Result<(), EngineError> {
-        // ExecBase passes the base as FlyBase's action target
-        // (C4Object.cpp:1010-1012). SetAction installs that target first
-        // (C4Object.cpp:4148-4150), before dispatching StartCall
-        // (C4Object.cpp:4171-4184).
+    fn exec_base_exit_zeroes_motion_and_runs_callbacks_before_flybase_start(
+    ) -> Result<(), EngineError> {
+        // ExecBase calls the default-argument Exit(0,0) before FlyBase
+        // (C4Object.cpp:1010-1012). Exit publishes its zeroed transform and
+        // motion before Ejection/Departure (C4Object.cpp:1532-1564), then
+        // SetAction installs the base target before FlyBase's StartCall
+        // (C4Object.cpp:4148-4184).
         let mut engine = Engine::new();
         let (hut, flag) = base_fixture(&mut engine)?;
         for _ in 0..11 {
@@ -66404,13 +66472,84 @@ protected func Entrance(pTarget)
         }
 
         let flag_index = engine.find_object_index(flag).expect("flag exists");
+        let flag_state = &engine.objects[flag_index].state;
         assert_eq!(
-            engine.objects[flag_index]
-                .state
-                .local_vars
-                .get("flyBaseStartTarget"),
+            flag_state.local_vars.get("callback_order"),
+            Some(&Value::Int(123)),
+            "Ejection and Departure precede FlyBase's StartCall"
+        );
+        for local in [
+            "ejection_x",
+            "ejection_y",
+            "ejection_r",
+            "ejection_xdir",
+            "ejection_ydir",
+            "ejection_rdir",
+            "departure_x",
+            "departure_y",
+            "departure_r",
+            "departure_xdir",
+            "departure_ydir",
+            "departure_rdir",
+        ] {
+            assert_eq!(
+                flag_state.local_vars.get(local),
+                Some(&Value::Int(0)),
+                "{local} observes Exit's default zero transform/motion"
+            );
+        }
+        for local in ["ejection_container", "departure_container"] {
+            assert_eq!(
+                flag_state.local_vars.get(local),
+                Some(&Value::Nil),
+                "{local} observes the completed unlink"
+            );
+        }
+        for local in ["ejection_action", "departure_action"] {
+            assert_eq!(
+                flag_state.local_vars.get(local),
+                Some(&Value::String("Idle".to_string())),
+                "{local} runs before FlyBase"
+            );
+        }
+        assert_eq!(
+            flag_state.local_vars.get("flyBaseStartTarget"),
             Some(&Value::Object(hut.as_u64())),
             "FlyBase StartCall observes the supplied base target"
+        );
+        assert_eq!(
+            flag_state.local_vars.get("flyBaseStartAction"),
+            Some(&Value::String("FlyBase".to_string()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exec_base_uses_the_flag_owner_after_flybase_callbacks() -> Result<(), EngineError> {
+        // The guard reads flag->Owner before Exit, but Base/SetOwner read it
+        // again after Exit and FlyBase callbacks (C4Object.cpp:1008-1018).
+        let mut engine = Engine::new();
+        let (hut, flag) = base_fixture(&mut engine)?;
+        engine.register_player(PlayerConfig::new(2, "Callback owner"))?;
+        let flag_index = engine.find_object_index(flag).expect("flag exists");
+        engine.objects[flag_index]
+            .state
+            .local_vars
+            .insert("flyBaseStartOwner".to_string(), Value::Int(2));
+
+        for _ in 0..11 {
+            engine.tick()?;
+        }
+
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        assert_eq!(engine.objects[hut_index].state.base, 2);
+        assert_eq!(engine.objects[hut_index].state.owner, 2);
+        assert_eq!(
+            engine
+                .object_snapshot(flag)
+                .expect("flag remains")
+                .owner,
+            2
         );
         Ok(())
     }

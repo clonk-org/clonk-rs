@@ -39715,14 +39715,19 @@ impl Engine {
                     })
                 });
                 if let Some(flag_id) = flag {
-                    let flag_owner = flag
+                    let candidate_owner = flag
                         .and_then(|id| self.find_object_index(id))
                         .map(|flag_index| self.objects[flag_index].state.owner)
                         .unwrap_or(OWNER_NONE);
-                    if self.players.contains_key(&flag_owner) && flag_owner != base {
+                    if self.players.contains_key(&candidate_owner) && candidate_owner != base {
                         let base_id = self.objects[idx].id;
                         // Attach new flag: Exit + FlyBase on this (:1010-1011).
-                        self.apply_object_update(flag_id, ObjectUpdate::new().clear_container())?;
+                        let _ = self.exit_object_at_position_with_zero_motion(
+                            flag_id,
+                            base_id,
+                            Vector2::ZERO,
+                            0,
+                        )?;
                         if let Some(flag_index) = self.find_object_index(flag_id) {
                             let flag_definition = self.objects[flag_index].definition_id.clone();
                             self.action_with_target_and_calls(
@@ -39732,6 +39737,12 @@ impl Engine {
                                 base_id,
                             )?;
                         }
+                        // Exit and FlyBase callbacks may change Owner. C++
+                        // re-reads flag->Owner for both assignments below.
+                        let flag_owner = self
+                            .find_object_index(flag_id)
+                            .map(|flag_index| self.objects[flag_index].state.owner)
+                            .unwrap_or(candidate_owner);
                         // Assign new base and force-close every remaining
                         // contained object's menu (:1013-1017;
                         // C4ObjectList::CloseMenus, C4ObjectList.cpp:705-710).
@@ -39790,7 +39801,7 @@ impl Engine {
             // current shape rectangle. This is independent of Base validity.
             let snow_rect = self.objects.get(idx).and_then(|object| {
                 (object.state.category & CATEGORY_STRUCTURE != 0
-                    && object.fixed_rotation == C4Fixed::ZERO
+                    && object.state.rotation == 0
                     && !self.structures_snow_in)
                     .then(|| {
                         object.current_shape_rect().map(|shape| {
