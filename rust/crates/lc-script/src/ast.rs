@@ -34,7 +34,7 @@ pub struct VarDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Script {
     pub functions: Vec<Function>,
-    pub var_decls: Vec<VarDecl>,    // Top-level variable declarations
+    pub var_decls: Vec<VarDecl>,    // Script-wide local/static declarations
     pub includes: Vec<String>,      // List of included definition IDs
     /// `#appendto` targets (C++ `C4AulScript::Appends`, a LIST —
     /// C4AulParse.cpp:1485; scripts may carry several).

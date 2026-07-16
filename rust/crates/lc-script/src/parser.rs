@@ -25,6 +25,13 @@ pub struct Parser<'a> {
     /// back. C4Aul advances past an offending top-level token only when the
     /// failed parse attempt itself made no progress.
     consumed_tokens: usize,
+    /// Script-wide object-local/static declarations discovered at any lexical
+    /// depth. C4Aul's preparser registers these without emitting bytecode.
+    script_var_decls: Vec<VarDecl>,
+    /// System/global scripts have no definition owner. Their legacy
+    /// old-style bodies may not declare object-local names.
+    global_script: bool,
+    parsing_old_style_function: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -37,7 +44,16 @@ impl<'a> Parser<'a> {
             strict_level: 0,
             brace_depth: 0,
             consumed_tokens: 0,
+            script_var_decls: Vec::new(),
+            global_script: false,
+            parsing_old_style_function: false,
         }
+    }
+
+    pub(crate) fn new_global_script(source: &'a str) -> Self {
+        let mut parser = Self::new(source);
+        parser.global_script = true;
+        parser
     }
 
     pub(crate) fn with_strict_level(source: &'a str, strict_level: Option<u8>) -> Self {
@@ -61,7 +77,6 @@ impl<'a> Parser<'a> {
         let mut includes = Vec::new();
         let mut appends = Vec::new();
         let mut strict_level = None;
-        let mut var_decls = Vec::new();
         let mut functions = Vec::new();
 
         while !self.is_eof()? {
@@ -133,15 +148,18 @@ impl<'a> Parser<'a> {
             } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Local) {
                 // Parse local variable declarations
                 self.consume()?; // consume 'local'
-                var_decls.extend(self.parse_var_decl_list(VarDeclKind::Local)?);
+                let declarations = self.parse_var_decl_list(VarDeclKind::Local)?;
+                self.script_var_decls.extend(declarations);
             } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Static) {
                 // Parse static variable declarations
                 self.consume()?; // consume 'static'
                                  // Check for 'const' after 'static'
                 if self.consume_if_keyword(Keyword::Const)?.is_some() {
-                    var_decls.extend(self.parse_var_decl_list(VarDeclKind::StaticConst)?);
+                    let declarations = self.parse_var_decl_list(VarDeclKind::StaticConst)?;
+                    self.script_var_decls.extend(declarations);
                 } else {
-                    var_decls.extend(self.parse_var_decl_list(VarDeclKind::Static)?);
+                    let declarations = self.parse_var_decl_list(VarDeclKind::Static)?;
+                    self.script_var_decls.extend(declarations);
                 }
             } else {
                 // Must be a function
@@ -151,7 +169,7 @@ impl<'a> Parser<'a> {
 
         Ok(Script::with_directives(
             functions,
-            var_decls,
+            std::mem::take(&mut self.script_var_decls),
             includes,
             appends,
             strict_level,
@@ -166,7 +184,6 @@ impl<'a> Parser<'a> {
         let mut includes = Vec::new();
         let mut appends = Vec::new();
         let mut strict_level = None;
-        let mut var_decls = Vec::new();
         let mut functions = Vec::new();
         let mut diagnostics = Vec::new();
         let mut top_level_ok = true;
@@ -271,13 +288,16 @@ impl<'a> Parser<'a> {
                     }
                 } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Local) {
                     self.consume()?;
-                    var_decls.extend(self.parse_var_decl_list(VarDeclKind::Local)?);
+                    let declarations = self.parse_var_decl_list(VarDeclKind::Local)?;
+                    self.script_var_decls.extend(declarations);
                 } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Static) {
                     self.consume()?;
                     if self.consume_if_keyword(Keyword::Const)?.is_some() {
-                        var_decls.extend(self.parse_var_decl_list(VarDeclKind::StaticConst)?);
+                        let declarations = self.parse_var_decl_list(VarDeclKind::StaticConst)?;
+                        self.script_var_decls.extend(declarations);
                     } else {
-                        var_decls.extend(self.parse_var_decl_list(VarDeclKind::Static)?);
+                        let declarations = self.parse_var_decl_list(VarDeclKind::Static)?;
+                        self.script_var_decls.extend(declarations);
                     }
                 } else {
                     let (function, error) = self.parse_function_recovering()?;
@@ -306,7 +326,13 @@ impl<'a> Parser<'a> {
         diagnostics.extend(self.lexer.take_diagnostics());
 
         (
-            Script::with_directives(functions, var_decls, includes, appends, strict_level),
+            Script::with_directives(
+                functions,
+                std::mem::take(&mut self.script_var_decls),
+                includes,
+                appends,
+                strict_level,
+            ),
             diagnostics,
         )
     }
@@ -437,10 +463,17 @@ impl<'a> Parser<'a> {
         self.expect_symbol(Symbol::Colon, "expected ':' after old-style function name")?;
         let description = self.parse_function_description()?;
 
-        let mut body = Vec::new();
-        while !self.is_eof()? && !self.is_old_style_function_boundary()? {
-            body.push(self.parse_statement()?);
-        }
+        let previous_old_style = self.parsing_old_style_function;
+        self.parsing_old_style_function = true;
+        let body = (|| {
+            let mut body = Vec::new();
+            while !self.is_eof()? && !self.is_old_style_function_boundary()? {
+                body.push(self.parse_statement()?);
+            }
+            Ok(body)
+        })();
+        self.parsing_old_style_function = previous_old_style;
+        let body = body?;
 
         Ok(Function {
             name,
@@ -480,6 +513,8 @@ impl<'a> Parser<'a> {
             Err(error) => Some(error),
         };
 
+        let previous_old_style = self.parsing_old_style_function;
+        self.parsing_old_style_function = true;
         while error.is_none() {
             match self.is_eof() {
                 Ok(true) => break,
@@ -502,6 +537,7 @@ impl<'a> Parser<'a> {
                 Err(parse_error) => error = Some(parse_error),
             }
         }
+        self.parsing_old_style_function = previous_old_style;
 
         if let Some(parse_error) = &error {
             self.recover_old_style_function_body(body_depth);
@@ -849,6 +885,23 @@ impl<'a> Parser<'a> {
     fn parse_statement(&mut self) -> Result<Stmt, ParseError> {
         if self.consume_if_keyword(Keyword::Var)?.is_some() {
             return self.parse_var_decl();
+        }
+        if let Some(token) = self.consume_if_keyword(Keyword::Local)? {
+            if self.global_script && self.parsing_old_style_function {
+                return Err(ParseError::new(
+                    "'local' variable declaration in global script",
+                    token.line,
+                    token.column,
+                ));
+            }
+            let declarations = self.parse_var_decl_list(VarDeclKind::Local)?;
+            self.script_var_decls.extend(declarations);
+            return Ok(Stmt::Sequence(Vec::new()));
+        }
+        if self.consume_if_keyword(Keyword::Static)?.is_some() {
+            let declarations = self.parse_var_decl_list(VarDeclKind::Static)?;
+            self.script_var_decls.extend(declarations);
+            return Ok(Stmt::Sequence(Vec::new()));
         }
         if self.consume_if_keyword(Keyword::Return)?.is_some() {
             return self.parse_return();
@@ -2335,7 +2388,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_var_decl_list(&mut self, kind: VarDeclKind) -> Result<Vec<VarDecl>, ParseError> {
-        // Parse: name [= expr] (, name [= expr])* ;
+        // Parse a comma-separated name list. Static constants additionally
+        // require an initializer for every name.
         let mut decls = Vec::new();
 
         loop {
@@ -2343,10 +2397,17 @@ impl<'a> Parser<'a> {
             let (name, name_token) =
                 self.expect_identifier("expected variable name in declaration")?;
 
-            // Check for initializer — parsed BELOW the comma level so the
-            // declaration-list comma stays with this loop (`static const
-            // A = 5, B = 1;` declares TWO constants, Talker.c4d:5-6).
-            let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
+            // Static constants alone accept initializers. Parse them BELOW
+            // the comma level so the declaration-list comma stays with this
+            // loop (`static const A = 5, B = 1;` declares two constants).
+            let init = if let Some(equal) = self.consume_if_symbol(Symbol::Equal)? {
+                if kind != VarDeclKind::StaticConst {
+                    return Err(ParseError::new(
+                        "expected ',' or ';' after variable declaration",
+                        equal.line,
+                        equal.column,
+                    ));
+                }
                 Some(self.parse_assignment()?)
             } else {
                 None

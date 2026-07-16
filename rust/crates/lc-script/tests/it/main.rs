@@ -9,6 +9,7 @@ mod test_appendto;
 mod test_array_append;
 mod test_assignment_in_if;
 mod test_assignment_in_unary;
+mod test_body_declarations;
 mod test_braceless_if_assignment;
 mod test_braceless_if_spacing;
 mod test_c4id_scope_resolution;

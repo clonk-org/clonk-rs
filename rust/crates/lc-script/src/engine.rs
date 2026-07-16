@@ -154,6 +154,14 @@ impl Script {
         Ok(Self::from_ast(ast, diagnostics))
     }
 
+    /// Compile a System/global script whose legacy old-style functions have
+    /// no definition owner. C++ rejects `local` declarations in those bodies.
+    pub fn compile_global(source: &str) -> Result<Self, ParseError> {
+        let mut parser = Parser::new_global_script(source);
+        let (ast, diagnostics) = parser.parse_script_recovering();
+        Ok(Self::from_ast(ast, diagnostics))
+    }
+
     fn from_ast(ast: AstScript, parse_diagnostics: Vec<ParseError>) -> Self {
         let mut functions: HashMap<String, Function> = HashMap::new();
         for mut function in ast.functions {

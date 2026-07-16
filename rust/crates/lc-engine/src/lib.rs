@@ -22139,7 +22139,7 @@ impl Engine {
             .unwrap_or_default();
         let mut loaded = 0usize;
         for (name, source) in sources {
-            match lc_script::Script::compile(source) {
+            match lc_script::Script::compile_global(source) {
                 Ok(compiled) => {
                     for diagnostic in compiled.parse_diagnostics() {
                         tracing::warn!(

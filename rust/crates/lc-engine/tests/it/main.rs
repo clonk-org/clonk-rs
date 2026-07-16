@@ -8,6 +8,7 @@ mod action_attach;
 mod action_build;
 mod action_procedure;
 mod activate_entrance_native;
+mod body_declarations;
 mod component_natives;
 mod component_order;
 mod creation_owner_strictness;
