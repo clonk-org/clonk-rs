@@ -14388,33 +14388,75 @@ fn debug_log_message(args: &[Value]) -> Result<Value, RuntimeError> {
     log_internal("DebugLog", args, LogLevel::Debug)
 }
 
-/// FnStartCallTrace (C4Script.cpp:5967-5971). The C++ diagnostic is scoped
-/// to the remainder of the active Aul context. Rust's debugger hooks are
-/// fixed when a VM starts and cannot be enabled from an in-flight native
-/// callback, so retain the script-visible void/nil contract as a tolerated
-/// debug-only no-op.
+/// FnStartCallTrace (C4Script.cpp:5967-5971). The execution-local controller
+/// is independent of immutable debugger hooks, so an in-flight native call
+/// can arm tracing for the remainder of its caller's script frame.
 fn start_call_trace(_args: &[Value]) -> Result<Value, RuntimeError> {
+    if lc_script::caller_host_identity().is_some() {
+        lc_script::start_call_trace(|message| {
+            info!(target: "lc-script-trace", "{message}");
+        });
+    }
     Ok(Value::Nil)
 }
 
 /// FnStartScriptProfiler/FnStopScriptProfiler (C4Script.cpp:5973-5993).
-/// The Rust VM has no script-profiler state to arm or dump, so preserve the
-/// tooling calls as counting no-ops while retaining C++'s definition lookup
-/// guard and script-visible return values.
 fn start_script_profiler(args: &[Value]) -> Result<Value, RuntimeError> {
     let definition = parse_native_c4id_argument(args.first(), "StartScriptProfiler")?;
-    let found = definition.as_deref().is_none_or(|definition| {
-        HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| context.world.definition_script(definition))
-                .is_some()
-        })
-    });
-    Ok(Value::Bool(found))
+    let target = match definition.as_deref() {
+        None => None,
+        Some(definition) => {
+            let script = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.world.definition_script(definition).cloned())
+            });
+            let Some(script) = script else {
+                // C4Id2Def failure leaves any active profiler run untouched.
+                return Ok(Value::Bool(false));
+            };
+            Some(script.host_identity())
+        }
+    };
+    lc_script::start_script_profiler(target);
+    Ok(Value::Bool(true))
 }
 
 fn stop_script_profiler(_args: &[Value]) -> Result<Value, RuntimeError> {
+    if let Some(entries) = lc_script::stop_script_profiler() {
+        info!(target: "lc-script-profiler", "Profiler statistics:");
+        info!(target: "lc-script-profiler", "==============================");
+        for entry in entries {
+            let function = match entry.host_identity {
+                None => format!("global {}", entry.function),
+                Some(host_identity) => HOST_CONTEXT
+                    .with(|cell| {
+                        cell.borrow().as_ref().and_then(|context| {
+                            context
+                                .world
+                                .script_for_host_identity(host_identity)
+                                .map(|(host, definition, _)| match definition {
+                                    Some(definition) => {
+                                        format!("{definition}::{}", entry.function)
+                                    }
+                                    None if host == "Game.Script" => {
+                                        format!("game {}", entry.function)
+                                    }
+                                    None => format!("{host}::{}", entry.function),
+                                })
+                        })
+                    })
+                    .unwrap_or(entry.function),
+            };
+            info!(
+                target: "lc-script-profiler",
+                "{:05}ms\t{}",
+                entry.elapsed.as_millis(),
+                function
+            );
+        }
+        info!(target: "lc-script-profiler", "==============================");
+    }
     Ok(Value::Nil)
 }
 
@@ -51768,6 +51810,57 @@ public func RejectConstruction(x, y, builder)
     }
 
     #[test]
+    fn debug_builtin_call_trace_follows_nested_calls_until_arming_frame_returns() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func Arm() { StartCallTrace(); return Outer(); }\n\
+                 func Outer() { return Inner(); }\n\
+                 func Inner() { return 7; }\n\
+                 func Untraced() { return 8; }",
+            )
+            .expect("call-trace probes compile");
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
+
+        subscriber::with_default(subscriber, || {
+            assert_eq!(
+                script.call("Arm", &[]).expect("call trace executes"),
+                Value::Int(7)
+            );
+            assert_eq!(
+                script
+                    .call("Untraced", &[])
+                    .expect("later top-level call executes"),
+                Value::Int(8)
+            );
+        });
+
+        let records = records.lock().unwrap();
+        assert!(records.iter().all(|record| record.level == Level::INFO));
+        assert!(
+            records
+                .iter()
+                .all(|record| record.target == "lc-script-trace")
+        );
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.message.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "T>Outer()",
+                "T>>Inner()",
+                "T>>Inner returned 7",
+                "T>Outer returned 7",
+                "TArm returned 7",
+            ]
+        );
+    }
+
+    #[test]
     fn script_profiler_builtins_validate_definition_and_execute() {
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
@@ -51823,6 +51916,94 @@ public func RejectConstruction(x, y, builder)
             Ok::<_, RuntimeError>(())
         });
         result.expect("script-profiler builtins execute");
+    }
+
+    #[test]
+    fn debug_builtin_script_profiler_emits_one_sorted_report_across_vm_calls() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script.register_host_function("ProfilerDelay", |_| {
+            std::thread::sleep(std::time::Duration::from_millis(3));
+            Ok(Value::Nil)
+        });
+        script
+            .load_script(
+                "#strict 3\n\
+                 func BeginProfile() { return StartScriptProfiler(); }\n\
+                 func AOuter() { return BInner(); }\n\
+                 func BInner() { ProfilerDelay(); return 1; }\n\
+                 func EndProfile() { return StopScriptProfiler(); }",
+            )
+            .expect("script-profiler report probes compile");
+        let script = Arc::new(script);
+        let world =
+            HostWorldContext::default().with_scenario_script(Some(Arc::clone(&script)));
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
+
+        let (result, _) = subscriber::with_default(subscriber, || {
+            with_effect_context(None, &[], world, 1, || {
+                let call = |name: &str| {
+                    script
+                        .call(name, &[])
+                        .map_err(|error| RuntimeError::new(error.to_string()))
+                };
+                assert_eq!(call("BeginProfile")?, Value::Bool(true));
+                assert_eq!(call("AOuter")?, Value::Int(1));
+                assert_eq!(call("EndProfile")?, Value::Nil);
+                assert_eq!(call("EndProfile")?, Value::Nil);
+                Ok::<_, RuntimeError>(())
+            })
+        });
+        result.expect("script-profiler report probes execute");
+
+        let records = records.lock().unwrap();
+        let profiler = records
+            .iter()
+            .filter(|record| record.target == "lc-script-profiler")
+            .collect::<Vec<_>>();
+        assert!(profiler.iter().all(|record| record.level == Level::INFO));
+        assert_eq!(
+            profiler
+                .iter()
+                .filter(|record| record.message == "Profiler statistics:")
+                .count(),
+            1,
+            "a repeated inactive stop emits no second report"
+        );
+        assert_eq!(
+            profiler
+                .iter()
+                .filter(|record| record.message == "==============================")
+                .count(),
+            2
+        );
+
+        let rows = profiler
+            .iter()
+            .filter(|record| record.message.contains("ms\t"))
+            .collect::<Vec<_>>();
+        let outer = rows
+            .iter()
+            .position(|record| record.message.ends_with("game AOuter"))
+            .expect("outer function is profiled");
+        let inner = rows
+            .iter()
+            .position(|record| record.message.ends_with("game BInner"))
+            .expect("inner function is profiled");
+        assert!(outer < inner, "inclusive outer time sorts before inner time");
+        let elapsed = rows
+            .iter()
+            .map(|record| {
+                record.message[..record.message.find("ms\t").unwrap()]
+                    .parse::<u128>()
+                    .expect("profile row starts with milliseconds")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            elapsed.windows(2).all(|pair| pair[0] >= pair[1]),
+            "profile rows are sorted descending"
+        );
     }
 
     #[test]

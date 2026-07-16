@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::ast::{
     AccessLevel, AssignmentTarget, BinaryOp, Expr, ForInit, Function, NavigationOperation,
@@ -205,7 +207,7 @@ pub(crate) struct ScriptCallerContext {
 /// Process-local identity of one compiled script host. It is meaningful only
 /// while the host is alive and is used to match a native call's suspended
 /// caller frame back to the exact `Engine` retained by lc-engine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ScriptHostIdentity(usize);
 
 impl ScriptHostIdentity {
@@ -227,6 +229,225 @@ thread_local! {
     static HOST_CALLER_CONTEXT: RefCell<Option<ScriptCallerContext>> = const {
         RefCell::new(None)
     };
+}
+
+type ScriptTraceSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+struct ActiveDiagnosticFrame {
+    profile_host_identity: Option<ScriptHostIdentity>,
+    function: String,
+    profile_started_at: Option<Instant>,
+}
+
+struct ScriptTraceRun {
+    start_depth: usize,
+    sink: ScriptTraceSink,
+}
+
+struct ScriptProfilerRun {
+    target: Option<ScriptHostIdentity>,
+    elapsed: HashMap<(Option<ScriptHostIdentity>, String), Duration>,
+}
+
+#[derive(Default)]
+struct ExecutionDiagnostics {
+    frames: Vec<ActiveDiagnosticFrame>,
+    trace: Option<ScriptTraceRun>,
+    profiler: Option<ScriptProfilerRun>,
+}
+
+thread_local! {
+    // C4AulExec owns one trace/profiler controller for the active execution
+    // thread. Keeping this outside an individual Vm lets diagnostics survive
+    // top-level calls and follow synchronous calls into another script host.
+    static EXECUTION_DIAGNOSTICS: RefCell<ExecutionDiagnostics> =
+        RefCell::new(ExecutionDiagnostics::default());
+}
+
+/// One completed script function in a [`stop_script_profiler`] report.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScriptProfileEntry {
+    /// `None` identifies a function owned by Game.ScriptEngine.
+    pub host_identity: Option<ScriptHostIdentity>,
+    pub function: String,
+    pub elapsed: Duration,
+}
+
+/// Arm C4Aul-style call tracing at the currently active script-stack depth.
+/// Repeated starts while a trace is active are ignored like C++.
+pub fn start_call_trace<F>(sink: F)
+where
+    F: Fn(&str) + Send + Sync + 'static,
+{
+    EXECUTION_DIAGNOSTICS.with(|cell| {
+        let mut diagnostics = cell.borrow_mut();
+        // A native/direct entry has no script frame whose unwind could clear
+        // the trace. C++ console DirectExec owns a context; Rust does not yet,
+        // so leave that unsupported path inert instead of leaking globally.
+        if !diagnostics.frames.is_empty() && diagnostics.trace.is_none() {
+            diagnostics.trace = Some(ScriptTraceRun {
+                start_depth: diagnostics.frames.len(),
+                sink: Arc::new(sink),
+            });
+        }
+    });
+}
+
+/// Reset and arm the singleton script profiler. `None` profiles the complete
+/// engine script tree; a host identity restricts collection to that script.
+pub fn start_script_profiler(target: Option<ScriptHostIdentity>) {
+    EXECUTION_DIAGNOSTICS.with(|cell| {
+        let mut diagnostics = cell.borrow_mut();
+        let now = Instant::now();
+        for frame in &mut diagnostics.frames {
+            frame.profile_started_at = match target {
+                None => Some(now),
+                Some(target) => (frame.profile_host_identity == Some(target)).then_some(now),
+            };
+        }
+        diagnostics.profiler = Some(ScriptProfilerRun {
+            target,
+            elapsed: HashMap::new(),
+        });
+    });
+}
+
+/// Stop profiling and return the completed nonzero-millisecond entries in
+/// descending elapsed-time order. Active frames are deliberately excluded:
+/// C++ disables profiling before the caller of StopScriptProfiler unwinds.
+pub fn stop_script_profiler() -> Option<Vec<ScriptProfileEntry>> {
+    EXECUTION_DIAGNOSTICS.with(|cell| {
+        let run = cell.borrow_mut().profiler.take()?;
+        let mut entries = run
+            .elapsed
+            .into_iter()
+            .filter(|(_, elapsed)| elapsed.as_millis() != 0)
+            .map(
+                |((host_identity, function), elapsed)| ScriptProfileEntry {
+                    host_identity,
+                    function,
+                    elapsed,
+                },
+            )
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            right
+                .elapsed
+                .cmp(&left.elapsed)
+                .then_with(|| left.function.cmp(&right.function))
+                .then_with(|| left.host_identity.cmp(&right.host_identity))
+        });
+        Some(entries)
+    })
+}
+
+struct ScriptDiagnosticGuard {
+    active: bool,
+}
+
+impl ScriptDiagnosticGuard {
+    fn enter(
+        name: &str,
+        profile_host_identity: Option<ScriptHostIdentity>,
+        args: &[Value],
+    ) -> Self {
+        let emission = EXECUTION_DIAGNOSTICS.with(|cell| {
+            let mut diagnostics = cell.borrow_mut();
+            let depth = diagnostics.frames.len() + 1;
+            let emission = diagnostics.trace.as_ref().map(|trace| {
+                let indent = ">".repeat(depth.saturating_sub(trace.start_depth));
+                let args = args
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (
+                    Arc::clone(&trace.sink),
+                    format!("T{indent}{name}({args})"),
+                )
+            });
+            let profile_started_at = diagnostics
+                .profiler
+                .as_ref()
+                .filter(|run| match run.target {
+                    None => true,
+                    Some(target) => profile_host_identity == Some(target),
+                })
+                .map(|_| Instant::now());
+            diagnostics.frames.push(ActiveDiagnosticFrame {
+                profile_host_identity,
+                function: name.to_string(),
+                profile_started_at,
+            });
+            emission
+        });
+
+        let guard = Self { active: true };
+        if let Some((sink, message)) = emission {
+            sink(&message);
+        }
+        guard
+    }
+
+    fn returned(&mut self, value: &Value) {
+        if self.active {
+            self.active = false;
+            exit_diagnostic_frame(Some(value));
+        }
+    }
+}
+
+impl Drop for ScriptDiagnosticGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.active = false;
+            exit_diagnostic_frame(None);
+        }
+    }
+}
+
+fn exit_diagnostic_frame(returned: Option<&Value>) {
+    let emission = EXECUTION_DIAGNOSTICS.with(|cell| {
+        let mut diagnostics = cell.borrow_mut();
+        let depth = diagnostics.frames.len();
+        let frame = diagnostics.frames.pop()?;
+
+        if let (Some(run), Some(started_at)) =
+            (diagnostics.profiler.as_mut(), frame.profile_started_at)
+        {
+            let matches_target = match run.target {
+                None => true,
+                Some(target) => frame.profile_host_identity == Some(target),
+            };
+            if matches_target {
+                *run.elapsed
+                    .entry((frame.profile_host_identity, frame.function.clone()))
+                    .or_default() += started_at.elapsed();
+            }
+        }
+
+        let emission = diagnostics.trace.as_ref().and_then(|trace| {
+            returned.map(|value| {
+                let indent = ">".repeat(depth.saturating_sub(trace.start_depth));
+                (
+                    Arc::clone(&trace.sink),
+                    format!("T{indent}{} returned {value}", frame.function),
+                )
+            })
+        });
+        let trace_finished = diagnostics
+            .trace
+            .as_ref()
+            .is_some_and(|trace| depth <= trace.start_depth);
+        if trace_finished {
+            diagnostics.trace = None;
+        }
+        emission
+    });
+
+    if let Some((sink, message)) = emission {
+        sink(&message);
+    }
 }
 
 /// Strictness of the script frame immediately calling the currently-running
@@ -2189,6 +2410,13 @@ impl<'a> Vm<'a> {
         Self::check_convert_function_parameters(name, function, &mut args, caller.as_ref())?;
 
         let debug_args = self.call_args_to_values(&args)?;
+        let profile_host_identity =
+            (function.access != AccessLevel::Global).then_some(self.host_identity);
+        let mut diagnostic = ScriptDiagnosticGuard::enter(
+            name,
+            profile_host_identity,
+            &debug_args[..debug_arg_count],
+        );
         if let Some(debugger) = &self.debugger {
             if let Some(callback) = debugger.on_call() {
                 callback(name, &debug_args[..debug_arg_count]);
@@ -2251,6 +2479,7 @@ impl<'a> Vm<'a> {
         };
 
         let debug_return = value.as_value()?;
+        diagnostic.returned(&debug_return);
         if let Some(debugger) = &self.debugger {
             if let Some(callback) = debugger.on_return() {
                 callback(name, &debug_return);
