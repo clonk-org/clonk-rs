@@ -45675,6 +45675,11 @@ public func StrictZero(int id)
 {
     return SetLeagueProgressData(0, id);
 }
+
+public func SetOnce(int id, string data)
+{
+    return [SetLeagueProgressData(data, id), GetLeagueProgressData(id)];
+}
 "#;
         let legacy_script = r#"#strict
 public func ClearWithZero(int id)
@@ -45744,6 +45749,32 @@ public func ClearWithZero(int id)
             ]
         );
 
+        assert_eq!(
+            engine
+                .call_object_function(
+                    strict_index,
+                    "SetOnce",
+                    vec![Value::Int(41), Value::String("lvl2".into())],
+                )
+                .expect("known league player accepts progress data"),
+            Value::Array(vec![Value::Bool(true), Value::String("lvl2".into())])
+        );
+        assert_eq!(
+            engine.take_player_info_league_progress_updates(),
+            vec![(41, Some(b"lvl2".to_vec()))]
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    strict_index,
+                    "SetOnce",
+                    vec![Value::Int(999), Value::String("lvl2".into())],
+                )
+                .expect("unknown player-info ID is a false result"),
+            Value::Array(vec![Value::Bool(false), Value::Nil])
+        );
+        assert!(engine.take_player_info_league_progress_updates().is_empty());
+
         let _error = engine
             .call_object_function(strict_index, "StrictZero", vec![Value::Int(41)])
             .expect_err("strict-3 typed zero is not a C4String pointer");
@@ -45764,6 +45795,17 @@ public func ClearWithZero(int id)
         );
 
         engine.set_league_name(Vec::new());
+        assert_eq!(
+            engine
+                .call_object_function(
+                    strict_index,
+                    "SetOnce",
+                    vec![Value::Int(41), Value::String("lvl2".into())],
+                )
+                .expect("non-league setter is a false result"),
+            Value::Array(vec![Value::Bool(false), Value::Nil])
+        );
+        assert!(engine.take_player_info_league_progress_updates().is_empty());
         assert_eq!(
             engine
                 .call_object_function(
