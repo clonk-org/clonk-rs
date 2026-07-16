@@ -37833,24 +37833,37 @@ fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(context) => context,
             None => return Ok(Value::Bool(false)),
         };
-        let valid_material = usize::try_from(material)
+        let Some(material_id) = usize::try_from(material)
             .ok()
             .and_then(crate::material::MaterialId::new)
-            .is_some_and(|material| {
-                context
-                    .world
-                    .materials()
-                    .and_then(|materials| materials.get_by_id(material))
-                    .is_some()
-            });
-        if !valid_material {
+        else {
             return Ok(Value::Bool(false));
-        }
+        };
+        let Some(materials) = context.world.materials() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(definition) = materials.get_by_id(material_id) else {
+            return Ok(Value::Bool(false));
+        };
+        let density = definition.density();
         let position = context
             .caller_scope()
             .map_or(Vector2::new(x, y), |(_, base)| {
                 Vector2::new(base.x.saturating_add(x), base.y.saturating_add(y))
             });
+        // C4Landscape::InsertMaterial returns true before checking bounds for
+        // density-zero materials, and performs no landscape operation.
+        if density == 0 {
+            return Ok(Value::Bool(true));
+        }
+        let can_insert = context.world.landscape_ref().is_some_and(|landscape| {
+            landscape
+                .insert_material_destination(position.x, position.y, density, materials)
+                .is_some()
+        });
+        if !can_insert {
+            return Ok(Value::Bool(false));
+        }
         context.register_landscape_operation(LandscapeOperation::InsertMaterial {
             material,
             position,
@@ -55398,6 +55411,95 @@ public func RejectConstruction(x, y, builder)
             Value::Bool(false)
         );
         assert!(outcome.landscape.is_empty());
+    }
+
+    #[test]
+    fn insert_material_returns_the_cpp_preflight_result() {
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material Water]\nName=Water\nDensity=25\n\n\
+             [Material Earth]\nName=Earth\nDensity=100\n\n\
+             [Material Air]\nName=Air\nDensity=0\n",
+        )
+        .expect("material library builds");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let air = materials.id_of("Air").expect("air exists");
+        let mut densities = vec![0; 3];
+        densities[1] = 25;
+        densities[2] = 100;
+        let names = vec![
+            None,
+            Some("Water".to_string()),
+            Some("Earth".to_string()),
+        ];
+        let mut landscape = Landscape::new(3, vec![3; 3]).expect("landscape builds");
+        landscape.set_world_height(3);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            3,
+            3,
+            vec![0, 0, 0, 0, 2, 0, 2, 2, 2],
+            densities,
+            names,
+            vec![None; 3],
+        ));
+        landscape.resolve_grid_materials(|name| materials.id_of(name));
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        )
+        .with_materials(Some(Rc::new(materials)));
+
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                insert_material(&[
+                    Value::Int(water.index() as i32),
+                    Value::Int(3),
+                    Value::Int(1),
+                ])?,
+                insert_material(&[
+                    Value::Int(water.index() as i32),
+                    Value::Int(1),
+                    Value::Int(1),
+                ])?,
+                insert_material(&[
+                    Value::Int(air.index() as i32),
+                    Value::Int(-999),
+                    Value::Int(-999),
+                ])?,
+                insert_material(&[
+                    Value::Int(water.index() as i32),
+                    Value::Int(0),
+                    Value::Int(0),
+                ])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("InsertMaterial probes succeed"),
+            Value::Array(vec![
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Bool(true),
+            ])
+        );
+        assert_eq!(outcome.landscape.len(), 1);
+        assert!(matches!(
+            &outcome.landscape[0],
+            LandscapeOperation::InsertMaterial {
+                material,
+                position,
+                velocity,
+            } if *material == water.index() as i32
+                && *position == Vector2::new(0, 0)
+                && *velocity == Vector2::new(0, 0)
+        ));
     }
 
     #[test]

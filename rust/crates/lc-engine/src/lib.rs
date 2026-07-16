@@ -47500,23 +47500,24 @@ impl Engine {
             return true;
         }
         let max_slide = material.max_slide();
-        let Some((width, height)) = self
+        let Some(destination) = self
             .landscape
             .as_ref()
-            .and_then(|landscape| landscape.grid_dimensions())
+            .and_then(|landscape| {
+                landscape.insert_material_destination(tx, ty, mdens, &self.materials)
+            })
         else {
-            // Fixture worlds without a plane keep the column model.
-            return self
-                .landscape
-                .as_mut()
-                .map(|landscape| landscape.insert_material_at(tx, ty, mat))
-                .unwrap_or(false);
-        };
-        // Bounds (`ty` may equal Height, C4Landscape.cpp:1166)
-        if !(0..width).contains(&tx) || !(0..=height).contains(&ty) {
             return false;
-        }
-        let (mut tx, mut ty) = (tx, ty);
+        };
+        let (mut tx, mut ty) = match destination {
+            landscape::InsertMaterialDestination::Column => {
+                return self
+                    .landscape
+                    .as_mut()
+                    .is_some_and(|landscape| landscape.insert_material_at(tx, ty, mat));
+            }
+            landscape::InsertMaterialDestination::Grid { x, y } => (x, y),
+        };
         let density_at = |engine: &Self, x: i32, y: i32| -> i32 {
             engine
                 .landscape
@@ -47524,24 +47525,6 @@ impl Engine {
                 .map(|landscape| landscape.density_at(x, y, &engine.materials))
                 .unwrap_or(0)
         };
-        // Move up above same density with the primitive slide
-        // (C4Landscape.cpp:1179-1189)
-        while mdens == density_at(self, tx, ty) {
-            ty -= 1;
-            if ty < 0 {
-                return false;
-            }
-            if density_at(self, tx - 1, ty) < mdens {
-                tx -= 1;
-            }
-            if density_at(self, tx + 1, ty) < mdens {
-                tx += 1;
-            }
-        }
-        // Stuck in higher density
-        if density_at(self, tx, ty) > mdens {
-            return false;
-        }
         // Try slide: while a slide position exists and the pixel below is
         // free, the material continues as PXS (C4Landscape.cpp:1192-1196)
         loop {

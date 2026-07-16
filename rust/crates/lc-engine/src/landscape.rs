@@ -1723,6 +1723,12 @@ pub const LANDSCAPE_MODE_DYNAMIC: i32 = 1;
 pub const LANDSCAPE_MODE_STATIC: i32 = 2;
 pub const LANDSCAPE_MODE_EXACT: i32 = 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InsertMaterialDestination {
+    Column,
+    Grid { x: i32, y: i32 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Landscape {
     width: u32,
@@ -4376,6 +4382,42 @@ impl Landscape {
             cslide += 1;
         }
         false
+    }
+
+    /// The failure-producing prefix of `C4Landscape::InsertMaterial` for
+    /// Clonk Rage's default `LandscapePushPull=0` path. Once this succeeds,
+    /// slide, reaction, and dead-pixel insertion paths all return true.
+    pub(crate) fn insert_material_destination(
+        &self,
+        mut x: i32,
+        mut y: i32,
+        density: i32,
+        materials: &MaterialSet,
+    ) -> Option<InsertMaterialDestination> {
+        let Some((width, height)) = self.grid_dimensions() else {
+            let index = usize::try_from(x).ok()?;
+            return (index < self.surface.len()).then_some(InsertMaterialDestination::Column);
+        };
+        // C++ deliberately accepts y == Height (C4Landscape.cpp:1166).
+        if !(0..width).contains(&x) || !(0..=height).contains(&y) {
+            return None;
+        }
+        while density == self.density_at(x, y, materials) {
+            y -= 1;
+            if y < 0 {
+                return None;
+            }
+            if self.density_at(x - 1, y, materials) < density {
+                x -= 1;
+            }
+            if self.density_at(x + 1, y, materials) < density {
+                x += 1;
+            }
+        }
+        if self.density_at(x, y, materials) > density {
+            return None;
+        }
+        Some(InsertMaterialDestination::Grid { x, y })
     }
 
     pub fn insert_material_at(&mut self, x: i32, y: i32, material: MaterialId) -> bool {
