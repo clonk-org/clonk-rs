@@ -19098,15 +19098,11 @@ fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
             None => return Ok(Value::Bool(true)),
         };
 
-        let mut target_id = if let Some(value) = object_arg {
+        let target_id = if let Some(value) = object_arg {
             parse_object_reference_argument(value, "SoundLevel", "object")?
         } else {
             None
         };
-
-        if target_id.is_none() {
-            target_id = context.object_context().map(|object| object.id());
-        }
 
         let volume = level.clamp(0, 100) as u8;
         context.audio_mut().sound_level(&name, target_id, volume);
@@ -40587,7 +40583,7 @@ impl AudioRegistry {
 
     pub(crate) fn sound_level(&mut self, name: &str, target: Option<ObjectId>, volume: u8) {
         if volume == 0 {
-            if self.is_looping(name, target) {
+            if self.is_playing(name, target) {
                 self.stop_sound(name, target);
             }
             return;
@@ -51965,6 +51961,56 @@ func Announce()
                 .state
                 .is_looping("Loop", Some(ObjectId::new(1)))
         );
+    }
+
+    #[test]
+    fn sound_level_uses_global_default_and_stops_any_playing_instance() {
+        let target = ObjectId::new(1);
+        let target_value = object_reference_value(target);
+        let (result, outcome) = with_object_host_context(|| {
+            sound_level(&[Value::String("Global".into()), Value::Int(50)])?;
+            sound(&[
+                Value::String("Shot".into()),
+                Value::Bool(false),
+                target_value.clone(),
+                Value::Int(100),
+            ])?;
+            sound_level(&[
+                Value::String("Shot".into()),
+                Value::Int(0),
+                target_value,
+            ])?;
+            Ok::<_, RuntimeError>(Value::Nil)
+        });
+
+        result.expect("SoundLevel probes run");
+        assert_eq!(
+            outcome.audio.events,
+            vec![
+                AudioCommand::PlaySound {
+                    name: "Global".into(),
+                    target: None,
+                    volume: 50,
+                    looped: true,
+                    multiple: false,
+                    custom_falloff: None,
+                },
+                AudioCommand::PlaySound {
+                    name: "Shot".into(),
+                    target: Some(target),
+                    volume: 100,
+                    looped: false,
+                    multiple: false,
+                    custom_falloff: None,
+                },
+                AudioCommand::StopSound {
+                    name: "Shot".into(),
+                    target: Some(target),
+                },
+            ]
+        );
+        assert!(outcome.audio.state.is_looping("Global", None));
+        assert!(!outcome.audio.state.is_playing("Shot", Some(target)));
     }
 
     #[test]
