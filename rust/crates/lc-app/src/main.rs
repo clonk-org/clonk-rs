@@ -5064,6 +5064,10 @@ impl AudioContext {
         self.missing_sounds.clear();
     }
 
+    fn available_sound_samples(&self) -> Vec<String> {
+        self.resolver.sample_names()
+    }
+
     fn music_enabled(&self) -> bool {
         self.options.music_enabled
     }
@@ -5373,6 +5377,26 @@ impl AudioContext {
     }
 }
 
+/// Configure the app-owned sound resolver before any definition/scenario
+/// callback can call the Message family, then hand the engine only the
+/// client-local sample filenames needed for StartSoundEffect's success gate.
+/// A missing AudioContext models a missing C++ Application.AudioSystem and
+/// therefore exposes an empty catalog so speech falls back to text.
+fn configure_scenario_sound_samples(
+    audio: Option<&mut AudioContext>,
+    scenario: &Scenario,
+    path: &Path,
+) -> Vec<String> {
+    let Some(audio) = audio else {
+        return Vec::new();
+    };
+    audio.configure_scenario(Some(path));
+    scenario.visit_definition_groups(|id, group| {
+        audio.register_definition_sounds(id, group);
+    });
+    audio.available_sound_samples()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SoundInstanceKey {
     name: String,
@@ -5466,6 +5490,23 @@ impl SoundResolver {
             }
         }
         None
+    }
+
+    fn sample_names(&self) -> Vec<String> {
+        let mut names = self
+            .scenario
+            .iter()
+            .chain(&self.global)
+            .flat_map(|library| {
+                library
+                    .entries
+                    .iter()
+                    .map(|entry| entry.file_name.clone())
+            })
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        names
     }
 
     fn register_definition_group(&mut self, definition_id: &str, group: &Group) {
@@ -30441,6 +30482,13 @@ impl GameApp {
         engine.set_league_game(self.network_is_league);
         self.apply_material_library_to(&mut engine);
 
+        let sound_samples = configure_scenario_sound_samples(
+            self.audio.as_mut(),
+            &scenario_data,
+            &path,
+        );
+        engine.configure_sound_samples(sound_samples);
+
         let apply_result = match (network_game, prepared_team_configuration) {
             (true, Some(configuration)) => scenario_data
                 .apply_before_network_final_init_with_team_configuration(
@@ -30516,13 +30564,8 @@ impl GameApp {
         self.mouse_control_allowed = !scenario_data.disables_mouse();
         self.mouse_control = self.mouse_control_allowed;
         if let Some(audio) = self.audio.as_mut() {
-            audio.configure_scenario(Some(&path));
             audio.reset_sfx();
-            scenario_data.visit_definition_groups(|id, group| {
-                audio.register_definition_sounds(id, group);
-            });
         }
-
         if !network_game {
             if let Some(startup) = offline_startup_players.as_ref() {
                 let startup_player_count = startup.startup_player_count();
@@ -30776,10 +30819,6 @@ impl GameApp {
         self.mouse_control = true;
         self.active_definition_load = None;
         self.sky = None;
-        if let Some(audio) = self.audio.as_mut() {
-            audio.configure_scenario(None);
-            audio.reset_sfx();
-        }
 
         let spawn_definition = match self.audio.as_mut() {
             Some(audio) => configure_sandbox_engine(&mut self.engine, Some(audio))?,
@@ -31072,12 +31111,14 @@ impl GameApp {
                     self.engine.set_control_rate(parameters.control_rate());
                 }
             }
+            let sound_samples = configure_scenario_sound_samples(
+                self.audio.as_mut(),
+                &scenario_data,
+                path,
+            );
+            self.engine.configure_sound_samples(sound_samples);
             if let Some(audio) = self.audio.as_mut() {
-                audio.configure_scenario(Some(path));
                 audio.reset_sfx();
-                scenario_data.visit_definition_groups(|id, group| {
-                    audio.register_definition_sounds(id, group);
-                });
             }
             // Restoring a save reloads definitions and world resources, but
             // C++ skips Script.Initialize for savegames. The captured engine
@@ -33993,11 +34034,16 @@ fn load_definitions_from_group(
 
 fn configure_sandbox_engine(
     engine: &mut Engine,
-    audio: Option<&mut AudioContext>,
+    mut audio: Option<&mut AudioContext>,
 ) -> Result<String, EngineError> {
+    if let Some(audio) = audio.as_deref_mut() {
+        audio.configure_scenario(None);
+        audio.reset_sfx();
+    }
     if let Ok(paths) = cached_app_paths() {
-        match load_install_definitions(engine, &paths, audio) {
+        match load_install_definitions(engine, &paths, audio.as_deref_mut()) {
             Ok(Some(spawn_definition)) => {
+                sync_engine_sound_samples(engine, audio.as_deref());
                 engine.set_environment(EnvironmentSettings::default());
                 engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
                 return Ok(spawn_definition);
@@ -34019,6 +34065,7 @@ fn configure_sandbox_engine(
         match Definition::from_resource(&resource_def) {
             Ok(definition) => {
                 engine.register_definition(definition)?;
+                sync_engine_sound_samples(engine, audio.as_deref());
                 engine.set_environment(EnvironmentSettings::default());
                 engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
                 return Ok(resource_def.core.id);
@@ -34046,9 +34093,18 @@ fn configure_sandbox_engine(
         .with_walk_acceleration(2);
     definition.set_movement_profile(profile);
     engine.register_definition(definition)?;
+    sync_engine_sound_samples(engine, audio.as_deref());
     engine.set_environment(EnvironmentSettings::default());
     engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
     Ok("Walker".to_string())
+}
+
+fn sync_engine_sound_samples(engine: &mut Engine, audio: Option<&AudioContext>) {
+    engine.configure_sound_samples(
+        audio
+            .map(AudioContext::available_sound_samples)
+            .unwrap_or_default(),
+    );
 }
 
 fn try_load_install_definition(definition_id: &str) -> Option<ResourceDefinitionData> {
@@ -39953,6 +40009,8 @@ mod tests {
         fs::create_dir_all(&scenario).expect("create scenario");
         fs::create_dir_all(&sibling).expect("create sibling scenario");
         fs::write(folder.join("Drop.wav"), b"parent drop").expect("write parent sound");
+        fs::write(definitions.join("Voice.wav"), b"definition voice")
+            .expect("write definition sound");
         fs::write(sibling.join("Sibling.wav"), b"sibling sound").expect("write sibling sound");
 
         let mut resolver = SoundResolver {
@@ -39974,6 +40032,19 @@ mod tests {
         assert!(
             resolver.resolve_entry("Sibling").is_none(),
             "sibling scenario sounds are not definition-folder root sounds"
+        );
+        assert_eq!(
+            resolver.sample_names(),
+            vec!["drop.wav"],
+            "the engine-facing inventory follows the same admitted libraries"
+        );
+
+        let definition_group = Group::open(&definitions).expect("definition group");
+        resolver.register_definition_group("TEST", &definition_group);
+        assert_eq!(
+            resolver.sample_names(),
+            vec!["drop.wav", "voice.wav"],
+            "definition samples join the catalog before initialization"
         );
     }
 

@@ -13275,10 +13275,7 @@ fn format_script_string(
 fn extract_speech_segment(raw: &str) -> Option<String> {
     let mut segments = raw.splitn(3, '$');
     segments.next()?;
-    segments
-        .next()
-        .map(|segment| segment.to_string())
-        .filter(|segment| !segment.is_empty())
+    segments.next().map(|segment| segment.to_string())
 }
 
 fn extract_message_text(formatted: &str) -> String {
@@ -13950,8 +13947,6 @@ fn message(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     let format_args = if args.len() > 2 { &args[2..] } else { &[] };
-    let formatted = format_script_string("Message", &raw_message, format_args)?;
-    let display_text = extract_message_text(&formatted);
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -13959,21 +13954,27 @@ fn message(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_mut()
             .ok_or_else(|| RuntimeError::new("Message requires an active engine context"))?;
 
-        let mut played_speech = false;
-        if let Some(sound) = extract_speech_segment(&raw_message) {
-            if !sound.is_empty() {
-                // FnMessage's pObj is only the text-message target. Speech
-                // is always anchored to cthr->Obj (C4Script.cpp:2415-2427).
-                let speech_target = context.object_context().map(|object| object.id());
-                context
-                    .audio_mut()
-                    .play_sound(&sound, speech_target, 100, false, false, None);
-                played_speech = true;
-            }
-        }
+        // FnMessage's pObj is only the text-message target. Speech is always
+        // anchored to cthr->Obj (C4Script.cpp:2415-2427). NewInstance's
+        // success decides whether text is suppressed; merely requesting a
+        // missing sample does not count as speech.
+        let played_speech = extract_speech_segment(&raw_message).is_some_and(|sound| {
+            let speech_target = context.object_context().map(|object| object.id());
+            context.audio_mut().try_play_sound(
+                &sound,
+                speech_target,
+                100,
+                false,
+                false,
+                None,
+            )
+        });
 
         if !played_speech {
-            let text = display_text.clone();
+            // C++ formats only the fallback path. A successful speech sound
+            // therefore also bypasses invalid or missing format arguments.
+            let formatted = format_script_string("Message", &raw_message, format_args)?;
+            let text = extract_message_text(&formatted);
             let spec = MessageSpec {
                 kind: if target_raw.is_some() {
                     MessageKind::Target
@@ -14078,8 +14079,6 @@ fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     let format_args = if args.len() > 3 { &args[3..] } else { &[] };
-    let formatted = format_script_string("PlayerMessage", &raw_message, format_args)?;
-    let display_text = extract_message_text(&formatted);
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -14089,21 +14088,24 @@ fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
         let resolved_player = resolve_target_player(context, player_id);
 
-        let mut played_speech = false;
-        if let Some(sound) = extract_speech_segment(&raw_message) {
-            if !sound.is_empty() {
-                let speech_target = target_raw
-                    .map(ObjectId::new)
-                    .or_else(|| context.object_context().map(|object| object.id()));
-                context
-                    .audio_mut()
-                    .play_sound(&sound, speech_target, 100, false, false, None);
-                played_speech = true;
-            }
-        }
+        let played_speech = extract_speech_segment(&raw_message).is_some_and(|sound| {
+            let speech_target = target_raw
+                .map(ObjectId::new)
+                .or_else(|| context.object_context().map(|object| object.id()));
+            context.audio_mut().try_play_sound(
+                &sound,
+                speech_target,
+                100,
+                false,
+                false,
+                None,
+            )
+        });
 
         if !played_speech {
-            let text = display_text.clone();
+            let formatted =
+                format_script_string("PlayerMessage", &raw_message, format_args)?;
+            let text = extract_message_text(&formatted);
             let kind = match (target_raw.is_some(), resolved_player.is_some()) {
                 (true, true) => MessageKind::TargetPlayer,
                 (true, false) => MessageKind::Target,
@@ -14197,8 +14199,6 @@ fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let player_id = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "PlrMessage", "player")?;
     let format_args = if args.len() > 2 { &args[2..] } else { &[] };
-    let formatted = format_script_string("PlrMessage", &raw_message, format_args)?;
-    let display_text = extract_message_text(&formatted);
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -14208,19 +14208,21 @@ fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
         let resolved_player = resolve_target_player(context, player_id);
 
-        let mut played_speech = false;
-        if let Some(sound) = extract_speech_segment(&raw_message) {
-            if !sound.is_empty() {
-                let speech_target = context.object_context().map(|object| object.id());
-                context
-                    .audio_mut()
-                    .play_sound(&sound, speech_target, 100, false, false, None);
-                played_speech = true;
-            }
-        }
+        let played_speech = extract_speech_segment(&raw_message).is_some_and(|sound| {
+            let speech_target = context.object_context().map(|object| object.id());
+            context.audio_mut().try_play_sound(
+                &sound,
+                speech_target,
+                100,
+                false,
+                false,
+                None,
+            )
+        });
 
         if !played_speech {
-            let text = display_text.clone();
+            let formatted = format_script_string("PlrMessage", &raw_message, format_args)?;
+            let text = extract_message_text(&formatted);
             let kind = if resolved_player.is_some() {
                 MessageKind::GlobalPlayer
             } else {
@@ -38404,6 +38406,10 @@ struct AudioInstance {
 #[derive(Debug, Clone, Default)]
 #[doc(hidden)]
 pub struct AudioRegistry {
+    /// Filenames admitted by the active C4SoundSystem resource chain. This
+    /// is client-local presentation state, not synchronized or save-persisted
+    /// state; cloning the registry across callbacks is cheap.
+    available_samples: Arc<HashSet<String>>,
     looping: HashMap<AudioInstanceKey, AudioInstance>,
     events: Vec<AudioCommand>,
 }
@@ -38461,6 +38467,39 @@ impl AudioRegistry {
                 _ => None,
             })
             .unwrap_or(false)
+    }
+
+    pub(crate) fn set_available_samples<I, S>(&mut self, samples: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.available_samples = Arc::new(
+            samples
+                .into_iter()
+                .map(|sample| normalize_sound_sample_name(sample.as_ref()))
+                .collect(),
+        );
+    }
+
+    /// StartSoundEffect/NewInstance's primary success gate for message
+    /// speech. Ordinary Sound/SoundLevel calls keep their existing deferred
+    /// behavior; only the message family needs the synchronous bool to decide
+    /// whether its text fallback runs.
+    fn try_play_sound(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        volume: u8,
+        looped: bool,
+        multiple: bool,
+        custom_falloff: Option<i32>,
+    ) -> bool {
+        if !sound_sample_available(&self.available_samples, name) {
+            return false;
+        }
+        self.play_sound(name, target, volume, looped, multiple, custom_falloff);
+        true
     }
 
     pub fn play_sound(
@@ -38591,6 +38630,46 @@ impl Default for AudioOutcome {
 
 fn normalize_sound_name(name: &str) -> String {
     name.to_ascii_lowercase()
+}
+
+fn normalize_sound_sample_name(name: &str) -> String {
+    name.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase()
+}
+
+/// `C4SoundSystem::PrepareFilename` plus StdFile's ASCII-insensitive
+/// WildcardMatch. Extensionless requests resolve only `.wav`, and legacy
+/// replaces every `*` with the one-character `?` wildcard.
+fn sound_sample_available(samples: &HashSet<String>, name: &str) -> bool {
+    let file_name = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let has_extension = file_name
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| !extension.is_empty());
+    let mut pattern = if has_extension {
+        name.to_ascii_lowercase()
+    } else {
+        format!("{}.wav", name.to_ascii_lowercase())
+    };
+    pattern = pattern.replace('*', "?");
+
+    if pattern.contains('?') {
+        samples
+            .iter()
+            .any(|sample| sound_filename_matches(&pattern, sample))
+    } else {
+        samples.contains(&pattern)
+    }
+}
+
+fn sound_filename_matches(pattern: &str, file_name: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let file_name = file_name.as_bytes();
+    pattern.len() == file_name.len()
+        && pattern.iter().zip(file_name).all(|(expected, actual)| {
+            *expected == b'?' || expected.eq_ignore_ascii_case(actual)
+        })
 }
 
 fn clear_removed_object_references(value: &mut Value, removed: &HashSet<ObjectId>) {
@@ -47877,11 +47956,20 @@ func Trigger(object pOther)
         // FnMessage ignores pObj for speech and uses cthr->Obj;
         // FnPlayerMessage prefers pObj; FnPlrMessage uses cthr->Obj
         // unconditionally (C4Script.cpp:2395-2463).
+        let mut audio = AudioRegistry::new();
+        audio.set_available_samples([
+            "messagespeech.WAV",
+            "PlayerSpeech.wav",
+            "PlrSpeech.wav",
+        ]);
+        let audio_guard = enter_audio_context(audio);
         let caller = ObjectId::new(1);
         let target = ObjectId::new(2);
         let (result, outcome) = with_object_host_context(|| {
             let message_result = message(&[
-                Value::String("Hello$MessageSpeech".into()),
+                // Successful speech bypasses FnStringFormat entirely, so
+                // this missing %d argument must not abort the call.
+                Value::String("Hello %d$MessageSpeech".into()),
                 object_reference_value(target),
             ])?;
             let player_result = player_message(&[
@@ -47895,6 +47983,7 @@ func Trigger(object pOther)
             ])?;
             Ok::<_, RuntimeError>((message_result, player_result, plr_result))
         });
+        let _ = audio_guard.finish();
         assert_eq!(
             result.expect("message speech calls succeed"),
             (Value::Bool(true), Value::Bool(true), Value::Bool(true))
@@ -47929,6 +48018,103 @@ func Trigger(object pOther)
                 },
             ]
         );
+    }
+
+    #[test]
+    fn message_family_missing_speech_falls_back_to_text() {
+        // StartSoundEffect fails when C4SoundSystem has no matching sample;
+        // all three natives then format and display segment zero instead of
+        // emitting an audio request (C4Script.cpp:2395-2463;
+        // C4SoundSystem.cpp:301-320).
+        let mut audio = AudioRegistry::new();
+        audio.set_available_samples(std::iter::empty::<&str>());
+        let audio_guard = enter_audio_context(audio);
+
+        let mut player = PlayerState::default();
+        player.id = 7;
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            Ok::<_, RuntimeError>((
+                message(&[Value::String("Hello 1$NoMessageSpeech$".into())])?,
+                player_message(&[
+                    Value::Int(7),
+                    Value::String("Hello 2$NoPlayerSpeech$".into()),
+                ])?,
+                plr_message(&[
+                    Value::String("Hello 3$NoPlrSpeech$".into()),
+                    Value::Int(7),
+                ])?,
+            ))
+        });
+        let _ = audio_guard.finish();
+
+        assert_eq!(
+            result.expect("missing speech falls back"),
+            (Value::Bool(true), Value::Bool(true), Value::Bool(true))
+        );
+        assert!(outcome.audio.events.is_empty());
+        assert_eq!(outcome.messages.len(), 3);
+        assert!(matches!(
+            &outcome.messages[0],
+            MessageCommand::Add(MessageSpec {
+                kind: MessageKind::Global,
+                text,
+                target: None,
+                player: None,
+                ..
+            }) if text == "Hello 1"
+        ));
+        assert!(matches!(
+            &outcome.messages[1],
+            MessageCommand::Add(MessageSpec {
+                kind: MessageKind::GlobalPlayer,
+                text,
+                target: None,
+                player: Some(7),
+                ..
+            }) if text == "Hello 2"
+        ));
+        assert!(matches!(
+            &outcome.messages[2],
+            MessageCommand::Add(MessageSpec {
+                kind: MessageKind::GlobalPlayer,
+                text,
+                target: None,
+                player: Some(7),
+                ..
+            }) if text == "Hello 3"
+        ));
+
+        for (command, expected) in outcome
+            .messages
+            .iter()
+            .cloned()
+            .zip(["Hello 1", "Hello 2", "Hello 3"])
+        {
+            let mut messages = crate::message::MessageManager::new();
+            messages.apply_command(command);
+            let snapshot = messages.snapshot();
+            assert_eq!(snapshot.len(), 1);
+            assert_eq!(snapshot[0].lines, vec![expected.to_string()]);
+        }
+    }
+
+    #[test]
+    fn message_speech_catalog_matches_cpp_prepared_filenames() {
+        let samples = HashSet::from([
+            "voice.wav".to_string(),
+            "encoded.ogg".to_string(),
+            "blast1.wav".to_string(),
+        ]);
+        assert!(sound_sample_available(&samples, "VOICE"));
+        assert!(sound_sample_available(&samples, "encoded.ogg"));
+        assert!(!sound_sample_available(&samples, "encoded"));
+        assert!(sound_sample_available(&samples, "Blast*"));
+        assert!(!sound_sample_available(&samples, "Blast??"));
+        assert!(!sound_sample_available(&samples, "sub/VOICE"));
     }
 
     #[test]

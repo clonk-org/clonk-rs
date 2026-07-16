@@ -16165,6 +16165,20 @@ impl Engine {
         self.messages.add_message(spec);
     }
 
+    /// Install the client-local sample filenames admitted by the active
+    /// sound resource chain. Message/PlayerMessage/PlrMessage need this
+    /// presentation-only inventory to know whether StartSoundEffect would
+    /// suppress their text fallback; it is deliberately absent from saves
+    /// and synchronization state.
+    #[doc(hidden)]
+    pub fn configure_sound_samples<I, S>(&mut self, samples: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.audio_registry.set_available_samples(samples);
+    }
+
     pub fn set_construction_needs_material(&mut self, enabled: bool) {
         self.construction_needs_material = enabled;
     }
