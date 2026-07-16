@@ -1,6 +1,6 @@
 // Test for exponentiation operator (**)
 
-use lc_script::{Engine, Value};
+use lc_script::{Engine, ScriptError, Value};
 
 fn eval(expression: &str) -> Value {
     let mut engine = Engine::new();
@@ -8,6 +8,20 @@ fn eval(expression: &str) -> Value {
         .load_script(&format!("func Test() {{ return {expression}; }}"))
         .expect("exponentiation script loads");
     engine.call("Test", &[]).expect("script call succeeds")
+}
+
+fn runtime_error(expression: &str) -> String {
+    let mut engine = Engine::new();
+    engine
+        .load_script(&format!("func Test() {{ return {expression}; }}"))
+        .expect("exponentiation script loads");
+    match engine
+        .call("Test", &[])
+        .expect_err("non-integer exponentiation operand must fail")
+    {
+        ScriptError::Runtime(error) => error.message().to_string(),
+        other => panic!("expected runtime error, got {other}"),
+    }
 }
 
 #[test]
@@ -97,13 +111,23 @@ fn unary_precedence_is_higher_than_exponentiation() {
 #[test]
 fn exponentiation_edge_semantics_match_cpp() {
     assert_eq!(
-        eval("[2 ** -1, nil ** 2, 7 ** nil, 10 ** 10]"),
+        eval("[2 ** -1, nil ** 3, 2 ** nil, true ** true, 2 ** 40, 10 ** 10]"),
         Value::Array(vec![
             Value::Int(0),
             Value::Int(0),
             Value::Int(1),
+            Value::Int(1),
+            Value::Int(0),
             Value::Int(1_410_065_408),
         ])
+    );
+}
+
+#[test]
+fn exponentiation_rejects_non_coercible_operands() {
+    assert_eq!(
+        runtime_error(r#""a" ** 2"#),
+        "cannot apply '**' to operands of type string and int"
     );
 }
 
