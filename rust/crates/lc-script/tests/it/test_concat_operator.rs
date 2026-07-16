@@ -115,6 +115,26 @@ func Test() { return "x" .. nil; }"#,
 }
 
 #[test]
+fn concat_nil_left_side_reports_cpp_conversion_error() {
+    assert_eq!(
+        runtime_error(r#"func Test() { return nil .. "a"; }"#, &[]),
+        "operator \"..\" left side: can not convert \"any\" to \"string\", \"array\" or \"map\"!"
+    );
+}
+
+#[test]
+fn strict3_concat_assign_checks_nil_left_side_first() {
+    assert_eq!(
+        runtime_error(
+            r#"#strict 3
+func Test() { var value; value ..= nil; return value; }"#,
+            &[]
+        ),
+        "operator \"..=\" left side: got nil, but expected \"&\"!"
+    );
+}
+
+#[test]
 fn concat_two_ints_is_string_not_addition() {
     // 5 .. 3 == "53" (concat), not 8 (`+` would add).
     assert_eq!(

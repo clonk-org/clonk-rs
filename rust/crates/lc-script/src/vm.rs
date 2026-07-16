@@ -4135,12 +4135,13 @@ impl<'a> Vm<'a> {
         }
 
         // CheckOpPars<Any, Any, false, false> rejects nil before AB_Concat at
-        // STRICT3. For `..=` the left stack value is still a reference here,
-        // so only its RHS participates in this early check.
+        // STRICT3. For `..=`, GetType() dereferences the left stack reference,
+        // but its expected operator-map type remains C4V_pC4Value (`"&"`).
         if strict.unwrap_or(0) >= 3 {
-            if operator != "..=" && matches!(left, Value::Nil) {
+            if matches!(left, Value::Nil) {
+                let expected = if operator == "..=" { "&" } else { "any" };
                 return Err(RuntimeError::new(format!(
-                    "operator \"{operator}\" left side: got nil, but expected \"any\"!"
+                    "operator \"{operator}\" left side: got nil, but expected \"{expected}\"!"
                 )));
             }
             if matches!(right, Value::Nil) {
