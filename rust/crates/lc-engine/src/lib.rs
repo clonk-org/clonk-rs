@@ -29546,11 +29546,16 @@ impl Engine {
     /// same frame, or queue it until that frame's local check exists. Returns
     /// false on synchronization loss.
     pub fn register_remote_sync_check(&mut self, packet: SyncCheckPacket) -> bool {
+        let is_replay = self.replay_control;
         let Some(local) = self.get_sync_check(packet.frame) else {
             self.sync_checks.push(packet);
             return true;
         };
-        local.matches(&packet)
+        if is_replay {
+            local.matches_replay(&packet)
+        } else {
+            local.matches(&packet)
+        }
     }
 
     pub fn capture_state(&self) -> EngineState {

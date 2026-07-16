@@ -2316,6 +2316,17 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         // matching digest → ok; tampered digest → synchronization loss.
         let local = machine.get_sync_check(60).cloned().expect("local check");
         assert!(machine.register_remote_sync_check(local.clone()));
+        let mut shifted_tick = local.clone();
+        shifted_tick.control_tick += 1;
+        assert!(
+            !machine.register_remote_sync_check(shifted_tick.clone()),
+            "live control compares ControlTick"
+        );
+        machine.set_replay_control(true);
+        assert!(
+            machine.register_remote_sync_check(shifted_tick),
+            "replay control exempts only ControlTick"
+        );
         let mut tampered = local;
         tampered.random_count += 1;
         assert!(!machine.register_remote_sync_check(tampered));

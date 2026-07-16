@@ -887,9 +887,21 @@ pub struct SyncCheckPacket {
 }
 
 impl SyncCheckPacket {
+    /// Strict live-network comparison from `C4ControlSyncCheck::Execute`.
     pub fn matches(&self, other: &Self) -> bool {
+        self.matches_with_replay_mode(other, false)
+    }
+
+    /// Replay comparison from `C4ControlSyncCheck::Execute`: playback pacing
+    /// may shift `ControlTick`, while every simulation digest field remains
+    /// strict.
+    pub fn matches_replay(&self, other: &Self) -> bool {
+        self.matches_with_replay_mode(other, true)
+    }
+
+    fn matches_with_replay_mode(&self, other: &Self, is_replay: bool) -> bool {
         self.frame == other.frame
-            && self.control_tick == other.control_tick
+            && (is_replay || self.control_tick == other.control_tick)
             && self.random3 == other.random3
             && self.random_count == other.random_count
             && self.crew_positions_sum == other.crew_positions_sum
@@ -2409,6 +2421,36 @@ mod tests {
         assert_eq!(packet.flags, 0);
         assert!(packet.players.is_empty());
         assert_eq!(packet.by_client, -1);
+    }
+
+    #[test]
+    fn sync_check_control_tick_mismatch_is_exempt_only_during_replay() {
+        // C4ControlSyncCheck::Execute excludes ControlTick from the mismatch
+        // condition only for replay control (src/C4Control.cpp:483-492).
+        let local = SyncCheckPacket {
+            frame: 100,
+            control_tick: 41,
+            random3: 2,
+            random_count: 3,
+            crew_positions_sum: 4,
+            pxs_count: 5,
+            mass_mover_index: 6,
+            object_count: 7,
+            object_enumeration_index: 8,
+            sector_shape_sum: 9,
+            by_client: 1,
+        };
+        let mut remote = local.clone();
+        remote.control_tick = 42;
+
+        assert!(!local.matches(&remote), "live control compares ticks");
+        assert!(local.matches_replay(&remote), "replay ignores tick drift");
+
+        remote.random_count += 1;
+        assert!(
+            !local.matches_replay(&remote),
+            "replay still compares synchronized simulation fields"
+        );
     }
 
     #[test]
