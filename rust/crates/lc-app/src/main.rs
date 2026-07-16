@@ -26684,6 +26684,21 @@ impl GameApp {
                         &self.network_league_name,
                         &self.control_player_infos,
                     );
+                    if matches!(self.runtime_network_role(), RuntimeNetworkRole::Offline)
+                        && self.engine.is_control_host()
+                    {
+                        // C4ControlPlayerInfo::Execute rechecks teams before
+                        // LocalJoinUnjoinedPlayersInQueue. Offline Rust folds
+                        // that queued follow-up inline, like the existing
+                        // CreateScriptPlayer admission path above.
+                        let joins = self.control_player_infos.issue_unjoined_local_players(
+                            0,
+                            |info| (!info.filename.is_empty()).then(|| info.filename.clone()),
+                        );
+                        for join in joins {
+                            self.apply_join_player_control(join)?;
+                        }
+                    }
                     self.publish_current_host_player_infos();
                     Ok(())
                 }
@@ -61338,6 +61353,69 @@ protected func InputCallback(string answer, int player)
             .team_registry;
         assert!(teams[0].player_ids.is_empty());
         assert_eq!(teams[1].player_ids, vec![20]);
+    }
+
+    #[test]
+    fn offline_player_info_control_rechecks_teams_before_joining_unjoined_script_player() {
+        let mut app = new_running_sandbox_app();
+        let existing_info_id = app
+            .engine
+            .player(app.local_owner)
+            .expect("sandbox local player")
+            .player_info_id();
+        let bot_info_id = existing_info_id + 1;
+        let metadata = set_control_test_metadata(
+            false,
+            vec![
+                set_control_test_team(1, vec![existing_info_id, bot_info_id], 0),
+                set_control_test_team(2, Vec::new(), 0),
+            ],
+        );
+        app.engine
+            .set_teams(runtime_teams_from_initial_metadata(&metadata));
+        app.network_team_assignment =
+            Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+
+        let existing =
+            set_control_test_player(existing_info_id, 1, lc_engine::PLAYER_INFO_FLAG_JOINED);
+        let mut bot = set_control_test_player(bot_info_id, 1, 0);
+        bot.player_type = lc_engine::PLAYER_INFO_TYPE_SCRIPT;
+        app.control_player_infos.replace_snapshot(
+            bot_info_id,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![existing.clone(), bot],
+                ..Default::default()
+            }],
+        );
+
+        let mut moved_bot = set_control_test_player(bot_info_id, 2, 0);
+        moved_bot.player_type = lc_engine::PLAYER_INFO_TYPE_SCRIPT;
+        app.apply_ready_controls(
+            7,
+            vec![NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    players: vec![existing, moved_bot],
+                    ..Default::default()
+                },
+            )],
+        )
+        .expect("offline PlayerInfo control executes");
+
+        let teams = app
+            .network_team_assignment
+            .as_ref()
+            .expect("offline team state")
+            .teams();
+        assert_eq!(teams.teams[0].player_ids, vec![existing_info_id]);
+        assert_eq!(teams.teams[1].player_ids, vec![bot_info_id]);
+        let bot = app
+            .engine
+            .players()
+            .find(|player| player.player_info_id() == bot_info_id)
+            .expect("offline PlayerInfo queues its unjoined script player");
+        assert_eq!(bot.team(), Some(2));
     }
 
     #[test]

@@ -547,6 +547,18 @@ impl RuntimeHandle {
                         self.player_infos.insert(id, entry);
                         client_entries.push(id);
                     }
+                    let mut memberships = self
+                        .player_infos
+                        .values()
+                        .filter(|entry| {
+                            entry.id > 0
+                                && entry.flags & crate::PLAYER_INFO_FLAG_REMOVED == 0
+                        })
+                        .map(|entry| (entry.id, entry.team))
+                        .collect::<Vec<_>>();
+                    memberships.sort_unstable_by_key(|(id, _)| *id);
+                    self.engine
+                        .recheck_team_player_info_memberships(&memberships);
                 }
                 ControlPacket::JoinPlayer(join) => {
                     self.handle_join_player(&join)?;
@@ -5192,6 +5204,69 @@ global func Step(state, frame, random)
         assert!(
             runtime.player_infos.contains_key(&9),
             "another client's list survives"
+        );
+    }
+
+    #[test]
+    fn replay_player_info_team_change_rechecks_both_team_lists() {
+        let entry = |id, team, flags| ControlPlayerInfoEntry {
+            id,
+            team,
+            flags,
+            ..ControlPlayerInfoEntry::default()
+        };
+        let packet = |players| {
+            ControlPacket::PlayerInfo(crate::PlayerInfoControlData {
+                client_id: 7,
+                players,
+                by_client: 0,
+                ..crate::PlayerInfoControlData::default()
+            })
+        };
+        let mut runtime = RuntimeHandle::new();
+        runtime.control_packets.insert(
+            0,
+            vec![packet(vec![
+                entry(10, 1, 0),
+                entry(20, 1, 0),
+                entry(30, 2, 0),
+                entry(40, 2, 0),
+                entry(50, 1, 0),
+                entry(60, 2, 0),
+            ])],
+        );
+        runtime
+            .apply_control_packets_for_frame(0)
+            .expect("initial player infos apply");
+        runtime.engine.set_teams(vec![
+            crate::TeamInfo::new(1, "One", 0).with_player_ids(vec![50, 20, 99, 50]),
+            crate::TeamInfo::new(2, "Two", 0).with_player_ids(vec![30, 40, 60, 77]),
+        ]);
+
+        runtime.control_packets.insert(
+            1,
+            vec![packet(vec![
+                entry(10, 1, 0),
+                entry(20, 2, 0),
+                entry(30, 2, 0),
+                entry(40, 1, 0),
+                entry(50, 1, 0),
+                entry(60, 2, crate::PLAYER_INFO_FLAG_REMOVED),
+                entry(0, 1, 0),
+            ])],
+        );
+        runtime
+            .apply_control_packets_for_frame(1)
+            .expect("runtime team-change info applies");
+
+        assert_eq!(
+            runtime.engine.teams()[0].player_ids,
+            vec![50, 50, 10, 40]
+        );
+        assert_eq!(runtime.engine.teams()[1].player_ids, vec![30, 20]);
+        assert!(
+            runtime.engine.players().next().is_none(),
+            "replay PlayerInfo must not synthesize a join"
         );
     }
 

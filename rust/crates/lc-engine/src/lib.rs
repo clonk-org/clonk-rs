@@ -17153,6 +17153,25 @@ impl Engine {
         self.recheck_runtime_team_memberships();
     }
 
+    /// Reconciles the live C4Team player-info ID lists after a PlayerInfo
+    /// control. Existing valid IDs retain their order; missing members are
+    /// appended in the caller-supplied (C4PlayerInfo ID) order.
+    #[doc(hidden)]
+    pub fn recheck_team_player_info_memberships(&mut self, memberships: &[(i32, i32)]) {
+        for team in Rc::make_mut(&mut self.teams) {
+            team.player_ids.retain(|player_info_id| {
+                memberships.iter().any(|(id, assigned_team)| {
+                    id == player_info_id && *assigned_team == team.id
+                })
+            });
+            for &(player_info_id, assigned_team) in memberships {
+                if assigned_team == team.id && !team.player_ids.contains(&player_info_id) {
+                    team.player_ids.push(player_info_id);
+                }
+            }
+        }
+    }
+
     pub fn teams(&self) -> &[TeamInfo] {
         &self.teams
     }
