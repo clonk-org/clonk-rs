@@ -14047,6 +14047,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GameCall", game_call);
     script.register_host_function("GameCallEx", game_call_ex);
     script.register_host_function("Format", format_string);
+    script.register_host_function("IsRef", is_ref);
     script.register_host_function("GetType", get_type);
     script.register_host_function("CreateArray", create_array);
     script.register_host_reference_function("Set", [0], set_reference);
@@ -15388,6 +15389,13 @@ fn create_array(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let values = vec![Value::Nil; size as usize];
     Ok(Value::Array(values))
+}
+
+/// FnIsRef (C4Script.cpp:3790-3793) is registered with a C4V_Any parameter.
+/// Native parameter conversion dereferences C4V_pC4Value before the body,
+/// so every script-visible argument reaches IsRef as a non-reference.
+fn is_ref(_args: &[Value]) -> Result<Value, RuntimeError> {
+    Ok(Value::Bool(false))
 }
 
 /// FnSet (C4Script.cpp:3764-3768): assign through the first native
@@ -47007,6 +47015,7 @@ mod tests {
         "Inside",
         "IsNetwork",
         "IsNewgfx",
+        "IsRef",
         "Jump",
         "Kill",
         "LandscapeHeight",

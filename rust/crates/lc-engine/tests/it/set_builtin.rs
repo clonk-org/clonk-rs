@@ -78,3 +78,25 @@ protected func Probe()
         ])
     );
 }
+
+#[test]
+fn is_ref_matches_cpp_any_parameter_dereference() {
+    let result = call_probe(
+        "ISRF",
+        r#"#strict 3
+protected func Probe()
+{
+    return [IsRef(Var(0)), IsRef(0), IsRef(GetX())];
+}
+"#,
+    );
+
+    assert_eq!(
+        result,
+        Value::Array(vec![
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(false),
+        ])
+    );
+}
