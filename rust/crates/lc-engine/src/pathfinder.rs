@@ -137,7 +137,7 @@ impl Zone {
         let mut y_incr1 = -1;
         let mut x_incr2 = 0;
         let mut y_incr2 = 1;
-        let perimeter = 2 * self.width.abs() + 2 * self.height.abs();
+        let perimeter = 2 * self.width + 2 * self.height;
         let mut found = false;
         for _ in 0..perimeter {
             if !state.is_solid(x1, y1) {
@@ -1081,7 +1081,15 @@ struct PathCheck {
 }
 
 fn clamp(value: i32, min_value: i32, max_value: i32) -> i32 {
-    value.clamp(min_value, max_value)
+    // C++ BoundBy intentionally does not normalize inverted bounds; negative
+    // transfer-zone extents can produce them (C4Math.h:23).
+    if value < min_value {
+        min_value
+    } else if value > max_value {
+        max_value
+    } else {
+        value
+    }
 }
 
 fn inside(value: i32, min_value: i32, max_value: i32) -> bool {
@@ -1424,6 +1432,50 @@ mod tests {
 
         assert!(!entry.found);
         assert_eq!((entry.x, entry.y), (5, 5));
+    }
+
+    #[test]
+    fn negative_transfer_zone_uses_signed_perimeter_and_cpp_bounds() {
+        // C++ keeps the perimeter expression signed. With both dimensions
+        // negative the loop has no iterations, even when its initial clamp
+        // is free; BoundBy also accepts the resulting inverted bounds
+        // (C4TransferZone.cpp:173-198; C4Math.h:23).
+        let landscape = Landscape::flat(16, 20);
+        let mut zones = [Zone {
+            owner: ObjectId::new(9),
+            x: 5,
+            y: 5,
+            width: -2,
+            height: -2,
+            used: false,
+        }];
+        let state = PathFinderState::new(&landscape, &mut zones, true, 1, Vector2::new(1, 1));
+
+        let entry = state.zones[0].entry_point(&state, 5, 5, 5, 5);
+
+        assert!(!entry.found);
+        assert_eq!((entry.x, entry.y), (3, 3));
+
+        // A negative dimension is not a blanket rejection: C++ still scans
+        // when the signed width-plus-height perimeter remains positive.
+        let mut mixed_zones = [Zone {
+            owner: ObjectId::new(9),
+            x: 5,
+            y: 5,
+            width: -1,
+            height: 2,
+            used: false,
+        }];
+        let mixed_state = PathFinderState::new(
+            &landscape,
+            &mut mixed_zones,
+            true,
+            1,
+            Vector2::new(1, 1),
+        );
+        let mixed_entry = mixed_state.zones[0].entry_point(&mixed_state, 5, 5, 5, 5);
+        assert!(mixed_entry.found);
+        assert_eq!(mixed_entry.x, 4);
     }
 
     #[test]

@@ -25832,7 +25832,7 @@ fn set_transfer_zone(args: &[Value]) -> Result<Value, RuntimeError> {
                 ))
             })?;
 
-        if width <= 0 || height <= 0 {
+        if width == 0 || height == 0 {
             context.register_transfer_zone_command(TransferZoneCommand::clear(owner));
             return Ok(Value::Bool(true));
         }
@@ -61030,6 +61030,27 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 assert_eq!(*owner, ObjectId::new(1));
             }
             other => panic!("expected clear command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn negative_transfer_zone_command_stays_set() {
+        let (result, outcome) = with_object_host_context(|| {
+            set_transfer_zone(&[
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(-1),
+                Value::Int(10),
+            ])
+        });
+
+        assert_eq!(result.expect("SetTransferZone succeeds"), Value::Bool(true));
+        match outcome.transfer_zones.first() {
+            Some(TransferZoneCommand::Set { owner, rect }) => {
+                assert_eq!(*owner, ObjectId::new(1));
+                assert_eq!((rect.x, rect.y, rect.width, rect.height), (0, 0, -1, 10));
+            }
+            other => panic!("expected set command, got {:?}", other),
         }
     }
 

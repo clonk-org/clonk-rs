@@ -66,7 +66,7 @@ impl TransferZoneTable {
     }
 
     pub fn set(&mut self, owner: ObjectId, rect: TransferZoneRect) {
-        if rect.width <= 0 || rect.height <= 0 {
+        if rect.width == 0 || rect.height == 0 {
             self.clear(owner);
             return;
         }
@@ -160,5 +160,36 @@ mod tests {
 
         let table = TransferZoneTable::from_states(&states);
         assert_eq!(table.states(), states, "round trip preserves order");
+    }
+
+    #[test]
+    fn negative_transfer_zone_keeps_cpp_traversal_slot() {
+        // C4TransferZones::Set clears only exact-zero extents. A negative
+        // extent remains as an inert entry and a later positive update
+        // mutates that same list node instead of prepending it (:78-91).
+        let first = ObjectId::new(1);
+        let second = ObjectId::new(2);
+        let mut table = TransferZoneTable::default();
+        table.set(first, rect(0, 0, 10, 10));
+        table.set(second, rect(0, 0, 10, 10));
+
+        table.set(first, rect(0, 0, -1, 10));
+        let states = table.states();
+        assert_eq!(states.iter().map(|zone| zone.owner).collect::<Vec<_>>(), [second, first]);
+        assert_eq!(states[1].width, -1);
+
+        table.set(first, rect(0, 0, 10, 10));
+        assert_eq!(
+            table
+                .states()
+                .iter()
+                .map(|zone| zone.owner)
+                .collect::<Vec<_>>(),
+            [second, first],
+            "restoring the overlapping zone keeps its original traversal slot"
+        );
+
+        table.set(first, rect(0, 0, 0, 10));
+        assert_eq!(table.states().iter().map(|zone| zone.owner).collect::<Vec<_>>(), [second]);
     }
 }

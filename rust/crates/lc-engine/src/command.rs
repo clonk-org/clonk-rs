@@ -10364,6 +10364,52 @@ mod tests {
     }
 
     #[test]
+    fn negative_transfer_zone_command_entry_fails_without_panicking() {
+        let actor_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(20, 5);
+        let target = snapshot_with_id(target_id.as_u64());
+        let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut transfer_zones = TransferZoneTable::default();
+        transfer_zones.set(
+            target_id,
+            TransferZoneRect {
+                x: 5,
+                y: 5,
+                width: -2,
+                height: -2,
+            },
+        );
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            landscape: None,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &transfer_zones,
+            rng: None,
+        };
+        let mut state = TransferState::from_request(
+            &CommandRequest::new(CommandId::Transfer).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result.operations.is_empty());
+        assert!(result.events.is_empty());
+    }
+
+    #[test]
     fn transfer_emits_control_transfer_event() {
         let actor_id = ObjectId::new(100);
         let target_id = ObjectId::new(200);
@@ -17756,6 +17802,18 @@ fn inside(value: i32, lo: i32, hi: i32) -> bool {
     value >= lo && value <= hi
 }
 
+fn bound_by(value: i32, lo: i32, hi: i32) -> i32 {
+    // C++ BoundBy preserves the supplied bound order, including the
+    // inverted bounds produced by negative transfer-zone extents.
+    if value < lo {
+        lo
+    } else if value > hi {
+        hi
+    } else {
+        value
+    }
+}
+
 /// `Angle` (C4Math.cpp:33-45): 0 = up, 90 = right, clockwise; float
 /// atan2 truncated like the C++ `static_cast<int>`.
 fn c4_angle(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
@@ -19617,8 +19675,8 @@ impl TransferState {
             }
         }
 
-        let mut x = target_x.clamp(zone.x - 1, zone.x + zone.width);
-        let mut y = target_y.clamp(zone.y - 1, zone.y + zone.height);
+        let mut x = bound_by(target_x, zone.x - 1, zone.x + zone.width);
+        let mut y = bound_by(target_y, zone.y - 1, zone.y + zone.height);
         let (mut x1, mut y1, mut x2, mut y2) = (x, y, x, y);
         let (mut x_incr1, mut y_incr1) = (0, -1);
         let (mut x_incr2, mut y_incr2) = (0, 1);
