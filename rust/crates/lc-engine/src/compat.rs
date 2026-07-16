@@ -11641,11 +11641,8 @@ fn get_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(value) => value_to_i32(value, "GetPlrKnowledge", "index")?,
     };
     let category = match args.get(3) {
-        Some(Value::Nil) | None => None,
-        Some(value) => {
-            let mask = value_to_i32(value, "GetPlrKnowledge", "category")?;
-            if mask == 0 { None } else { Some(mask) }
-        }
+        Some(Value::Nil) | None => 0,
+        Some(value) => value_to_i32(value, "GetPlrKnowledge", "category")?,
     };
 
     HOST_CONTEXT.with(|cell| {
@@ -11671,10 +11668,8 @@ fn get_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
             .into_iter()
             .filter_map(|(entry, _)| {
                 let metadata = context.definition_metadata(&entry)?;
-                if let Some(mask) = category {
-                    if metadata.category & mask == 0 {
-                        return None;
-                    }
+                if category != -1 && metadata.category & category == 0 {
+                    return None;
                 }
                 Some(entry)
             })
@@ -56850,6 +56845,71 @@ func ProbeBadIndex(id) {
         assert_eq!(
             result.expect("GetPlrKnowledge succeeds"),
             Value::C4Id("STON".into())
+        );
+    }
+
+    #[test]
+    fn get_plr_knowledge_indexed_zero_and_all_categories_match_c4idlist() {
+        let player = PlayerState {
+            id: 26,
+            knowledge: vec!["ZERO".to_string(), "BRIK".to_string()],
+            ..PlayerState::default()
+        };
+        let definitions = HashMap::from([
+            (
+                DefinitionId::from("ZERO"),
+                DefinitionMetadata::default(),
+            ),
+            (
+                DefinitionId::from("BRIK"),
+                DefinitionMetadata {
+                    category: 0x1,
+                    ..DefinitionMetadata::default()
+                },
+            ),
+        ]);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::from([(26, player)]),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            Ok::<Value, RuntimeError>(Value::Array(vec![
+                get_plr_knowledge(&[Value::Int(26), Value::Nil, Value::Int(0)])?,
+                get_plr_knowledge(&[
+                    Value::Int(26),
+                    Value::Nil,
+                    Value::Int(0),
+                    Value::Int(0),
+                ])?,
+                get_plr_knowledge(&[
+                    Value::Int(26),
+                    Value::Nil,
+                    Value::Int(0),
+                    Value::Int(-1),
+                ])?,
+                get_plr_knowledge(&[
+                    Value::Int(26),
+                    Value::Nil,
+                    Value::Int(1),
+                    Value::Int(-1),
+                ])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("GetPlrKnowledge category edge queries succeed"),
+            Value::Array(vec![
+                Value::Nil,
+                Value::Nil,
+                Value::C4Id("ZERO".into()),
+                Value::C4Id("BRIK".into()),
+            ])
         );
     }
 
