@@ -64227,6 +64227,78 @@ func ResortExplicit(object target) { Resort(target); }
     }
 
     #[test]
+    fn set_category_keeps_a_multi_bit_sort_mask_and_resorts_by_its_raw_value() {
+        let mover = Definition::from_script(
+            "MOVE",
+            "Mover",
+            "#strict\nfunc Reclassify() { SetCategory(C4D_Structure | C4D_Vehicle); return(GetCategory()); }\nfunc ReadCategory() { return(GetCategory()); }\n",
+        )
+        .expect("mover compiles");
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.register_definition(mover).expect("mover registers");
+        for id in ["STRU", "VEHI", "LIVE"] {
+            engine
+                .register_definition(simple_definition(id))
+                .expect("anchor registers");
+        }
+
+        let structure = engine
+            .spawn_object(SpawnConfig::new("STRU").with_category(CATEGORY_STRUCTURE))
+            .expect("structure anchor spawns");
+        let vehicle = engine
+            .spawn_object(SpawnConfig::new("VEHI").with_category(CATEGORY_VEHICLE))
+            .expect("vehicle anchor spawns");
+        let living = engine
+            .spawn_object(SpawnConfig::new("LIVE").with_category(CATEGORY_LIVING))
+            .expect("living anchor spawns");
+        let mover = engine
+            .spawn_object(SpawnConfig::new("MOVE").with_category(CATEGORY_OBJECT))
+            .expect("mover spawns");
+        assert_eq!(
+            engine.debug_exec_order(),
+            vec![structure, vehicle, living, mover]
+        );
+
+        let raw_category = CATEGORY_STRUCTURE | CATEGORY_VEHICLE;
+        let mover_index = engine.find_object_index(mover).expect("mover exists");
+        assert_eq!(
+            engine
+                .call_object_function(mover_index, "Reclassify", Vec::new())
+                .expect("SetCategory succeeds"),
+            Value::Int(raw_category)
+        );
+        assert_eq!(
+            engine.objects[mover_index].state.category, raw_category,
+            "SetCategory stores the complete requested sort mask"
+        );
+        assert_eq!(
+            engine.debug_exec_order(),
+            vec![structure, vehicle, living, mover],
+            "SetCategory defers its main-list re-add"
+        );
+
+        engine.execute_object_order_commands();
+        let raw_order = vec![structure, vehicle, mover, living];
+        assert_eq!(
+            engine.debug_exec_order(),
+            raw_order,
+            "C4ObjectList::Add compares the raw 6 mask between Vehicle 4 and Living 8"
+        );
+
+        engine.tick().expect("subsequent frame succeeds");
+        let mover_index = engine.find_object_index(mover).expect("mover remains");
+        assert_eq!(
+            engine
+                .call_object_function(mover_index, "ReadCategory", Vec::new())
+                .expect("GetCategory succeeds"),
+            Value::Int(raw_category)
+        );
+        assert_eq!(engine.debug_exec_order(), raw_order);
+    }
+
+    #[test]
     fn set_category_resort_prefers_the_same_definition_cluster() {
         // stMain pass 1 takes precedence over the category-bracket fallback:
         // after X moves Vehicle -> Object it is inserted at the same-def

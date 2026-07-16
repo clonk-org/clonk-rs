@@ -46026,9 +46026,16 @@ impl ObjectScopeContext {
     }
 
     fn set_category(&mut self, category: i32) {
-        let normalized = crate::normalize_category(category, self.current_category);
-        self.current_category = normalized;
-        self.pending_update.category = Some(normalized);
+        // FnSetCategory preserves the object's current sorting bits only
+        // when the requested value has none. Unlike DefCore/load repair it
+        // does not invent StaticBack when both masks are zero.
+        let category = if category & CATEGORY_SORT_LIMIT == 0 {
+            category | (self.category() & CATEGORY_SORT_LIMIT)
+        } else {
+            category
+        };
+        self.current_category = category;
+        self.pending_update.category = Some(category);
     }
 
     fn clear_command_stack(&mut self) {
@@ -68714,6 +68721,27 @@ func ChangeAndProbe()
 
         assert_eq!(
             result.expect("foreign SetCategory merge succeeds"),
+            Value::Array(vec![Value::Bool(true), Value::Int(expected)])
+        );
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
+        assert_eq!(foreign_category_update(&outcome, target_id), Some(expected));
+    }
+
+    #[test]
+    fn set_category_does_not_invent_sort_bits_when_the_target_has_none() {
+        let target_id = ObjectId::new(2);
+        let world = set_category_target_world(target_id, 0);
+        let target = object_reference_value(target_id);
+        let expected = crate::CATEGORY_MAGIC;
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            Ok(Value::Array(vec![
+                set_category(&[Value::Int(expected), target.clone()])?,
+                get_category(&[target])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("foreign SetCategory succeeds"),
             Value::Array(vec![Value::Bool(true), Value::Int(expected)])
         );
         assert!(outcome.object_update.is_none(), "caller remains unchanged");
