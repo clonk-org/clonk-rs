@@ -23678,7 +23678,11 @@ fn finish_command(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|arg| parse_object_reference_argument(arg, "FinishCommand", "obj"))
         .transpose()?
         .flatten();
-    let success = matches!(args.get(1), Some(Value::Bool(true)) | Some(Value::Int(1)));
+    let success = value_to_bool(
+        args.get(1).unwrap_or(&Value::Nil),
+        "FinishCommand",
+        "success",
+    )?;
     let index = parse_optional_i32(args.get(2), "FinishCommand", "command")?.unwrap_or(0);
     let active = HOST_CONTEXT.with(|cell| {
         cell.borrow()
@@ -23705,7 +23709,9 @@ fn finish_command(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(object) = context.object_context_mut() else {
             return Ok(Value::Bool(false));
         };
-        object.live_commands.finish_entry_public(index, success);
+        if !object.live_commands.finish_entry_public(index, success) {
+            return Ok(Value::Bool(false));
+        }
         object
             .command_operations
             .push(CommandOperation::Finish { index, success });
@@ -61134,6 +61140,40 @@ func Probe(state) {
             }
             other => panic!("expected PushFront operation, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn finish_command_rejects_missing_indices_and_uses_cpp_bool_coercion() {
+        let (result, outcome) = with_object_host_context(|| {
+            assert_eq!(
+                add_command(&[Value::Int(0), Value::String("Wait".into())])?,
+                Value::Bool(true)
+            );
+            Ok(Value::Array(vec![
+                finish_command(&[Value::Int(0), Value::Bool(true), Value::Int(5)])?,
+                finish_command(&[Value::Int(0), Value::Bool(true), Value::Int(-1)])?,
+                finish_command(&[Value::Int(0), Value::Int(2)])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("FinishCommand calls succeed"),
+            Value::Array(vec![
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(true),
+            ])
+        );
+        assert!(matches!(
+            outcome.command_operations.as_slice(),
+            [
+                CommandOperation::PushFront(request),
+                CommandOperation::Finish {
+                    index: 0,
+                    success: true
+                }
+            ] if request.id == CommandId::Wait
+        ));
     }
 
     #[test]

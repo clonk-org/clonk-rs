@@ -17571,25 +17571,24 @@ impl CommandStack {
     /// command; success drops it (Finished commands complete on their
     /// next Execute — the stack model removes immediately), failure
     /// bumps the entry's failure counter.
-    pub fn finish_entry_public(&mut self, index: i32, success: bool) {
-        self.finish_entry(index, success);
+    pub fn finish_entry_public(&mut self, index: i32, success: bool) -> bool {
+        self.finish_entry(index, success)
     }
 
-    fn finish_entry(&mut self, index: i32, success: bool) {
+    fn finish_entry(&mut self, index: i32, success: bool) -> bool {
         if index < 0 {
-            return;
+            return false;
         }
         let index = index as usize;
-        if index >= self.entries.len() {
-            return;
-        }
+        let Some(entry) = self.entries.get_mut(index) else {
+            return false;
+        };
         if success {
-            if let Some(entry) = self.entries.get_mut(index) {
-                entry.finished = Some(CommandStatus::Completed);
-            }
-        } else if let Some(entry) = self.entries.get_mut(index) {
+            entry.finished = Some(CommandStatus::Completed);
+        } else {
             entry.failures = entry.failures.saturating_add(1);
         }
+        true
     }
 
     /// Drain one feedback item produced by a live callback resolution.
