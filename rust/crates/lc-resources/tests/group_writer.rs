@@ -3,8 +3,8 @@
 #[path = "../src/group_writer.rs"]
 mod group_writer;
 
-use group_writer::{c4group_file_crc, compress_c4group_for_test, MutableGroup, MutableGroupError};
-use lc_resources::Group;
+use group_writer::{c4group_file_crc, compress_c4group_for_test};
+use lc_resources::{Group, MutableGroup, MutableGroupChildMut, MutableGroupError};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
@@ -464,6 +464,236 @@ fn cpp_group_reader_exposes_the_raw_uncompressed_image() {
     let group = Group::from_memory(PathBuf::from("Crew.c4i"), packed).unwrap();
 
     assert_eq!(group.raw_image().unwrap(), raw);
+}
+
+#[test]
+fn mutable_group_from_group_preserves_existing_material_child_contents_and_metadata() {
+    let mut nested = MutableGroup::new("Nested.c4g");
+    nested.add_file("inside.bin", b"nested".to_vec()).unwrap();
+
+    let mut material = MutableGroup::new("Material.c4g");
+    material.set_maker("Material Maker");
+    material
+        .add_file_with_metadata("Sentinel.bin", b"keep me".to_vec(), 0x1234_5678, true)
+        .unwrap();
+    material
+        .add_child_with_metadata("Nested.c4g", nested, 0x8765_4321, false)
+        .unwrap();
+    material
+        .add_file("TexMap.txt", b"1=Old-Texture\r\n".to_vec())
+        .unwrap();
+
+    let mut source_image = material.pack_raw().unwrap();
+    let mut source_header: [u8; 204] = source_image[..204].try_into().unwrap();
+    mem_unscramble(&mut source_header);
+    source_header[72..104].fill(0xa5);
+    source_header[112..204].fill(0x5a);
+    mem_unscramble(&mut source_header);
+    source_image[..204].copy_from_slice(&source_header);
+
+    let source = Group::from_memory(PathBuf::from("Material.c4g"), source_image).unwrap();
+    let source_entries = source.entries().unwrap();
+    let source_sentinel = source_entries
+        .iter()
+        .find(|entry| entry.name_bytes.eq_ignore_ascii_case(b"Sentinel.bin"))
+        .unwrap();
+    let source_sentinel_crc = source_sentinel.stored_crc;
+
+    let mut rewritten = MutableGroup::from_group(&source).unwrap();
+    rewritten
+        .add_file("TexMap.txt", b"1=New-Texture\r\n".to_vec())
+        .unwrap();
+    let rewritten_image = rewritten.pack_raw().unwrap();
+    let reopened =
+        Group::from_memory(PathBuf::from("Material.c4g"), rewritten_image.clone()).unwrap();
+
+    assert_eq!(reopened.read_file("Sentinel.bin").unwrap(), b"keep me");
+    assert_eq!(
+        reopened.read_file("TexMap.txt").unwrap(),
+        b"1=New-Texture\r\n"
+    );
+    assert_eq!(
+        reopened
+            .open_child("Nested.c4g")
+            .unwrap()
+            .read_file("inside.bin")
+            .unwrap(),
+        b"nested"
+    );
+
+    let entries = reopened.entries().unwrap();
+    let sentinel = entries
+        .iter()
+        .find(|entry| entry.name_bytes.eq_ignore_ascii_case(b"Sentinel.bin"))
+        .unwrap();
+    assert_eq!(sentinel.time, 0x1234_5678);
+    assert!(sentinel.executable);
+    assert_eq!(sentinel.stored_crc, source_sentinel_crc);
+    let nested = entries
+        .iter()
+        .find(|entry| entry.name_bytes.eq_ignore_ascii_case(b"Nested.c4g"))
+        .unwrap();
+    assert!(nested.is_directory);
+    assert_eq!(nested.time, 0x8765_4321);
+
+    let mut rewritten_header: [u8; 204] = rewritten_image[..204].try_into().unwrap();
+    mem_unscramble(&mut rewritten_header);
+    assert_eq!(&rewritten_header[40..55], b"Material Maker\0");
+    assert_eq!(&rewritten_header[72..104], &[0xa5; 32]);
+    assert_eq!(&rewritten_header[112..204], &[0x5a; 92]);
+}
+
+#[test]
+fn mutable_group_child_mut_opens_imported_child_case_insensitively() {
+    let mut material = MutableGroup::new("Material.c4g");
+    material
+        .add_file("Sentinel.bin", b"preserved".to_vec())
+        .unwrap();
+    let mut scenario = MutableGroup::new("Scenario.c4s");
+    scenario.add_child("Material.c4g", material).unwrap();
+    scenario
+        .add_file("Ordinary.c4g", b"not a child".to_vec())
+        .unwrap();
+    let source =
+        Group::from_memory(PathBuf::from("Scenario.c4s"), scenario.pack_raw().unwrap()).unwrap();
+
+    let mut rewritten = MutableGroup::from_group(&source).unwrap();
+    assert!(matches!(
+        rewritten.child_mut("missing.c4g").unwrap(),
+        MutableGroupChildMut::Missing
+    ));
+    assert!(matches!(
+        rewritten.child_mut("ordinary.C4G").unwrap(),
+        MutableGroupChildMut::File
+    ));
+    let MutableGroupChildMut::Child(material) = rewritten.child_mut("mAtErIaL.C4g").unwrap() else {
+        panic!("Material.c4g must remain a child")
+    };
+    material
+        .add_file("TexMap.txt", b"1=Earth-Rough\r\n".to_vec())
+        .unwrap();
+
+    let reopened =
+        Group::from_memory(PathBuf::from("Scenario.c4s"), rewritten.pack_raw().unwrap()).unwrap();
+    let material = reopened.open_child("Material.c4g").unwrap();
+    assert_eq!(material.read_file("Sentinel.bin").unwrap(), b"preserved");
+    assert_eq!(
+        material.read_file("TexMap.txt").unwrap(),
+        b"1=Earth-Rough\r\n"
+    );
+}
+
+#[test]
+fn mutable_group_keeps_directory_packed_child_image_opaque_until_mutated() {
+    let directory = tempdir().unwrap();
+    let scenario_path = directory.path().join("FolderScenario.c4s");
+    std::fs::create_dir(&scenario_path).unwrap();
+
+    let mut material = MutableGroup::new("Material.c4g");
+    material
+        .add_file("Earth.c4m", b"child sentinel".to_vec())
+        .unwrap();
+    let mut material_raw = material.pack_raw().unwrap();
+    let mut material_header: [u8; 204] = material_raw[..204].try_into().unwrap();
+    mem_unscramble(&mut material_header);
+    material_header[104..108].copy_from_slice(&0x1234_5678_u32.to_le_bytes());
+    material_header[112..204].fill(0xa7);
+    mem_unscramble(&mut material_header);
+    material_raw[..204].copy_from_slice(&material_header);
+    std::fs::write(
+        scenario_path.join("Material.c4g"),
+        compress_c4group_for_test(&material_raw).unwrap(),
+    )
+    .unwrap();
+
+    let source = Group::open(&scenario_path).unwrap();
+    let rewritten = MutableGroup::from_group(&source).unwrap();
+    let reopened = Group::from_memory(
+        PathBuf::from("FolderScenario.c4s"),
+        rewritten.pack_raw().unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        reopened
+            .open_child("Material.c4g")
+            .unwrap()
+            .raw_image()
+            .unwrap(),
+        material_raw,
+        "an untouched packed file child must retain its exact raw group image"
+    );
+}
+
+#[test]
+fn mutable_group_rewritten_packed_child_refreshes_outer_metadata() {
+    let mut material = MutableGroup::new("Material.c4g");
+    material
+        .add_file("Earth.c4m", b"child sentinel".to_vec())
+        .unwrap();
+    let mut scenario = MutableGroup::new("Scenario.c4s");
+    scenario
+        .add_child_with_metadata("Material.c4g", material, 0x1234_5678, true)
+        .unwrap();
+    let source =
+        Group::from_memory(PathBuf::from("Scenario.c4s"), scenario.pack_raw().unwrap()).unwrap();
+
+    let mut rewritten = MutableGroup::from_group(&source).unwrap();
+    let before = unix_time_now();
+    let MutableGroupChildMut::Child(material) = rewritten.child_mut("Material.c4g").unwrap() else {
+        panic!("packed Material.c4g must open as a mutable child")
+    };
+    material
+        .add_file("TexMap.txt", b"1=Earth-Rough\r\n".to_vec())
+        .unwrap();
+    let rewritten_image = rewritten.pack_raw().unwrap();
+    let after = unix_time_now();
+    let reopened = Group::from_memory(PathBuf::from("Scenario.c4s"), rewritten_image).unwrap();
+    let material_entry = reopened
+        .entries()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.name_bytes.eq_ignore_ascii_case(b"Material.c4g"))
+        .unwrap();
+
+    assert!((before..=after).contains(&material_entry.time));
+    assert!(!material_entry.executable);
+}
+
+#[test]
+fn mutable_group_from_directory_recognizes_packed_material_child_file() {
+    let directory = tempdir().unwrap();
+    let scenario_path = directory.path().join("FolderScenario.c4s");
+    std::fs::create_dir(&scenario_path).unwrap();
+    std::fs::write(scenario_path.join("Root.txt"), b"root sentinel").unwrap();
+
+    let mut material = MutableGroup::new("Material.c4g");
+    material
+        .add_file("Earth.c4m", b"child sentinel".to_vec())
+        .unwrap();
+    material
+        .add_file("TexMap.txt", b"old map".to_vec())
+        .unwrap();
+    std::fs::write(scenario_path.join("Material.c4g"), material.pack().unwrap()).unwrap();
+
+    let source = Group::open(&scenario_path).unwrap();
+    let mut rewritten = MutableGroup::from_group(&source).unwrap();
+    let MutableGroupChildMut::Child(material) = rewritten.child_mut("material.C4G").unwrap() else {
+        panic!("packed Material.c4g file must import as a child")
+    };
+    material
+        .add_file("TexMap.txt", b"new map".to_vec())
+        .unwrap();
+
+    let reopened = Group::from_memory(
+        PathBuf::from("FolderScenario.c4s"),
+        rewritten.pack_raw().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reopened.read_file("Root.txt").unwrap(), b"root sentinel");
+    let material = reopened.open_child("Material.c4g").unwrap();
+    assert_eq!(material.read_file("Earth.c4m").unwrap(), b"child sentinel");
+    assert_eq!(material.read_file("TexMap.txt").unwrap(), b"new map");
 }
 
 #[test]

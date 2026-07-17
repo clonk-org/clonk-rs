@@ -31,6 +31,15 @@ const MAX_RENDER_DIRTY_GENERATIONS: usize = 50;
 const RENDER_TOKEN_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const RENDER_TOKEN_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+#[cfg(windows)]
+const C_RAND_MAX: i32 = 32_767;
+#[cfg(not(windows))]
+const C_RAND_MAX: i32 = i32::MAX;
+
+unsafe extern "C" {
+    fn rand() -> std::ffi::c_int;
+}
+
 fn render_token_bytes(mut token: u64, bytes: impl IntoIterator<Item = u8>) -> u64 {
     for byte in bytes {
         token ^= u64::from(byte);
@@ -1234,6 +1243,13 @@ pub(crate) struct RuntimeTexMapMaterial {
     pub(crate) shape: crate::chunky::ChunkShape,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeTexMapLookup {
+    pub(crate) material_texture: String,
+    pub(crate) default_texture: Option<String>,
+    pub(crate) eager_index: u8,
+}
+
 /// The live C4 texture-map state needed by post-initialization raster writes.
 /// Unlike [`PixelGrid`], this retains the raw texture names used for pair
 /// matching, the available texture/material inventories, and the exact
@@ -1256,9 +1272,55 @@ pub struct RuntimeTexMapState {
     /// fixed when later texture-map edits create duplicate entries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) material_crossmap_entries: Vec<u8>,
+    /// `C4TextureMap::fEntriesAdded`: runtime GetIndex allocations,
+    /// MoveIndex and RemoveUnusedTexMapEntries make the local TexMap dirty.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub(crate) entries_added: bool,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub(crate) overload_materials: bool,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub(crate) overload_textures: bool,
+}
+
+impl Default for RuntimeTexMapState {
+    fn default() -> Self {
+        let slots = C4M_MAX_TEX_INDEX + 1;
+        Self {
+            densities: vec![0; slots],
+            material_names: vec![None; slots],
+            texture_names: vec![None; slots],
+            match_texture_names: vec![None; slots],
+            shapes: vec![None; slots],
+            materials: Vec::new(),
+            texture_inventory: Vec::new(),
+            default_material_entries: Vec::new(),
+            material_crossmap_entries: Vec::new(),
+            entries_added: false,
+            overload_materials: false,
+            overload_textures: false,
+        }
+    }
 }
 
 impl RuntimeTexMapState {
+    fn replay_section_lookups(
+        mut live: Self,
+        lookups: &[RuntimeTexMapLookup],
+    ) -> (Self, [u8; 128]) {
+        let mut remap = std::array::from_fn(|slot| slot as u8);
+        for lookup in lookups {
+            let destination = live.get_index_mat_tex(
+                &lookup.material_texture,
+                lookup.default_texture.as_deref(),
+            );
+            let source = usize::from(lookup.eager_index & 0x7f);
+            if source != 0 {
+                remap[source] = destination & 0x7f;
+            }
+        }
+        (live, remap)
+    }
+
     pub(crate) fn texture_exists(&self, name: &str) -> bool {
         self.texture_inventory
             .iter()
@@ -1370,6 +1432,7 @@ impl RuntimeTexMapState {
         self.texture_names[slot] = texture_name.map(str::to_string);
         self.shapes[slot] = Some(shape);
         self.densities[slot] = density;
+        self.entries_added = true;
         slot as u8
     }
 
@@ -1424,6 +1487,7 @@ impl RuntimeTexMapState {
         self.texture_names[new_slot] = self.texture_names[old_slot].clone();
         self.match_texture_names[new_slot] = self.match_texture_names[old_slot].clone();
         self.shapes[new_slot] = self.shapes[old_slot];
+        self.entries_added = true;
         (true, Some((old_slot as u8, new_index)))
     }
 
@@ -1438,6 +1502,9 @@ impl RuntimeTexMapState {
         &mut self,
         mut texture_usage: [bool; 128],
     ) -> Vec<u8> {
+        // Native code sets fEntriesAdded after the removal scan even when no
+        // slot was cleared.
+        self.entries_added = true;
         for &(_, slot) in &self.default_material_entries {
             texture_usage[usize::from(slot & 0x7f)] = true;
         }
@@ -1496,6 +1563,36 @@ impl RuntimeTexMapState {
         self.default_material_entry(material_texture).unwrap_or(0)
     }
 
+    pub(crate) fn entries_added(&self) -> bool {
+        self.entries_added
+    }
+
+    fn serialize_added_entries(&self) -> Vec<u8> {
+        let mut output = String::from(
+            "# Automatically generated texture map\r\n\
+# Contains material-texture-combinations added at runtime\r\n",
+        );
+        if self.overload_materials {
+            output.push_str(
+                "# Import materials from global file as well\r\nOverloadMaterials\r\n",
+            );
+        }
+        if self.overload_textures {
+            output.push_str(
+                "# Import textures from global file as well\r\nOverloadTextures\r\n",
+            );
+        }
+        output.push_str("\r\n");
+        for slot in 0..C4M_MAX_TEX_INDEX {
+            let Some(material) = self.material_names[slot].as_deref() else {
+                continue;
+            };
+            let texture = self.match_texture_names[slot].as_deref().unwrap_or("");
+            output.push_str(&format!("{slot}={material}-{texture}\r\n"));
+        }
+        output.into_bytes()
+    }
+
     /// Append one C4Material::DefaultMatTex row. Same-load duplicate names
     /// retain distinct material slots; name lookup below deliberately finds
     /// the first/lower material index.
@@ -1520,6 +1617,81 @@ impl RuntimeTexMapState {
     }
 }
 
+fn store_map_palette(
+    texmap: &RuntimeTexMapState,
+    materials: &MaterialSet,
+) -> lc_resources::bitmap::RgbPalette {
+    let mut palette = [[0_u8; 3]; 256];
+    palette[0] = [192, 196, 252];
+    let mut set = [false; 256];
+    for slot in 0..C4M_MAX_TEX_INDEX {
+        let Some(material) = texmap.material_names[slot]
+            .as_deref()
+            .and_then(|name| materials.get(name))
+        else {
+            continue;
+        };
+        let color = material.color();
+        palette[slot] = [
+            color.get(6).copied().unwrap_or(0) as u8,
+            color.get(7).copied().unwrap_or(0) as u8,
+            color.get(8).copied().unwrap_or(0) as u8,
+        ];
+        palette[slot + 128] = [
+            color.get(3).copied().unwrap_or(0) as u8,
+            color.get(4).copied().unwrap_or(0) as u8,
+            color.get(5).copied().unwrap_or(0) as u8,
+        ];
+        set[slot] = true;
+        set[slot + 128] = true;
+    }
+
+    for slot in 0..palette.len() {
+        if !set[slot] {
+            continue;
+        }
+        while (0..slot).any(|previous| set[previous] && palette[previous] == palette[slot]) {
+            for channel in &mut palette[slot] {
+                // StoreMapPalette intentionally consumes the process-global
+                // C rand() stream; the chosen color is presentation-only.
+                let increase = unsafe { rand() } < C_RAND_MAX / 2;
+                *channel = if increase {
+                    channel.wrapping_add(3)
+                } else {
+                    channel.wrapping_sub(3)
+                };
+            }
+        }
+    }
+    palette
+}
+
+fn store_surface_palette(
+    source_palette: &lc_resources::bitmap::RgbPalette,
+    painted_materials: &[Option<String>],
+    materials: &MaterialSet,
+) -> lc_resources::bitmap::RgbPalette {
+    let mut palette = *source_palette;
+    for slot in 0..C4M_MAX_TEX_INDEX {
+        let Some(material) = painted_materials
+            .get(slot)
+            .and_then(Option::as_deref)
+            .and_then(|name| materials.get(name))
+        else {
+            continue;
+        };
+        let color = material.color();
+        let rgb = [
+            color.first().copied().unwrap_or(0) as u8,
+            color.get(1).copied().unwrap_or(0) as u8,
+            color.get(2).copied().unwrap_or(0) as u8,
+        ];
+        palette[slot] = rgb;
+        palette[slot + 128] = rgb;
+    }
+    palette
+}
+
 /// State C++ keeps alongside `Surface8` for deterministic map-to-landscape
 /// rasterization after scenario activation (`C4Landscape.h:57-71`). It is
 /// absent for fixture/column-only landscapes that have no texture map.
@@ -1528,6 +1700,19 @@ pub(crate) struct LandscapeRasterState {
     map_zoom: i32,
     map_seed: i32,
     texmap: RuntimeTexMapState,
+    #[serde(
+        default = "default_surface_palette_vec",
+        skip_serializing_if = "surface_palette_is_default"
+    )]
+    surface_palette: Vec<[u8; 3]>,
+    /// Material colors most recently painted into the live Surface8 palette
+    /// by Mat2Pal. Slots are intentionally sticky: RemoveEntry/MoveIndex do
+    /// not call HandleTexMapUpdate, so cleared/moved entries retain their old
+    /// RGB bytes until a later successful AddEntry repaints all mapped slots.
+    #[serde(default, skip_serializing_if = "surface_palette_materials_are_empty")]
+    surface_palette_materials: Vec<Option<String>>,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    map_changed: bool,
     /// The authoritative indexed `C4Landscape::Map`. Static editor tools
     /// mutate this plane before MapToLandscape; exact-mode edits intentionally
     /// leave it untouched so switching back to Static restores the map.
@@ -1543,23 +1728,44 @@ pub(crate) struct LandscapeRasterState {
 
 impl LandscapeRasterState {
     pub(crate) fn new(map_zoom: i32, map_seed: i32, texmap: RuntimeTexMapState) -> Self {
-        Self {
+        let mut state = Self {
             map_zoom,
             map_seed,
             texmap,
+            surface_palette: default_surface_palette().to_vec(),
+            surface_palette_materials: Vec::new(),
+            map_changed: false,
             map_indices: Vec::new(),
             map_width: 0,
             map_height: 0,
             map_creator: None,
-        }
+        };
+        state.repaint_surface_palette_materials();
+        state
     }
 
     pub(crate) fn map_zoom(&self) -> i32 {
         self.map_zoom
     }
 
+    pub(crate) fn set_map_zoom(&mut self, map_zoom: i32) {
+        self.map_zoom = map_zoom;
+    }
+
     pub(crate) fn map_seed(&self) -> i32 {
         self.map_seed
+    }
+
+    pub(crate) fn set_map_seed(&mut self, map_seed: i32) {
+        self.map_seed = map_seed;
+    }
+
+    pub(crate) fn map_changed(&self) -> bool {
+        self.map_changed
+    }
+
+    pub(crate) fn set_map_changed(&mut self) {
+        self.map_changed = true;
     }
 
     pub(crate) fn texmap(&self) -> &RuntimeTexMapState {
@@ -1568,6 +1774,72 @@ impl LandscapeRasterState {
 
     pub(crate) fn texmap_mut(&mut self) -> &mut RuntimeTexMapState {
         &mut self.texmap
+    }
+
+    pub(crate) fn set_surface_palette(
+        &mut self,
+        palette: lc_resources::bitmap::RgbPalette,
+    ) {
+        self.surface_palette = palette.to_vec();
+    }
+
+    fn surface_palette(&self) -> lc_resources::bitmap::RgbPalette {
+        let mut palette = default_surface_palette();
+        for (target, source) in palette.iter_mut().zip(&self.surface_palette) {
+            *target = *source;
+        }
+        palette
+    }
+
+    fn repaint_surface_palette_materials(&mut self) {
+        if self.surface_palette_materials.is_empty()
+            && !self
+                .texmap
+                .material_names
+                .iter()
+                .take(C4M_MAX_TEX_INDEX)
+                .any(Option::is_some)
+        {
+            return;
+        }
+        self.surface_palette_materials
+            .resize(C4M_MAX_TEX_INDEX, None);
+        for slot in 0..C4M_MAX_TEX_INDEX {
+            if let Some(material) = self
+                .texmap
+                .material_names
+                .get(slot)
+                .and_then(Option::as_ref)
+            {
+                self.surface_palette_materials[slot] = Some(material.clone());
+            }
+        }
+    }
+
+    fn texmap_adds_slot(&self, texmap: &RuntimeTexMapState) -> bool {
+        (1..C4M_MAX_TEX_INDEX).any(|slot| {
+            self.texmap
+                .material_names
+                .get(slot)
+                .and_then(Option::as_ref)
+                .is_none()
+                && texmap
+                    .material_names
+                    .get(slot)
+                    .and_then(Option::as_ref)
+                    .is_some()
+        })
+    }
+
+    fn replace_texmap(&mut self, texmap: RuntimeTexMapState, force_repaint: bool) {
+        let repaint = force_repaint || self.texmap_adds_slot(&texmap);
+        self.texmap = texmap;
+        if repaint {
+            if force_repaint {
+                self.surface_palette_materials.clear();
+            }
+            self.repaint_surface_palette_materials();
+        }
     }
 
     pub(crate) fn set_map(&mut self, bitmap: &lc_resources::bitmap::IndexedBitmap) {
@@ -1585,6 +1857,19 @@ impl LandscapeRasterState {
                 indices: self.map_indices.clone(),
             }
         })
+    }
+
+    fn has_map(&self) -> bool {
+        let Some(expected) = (self.map_width as usize).checked_mul(self.map_height as usize) else {
+            return false;
+        };
+        self.map_width > 0 && self.map_height > 0 && self.map_indices.len() == expected
+    }
+
+    pub(crate) fn clear_map(&mut self) {
+        self.map_indices.clear();
+        self.map_width = 0;
+        self.map_height = 0;
     }
 
     fn map_mut(&mut self) -> Option<(u32, u32, &mut [u8])> {
@@ -1755,6 +2040,24 @@ pub enum LandscapeError {
     },
 }
 
+#[derive(Debug, Error)]
+pub enum LandscapePersistenceError {
+    #[error("engine has no landscape")]
+    MissingLandscape,
+    #[error("landscape has no retained map")]
+    MissingMap,
+    #[error("static scenario save requested for landscape mode {0}")]
+    NotStatic(i32),
+    #[error("Material.c4g exists but is not a child group")]
+    MaterialGroupIsFile,
+    #[error("landscape surface persistence failed: {0}")]
+    Landscape(#[from] LandscapeError),
+    #[error("failed to encode retained map: {0}")]
+    Bitmap(#[from] lc_resources::bitmap::BitmapError),
+    #[error("failed to update C4Group: {0}")]
+    Group(#[from] lc_resources::MutableGroupError),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct LiquidColumn {
     #[serde(default)]
@@ -1900,6 +2203,34 @@ fn bool_is_false(value: &bool) -> bool {
 
 fn bool_is_true(value: &bool) -> bool {
     *value
+}
+
+fn default_surface_palette() -> lc_resources::bitmap::RgbPalette {
+    let source = include_bytes!("../../../../planet/Graphics.c4g/C4.PAL");
+    let mut palette = [[0_u8; 3]; 256];
+    for (index, color) in palette.iter_mut().enumerate() {
+        let offset = index * 3;
+        *color = [
+            source[offset] << 2,
+            source[offset + 1] << 2,
+            source[offset + 2] << 2,
+        ];
+    }
+    palette[0] = [0, 0, 0];
+    palette[191] = [0, 0, 255];
+    palette
+}
+
+fn default_surface_palette_vec() -> Vec<[u8; 3]> {
+    default_surface_palette().to_vec()
+}
+
+fn surface_palette_is_default(palette: &Vec<[u8; 3]>) -> bool {
+    palette.as_slice() == default_surface_palette()
+}
+
+fn surface_palette_materials_are_empty(materials: &Vec<Option<String>>) -> bool {
+    materials.iter().all(Option::is_none)
 }
 
 /// What `C4Landscape::GetPix` (C4Landscape.h:144-161) reads beyond the
@@ -2118,6 +2449,13 @@ impl Landscape {
         true
     }
 
+    pub(crate) fn set_runtime_mode(&mut self, mode: i32) {
+        // CompileFunc assigns the integer directly; malformed/future values
+        // are retained even though the editor-facing SetMode API rejects
+        // values outside Dynamic..Exact.
+        self.mode = mode;
+    }
+
     pub fn modulation(&self) -> u32 {
         self.modulation
     }
@@ -2132,6 +2470,159 @@ impl Landscape {
 
     pub fn set_shade_materials(&mut self, shade_materials: bool) {
         self.shade_materials = shade_materials;
+    }
+
+    pub fn map_seed(&self) -> i32 {
+        self.raster_state
+            .as_ref()
+            .map_or(0, LandscapeRasterState::map_seed)
+    }
+
+    pub(crate) fn set_map_seed(&mut self, map_seed: i32) {
+        if let Some(state) = self.raster_state.as_mut() {
+            state.set_map_seed(map_seed);
+        }
+    }
+
+    pub fn map_changed(&self) -> bool {
+        self.raster_state
+            .as_ref()
+            .is_some_and(LandscapeRasterState::map_changed)
+    }
+
+    pub(crate) fn set_map_changed(&mut self) {
+        if let Some(state) = self.raster_state.as_mut() {
+            state.set_map_changed();
+        }
+    }
+
+    pub fn texture_map_entries_added(&self) -> bool {
+        self.raster_state
+            .as_ref()
+            .is_some_and(|state| state.texmap().entries_added())
+    }
+
+    /// C4Landscape::SaveMap: write the retained indexed editor map as
+    /// `Map.bmp` using C4TextureMap::StoreMapPalette colors.
+    pub(crate) fn save_c4_map(
+        &self,
+        materials: &MaterialSet,
+        group: &mut lc_resources::MutableGroup,
+    ) -> Result<(), LandscapePersistenceError> {
+        let state = self
+            .raster_state
+            .as_ref()
+            .ok_or(LandscapePersistenceError::MissingMap)?;
+        let map = state.map().ok_or(LandscapePersistenceError::MissingMap)?;
+        let palette = store_map_palette(state.texmap(), materials);
+        group.add_file("Map.bmp", map.encode_with_palette(&palette)?)?;
+        Ok(())
+    }
+
+    /// SaveMap gate used by exact/forced-exact Save and SaveDiff. A normal
+    /// non-exact Static scenario save calls [`Self::save_c4_map`] directly.
+    pub(crate) fn save_changed_c4_map(
+        &self,
+        materials: &MaterialSet,
+        group: &mut lc_resources::MutableGroup,
+    ) -> Result<bool, LandscapePersistenceError> {
+        if !self.map_changed()
+            || self
+                .raster_state
+                .as_ref()
+                .is_none_or(|state| !state.has_map())
+        {
+            return Ok(false);
+        }
+        self.save_c4_map(materials, group)?;
+        Ok(true)
+    }
+
+    /// C4GameSave::SaveLandscape's non-exact Static branch: discard a stale
+    /// full-resolution Landscape.bmp, always write Map.bmp, then persist any
+    /// runtime texture-map additions.
+    pub(crate) fn save_c4_static_scenario(
+        &self,
+        materials: &MaterialSet,
+        group: &mut lc_resources::MutableGroup,
+    ) -> Result<(), LandscapePersistenceError> {
+        if self.mode != LANDSCAPE_MODE_STATIC {
+            return Err(LandscapePersistenceError::NotStatic(self.mode));
+        }
+        group.remove_entry("Landscape.bmp");
+        self.save_c4_map(materials, group)?;
+        self.save_c4_textures(group)?;
+        Ok(())
+    }
+
+    /// C4Landscape::SaveTextures. The false dirty flag is a successful no-op;
+    /// a missing Material.c4g creates a child, while an existing child is
+    /// updated in place and retains every unrelated entry.
+    pub(crate) fn save_c4_textures(
+        &self,
+        group: &mut lc_resources::MutableGroup,
+    ) -> Result<bool, LandscapePersistenceError> {
+        let Some(texmap) = self
+            .raster_state
+            .as_ref()
+            .map(LandscapeRasterState::texmap)
+            .filter(|texmap| texmap.entries_added())
+        else {
+            return Ok(false);
+        };
+        let bytes = texmap.serialize_added_entries();
+        match group.child_mut("Material.c4g")? {
+            lc_resources::MutableGroupChildMut::Missing => {}
+            lc_resources::MutableGroupChildMut::File => {
+                return Err(LandscapePersistenceError::MaterialGroupIsFile);
+            }
+            lc_resources::MutableGroupChildMut::Child(child) => {
+                child.add_file("TexMap.txt", bytes)?;
+                return Ok(true);
+            }
+        }
+        let mut child = lc_resources::MutableGroup::new("Material.c4g");
+        child.add_file("TexMap.txt", bytes)?;
+        group.add_child("Material.c4g", child)?;
+        Ok(true)
+    }
+
+    /// C4Landscape::SaveDiff: write the full or 0xff-masked Surface8 diff
+    /// with the live Mat2Pal colors, then persist changed Map/TexMap state.
+    pub(crate) fn save_c4_diff(
+        &self,
+        materials: &MaterialSet,
+        group: &mut lc_resources::MutableGroup,
+        sync_save: bool,
+    ) -> Result<bool, LandscapePersistenceError> {
+        let diff = self.save_diff(sync_save)?;
+        let wrote_diff = if let Some(diff) = diff {
+            let raster = self
+                .raster_state
+                .as_ref()
+                .ok_or(LandscapePersistenceError::MissingMap)?;
+            let source_palette = raster.surface_palette();
+            let painted_materials = if raster.surface_palette_materials.is_empty() {
+                &raster.texmap().material_names
+            } else {
+                &raster.surface_palette_materials
+            };
+            let palette = store_surface_palette(
+                &source_palette,
+                painted_materials,
+                materials,
+            );
+            group.add_file(
+                "DiffLandscape.bmp",
+                diff.encode_with_palette(&palette)?,
+            )?;
+            true
+        } else {
+            false
+        };
+        self.save_changed_c4_map(materials, group)?;
+        self.save_c4_textures(group)?;
+        Ok(wrote_diff)
     }
 
     pub fn scan_x(&self) -> u32 {
@@ -2293,7 +2784,28 @@ impl Landscape {
         self.raster_state.as_mut()
     }
 
+    pub(crate) fn clear_retained_map(&mut self) {
+        if let Some(state) = self.raster_state.as_mut() {
+            state.clear_map();
+        }
+    }
+
     pub(crate) fn replace_runtime_texmap_state(&mut self, texmap: RuntimeTexMapState) -> bool {
+        self.replace_runtime_texmap_state_with_repaint(texmap, false)
+    }
+
+    pub(crate) fn replace_runtime_texmap_state_and_repaint(
+        &mut self,
+        texmap: RuntimeTexMapState,
+    ) -> bool {
+        self.replace_runtime_texmap_state_with_repaint(texmap, true)
+    }
+
+    fn replace_runtime_texmap_state_with_repaint(
+        &mut self,
+        texmap: RuntimeTexMapState,
+        force_repaint: bool,
+    ) -> bool {
         let Landscape {
             pixels,
             raster_state,
@@ -2302,9 +2814,151 @@ impl Landscape {
         let Some(state) = raster_state.as_mut() else {
             return false;
         };
-        *state.texmap_mut() = texmap;
+        state.replace_texmap(texmap, force_repaint);
         if let Some(pixels) = pixels {
             pixels.sync_runtime_texmap(state.texmap());
+        }
+        true
+    }
+
+    /// C4TextureMap is game-global and survives `C4Landscape::Clear`. Eager
+    /// Rust section maps carry the entries they allocated while preparing;
+    /// merge those into the current live map and remap target Surface8/Map
+    /// bytes when a runtime entry already occupied the same numeric slot.
+    pub(crate) fn merge_runtime_texmap_for_section(
+        &mut self,
+        live: RuntimeTexMapState,
+        lookups: &[RuntimeTexMapLookup],
+    ) -> bool {
+        let raw_diff = self.save_diff(false).ok().flatten();
+        {
+            let Landscape {
+                pixels,
+                raster_state,
+                initial_pixels,
+                ..
+            } = self;
+            let Some(state) = raster_state.as_mut() else {
+                return false;
+            };
+            let (merged, remap) =
+                RuntimeTexMapState::replay_section_lookups(live, lookups);
+            let remap_byte = |byte: &mut u8| {
+                *byte = (*byte & 0x80) | remap[usize::from(*byte & 0x7f)];
+            };
+            for byte in &mut state.map_indices {
+                remap_byte(byte);
+            }
+            if let Some(creator) = state.map_creator.as_mut() {
+                creator.remap_material_colors(&remap);
+            }
+            if let Some(initial) = initial_pixels.0.as_mut() {
+                for byte in Arc::make_mut(&mut initial.bytes) {
+                    remap_byte(byte);
+                }
+                if let Some(pixels) = pixels.as_mut() {
+                    pixels.bytes = Arc::clone(&initial.bytes);
+                }
+            } else if let Some(pixels) = pixels.as_mut() {
+                for byte in Arc::make_mut(&mut pixels.bytes) {
+                    remap_byte(byte);
+                }
+            }
+            state.replace_texmap(merged, true);
+            if let Some(pixels) = pixels.as_mut() {
+                pixels.sync_runtime_texmap(state.texmap());
+            }
+        }
+        self.refresh_all_raster_columns();
+        if let Some(diff) = raw_diff {
+            if self.apply_diff(&diff).is_err() {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn replay_empty_section_texmap_lookups(
+        &mut self,
+        lookups: &[RuntimeTexMapLookup],
+    ) -> Option<[u8; 128]> {
+        let Landscape {
+            pixels,
+            raster_state,
+            ..
+        } = self;
+        let Some(state) = raster_state.as_mut() else {
+            return None;
+        };
+        let (replayed, remap) = RuntimeTexMapState::replay_section_lookups(
+            state.texmap().clone(),
+            lookups,
+        );
+        state.replace_texmap(replayed, false);
+        if let Some(pixels) = pixels {
+            pixels.sync_runtime_texmap(state.texmap());
+        }
+        Some(remap)
+    }
+
+    /// A raw section Map.bmp is interpreted only when the section is
+    /// activated, against the then-live global texture map. Rebuild the
+    /// eagerly prepared Surface8 with those live slot shapes, while keeping
+    /// the section's sparse DiffLandscape overlay relative to the new base.
+    pub(crate) fn resynthesize_retained_map_for_section(&mut self) -> bool {
+        let diff = self.save_diff(false).ok().flatten();
+        let Some((map, map_zoom, map_seed, shapes)) = self.raster_state.as_ref().and_then(|state| {
+            Some((
+                state.map()?,
+                state.map_zoom(),
+                state.map_seed(),
+                state.texmap().shapes.clone(),
+            ))
+        }) else {
+            return false;
+        };
+        let (Ok(map_width), Ok(map_height)) =
+            (i32::try_from(map.width), i32::try_from(map.height))
+        else {
+            return false;
+        };
+        if map_zoom <= 0 {
+            return false;
+        }
+        let synthesized = crate::chunky::synthesize_landscape(
+            &map.indices,
+            map_width,
+            map_height,
+            map_zoom,
+            map_seed,
+            &shapes,
+        )
+        .into_bytes();
+        let Some(grid) = self.pixels.as_mut() else {
+            return false;
+        };
+        let target_width = map_width.saturating_mul(map_zoom).max(0) as usize;
+        let target_height = map_height.saturating_mul(map_zoom).max(0) as usize;
+        let grid_width = grid.width as usize;
+        let grid_height = grid.height as usize;
+        let bytes = Arc::make_mut(&mut grid.bytes);
+        bytes.fill(0);
+        let copy_width = target_width.min(grid_width);
+        let copy_height = target_height.min(grid_height);
+        for row in 0..copy_height {
+            let source = row * target_width;
+            let destination = row * grid_width;
+            bytes[destination..destination + copy_width]
+                .copy_from_slice(&synthesized[source..source + copy_width]);
+        }
+        self.refresh_all_raster_columns();
+        if self.save_initial().is_err() {
+            return false;
+        }
+        if let Some(diff) = diff {
+            if self.apply_diff(&diff).is_err() {
+                return false;
+            }
         }
         true
     }
@@ -2672,10 +3326,25 @@ impl Landscape {
         let Some(state) = raster_state.as_mut() else {
             return 0;
         };
+        let occupied_before = state
+            .texmap()
+            .material_names
+            .iter()
+            .map(Option::is_some)
+            .collect::<Vec<_>>();
         let slot = state
             .texmap_mut()
             .get_index_mat_tex(material_texture, None);
         if slot != 0 {
+            if !occupied_before.get(usize::from(slot)).copied().unwrap_or(false)
+                && state
+                    .texmap()
+                    .material_names
+                    .get(usize::from(slot))
+                    .is_some_and(Option::is_some)
+            {
+                state.repaint_surface_palette_materials();
+            }
             if let Some(pixels) = pixels {
                 pixels.sync_runtime_texmap(state.texmap());
             }
@@ -2696,11 +3365,26 @@ impl Landscape {
             ..
         } = self;
         let state = raster_state.as_mut()?;
+        let occupied_before = state
+            .texmap()
+            .material_names
+            .iter()
+            .map(Option::is_some)
+            .collect::<Vec<_>>();
         let slot = state
             .texmap_mut()
             .get_index(material, Some(texture), true);
         if slot == 0 {
             return None;
+        }
+        if !occupied_before.get(usize::from(slot)).copied().unwrap_or(false)
+            && state
+                .texmap()
+                .material_names
+                .get(usize::from(slot))
+                .is_some_and(Option::is_some)
+        {
+            state.repaint_surface_palette_materials();
         }
         if let Some(pixels) = pixels {
             pixels.sync_runtime_texmap(state.texmap());
@@ -5426,6 +6110,54 @@ impl EditorMapSurface<'_> {
 }
 
 impl crate::Engine {
+    /// Persist a non-exact static C4 landscape using this engine's material
+    /// palette and texture map.
+    pub fn save_c4_static_landscape(
+        &self,
+        group: &mut lc_resources::MutableGroup,
+    ) -> Result<(), LandscapePersistenceError> {
+        let landscape = self
+            .landscape()
+            .ok_or(LandscapePersistenceError::MissingLandscape)?;
+        landscape.save_c4_static_scenario(self.materials(), group)
+    }
+
+    /// Persist `Map.bmp` only when C4's `fMapChanged && Map` gate is true.
+    pub fn save_changed_c4_landscape_map(
+        &self,
+        group: &mut lc_resources::MutableGroup,
+    ) -> Result<bool, LandscapePersistenceError> {
+        let landscape = self
+            .landscape()
+            .ok_or(LandscapePersistenceError::MissingLandscape)?;
+        landscape.save_changed_c4_map(self.materials(), group)
+    }
+
+    /// Persist runtime texture-map additions into `Material.c4g/TexMap.txt`.
+    pub fn save_c4_landscape_textures(
+        &self,
+        group: &mut lc_resources::MutableGroup,
+    ) -> Result<bool, LandscapePersistenceError> {
+        let landscape = self
+            .landscape()
+            .ok_or(LandscapePersistenceError::MissingLandscape)?;
+        landscape.save_c4_textures(group)
+    }
+
+    /// Persist C4's DiffLandscape.bmp plus its gated Map.bmp and TexMap.txt
+    /// companions. `sync_save` selects a full index plane instead of 0xff
+    /// masking unchanged pixels.
+    pub fn save_c4_landscape_diff(
+        &self,
+        group: &mut lc_resources::MutableGroup,
+        sync_save: bool,
+    ) -> Result<bool, LandscapePersistenceError> {
+        let landscape = self
+            .landscape_without_solid_masks()
+            .ok_or(LandscapePersistenceError::MissingLandscape)?;
+        landscape.save_c4_diff(self.materials(), group, sync_save)
+    }
+
     /// Engine-level half of a raster change: temporarily expose the saved
     /// background under intersecting solid masks, run the landscape change,
     /// then record the changed background and put the masks back. This is the
@@ -5684,6 +6416,7 @@ impl crate::Engine {
                     _ => return true,
                 };
                 drop(map);
+                state.set_map_changed();
                 state
                     .map()
                     .map(|map| (map, state.texmap().clone(), segment))
@@ -5930,7 +6663,7 @@ impl crate::Engine {
         let bytes = surface.into_bytes();
         let bounds = RasterChangeRect::new(origin.x, origin.y, target_width, target_height);
         self.landscape_raster_transaction(bounds, move |grid, state| {
-            *state.texmap_mut() = texmap;
+            state.replace_texmap(texmap, false);
             // SkyToLandscape clears the entire rounded target before any
             // material pass. Copy zero bytes too; skipping them would leave
             // old landscape under sky cells (C4Landscape.cpp:441-461).
@@ -6014,7 +6747,7 @@ impl crate::Engine {
         let bytes = surface.into_bytes();
         let bounds = RasterChangeRect::new(target_x, target_y, target_width, target_height);
         self.landscape_raster_transaction(bounds, move |grid, state| {
-            *state.texmap_mut() = texmap;
+            state.replace_texmap(texmap, false);
             for target_local_y in 0..target_height {
                 for target_local_x in 0..target_width {
                     let source_x = target_x + target_local_x;
@@ -6476,6 +7209,58 @@ mod tests {
     }
 
     #[test]
+    fn surface_palette_retains_source_and_stale_slots_until_add_entry_repaint() {
+        let library = MaterialLibrary::parse(
+            "[Material]\nName=Earth\nColor=10,20,30\n\
+             [Material]\nName=Rock\nColor=40,50,60\n",
+        )
+        .expect("palette materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let mut texmap = RuntimeTexMapState::default();
+        texmap.material_names[1] = Some("Earth".to_string());
+        let mut raster = LandscapeRasterState::new(1, 7, texmap);
+        let mut source = default_surface_palette();
+        source[255] = [71, 72, 73];
+        raster.set_surface_palette(source);
+
+        raster.texmap_mut().clear_entries(&[1]);
+        let palette = store_surface_palette(
+            &raster.surface_palette(),
+            &raster.surface_palette_materials,
+            &materials,
+        );
+        assert_eq!(palette[1], [10, 20, 30]);
+        assert_eq!(palette[129], [10, 20, 30]);
+        assert_eq!(palette[255], [71, 72, 73]);
+
+        let mut added = raster.texmap().clone();
+        added.material_names[2] = Some("Rock".to_string());
+        raster.replace_texmap(added, false);
+        let palette = store_surface_palette(
+            &raster.surface_palette(),
+            &raster.surface_palette_materials,
+            &materials,
+        );
+        assert_eq!(palette[1], [10, 20, 30], "cleared slot stays stale");
+        assert_eq!(palette[2], [40, 50, 60], "AddEntry repaints mappings");
+        assert_eq!(palette[130], [40, 50, 60]);
+        assert_eq!(palette[255], [71, 72, 73]);
+
+        let current = raster.texmap().clone();
+        raster.replace_texmap(current, true);
+        let palette = store_surface_palette(
+            &raster.surface_palette(),
+            &raster.surface_palette_materials,
+            &materials,
+        );
+        assert_eq!(
+            palette[1], source[1],
+            "a new Surface8 drops stale eager-target palette slots"
+        );
+        assert_eq!(palette[2], [40, 50, 60]);
+    }
+
+    #[test]
     fn legacy_landscape_diff_round_trip_uses_set_pix_path() {
         let original = vec![
             0, 0, 0, //
@@ -6635,6 +7420,7 @@ mod tests {
             texture_inventory: vec!["smooth".to_string()],
             default_material_entries: Vec::new(),
             material_crossmap_entries: Vec::new(),
+            ..Default::default()
         };
         texmap.set_default_material_entry("Earth", 7);
 
@@ -6910,6 +7696,7 @@ mod tests {
             texture_inventory: vec!["Rough".to_string(), "Smooth".to_string()],
             default_material_entries: Vec::new(),
             material_crossmap_entries: Vec::new(),
+            ..Default::default()
         };
         texmap.set_default_material_entry("Rock", 7);
 
@@ -7052,6 +7839,7 @@ mod tests {
             texture_inventory: Vec::new(),
             default_material_entries: Vec::new(),
             material_crossmap_entries: Vec::new(),
+            ..Default::default()
         };
         texmap.set_default_material_entry("Earth", 1);
         texmap.set_default_material_entry("Vehicle", 2);
@@ -9278,6 +10066,7 @@ func TransactionThenRaw()
                 ("Target".to_string(), 40),
             ],
             material_crossmap_entries: vec![40, 40],
+            ..Default::default()
         };
         let mut landscape = Landscape::new(2, vec![2; 2]).expect("temperature landscape builds");
         landscape.set_world_height(2);

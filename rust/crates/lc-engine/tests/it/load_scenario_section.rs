@@ -107,9 +107,10 @@ fn replayed_section_load_realigns_random_count_and_random3_across_runs() {
         run_replayed_section_switch("Random(17) + Random(19) + Random(23)");
 
     let mut expected = LcgRng::seed_from_u64(23);
+    let _ = expected.random(1);
     expected.trace = first_rng.trace;
     assert_eq!(first_rng, expected);
     assert_eq!(second_rng, expected);
-    assert_eq!(first_checks[0], (500, 0));
+    assert_eq!(first_checks[0], (501, 0));
     assert_eq!(first_checks, second_checks);
 }

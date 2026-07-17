@@ -21,7 +21,7 @@ pub use definition::{
 pub use font::{load_endeavour_font, load_ttf, FontResource, FontResourceError};
 pub use graphics::{GraphicsError, GraphicsImage, GraphicsResource};
 pub use group::{Group, GroupEntry, GroupError};
-pub use group_writer::{c4group_file_crc, MutableGroup, MutableGroupError};
+pub use group_writer::{c4group_file_crc, MutableGroup, MutableGroupChildMut, MutableGroupError};
 pub use material::{MaterialDefinition, MaterialError, MaterialLibrary};
 pub use network_scenario::{combine_network_scenario, NetworkScenarioError};
 pub use scenario::{

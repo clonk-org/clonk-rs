@@ -112,6 +112,23 @@ impl MassMoverSet {
         self.count = 0;
     }
 
+    /// C4MassMoverSet::Save consolidates occupied slots, resets CreatePtr,
+    /// and replaces the quirky runtime Count ledger with the live count
+    /// before the compact array is loaded again.
+    pub(crate) fn prepared_for_save(&self) -> Self {
+        let slots = self
+            .slots
+            .iter()
+            .filter_map(|slot| *slot)
+            .map(Some)
+            .collect::<Vec<_>>();
+        Self {
+            count: slots.len() as i32,
+            slots,
+            create_ptr: 0,
+        }
+    }
+
     /// The C++ `Count` ledger value (see the struct docs for its quirks).
     pub(crate) fn count(&self) -> i32 {
         self.count

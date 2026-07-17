@@ -10,6 +10,42 @@ use crate::{Engine, EnvironmentSettings, GammaControlState, NextMissionState};
 /// The shipped C++ build's `C4SyncCheckRate` default.
 pub const INITIAL_NETWORK_DEFAULT_SYNC_RATE: i32 = 100;
 
+/// `C4Landscape::CompileFunc`'s default `FIXED100(20)`, stored through
+/// `mkCastIntAdapt` as the fixed-point value's raw signed 32-bit word.
+pub const LANDSCAPE_DEFAULT_GRAVITY_RAW: i32 = 13_107;
+
+/// The exact `[Landscape]` runtime block compiled into `Game.txt`.
+///
+/// `gravity` is the raw `C4Fixed` representation, not the script-facing
+/// `GetGravity()` integer. `mat_modulation` remains unsigned like C++'s
+/// `uint32_t Modulation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LandscapeGameData {
+    pub map_seed: i32,
+    pub left_open: i32,
+    pub right_open: i32,
+    pub top_open: bool,
+    pub bottom_open: bool,
+    pub gravity: i32,
+    pub mat_modulation: u32,
+    pub mode: i32,
+}
+
+impl Default for LandscapeGameData {
+    fn default() -> Self {
+        Self {
+            map_seed: 0,
+            left_open: 0,
+            right_open: 0,
+            top_open: false,
+            bottom_open: false,
+            gravity: LANDSCAPE_DEFAULT_GRAVITY_RAW,
+            mat_modulation: 0,
+            mode: 0,
+        }
+    }
+}
+
 /// The state serialized by `C4Game::CompileFunc` before runtime-join data is
 /// added to a network dynamic.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +77,9 @@ pub struct InitialNetworkGameData {
     pub script_counter: i32,
     pub environment: EnvironmentSettings,
     pub gamma: GammaControlState,
+    /// `None` before a landscape exists (notably the pristine initial host
+    /// dynamic). A present all-default block still decompiles to no section.
+    pub landscape: Option<LandscapeGameData>,
 }
 
 impl Default for InitialNetworkGameData {
@@ -75,6 +114,7 @@ impl Default for InitialNetworkGameData {
             script_counter: 0,
             environment: EnvironmentSettings::default(),
             gamma: GammaControlState::default(),
+            landscape: None,
         }
     }
 }
@@ -85,9 +125,6 @@ impl InitialNetworkGameData {
     pub fn from_engine(engine: &Engine) -> Result<Self, InitialNetworkGameError> {
         if !engine.capture_script_globals().is_empty() {
             return Err(UnsupportedInitialNetworkGameState::ScriptGlobals.into());
-        }
-        if engine.landscape.is_some() {
-            return Err(UnsupportedInitialNetworkGameState::Landscape.into());
         }
         if engine.sky.is_some() {
             return Err(UnsupportedInitialNetworkGameState::Sky.into());
@@ -133,6 +170,23 @@ impl InitialNetworkGameData {
             rules |= 16;
         }
 
+        let landscape = engine
+            .landscape
+            .as_ref()
+            .map(|landscape| LandscapeGameData {
+                map_seed: landscape
+                    .raster_state()
+                    .map(|state| state.map_seed())
+                    .unwrap_or(0),
+                left_open: landscape.left_open(),
+                right_open: landscape.right_open(),
+                top_open: landscape.top_open(),
+                bottom_open: landscape.bottom_open(),
+                gravity: engine.physics().gravity_as_c4fixed().val(),
+                mat_modulation: landscape.modulation(),
+                mode: landscape.mode(),
+            });
+
         Ok(Self {
             time: engine.game_time,
             frame,
@@ -149,7 +203,11 @@ impl InitialNetworkGameData {
             object_enumeration_index,
             rules,
             play_list: engine.music_playlist().to_owned(),
-            current_scenario_section: String::new(),
+            current_scenario_section: engine
+                .last_scenario_section_flags
+                .is_some()
+                .then(|| engine.current_scenario_section.clone())
+                .unwrap_or_default(),
             resort_any_object: !engine.pending_object_order_commands.is_empty(),
             music_enabled: false,
             music_level: 100,
@@ -159,6 +217,7 @@ impl InitialNetworkGameData {
             script_counter: engine.scenario_script_counter,
             environment: engine.environment,
             gamma: engine.gamma,
+            landscape,
         })
     }
 }
@@ -230,6 +289,13 @@ pub fn serialize_initial_network_game(
     writer.push_section("Game", game_lines(data)?);
     writer.push_section("Script", script_lines(data));
     writer.push_section("Weather", weather_lines(data));
+    writer.push_section(
+        "Landscape",
+        data.landscape
+            .as_ref()
+            .map(landscape_lines)
+            .unwrap_or_default(),
+    );
 
     let mut output = writer.finish().into_bytes();
     if let Some(player_sections) = original_game_text.and_then(player_section_tail) {
@@ -381,7 +447,295 @@ fn weather_lines(data: &InitialNetworkGameData) -> Vec<String> {
     lines
 }
 
+fn landscape_lines(landscape: &LandscapeGameData) -> Vec<String> {
+    let defaults = LandscapeGameData::default();
+    let mut lines = Vec::new();
+    push_i32(&mut lines, "MapSeed", landscape.map_seed, defaults.map_seed);
+    push_i32(
+        &mut lines,
+        "LeftOpen",
+        landscape.left_open,
+        defaults.left_open,
+    );
+    push_i32(
+        &mut lines,
+        "RightOpen",
+        landscape.right_open,
+        defaults.right_open,
+    );
+    push_bool(&mut lines, "TopOpen", landscape.top_open, defaults.top_open);
+    push_bool(
+        &mut lines,
+        "BottomOpen",
+        landscape.bottom_open,
+        defaults.bottom_open,
+    );
+    push_i32(&mut lines, "Gravity", landscape.gravity, defaults.gravity);
+    push_u32(
+        &mut lines,
+        "MatModulation",
+        landscape.mat_modulation,
+        defaults.mat_modulation,
+    );
+    push_i32(&mut lines, "Mode", landscape.mode, defaults.mode);
+    lines
+}
+
+/// Parses the first `[Landscape]` block from C++ `Game.txt` input.
+///
+/// Section and field names use StdCompilerINIRead's exact spelling. Missing
+/// or malformed fields (and a missing or empty section) take the same
+/// per-field defaults as `C4Landscape::CompileFunc`'s default adaptors. Like
+/// C4's string-backed compiler, bytes after the first NUL are not visible.
+pub fn parse_landscape_game_data(source: &[u8]) -> LandscapeGameData {
+    let source = source.split(|byte| *byte == 0).next().unwrap_or_default();
+    let source = String::from_utf8_lossy(source);
+    let mut landscape = LandscapeGameData::default();
+    let mut found_landscape = false;
+    let mut sections: Vec<(usize, bool)> = Vec::new();
+    let mut seen = HashSet::new();
+
+    for raw_line in source.split(['\r', '\n']) {
+        let indent = raw_line
+            .as_bytes()
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        let line = &raw_line[indent..];
+        if let Some(section) = ini_section_name(line) {
+            while sections.last().is_some_and(|(level, _)| *level >= indent) {
+                sections.pop();
+            }
+            let is_landscape = sections.is_empty()
+                && !found_landscape
+                && section == "Landscape";
+            found_landscape |= is_landscape;
+            sections.push((indent, is_landscape));
+            continue;
+        }
+        let Some((name, value)) = ini_named_value(line) else {
+            continue;
+        };
+        let value_indent = indent + 1;
+        while sections
+            .last()
+            .is_some_and(|(level, _)| *level >= value_indent)
+        {
+            sections.pop();
+        }
+        if !sections.last().is_some_and(|(_, target)| *target) {
+            continue;
+        }
+        if !seen.insert(name.to_owned()) {
+            continue;
+        }
+        match name {
+            "MapSeed" => {
+                landscape.map_seed = parse_i32_prefix(value).unwrap_or_default();
+            }
+            "LeftOpen" => {
+                landscape.left_open = parse_i32_prefix(value).unwrap_or_default();
+            }
+            "RightOpen" => {
+                landscape.right_open = parse_i32_prefix(value).unwrap_or_default();
+            }
+            "TopOpen" => {
+                landscape.top_open = parse_bool_prefix(value).unwrap_or_default();
+            }
+            "BottomOpen" => {
+                landscape.bottom_open = parse_bool_prefix(value).unwrap_or_default();
+            }
+            "Gravity" => {
+                landscape.gravity =
+                    parse_i32_prefix(value).unwrap_or(LANDSCAPE_DEFAULT_GRAVITY_RAW);
+            }
+            "MatModulation" => {
+                landscape.mat_modulation = parse_u32_prefix(value).unwrap_or_default();
+            }
+            "Mode" => {
+                landscape.mode = parse_i32_prefix(value).unwrap_or_default();
+            }
+            _ => {}
+        }
+    }
+
+    landscape
+}
+
+fn ini_section_name(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('[')?;
+    let name_end = ini_name_end(rest)?;
+    let mut delimiter = name_end;
+    while rest
+        .as_bytes()
+        .get(delimiter)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        delimiter += 1;
+    }
+    (rest.as_bytes().get(delimiter) == Some(&b']')).then_some(&rest[..name_end])
+}
+
+fn ini_named_value(line: &str) -> Option<(&str, &str)> {
+    let name_end = ini_name_end(line)?;
+    let mut delimiter = name_end;
+    while line
+        .as_bytes()
+        .get(delimiter)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        delimiter += 1;
+    }
+    (line.as_bytes().get(delimiter) == Some(&b'='))
+        .then_some((&line[..name_end], &line[delimiter + 1..]))
+}
+
+fn ini_name_end(value: &str) -> Option<usize> {
+    let bytes = value.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let mut end = 1;
+    while bytes
+        .get(end)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_'))
+    {
+        end += 1;
+    }
+    Some(end)
+}
+
+fn numeric_prefix(value: &str, radix: u32) -> Option<(&str, bool)> {
+    let bytes = value.as_bytes();
+    let negative = bytes.first() == Some(&b'-');
+    let mut start = usize::from(matches!(bytes.first(), Some(b'+') | Some(b'-')));
+    let digits_start = start;
+    while bytes.get(start).is_some_and(|byte| match radix {
+        10 => byte.is_ascii_digit(),
+        16 => byte.is_ascii_hexdigit(),
+        _ => false,
+    }) {
+        start += 1;
+    }
+    (start > digits_start).then_some((&value[digits_start..start], negative))
+}
+
+fn digit_prefix(value: &str, radix: u32) -> &str {
+    let count = value
+        .bytes()
+        .take_while(|byte| match radix {
+            10 => byte.is_ascii_digit(),
+            16 => byte.is_ascii_hexdigit(),
+            _ => false,
+        })
+        .count();
+    &value[..count]
+}
+
+fn parse_saturating_u64(digits: &str, radix: u32) -> (u64, bool) {
+    let mut value = 0_u64;
+    let mut overflow = false;
+    for byte in digits.bytes() {
+        let digit = (byte as char)
+            .to_digit(radix)
+            .expect("numeric_prefix admits only radix digits") as u64;
+        match value
+            .checked_mul(u64::from(radix))
+            .and_then(|value| value.checked_add(digit))
+        {
+            Some(next) if !overflow => value = next,
+            _ => {
+                value = u64::MAX;
+                overflow = true;
+            }
+        }
+    }
+    (value, overflow)
+}
+
+fn parse_i32_prefix(value: &str) -> Option<i32> {
+    let value = value.trim_start_matches([' ', '\t']);
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        let digits = digit_prefix(hex, 16);
+        if digits.is_empty() {
+            return Some(0);
+        }
+        let (magnitude, overflow) = parse_saturating_u64(digits, 16);
+        let value = if overflow || magnitude > i64::MAX as u64 {
+            i64::MAX
+        } else {
+            magnitude as i64
+        };
+        return Some(value as i32);
+    }
+    let (digits, negative) = numeric_prefix(value, 10)?;
+    let (magnitude, overflow) = parse_saturating_u64(digits, 10);
+    let value = if negative {
+        if overflow || magnitude > (i64::MAX as u64) + 1 {
+            i64::MIN
+        } else if magnitude == (i64::MAX as u64) + 1 {
+            i64::MIN
+        } else {
+            -(magnitude as i64)
+        }
+    } else if overflow || magnitude > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        magnitude as i64
+    };
+    Some(value as i32)
+}
+
+fn parse_u32_prefix(value: &str) -> Option<u32> {
+    let value = value.trim_start_matches([' ', '\t']);
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        let digits = digit_prefix(hex, 16);
+        if digits.is_empty() {
+            return Some(0);
+        }
+        return Some(parse_saturating_u64(digits, 16).0 as u32);
+    }
+    let (digits, negative) = numeric_prefix(value, 10)?;
+    let (magnitude, overflow) = parse_saturating_u64(digits, 10);
+    let value = if overflow {
+        u64::MAX
+    } else if negative {
+        magnitude.wrapping_neg()
+    } else {
+        magnitude
+    };
+    Some(value as u32)
+}
+
+fn parse_bool_prefix(value: &str) -> Option<bool> {
+    let bytes = value.as_bytes();
+    if (bytes.first() == Some(&b'1') && bytes.get(1).is_none_or(|byte| !byte.is_ascii_digit()))
+        || value.get(..4) == Some("true")
+    {
+        Some(true)
+    } else if (bytes.first() == Some(&b'0')
+        && bytes.get(1).is_none_or(|byte| !byte.is_ascii_digit()))
+        || value.get(..5) == Some("false")
+    {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn push_i32(lines: &mut Vec<String>, name: &str, value: i32, default: i32) {
+    if value != default {
+        lines.push(format!("{name}={value}"));
+    }
+}
+
+fn push_u32(lines: &mut Vec<String>, name: &str, value: u32, default: u32) {
     if value != default {
         lines.push(format!("{name}={value}"));
     }
@@ -561,6 +915,7 @@ mod tests {
             script_counter: 15,
             environment: EnvironmentSettings::default(),
             gamma: GammaControlState::default(),
+            landscape: None,
         };
         data.environment.season = 16;
         data.environment.year_speed = 17;
@@ -630,15 +985,129 @@ mod tests {
     }
 
     #[test]
-    fn engine_capture_is_typed_when_an_unported_component_is_required() {
-        let mut engine = Engine::new();
-        engine.landscape = Some(crate::Landscape::flat(1, 1));
+    fn landscape_block_keeps_cpp_order_widths_and_raw_gravity() {
+        let mut data = InitialNetworkGameData::default();
+        data.landscape = Some(LandscapeGameData {
+            map_seed: -7,
+            left_open: 11,
+            right_open: 12,
+            top_open: true,
+            bottom_open: true,
+            gravity: -123_456,
+            mat_modulation: 4_000_000_000,
+            mode: 3,
+        });
+
+        let bytes = serialize_initial_network_game(&data, None)
+            .expect("landscape fields serialize")
+            .expect("nondefault landscape emits Game.txt");
 
         assert_eq!(
-            InitialNetworkGameData::from_engine(&engine),
-            Err(InitialNetworkGameError::Unsupported(
-                UnsupportedInitialNetworkGameState::Landscape
-            ))
+            bytes,
+            b"[Game]\r\nMessageBoardCommands=1;\"speed\"=\"SetGameSpeed(%d)\",Escaped\r\n\r\n[Weather]\r\nNoGamma=true\r\n\r\n[Landscape]\r\nMapSeed=-7\r\nLeftOpen=11\r\nRightOpen=12\r\nTopOpen=true\r\nBottomOpen=true\r\nGravity=-123456\r\nMatModulation=4000000000\r\nMode=3\r\n"
+        );
+        assert_eq!(
+            parse_landscape_game_data(&bytes),
+            data.landscape.expect("landscape data remains present")
+        );
+    }
+
+    #[test]
+    fn landscape_parser_matches_exact_names_lowercase_bools_and_hex_numbers() {
+        let source = b"[lAnDsCaPe]\r\nMapSeed=999\r\n\r\n[Landscape]\r\nmapseed=888\r\nMapSeed =777\r\nMapSeed=0xFFFFFFED trailing\r\nMapSeed=99\r\nLeftOpen=0XFFFFFFFF\r\nRightOpen=42\r\ntopopen=TRUE\r\nTopOpen=true\r\nBottomOpen=1\r\nGravity=0xFFFFE21A\r\nMatModulation=0xFFFFFFFF\r\nMode=0X2\r\n\r\n[Weather]\r\nWind=8\r\n";
+
+        assert_eq!(
+            parse_landscape_game_data(source),
+            LandscapeGameData {
+                map_seed: -19,
+                left_open: -1,
+                right_open: 42,
+                top_open: true,
+                bottom_open: true,
+                gravity: -7_654,
+                mat_modulation: u32::MAX,
+                mode: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn empty_landscape_section_uses_cpp_compile_defaults() {
+        assert_eq!(
+            parse_landscape_game_data(b"[Landscape]\r\n"),
+            LandscapeGameData::default()
+        );
+        assert_eq!(
+            parse_landscape_game_data(b"[LANDSCAPE]\r\nMapSeed=7\r\n"),
+            LandscapeGameData::default(),
+            "wrong-case section names remain invisible"
+        );
+        assert_eq!(
+            LandscapeGameData::default().gravity,
+            LANDSCAPE_DEFAULT_GRAVITY_RAW
+        );
+        assert_eq!(LANDSCAPE_DEFAULT_GRAVITY_RAW, 13_107);
+    }
+
+    #[test]
+    fn recognized_invalid_landscape_values_take_compile_defaults() {
+        assert_eq!(
+            parse_landscape_game_data(
+                b"[Landscape]\r\nMapSeed=oops\r\nTopOpen= true\r\nBottomOpen=TRUE\r\nGravity=\r\nMode=3\r\n",
+            ),
+            LandscapeGameData {
+                mode: 3,
+                ..LandscapeGameData::default()
+            }
+        );
+    }
+
+    #[test]
+    fn landscape_parser_matches_ini_tree_root_and_libc_number_edges() {
+        let source = b"[Game]\r\n [Landscape]\r\n MapSeed=7\r\n\xef\xbb\xbf[Landscape]\r\nMapSeed=8\r\n[Landscape]\r\nMapSeed=9223372036854775808\r\nGravity=0x\r\nMatModulation=18446744073709551616\r\n";
+        assert_eq!(
+            parse_landscape_game_data(source),
+            LandscapeGameData {
+                map_seed: -1,
+                gravity: 0,
+                mat_modulation: u32::MAX,
+                ..LandscapeGameData::default()
+            }
+        );
+        assert_eq!(
+            parse_landscape_game_data(b"[Landscape]\rMapSeed=7"),
+            LandscapeGameData {
+                map_seed: 7,
+                ..LandscapeGameData::default()
+            }
+        );
+    }
+
+    #[test]
+    fn engine_capture_includes_represented_landscape_runtime_fields() {
+        let mut engine = Engine::new();
+        let mut landscape = crate::Landscape::flat(2, 2);
+        assert!(landscape.set_mode(crate::LANDSCAPE_MODE_STATIC));
+        landscape.set_modulation(0xaabb_ccdd);
+        landscape.set_border_open(7, 9, false, true);
+        engine.set_physics(crate::PhysicsSettings::new(77, 12, -12));
+        let gravity = engine.physics().gravity_as_c4fixed().val();
+        engine.set_landscape(landscape);
+
+        assert_eq!(
+            InitialNetworkGameData::from_engine(&engine)
+                .expect("represented landscape captures")
+                .landscape,
+            Some(LandscapeGameData {
+                map_seed: 0,
+                left_open: 7,
+                right_open: 9,
+                top_open: false,
+                bottom_open: true,
+                gravity,
+                mat_modulation: 0xaabb_ccdd,
+                mode: crate::LANDSCAPE_MODE_STATIC,
+            })
         );
     }
 

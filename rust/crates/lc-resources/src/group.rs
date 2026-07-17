@@ -8,6 +8,10 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use thiserror::Error;
 use walkdir::{Error as WalkDirError, WalkDir};
 
+use crate::group_writer::{
+    MutableGroup, MutableGroupChildMut, MutableGroupEntryData, MutableGroupError,
+};
+
 const GROUP_HEADER_SIZE: usize = 204;
 const GROUP_ENTRY_SIZE: usize = 316;
 const GROUP_FILE_ID: &[u8] = b"RedWolf Design GrpFolder";
@@ -257,6 +261,35 @@ impl Group {
         }
     }
 
+    fn entry_contents_crc(
+        &self,
+        entry: &GroupEntry,
+        physical_data: &[u8],
+    ) -> Result<u32, GroupError> {
+        if entry.crc_state == 2 {
+            return Ok(entry.stored_crc);
+        }
+        if entry.is_directory {
+            let child = match &self.kind {
+                GroupKind::Directory(_) => self.open_child(&entry.relative_path)?,
+                GroupKind::Packed(packed) => Group::from_raw_memory(
+                    packed.path.join(&entry.relative_path),
+                    physical_data.to_vec(),
+                )?,
+            };
+            return child.contents_crc();
+        }
+        if entry.size == 0 {
+            return Ok(0);
+        }
+        let data_crc = if entry.crc_state == 1 {
+            entry.stored_crc
+        } else {
+            crc32(0, physical_data)
+        };
+        Ok(crc32(data_crc, &entry.name_bytes))
+    }
+
     /// Computes C4Group::EntryCRC32's observable return value when a nested
     /// CRC calculation fails. A directly unopenable child makes this group
     /// return zero, while a successfully opened parent treats a nested
@@ -290,6 +323,124 @@ impl Group {
         let packed = PackedGroup::from_memory(path, data)?;
         Ok(Self {
             kind: GroupKind::Packed(packed),
+        })
+    }
+}
+
+impl MutableGroup {
+    /// Creates a writable C4Group rewrite from a read-only group while
+    /// retaining its header template, legacy entry names, timestamps,
+    /// executable bits, calculated CRCs, and file/child distinctions.
+    ///
+    /// Packed children remain opaque raw group images, matching
+    /// `C4Group::AppendEntry2StdFile`. Directory children are cloned
+    /// recursively so the resulting group has the same child hierarchy.
+    pub fn from_group(group: &Group) -> Result<Self, MutableGroupError> {
+        let mut mutable = Self::new_bytes(group.root().as_os_str().as_encoded_bytes().to_vec());
+        if let Some(header) = group.rewrite_header_template() {
+            mutable.set_rewrite_header_template(header);
+        }
+
+        let entries = group
+            .entries()
+            .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
+        for entry in entries {
+            if group.is_directory() && entry.is_directory {
+                let child = group
+                    .open_child(&entry.relative_path)
+                    .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
+                let child = Self::from_group(&child)?;
+                mutable.add_existing_child_bytes_with_metadata(
+                    entry.name_bytes,
+                    child,
+                    entry.time,
+                    entry.executable,
+                )?;
+                continue;
+            }
+
+            // A packed C4Group file inside a folder group is a child too
+            // (C4Group_IsGroup/AddEntryOnDisk), but its already-uncompressed
+            // image is copied opaquely. Keep it lazy just like a child core in
+            // a packed parent; opening it eagerly would rewrite its own header.
+            if group.is_directory() {
+                if let Ok(child) = group.open_child(&entry.relative_path) {
+                    let data = child
+                        .raw_image()
+                        .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
+                    let contents_crc = child
+                        .contents_crc()
+                        .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
+                    mutable.add_packed_child_bytes_with_metadata(
+                        entry.name_bytes,
+                        data,
+                        contents_crc,
+                        entry.time,
+                        entry.executable,
+                    )?;
+                    continue;
+                }
+            }
+
+            let data = group
+                .read_entry_bytes_exact(&entry)
+                .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
+            let contents_crc = group
+                .entry_contents_crc(&entry, &data)
+                .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
+            if entry.is_directory {
+                mutable.add_packed_child_bytes_with_metadata(
+                    entry.name_bytes,
+                    data,
+                    contents_crc,
+                    entry.time,
+                    entry.executable,
+                )?;
+            } else {
+                mutable.add_existing_file_bytes_with_metadata(
+                    entry.name_bytes,
+                    data,
+                    contents_crc,
+                    entry.time,
+                    entry.executable,
+                )?;
+            }
+        }
+        Ok(mutable)
+    }
+
+    /// Finds a child using C4Group's ASCII-case-insensitive entry matching.
+    /// Packed children imported by [`Self::from_group`] are opened lazily, so
+    /// untouched sibling children retain their opaque payloads.
+    pub fn child_mut(&mut self, name: &str) -> Result<MutableGroupChildMut<'_>, MutableGroupError> {
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.name_bytes.eq_ignore_ascii_case(name.as_bytes()))
+        else {
+            return Ok(MutableGroupChildMut::Missing);
+        };
+
+        if let MutableGroupEntryData::PackedChild { data, .. } = &self.entries[index].data {
+            let label = PathBuf::from(
+                String::from_utf8_lossy(&self.entries[index].name_bytes).into_owned(),
+            );
+            let source = Group::from_raw_memory(label, data.clone())
+                .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
+            let child = Self::from_group(&source)?;
+            self.entries[index].data = MutableGroupEntryData::Child(Box::new(child));
+        }
+
+        if matches!(&self.entries[index].data, MutableGroupEntryData::Child(_)) {
+            self.entries[index].mark_child_rewritten();
+        }
+
+        Ok(match &mut self.entries[index].data {
+            MutableGroupEntryData::Child(child) => MutableGroupChildMut::Child(child),
+            MutableGroupEntryData::File(_) | MutableGroupEntryData::ExistingFile { .. } => {
+                MutableGroupChildMut::File
+            }
+            MutableGroupEntryData::PackedChild { .. } => unreachable!("packed child was opened"),
         })
     }
 }

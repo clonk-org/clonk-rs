@@ -56,6 +56,7 @@ const C4CFN_FLS: &[(&str, &str)] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MutableGroupError {
+    SourceGroup(String),
     EmptyEntryName,
     EntryNameContainsNul,
     EntryNameTooLong(usize),
@@ -68,6 +69,9 @@ pub enum MutableGroupError {
 impl fmt::Display for MutableGroupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SourceGroup(message) => {
+                write!(formatter, "failed to read source C4Group: {message}")
+            }
             Self::EmptyEntryName => formatter.write_str("C4Group entry name is empty"),
             Self::EntryNameContainsNul => {
                 formatter.write_str("C4Group entry name contains a NUL byte")
@@ -95,26 +99,33 @@ impl fmt::Display for MutableGroupError {
 
 impl std::error::Error for MutableGroupError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MutableGroup {
-    filename: Vec<u8>,
-    rewrite_header_template: Option<[u8; GROUP_HEADER_SIZE]>,
-    maker: [u8; GROUP_MAKER_FIELD_BYTES],
-    original: i32,
-    entries: Vec<MutableGroupEntry>,
+#[derive(Debug)]
+pub enum MutableGroupChildMut<'a> {
+    Missing,
+    File,
+    Child(&'a mut MutableGroup),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct MutableGroupEntry {
+pub struct MutableGroup {
+    pub(crate) filename: Vec<u8>,
+    rewrite_header_template: Option<[u8; GROUP_HEADER_SIZE]>,
+    maker: [u8; GROUP_MAKER_FIELD_BYTES],
+    original: i32,
+    pub(crate) entries: Vec<MutableGroupEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MutableGroupEntry {
     name: String,
-    name_bytes: Vec<u8>,
-    data: MutableGroupEntryData,
+    pub(crate) name_bytes: Vec<u8>,
+    pub(crate) data: MutableGroupEntryData,
     time: u32,
     executable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum MutableGroupEntryData {
+pub(crate) enum MutableGroupEntryData {
     File(Vec<u8>),
     ExistingFile { data: Vec<u8>, contents_crc: u32 },
     Child(Box<MutableGroup>),
@@ -284,6 +295,25 @@ impl MutableGroup {
         )
     }
 
+    /// Imports an existing child core without treating timestamp zero as the
+    /// sentinel used by C4Group's public Add overloads.
+    pub(crate) fn add_existing_child_bytes_with_metadata(
+        &mut self,
+        name: impl Into<Vec<u8>>,
+        mut child: MutableGroup,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
+        let name = name.into();
+        child.filename = name.clone();
+        self.add_entry_bytes(
+            name,
+            MutableGroupEntryData::Child(Box::new(child)),
+            time,
+            executable,
+        )
+    }
+
     /// Imports the raw uncompressed image stored for a packed child group.
     /// C4Group copies unchanged child payloads as opaque bytes when rewriting
     /// their parent (`C4Group::AppendEntry2StdFile`).
@@ -424,6 +454,15 @@ impl MutableGroup {
             .iter()
             .map(|entry| entry.name.as_str())
             .collect()
+    }
+
+    /// Deletes every entry with the same ASCII-case-insensitive name, like
+    /// C4Group::DeleteEntry during a scenario rewrite.
+    pub fn remove_entry(&mut self, name: &str) -> bool {
+        let previous = self.entries.len();
+        self.entries
+            .retain(|entry| !entry.name_bytes.eq_ignore_ascii_case(name.as_bytes()));
+        self.entries.len() != previous
     }
 
     pub fn sort(&mut self, sort_list: &str) -> bool {
@@ -696,6 +735,15 @@ fn wildcard_match(pattern: &[u8], value: &[u8]) -> bool {
 }
 
 impl MutableGroupEntry {
+    pub(crate) fn mark_child_rewritten(&mut self) {
+        // C4Group::Save rewrites a modified child to a temporary file and
+        // moves that file back through Mother->Move. AddEntryOnDisk therefore
+        // gives the replacement child the temp file's current timestamp and
+        // executable bit (normally false), rather than retaining the old core.
+        self.time = unix_time_now();
+        self.executable = false;
+    }
+
     fn contents_crc(&self) -> u32 {
         match &self.data {
             MutableGroupEntryData::File(data) if data.is_empty() => 0,

@@ -16954,7 +16954,7 @@ impl PhysicsDelta {
 
     pub fn apply(&self, physics: &mut PhysicsSettings) {
         if let Some(gravity) = self.gravity {
-            physics.gravity = gravity.clamp(-300, 300);
+            physics.set_script_gravity(gravity);
         }
     }
 }
@@ -16975,7 +16975,7 @@ impl PhysicsContext {
 
     fn set_gravity(&self, gravity: i32) {
         let clamped = gravity.clamp(-300, 300);
-        self.settings.borrow_mut().gravity = clamped;
+        self.settings.borrow_mut().set_script_gravity(clamped);
         self.pending.borrow_mut().gravity = Some(clamped);
     }
 
@@ -56627,6 +56627,7 @@ public func RejectConstruction(x, y, builder)
             texture_inventory: Vec::new(),
             default_material_entries: Vec::new(),
             material_crossmap_entries: Vec::new(),
+            ..Default::default()
         };
         texmap.set_default_material_entry("Water", 3);
         let mut landscape = Landscape::new(6, vec![6; 6]).expect("landscape builds");
@@ -56676,6 +56677,7 @@ public func RejectConstruction(x, y, builder)
             texture_inventory: vec!["Rough".to_string()],
             default_material_entries: Vec::new(),
             material_crossmap_entries: Vec::new(),
+            ..Default::default()
         };
         texmap.set_default_material_entry("Vehicle", 2);
         let mut landscape = Landscape::new(16, vec![12; 16]).expect("landscape builds");
@@ -56756,6 +56758,7 @@ public func RejectConstruction(x, y, builder)
             texture_inventory: vec!["Rough".to_string(), "Smooth".to_string()],
             default_material_entries: Vec::new(),
             material_crossmap_entries: Vec::new(),
+            ..Default::default()
         };
         // Deliberately differ from the first Earth slot: Mat2PixColDefault
         // must use DefaultMatTex, not a material-name scan.
@@ -56815,6 +56818,7 @@ public func RejectConstruction(x, y, builder)
             texture_inventory: vec!["Rough".to_string(), "Ridge".to_string()],
             default_material_entries: Vec::new(),
             material_crossmap_entries: Vec::new(),
+            ..Default::default()
         };
         texmap.set_default_material_entry("Earth", 1);
 
@@ -56899,6 +56903,7 @@ public func RejectConstruction(x, y, builder)
             // Slot 3 models one of BlastShiftTo/BelowTempConvertTo/
             // AboveTempConvertTo; it has no Surface8 pixel of its own.
             material_crossmap_entries: vec![3],
+            ..Default::default()
         };
         texmap.set_default_material_entry("Earth", 1);
         texmap.set_default_material_entry("Rock", 2);
@@ -57008,6 +57013,7 @@ public func RejectConstruction(x, y, builder)
             texture_inventory: vec!["Liquid".to_string()],
             default_material_entries: Vec::new(),
             material_crossmap_entries: Vec::new(),
+            ..Default::default()
         };
         let mut landscape = Landscape::new(4, vec![1; 4]).expect("landscape builds");
         landscape.set_world_height(1);

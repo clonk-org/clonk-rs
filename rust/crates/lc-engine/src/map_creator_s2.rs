@@ -274,6 +274,13 @@ impl PostInitMapCallbacks {
         })
     }
 
+    fn append_from(&mut self, other: &Self) {
+        self.arrays.extend(other.arrays.iter().cloned());
+        if other.map_zoom != 0 {
+            self.map_zoom = other.map_zoom;
+        }
+    }
+
     pub(crate) fn array_count(&self) -> usize {
         self.arrays.len()
     }
@@ -339,6 +346,41 @@ impl PostInitMapCallbacks {
             }
         }
     }
+
+    /// Merge the callback masks produced by rendering another map on the
+    /// SAME creator. Existing arrays retain their first map dimensions and
+    /// accumulate in-bounds pixels; arrays declared by the appended source
+    /// are added in declaration order.
+    fn merge_live_render_from(&mut self, other: &Self, retained_count: usize) {
+        for index in 0..retained_count.min(other.arrays.len()) {
+            let source = &other.arrays[index];
+            let Some(target) = self.arrays.get_mut(index) else {
+                self.arrays.push(source.clone());
+                continue;
+            };
+            if target.is_empty() {
+                *target = source.clone();
+                continue;
+            }
+            for bit_index in 0..source.width.saturating_mul(source.height).max(0) as usize {
+                if source
+                    .bits
+                    .get(bit_index / 8)
+                    .is_some_and(|byte| byte & (1 << (bit_index % 8)) != 0)
+                {
+                    let bit_index = bit_index as i32;
+                    target.enable(
+                        bit_index % source.width,
+                        bit_index / source.width,
+                        source.width,
+                        source.height,
+                    );
+                }
+            }
+        }
+        self.arrays
+            .extend(other.arrays.iter().skip(retained_count).cloned());
+    }
 }
 
 impl CallbackArray {
@@ -379,23 +421,19 @@ impl CallbackArray {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MapCreatorS2State {
     tree: Tree,
-    /// Constructor-evaluated C4MapCreatorS2::DefaultMap. Section
-    /// Landscape.txt files parsed into a retained creator keep cloning this
-    /// original template even when their Scenario.txt changes MapWdt/Hgt.
+    /// `C4MapCreatorS2::DefaultMap` is evaluated only when the creator is
+    /// constructed. Section overloads reuse the live creator, so maps parsed
+    /// by a later `Landscape.txt` inherit these original dimensions instead
+    /// of evaluating the new section's `MapWdt`/`MapHgt` again.
     #[serde(default = "default_retained_map")]
     default_map: Overlay,
     #[serde(skip, default)]
     callbacks: PostInitMapCallbacks,
 }
 
-fn default_retained_map() -> Overlay {
-    let mut default_map = Overlay::default_template();
-    default_map.is_map = true;
-    default_map
-}
-
 // Callback bitmaps are transient PostInitMap work, deliberately omitted from
-// saves. Creator identity/equality follows the persisted tree and DefaultMap.
+// saves. Creator identity/equality follows the persisted S2 tree and its
+// construction-time default map.
 impl PartialEq for MapCreatorS2State {
     fn eq(&self, other: &Self) -> bool {
         self.tree == other.tree && self.default_map == other.default_map
@@ -416,6 +454,52 @@ impl MapCreatorS2State {
 
     pub(crate) fn callbacks(&self) -> &PostInitMapCallbacks {
         &self.callbacks
+    }
+
+    pub(crate) fn append_from(&mut self, other: &Self) {
+        let callback_offset = self.tree.callbacks.len();
+        self.tree.callbacks.extend(other.tree.callbacks.iter().cloned());
+        let node_offset = self.tree.nodes.len().saturating_sub(1);
+        let remap_node = |id: NodeId| if id == 0 { 0 } else { id + node_offset };
+        self.tree.nodes[0].children.extend(
+            other.tree.nodes[0]
+                .children
+                .iter()
+                .copied()
+                .map(remap_node),
+        );
+        for source in other.tree.nodes.iter().skip(1) {
+            let mut node = source.clone();
+            node.owner = node.owner.map(remap_node);
+            node.children = node.children.into_iter().map(remap_node).collect();
+            if let NodeKind::Overlay(overlay) = &mut node.kind {
+                overlay.eval_callback = overlay
+                    .eval_callback
+                    .map(|callback| callback + callback_offset);
+                overlay.draw_callback = overlay
+                    .draw_callback
+                    .map(|callback| callback + callback_offset);
+            }
+            self.tree.nodes.push(node);
+        }
+        self.callbacks.append_from(&other.callbacks);
+    }
+
+    pub(crate) fn callback_state(&self) -> PostInitMapCallbacks {
+        self.callbacks.clone()
+    }
+
+    pub(crate) fn remap_material_colors(&mut self, remap: &[u8; 128]) {
+        for node in &mut self.tree.nodes {
+            let NodeKind::Overlay(overlay) = &mut node.kind else {
+                continue;
+            };
+            let ift = overlay.mat_clr & 0x80;
+            let slot = usize::from(overlay.mat_clr & 0x7f);
+            if slot != 0 {
+                overlay.mat_clr = ift | remap[slot];
+            }
+        }
     }
 }
 
@@ -1706,23 +1790,39 @@ pub(crate) fn create_s2_map_with_state_and_functions(
     )
 }
 
-/// C4Landscape::CreateMapS2 with an already-retained pMapCreator
-/// (src/C4Landscape.cpp:531-546): append the section source to the live tree,
-/// keep the constructor-evaluated DefaultMap, and therefore take no fresh
-/// MapWdt/MapHgt draws. Existing callback arrays remain live and new callback
-/// declarations append to them just as C4MapCreatorS2::ReadFile does.
-pub(crate) fn extend_s2_map_with_state_and_functions(
-    creator: MapCreatorS2State,
+/// Unified `CreateMapS2` entry point for scenario-section activation. With a
+/// retained creator, `ReadFile` mutates that creator and keeps its evaluated
+/// defaults/callback arrays. Without one, construction evaluates the active
+/// section's MapWdt/MapHgt before parsing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_s2_map_for_section_with_state_and_functions(
+    retained: Option<MapCreatorS2State>,
     source: &str,
     classifier: &mut MapPixelClassifier,
+    map_width: LegacyC4SVal,
+    map_height: LegacyC4SVal,
+    map_player_extend: bool,
+    player_count: i32,
     rng: &mut LcgRng,
     script_functions: &HashSet<String>,
 ) -> S2MapCreation {
+    let Some(retained) = retained else {
+        return create_s2_map_with_state_and_functions(
+            source,
+            classifier,
+            map_width,
+            map_height,
+            map_player_extend,
+            player_count,
+            rng,
+            script_functions,
+        );
+    };
     let MapCreatorS2State {
         tree,
         default_map,
         callbacks,
-    } = creator;
+    } = retained;
     parse_and_render_s2_map_with_callbacks(
         tree,
         source,
@@ -1731,7 +1831,55 @@ pub(crate) fn extend_s2_map_with_state_and_functions(
         rng,
         false,
         script_functions,
-        callbacks,
+        Some(callbacks),
+    )
+}
+
+/// Compatibility name for the retained-creator branch of
+/// [`create_s2_map_for_section_with_state_and_functions`].
+pub(crate) fn extend_s2_map_with_state_and_functions(
+    creator: MapCreatorS2State,
+    source: &str,
+    classifier: &mut MapPixelClassifier,
+    rng: &mut LcgRng,
+    script_functions: &HashSet<String>,
+) -> S2MapCreation {
+    create_s2_map_for_section_with_state_and_functions(
+        Some(creator),
+        source,
+        classifier,
+        LegacyC4SVal::default(),
+        LegacyC4SVal::default(),
+        false,
+        1,
+        rng,
+        script_functions,
+    )
+}
+
+/// Section-overload form of `C4Landscape::CreateMapS2`. Native C++ calls
+/// `ReadFile` on the existing `pMapCreator`, rather than constructing a new
+/// creator, so the appended source can resolve named templates from earlier
+/// sections. The creator's construction-time `DefaultMap` and callback masks
+/// also remain live. In particular this performs no new MapWdt/MapHgt RNG
+/// evaluations.
+pub(crate) fn create_s2_map_from_retained_state_and_functions(
+    retained: &MapCreatorS2State,
+    source: &str,
+    classifier: &mut MapPixelClassifier,
+    rng: &mut LcgRng,
+    script_functions: &HashSet<String>,
+) -> S2MapCreation {
+    create_s2_map_for_section_with_state_and_functions(
+        Some(retained.clone()),
+        source,
+        classifier,
+        LegacyC4SVal::default(),
+        LegacyC4SVal::default(),
+        false,
+        1,
+        rng,
+        script_functions,
     )
 }
 
@@ -1789,6 +1937,10 @@ fn default_map_for_size(wdt: i32, hgt: i32) -> Overlay {
     default_map
 }
 
+fn default_retained_map() -> Overlay {
+    default_map_for_size(SIZE_RES, SIZE_RES)
+}
+
 fn parse_and_render_s2_map(
     tree: Tree,
     source: &str,
@@ -1806,7 +1958,7 @@ fn parse_and_render_s2_map(
         rng,
         runtime_source,
         script_functions,
-        PostInitMapCallbacks::default(),
+        None,
     )
 }
 
@@ -1819,13 +1971,13 @@ fn parse_and_render_s2_map_with_callbacks(
     rng: &mut LcgRng,
     runtime_source: bool,
     script_functions: &HashSet<String>,
-    mut callbacks: PostInitMapCallbacks,
+    retained_callbacks: Option<PostInitMapCallbacks>,
 ) -> S2MapCreation {
-    let retained_default_map = default_map.clone();
+    let retained_callback_count = tree.callbacks.len();
     let mut parser = Parser {
         tokens: Tokenizer::new(source),
         tree,
-        default_map,
+        default_map: default_map.clone(),
         classifier,
         rng,
         script_functions,
@@ -1840,24 +1992,19 @@ fn parse_and_render_s2_map_with_callbacks(
         }
     }
     let tree = parser.tree;
-    callbacks.arrays.extend(
-        tree.callbacks
-            .iter()
-            .skip(callbacks.arrays.len())
-            .map(CallbackArray::new),
-    );
-    let bitmap = last_map(&tree).and_then(|map| {
-        if callbacks.arrays.is_empty() {
-            render_map(&tree, map)
-        } else {
-            render_map_recording_callbacks(&tree, map, &mut callbacks)
-        }
-    });
+
+    let (bitmap, rendered_callbacks) = render_last_map(&tree);
+    let mut callbacks = retained_callbacks.unwrap_or_default();
+    if callbacks.arrays.is_empty() && retained_callback_count == 0 {
+        callbacks = rendered_callbacks;
+    } else {
+        callbacks.merge_live_render_from(&rendered_callbacks, retained_callback_count);
+    }
     S2MapCreation {
         bitmap,
         creator: MapCreatorS2State {
             tree,
-            default_map: retained_default_map,
+            default_map,
             callbacks: callbacks.clone(),
         },
         callbacks,
@@ -1872,6 +2019,21 @@ fn last_map(tree: &Tree) -> Option<NodeId> {
         .rev()
         .find(|&&child| tree.overlay(child).is_some_and(|overlay| overlay.is_map))
         .copied()
+}
+
+fn render_last_map(
+    tree: &Tree,
+) -> (
+    Option<lc_resources::bitmap::IndexedBitmap>,
+    PostInitMapCallbacks,
+) {
+    let Some(map) = last_map(tree) else {
+        return (None, PostInitMapCallbacks::default());
+    };
+    render_map_with_callbacks(tree, map).map_or_else(
+        || (None, PostInitMapCallbacks::default()),
+        |(bitmap, callbacks)| (Some(bitmap), callbacks),
+    )
 }
 
 fn render_map(tree: &Tree, map: NodeId) -> Option<lc_resources::bitmap::IndexedBitmap> {
@@ -1894,6 +2056,25 @@ fn render_map(tree: &Tree, map: NodeId) -> Option<lc_resources::bitmap::IndexedB
         height: hgt as u32,
         indices: bytes,
     })
+}
+
+fn render_map_with_callbacks(
+    tree: &Tree,
+    map: NodeId,
+) -> Option<(
+    lc_resources::bitmap::IndexedBitmap,
+    PostInitMapCallbacks,
+)> {
+    if tree.callbacks.is_empty() {
+        return render_map(tree, map)
+            .map(|bitmap| (bitmap, PostInitMapCallbacks::default()));
+    }
+    let mut callbacks = PostInitMapCallbacks {
+        arrays: tree.callbacks.iter().map(CallbackArray::new).collect(),
+        map_zoom: 0,
+    };
+    let bitmap = render_map_recording_callbacks(tree, map, &mut callbacks)?;
+    Some((bitmap, callbacks))
 }
 
 fn render_map_recording_callbacks(
@@ -2417,6 +2598,74 @@ mod tests {
         let restored: MapCreatorS2State =
             serde_json::from_str(&encoded).expect("creator restores");
         assert_eq!(restored, creation.creator);
+    }
+
+    #[test]
+    fn section_reparse_resolves_retained_templates_and_keeps_creator_defaults() {
+        // CreateMapS2 reuses pMapCreator across a section overload. The new
+        // file can instantiate a named overlay from the old tree, uses the
+        // creator's already-evaluated DefaultMap, and ORs callback pixels
+        // into the old callback array (C4Landscape.cpp:531-546).
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(23);
+        let functions = HashSet::from(["Paint".to_string()]);
+        let retained = create_s2_map_with_state_and_functions(
+            "overlay Named { mat=Earth; tex=Rough; wdt=50; seed=7; drawFn=Paint; }; \
+             map First { seed=9; Named; };",
+            &mut classifier,
+            LegacyC4SVal::new(8, 0, 8, 8),
+            LegacyC4SVal::new(1, 0, 1, 1),
+            false,
+            1,
+            &mut rng,
+            &functions,
+        );
+        assert_eq!(
+            retained.callbacks.arrays[0]
+                .bits
+                .iter()
+                .map(|byte| byte.count_ones())
+                .sum::<u32>(),
+            4
+        );
+        let before = rng.count;
+
+        let appended = create_s2_map_from_retained_state_and_functions(
+            &retained.creator,
+            "map Second { seed=11; Named { x=50; }; };",
+            &mut classifier,
+            &mut rng,
+            &functions,
+        );
+        let map = appended.bitmap.as_ref().expect("appended map renders");
+        assert_eq!((map.width, map.height), (8, 1));
+        assert_eq!(&map.indices[..4], &[0; 4]);
+        assert_eq!(&map.indices[4..], &[2 | 0x80; 4]);
+        assert_eq!(appended.callbacks.arrays.len(), 1);
+        assert_eq!(
+            appended.callbacks.arrays[0]
+                .bits
+                .iter()
+                .map(|byte| byte.count_ones())
+                .sum::<u32>(),
+            8,
+            "the retained callback array accumulates both section renders"
+        );
+        assert_eq!(
+            rng.count, before,
+            "reusing a creator does not reevaluate DefaultMap or fixed seeds"
+        );
+
+        // Render(nullptr) always chooses the last map in the combined tree;
+        // a template-only section therefore renders the preceding map.
+        let template_only = create_s2_map_from_retained_state_and_functions(
+            &appended.creator,
+            "overlay Later { seed=13; };",
+            &mut classifier,
+            &mut rng,
+            &functions,
+        );
+        assert_eq!(template_only.bitmap, appended.bitmap);
     }
 
     #[test]

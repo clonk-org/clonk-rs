@@ -6,6 +6,16 @@
 
 use thiserror::Error;
 
+const BMP_FILE_HEADER_SIZE: usize = 14;
+const BMP_INFO_HEADER_SIZE: usize = 40;
+const BMP_PALETTE_ENTRY_COUNT: usize = 256;
+const BMP_PALETTE_ENTRY_SIZE: usize = 4;
+const BMP_DATA_OFFSET: usize =
+    BMP_FILE_HEADER_SIZE + BMP_INFO_HEADER_SIZE + BMP_PALETTE_ENTRY_COUNT * BMP_PALETTE_ENTRY_SIZE;
+
+/// The RGB colors for all 256 entries in an 8-bit indexed BMP palette.
+pub type RgbPalette = [[u8; 3]; BMP_PALETTE_ENTRY_COUNT];
+
 #[derive(Debug, Error)]
 pub enum BitmapError {
     #[error("bitmap data truncated ({0})")]
@@ -98,22 +108,76 @@ impl IndexedBitmap {
         })
     }
 
+    /// Decode the index plane together with the source BMP palette. C++'s
+    /// `CSurface8` retains these colors even though gameplay addresses only
+    /// indices; later `Mat2Pal` overwrites mapped material slots and leaves
+    /// every other entry byte-identical.
+    pub fn decode_with_palette(bytes: &[u8]) -> Result<(Self, RgbPalette), BitmapError> {
+        let bitmap = Self::decode(bytes)?;
+        let dib_size = u32::from_le_bytes(
+            bytes
+                .get(14..18)
+                .ok_or(BitmapError::Truncated("DIB header"))?
+                .try_into()
+                .expect("four-byte DIB size slice"),
+        ) as usize;
+        let palette_start = BMP_FILE_HEADER_SIZE
+            .checked_add(dib_size)
+            .ok_or(BitmapError::Truncated("palette"))?;
+        let data_offset = u32::from_le_bytes(
+            bytes[10..14]
+                .try_into()
+                .expect("validated BMP header offset slice"),
+        ) as usize;
+        if palette_start > data_offset || data_offset > bytes.len() {
+            return Err(BitmapError::Truncated("palette"));
+        }
+        let mut palette = [[0_u8; 3]; BMP_PALETTE_ENTRY_COUNT];
+        for (slot, color) in palette.iter_mut().enumerate() {
+            let offset = palette_start + slot * BMP_PALETTE_ENTRY_SIZE;
+            let Some(entry) = bytes.get(offset..offset + BMP_PALETTE_ENTRY_SIZE) else {
+                break;
+            };
+            if offset + BMP_PALETTE_ENTRY_SIZE > data_offset {
+                break;
+            }
+            *color = [entry[2], entry[1], entry[0]];
+        }
+        Ok((bitmap, palette))
+    }
+
     /// Encode the exact palette-index plane as an uncompressed, bottom-up
     /// 8-bit BMP. DiffLandscape.bmp consumes only these indices; its palette
     /// entries are therefore left zeroed.
     pub fn encode(&self) -> Result<Vec<u8>, BitmapError> {
-        if self.width == 0
-            || self.height == 0
-            || self.width > i32::MAX as u32
-            || self.height > i32::MAX as u32
-        {
+        self.encode_with_palette(&[[0; 3]; BMP_PALETTE_ENTRY_COUNT])
+    }
+
+    /// Encode the indexed plane as the bottom-up, uncompressed 8-bit BMP
+    /// written by C++ `CSurface8::Save`. Palette colors are supplied as RGB
+    /// and stored in BMP's physical BGRA order; scanlines are padded to four
+    /// bytes. C++ records the unpadded `width * height` in `biSizeImage`, so
+    /// this intentionally does the same even when the file contains padding.
+    pub fn encode_with_palette(&self, palette: &RgbPalette) -> Result<Vec<u8>, BitmapError> {
+        let width = i32::try_from(self.width).map_err(|_| BitmapError::EncodeDimensions {
+            width: self.width,
+            height: self.height,
+        })?;
+        let height = i32::try_from(self.height).map_err(|_| BitmapError::EncodeDimensions {
+            width: self.width,
+            height: self.height,
+        })?;
+        if width <= 0 || height <= 0 {
             return Err(BitmapError::EncodeDimensions {
                 width: self.width,
                 height: self.height,
             });
         }
-        let expected = (self.width as usize)
-            .checked_mul(self.height as usize)
+
+        let width_usize = self.width as usize;
+        let height_usize = self.height as usize;
+        let expected = width_usize
+            .checked_mul(height_usize)
             .ok_or(BitmapError::EncodeTooLarge)?;
         if self.indices.len() != expected {
             return Err(BitmapError::IndexCount {
@@ -124,43 +188,49 @@ impl IndexedBitmap {
             });
         }
 
-        let row_width = self.width as usize;
-        let stride = row_width
+        let row_stride = width_usize
             .checked_add(3)
             .map(|width| width & !3)
             .ok_or(BitmapError::EncodeTooLarge)?;
-        let data_offset = 14usize + 40 + 256 * 4;
-        let pixel_bytes = stride
-            .checked_mul(self.height as usize)
+        let pixel_data_size = row_stride
+            .checked_mul(height_usize)
             .ok_or(BitmapError::EncodeTooLarge)?;
-        let file_size = data_offset
-            .checked_add(pixel_bytes)
-            .filter(|&size| u32::try_from(size).is_ok())
+        let file_size = BMP_DATA_OFFSET
+            .checked_add(pixel_data_size)
             .ok_or(BitmapError::EncodeTooLarge)?;
+        let file_size = u32::try_from(file_size).map_err(|_| BitmapError::EncodeTooLarge)?;
+        let unpadded_image_size =
+            u32::try_from(expected).map_err(|_| BitmapError::EncodeTooLarge)?;
 
-        let mut bytes = Vec::with_capacity(file_size);
+        let mut bytes = Vec::with_capacity(file_size as usize);
         bytes.extend_from_slice(b"BM");
-        bytes.extend_from_slice(&(file_size as u32).to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&(data_offset as u32).to_le_bytes());
-        bytes.extend_from_slice(&40u32.to_le_bytes());
-        bytes.extend_from_slice(&(self.width as i32).to_le_bytes());
-        bytes.extend_from_slice(&(self.height as i32).to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&8u16.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&(pixel_bytes as u32).to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&256u32.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.resize(data_offset, 0);
+        bytes.extend_from_slice(&file_size.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&(BMP_DATA_OFFSET as u32).to_le_bytes());
 
-        for row in (0..self.height as usize).rev() {
-            let start = row * row_width;
-            bytes.extend_from_slice(&self.indices[start..start + row_width]);
-            bytes.resize(bytes.len() + stride - row_width, 0);
+        bytes.extend_from_slice(&(BMP_INFO_HEADER_SIZE as u32).to_le_bytes());
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&8_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&unpadded_image_size.to_le_bytes());
+        bytes.extend_from_slice(&0_i32.to_le_bytes());
+        bytes.extend_from_slice(&0_i32.to_le_bytes());
+        bytes.extend_from_slice(&(BMP_PALETTE_ENTRY_COUNT as u32).to_le_bytes());
+        bytes.extend_from_slice(&(BMP_PALETTE_ENTRY_COUNT as u32).to_le_bytes());
+
+        for &[red, green, blue] in palette {
+            bytes.extend_from_slice(&[blue, green, red, 0]);
         }
+
+        let padding = row_stride - width_usize;
+        for row in (0..height_usize).rev() {
+            let start = row * width_usize;
+            bytes.extend_from_slice(&self.indices[start..start + width_usize]);
+            bytes.resize(bytes.len() + padding, 0);
+        }
+        debug_assert_eq!(bytes.len(), file_size as usize);
         Ok(bytes)
     }
 
@@ -173,6 +243,18 @@ impl IndexedBitmap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn u16_at(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
+    }
+
+    fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn i32_at(bytes: &[u8], offset: usize) -> i32 {
+        i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
 
     /// A minimal uncompressed 8-bit BMP with the given top-down rows.
     fn encode_bmp(rows: &[&[u8]], bottom_up: bool) -> Vec<u8> {
@@ -256,6 +338,105 @@ mod tests {
         assert!(matches!(
             IndexedBitmap::decode(&bytes),
             Err(BitmapError::BitDepth(24))
+        ));
+    }
+
+    #[test]
+    fn encodes_cpp_surface8_layout_palette_and_bottom_up_rows() {
+        let bitmap = IndexedBitmap {
+            width: 3,
+            height: 2,
+            indices: vec![1, 2, 3, 4, 5, 6],
+        };
+        let mut palette = [[0; 3]; 256];
+        palette[0] = [192, 196, 252];
+        palette[1] = [10, 20, 30];
+        palette[255] = [40, 50, 60];
+
+        let bytes = bitmap
+            .encode_with_palette(&palette)
+            .expect("bitmap encodes");
+        assert_eq!(&bytes[0..2], b"BM");
+        assert_eq!(u32_at(&bytes, 2), 1_086);
+        assert_eq!(&bytes[6..10], &[0; 4]);
+        assert_eq!(u32_at(&bytes, 10), 1_078);
+        assert_eq!(u32_at(&bytes, 14), 40);
+        assert_eq!(i32_at(&bytes, 18), 3);
+        assert_eq!(i32_at(&bytes, 22), 2, "positive height is bottom-up");
+        assert_eq!(u16_at(&bytes, 26), 1);
+        assert_eq!(u16_at(&bytes, 28), 8);
+        assert_eq!(u32_at(&bytes, 30), 0);
+        assert_eq!(u32_at(&bytes, 34), 6, "C++ stores the unpadded size");
+        assert_eq!((u32_at(&bytes, 38), u32_at(&bytes, 42)), (0, 0));
+        assert_eq!((u32_at(&bytes, 46), u32_at(&bytes, 50)), (256, 256));
+
+        assert_eq!(&bytes[54..58], &[252, 196, 192, 0]);
+        assert_eq!(&bytes[58..62], &[30, 20, 10, 0]);
+        assert_eq!(&bytes[1_074..1_078], &[60, 50, 40, 0]);
+        assert_eq!(
+            &bytes[1_078..],
+            &[4, 5, 6, 0, 1, 2, 3, 0],
+            "rows are bottom-up with zero padding"
+        );
+        let (decoded, decoded_palette) =
+            IndexedBitmap::decode_with_palette(&bytes).expect("palette decodes");
+        assert_eq!(decoded, bitmap);
+        assert_eq!(decoded_palette, palette);
+    }
+
+    #[test]
+    fn encoded_bitmap_round_trips_indices_with_row_padding() {
+        let bitmap = IndexedBitmap {
+            width: 5,
+            height: 3,
+            indices: (0..15).collect(),
+        };
+        let encoded = bitmap.encode().expect("bitmap encodes");
+        let decoded = IndexedBitmap::decode(&encoded).expect("encoded bitmap decodes");
+        assert_eq!(decoded, bitmap);
+    }
+
+    #[test]
+    fn encode_rejects_mismatched_index_plane() {
+        let bitmap = IndexedBitmap {
+            width: 2,
+            height: 2,
+            indices: vec![1, 2, 3],
+        };
+        assert!(matches!(
+            bitmap.encode(),
+            Err(BitmapError::IndexCount {
+                width: 2,
+                height: 2,
+                expected: 4,
+                found: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn encode_rejects_zero_and_out_of_range_dimensions() {
+        let zero = IndexedBitmap {
+            width: 0,
+            height: 1,
+            indices: Vec::new(),
+        };
+        assert!(matches!(
+            zero.encode(),
+            Err(BitmapError::EncodeDimensions {
+                width: 0,
+                height: 1
+            })
+        ));
+
+        let out_of_range = IndexedBitmap {
+            width: i32::MAX as u32 + 1,
+            height: 1,
+            indices: Vec::new(),
+        };
+        assert!(matches!(
+            out_of_range.encode(),
+            Err(BitmapError::EncodeDimensions { .. })
         ));
     }
 }

@@ -105,9 +105,9 @@ pub use control_execution::{
 pub use effect::{EffectState, EffectVarValue};
 pub use input::PlayerInputState;
 pub use landscape::{
-    BlastResult, CollisionResolution, Landscape, LandscapeCommand, LandscapeError, LiquidColumn,
-    LiquidSegment, LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC,
-    LANDSCAPE_MODE_UNDEFINED,
+    BlastResult, CollisionResolution, Landscape, LandscapeCommand, LandscapeError,
+    LandscapePersistenceError, LiquidColumn, LiquidSegment, LANDSCAPE_MODE_DYNAMIC,
+    LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC, LANDSCAPE_MODE_UNDEFINED,
 };
 pub use material::{Material, MaterialId, MaterialSet};
 pub use message::{
@@ -116,9 +116,11 @@ pub use message::{
     FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL,
 };
 pub use network_game_data::{
-    serialize_initial_network_game, InitialNetworkGameData, InitialNetworkGameError,
-    InitialNetworkMessageBoardCommand, MessageBoardCommandRestriction,
+    parse_landscape_game_data, serialize_initial_network_game, InitialNetworkGameData,
+    InitialNetworkGameError, InitialNetworkMessageBoardCommand, LandscapeGameData,
+    MessageBoardCommandRestriction,
     UnsupportedInitialNetworkGameState, INITIAL_NETWORK_DEFAULT_SYNC_RATE,
+    LANDSCAPE_DEFAULT_GRAVITY_RAW,
 };
 pub use pathfinder::{PathFinder, PathWaypoint};
 pub use player::{
@@ -2570,12 +2572,16 @@ impl ShapeVertexBuffer {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicsSettings {
     pub gravity: i32,
+    /// Exact `C4Landscape::Gravity` bits restored from a C++ `Game.txt`.
+    /// Ordinary scenario/script gravity uses the public integer projection;
+    /// this override exists because the runtime compiler accepts every 16.16
+    /// value, including values that cannot round-trip through `GetGravity`.
+    gravity_raw: Option<i32>,
     pub max_fall_speed: i32,
     pub max_rise_speed: i32,
-    #[serde(default = "PhysicsSettings::default_max_horizontal_speed")]
     pub max_horizontal_speed: i32,
 }
 
@@ -2585,6 +2591,7 @@ impl PhysicsSettings {
     pub const fn new(gravity: i32, max_fall_speed: i32, max_rise_speed: i32) -> Self {
         Self {
             gravity,
+            gravity_raw: None,
             max_fall_speed,
             max_rise_speed,
             max_horizontal_speed: Self::DEFAULT_MAX_HORIZONTAL_SPEED,
@@ -2620,7 +2627,38 @@ impl PhysicsSettings {
     }
 
     pub fn gravity_as_c4fixed(&self) -> C4Fixed {
-        fixed100(self.gravity) / 5
+        self.canonical_gravity_raw()
+            .map(C4Fixed::from_raw)
+            .unwrap_or_else(|| fixed100(self.gravity) / 5)
+    }
+
+    /// Raw signed 16.16 value used by C4's runtime landscape compiler.
+    pub fn gravity_raw(&self) -> i32 {
+        self.gravity_as_c4fixed().val()
+    }
+
+    pub(crate) fn set_script_gravity(&mut self, gravity: i32) {
+        self.gravity = gravity.clamp(-300, 300);
+        self.gravity_raw = None;
+    }
+
+    pub(crate) fn set_raw_gravity(&mut self, gravity_raw: i32) {
+        self.gravity_raw = Some(gravity_raw);
+        self.gravity = fixtoi(C4Fixed::from_raw(gravity_raw) * 500);
+    }
+
+    fn reconcile_raw_gravity(&mut self) {
+        if self.gravity_raw != self.canonical_gravity_raw() {
+            // The public script-facing field was edited through the existing
+            // PhysicsSettings API. Treat that as a new SetGravity-style value
+            // instead of letting a hidden savegame override win.
+            self.gravity_raw = None;
+        }
+    }
+
+    fn canonical_gravity_raw(&self) -> Option<i32> {
+        self.gravity_raw
+            .filter(|raw| fixtoi(C4Fixed::from_raw(*raw) * 500) == self.gravity)
     }
 
     fn clamp_fixed_velocity(&self, velocity: &mut FixedVec2) {
@@ -2637,10 +2675,66 @@ impl Default for PhysicsSettings {
     fn default() -> Self {
         Self {
             gravity: 1,
+            gravity_raw: None,
             max_fall_speed: 12,
             max_rise_speed: -20,
             max_horizontal_speed: Self::DEFAULT_MAX_HORIZONTAL_SPEED,
         }
+    }
+}
+
+impl Serialize for PhysicsSettings {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct Fields {
+            gravity: i32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            gravity_raw: Option<i32>,
+            max_fall_speed: i32,
+            max_rise_speed: i32,
+            max_horizontal_speed: i32,
+        }
+
+        Fields {
+            gravity: self.gravity,
+            gravity_raw: self.canonical_gravity_raw(),
+            max_fall_speed: self.max_fall_speed,
+            max_rise_speed: self.max_rise_speed,
+            max_horizontal_speed: self.max_horizontal_speed,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PhysicsSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Fields {
+            gravity: i32,
+            #[serde(default)]
+            gravity_raw: Option<i32>,
+            max_fall_speed: i32,
+            max_rise_speed: i32,
+            #[serde(default = "PhysicsSettings::default_max_horizontal_speed")]
+            max_horizontal_speed: i32,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        let mut physics = Self {
+            gravity: fields.gravity,
+            gravity_raw: fields.gravity_raw,
+            max_fall_speed: fields.max_fall_speed,
+            max_rise_speed: fields.max_rise_speed,
+            max_horizontal_speed: fields.max_horizontal_speed,
+        };
+        physics.reconcile_raw_gravity();
+        Ok(physics)
     }
 }
 
@@ -7719,6 +7813,8 @@ pub enum EngineError {
     ClassicMenuParityBoundary { detail: String },
     #[error("object id `{0}` is already in use")]
     DuplicateObjectId(ObjectId),
+    #[error("invalid scenario-section landscape: {0}")]
+    InvalidScenarioSectionLandscape(String),
 }
 
 #[derive(Debug, Error)]
@@ -14845,6 +14941,12 @@ struct RuntimeScenarioSection {
     name: String,
     landscape: Option<Landscape>,
     landscape_systems: scenario::ScenarioLandscapeSystems,
+    exact_landscape: bool,
+    texmap_lookups: Vec<landscape::RuntimeTexMapLookup>,
+    resynthesize_static_map: bool,
+    map_creator: Option<map_creator_s2::MapCreatorS2State>,
+    s2_overload: Option<scenario::ScenarioSectionS2Spec>,
+    gravity: scenario::LegacyC4SVal,
     post_init_map_callbacks: map_creator_s2::PostInitMapCallbacks,
     keep_map_creator: bool,
     no_initialize: bool,
@@ -17778,6 +17880,12 @@ impl Engine {
                         name: section.name.clone(),
                         landscape: section.landscape.clone(),
                         landscape_systems: section.landscape_systems.clone(),
+                        exact_landscape: section.exact_landscape,
+                        texmap_lookups: section.texmap_lookups.clone(),
+                        resynthesize_static_map: section.resynthesize_static_map,
+                        map_creator: section.map_creator.clone(),
+                        s2_overload: section.s2_overload.clone(),
+                        gravity: section.gravity,
                         post_init_map_callbacks: section.post_init_map_callbacks.clone(),
                         keep_map_creator: section.keep_map_creator,
                         no_initialize: section.no_initialize,
@@ -20749,7 +20857,8 @@ impl Engine {
         }
     }
 
-    pub fn set_physics(&mut self, physics: PhysicsSettings) {
+    pub fn set_physics(&mut self, mut physics: PhysicsSettings) {
+        physics.reconcile_raw_gravity();
         self.physics = physics;
         for object in &mut self.objects {
             object.clamp_velocity(&self.physics);
@@ -30848,7 +30957,9 @@ impl Engine {
         self.debug_mode = false;
         self.edit_cursor_target = None;
         self.time_go = false;
-        self.physics = state.physics;
+        let mut physics = state.physics;
+        physics.reconcile_raw_gravity();
+        self.physics = physics;
         self.environment = state.environment;
         self.environment.refresh_runtime_fields();
         self.gamma = state.gamma;
@@ -32768,7 +32879,22 @@ impl Engine {
                 .get_mut(&self.current_scenario_section.to_ascii_lowercase())
             {
                 if flags & 1 != 0 {
-                    current.landscape = state.landscape.clone();
+                    let mut saved_landscape = state.landscape.clone();
+                    if let Some(landscape) = saved_landscape
+                        .as_mut()
+                        .filter(|landscape| landscape.pixel_grid().is_some())
+                    {
+                        landscape
+                            .save_initial()
+                            .expect("a present section pixel grid can seed pInitial");
+                        landscape.clear_retained_map();
+                    }
+                    current.landscape = saved_landscape;
+                    current.exact_landscape = true;
+                    current.texmap_lookups.clear();
+                    current.resynthesize_static_map = false;
+                    current.s2_overload = None;
+                    current.map_creator = None;
                     // A saved section landscape reloads as ExactLandscape;
                     // C++ has no S2 creator or callback masks to replay.
                     current.post_init_map_callbacks =
@@ -32801,10 +32927,8 @@ impl Engine {
             .get(&key)
             .cloned()
             .expect("section presence checked above");
-        let run_post_init_map = !target.no_initialize && target.landscape.is_some();
-        let target_landscape_loaded = target.landscape.is_some();
         let target_landscape_systems = target.landscape_systems.clone();
-        let post_init_map_callbacks = target.post_init_map_callbacks.clone();
+        let mut post_init_map_callbacks = map_creator_s2::PostInitMapCallbacks::default();
         let keep_map_creator = target.keep_map_creator;
         let retained = state
             .objects
@@ -32819,15 +32943,264 @@ impl Engine {
             .filter(|id| preserved.contains(id))
             .collect::<Vec<_>>();
 
+        // C4Landscape::Init repairs an unset persistent MapSeed before its
+        // first FixRandom. The draw is deliberately made on the pre-reset
+        // game ledger; FixRandom immediately discards its resulting state.
+        if state
+            .landscape
+            .as_ref()
+            .is_some_and(|landscape| landscape.map_seed() == 0)
+        {
+            let map_seed = self.rng.random(3_133_700);
+            if let Some(landscape) = state.landscape.as_mut() {
+                landscape.set_map_seed(map_seed);
+            }
+        }
+
         // C4Landscape::Init brackets section landscape creation with two
         // unconditional FixRandom calls. RuntimeScenarioSection landscapes
         // are built eagerly with the persistent initial MapSeed, so the
         // prepared-landscape swap below is the corresponding creation span
         // (C4Landscape.cpp:564,579,735; C4Game.cpp:2642-2657).
+        let persistent_landscape = state.landscape.as_ref().map(|landscape| {
+            (
+                landscape.map_seed(),
+                landscape.modulation(),
+                landscape.mode(),
+                landscape
+                    .raster_state()
+                    .map(landscape::LandscapeRasterState::map_zoom),
+                landscape
+                    .raster_state()
+                    .map(|state| state.texmap().clone()),
+                landscape
+                    .raster_state()
+                    .and_then(landscape::LandscapeRasterState::map_creator)
+                    .cloned(),
+            )
+        });
         self.fix_random();
         state.rng = self.rng.clone();
-        if let Some(landscape) = target.landscape.clone() {
-            state.landscape = Some(landscape);
+        let mut landscape_loaded = target.landscape.is_some();
+        let mut runtime_s2_handled = false;
+        if let Some(spec) = target.s2_overload.as_ref() {
+            let live_texmap = persistent_landscape
+                .as_ref()
+                .and_then(|(_, _, _, _, texmap, _)| texmap.clone())
+                .or_else(|| {
+                    target
+                        .landscape
+                        .as_ref()
+                        .and_then(Landscape::raster_state)
+                        .map(|state| state.texmap().clone())
+                });
+            if let Some(live_texmap) = live_texmap {
+                runtime_s2_handled = true;
+                let map_seed = persistent_landscape
+                    .as_ref()
+                    .map(|(seed, _, _, _, _, _)| *seed)
+                    .or_else(|| target.landscape.as_ref().map(Landscape::map_seed))
+                    .unwrap_or_default();
+                let modulation = persistent_landscape
+                    .as_ref()
+                    .map(|(_, modulation, _, _, _, _)| *modulation)
+                    .or_else(|| target.landscape.as_ref().map(Landscape::modulation))
+                    .unwrap_or(0xffff_ffff);
+                let previous_mode = persistent_landscape
+                    .as_ref()
+                    .map(|(_, _, mode, _, _, _)| *mode)
+                    .unwrap_or(LANDSCAPE_MODE_UNDEFINED);
+                let live_creator = persistent_landscape
+                    .as_ref()
+                    .and_then(|(_, _, _, _, _, creator)| creator.clone());
+                let mut classifier = scenario::MapPixelClassifier::from_runtime_state(live_texmap);
+                let creation =
+                    map_creator_s2::create_s2_map_for_section_with_state_and_functions(
+                        live_creator,
+                        &spec.source,
+                        &mut classifier,
+                        spec.map_width,
+                        spec.map_height,
+                        spec.map_player_extend,
+                        spec.player_count,
+                        &mut state.rng,
+                        &spec.script_functions,
+                    );
+                let runtime_texmap = classifier.into_runtime_state();
+                if let Some(bitmap) = creation.bitmap.as_ref() {
+                    let map_zoom = spec.map_zoom.evaluate(&mut state.rng) as u32 as i32;
+                    let mut landscape = scenario::classified_landscape(
+                        bitmap,
+                        &scenario::MapPixelClassifier::from_runtime_state(runtime_texmap),
+                        map_zoom,
+                        map_seed,
+                    )
+                    .map_err(|error| {
+                        EngineError::InvalidScenarioSectionLandscape(error.to_string())
+                    })?;
+                    landscape.save_initial().map_err(|error| {
+                        EngineError::InvalidScenarioSectionLandscape(error.to_string())
+                    })?;
+                    if let Some(diff) = spec.diff.as_ref() {
+                        landscape.apply_diff(diff).map_err(|error| {
+                            EngineError::InvalidScenarioSectionLandscape(error.to_string())
+                        })?;
+                    }
+                    landscape.set_shade_materials(spec.shade_materials);
+                    landscape.set_no_scan(spec.no_scan);
+                    landscape.set_border_open(
+                        spec.left_open,
+                        spec.right_open,
+                        spec.top_open,
+                        spec.bottom_open,
+                    );
+                    if spec.auto_scan_side_open {
+                        landscape.scan_side_open();
+                    }
+                    landscape.set_modulation(modulation);
+                    let mut creator = creation.creator;
+                    creator.set_callback_map_zoom(map_zoom);
+                    let retained_creator = if keep_map_creator {
+                        post_init_map_callbacks = creator.callback_state();
+                        Some(creator)
+                    } else {
+                        None
+                    };
+                    landscape
+                        .raster_state_mut()
+                        .expect("classified section landscapes carry raster state")
+                        .set_map_creator(retained_creator);
+                    let mode = if target.exact_landscape
+                        && previous_mode == LANDSCAPE_MODE_UNDEFINED
+                    {
+                        LANDSCAPE_MODE_EXACT
+                    } else {
+                        LANDSCAPE_MODE_UNDEFINED
+                    };
+                    landscape.set_runtime_mode(mode);
+                    state.landscape = Some(landscape);
+                    landscape_loaded = true;
+                } else {
+                    landscape_loaded = false;
+                    if let Some(landscape) = state.landscape.as_mut() {
+                        if !landscape.replace_runtime_texmap_state(runtime_texmap.clone()) {
+                            let mut raster = landscape::LandscapeRasterState::new(
+                                1,
+                                map_seed,
+                                runtime_texmap,
+                            );
+                            raster.set_map_creator(Some(creation.creator));
+                            landscape.set_raster_state(raster);
+                        } else if let Some(raster) = landscape.raster_state_mut() {
+                            raster.set_map_creator(Some(creation.creator));
+                        }
+                    }
+                }
+            }
+        }
+        if !runtime_s2_handled && landscape_loaded {
+            state.landscape = target.landscape.clone();
+            if let Some(landscape) = state.landscape.as_mut() {
+                if let Some((
+                    map_seed,
+                    modulation,
+                    previous_mode,
+                    persistent_map_zoom,
+                    texmap,
+                    live_creator,
+                )) = persistent_landscape.clone()
+                {
+                    landscape.set_map_seed(map_seed);
+                    landscape.set_modulation(modulation);
+                    if target.exact_landscape {
+                        if let Some(raster) = landscape.raster_state_mut() {
+                            raster.set_map_zoom(persistent_map_zoom.unwrap_or(0));
+                        }
+                    }
+                    if let Some(texmap) = texmap {
+                        if target.texmap_lookups.is_empty() {
+                            landscape.replace_runtime_texmap_state_and_repaint(texmap);
+                        } else {
+                            landscape.merge_runtime_texmap_for_section(
+                                texmap,
+                                &target.texmap_lookups,
+                            );
+                        }
+                    }
+                    if target.resynthesize_static_map {
+                        landscape.resynthesize_retained_map_for_section();
+                    }
+                    let prepared_creator = landscape
+                        .raster_state()
+                        .and_then(landscape::LandscapeRasterState::map_creator)
+                        .cloned()
+                        .or_else(|| target.map_creator.clone());
+                    let mut creator = if keep_map_creator {
+                        match (live_creator, prepared_creator) {
+                            (Some(mut live), Some(prepared)) => {
+                                live.append_from(&prepared);
+                                Some(live)
+                            }
+                            (Some(live), None) => Some(live),
+                            (None, Some(prepared)) => Some(prepared),
+                            (None, None) => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(creator) = creator.as_mut() {
+                        if let Some(map_zoom) = landscape
+                            .raster_state()
+                            .map(landscape::LandscapeRasterState::map_zoom)
+                        {
+                            creator.set_callback_map_zoom(map_zoom);
+                        }
+                        post_init_map_callbacks = creator.callback_state();
+                    }
+                    if let Some(state) = landscape.raster_state_mut() {
+                        state.set_map_creator(creator);
+                    }
+                    let mode = if target.exact_landscape
+                        && previous_mode == LANDSCAPE_MODE_UNDEFINED
+                    {
+                        LANDSCAPE_MODE_EXACT
+                    } else {
+                        LANDSCAPE_MODE_UNDEFINED
+                    };
+                    landscape.set_runtime_mode(mode);
+                }
+            }
+        } else if !runtime_s2_handled {
+            let mut prepared_creator = target.map_creator.clone();
+            if let Some(landscape) = state.landscape.as_mut() {
+                if !target.texmap_lookups.is_empty() {
+                    if let Some(remap) = landscape
+                        .replay_empty_section_texmap_lookups(&target.texmap_lookups)
+                    {
+                        if let Some(creator) = prepared_creator.as_mut() {
+                            creator.remap_material_colors(&remap);
+                        }
+                    }
+                }
+                let live_creator = persistent_landscape
+                    .as_ref()
+                    .and_then(|(_, _, _, _, _, creator)| creator.clone());
+                let creator = match (live_creator, prepared_creator) {
+                    (Some(mut live), Some(prepared)) => {
+                        live.append_from(&prepared);
+                        Some(live)
+                    }
+                    (Some(live), None) => Some(live),
+                    (None, Some(prepared)) => Some(prepared),
+                    (None, None) => None,
+                };
+                if let Some(state) = landscape.raster_state_mut() {
+                    state.set_map_creator(creator);
+                }
+            }
+        }
+        if let Some(landscape) = state.landscape.as_mut() {
+            landscape.set_map_changed();
         }
         state.scenario_values = Some(target.scenario_values.clone());
         state.base_reject_entrance_enabled = Some(target.base_reject_entrance_enabled);
@@ -32858,26 +33231,29 @@ impl Engine {
                 pxs.set_execute_count(departing_pxs.execute_count());
                 self.pxs_system = pxs;
             }
-            None if target_landscape_loaded => self.pxs_system.clear(),
+            None if landscape_loaded => self.pxs_system.clear(),
             None => self.pxs_system = departing_pxs,
         }
         match target_landscape_systems.mass_movers {
             Some(mass_movers) => self.mass_movers = mass_movers,
-            None if target_landscape_loaded => self.mass_movers.clear(),
+            None if landscape_loaded => self.mass_movers.clear(),
             None => self.mass_movers = departing_mass_movers,
         }
         // Objects.Load follows Landscape.Init's second FixRandom. Keep the
         // same boundary before fresh section objects run Construction or
         // Initialize callbacks.
-        self.fix_random();
+        if landscape_loaded {
+            self.fix_random();
+            let gravity = self.evaluate_scenario_gravity(target.gravity);
+            let mut physics = self.physics;
+            physics.set_script_gravity(gravity);
+            self.set_physics(physics);
+        }
         if load_initial_objects {
             self.spawn_scenario_section_objects(target.initial_objects)?;
         }
-        if run_post_init_map {
+        if !target.no_initialize && landscape_loaded && keep_map_creator {
             self.run_post_init_map_callbacks(&post_init_map_callbacks)?;
-            if !keep_map_creator {
-                self.clear_runtime_map_creator();
-            }
         }
         self.current_scenario_section = target.name;
         self.last_scenario_section_flags = Some(flags);
@@ -54616,6 +54992,7 @@ mod frozen_blast_crossmap_regression {
                 ("Target".to_string(), 40),
             ],
             material_crossmap_entries: vec![40],
+            ..Default::default()
         };
         let mut landscape = Landscape::new(5, vec![5; 5]).expect("landscape builds");
         landscape.set_world_height(5);
@@ -57726,33 +58103,54 @@ mod em_draw_tool_control_parity {
         const WIDTH: u32 = 32;
         const HEIGHT: u32 = 32;
         let library = lc_resources::MaterialLibrary::parse(
-            "[Material Earth]\nName=Earth\nDensity=80\nMaxSlide=0\nTextureOverlay=Rough\n",
+            "[Material Earth]\nName=Earth\nColor=1,2,3,40,50,60,10,20,30\nDensity=80\nMaxSlide=0\nTextureOverlay=Rough\n\n\
+             [Material Water]\nName=Water\nColor=4,5,6,70,80,90,100,110,120\nDensity=25\nTextureOverlay=Smooth\n",
         )
         .expect("material fixture parses");
         let materials = MaterialSet::from_resource_library(&library);
 
         let mut densities = vec![0; 128];
         densities[1] = 80;
+        densities[3] = 25;
         let mut material_names = vec![None; 128];
         material_names[1] = Some("Earth".to_string());
+        material_names[3] = Some("Water".to_string());
         let mut texture_names = vec![None; 128];
         texture_names[1] = Some("Rough".to_string());
+        texture_names[3] = Some("Liquid".to_string());
+        let mut match_texture_names = texture_names.clone();
+        match_texture_names[3] = Some("Smooth".to_string());
         let mut shapes = vec![None; 128];
         shapes[1] = Some(ChunkShape::from_shape(0));
+        shapes[3] = Some(ChunkShape::from_shape(0));
         let texmap = RuntimeTexMapState {
             densities: densities.clone(),
             material_names: material_names.clone(),
             texture_names: texture_names.clone(),
-            match_texture_names: texture_names.clone(),
+            match_texture_names,
             shapes,
-            materials: vec![RuntimeTexMapMaterial {
-                name: "Earth".to_string(),
-                density: 80,
-                shape: ChunkShape::from_shape(0),
-            }],
-            texture_inventory: vec!["Rough".to_string()],
-            default_material_entries: vec![("Earth".to_string(), 1)],
+            materials: vec![
+                RuntimeTexMapMaterial {
+                    name: "Earth".to_string(),
+                    density: 80,
+                    shape: ChunkShape::from_shape(0),
+                },
+                RuntimeTexMapMaterial {
+                    name: "Water".to_string(),
+                    density: 25,
+                    shape: ChunkShape::from_shape(0),
+                },
+            ],
+            texture_inventory: vec![
+                "Rough".to_string(),
+                "Smooth".to_string(),
+                "Liquid".to_string(),
+            ],
+            default_material_entries: vec![("Earth".to_string(), 1), ("Water".to_string(), 3)],
             material_crossmap_entries: Vec::new(),
+            overload_materials: true,
+            overload_textures: true,
+            ..Default::default()
         };
         let map = lc_resources::bitmap::IndexedBitmap {
             width: WIDTH,
@@ -57957,6 +58355,224 @@ mod em_draw_tool_control_parity {
             ..EmDrawToolControlData::default()
         }));
         assert_ne!(engine.debug_landscape_byte(3, 3), Some(0));
+    }
+
+    #[test]
+    fn static_draw_marks_and_saves_map_bmp_with_store_map_palette_colors() {
+        let mut exact_without_map = Engine::new();
+        let mut exact_landscape = Landscape::flat(2, 2);
+        exact_landscape.set_raster_state(LandscapeRasterState::new(
+            1,
+            0,
+            RuntimeTexMapState::default(),
+        ));
+        exact_landscape.set_map_changed();
+        exact_without_map.set_landscape(exact_landscape);
+        assert!(!exact_without_map
+            .save_changed_c4_landscape_map(&mut lc_resources::MutableGroup::new(
+                "Scenario.c4s",
+            ))
+            .expect("fMapChanged without a retained Map is a no-op"));
+
+        let mut engine = editor_engine(37);
+        let _ = engine.landscape.as_mut().unwrap().set_mode(LANDSCAPE_MODE_STATIC);
+        engine
+            .landscape
+            .as_mut()
+            .unwrap()
+            .save_initial()
+            .expect("initial Surface8 captures");
+        assert!(!engine.landscape().unwrap().map_changed());
+
+        let mut untouched = lc_resources::MutableGroup::new("Scenario.c4s");
+        assert!(!engine
+            .save_changed_c4_landscape_map(&mut untouched)
+            .expect("unchanged map save is a no-op"));
+        assert!(!untouched
+            .entry_names()
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("Map.bmp")));
+
+        let mut brush = control(EMDT_BRUSH);
+        brush.mode = LANDSCAPE_MODE_STATIC;
+        brush.x = 8;
+        brush.y = 8;
+        brush.grade = 0;
+        assert!(engine.execute_em_draw_tool_control(&brush));
+        assert!(engine.landscape().unwrap().map_changed());
+
+        let mut saved = lc_resources::MutableGroup::new("Scenario.c4s");
+        saved
+            .add_file("LANDSCAPE.BMP", b"stale full surface".to_vec())
+            .unwrap();
+        engine
+            .save_c4_static_landscape(&mut saved)
+            .expect("static scenario components save");
+        let mut gated = lc_resources::MutableGroup::new("Scenario.c4s");
+        assert!(engine
+            .save_changed_c4_landscape_map(&mut gated)
+            .expect("changed map saves"));
+        assert!(engine.landscape().unwrap().map_changed(), "save does not clear the gate");
+
+        let root = lc_resources::Group::from_memory(
+            std::path::PathBuf::from("Scenario.c4s"),
+            saved.pack_raw().expect("scenario packs"),
+        )
+        .expect("scenario reopens");
+        assert!(!root.exists("Landscape.bmp"));
+        let bytes = root.read_file("Map.bmp").expect("SaveMap uses Map.bmp");
+        let map = lc_resources::bitmap::IndexedBitmap::decode(&bytes).expect("map decodes");
+        assert_eq!(map.index_at(8, 8), Some(1));
+        assert_eq!(&bytes[54..58], &[252, 196, 192, 0], "sky palette is BGRA");
+        assert_eq!(&bytes[58..62], &[30, 20, 10, 0]);
+        let ift_offset = 54 + 129 * 4;
+        assert_eq!(&bytes[ift_offset..ift_offset + 4], &[60, 50, 40, 0]);
+        assert_eq!(&bytes[54 + 127 * 4..54 + 128 * 4], &[0, 0, 0, 0]);
+        assert_eq!(&bytes[54 + 255 * 4..54 + 256 * 4], &[0, 0, 0, 0]);
+
+        let mut diff_group = lc_resources::MutableGroup::new("Scenario.c4s");
+        assert!(engine
+            .save_c4_landscape_diff(&mut diff_group, false)
+            .expect("changed Surface8 diff saves"));
+        let diff_group = lc_resources::Group::from_memory(
+            std::path::PathBuf::from("Scenario.c4s"),
+            diff_group.pack_raw().unwrap(),
+        )
+        .unwrap();
+        assert!(diff_group.exists("Map.bmp"));
+        let diff = diff_group.read_file("DiffLandscape.bmp").unwrap();
+        assert_eq!(&diff[58..62], &[3, 2, 1, 0]);
+        assert_eq!(&diff[54 + 129 * 4..54 + 130 * 4], &[3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn runtime_texmap_save_gates_creates_and_mutates_material_child() {
+        let mut engine = editor_engine(41);
+        let mut untouched = lc_resources::MutableGroup::new("Scenario.c4s");
+        assert!(!engine
+            .save_c4_landscape_textures(&mut untouched)
+            .expect("clean texmap save is a no-op"));
+        assert!(!untouched
+            .entry_names()
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("Material.c4g")));
+        let mut clean_material = lc_resources::MutableGroup::new("Material.c4g");
+        clean_material
+            .add_file("TexMap.txt", b"leave stale bytes alone".to_vec())
+            .unwrap();
+        clean_material
+            .add_file("Sentinel.bin", b"untouched".to_vec())
+            .unwrap();
+        let mut clean_root = lc_resources::MutableGroup::new("Scenario.c4s");
+        clean_root.add_child("Material.c4g", clean_material).unwrap();
+        assert!(!engine
+            .save_c4_landscape_textures(&mut clean_root)
+            .expect("clean existing child is untouched"));
+        let clean_root = lc_resources::Group::from_memory(
+            std::path::PathBuf::from("Scenario.c4s"),
+            clean_root.pack_raw().unwrap(),
+        )
+        .unwrap();
+        let clean_material = clean_root.open_child("Material.c4g").unwrap();
+        assert_eq!(
+            clean_material.read_file("TexMap.txt").unwrap(),
+            b"leave stale bytes alone"
+        );
+        assert_eq!(clean_material.read_file("Sentinel.bin").unwrap(), b"untouched");
+
+        let slot = engine
+            .landscape
+            .as_mut()
+            .unwrap()
+            .raster_state_mut()
+            .unwrap()
+            .texmap_mut()
+            .get_index("Earth", Some("Smooth"), true);
+        assert_eq!(slot, 2);
+        assert!(engine.landscape().unwrap().texture_map_entries_added());
+
+        let expected = b"# Automatically generated texture map\r\n# Contains material-texture-combinations added at runtime\r\n# Import materials from global file as well\r\nOverloadMaterials\r\n# Import textures from global file as well\r\nOverloadTextures\r\n\r\n1=Earth-Rough\r\n2=Earth-Smooth\r\n3=Water-Smooth\r\n";
+
+        let mut fresh = lc_resources::MutableGroup::new("Scenario.c4s");
+        assert!(engine
+            .save_c4_landscape_textures(&mut fresh)
+            .expect("fresh Material child saves"));
+        let fresh = lc_resources::Group::from_memory(
+            std::path::PathBuf::from("Scenario.c4s"),
+            fresh.pack_raw().expect("fresh scenario packs"),
+        )
+        .expect("fresh scenario reopens");
+        assert_eq!(
+            fresh
+                .open_child("Material.c4g")
+                .expect("fresh material child opens")
+                .read_file("TexMap.txt")
+                .expect("fresh texmap reads"),
+            expected
+        );
+
+        let mut old_material = lc_resources::MutableGroup::new("Material.c4g");
+        old_material
+            .add_file("Earth.c4m", b"sentinel".to_vec())
+            .unwrap();
+        old_material
+            .add_file("texmap.TXT", b"stale".to_vec())
+            .unwrap();
+        let mut old_root = lc_resources::MutableGroup::new("Scenario.c4s");
+        old_root.add_child("Material.c4g", old_material).unwrap();
+        let source = lc_resources::Group::from_memory(
+            std::path::PathBuf::from("Scenario.c4s"),
+            old_root.pack_raw().expect("old scenario packs"),
+        )
+        .expect("old scenario opens");
+        let mut rewritten = lc_resources::MutableGroup::from_group(&source).unwrap();
+        assert!(engine
+            .save_c4_landscape_textures(&mut rewritten)
+            .expect("existing Material child mutates"));
+        let rewritten = lc_resources::Group::from_memory(
+            std::path::PathBuf::from("Scenario.c4s"),
+            rewritten.pack_raw().expect("rewritten scenario packs"),
+        )
+        .expect("rewritten scenario opens");
+        let material = rewritten
+            .open_child("Material.c4g")
+            .expect("rewritten material child opens");
+        assert_eq!(material.read_file("Earth.c4m").unwrap(), b"sentinel");
+        assert_eq!(material.read_file("TexMap.txt").unwrap(), expected);
+        assert!(engine.landscape().unwrap().texture_map_entries_added(), "save does not clear the gate");
+
+        let mut file_root = lc_resources::MutableGroup::new("Scenario.c4s");
+        file_root
+            .add_file("Material.c4g", b"ordinary file".to_vec())
+            .unwrap();
+        assert!(matches!(
+            engine.save_c4_landscape_textures(&mut file_root),
+            Err(LandscapePersistenceError::MaterialGroupIsFile)
+        ));
+
+        let mut moved = editor_engine(42);
+        let (succeeded, _) = moved
+            .landscape
+            .as_mut()
+            .unwrap()
+            .raster_state_mut()
+            .unwrap()
+            .texmap_mut()
+            .set_texture_index("Earth-Rough", 5, false);
+        assert!(succeeded);
+        assert!(moved.landscape().unwrap().texture_map_entries_added());
+
+        let mut removed = editor_engine(43);
+        let cleared = removed
+            .landscape
+            .as_mut()
+            .unwrap()
+            .raster_state_mut()
+            .unwrap()
+            .texmap_mut()
+            .remove_unused_entries([true; 128]);
+        assert!(cleared.is_empty());
+        assert!(removed.landscape().unwrap().texture_map_entries_added());
     }
 }
 
@@ -60205,6 +60821,10 @@ mod solid_mask_state_regression {
 #[cfg(test)]
 mod scenario_section_random_regression {
     use super::*;
+    use crate::landscape::{
+        LandscapeRasterState, RuntimeTexMapLookup, RuntimeTexMapMaterial,
+        RuntimeTexMapState,
+    };
 
     fn section(
         name: &str,
@@ -60215,6 +60835,12 @@ mod scenario_section_random_regression {
             name: name.to_string(),
             landscape: Some(Landscape::flat(width, 40)),
             landscape_systems: scenario::ScenarioLandscapeSystems::default(),
+            exact_landscape: false,
+            texmap_lookups: Vec::new(),
+            resynthesize_static_map: false,
+            map_creator: None,
+            s2_overload: None,
+            gravity: scenario::LegacyC4SVal::new(100, 0, 10, 200),
             post_init_map_callbacks: map_creator_s2::PostInitMapCallbacks::default(),
             keep_map_creator: false,
             no_initialize: false,
@@ -60246,6 +60872,12 @@ mod scenario_section_random_regression {
             name: name.to_string(),
             landscape: Some(landscape),
             landscape_systems: scenario::ScenarioLandscapeSystems::default(),
+            exact_landscape: false,
+            texmap_lookups: Vec::new(),
+            resynthesize_static_map: false,
+            map_creator: None,
+            s2_overload: None,
+            gravity: scenario::LegacyC4SVal::new(100, 0, 10, 200),
             post_init_map_callbacks: map_creator_s2::PostInitMapCallbacks::default(),
             keep_map_creator: false,
             no_initialize: false,
@@ -60292,13 +60924,232 @@ mod scenario_section_random_regression {
         );
 
         let mut expected = LcgRng::seed_from_u64(seed);
+        let _ = expected.random(1);
         expected.trace = engine.rng.trace;
-        assert_eq!(engine.rng.count, 500);
+        assert_eq!(engine.rng.count, 501);
         assert_eq!(engine.rng.rnd3_ptr(), 0);
         assert_eq!(
             engine.rng, expected,
-            "post-landscape FixRandom restores hold, count, FRndBuf3, and FRndPtr3"
+            "section ScenarioInit consumes gravity immediately after the second FixRandom"
         );
+    }
+
+    #[test]
+    fn section_load_preserves_runtime_landscape_state_and_matches_mode_quirk() {
+        let mut main = Landscape::flat(8, 4);
+        let mut live_texmap = RuntimeTexMapState::default();
+        live_texmap.densities[1] = 100;
+        live_texmap.material_names[1] = Some("Earth".to_owned());
+        live_texmap.texture_names[1] = Some("Rough".to_owned());
+        live_texmap.match_texture_names[1] = Some("Rough".to_owned());
+        live_texmap.shapes[1] = Some(crate::chunky::ChunkShape::Flat);
+        live_texmap.materials = vec![
+            RuntimeTexMapMaterial {
+                name: "Earth".to_owned(),
+                density: 100,
+                shape: crate::chunky::ChunkShape::Flat,
+            },
+            RuntimeTexMapMaterial {
+                name: "Water".to_owned(),
+                density: 25,
+                shape: crate::chunky::ChunkShape::Flat,
+            },
+        ];
+        live_texmap.texture_inventory = vec![
+            "Rough".to_owned(),
+            "Smooth".to_owned(),
+            "Liquid".to_owned(),
+        ];
+        live_texmap.entries_added = true;
+        main.set_raster_state(LandscapeRasterState::new(7, -7, live_texmap));
+        main.set_modulation(0xaabb_ccdd);
+        assert!(main.set_mode(LANDSCAPE_MODE_STATIC));
+        let mut next = Landscape::flat(9, 4);
+        let mut target_texmap = RuntimeTexMapState::default();
+        target_texmap.densities[1] = 25;
+        target_texmap.material_names[1] = Some("Water".to_owned());
+        target_texmap.texture_names[1] = Some("Smooth".to_owned());
+        target_texmap.match_texture_names[1] = Some("Smooth".to_owned());
+        target_texmap.shapes[1] = Some(crate::chunky::ChunkShape::Flat);
+        target_texmap.entries_added = true;
+        next.set_pixel_grid(landscape::PixelGrid::new(
+            9,
+            4,
+            [vec![1], vec![0; 35]].concat(),
+            target_texmap.densities.clone(),
+            target_texmap.material_names.clone(),
+            target_texmap.texture_names.clone(),
+        ));
+        next.set_raster_state(LandscapeRasterState::new(1, 999, target_texmap.clone()));
+        assert!(next.set_mode(LANDSCAPE_MODE_STATIC));
+        let mut exact = Landscape::flat(10, 4);
+        exact.set_raster_state(LandscapeRasterState::new(
+            1,
+            999,
+            RuntimeTexMapState::default(),
+        ));
+        assert!(exact.set_mode(LANDSCAPE_MODE_EXACT));
+        let mut exact_section = vehicle_section("exact", exact);
+        exact_section.exact_landscape = true;
+        let mut next_section = vehicle_section("next", next);
+        next_section.texmap_lookups = vec![RuntimeTexMapLookup {
+            material_texture: "Water-Smooth".to_owned(),
+            default_texture: None,
+            eager_index: 1,
+        }];
+        let mut raw_static = Landscape::flat(1, 1);
+        raw_static.set_pixel_grid(landscape::PixelGrid::new(
+            1,
+            1,
+            vec![1],
+            target_texmap.densities.clone(),
+            target_texmap.material_names.clone(),
+            target_texmap.texture_names.clone(),
+        ));
+        let mut raw_state = LandscapeRasterState::new(1, 999, target_texmap);
+        raw_state.set_map(&lc_resources::bitmap::IndexedBitmap {
+            width: 1,
+            height: 1,
+            indices: vec![1],
+        });
+        raw_static.set_raster_state(raw_state);
+        raw_static.save_initial().unwrap();
+        assert!(raw_static.set_mode(LANDSCAPE_MODE_STATIC));
+        let mut raw_section = vehicle_section("raw", raw_static);
+        raw_section.resynthesize_static_map = true;
+
+        let mut engine = Engine::with_seed(17);
+        engine.configure_scenario_sections(&[
+            vehicle_section("main", main.clone()),
+            next_section,
+            exact_section,
+            raw_section,
+        ]);
+        engine.set_landscape(main);
+        assert!(!engine.landscape().unwrap().map_changed());
+
+        assert!(engine
+            .load_scenario_section("exact", 0, Vec::new())
+            .expect("exact section loads"));
+        let landscape = engine.landscape().unwrap();
+        assert!(landscape.map_changed());
+        assert_eq!(landscape.map_seed(), -7);
+        assert_eq!(landscape.modulation(), 0xaabb_ccdd);
+        assert!(landscape.texture_map_entries_added());
+        assert_eq!(landscape.mode(), LANDSCAPE_MODE_UNDEFINED);
+        assert_eq!(
+            landscape.raster_state().unwrap().map_zoom(),
+            7,
+            "exact section overloads retain the live MapZoom"
+        );
+        assert_eq!(engine.physics().gravity, 100);
+
+        assert!(engine
+            .load_scenario_section("exact", 0, Vec::new())
+            .expect("current exact section reloads"));
+        assert_eq!(
+            engine.landscape().unwrap().mode(),
+            LANDSCAPE_MODE_EXACT,
+            "an undefined pre-load mode permits the post-Clear exact assignment"
+        );
+
+        assert!(engine
+            .load_scenario_section("next", 0, Vec::new())
+            .expect("next section loads"));
+        let landscape = engine.landscape().unwrap();
+        assert!(landscape.map_changed());
+        assert_eq!(landscape.map_seed(), -7);
+        assert_eq!(landscape.modulation(), 0xaabb_ccdd);
+        assert!(landscape.texture_map_entries_added());
+        assert_eq!(landscape.mode(), LANDSCAPE_MODE_UNDEFINED);
+        assert_eq!(landscape.grid_byte_at(0, 0), Some(2));
+        let texmap = landscape.raster_state().unwrap().texmap();
+        assert_eq!(texmap.material_names[1].as_deref(), Some("Earth"));
+        assert_eq!(texmap.material_names[2].as_deref(), Some("Water"));
+        assert_eq!(
+            InitialNetworkGameData::from_engine(&engine)
+                .expect("section runtime state captures")
+                .current_scenario_section,
+            "next"
+        );
+
+        assert!(engine
+            .load_scenario_section("raw", 0, Vec::new())
+            .expect("raw static section loads"));
+        let landscape = engine.landscape().unwrap();
+        assert_eq!(landscape.grid_byte_at(0, 0), Some(1));
+        assert_eq!(
+            landscape.raster_state().unwrap().texmap().material_names[1].as_deref(),
+            Some("Earth"),
+            "raw Map.bmp bytes are interpreted against the live global slot"
+        );
+    }
+
+    #[test]
+    fn saved_section_exact_reload_reseeds_the_diff_baseline() {
+        let mut main = vehicle_section_landscape(4, 4);
+        main.save_initial().expect("base Surface8 captures");
+        main.grid_write_byte(1, 1, 1);
+        let next = vehicle_section_landscape(4, 4);
+
+        let mut engine = Engine::with_seed(23);
+        engine.configure_scenario_sections(&[
+            vehicle_section("main", main.clone()),
+            vehicle_section("next", next),
+        ]);
+        engine.set_landscape(main);
+
+        assert!(engine
+            .load_scenario_section("next", 1, Vec::new())
+            .expect("main landscape saves while leaving"));
+        assert!(engine
+            .load_scenario_section("main", 0, Vec::new())
+            .expect("saved exact main reloads"));
+        assert_eq!(
+            engine
+                .landscape()
+                .unwrap()
+                .save_diff(false)
+                .expect("saved exact landscape has pInitial"),
+            None,
+            "the just-saved full surface is the new diff baseline"
+        );
+    }
+
+    #[test]
+    fn empty_section_overload_retains_landscape_and_skips_second_init() {
+        let mut main = Landscape::flat(8, 4);
+        main.set_raster_state(LandscapeRasterState::new(
+            1,
+            -7,
+            RuntimeTexMapState::default(),
+        ));
+        main.set_modulation(0x1122_3344);
+        assert!(main.set_mode(LANDSCAPE_MODE_STATIC));
+        let mut empty = vehicle_section("empty", Landscape::flat(1, 1));
+        empty.landscape = None;
+        empty.gravity = scenario::LegacyC4SVal::new(150, 0, 10, 200);
+
+        let mut engine = Engine::with_seed(29);
+        engine.configure_scenario_sections(&[
+            vehicle_section("main", main.clone()),
+            empty,
+        ]);
+        engine.set_landscape(main);
+        engine.set_physics(PhysicsSettings::new(77, 12, -20));
+        engine.rng.random(9);
+
+        assert!(engine
+            .load_scenario_section("empty", 0, Vec::new())
+            .expect("empty overload succeeds"));
+        let landscape = engine.landscape().unwrap();
+        assert_eq!(landscape.width(), 8);
+        assert_eq!(landscape.map_seed(), -7);
+        assert_eq!(landscape.modulation(), 0x1122_3344);
+        assert_eq!(landscape.mode(), LANDSCAPE_MODE_STATIC);
+        assert!(landscape.map_changed());
+        assert_eq!(engine.physics().gravity, 77);
+        assert_eq!(engine.rng.count, 500, "only the first FixRandom runs");
     }
 
     #[test]
