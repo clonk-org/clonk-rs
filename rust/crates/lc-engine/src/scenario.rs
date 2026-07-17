@@ -40,6 +40,8 @@ pub enum ScenarioError {
     ManifestMissing,
     #[error("legacy scenario core `Scenario.txt` not found")]
     LegacyCoreMissing,
+    #[error("invalid legacy scenario section name `{path}`; expected 1..=30 bytes")]
+    InvalidScenarioSectionName { path: PathBuf },
     #[error("failed to parse scenario manifest: {0}")]
     ManifestParse(#[from] serde_json::Error),
     #[error("scenario resource error: {0}")]
@@ -9788,16 +9790,24 @@ fn derive_legacy_environment(
     Ok(environment)
 }
 
-fn legacy_scenario_section_name(path: &Path) -> Option<String> {
+fn legacy_scenario_section_name(path: &Path) -> Result<Option<String>, ScenarioError> {
     if path.components().count() != 1 {
-        return None;
+        return Ok(None);
     }
-    let filename = path.file_name()?.to_str()?;
+    let Some(filename) = path.file_name().and_then(|filename| filename.to_str()) else {
+        return Ok(None);
+    };
     let lower = filename.to_ascii_lowercase();
-    if !lower.starts_with("sect") || !lower.ends_with(".c4g") || filename.len() <= 8 {
-        return None;
+    if !lower.starts_with("sect") || !lower.ends_with(".c4g") {
+        return Ok(None);
     }
-    filename.get(4..filename.len() - 4).map(str::to_owned)
+    let name = &filename[4..filename.len() - 4];
+    if name.is_empty() || name.len() > 30 {
+        return Err(ScenarioError::InvalidScenarioSectionName {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(Some(name.to_owned()))
 }
 
 fn load_legacy_landscape_systems(
@@ -9871,15 +9881,15 @@ fn load_legacy_scenario_sections(
         environment: main_environment,
     }];
 
-    let mut discovered = group
-        .entries()?
-        .into_iter()
-        .filter_map(|entry| {
-            legacy_scenario_section_name(&entry.relative_path)
-                .map(|name| (name, entry.relative_path))
-        })
-        .filter(|(name, _)| !name.eq_ignore_ascii_case("main"))
-        .collect::<Vec<_>>();
+    let mut discovered = Vec::new();
+    for entry in group.entries()? {
+        let Some(name) = legacy_scenario_section_name(&entry.relative_path)? else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case("main") {
+            discovered.push((name, entry.relative_path));
+        }
+    }
     discovered.sort_by(|(left, _), (right, _)| {
         left.to_ascii_lowercase()
             .cmp(&right.to_ascii_lowercase())
@@ -9892,8 +9902,12 @@ fn load_legacy_scenario_sections(
             classifier.clear_texmap_lookups();
         }
         let section_group = group.open_child(path)?;
-        let overlay = parse_legacy_scenario_manifest(&section_group)?;
-        let manifest = overlay_legacy_scenario_manifest(main_manifest, overlay)?;
+        let manifest = match parse_legacy_scenario_manifest(&section_group) {
+            Ok(overlay) => Some(overlay_legacy_scenario_manifest(main_manifest, overlay)?),
+            Err(ScenarioError::LegacyCoreMissing) => None,
+            Err(error) => return Err(error),
+        };
+        let manifest = manifest.as_ref().unwrap_or(main_manifest);
         let s2_source = try_read_group_file_case_insensitive(&section_group, "Landscape.txt")?
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
         let s2_diff = try_read_group_file_case_insensitive(&section_group, "DiffLandscape.bmp")
@@ -9905,7 +9919,7 @@ fn load_legacy_scenario_sections(
         let mut prepared_map_creator = None;
         let mut landscape = load_legacy_landscape(
             &section_group,
-            &manifest,
+            manifest,
             persistent_runtime.as_ref(),
             true,
             section_classifier.as_mut(),
@@ -9929,7 +9943,7 @@ fn load_legacy_scenario_sections(
                 .and_then(Landscape::raster_state)
                 .is_some_and(|state| state.map().is_some() && state.map_creator().is_none());
         let objects = collect_legacy_objects(&section_group, definitions)?;
-        let environment = derive_legacy_environment(&manifest)?;
+        let environment = derive_legacy_environment(manifest)?;
         let scenario_values =
             ScenarioValueStore::from_runtime_core(&manifest.core, has_sky_surface);
         let has_s2_overload = prepared_map_creator.is_some() && s2_source.is_some();
@@ -23317,6 +23331,111 @@ public func ActualizePhase(pClonk)
                 .map(|cell| cell.borrow().clone()),
             Some(lc_script::Value::String("-2,-2,5".into()))
         );
+    }
+
+    #[test]
+    fn coreless_section_keeps_main_core_and_switches_landscape() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "#strict\n");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Coreless section\n\n\
+             [Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nExactLandscape=1\nGravity=137,0,137,137\n",
+        )
+        .expect("write main scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[&[0, 0]]),
+        )
+        .expect("write main exact landscape");
+
+        let section = scenario_dir.join("SectNext.c4g");
+        std::fs::create_dir_all(&section).expect("section dir");
+        std::fs::write(
+            section.join("Landscape.bmp"),
+            encode_indexed_bmp(&[&[0, 0, 0]]),
+        )
+        .expect("write coreless section landscape");
+        assert!(!section.join("Scenario.txt").exists());
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        assert_eq!(engine.landscape().map(Landscape::width), Some(2));
+        assert_eq!(engine.physics().gravity, 137);
+
+        assert!(engine
+            .load_scenario_section("Next", 0, Vec::new())
+            .expect("coreless section switch succeeds"));
+        assert_eq!(
+            engine.landscape().map(Landscape::width),
+            Some(3),
+            "the inherited ExactLandscape core loads the section bitmap at pixel scale"
+        );
+        assert_eq!(
+            engine.physics().gravity,
+            137,
+            "a missing section core leaves the inherited gravity unchanged"
+        );
+    }
+
+    #[test]
+    fn main_scenario_still_requires_scenario_core() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "#strict\n");
+        let section = scenario_dir.join("SectNext.c4g");
+        std::fs::create_dir_all(&section).expect("section dir");
+        std::fs::write(section.join("Scenario.txt"), "[Head]\nTitle=Next\n")
+            .expect("write section core");
+        std::fs::remove_file(scenario_dir.join("Scenario.txt")).expect("remove main core");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let error = match Scenario::load_from_path_with(&scenario_dir, &resolver) {
+            Ok(_) => panic!("main scenario unexpectedly loaded without Scenario.txt"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ScenarioError::LegacyCoreMissing));
+    }
+
+    #[test]
+    fn invalid_section_name_lengths_abort_scenario_load() {
+        for filename in [
+            "Sect.c4g".to_string(),
+            format!("Sect{}.c4g", "x".repeat(31)),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let scenario_dir = write_resilience_fixture(dir.path(), None, "#strict\n");
+            std::fs::create_dir_all(scenario_dir.join(&filename)).expect("section dir");
+            let resolver = FileSystemResolver {
+                roots: vec![dir.path().to_path_buf()],
+            };
+            let error = match Scenario::load_from_path_with(&scenario_dir, &resolver) {
+                Ok(_) => panic!("scenario unexpectedly accepted section {filename}"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                error,
+                ScenarioError::InvalidScenarioSectionName { path }
+                    if path == Path::new(&filename)
+            ));
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "#strict\n");
+        let valid = format!("Sect{}.c4g", "x".repeat(30));
+        std::fs::create_dir_all(scenario_dir.join(valid)).expect("30-byte section dir");
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        Scenario::load_from_path_with(&scenario_dir, &resolver)
+            .expect("a 30-byte section name remains valid");
     }
 
     #[test]
