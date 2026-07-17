@@ -1555,6 +1555,61 @@ mod tests {
         assert_eq!(entries[0].title, "From Title");
     }
 
+    #[test]
+    fn unreadable_title_candidate_falls_through_without_dropping_siblings() {
+        let dir = tempdir().unwrap();
+
+        let broken_path = dir.path().join("Broken.c4s");
+        let mut broken = build_group(&[
+            (
+                "Scenario.txt",
+                b"[Head]\nTitle=Core fallback\n".to_vec(),
+            ),
+            ("TitleUS.txt", b"unreadable".to_vec()),
+        ]);
+        make_group_entry_unreadable(&mut broken, 1);
+        fs::write(&broken_path, gzip_group_image(&broken)).unwrap();
+
+        let plain_path = dir.path().join("Plain.c4s");
+        let mut plain = build_group(&[
+            ("Scenario.txt", b"[Head]\nTitle=Wrong core title\n".to_vec()),
+            ("Title.txt", b"US:Plain title\n".to_vec()),
+            ("TitleUS.txt", b"unreadable".to_vec()),
+        ]);
+        make_group_entry_unreadable(&mut plain, 2);
+        fs::write(&plain_path, gzip_group_image(&plain)).unwrap();
+
+        let sibling_path = dir.path().join("Sibling.c4s");
+        fs::create_dir(&sibling_path).unwrap();
+        fs::write(
+            sibling_path.join("Scenario.txt"),
+            "[Head]\nTitle=Sibling\n",
+        )
+        .unwrap();
+
+        for path in [&broken_path, &plain_path] {
+            let group = Group::open(path).expect("open corrupt-entry fixture");
+            assert!(group.exists("TitleUS.txt"));
+            assert!(matches!(
+                group.read_file("TitleUS.txt"),
+                Err(GroupError::InvalidGroup(_))
+            ));
+        }
+
+        let entries = discover_with_languages(dir.path(), &langs(&["US"]))
+            .expect("one unreadable title component must not abort its root");
+        assert_eq!(entries.len(), 3);
+        let title = |identifier: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.identifier == identifier)
+                .map(|entry| entry.title.as_str())
+        };
+        assert_eq!(title("Broken.c4s"), Some("Core fallback"));
+        assert_eq!(title("Plain.c4s"), Some("Plain title"));
+        assert_eq!(title("Sibling.c4s"), Some("Sibling"));
+    }
+
     // C4ScenarioListLoader::Entry::Load (C4StartupScenSelDlg.cpp:477-515):
     // Title.txt wins over the Scenario.txt [Head] Title fallback.
     #[test]
@@ -2050,6 +2105,11 @@ mod tests {
     fn mark_group_entry_child(group: &mut [u8], entry_index: usize) {
         let child_flag = GROUP_HEADER_SIZE + entry_index * GROUP_ENTRY_SIZE + 260 + 4;
         group[child_flag..child_flag + 4].copy_from_slice(&1_i32.to_le_bytes());
+    }
+
+    fn make_group_entry_unreadable(group: &mut [u8], entry_index: usize) {
+        let size = GROUP_HEADER_SIZE + entry_index * GROUP_ENTRY_SIZE + 260 + 4 + 4;
+        group[size..size + 4].copy_from_slice(&i32::MAX.to_le_bytes());
     }
 
     fn scramble(buffer: &mut [u8]) {
