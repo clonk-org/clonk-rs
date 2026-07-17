@@ -326,6 +326,54 @@ enum CollectedDefinition {
     SystemScripts(Vec<(String, String)>),
 }
 
+// C4Game::InitDefs checks every loaded definition against the running engine
+// tuple before script linking (C4Game.cpp:108-115; C4Version.h:28-32).
+const DEFINITION_ENGINE_VERSION: [i32; 5] = [4, 9, 11, 0, 362];
+
+fn definition_requires_newer_engine(definition: &ScenarioDefinition) -> bool {
+    let Some(core) = definition.core.as_ref() else {
+        // Scenario.json definitions are a Rust-only fixture surface, not
+        // C4Def entries participating in CheckEngineVersion.
+        return false;
+    };
+    let version = core.version;
+    match version[..4].cmp(&DEFINITION_ENGINE_VERSION[..4]) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        // CompareVersion treats a non-positive definition build as a
+        // wildcard and only compares positive candidate builds.
+        std::cmp::Ordering::Equal => {
+            version[4] > 0 && version[4] > DEFINITION_ENGINE_VERSION[4]
+        }
+    }
+}
+
+fn prune_incompatible_definitions(definitions: &mut Vec<ScenarioDefinition>) {
+    definitions.retain(|definition| !definition_requires_newer_engine(definition));
+
+    // C4DefList::CheckRequireDef repeats removal until membership is stable:
+    // removing one dependency can invalidate another definition on the next
+    // pass. Closed cycles and self-requirements remain because every named ID
+    // is present throughout the fixpoint.
+    loop {
+        let present_ids: HashSet<String> = definitions
+            .iter()
+            .map(|definition| definition.id.clone())
+            .collect();
+        let previous_len = definitions.len();
+        definitions.retain(|definition| {
+            definition.core.as_ref().is_none_or(|core| {
+                core.require_defs
+                    .iter()
+                    .all(|required| present_ids.contains(required))
+            })
+        });
+        if definitions.len() == previous_len {
+            break;
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Scenario {
     /// Parsed C4Scenario core retained for C++-format save/network
@@ -2479,9 +2527,21 @@ impl Scenario {
             }
         }
 
+        // C4Game checks for an entirely missing definition load before these
+        // filters; filtering every loaded def is therefore not itself fatal.
         if collected.is_empty() && !has_unresolved_savegame_definitions {
             return Err(ScenarioError::NoDefinitions);
         }
+
+        prune_incompatible_definitions(&mut collected);
+        let retained_definition_ids: HashSet<&str> = collected
+            .iter()
+            .map(|definition| definition.id.as_str())
+            .collect();
+        definition_load_steps.retain(|step| match step {
+            DefinitionLoadStep::Definition(id) => retained_definition_ids.contains(id.as_str()),
+            DefinitionLoadStep::Declarations { .. } | DefinitionLoadStep::SystemScripts(_) => true,
+        });
 
         let script = load_legacy_scenario_script(group, &scenario_components, languages)?;
         let scenario_system_scripts = load_scenario_system_scripts(
@@ -22102,6 +22162,89 @@ public func ActualizePhase(pClonk)
             engine.debug_solid_mask_override(id.as_u64()),
             Some(None),
             "C4Def::Load disables an out-of-bitmap base mask before object Init can clamp it"
+        );
+    }
+
+    #[test]
+    fn legacy_definitions_prune_future_versions_and_unmet_requirements_before_objects() {
+        fn write_definition(
+            root: &Path,
+            id: &str,
+            version: Option<&str>,
+            require_def: Option<&str>,
+        ) {
+            let path = root.join(format!("{id}.c4d"));
+            std::fs::create_dir_all(&path).expect("definition dir");
+            let mut core = format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n");
+            if let Some(version) = version {
+                core.push_str(&format!("Version={version}\n"));
+            }
+            if let Some(require_def) = require_def {
+                core.push_str(&format!("RequireDef={require_def}\n"));
+            }
+            std::fs::write(path.join("DefCore.txt"), core).expect("write DefCore");
+            std::fs::write(path.join("Script.c"), "// definition script\n")
+                .expect("write definition script");
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let definitions = dir.path().join("Defs.c4d");
+        write_definition(&definitions, "GOOD", None, None);
+        // CompareVersion ignores a non-positive candidate build.
+        write_definition(&definitions, "WILD", Some("4,9,11,0,0"), None);
+        write_definition(&definitions, "CURR", Some("4,9,11,0,362"), None);
+        write_definition(&definitions, "FBLD", Some("4,9,11,0,363"), None);
+        write_definition(&definitions, "FUTR", Some("5,0,0,0,0"), None);
+        write_definition(&definitions, "DIRC", None, Some("MISS"));
+        write_definition(&definitions, "CHNA", None, Some("CHNB"));
+        write_definition(&definitions, "CHNB", None, Some("MISS"));
+        write_definition(&definitions, "CASC", None, Some("FUTR"));
+        write_definition(&definitions, "CYCA", None, Some("CYCB"));
+        write_definition(&definitions, "CYCB", None, Some("CYCA"));
+
+        let scenario_dir = dir.path().join("PrunedDefs.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Pruned definitions\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write Scenario.txt");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=FUTR\nNumber=1\nStatus=1\nCategory=0\nX=10\nY=10\n\n\
+             [Object]\nid=CHNA\nNumber=2\nStatus=1\nCategory=0\nX=15\nY=15\n\n\
+             [Object]\nid=GOOD\nNumber=3\nStatus=1\nCategory=0\nX=20\nY=20\n",
+        )
+        .expect("write Objects.txt");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+
+        let mut retained = scenario
+            .definitions
+            .iter()
+            .map(|definition| definition.id.clone())
+            .collect::<Vec<_>>();
+        retained.sort();
+        assert_eq!(retained, ["CURR", "CYCA", "CYCB", "GOOD", "WILD"]);
+        assert_eq!(scenario.initial_spawns.len(), 1);
+        assert_eq!(scenario.initial_spawns[0].config.definition_id, "GOOD");
+
+        let mut engine = Engine::with_seed(0);
+        let created = scenario.apply(&mut engine).expect("scenario applies");
+        let mut registered = engine.definition_ids().map(str::to_owned).collect::<Vec<_>>();
+        registered.sort();
+        assert_eq!(registered, ["CURR", "CYCA", "CYCB", "GOOD", "WILD"]);
+        assert_eq!(created.len(), 1, "the future-version object is skipped");
+        assert_eq!(
+            engine
+                .object_snapshot(created[0])
+                .expect("surviving object exists")
+                .definition_id,
+            "GOOD"
         );
     }
 
