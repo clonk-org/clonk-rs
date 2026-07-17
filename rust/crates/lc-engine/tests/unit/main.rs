@@ -6352,6 +6352,181 @@ func CatchBlow(level, by)
         assert_eq!(engine.pxs_system.count(), 0);
     }
 
+    fn pxs_pos_material_refresh_engine(
+        reaction: &str,
+        trigger_at_pixel: bool,
+    ) -> (Engine, MaterialId, MaterialId) {
+        let library = MaterialLibrary::parse(&format!(
+            r#"
+            [Material Source]
+            Name=Source
+            Density=1
+            WindDrift=0
+            Friction=0
+
+            {reaction}
+
+            [Material Target]
+            Name=Target
+            Density=25
+            WindDrift=40
+            Friction=0
+
+            [Material Trigger]
+            Name=Trigger
+            Density=10
+            Friction=0
+            "#
+        ))
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let source = materials.id_of("Source").expect("source exists");
+        let target = materials.id_of("Target").expect("target exists");
+
+        let mut engine = Engine::with_seed(21);
+        engine.set_materials(materials);
+        engine.set_physics(PhysicsSettings::new(0, 12, -20));
+        engine.set_environment(EnvironmentSettings::new(80));
+
+        // The PXS sits at (2,2); its current cell optionally triggers the
+        // PXSPos reaction, while the cell below always has density 10.
+        let mut densities = vec![0i32; 128];
+        densities[10] = 10;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[10] = Some("Trigger".into());
+        let mut bytes = vec![0u8; 5 * 6];
+        if trigger_at_pixel {
+            bytes[2 * 5 + 2] = 10;
+        }
+        bytes[3 * 5 + 2] = 10;
+        let grid = landscape::PixelGrid::new(5, 6, bytes, densities, names, vec![None; 128]);
+        let mut world = Landscape::new(5, vec![6; 5]).expect("landscape builds");
+        world.set_world_height(6);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+        assert!(engine.pxs_system.create(
+            source,
+            math::itofix(2),
+            math::itofix(2),
+            math::C4Fixed::ZERO,
+            math::C4Fixed::ZERO,
+        ));
+
+        (engine, source, target)
+    }
+
+    #[test]
+    fn pxs_pos_convert_refreshes_material_physics_for_same_tick() {
+        let (mut engine, _source, target) = pxs_pos_material_refresh_engine(
+            r#"
+            [Reaction]
+            Type=Convert
+            TargetSpec=Trigger
+            ConvertMat=Target
+            CheckSlide=0
+            ExecMask=1
+            "#,
+            true,
+        );
+        let mut mirror = engine.rng.clone();
+        let random_x = mirror.random(1200);
+        let random_y = mirror.random(1200);
+        let txdir = math::itofix_prec(80, 15) + math::fixed256(random_x - 600);
+        let tydir = math::fixed256(random_y - 600);
+        let factor = math::itofix_prec(1, 800);
+
+        engine.tick_pxs();
+
+        let pixels: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
+        assert_eq!(pixels.len(), 1);
+        assert_eq!(pixels[0].mat, target, "PXSPos converted the material");
+        assert_eq!(
+            pixels[0].xdir,
+            txdir * 20 * factor,
+            "same-tick drift uses Target WindDrift=40"
+        );
+        assert_eq!(pixels[0].ydir, tydir * 20 * factor);
+        assert_eq!(
+            engine.rng, mirror,
+            "Target Density=25 over density 10 takes both Random(1200) draws"
+        );
+    }
+
+    #[test]
+    fn pxs_pos_no_conversion_keeps_source_material_physics() {
+        let (mut engine, source, _target) = pxs_pos_material_refresh_engine(
+            r#"
+            [Reaction]
+            Type=Convert
+            TargetSpec=Trigger
+            ConvertMat=Target
+            CheckSlide=0
+            ExecMask=1
+            "#,
+            false,
+        );
+        let mirror = engine.rng.clone();
+
+        engine.tick_pxs();
+
+        let pixels: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
+        assert_eq!(pixels.len(), 1);
+        assert_eq!(pixels[0].mat, source);
+        assert_eq!(pixels[0].xdir, math::C4Fixed::ZERO);
+        assert_eq!(pixels[0].ydir, math::C4Fixed::ZERO);
+        assert_eq!(
+            engine.rng, mirror,
+            "Source Density=1 over density 10 stays out of free fall"
+        );
+    }
+
+    #[test]
+    fn pxs_pos_script_writeback_refreshes_material_physics_for_same_tick() {
+        let (mut engine, _source, target) = pxs_pos_material_refresh_engine(
+            r#"
+            [Reaction]
+            Type=Script
+            ScriptFunc=RewritePxsMat
+            TargetSpec=Trigger
+            CheckSlide=0
+            ExecMask=1
+            "#,
+            true,
+        );
+        engine
+            .install_scenario_script(
+                "Scenario",
+                &format!(
+                    r#"
+                    global func RewritePxsMat(&x, &y, lsx, lsy, &xdir, &ydir, &pxs_mat, ls_mat, event) {{
+                        if (event == 0) {{ pxs_mat = {}; }}
+                        return 0;
+                    }}
+                    "#,
+                    target.index()
+                ),
+            )
+            .expect("scenario script installs");
+        let mut mirror = engine.rng.clone();
+        let random_x = mirror.random(1200);
+        let random_y = mirror.random(1200);
+        let txdir = math::itofix_prec(80, 15) + math::fixed256(random_x - 600);
+        let tydir = math::fixed256(random_y - 600);
+        let factor = math::itofix_prec(1, 800);
+
+        engine.tick_pxs();
+
+        let pixels: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
+        assert_eq!(pixels.len(), 1);
+        assert_eq!(pixels[0].mat, target, "script PxsMat writes back");
+        assert_eq!(pixels[0].xdir, txdir * 20 * factor);
+        assert_eq!(pixels[0].ydir, tydir * 20 * factor);
+        assert_eq!(
+            engine.rng, mirror,
+            "script Target Density=25 takes both same-tick jitter draws"
+        );
+    }
+
     #[test]
     fn user_convert_reaction_fires_on_pxs_move_like_cpp() {
         // mrfConvert: hardcoded InMatConvert has no collision proc, but

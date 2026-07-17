@@ -48276,11 +48276,9 @@ impl Engine {
             ));
         }
         // Safety (C4PXS.cpp:40-43)
-        let Some(material) = self.materials.get_by_id(pixel.mat) else {
+        if self.materials.get_by_id(pixel.mat).is_none() {
             return None;
-        };
-        let density = material.density();
-        let wind_drift_param = material.wind_drift();
+        }
         // Out of bounds (C4PXS.cpp:45-49)
         let (back_wdt, back_hgt) = self
             .landscape
@@ -48322,6 +48320,13 @@ impl Engine {
                 return None;
             }
         }
+        // `Mat` is passed by reference to the PXSPos reaction. Both
+        // mrfConvert and mrfScript may replace it, and C++ reads the density
+        // and WindDrift from that replacement for this same tick
+        // (C4PXS.cpp:59-80; C4Material.cpp:643-649, 822-832).
+        let material = self.materials.get_by_id(pixel.mat)?;
+        let density = material.density();
+        let wind_drift_param = material.wind_drift();
         // Gravity (C4PXS.cpp:60)
         pixel.ydir += self.physics.gravity_as_c4fixed();
         // Free fall: wind drift with synced jitter (C4PXS.cpp:62-74). The
