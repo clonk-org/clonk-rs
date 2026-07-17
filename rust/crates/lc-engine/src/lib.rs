@@ -1678,6 +1678,30 @@ impl Default for PlayerRuntimeControl {
     }
 }
 
+/// Process-local display names for one configured control binding.
+///
+/// C++ obtains these from `Config.Controls`/`Config.Gamepads`; they are UI
+/// configuration and therefore deliberately remain outside synchronized
+/// engine state and savegame snapshots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlKeyName {
+    long: String,
+    short: String,
+}
+
+impl ControlKeyName {
+    pub fn new(long: impl Into<String>, short: impl Into<String>) -> Self {
+        Self {
+            long: long.into(),
+            short: short.into(),
+        }
+    }
+
+    fn display(&self, short: bool) -> &str {
+        if short { &self.short } else { &self.long }
+    }
+}
+
 /// One ordered entry from the scenario's `Teams.txt` list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamInfo {
@@ -14854,6 +14878,10 @@ pub struct Engine {
     /// Explicit client-local players. `None` is the standalone/headless
     /// default where every registered player has local control.
     local_players: Option<HashSet<i32>>,
+    /// Process-local `Config.Controls`/`Config.Gamepads` display names,
+    /// keyed by effective player control set. This presentation-only table
+    /// is intentionally absent from `EngineState` and snapshots.
+    control_key_names: Rc<HashMap<i32, Vec<ControlKeyName>>>,
     /// The process-local singleton script-query edit line. Player query
     /// registration is synchronized and saved; this presentation state is
     /// deliberately runtime-only like C++ `Game.MessageInput`.
@@ -16958,6 +16986,7 @@ impl Engine {
             pause_game_requests: Rc::new(RefCell::new(Vec::new())),
             edit_cursor_target: None,
             local_players: None,
+            control_key_names: Rc::new(HashMap::new()),
             active_message_board_input: None,
             message_board_commands: vec![InitialNetworkMessageBoardCommand::speed()],
             exec_list: Vec::new(),
@@ -17311,6 +17340,15 @@ impl Engine {
     /// fresh game engines.
     pub fn set_mission_access_store(&mut self, store: MissionAccessStore) {
         self.mission_access = store;
+    }
+
+    /// Installs the frontend's process-local control-binding display names.
+    /// Control indices use the legacy `CON_*` order (0 through 11).
+    pub fn set_control_key_names(
+        &mut self,
+        names: HashMap<i32, Vec<ControlKeyName>>,
+    ) {
+        self.control_key_names = Rc::new(names);
     }
 
     /// `[Landscape] MapZoom` as a C4SVal — ScenarioInit evaluates it per
@@ -21758,6 +21796,7 @@ impl Engine {
             self.team_home_base_rule,
         )
         .with_needed_material_strings(Rc::clone(&self.needed_material_strings))
+        .with_control_key_names(Rc::clone(&self.control_key_names))
         .with_solid_mask_metadata(solid_mask_metadata)
         .with_solid_mask_bakes(
             self.objects

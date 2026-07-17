@@ -1753,6 +1753,9 @@ pub struct HostWorldContext {
     pathfinder_level: i32,
     pathfinder_transfer_zones_enabled: bool,
     players: Rc<HashMap<i32, PlayerState>>,
+    /// Process-local display names for configured keyboard/gamepad controls,
+    /// keyed by the player's effective control-set number.
+    control_key_names: Rc<HashMap<i32, Vec<crate::ControlKeyName>>>,
     /// IDs present in `Game.PlayerInfos`, including retained infos whose
     /// runtime C4Player has already retired. ID zero is the global-results
     /// sentinel and is never stored here.
@@ -1917,6 +1920,7 @@ impl Default for HostWorldContext {
             pathfinder_level: 1,
             pathfinder_transfer_zones_enabled: true,
             players: Rc::new(HashMap::new()),
+            control_key_names: Rc::new(HashMap::new()),
             player_info_ids: Rc::new(HashSet::new()),
             player_order: Rc::new(Vec::new()),
             teams: Rc::new(Vec::new()),
@@ -2164,6 +2168,7 @@ impl HostWorldContext {
             player_order: Rc::new(player_ids),
             player_info_ids: Rc::new(player_info_ids),
             players: Rc::new(players),
+            control_key_names: Rc::new(HashMap::new()),
             teams: Rc::new(Vec::new()),
             crew_selection: Rc::new(crew_selection),
             next_object_id,
@@ -2276,6 +2281,14 @@ impl HostWorldContext {
         input: Option<crate::ActiveMessageBoardInput>,
     ) -> Self {
         self.active_message_board_input = input;
+        self
+    }
+
+    pub(crate) fn with_control_key_names(
+        mut self,
+        names: Rc<HashMap<i32, Vec<crate::ControlKeyName>>>,
+    ) -> Self {
+        self.control_key_names = names;
         self
     }
 
@@ -3109,6 +3122,14 @@ impl HostWorldContext {
 
     pub(crate) fn player(&self, id: i32) -> Option<&PlayerState> {
         self.players.get(&id)
+    }
+
+    fn control_key_name(&self, control_set: i32, control: i32, short: bool) -> Option<&str> {
+        let control = usize::try_from(control).ok()?;
+        self.control_key_names
+            .get(&control_set)?
+            .get(control)
+            .map(|name| name.display(short))
     }
 }
 
@@ -14293,6 +14314,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("DoDamage", do_damage);
     script.register_host_function("GetDamage", get_damage);
     script.register_host_function("GetPlrColorDw", get_plr_color_dw);
+    script.register_host_function("GetPlrControlName", get_plr_control_name);
     script.register_host_function("GetPlrJumpAndRunControl", get_plr_jump_and_run_control);
     script.register_host_function("DoHomebaseMaterial", do_homebase_material);
     script.register_host_function("DoHomebaseProduction", do_homebase_production);
@@ -22064,6 +22086,40 @@ fn get_plr_color_dw(args: &[Value]) -> Result<Value, RuntimeError> {
                 .map(|color| ((color.r as i32) << 16) | ((color.g as i32) << 8) | color.b as i32)
                 .unwrap_or(0),
         ))
+    })
+}
+
+/// FnGetPlrControlName (C4Script.cpp:2568-2571): format the configured key
+/// for the player's effective local control set. Configuration lookup
+/// failures are a non-nil empty C4 string.
+fn get_plr_control_name(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "GetPlrControlName expects at most 3 arguments: player, control, short",
+        ));
+    }
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetPlrControlName",
+        "player",
+    )?;
+    let control = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GetPlrControlName",
+        "control",
+    )?;
+    let short = args.get(2).map(Value::as_bool).unwrap_or(false);
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let name = borrow
+            .as_ref()
+            .and_then(|context| {
+                let control_set = context.player_state(player_id)?.control_set;
+                context.world.control_key_name(control_set, control, short)
+            })
+            .unwrap_or_default();
+        Ok(Value::String(name.to_string()))
     })
 }
 
@@ -47533,6 +47589,7 @@ mod tests {
         "GetPlayerType",
         "GetPlayerVal",
         "GetPlrColorDw",
+        "GetPlrControlName",
         "GetPlrDownDouble",
         "GetPlrExtraData",
         "GetPlrJumpAndRunControl",

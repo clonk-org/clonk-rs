@@ -77,6 +77,7 @@ use lc_engine::command::CommandId;
 use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::{LegacyDefinitionResolver, ScenarioLoaderHead, ScenarioLobbyMetadata};
 use lc_engine::text_spec::{TextSpec, TextSpecIcon, parse_text_spec};
+use lc_engine::ControlKeyName;
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlClientRegistry,
     ControlCommand, ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError,
@@ -13624,6 +13625,29 @@ fn build_game_over_dialog(
     dialog
 }
 
+fn configured_control_key_names(
+    bindings: &KeyboardBindings,
+) -> HashMap<i32, Vec<ControlKeyName>> {
+    (0..4_usize)
+        .map(|control_set| {
+            let names = ControlBindingId::ALL
+                .iter()
+                .map(|&binding| {
+                    let label = bindings
+                        .key_for_set(control_set, binding)
+                        .map(format_key_label)
+                        .unwrap_or_default();
+                    ControlKeyName::new(label.clone(), label)
+                })
+                .collect();
+            (
+                i32::try_from(control_set).expect("keyboard control set index fits i32"),
+                names,
+            )
+        })
+        .collect()
+}
+
 impl GameApp {
     fn new(
         width: u32,
@@ -13747,8 +13771,10 @@ impl GameApp {
                 }
             })
             .unwrap_or_default();
+        let bindings = KeyboardBindings::load(paths);
         let mut engine = Engine::new();
         engine.set_mission_access_store(mission_access.clone());
+        engine.set_control_key_names(configured_control_key_names(&bindings));
         engine.set_smoke_level(graphics_smoke_level);
         engine.set_control_host(!matches!(
             network_mode.as_ref(),
@@ -13852,7 +13878,7 @@ impl GameApp {
             needed_material_none,
             mission_access,
             input: InputDispatcher::new(),
-            bindings: KeyboardBindings::load(paths),
+            bindings,
             gamepad_bindings: GamepadBindings::load(paths),
             local_controls: LocalControlRegistry::default(),
             pressed_engine_keys: HashSet::new(),
@@ -14313,6 +14339,8 @@ impl GameApp {
         self.engine
             .set_mission_access_store(self.mission_access.clone());
         self.engine
+            .set_control_key_names(configured_control_key_names(&self.bindings));
+        self.engine
             .set_control_host(!matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))));
         self.engine.set_needed_material_resource_strings(
             self.needed_material_need.clone(),
@@ -14327,6 +14355,7 @@ impl GameApp {
 
     fn apply_material_library_to(&self, engine: &mut Engine) {
         engine.set_mission_access_store(self.mission_access.clone());
+        engine.set_control_key_names(configured_control_key_names(&self.bindings));
         engine
             .set_control_host(!matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))));
         engine.set_needed_material_resource_strings(

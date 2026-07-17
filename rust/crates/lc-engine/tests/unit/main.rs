@@ -69232,6 +69232,53 @@ protected func RejectCollect(id, pObject) { return(1); }
     }
 
     #[test]
+    fn get_plr_control_name_uses_runtime_binding_names_and_empty_string_failures() {
+        let mut engine = Engine::new();
+        let mut set_two = vec![ControlKeyName::new("", ""); 12];
+        set_two[6] = ControlKeyName::new("Left Arrow", "Left");
+        engine.set_control_key_names(HashMap::from([(2, set_two)]));
+        engine
+            .register_player_with_runtime_control(
+                PlayerConfig::new(9, "Ada"),
+                PlayerRuntimeControl::new(2, 0),
+            )
+            .expect("player with control set registers");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "KYNM",
+                    "Control name probe",
+                    r#"#strict 2
+func Probe() {
+    return [GetPlrControlName(9, 6), GetPlrControlName(9, 6, true),
+            GetPlrControlName(42, 6), GetPlrControlName(9, 99)];
+}
+"#,
+                )
+                .expect("control-name fixture compiles"),
+            )
+            .expect("control-name fixture registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("KYNM"))
+            .expect("control-name fixture spawns");
+        let index = engine
+            .find_object_index(object)
+            .expect("control-name fixture exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Probe", Vec::new())
+                .expect("GetPlrControlName calls run"),
+            Value::Array(vec![
+                Value::String("Left Arrow".into()),
+                Value::String("Left".into()),
+                Value::String(String::new()),
+                Value::String(String::new()),
+            ])
+        );
+    }
+
+    #[test]
     fn nil_map_assignment_matches_cpp_removal_and_unchanged_slot_rules() {
         let script_template = r#"#strict 2
 func Probe() {
