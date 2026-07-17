@@ -3628,6 +3628,34 @@ fn parse_object_reference_argument(
     }
 }
 
+/// Apply native `C4Object *` parameter conversion. Before strict 3, C4Aul
+/// eagerly resets raw-falsy values to nil; strict-3 callers retain typed
+/// integer/bool zero and therefore fail the object typecheck. Canonical null
+/// object and raw-zero C4ID values remain nil in either mode.
+fn parse_native_object_argument(
+    value: Option<&Value>,
+    function: &str,
+    parameter: &str,
+) -> Result<Option<ObjectId>, RuntimeError> {
+    let value = value.unwrap_or(&Value::Nil);
+    let canonical_nil = matches!(value, Value::Nil | Value::Object(0))
+        || matches!(value, Value::C4Id(id) if cast_c4id_payload(id) == 0);
+    let eager_falsy_conversion = !matches!(
+        lc_script::caller_origin_strictness(),
+        lc_script::HostCallerStrictness::Strict(level) if level >= 3
+    );
+    if canonical_nil || (eager_falsy_conversion && !value.as_bool()) {
+        return Ok(None);
+    }
+    match value {
+        Value::Object(_) | Value::Proplist(_) => Ok(object_id_from_value(value)),
+        other => Err(RuntimeError::new(format!(
+            "{function}: expected object for {parameter}, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 fn consume_optional_object_reference_argument(
     args: &[Value],
     index: &mut usize,
@@ -14047,6 +14075,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetCommand", get_command);
     script.register_host_function("PlayerObjectCommand", player_object_command_host);
     script.register_host_function("ShiftContents", shift_contents);
+    script.register_host_function("ScrollContents", scroll_contents);
     script.register_host_function("GetActTime", get_act_time);
     script.register_host_function("GetPhase", get_phase);
     script.register_host_function("SetPhase", set_phase);
@@ -24125,6 +24154,51 @@ fn set_action_targets(args: &[Value]) -> Result<Value, RuntimeError> {
         object.set_action_target(1, target2);
 
         Ok(Value::Bool(true))
+    })
+}
+
+/// FnScrollContents (C4Script.cpp:1793-1805): move the raw first contents
+/// link to the back and return the new first object. Unlike ShiftContents,
+/// this always advances exactly one link, including within a uniform stack.
+fn scroll_contents(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target_object =
+        parse_native_object_argument(args.first(), "ScrollContents", "target")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        let Some(target) = target_object.or(context.script_object_context) else {
+            return Ok(Value::Nil);
+        };
+        let Some(container) = context.get_world_object(target) else {
+            return Ok(Value::Nil);
+        };
+        let contents: Vec<ObjectId> = container
+            .contents()
+            .iter()
+            .copied()
+            .filter(|child| {
+                context
+                    .get_world_object(*child)
+                    .is_some_and(|object| object.is_present())
+            })
+            .collect();
+        let Some(front) = contents.first().copied() else {
+            return Ok(Value::Nil);
+        };
+        let Some(new_front) = contents.get(1).copied() else {
+            return Ok(object_reference_value(front));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Nil);
+        }
+        let Some(container) = context.object_scope_mut(target) else {
+            return Ok(Value::Nil);
+        };
+        container.shift_contents_front(new_front);
+        Ok(object_reference_value(new_front))
     })
 }
 
@@ -47751,6 +47825,7 @@ mod tests {
         "ScoreboardCol",
         "ScriptCounter",
         "ScriptGo",
+        "ScrollContents",
         "SelectCrew",
         "SelectMenuItem",
         "Sell",

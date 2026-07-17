@@ -46361,6 +46361,133 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         );
     }
 
+    // FnScrollContents (C4Script.cpp:1793-1805) removes the raw first
+    // contents link, appends it with stNone, and returns the new front.
+    // Same-definition items deliberately prove this is a one-link rotation,
+    // not ShiftContents' search for the next different picture stack.
+    #[test]
+    fn scroll_contents_moves_first_to_back_and_returns_new_front_like_cpp() {
+        let script = r#"#strict 3
+        global func Cycle() { return ScrollContents(); }
+        global func Invalid() { return ScrollContents(false); }
+        "#;
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("CHES", "Chest", script).expect("script compiles"),
+            )
+            .expect("chest registers");
+        engine
+            .register_definition(simple_definition("ITEM"))
+            .expect("item registers");
+
+        let filled = engine
+            .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
+            .expect("filled chest spawns");
+        let empty = engine
+            .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
+            .expect("empty chest spawns");
+        let c = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(filled),
+            )
+            .expect("C spawns");
+        let b = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(filled),
+            )
+            .expect("B spawns");
+        let a = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(filled),
+            )
+            .expect("A spawns");
+
+        let filled_idx = engine.find_object_index(filled).expect("filled chest exists");
+        assert_eq!(engine.objects[filled_idx].state.contents, vec![a, b, c]);
+        let result = engine
+            .call_object_function(filled_idx, "Cycle", Vec::new())
+            .expect("ScrollContents runs");
+        assert_eq!(result, Value::Object(b.as_u64()));
+        let filled_idx = engine.find_object_index(filled).expect("filled chest exists");
+        assert_eq!(
+            engine.objects[filled_idx].state.contents,
+            vec![b, c, a],
+            "ScrollContents rotates exactly one raw contents link"
+        );
+        engine
+            .call_object_function(filled_idx, "Invalid", Vec::new())
+            .expect_err("strict typed false must fail object conversion");
+        let filled_idx = engine.find_object_index(filled).expect("filled chest exists");
+        assert_eq!(engine.objects[filled_idx].state.contents, vec![b, c, a]);
+
+        let empty_idx = engine.find_object_index(empty).expect("empty chest exists");
+        let result = engine
+            .call_object_function(empty_idx, "Cycle", Vec::new())
+            .expect("empty ScrollContents runs");
+        assert_eq!(result, Value::Nil);
+        let empty_idx = engine.find_object_index(empty).expect("empty chest exists");
+        assert!(engine.objects[empty_idx].state.contents.is_empty());
+    }
+
+    // FnScrollContents' optional pObj only defaults nil to cthr->Obj. An
+    // explicit foreign container is mutated while the caller stays intact.
+    #[test]
+    fn scroll_contents_rotates_an_explicit_foreign_container_like_cpp() {
+        let script = r#"
+        global func Poke(target) { return ScrollContents(target); }
+        "#;
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", script).expect("script compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(simple_definition("CHES"))
+            .expect("chest registers");
+        engine
+            .register_definition(simple_definition("ITEM"))
+            .expect("item registers");
+
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let chest = engine
+            .spawn_object(SpawnConfig::new("CHES").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let b = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("B spawns");
+        let a = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("A spawns");
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        let result = engine
+            .call_object_function(actor_idx, "Poke", vec![Value::Object(chest.as_u64())])
+            .expect("foreign ScrollContents runs");
+        assert_eq!(result, Value::Object(b.as_u64()));
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(engine.objects[chest_idx].state.contents, vec![b, a]);
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        assert!(engine.objects[actor_idx].state.contents.is_empty());
+    }
+
     // FnShiftContents (C4Script.cpp:1784-1797): the regular shift rotates
     // the contents CYCLICALLY to the next different item
     // (C4Object::ShiftContents C4Object.cpp:5728-5752,
