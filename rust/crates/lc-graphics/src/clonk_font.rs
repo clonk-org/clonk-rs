@@ -794,6 +794,41 @@ fn read_tag(text: &str, stack: Option<&mut Vec<MarkupTag>>) -> Option<usize> {
     valid.then_some(advance)
 }
 
+/// Return the closing and reopening markup for the tags left active after
+/// parsing `text` with `CMarkup::Read(..., false)`.
+///
+/// `CStdFont::BreakMessage` uses these fragments around each automatically
+/// inserted newline so either physical line can be drawn independently.
+pub fn active_markup_fragments(text: &str) -> (String, String) {
+    let mut stack = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if rest.starts_with('<') {
+            if let Some(advance) = read_tag(rest, Some(&mut stack)) {
+                rest = &rest[advance..];
+                continue;
+            }
+        }
+        let character = rest.chars().next().expect("non-empty markup text");
+        rest = &rest[character.len_utf8()..];
+    }
+
+    let mut closing = String::new();
+    for tag in stack.iter().rev() {
+        closing.push_str("</");
+        closing.push_str(tag.name());
+        closing.push('>');
+    }
+    let mut reopening = String::new();
+    for tag in stack {
+        match tag {
+            MarkupTag::Italic => reopening.push_str("<i>"),
+            MarkupTag::TextColor(color) => reopening.push_str(&format!("<c {color:x}>")),
+        }
+    }
+    (closing, reopening)
+}
+
 /// Parse `<c ...>` parameters (`src/StdMarkup.cpp:83-94`): lowercase hex
 /// digits only (`src/StdMarkup.cpp:87-89`, uppercase makes the tag invalid),
 /// accumulated big-endian into a u32 — so 8 digits are **AARRGGBB** — with
@@ -1175,6 +1210,23 @@ mod tests {
         // Without markup, tag characters are unknown glyphs (width 0) whose
         // h_space pulls the row negative; the max stays 0.
         assert_eq!(font.measure("<c ffffff7f>A</c>B", false), (0, 3));
+    }
+
+    #[test]
+    fn active_markup_fragments_match_strict_cpp_stack_and_color_spelling() {
+        assert_eq!(
+            active_markup_fragments("<c 000001><i>text"),
+            ("</i></c>".into(), "<c 1><i>".into())
+        );
+        assert_eq!(
+            active_markup_fragments("<c 80ff0000>text"),
+            ("</c>".into(), "<c 7fff0000>".into())
+        );
+        assert_eq!(
+            active_markup_fragments("<c ff><i>text</c>"),
+            ("</i></c>".into(), "<c ff><i>".into()),
+            "a mismatched close does not mutate the active stack"
+        );
     }
 
     #[test]

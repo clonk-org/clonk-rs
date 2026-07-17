@@ -6,7 +6,9 @@
 //! the C++ integer math exactly; see `rust/target/parity-specs/about.md`.
 
 use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
-use crate::classic_gui::{draw_3d_frame, draw_clipped_text, draw_engine_box};
+use crate::classic_gui::{
+    draw_3d_frame, draw_clipped_text, draw_clipped_text_with_markup, draw_engine_box,
+};
 use crate::message_dialog::break_message;
 use crate::startup_main_menu::{draw_bar, IntRect};
 use crate::{GuiPoint, ImageData, KeyCode};
@@ -1157,7 +1159,7 @@ fn draw_license_page(
             y += line.font.line_height / 3;
         }
         if y < viewport.y + viewport.h && y + line.font.line_height > viewport.y {
-            draw_clipped_text(
+            draw_clipped_text_with_markup(
                 surface,
                 line.font,
                 viewport.x,
@@ -1167,6 +1169,7 @@ fn draw_license_page(
                 TextAlign::Left,
                 gamma,
                 viewport,
+                false,
             );
         }
         y += line.font.line_height;
@@ -1538,6 +1541,23 @@ mod tests {
             state.handle_key_down(KeyCode::Down),
             vec![AboutDlgAction::LicenseChanged(0)]
         );
+    }
+
+    #[test]
+    fn license_text_keeps_manual_pipe_on_one_literal_row() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let mut lines = Vec::new();
+        append_license_line(
+            &mut lines,
+            "left|right",
+            &fonts.text,
+            WHITE,
+            i32::MAX,
+        );
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "left|right");
+        assert!(lines[0].new_paragraph);
     }
 
     #[test]

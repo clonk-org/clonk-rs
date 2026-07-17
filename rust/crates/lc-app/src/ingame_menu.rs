@@ -1452,7 +1452,7 @@ pub(crate) fn draw_tooltip(
 ) {
     let broken = break_hud_message(font, text, tooltip_wrap_width(facet));
     let text_w = font.text_width_markup(&broken);
-    let text_h = font.line_height() * broken.split('\n').count() as i32;
+    let text_h = font.line_height() * tooltip_line_count(&broken) as i32;
     let w = text_w + 6;
     let h = text_h + 4;
     let (tx, ty) = tooltip_position(facet, x, y, w, h);
@@ -1481,6 +1481,10 @@ pub(crate) fn draw_tooltip(
 
 pub(crate) fn tooltip_wrap_width(facet: Rect) -> i32 {
     MAX_TOOLTIP_WDT.min((facet.width as i32).max(50))
+}
+
+fn tooltip_line_count(text: &str) -> usize {
+    text.split(['\n', '|']).count()
 }
 
 pub(crate) fn tooltip_position(
@@ -2155,6 +2159,7 @@ mod tests {
         assert_eq!(tooltip_wrap_width(Rect::new(0, 0, 20, 100)), 50);
         assert_eq!(tooltip_wrap_width(Rect::new(0, 0, 320, 100)), 320);
         assert_eq!(tooltip_wrap_width(Rect::new(0, 0, 800, 100)), 500);
+        assert_eq!(tooltip_line_count("first|second\nthird"), 3);
 
         let facet = Rect::new(100, 20, 320, 50);
         assert_eq!(tooltip_position(facet, 200, 40, 80, 40), (160, 30));

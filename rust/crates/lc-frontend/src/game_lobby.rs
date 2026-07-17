@@ -1485,13 +1485,13 @@ impl GameLobby {
                 .filter(|paragraph| !paragraph.is_empty())
             {
                 let text = break_message(font, paragraph, layout.chat_log_client.w.max(1));
-                for (physical_index, physical) in lobby_markup_lines(&text)
-                    .into_iter()
+                for (physical_index, physical) in text
+                    .split('\n')
                     .filter(|physical| !physical.is_empty())
                     .enumerate()
                 {
                     wrapped.push(WrappedLobbyLogLine {
-                        text: physical,
+                        text: physical.to_string(),
                         color: line.color,
                         new_paragraph: physical_index == 0,
                     });
@@ -4124,73 +4124,6 @@ fn valid_boundary_at_or_before(text: &str, mut position: usize) -> usize {
     position
 }
 
-/// `CStdFont::BreakMessage(..., fCheckMarkup=true)` closes active markup at
-/// an inserted wrap and reopens it on the continuation line. Lobby rows draw
-/// physical lines independently, so retain that state explicitly.
-fn lobby_markup_lines(text: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    let mut open: Vec<(String, String)> = Vec::new();
-    let mut rest = text;
-    while !rest.is_empty() {
-        if rest.starts_with('\n') {
-            for (name, _) in open.iter().rev() {
-                line.push_str("</");
-                line.push_str(name);
-                line.push('>');
-            }
-            lines.push(std::mem::take(&mut line));
-            for (_, markup) in &open {
-                line.push_str(markup);
-            }
-            rest = &rest[1..];
-            continue;
-        }
-        if rest.starts_with('<') {
-            if let Some(end) = rest.find('>') {
-                let raw = &rest[..=end];
-                let contents = &rest[1..end];
-                let opening = if contents == "i" {
-                    Some("i")
-                } else if let Some(color) = contents.strip_prefix("c ") {
-                    (color.len() <= 8
-                        && color
-                            .bytes()
-                            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
-                    .then_some("c")
-                } else {
-                    None
-                };
-                let closing = match contents {
-                    "/i" => Some("i"),
-                    "/c" => Some("c"),
-                    _ => None,
-                };
-                if let Some(name) = opening {
-                    line.push_str(raw);
-                    open.push((name.to_string(), raw.to_string()));
-                    rest = &rest[end + 1..];
-                    continue;
-                }
-                if closing.is_some_and(|name| {
-                    open.last()
-                        .is_some_and(|(open_name, _)| open_name == name)
-                }) {
-                    line.push_str(raw);
-                    open.pop();
-                    rest = &rest[end + 1..];
-                    continue;
-                }
-            }
-        }
-        let character = rest.chars().next().expect("non-empty markup text");
-        line.push(character);
-        rest = &rest[character.len_utf8()..];
-    }
-    lines.push(line);
-    lines
-}
-
 fn scrollbar_max_pin(rect: IntRect) -> i32 {
     (rect.h - 3 * SCROLLBAR_EXTENT).max(0)
 }
@@ -4391,23 +4324,37 @@ mod tests {
 
     #[test]
     fn independently_drawn_wrapped_lobby_lines_close_and_reopen_markup() {
+        let fonts = endeavour_font_set();
+        let mut lobby = lobby(LobbyRole::Host, vec![]);
+        let mut layout = game_lobby_layout(
+            640,
+            300,
+            fonts.title.line_height,
+            fonts.text.line_height,
+            LobbyRole::Host,
+            false,
+            false,
+        );
+        layout.chat_log_client.w = fonts.text.measure("W", true).0;
+        lobby.set_logs(vec![LobbyLogLine {
+            text: "<c 123456>WWW</c>".into(),
+            color: COLOR_WHITE,
+        }]);
+
+        let wrapped = lobby.wrapped_chat_lines(&layout, &fonts.text);
         assert_eq!(
-            lobby_markup_lines("<c 123456>sender <i>long\ncontinuation</i></c>"),
-            vec![
-                "<c 123456>sender <i>long</i></c>",
-                "<c 123456><i>continuation</i></c>",
-            ]
+            wrapped
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            ["<c 123456>W</c>", "<c 123456>WW</c>"]
         );
         assert_eq!(
-            lobby_markup_lines("<c RED>literal\ncontinuation"),
-            vec!["<c RED>literal", "continuation"]
-        );
-        assert_eq!(
-            lobby_markup_lines("<c ff><i>x</c>\ny"),
-            vec![
-                "<c ff><i>x</c></i></c>",
-                "<c ff><i>y",
-            ]
+            wrapped
+                .iter()
+                .map(|line| line.new_paragraph)
+                .collect::<Vec<_>>(),
+            [true, false]
         );
     }
 

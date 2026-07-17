@@ -617,6 +617,27 @@ pub fn draw_clipped_text(
     gamma: Option<&GammaRamp>,
     clip: IntRect,
 ) {
+    draw_clipped_text_with_markup(
+        surface, font, x, y, text, color, align, gamma, clip, true,
+    );
+}
+
+/// [`draw_clipped_text`] with the caller-selected `C4GUI::Label::fMarkup`
+/// mode. Text windows such as the license viewer deliberately draw literal
+/// markup separators even though their log buffer uses markup-aware wrapping.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_clipped_text_with_markup(
+    surface: &mut Surface,
+    font: &ClonkFont,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: [u8; 4],
+    align: TextAlign,
+    gamma: Option<&GammaRamp>,
+    clip: IntRect,
+    markup: bool,
+) {
     let cx0 = clip.x.max(0);
     let cy0 = clip.y.max(0);
     let cx1 = (clip.x + clip.w).min(surface.width() as i32);
@@ -641,7 +662,7 @@ pub fn draw_clipped_text(
         text,
         color,
         align,
-        true,
+        markup,
         gamma,
     );
     for target_y in 0..height {
@@ -839,6 +860,57 @@ mod tests {
         assert_ne!(surface.get_pixel(1, 1), surface.get_pixel(6, 1));
         assert_ne!(surface.get_pixel(1, 6), surface.get_pixel(6, 6));
         assert_eq!(surface.get_pixel(3, 3), Some(Color::opaque(200, 200, 200)));
+    }
+
+    #[test]
+    fn clipped_text_mode_can_draw_pipe_as_a_literal_character() {
+        let fonts = endeavour_font_set();
+        let font = &fonts.text;
+        let height = (font.line_height * 2).max(1) as u32;
+        let clip = IntRect {
+            x: 0,
+            y: 0,
+            w: 160,
+            h: height as i32,
+        };
+        let mut literal = Surface::new(160, height, PixelFormat::Rgba8888);
+        draw_clipped_text_with_markup(
+            &mut literal,
+            font,
+            0,
+            0,
+            "A|B",
+            [255, 255, 255, 255],
+            TextAlign::Left,
+            None,
+            clip,
+            false,
+        );
+        let mut markup = Surface::new(160, height, PixelFormat::Rgba8888);
+        draw_clipped_text_with_markup(
+            &mut markup,
+            font,
+            0,
+            0,
+            "A|B",
+            [255, 255, 255, 255],
+            TextAlign::Left,
+            None,
+            clip,
+            true,
+        );
+
+        let continuation_has_ink = |surface: &Surface| {
+            (font.line_height.max(0) as u32..height).any(|y| {
+                (0..surface.width()).any(|x| {
+                    surface
+                        .get_pixel(x, y)
+                        .is_some_and(|pixel| pixel.a != 0)
+                })
+            })
+        };
+        assert!(!continuation_has_ink(&literal));
+        assert!(continuation_has_ink(&markup));
     }
 
     // Structural equivalence guard for the extracted `Button::DrawElement`

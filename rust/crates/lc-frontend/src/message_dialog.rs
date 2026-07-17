@@ -10,8 +10,8 @@ use crate::hud::HudFont;
 use crate::{expand_hotkey_markup, ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use anyhow::Result;
 use lc_graphics::clonk_font::{
-    font_image_lookup_tag, inline_image_token, scaled_font_image_width, skip_markup_tag, ClonkFont,
-    FontImageProvider, TextAlign,
+    active_markup_fragments, font_image_lookup_tag, inline_image_token, scaled_font_image_width,
+    skip_markup_tag, ClonkFont, FontImageProvider, TextAlign,
 };
 use lc_graphics::{GammaRamp, Surface};
 use lc_gui::Rect as GuiRect;
@@ -1052,25 +1052,35 @@ fn validate_checkbox_sheet(name: &str, image: &ImageData) -> Result<()> {
 enum MessageToken {
     Text {
         raw: String,
-        width: i32,
+        width: f32,
         break_kind: Option<bool>,
         line_character: bool,
+        source_end: usize,
     },
-    HardBreak,
+    HardBreak {
+        delimiter: char,
+        source_end: usize,
+    },
 }
 
 impl MessageToken {
-    fn width(&self) -> i32 {
+    fn width(&self) -> f32 {
         match self {
             Self::Text { width, .. } => *width,
-            Self::HardBreak => 0,
+            Self::HardBreak { .. } => 0.0,
         }
     }
 
     fn break_kind(&self) -> Option<bool> {
         match self {
             Self::Text { break_kind, .. } => *break_kind,
-            Self::HardBreak => None,
+            Self::HardBreak { .. } => None,
+        }
+    }
+
+    fn source_end(&self) -> usize {
+        match self {
+            Self::Text { source_end, .. } | Self::HardBreak { source_end, .. } => *source_end,
         }
     }
 
@@ -1091,11 +1101,49 @@ impl MessageToken {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum MessageBreak {
+    Automatic,
+    Manual(char),
+}
+
+#[derive(Clone, Debug)]
+struct MessageSegment {
+    tokens: Vec<MessageToken>,
+    break_after: Option<MessageBreak>,
+}
+
+/// Optional `CStdFont::BreakMessage` parameters. Existing helpers use these
+/// defaults, matching C++'s `fZoom=1.0` and unlimited `maxLines=0`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BreakMessageOptions {
+    pub zoom: f32,
+    pub max_lines: usize,
+}
+
+impl Default for BreakMessageOptions {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            max_lines: 0,
+        }
+    }
+}
+
 /// `CStdFont::BreakMessage`'s character-level line breaking for ordinary GUI
-/// labels. Valid color/italic tags are widthless and their state naturally
-/// persists across the inserted newline in `ClonkFont::draw_with_gamma`.
+/// labels. Automatic wraps close and reopen active markup so each physical
+/// line is self-contained, while manual `\n` and `|` delimiters stay verbatim.
 pub fn break_message(font: &ClonkFont, text: &str, max_width: i32) -> String {
-    break_message_impl(font, text, max_width, None)
+    break_message_with_options(font, text, max_width, BreakMessageOptions::default())
+}
+
+pub fn break_message_with_options(
+    font: &ClonkFont,
+    text: &str,
+    max_width: i32,
+    options: BreakMessageOptions,
+) -> String {
+    break_message_impl(font, text, max_width, None, options)
 }
 
 /// [`CStdFont::BreakMessage`](../../../../src/StdFont.cpp) using the in-game
@@ -1104,15 +1152,16 @@ pub fn break_message(font: &ClonkFont, text: &str, max_width: i32) -> String {
 pub fn break_hud_message(font: &HudFont<'_>, text: &str, max_width: i32) -> String {
     break_message_in_units(
         text,
-        max_width.max(1),
+        max_width as f32,
+        0,
         |character| {
             if character >= ' ' {
-                font.character_advance(character)
+                font.character_advance(character) as f32
             } else {
-                0
+                0.0
             }
         },
-        |_| 0,
+        |_| 0.0,
     )
 }
 
@@ -1122,7 +1171,23 @@ pub fn break_message_with_images(
     max_width: i32,
     images: &dyn FontImageProvider,
 ) -> String {
-    break_message_impl(font, text, max_width, Some(images))
+    break_message_with_images_and_options(
+        font,
+        text,
+        max_width,
+        images,
+        BreakMessageOptions::default(),
+    )
+}
+
+pub fn break_message_with_images_and_options(
+    font: &ClonkFont,
+    text: &str,
+    max_width: i32,
+    images: &dyn FontImageProvider,
+    options: BreakMessageOptions,
+) -> String {
+    break_message_impl(font, text, max_width, Some(images), options)
 }
 
 fn break_message_impl(
@@ -1130,15 +1195,25 @@ fn break_message_impl(
     text: &str,
     max_width: i32,
     images: Option<&dyn FontImageProvider>,
+    options: BreakMessageOptions,
 ) -> String {
     break_message_in_units(
         text,
-        max_width.max(1),
-        |character| font.message_character_advance(character),
+        max_width as f32,
+        options.max_lines,
+        |character| {
+            if character >= ' ' {
+                let advance = font.message_character_advance(character);
+                options.zoom * (advance - font.h_space) as f32 + font.h_space as f32
+            } else {
+                0.0
+            }
+        },
         |tag| {
             images
                 .and_then(|provider| provider.font_image(font_image_lookup_tag(tag)))
                 .map_or(0, |image| scaled_font_image_width(font.cell_height, image))
+                as f32
         },
     )
 }
@@ -1147,7 +1222,16 @@ fn break_message_impl(
 /// numerator units until the comparison against the GUI-unit width, matching
 /// C++'s float accumulation without prematurely truncating each glyph.
 pub fn break_native_message(font: &NativeClonkFont, text: &str, max_width: i32) -> String {
-    break_native_message_impl(font, text, max_width, None)
+    break_native_message_with_options(font, text, max_width, BreakMessageOptions::default())
+}
+
+pub fn break_native_message_with_options(
+    font: &NativeClonkFont,
+    text: &str,
+    max_width: i32,
+    options: BreakMessageOptions,
+) -> String {
+    break_native_message_impl(font, text, max_width, None, options)
 }
 
 pub fn break_native_message_with_images(
@@ -1156,7 +1240,23 @@ pub fn break_native_message_with_images(
     max_width: i32,
     images: &dyn FontImageProvider,
 ) -> String {
-    break_native_message_impl(font, text, max_width, Some(images))
+    break_native_message_with_images_and_options(
+        font,
+        text,
+        max_width,
+        images,
+        BreakMessageOptions::default(),
+    )
+}
+
+pub fn break_native_message_with_images_and_options(
+    font: &NativeClonkFont,
+    text: &str,
+    max_width: i32,
+    images: &dyn FontImageProvider,
+    options: BreakMessageOptions,
+) -> String {
+    break_native_message_impl(font, text, max_width, Some(images), options)
 }
 
 fn break_native_message_impl(
@@ -1164,36 +1264,48 @@ fn break_native_message_impl(
     text: &str,
     max_width: i32,
     images: Option<&dyn FontImageProvider>,
+    options: BreakMessageOptions,
 ) -> String {
     let units_per_pixel = font.message_width_units_per_gui_pixel();
-    let max_width_units = max_width.max(1).saturating_mul(units_per_pixel);
+    let max_width_units = max_width.saturating_mul(units_per_pixel);
+    let spacing_units = -units_per_pixel;
     break_message_in_units(
         text,
-        max_width_units,
-        |character| font.message_character_advance_units(character),
+        max_width_units as f32,
+        options.max_lines,
+        |character| {
+            if character < ' ' {
+                return 0.0;
+            }
+            let advance = font.message_character_advance_units(character);
+            options.zoom * (advance - spacing_units) as f32 + spacing_units as f32
+        },
         |tag| {
             images
                 .and_then(|provider| provider.font_image(font_image_lookup_tag(tag)))
-                .map_or(0, |image| font.message_image_advance_units(image))
+                .map_or(0, |image| font.message_image_advance_units(image)) as f32
         },
     )
 }
 
 fn break_message_in_units(
     text: &str,
-    max_width: i32,
-    mut character_width: impl FnMut(char) -> i32,
-    mut image_width: impl FnMut(&str) -> i32,
+    max_width: f32,
+    max_lines: usize,
+    mut character_width: impl FnMut(char) -> f32,
+    mut image_width: impl FnMut(&str) -> f32,
 ) -> String {
     let mut tokens = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
+        let source_start = text.len() - rest.len();
         if let Some(advance) = skip_markup_tag(rest) {
             tokens.push(MessageToken::Text {
                 raw: rest[..advance].to_string(),
-                width: 0,
+                width: 0.0,
                 break_kind: None,
                 line_character: false,
+                source_end: source_start + advance,
             });
             rest = &rest[advance..];
             continue;
@@ -1204,6 +1316,7 @@ fn break_message_in_units(
                 width: image_width(tag),
                 break_kind: None,
                 line_character: true,
+                source_end: source_start + advance,
             });
             rest = &rest[advance..];
             continue;
@@ -1211,7 +1324,10 @@ fn break_message_in_units(
         let character = rest.chars().next().expect("non-empty message");
         rest = &rest[character.len_utf8()..];
         if character == '\n' || character == '|' {
-            tokens.push(MessageToken::HardBreak);
+            tokens.push(MessageToken::HardBreak {
+                delimiter: character,
+                source_end: source_start + character.len_utf8(),
+            });
             continue;
         }
         let width = character_width(character);
@@ -1227,22 +1343,42 @@ fn break_message_in_units(
             width,
             break_kind,
             line_character: true,
+            source_end: source_start + character.len_utf8(),
         });
     }
 
-    let mut lines: Vec<Vec<MessageToken>> = Vec::new();
+    let mut segments = Vec::new();
     let mut line = Vec::new();
-    let mut line_width = 0_i32;
+    let mut line_width = 0.0_f32;
     let mut last_break: Option<(usize, bool)> = None;
+    let mut last_emergency_break = 0_usize;
     let mut first_line_character = true;
+    let mut breaks_seen = 0_usize;
+    let mut early_tail = None;
     for token in tokens {
-        if matches!(token, MessageToken::HardBreak) {
-            lines.push(std::mem::take(&mut line));
-            line_width = 0;
-            last_break = None;
-            first_line_character = true;
-            continue;
-        }
+        let token = match token {
+            MessageToken::HardBreak {
+                delimiter,
+                source_end,
+            } => {
+                segments.push(MessageSegment {
+                    tokens: std::mem::take(&mut line),
+                    break_after: Some(MessageBreak::Manual(delimiter)),
+                });
+                breaks_seen += 1;
+                if max_lines != 0 && breaks_seen == max_lines {
+                    early_tail = Some(text[source_end..].to_string());
+                    break;
+                }
+                line_width = 0.0;
+                last_break = None;
+                last_emergency_break = 0;
+                first_line_character = true;
+                continue;
+            }
+            token => token,
+        };
+        let source_end = token.source_end();
         let width = token.width();
         let token_break = token.break_kind();
         let line_character = token.is_line_character();
@@ -1250,12 +1386,13 @@ fn break_message_in_units(
         if !line_character {
             continue;
         }
-        line_width = line_width.saturating_add(width);
+        line_width += width;
         let was_first_line_character = first_line_character;
         if line_width <= max_width || was_first_line_character {
             if let Some(include) = token_break {
                 last_break = Some((line.len() - 1, include || was_first_line_character));
             }
+            last_emergency_break = line.len();
             first_line_character = false;
             continue;
         }
@@ -1270,34 +1407,62 @@ fn break_message_in_units(
                 (index, 1)
             }
         } else {
-            (line.len() - 1, 0)
+            (last_emergency_break, 0)
         };
         let mut remainder = line.split_off(split_at);
         if skip > 0 && !remainder.is_empty() {
             remainder.remove(0);
         }
-        lines.push(std::mem::take(&mut line));
+        segments.push(MessageSegment {
+            tokens: std::mem::take(&mut line),
+            break_after: Some(MessageBreak::Automatic),
+        });
+        breaks_seen += 1;
+        if max_lines != 0 && breaks_seen == max_lines {
+            let mut tail = String::new();
+            for token in &remainder {
+                token.append_to(&mut tail);
+            }
+            tail.push_str(&text[source_end..]);
+            early_tail = Some(tail);
+            break;
+        }
         line = remainder;
-        line_width = line
-            .iter()
-            .fold(0_i32, |sum, token| sum.saturating_add(token.width()));
+        line_width = line.iter().fold(0.0_f32, |sum, token| sum + token.width());
         // `CStdFont::BreakMessage` deliberately resets both the normal break
         // candidate and its first-character flag after an automatic split,
         // even when already-scanned remainder text occupies the new line.
         // Consequently the next scanned character is admitted regardless of
         // width and old spaces in the remainder are not reused as candidates.
         last_break = None;
+        last_emergency_break = 0;
         first_line_character = true;
     }
-    lines.push(line);
+    if early_tail.is_none() {
+        segments.push(MessageSegment {
+            tokens: line,
+            break_after: None,
+        });
+    }
     let mut output = String::new();
-    for (line_index, line) in lines.iter().enumerate() {
-        if line_index > 0 {
-            output.push('\n');
-        }
-        for token in line {
+    for segment in segments {
+        for token in &segment.tokens {
             token.append_to(&mut output);
         }
+        match segment.break_after {
+            Some(MessageBreak::Automatic) => {
+                let current_line = output.rsplit('\n').next().unwrap_or(&output);
+                let (closing, reopening) = active_markup_fragments(current_line);
+                output.push_str(&closing);
+                output.push('\n');
+                output.push_str(&reopening);
+            }
+            Some(MessageBreak::Manual(delimiter)) => output.push(delimiter),
+            None => {}
+        }
+    }
+    if let Some(tail) = early_tail {
+        output.push_str(&tail);
     }
     output
 }
@@ -1391,7 +1556,8 @@ mod tests {
 
         assert_eq!(layout.message_alignment, TextAlign::Center);
         assert_eq!(layout.message.w, 360);
-        assert!(layout.message_text.contains('\n'));
+        assert!(layout.message_text.contains('|'));
+        assert!(!layout.message_text.contains('\n'));
     }
 
     #[test]
@@ -1686,6 +1852,103 @@ mod tests {
                 .lines()
                 .all(|line| font.measure(line, true).0 <= 5),
             "every broken line fits when measured with the rendered fallback"
+        );
+    }
+
+    #[test]
+    fn break_message_matches_cpp_output_contract() {
+        let mut font = ClonkFont::new(3);
+        font.h_space = 0;
+        font.add_glyph(
+            'W',
+            lc_graphics::clonk_font::GlyphCell {
+                width: 1,
+                pixels: vec![Color::opaque(255, 255, 255); 4],
+            },
+        );
+
+        assert_eq!(break_message(&font, "WWWW", 1), "W\nWW\nW");
+        assert_eq!(
+            break_message_with_options(
+                &font,
+                "WWWW",
+                1,
+                BreakMessageOptions {
+                    max_lines: 1,
+                    ..BreakMessageOptions::default()
+                },
+            ),
+            "W\nWWW",
+            "the suffix after the first break stays untouched"
+        );
+        assert_eq!(
+            break_message(&font, "<c ff0000>WWW</c>", 1),
+            "<c ff0000>W</c>\n<c ff0000>WW</c>"
+        );
+        assert_eq!(
+            break_message(&font, "W<i>W</i>", 1),
+            "W\n<i>W</i>",
+            "markup skipped immediately before overflow moves to the continuation"
+        );
+        assert_eq!(
+            break_message(&font, "<c RED>WW", 1),
+            "<c RED>W\nW",
+            "skip-mode markup can be widthless without entering the strict reopen stack"
+        );
+        assert_eq!(
+            break_message_with_options(
+                &font,
+                "W|WWWW",
+                1,
+                BreakMessageOptions {
+                    max_lines: 1,
+                    ..BreakMessageOptions::default()
+                },
+            ),
+            "W|WWWW",
+            "a manual break also exhausts max_lines before the untouched suffix"
+        );
+        assert_eq!(break_message(&font, "left|right", i32::MAX), "left|right");
+        assert_eq!(break_message(&font, "left\nright", i32::MAX), "left\nright");
+    }
+
+    #[test]
+    fn break_message_zoom_scales_glyphs_but_not_spacing() {
+        let mut font = ClonkFont::new(3);
+        font.h_space = 0;
+        font.add_glyph(
+            'W',
+            lc_graphics::clonk_font::GlyphCell {
+                width: 2,
+                pixels: vec![Color::opaque(255, 255, 255); 8],
+            },
+        );
+
+        assert_eq!(break_message(&font, "WW", 2), "W\nW");
+        assert_eq!(
+            break_message_with_options(
+                &font,
+                "WW",
+                2,
+                BreakMessageOptions {
+                    zoom: 0.5,
+                    ..BreakMessageOptions::default()
+                },
+            ),
+            "WW"
+        );
+        assert_eq!(
+            break_message_with_options(
+                &font,
+                "WW",
+                0,
+                BreakMessageOptions {
+                    zoom: 0.5,
+                    ..BreakMessageOptions::default()
+                },
+            ),
+            "W\nW",
+            "BreakMessage does not clamp a zero-width output area"
         );
     }
 
