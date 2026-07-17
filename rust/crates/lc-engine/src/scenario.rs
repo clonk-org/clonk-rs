@@ -11843,7 +11843,13 @@ fn collect_definitions_from_group<S: AsRef<str>>(
             Err(error) => return Err(error.into()),
         };
         if let Some(core) = core {
-            if !skip_ids.contains(&core.id.to_ascii_uppercase()) {
+            if !core.has_valid_id() {
+                tracing::warn!(
+                    id = %core.id,
+                    path = %group.root().display(),
+                    "skipping definition with invalid C4ID"
+                );
+            } else if !skip_ids.contains(&core.id.to_ascii_uppercase()) {
                 match ResourceDefinitionData::load_with_languages(group, languages) {
                     Ok(resource) => {
                         primary_definition = true;
@@ -20035,6 +20041,53 @@ public func ActualizePhase(pClonk)
         for object in &crew {
             assert_eq!(object.definition_id, "GOOD");
         }
+    }
+
+    #[test]
+    fn definition_collection_truncates_and_skips_invalid_c4ids() {
+        fn write_definition(path: &Path, id: &str) {
+            std::fs::create_dir_all(path).expect("definition directory");
+            std::fs::write(
+                path.join("DefCore.txt"),
+                format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n"),
+            )
+            .expect("write DefCore");
+            std::fs::write(path.join("Script.c"), "// definition\n").expect("write script");
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("Defs.c4d");
+        write_definition(&root.join("Lowercase.c4d"), "Clonk");
+        std::fs::write(
+            root.join("Lowercase.c4d/ActMap.txt"),
+            "not an action map",
+        )
+        .expect("write malformed skipped ActMap");
+        write_definition(&root.join("Lowercase.c4d/Child.c4d"), "CHLD");
+        write_definition(&root.join("Long.c4d"), "CLONKX");
+        write_definition(&root.join("Numeric.c4d"), "1337");
+        write_definition(&root.join("Zero.c4d"), "0000");
+        write_definition(&root.join("Hud.c4d"), "3HUD");
+
+        let group = Group::open(&root).expect("definition root opens");
+        let mut collected = Vec::new();
+        collect_definitions_from_group(
+            &group,
+            false,
+            &HashSet::new(),
+            &["US"],
+            &mut collected,
+        )
+        .expect("invalid IDs skip without aborting the definition tree");
+        let mut ids = collected
+            .into_iter()
+            .filter_map(|item| match item {
+                CollectedDefinition::Definition(definition) => Some(definition.id),
+                CollectedDefinition::SystemScripts(_) => None,
+            })
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, ["1337", "3HUD", "CHLD", "CLON"]);
     }
 
     #[test]

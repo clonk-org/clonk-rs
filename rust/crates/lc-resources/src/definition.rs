@@ -662,6 +662,20 @@ impl DefCore {
 
         Ok(core)
     }
+
+    /// `LooksLikeID(C4ID)` after C4IDAdapt has compiled the four-byte token.
+    pub fn has_valid_id(&self) -> bool {
+        let bytes = self.id.as_bytes();
+        if bytes.len() != 4 || self.id == "NONE" {
+            return false;
+        }
+        if bytes.iter().all(u8::is_ascii_digit) {
+            return bytes != b"0000";
+        }
+        bytes
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+    }
 }
 
 /// Combined script sources originating from a definition group.
@@ -866,6 +880,18 @@ pub enum DefinitionError {
     Resources(#[from] GroupError),
 }
 
+/// C4IDAdapt reads a fixed four-byte `RCT_ID` buffer. Identifier input may
+/// contain lowercase letters and `-`; `LooksLikeID` validates the packed
+/// result separately after this truncating read.
+fn parse_c4_id_token(value: &str) -> String {
+    value
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        .take(4)
+        .map(char::from)
+        .collect()
+}
+
 fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let text = String::from_utf8_lossy(bytes);
     let mut current_section: Option<String> = None;
@@ -1020,7 +1046,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         match key.to_ascii_lowercase().as_str() {
             "id" => {
                 if !value.is_empty() {
-                    id = Some(value.to_string());
+                    id = Some(parse_c4_id_token(value));
                 }
             }
             "version" => {
@@ -3489,6 +3515,25 @@ Entrance=1,2,,4
             checked += expected.len();
         }
         assert_eq!(checked, 75, "recursive shipped portrait census changed");
+    }
+
+    #[test]
+    fn defcore_id_uses_c4id_adapt_truncation_and_looks_like_id() {
+        for (source, expected, valid) in [
+            ("Clonk", "Clon", false),
+            ("CLONKX", "CLON", true),
+            ("1337", "1337", true),
+            ("0000", "0000", false),
+            ("3HUD", "3HUD", true),
+            ("NONEfoo", "NONE", false),
+            ("CL.ON", "CL", false),
+            ("AB-C", "AB-C", false),
+        ] {
+            let core = parse_def_core(format!("[DefCore]\nid={source}\n").as_bytes())
+                .expect("DefCore parses");
+            assert_eq!(core.id, expected, "source {source}");
+            assert_eq!(core.has_valid_id(), valid, "source {source}");
+        }
     }
 
     #[test]

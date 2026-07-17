@@ -37065,58 +37065,84 @@ fn load_definitions_from_group(
     spawn_candidate: &mut Option<String>,
 ) -> Result<Option<NonNull<AudioContext>>, EngineError> {
     if group.exists("DefCore.txt") {
-        match ResourceDefinitionData::load(group) {
-            Ok(resource) => {
-                let id_normalized = resource.core.id.to_ascii_lowercase();
-                if seen.insert(id_normalized) {
-                    match Definition::from_resource(&resource) {
-                        Ok(definition) => match engine.register_definition(definition) {
-                            Ok(()) => {
-                                if resource.core.crew_member != 0 {
-                                    if spawn_candidate
-                                        .as_ref()
-                                        .map(|existing| existing.eq_ignore_ascii_case("Clonk"))
-                                        .unwrap_or(false)
-                                    {
-                                        // Clonk already selected; keep it.
-                                    } else if resource.core.id.eq_ignore_ascii_case("Clonk")
-                                        || spawn_candidate.is_none()
-                                    {
-                                        *spawn_candidate = Some(resource.core.id.clone());
-                                    }
-                                }
-                            }
-                            Err(EngineError::DefinitionAlreadyExists(_)) => {}
-                            Err(error) => {
-                                tracing::warn!(
-                                    definition = %resource.core.id,
-                                    error = ?error,
-                                    "failed to register install definition"
-                                );
-                            }
-                        },
-                        Err(error) => {
-                            tracing::warn!(
-                                definition = %resource.core.id,
-                                error = ?error,
-                                "failed to compile install definition script"
-                            );
-                        }
-                    }
-                    if let Some(mut ptr) = audio {
-                        unsafe {
-                            ptr.as_mut()
-                                .register_definition_sounds(&resource.core.id, group);
-                        }
+        let valid_id = match ResourceDefCore::load(group) {
+            Ok(core) if core.has_valid_id() => true,
+            Ok(core) => {
+                tracing::warn!(
+                    id = %core.id,
+                    group = %group.root().display(),
+                    "skipping install definition with invalid C4ID"
+                );
+                if let Some(mut ptr) = audio {
+                    unsafe {
+                        ptr.as_mut().register_definition_sounds(&core.id, group);
                     }
                 }
+                false
             }
             Err(error) => {
                 tracing::warn!(
                     error = %error,
                     group = %group.root().display(),
-                    "failed to load definition resources"
+                    "failed to load definition core"
                 );
+                false
+            }
+        };
+        if valid_id {
+            match ResourceDefinitionData::load(group) {
+                Ok(resource) => {
+                    let id_normalized = resource.core.id.to_ascii_lowercase();
+                    if seen.insert(id_normalized) {
+                        match Definition::from_resource(&resource) {
+                            Ok(definition) => match engine.register_definition(definition) {
+                                Ok(()) => {
+                                    if resource.core.crew_member != 0 {
+                                        if spawn_candidate
+                                            .as_ref()
+                                            .map(|existing| existing.eq_ignore_ascii_case("CLNK"))
+                                            .unwrap_or(false)
+                                        {
+                                            // Clonk already selected; keep it.
+                                        } else if resource.core.id.eq_ignore_ascii_case("CLNK")
+                                            || spawn_candidate.is_none()
+                                        {
+                                            *spawn_candidate = Some(resource.core.id.clone());
+                                        }
+                                    }
+                                }
+                                Err(EngineError::DefinitionAlreadyExists(_)) => {}
+                                Err(error) => {
+                                    tracing::warn!(
+                                        definition = %resource.core.id,
+                                        error = ?error,
+                                        "failed to register install definition"
+                                    );
+                                }
+                            },
+                            Err(error) => {
+                                tracing::warn!(
+                                    definition = %resource.core.id,
+                                    error = ?error,
+                                    "failed to compile install definition script"
+                                );
+                            }
+                        }
+                        if let Some(mut ptr) = audio {
+                            unsafe {
+                                ptr.as_mut()
+                                    .register_definition_sounds(&resource.core.id, group);
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        group = %group.root().display(),
+                        "failed to load definition resources"
+                    );
+                }
             }
         }
     }
@@ -37183,7 +37209,7 @@ fn configure_sandbox_engine(
         }
     }
 
-    let install_definition_id = "Clonk";
+    let install_definition_id = "CLNK";
     if let Some(resource_def) = try_load_install_definition(install_definition_id) {
         match Definition::from_resource(&resource_def) {
             Ok(definition) => {
@@ -37285,7 +37311,7 @@ fn find_definition_in_group(
         let child = group.open_child(&entry.relative_path)?;
         match ResourceDefCore::load(&child) {
             Ok(core) => {
-                if core.id.eq_ignore_ascii_case(definition_id) {
+                if core.has_valid_id() && core.id.eq_ignore_ascii_case(definition_id) {
                     let definition = ResourceDefinitionData::load(&child)?;
                     return Ok(Some(definition));
                 }
@@ -84262,7 +84288,7 @@ protected func InputCallback(string answer, int player)
         fs::create_dir_all(&objects_dir).unwrap();
         fs::write(
             objects_dir.join("DefCore.txt"),
-            "[DefCore]\nid=Clonk\nName=Clonk\nCategory=1\nCrewMember=1\nValue=100\nMass=40\n",
+            "[DefCore]\nid=CLNK\nName=Clonk\nCategory=1\nCrewMember=1\nValue=100\nMass=40\n",
         )
         .unwrap();
         fs::write(objects_dir.join("Script.c"), walker_script()).unwrap();
@@ -84339,10 +84365,34 @@ protected func InputCallback(string answer, int player)
         fs::create_dir_all(&objects_dir).unwrap();
         fs::write(
             objects_dir.join("DefCore.txt"),
-            "[DefCore]\nid=Clonk\nName=Clonk\nCategory=1\nCrewMember=1\nValue=100\nMass=40\n",
+            "[DefCore]\nid=Clonk\nName=Invalid\nCategory=1\nCrewMember=1\nValue=100\nMass=40\n",
         )
         .unwrap();
         fs::write(objects_dir.join("Script.c"), walker_script()).unwrap();
+        let long_id = planet_dir.join("objects.c4d").join("clone.c4d");
+        fs::create_dir_all(&long_id).unwrap();
+        fs::write(
+            long_id.join("DefCore.txt"),
+            "[DefCore]\nid=WIPFEX\nName=Wipf\nCategory=1\nCrewMember=1\nValue=100\nMass=40\n",
+        )
+        .unwrap();
+        fs::write(long_id.join("Script.c"), walker_script()).unwrap();
+        let zero_id = planet_dir.join("objects.c4d").join("zero.c4d");
+        fs::create_dir_all(&zero_id).unwrap();
+        fs::write(
+            zero_id.join("DefCore.txt"),
+            "[DefCore]\nid=0000\nName=Zero\nCategory=1\nCrewMember=1\nValue=100\nMass=40\n",
+        )
+        .unwrap();
+        fs::write(zero_id.join("ActMap.txt"), "not an action map").unwrap();
+        let canonical = planet_dir.join("objects.c4d").join("canonical.c4d");
+        fs::create_dir_all(&canonical).unwrap();
+        fs::write(
+            canonical.join("DefCore.txt"),
+            "[DefCore]\nid=CLNK\nName=Clonk\nCategory=1\nCrewMember=1\nValue=100\nMass=40\n",
+        )
+        .unwrap();
+        fs::write(canonical.join("Script.c"), walker_script()).unwrap();
 
         let user_dir = install_dir.path().join("user-data");
         fs::create_dir_all(&user_dir).unwrap();
@@ -84356,12 +84406,34 @@ protected func InputCallback(string answer, int player)
         let mut engine = Engine::new();
         let spawn =
             load_install_definitions(&mut engine, &paths, None).expect("load install definitions");
-        assert_eq!(spawn.as_deref(), Some("Clonk"));
+        assert_eq!(spawn.as_deref(), Some("CLNK"));
         assert!(
             engine
                 .definition_ids()
-                .any(|id| id.eq_ignore_ascii_case("Clonk")),
+                .any(|id| id == "CLNK"),
             "expected Clonk definition to be registered"
+        );
+        assert!(engine.definition_ids().any(|id| id == "WIPF"));
+        assert!(!engine.definition_ids().any(|id| id == "Clon"));
+
+        let objects_group = Group::open(planet_dir.join("objects.c4d")).unwrap();
+        assert!(
+            find_definition_in_group(&objects_group, "Clon")
+                .expect("lowercase ID lookup skips")
+                .is_none()
+        );
+        assert!(
+            find_definition_in_group(&objects_group, "0000")
+                .expect("invalid lookup skips")
+                .is_none()
+        );
+        assert_eq!(
+            find_definition_in_group(&objects_group, "WIPF")
+                .expect("truncated lookup succeeds")
+                .expect("WIPF exists")
+                .core
+                .id,
+            "WIPF"
         );
 
         reset_cached_app_paths();
