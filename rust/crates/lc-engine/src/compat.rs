@@ -67,6 +67,41 @@ thread_local! {
         RefCell::new(None)
     };
     static AUDIO_CONTEXT: RefCell<Option<AudioRegistry>> = const { RefCell::new(None) };
+    // GetFairCrewPhysical runs while an object physical is being resolved.
+    // Keep the definition-only GetID/GetPhysical surfaces available without
+    // recursively borrowing the active object host context.
+    static FAIR_CREW_DEFINITION_CONTEXT: RefCell<Option<(DefinitionId, PhysicalInfo)>> =
+        const { RefCell::new(None) };
+}
+
+struct FairCrewDefinitionContextGuard;
+
+impl Drop for FairCrewDefinitionContextGuard {
+    fn drop(&mut self) {
+        FAIR_CREW_DEFINITION_CONTEXT.with(|cell| {
+            cell.borrow_mut().take();
+        });
+    }
+}
+
+pub(crate) fn with_fair_crew_definition_context<T>(
+    definition: DefinitionId,
+    physical: PhysicalInfo,
+    call: impl FnOnce() -> T,
+) -> T {
+    FAIR_CREW_DEFINITION_CONTEXT.with(|cell| {
+        assert!(
+            cell.borrow().is_none(),
+            "nested fair-crew definition contexts are not supported"
+        );
+        *cell.borrow_mut() = Some((definition, physical));
+    });
+    let _guard = FairCrewDefinitionContextGuard;
+    call()
+}
+
+fn fair_crew_definition_context() -> Option<(DefinitionId, PhysicalInfo)> {
+    FAIR_CREW_DEFINITION_CONTEXT.with(|cell| cell.borrow().clone())
 }
 
 /// Private VM marker used to lift the unmodeled network side of
@@ -1730,6 +1765,8 @@ pub struct HostWorldContext {
     /// distinct from an empty custom table: absent definitions fall back to
     /// the game-global rank system during `C4Object::Promote`.
     definition_rank_names: Rc<HashMap<DefinitionId, Vec<String>>>,
+    /// `C4RankSystem::Base` paired with each custom definition rank table.
+    definition_rank_bases: Rc<HashMap<DefinitionId, i32>>,
     /// Runtime `Game.Defs` order after C4DefList::SortByID. Definition-indexing
     /// APIs must never observe the nondeterministic order of `definitions`.
     definition_order: Rc<Vec<DefinitionId>>,
@@ -1920,6 +1957,7 @@ impl Default for HostWorldContext {
             no_sell_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_rank_names: Rc::new(HashMap::new()),
+            definition_rank_bases: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors: RefCell::new(None),
             transfer_zones: Rc::new(Vec::new()),
@@ -2168,6 +2206,7 @@ impl HostWorldContext {
             no_sell_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_rank_names: Rc::new(HashMap::new()),
+            definition_rank_bases: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors,
             transfer_zones: Rc::new(transfer_zones),
@@ -2255,6 +2294,14 @@ impl HostWorldContext {
         names: HashMap<DefinitionId, Vec<String>>,
     ) -> Self {
         self.definition_rank_names = Rc::new(names);
+        self
+    }
+
+    pub(crate) fn with_definition_rank_bases(
+        mut self,
+        bases: HashMap<DefinitionId, i32>,
+    ) -> Self {
+        self.definition_rank_bases = Rc::new(bases);
         self
     }
 
@@ -3332,6 +3379,10 @@ impl HostWorldContext {
 
     pub(crate) fn definition_metadata(&self, id: &str) -> Option<&DefinitionMetadata> {
         self.definitions.get(id)
+    }
+
+    pub(crate) fn definition_rank_base(&self, id: &str) -> Option<i32> {
+        self.definition_rank_bases.get(id).copied()
     }
 
     pub(crate) fn definition_description(&self, id: &str) -> Option<&str> {
@@ -21741,6 +21792,19 @@ fn get_physical(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(name) = name else {
         return Ok(Value::Nil);
     };
+    if let Some((definition, physical)) = fair_crew_definition_context() {
+        // The native hook has no object context. An implicit object read is
+        // therefore nil; only its explicit definition form reads physicals.
+        // Resolve it here before the surrounding object GetPhysical borrow
+        // can recursively enter another fair-crew projection.
+        if target_id.is_some() || definition_id.as_deref() != Some(definition.as_str()) {
+            return Ok(Value::Nil);
+        }
+        return Ok(physical
+            .value_by_name(&name)
+            .map(Value::Int)
+            .unwrap_or(Value::Nil));
+    }
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -33935,6 +33999,13 @@ fn get_id(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut target_id: Option<ObjectId> = None;
     if let Some(arg) = args.first() {
         target_id = parse_object_reference_argument(arg, "GetID", "target")?;
+    }
+    if let Some((definition, _)) = fair_crew_definition_context() {
+        return Ok(if target_id.is_none() {
+            Value::C4Id(definition.as_str().to_string())
+        } else {
+            Value::Nil
+        });
     }
 
     HOST_CONTEXT.with(|cell| {
@@ -46718,6 +46789,9 @@ struct ObjectScopeContext {
     use_fair_crew: bool,
     fair_crew_strength: i32,
     info_definition_physical: Option<PhysicalInfo>,
+    info_definition_id: Option<DefinitionId>,
+    info_definition_rank_base: i32,
+    info_definition_script: Option<Arc<ScriptEngine>>,
     /// Live pObj->Info->Rank. Unlike `crew_member`, this distinguishes an
     /// object registered as crew from one that actually owns C4ObjectInfo.
     current_info_rank: Option<i32>,
@@ -46847,6 +46921,9 @@ impl ObjectScopeContext {
             use_fair_crew: false,
             fair_crew_strength: 1_000,
             info_definition_physical: None,
+            info_definition_id: None,
+            info_definition_rank_base: 1_000,
+            info_definition_script: None,
             current_info_rank: None,
             current_info_link: None,
             current_info_core: None,
@@ -46965,11 +47042,24 @@ impl ObjectScopeContext {
     fn configure_fair_crew(&mut self, world: &HostWorldContext) {
         self.use_fair_crew = world.use_fair_crew;
         self.fair_crew_strength = world.fair_crew_strength;
-        self.info_definition_physical = self
+        self.info_definition_id = self
             .current_info_core
             .as_ref()
-            .and_then(|info| world.definition_metadata(info.definition_id.as_str()))
+            .map(|info| info.definition_id.clone());
+        self.info_definition_physical = self
+            .info_definition_id
+            .as_ref()
+            .and_then(|id| world.definition_metadata(id.as_str()))
             .map(|metadata| metadata.physical);
+        self.info_definition_rank_base = self
+            .info_definition_id
+            .as_ref()
+            .and_then(|id| world.definition_rank_base(id.as_str()))
+            .unwrap_or(1_000);
+        self.info_definition_script = self
+            .info_definition_id
+            .as_ref()
+            .and_then(|id| world.definition_script(id.as_str()).cloned());
     }
 
     /// Real engine contexts carry the full info core. Legacy host fixtures
@@ -46994,7 +47084,23 @@ impl ObjectScopeContext {
                 .info_definition_physical
                 .unwrap_or(self.definition_physical);
             if self.use_fair_crew {
-                return crate::fair_crew_physical(info_definition, self.fair_crew_strength);
+                if let (Some(id), Some(script)) = (
+                    self.info_definition_id.as_ref(),
+                    self.info_definition_script.as_ref(),
+                ) {
+                    return crate::fair_crew_physical_with_script(
+                        info_definition,
+                        self.fair_crew_strength,
+                        self.info_definition_rank_base,
+                        id,
+                        script.as_ref(),
+                    );
+                }
+                return crate::fair_crew_physical(
+                    info_definition,
+                    self.fair_crew_strength,
+                    self.info_definition_rank_base,
+                );
             }
             return self.info_physical.unwrap_or(info_definition);
         }

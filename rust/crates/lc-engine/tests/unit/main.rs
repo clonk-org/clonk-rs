@@ -30520,6 +30520,105 @@ public func TrainTemporaryScale()
     }
 
     #[test]
+    fn fair_crew_uses_custom_rank_base_and_definition_script_override() {
+        let mut definition = Definition::from_script(
+            "RANK",
+            "Ranked crew",
+            r#"#strict
+protected func GetFairCrewPhysical(string name, int rank, &value)
+{
+    if (name eq "Magic")
+    {
+        value = GetPhysical("Magic", 0, 0, GetID()) + rank * 1000 + 7;
+        return true;
+    }
+    if (name eq "Breath")
+    {
+        if (GetPhysical("Magic")) value = 999;
+        else value = 123;
+        return true;
+    }
+    value = 777777;
+    return false;
+}
+public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), GetPhysical("Breath")]; }
+"#,
+        )
+        .expect("ranked crew compiles");
+        definition.set_crew_member(true);
+        definition.set_rank_system(Some(vec!["Recruit".to_string()]), Some(500));
+        definition.set_physical(PhysicalInfo {
+            magic: 45_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("ranked definition registers");
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("RANK".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(JoinPlayerConfig {
+                name: "Rank owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![player_file::CrewInfo {
+                    id: "RANK".to_string(),
+                    name: "Ranked".to_string(),
+                    death_message: String::new(),
+                    rank: 0,
+                    rank_name: "Recruit".to_string(),
+                    experience: 0,
+                    rounds: 0,
+                    physical: PhysicalInfo::default(),
+                    death_count: 0,
+                    total_playing_time: 0,
+                    birthday: 0,
+                    age: 0,
+                    participation: 1,
+                    in_action: false,
+                    was_in_action: false,
+                    in_action_time: 0,
+                    has_died: false,
+                    extra_data: Vec::new(),
+                    portraits: Default::default(),
+                }],
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("player joins");
+        let crew = engine.player(0).expect("player exists").crew()[0];
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+
+        engine.set_fair_crew_strength(500);
+        let physical = engine.object_physical(crew_index);
+        assert_eq!(physical.magic, 46_007);
+        assert_eq!(physical.energy, 55_000);
+        assert_eq!(physical.breath, 123);
+        assert_eq!(
+            engine
+                .call_object_function(crew_index, "ReadFair", Vec::new())
+                .expect("script reads custom fair physicals"),
+            Value::Array(vec![
+                Value::Int(46_007),
+                Value::Int(55_000),
+                Value::Int(123),
+            ])
+        );
+    }
+
+    #[test]
     fn engine_state_retains_forced_control_style_for_later_joins() {
         // Savegame restoration preserves C4S.Head, which remains the source
         // for C4Player::ApplyForcedControl on runtime joins

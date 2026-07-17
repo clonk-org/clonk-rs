@@ -7615,10 +7615,10 @@ impl Object {
 /// (C4AulExec.cpp:1318-1342). Non-script engine errors stay fatal.
 /// `C4RankSystem::RankByExperience` with the default curve
 /// Experience(rank) = rank^1.5 * RankBase(=1000) (C4RankSystem.cpp:226-237).
-fn fair_crew_rank(experience: i32) -> i32 {
+fn fair_crew_rank(experience: i32, rank_base: i32) -> i32 {
     let mut rank = 0;
     loop {
-        let next = ((rank + 1) as f64).powf(1.5) * 1000.0;
+        let next = ((rank + 1) as f64).powf(1.5) * f64::from(rank_base);
         if next as i32 <= experience {
             rank += 1;
         } else {
@@ -7698,9 +7698,94 @@ pub(crate) fn crew_info_physical(definition: PhysicalInfo, info_rank: i32) -> Ph
 
 /// `C4Def::GetFairCrewPhysicals` without its cache: deriving this on each
 /// read keeps the Rust projection tied to the live round parameters.
-pub(crate) fn fair_crew_physical(definition: PhysicalInfo, strength: i32) -> PhysicalInfo {
-    let rank = fair_crew_rank(strength);
+pub(crate) fn fair_crew_physical(
+    definition: PhysicalInfo,
+    strength: i32,
+    rank_base: i32,
+) -> PhysicalInfo {
+    let rank = fair_crew_rank(strength, rank_base);
     promotion_updated_physical(definition, rank, Some(definition))
+}
+
+const FAIR_CREW_PHYSICAL_NAMES: [&str; 21] = [
+    "Energy",
+    "Breath",
+    "Walk",
+    "Jump",
+    "Scale",
+    "Hangle",
+    "Dig",
+    "Swim",
+    "Throw",
+    "Push",
+    "Fight",
+    "Magic",
+    "Float",
+    "CanScale",
+    "CanHangle",
+    "CanDig",
+    "CanConstruct",
+    "CanChop",
+    "CanFly",
+    "CorrosionResist",
+    "BreatheWater",
+];
+
+/// C4PhysicalInfo::PromotionUpdate's definition callback. Every field is
+/// passed by reference after the numeric promotion; the callback's result is
+/// only the commit gate for the final reference value.
+fn apply_fair_crew_physical_script(
+    definition_physical: PhysicalInfo,
+    mut physical: PhysicalInfo,
+    rank: i32,
+    definition_id: &DefinitionId,
+    script: &ScriptEngine,
+) -> PhysicalInfo {
+    if !script.has_function("GetFairCrewPhysical") {
+        return physical;
+    }
+    compat::with_fair_crew_definition_context(
+        definition_id.clone(),
+        definition_physical,
+        || {
+            for name in FAIR_CREW_PHYSICAL_NAMES {
+                let current = physical.value_by_name(name).unwrap_or_default();
+                let args = [Value::from(name), Value::Int(rank), Value::Int(current)];
+                match script.call_with_ref_args("GetFairCrewPhysical", &args) {
+                    Ok((commit, final_args)) if compat::value_raw_truthy(&commit) => {
+                        let value = final_args
+                            .get(2)
+                            .and_then(Value::as_c4_int)
+                            .unwrap_or_default();
+                        physical.set_by_name(name, value);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            definition = %definition_id,
+                            function = "GetFairCrewPhysical",
+                            field = name,
+                            error = %error,
+                            "script error in fair-crew physical callback; retaining numeric value"
+                        );
+                    }
+                }
+            }
+            physical
+        }
+    )
+}
+
+fn fair_crew_physical_with_script(
+    definition: PhysicalInfo,
+    strength: i32,
+    rank_base: i32,
+    definition_id: &DefinitionId,
+    script: &ScriptEngine,
+) -> PhysicalInfo {
+    let rank = fair_crew_rank(strength, rank_base);
+    let numeric = promotion_updated_physical(definition, rank, Some(definition));
+    apply_fair_crew_physical_script(definition, numeric, rank, definition_id, script)
 }
 
 fn tolerate_script_error<T>(result: Result<T, EngineError>) -> Result<Option<T>, EngineError> {
@@ -9795,6 +9880,9 @@ pub struct Definition {
     /// Finite localized `C4Def::pRankNames` table used by Promote. This is
     /// independent of the rank-symbol strip and may be inherited.
     rank_names: Option<Vec<String>>,
+    /// `C4RankSystem::Base` paired with `rank_names`. Like the native
+    /// `pRankNames` pointer, an inherited rank table carries its curve.
+    rank_base: Option<i32>,
     rank_names_owned: bool,
     /// Base rank-cell count after localized extension cells are removed.
     rank_symbol_count: Option<u32>,
@@ -10079,6 +10167,7 @@ impl Definition {
             portrait_graphics: Vec::new(),
             rank_symbols_image: None,
             rank_names: None,
+            rank_base: None,
             rank_names_owned: false,
             rank_symbol_count: None,
             rank_symbols_owned: false,
@@ -10298,6 +10387,7 @@ impl Definition {
         self.includes_resolved = false;
         if !self.rank_names_owned {
             self.rank_names = None;
+            self.rank_base = None;
         }
         if !self.clonk_names_owned {
             self.clonk_names = None;
@@ -10323,6 +10413,7 @@ impl Definition {
         }
         if !self.rank_names_owned {
             self.rank_names = parent.rank_names.clone();
+            self.rank_base = parent.rank_base;
         }
         if !self.rank_symbols_owned {
             self.rank_symbols_image = parent.rank_symbols_image.clone();
@@ -10448,7 +10539,7 @@ impl Definition {
             definition
                 .set_rank_symbols_image(Some(DefinitionPictureImage::from_resource(image, None)));
         }
-        definition.set_rank_names(resource.rank_names.clone());
+        definition.set_rank_system(resource.rank_names.clone(), resource.rank_base);
         definition.set_rank_symbol_count(resource.rank_symbol_count);
         if let Some(image) = resource.graphics_image.as_ref() {
             let mask = resource.color_by_owner_mask.as_ref();
@@ -11138,8 +11229,21 @@ impl Definition {
     }
 
     pub fn set_rank_names(&mut self, names: Option<Vec<String>>) {
+        let base = names.as_ref().map(|_| 1_000);
+        self.set_rank_system(names, base);
+    }
+
+    pub fn rank_base(&self) -> Option<i32> {
+        self.rank_base
+    }
+
+    pub fn set_rank_system(&mut self, names: Option<Vec<String>>, rank_base: Option<i32>) {
         self.rank_names_owned = names.is_some();
         self.rank_names = names;
+        self.rank_base = self.rank_names.as_ref().map(|_| match rank_base {
+            Some(0) | None => 1_000,
+            Some(base) => base,
+        });
     }
 
     pub fn rank_symbol_count(&self) -> Option<u32> {
@@ -22565,6 +22669,14 @@ impl Engine {
                     definition
                         .rank_names()
                         .map(|names| (id.clone(), names.to_vec()))
+                })
+                .collect(),
+        )
+        .with_definition_rank_bases(
+            self.definitions
+                .iter()
+                .filter_map(|(id, definition)| {
+                    definition.rank_base().map(|base| (id.clone(), base))
                 })
                 .collect(),
         )
@@ -41597,6 +41709,25 @@ impl Engine {
             .or_else(|| Some(self.definition_physical(idx)))
     }
 
+    fn fair_crew_info_physical(&self, idx: usize, raw: PhysicalInfo) -> PhysicalInfo {
+        let object = &self.objects[idx];
+        let definition_id = self
+            .crew_object_infos
+            .get(&object.id)
+            .map(|info| &info.definition_id)
+            .unwrap_or(&object.definition_id);
+        let Some(definition) = self.definitions.get(definition_id) else {
+            return fair_crew_physical(raw, self.fair_crew_strength, 1_000);
+        };
+        fair_crew_physical_with_script(
+            raw,
+            self.fair_crew_strength,
+            definition.rank_base().unwrap_or(1_000),
+            definition_id,
+            definition.script.as_ref(),
+        )
+    }
+
     /// `C4Object::GetPhysical` (C4Object.cpp:2118-2134): the temporary set
     /// when temporary mode is on; otherwise an object carrying crew info
     /// resolves either its persistent info physicals or the definition's
@@ -41608,7 +41739,7 @@ impl Engine {
         let definition = self.definition_physical(idx);
         let permanent = match self.info_definition_physical(idx) {
             Some(info_definition) if self.use_fair_crew => {
-                fair_crew_physical(info_definition, self.fair_crew_strength)
+                self.fair_crew_info_physical(idx, info_definition)
             }
             Some(info_definition) => object.state.info_physical.unwrap_or(info_definition),
             None => definition,

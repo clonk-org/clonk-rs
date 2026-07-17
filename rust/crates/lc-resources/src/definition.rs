@@ -65,6 +65,11 @@ pub struct Definition {
     /// `None` means that no component was present or that C++ would reject it
     /// for containing no ordinary rank name.
     pub rank_names: Option<Vec<String>>,
+    /// Experience curve base from the selected definition rank component's
+    /// exact, case-sensitive `Base=` setting. Valid custom rank components
+    /// default to 1000, matching `C4RankSystem`; invalid or absent components
+    /// have no definition-local base.
+    pub rank_base: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -178,7 +183,9 @@ impl Definition {
             let phase_count = image.width() / image.height().max(1);
             (phase_count > 0).then(|| phase_count.saturating_sub(rank_extension_count).max(1))
         });
-        let rank_names = rank_name_table.map(|table| table.names);
+        let (rank_names, rank_base) = rank_name_table
+            .map(|table| (Some(table.names), Some(table.base)))
+            .unwrap_or((None, None));
 
         Ok(Self {
             core,
@@ -196,6 +203,7 @@ impl Definition {
             rank_symbols_image,
             rank_symbol_count,
             rank_names,
+            rank_base,
         })
     }
 
@@ -300,6 +308,7 @@ fn load_optional_entry_string<P: AsRef<Path>>(
 struct RankNameTable {
     names: Vec<String>,
     extension_count: u32,
+    base: i32,
 }
 
 /// Loads and resolves the selected definition rank component exactly in the
@@ -317,6 +326,7 @@ fn load_rank_name_table<S: AsRef<str>>(
     let text = decode_legacy_script_text(&component.bytes);
     let mut ordinary_names = Vec::new();
     let mut extensions = Vec::new();
+    let mut base = 1000;
     // The C++ loop only processes lines when it encounters CR or LF within
     // the component data; its appended trailing NUL lies outside that loop.
     // Consequently an unterminated final line is intentionally ignored.
@@ -331,6 +341,8 @@ fn load_rank_name_table<S: AsRef<str>>(
         };
         if let Some(extension) = line.strip_prefix('*') {
             extensions.push(extension.to_string());
+        } else if let Some(parsed_base) = parse_rank_base(line) {
+            base = parsed_base;
         } else if !line.starts_with('#') && !line.contains('=') {
             ordinary_names.push(line.to_string());
         }
@@ -356,7 +368,26 @@ fn load_rank_name_table<S: AsRef<str>>(
     Ok(Some(RankNameTable {
         names,
         extension_count,
+        base: if base == 0 { 1000 } else { base },
     }))
+}
+
+/// Parse the `%d` prefix accepted by C++ for an exact `Base=` rank setting.
+/// Leading ASCII whitespace and a sign are accepted; trailing bytes are
+/// ignored. A malformed value leaves the previously parsed base unchanged.
+fn parse_rank_base(line: &str) -> Option<i32> {
+    let value = line
+        .strip_prefix("Base=")?
+        .trim_start_matches(|character: char| character.is_ascii_whitespace());
+    let digits_start = usize::from(value.starts_with('+') || value.starts_with('-'));
+    let digit_count = value[digits_start..]
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
+    if digit_count == 0 {
+        return None;
+    }
+    value[..digits_start + digit_count].parse().ok()
 }
 
 /// The shipped rank extensions use the `fmt::sprintf(format, base_name)`
@@ -3872,6 +3903,63 @@ Entrance=1,2,,4
                 "100% Veteran".to_string(),
             ])
         );
+        assert_eq!(definition.rank_base, Some(500));
+    }
+
+    #[test]
+    fn custom_rank_base_matches_cpp_setting_parsing() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("RankBase.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=RBAS\n").expect("DefCore");
+
+        fs::write(
+            def_dir.join("RankUS.txt"),
+            b"Base=  +500suffix\r\nBase=invalid\r\nRecruit\r\nBase=250",
+        )
+        .expect("custom rank base");
+        let parsed = Definition::load_with_languages(
+            &Group::open(&def_dir).expect("open definition"),
+            &["US"],
+        )
+        .expect("load definition");
+        assert_eq!(
+            parsed.rank_base,
+            Some(500),
+            "scanf accepts a signed numeric prefix, malformed settings keep the prior value, and an unterminated line is ignored"
+        );
+
+        fs::write(
+            def_dir.join("RankUS.txt"),
+            b"Base=500\nBase=0trailing\nRecruit\n",
+        )
+        .expect("zero rank base");
+        let zero = Definition::load_with_languages(
+            &Group::open(&def_dir).expect("reopen definition"),
+            &["US"],
+        )
+        .expect("reload definition");
+        assert_eq!(
+            zero.rank_base,
+            Some(1000),
+            "C++ normalizes a final zero base to its global default"
+        );
+
+        fs::write(
+            def_dir.join("RankUS.txt"),
+            b"base=250\nBase =300\nRecruit\n",
+        )
+        .expect("non-matching rank settings");
+        let defaulted = Definition::load_with_languages(
+            &Group::open(&def_dir).expect("reopen definition"),
+            &["US"],
+        )
+        .expect("reload definition");
+        assert_eq!(
+            defaulted.rank_base,
+            Some(1000),
+            "the Base setting name and equals placement are exact"
+        );
     }
 
     #[test]
@@ -3900,6 +3988,7 @@ Entrance=1,2,,4
             "C4RankSystem rejects a component without ordinary rank names"
         );
         assert_eq!(invalid.rank_names, None);
+        assert_eq!(invalid.rank_base, None);
 
         let saturated_dir = temp.path().join("SaturatedRanks.c4d");
         fs::create_dir(&saturated_dir).expect("saturated definition directory");

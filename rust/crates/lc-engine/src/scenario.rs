@@ -161,6 +161,7 @@ struct ScenarioDefinition {
     /// Def rank symbols (C4Def::pRankSymbols, src/C4Def.cpp:684-691).
     rank_symbols_image: Option<GraphicsImage>,
     rank_names: Option<Vec<String>>,
+    rank_base: Option<i32>,
     rank_symbol_count: Option<u32>,
     resource_group: Option<Group>,
     resource_components: Option<ComponentGroups>,
@@ -3183,7 +3184,7 @@ impl Scenario {
                     .as_ref()
                     .map(|image| DefinitionPictureImage::from_resource(image, None)),
             );
-            compiled.set_rank_names(definition.rank_names.clone());
+            compiled.set_rank_system(definition.rank_names.clone(), definition.rank_base);
             compiled.set_rank_symbol_count(definition.rank_symbol_count);
             let sprite_image = definition.graphics_image.as_ref().map(|image| {
                 DefinitionSpriteImage::from_resource(image, definition.color_by_owner_mask.as_ref())
@@ -3523,6 +3524,7 @@ impl Scenario {
                     portrait_graphics: Vec::new(),
                     rank_symbols_image: None,
                     rank_names: None,
+                    rank_base: None,
                     rank_symbol_count: None,
                     resource_group: None,
                     resource_components: None,
@@ -12226,6 +12228,7 @@ fn scenario_definition_from_resource(
         portrait_graphics,
         rank_symbols_image,
         rank_names,
+        rank_base,
         rank_symbol_count,
     } = resource;
     let actions = action_map.map(|map| convert_action_map(&map));
@@ -12255,6 +12258,7 @@ fn scenario_definition_from_resource(
         portrait_graphics,
         rank_symbols_image,
         rank_names,
+        rank_base,
         rank_symbol_count,
         resource_group: source_group,
         resource_components: source_components,
@@ -16810,6 +16814,7 @@ global func Step(state, frame, random)
                 portrait_graphics: Vec::new(),
                 rank_symbols_image: None,
                 rank_names: None,
+                rank_base: None,
                 rank_symbol_count: None,
                 resource_group: None,
                 resource_components: None,
@@ -16938,6 +16943,7 @@ global func Step(state, frame, random)
                 portrait_graphics: Vec::new(),
                 rank_symbols_image: None,
                 rank_names: None,
+                rank_base: None,
                 rank_symbol_count: None,
                 resource_group: None,
                 resource_components: None,
