@@ -56102,6 +56102,137 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
     }
 
     #[test]
+    fn fully_off_landscape_solid_mask_put_still_restores_rider() {
+        fn plane_bytes(engine: &Engine) -> Vec<u8> {
+            let landscape = engine.landscape().expect("landscape remains");
+            let (width, height) = landscape.grid_dimensions().expect("grid mode");
+            (0..height)
+                .flat_map(|y| (0..width).map(move |x| landscape.grid_byte_at(x, y).unwrap()))
+                .collect()
+        }
+
+        // The platform starts with its one-pixel mask on the final landscape
+        // column, then moves onto the inclusive right boundary. C++ records
+        // that fully clipped put as MaskPut=true and therefore carries the
+        // backed-up rider even though no Vehicle pixel is written.
+        let mut platform = movement_mask_definition("EDGE", 1, -2);
+        platform.set_category(CATEGORY_OBJECT);
+        let mut rotated = movement_mask_definition("ROFF", 1, -2);
+        rotated.set_category(CATEGORY_OBJECT);
+        rotated.set_rotated_solid_masks(true);
+        let mut rider = simple_definition("RIDE");
+        rider.set_category(CATEGORY_OBJECT);
+        rider.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        rider.set_shape_vertices(vec![
+            ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM),
+        ]);
+        rider.set_contact_density(50);
+
+        let mut landscape = vehicle_grid_landscape(16, 20);
+        landscape.set_border_open(20, 20, true, false);
+        landscape.grid_write_byte(3, 3, 1);
+        let mut engine = Engine::with_seed(67);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(platform)
+            .expect("platform registers");
+        engine
+            .register_definition(rotated)
+            .expect("rotated mask registers");
+        engine.register_definition(rider).expect("rider registers");
+        let platform = engine
+            .spawn_object(
+                SpawnConfig::new("EDGE")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(15, 10))
+                    .with_fixed_position(FixedVec2::from_ints(15, 10))
+                    .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("platform spawns");
+        let platform_index = engine
+            .find_object_index(platform)
+            .expect("platform exists");
+        engine.update_solid_mask(platform_index);
+        let rider = engine
+            .spawn_object(
+                SpawnConfig::new("RIDE")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(15, 9))
+                    .with_fixed_position(FixedVec2::from_ints(15, 9))
+                    .with_loaded(true),
+            )
+            .expect("rider spawns");
+        assert_eq!(vehicle_pixels(&engine), vec![(15, 10)]);
+
+        engine.tick().expect("edge movement succeeds");
+
+        assert_eq!(
+            engine
+                .object_snapshot(platform)
+                .expect("platform remains on inclusive boundary")
+                .position,
+            Vector2::new(16, 10)
+        );
+        assert_eq!(
+            engine.object_snapshot(rider).expect("rider remains").position,
+            Vector2::new(16, 9),
+            "the empty put still restores the captured rider by the movement delta"
+        );
+        let platform_index = engine
+            .find_object_index(platform)
+            .expect("platform remains");
+        assert_eq!(
+            engine.debug_solid_mask_is_put(platform.as_u64()),
+            Some(true),
+            "the fully clipped mask remains explicitly put without raster data"
+        );
+        assert_eq!(engine.debug_solid_mask_buffer(platform.as_u64()), None);
+        assert!(vehicle_pixels(&engine).is_empty());
+
+        let plane_before_remove = plane_bytes(&engine);
+        engine.remove_solid_mask(platform_index);
+        let plane_after_remove = plane_bytes(&engine);
+        assert_eq!(
+            plane_after_remove, plane_before_remove,
+            "removing an empty put is a complete raster no-op"
+        );
+        assert_eq!(
+            engine.debug_solid_mask_is_put(platform.as_u64()),
+            Some(false)
+        );
+        assert_eq!(engine.debug_solid_mask_buffer(platform.as_u64()), None);
+
+        // Rotation has a separate clipping branch and must record the same
+        // logical put without attempting a negative-sized allocation.
+        let rotated = engine
+            .spawn_object(
+                SpawnConfig::new("ROFF")
+                    .with_position(Vector2::new(30, 10))
+                    .with_rotation(45)
+                    .with_loaded(true),
+            )
+            .expect("offscreen rotated mask spawns");
+        assert_eq!(
+            engine.debug_solid_mask_is_put(rotated.as_u64()),
+            Some(true)
+        );
+        assert_eq!(engine.debug_solid_mask_buffer(rotated.as_u64()), None);
+        let plane_before_remove = plane_bytes(&engine);
+        let rotated_index = engine
+            .find_object_index(rotated)
+            .expect("rotated mask remains");
+        engine.remove_solid_mask(rotated_index);
+        assert_eq!(plane_bytes(&engine), plane_before_remove);
+        assert_eq!(
+            engine.debug_solid_mask_is_put(rotated.as_u64()),
+            Some(false)
+        );
+    }
+
+    #[test]
     fn solid_mask_riders_restore_in_sector_shape_order() {
         // Native capture walks the expanded platform rect's ObjectShapes
         // lists sector by sector. A is in sector 0 and B in sector 1 even

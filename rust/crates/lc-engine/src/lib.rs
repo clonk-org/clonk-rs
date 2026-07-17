@@ -5932,6 +5932,11 @@ pub struct Object {
     /// The baked solid mask (grid worlds only; C4Object::pSolidMaskData).
     #[doc(hidden)]
     pub solid_mask_bake: Option<SolidMaskBake>,
+    /// C4SolidMask::MaskPut for an eligible mask whose landscape-clipped
+    /// rectangle is empty. Such a put has no raster bake, but it must remain
+    /// logically put so movement can restore riders and a later Remove can
+    /// clear the lifecycle state (C4SolidMask.cpp:75-79,176-195,231-262).
+    solid_mask_empty_put: bool,
     /// Construction order of the live C4SolidMask instance. This survives
     /// ordinary Remove/Put cycles (including fully off-landscape puts) and is
     /// cleared only when C++ would delete pSolidMaskData.
@@ -6086,6 +6091,7 @@ impl Object {
             frame_t_attach: 0,
             frame_t_contact: 0,
             solid_mask_bake: None,
+            solid_mask_empty_put: false,
             solid_mask_instance_sequence: None,
             state,
             upright_t_attach: 0,
@@ -43334,6 +43340,15 @@ impl Engine {
             .map(|bake| bake.buffer.clone())
     }
 
+    /// Debug/test helper: C4SolidMask::MaskPut state, including a fully
+    /// clipped put that has no raster buffer.
+    pub fn debug_solid_mask_is_put(&self, id: u64) -> Option<bool> {
+        self.objects
+            .iter()
+            .find(|object| object.id.as_u64() == id)
+            .map(|object| object.solid_mask_bake.is_some() || object.solid_mask_empty_put)
+    }
+
     /// The force-close/RejectContents lifecycle shared by the internal
     /// Activate/Get/Contents menus (C4Object.cpp:1884-1959).
     fn apply_container_menu_request(&mut self, request: MenuRequest) -> Result<(), EngineError> {
@@ -44688,7 +44703,10 @@ impl Engine {
         if self.defer_solid_mask_updates {
             return;
         }
-        if index >= self.objects.len() || self.objects[index].solid_mask_bake.is_some() {
+        if index >= self.objects.len()
+            || self.objects[index].solid_mask_bake.is_some()
+            || self.objects[index].solid_mask_empty_put
+        {
             return;
         }
         let Some(spec) = self.solid_mask_spec(index) else {
@@ -44731,7 +44749,10 @@ impl Engine {
         position: Vector2,
         instance_sequence: u64,
     ) {
-        if index >= self.objects.len() || self.objects[index].solid_mask_bake.is_some() {
+        if index >= self.objects.len()
+            || self.objects[index].solid_mask_bake.is_some()
+            || self.objects[index].solid_mask_empty_put
+        {
             return;
         }
         let Some(vehicle) = self
@@ -44783,6 +44804,10 @@ impl Engine {
         let width = (ox + mask.width).min(grid_width) - rect_x;
         let height = (oy + mask.height).min(grid_height) - rect_y;
         if width <= 0 || height <= 0 {
+            // Native stores MaskPut=true even when Wdt/Hgt are zero or
+            // negative; the raster loops are empty, but attachment restore
+            // still belongs to this successful regular Put.
+            self.objects[index].solid_mask_empty_put = true;
             return;
         }
         let mut bake = SolidMaskBake {
@@ -44859,9 +44884,7 @@ impl Engine {
             - mat_buff_pitch / 2;
         let ystart = position.y + fixtoi(-mb1 * itofix(center_x) + mb2 * itofix(center_y))
             - mat_buff_pitch / 2;
-        // Store put rect (C4SolidMask.cpp:119-128); like C++, a fully
-        // off-landscape mask puts nothing (the loop bounds go empty —
-        // here: no bake, so Remove is the same no-op).
+        // Store put rect (C4SolidMask.cpp:119-128).
         let mut rect_x = xstart;
         let mut tx = 0;
         if rect_x < 0 {
@@ -44877,6 +44900,7 @@ impl Engine {
         let width = (xstart + mat_buff_pitch).min(grid_width) - rect_x;
         let height = (ystart + mat_buff_pitch).min(grid_height) - rect_y;
         if width <= 0 || height <= 0 {
+            self.objects[index].solid_mask_empty_put = true;
             return;
         }
         let mut bake = SolidMaskBake {
@@ -44976,6 +45000,7 @@ impl Engine {
         }
         let Some(landscape) = self.landscape.as_mut() else {
             self.objects[index].solid_mask_bake.take();
+            self.objects[index].solid_mask_empty_put = false;
             return None;
         };
         let definitions = &self.definitions;
@@ -45015,7 +45040,13 @@ impl Engine {
         cause_instability: bool,
         backup_attachments: bool,
     ) -> Option<SolidMaskAttachmentBackup> {
-        let bake = mover.solid_mask_bake.take()?;
+        let empty_put = std::mem::take(&mut mover.solid_mask_empty_put);
+        let Some(bake) = mover.solid_mask_bake.take() else {
+            return (empty_put && backup_attachments).then(|| SolidMaskAttachmentBackup {
+                removal_position: mover.state.position,
+                object_ids: Vec::new(),
+            });
+        };
         let vehicle = landscape.grid_vehicle_byte()?;
         for cy in 0..bake.height {
             for cx in 0..bake.width {
@@ -45194,7 +45225,9 @@ impl Engine {
             if self.objects[index].destroyed || !self.objects[index].state.status.is_active() {
                 continue;
             }
-            if self.objects[index].solid_mask_bake.is_some() {
+            if self.objects[index].solid_mask_bake.is_some()
+                || self.objects[index].solid_mask_empty_put
+            {
                 self.remove_solid_mask_impl(index, false, false);
             }
         }
@@ -45357,8 +45390,9 @@ impl Engine {
             return;
         };
         // C++ restores only from Put; a removed/ineligible mover clears the
-        // backup without translating anything.
-        if mover.solid_mask_bake.is_none() {
+        // backup without translating anything. A fully clipped regular Put
+        // still sets MaskPut despite having no raster bake.
+        if mover.solid_mask_bake.is_none() && !mover.solid_mask_empty_put {
             return;
         }
         let dx = mover.state.position.x - backup.removal_position.x;
@@ -45481,6 +45515,7 @@ impl Engine {
     fn stage_materialized_spawn_solid_mask(&mut self, index: usize) {
         if !self.defer_solid_mask_updates
             || self.objects[index].solid_mask_bake.is_some()
+            || self.objects[index].solid_mask_empty_put
             || self.deferred_solid_mask_operations.iter().any(|operation| {
                 matches!(operation,
                     HostSolidMaskOperation::Put { object_id, .. }

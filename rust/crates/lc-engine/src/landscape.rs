@@ -9142,8 +9142,9 @@ func TransactionThenRaw()
     #[test]
     fn solid_mask_offscreen_instance_age_survives_until_eligibility_loss() {
         // C4SolidMask construction links the instance before Put clips it.
-        // A fully off-landscape eligible mask therefore has no raster bake
-        // but keeps its list age when it later moves on-screen.
+        // A fully off-landscape eligible mask therefore has no raster bake,
+        // but remains logically put and keeps its list age when it later
+        // moves on-screen.
         let mut definition =
             crate::Definition::from_script("MASK", "Mask", "").expect("definition compiles");
         definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
@@ -9161,6 +9162,7 @@ func TransactionThenRaw()
             .solid_mask_instance_sequence
             .expect("eligible offscreen instance was constructed");
         assert!(engine.objects[index].solid_mask_bake.is_none());
+        assert!(engine.objects[index].solid_mask_empty_put);
 
         engine.objects[index].set_position(Vector2::new(1, 1));
         engine.update_solid_mask(index);
@@ -9172,6 +9174,7 @@ func TransactionThenRaw()
                 .instance_sequence,
             offscreen_sequence
         );
+        assert!(!engine.objects[index].solid_mask_empty_put);
 
         engine.objects[index].state.container = Some(crate::ObjectId::new(999));
         engine.update_solid_mask(index);
