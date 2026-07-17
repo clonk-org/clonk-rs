@@ -6111,58 +6111,90 @@ impl LegacyScenarioCore {
         Ok(core)
     }
 
-    /// Applies a scenario-section core over the already loaded main core.
-    /// C4Scenario::Load(..., true) leaves fields absent from the section
-    /// untouched instead of reinstating their ordinary main-file defaults
-    /// (C4Game.cpp:4211-4223).
-    fn apply_section_overrides(
-        &mut self,
+    /// Compile a present section Scenario.txt with C4Scenario's `fSection`
+    /// field set. Named fields in the compiled subset receive their naming
+    /// defaults even when their whole INI section is absent; only the fields
+    /// omitted by the C++ section compiler retain the main core's values
+    /// (C4Scenario.cpp:120-134,164-204,221-257,441-445).
+    fn compile_section(
+        &self,
         sections: &HashMap<String, Vec<(String, String)>>,
-    ) -> Result<(), ScenarioError> {
+    ) -> Result<Self, ScenarioError> {
+        let mut core = LegacyScenarioCore::default();
+
+        // Head compiles only these four fields in section mode. The two
+        // forced-control defaults are statics captured from the main Head;
+        // every other Head value survives unchanged.
+        core.head = self.head.clone();
+        core.head.no_initialize = 0;
+        core.head.random_seed = 0;
         if let Some(entries) = sections.get("head") {
-            self.head.apply_entries(entries)?;
+            let retained_max_player_league = core.head.max_player_league;
+            let entries = entries
+                .iter()
+                .filter(|(key, _)| {
+                    [
+                        "NoInitialize",
+                        "RandomSeed",
+                        "ForcedAutoContextMenu",
+                        "ForcedAutoStopControl",
+                    ]
+                    .iter()
+                    .any(|allowed| key.eq_ignore_ascii_case(allowed))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            core.head.apply_entries(&entries)?;
+            // `LegacyHead::apply_entries` normally implements the main-file
+            // MaxPlayerLeague fallback. That field is not compiled at all in
+            // section mode, so preserve the already-loaded main value.
+            core.head.max_player_league = retained_max_player_league;
         }
-        if let Some(entries) = sections.get("definitions") {
-            self.definitions.apply_entries(entries)?;
-        }
+
+        // Definitions and ValueOverloads are not visited by the section
+        // compiler at all.
+        core.definitions = self.definitions.clone();
+        core.game.realism.value_overloads = self.game.realism.value_overloads.clone();
+        // This compiler default differs from C4SRealism::Default().
+        core.game.realism.landscape_insert_thrust = 1;
         if let Some(entries) = sections.get("game") {
-            self.game.apply_entries(entries)?;
+            let entries = entries
+                .iter()
+                .filter(|(key, _)| !key.eq_ignore_ascii_case("ValueOverloads"))
+                .cloned()
+                .collect::<Vec<_>>();
+            core.game.apply_entries(&entries)?;
         }
+
+        core.players = vec![LegacyPlayer::default(); MAX_PLAYER_STARTS];
+        for index in 0..MAX_PLAYER_STARTS {
+            if let Some(entries) = sections.get(&format!("player{}", index + 1)) {
+                core.players[index].apply_entries(entries)?;
+            }
+        }
+
+        // Version is a retained Head field, so ShadeMaterials' naming default
+        // is derived from the main scenario version even for a section.
+        core.landscape.shade_materials =
+            core.head.version[0] == 0 || core.head.version >= [4, 6, 5, 0, 0];
         if let Some(entries) = sections.get("landscape") {
-            self.landscape.apply_entries(entries)?;
-        }
-        if let Some(entries) = sections.get("weather") {
-            self.weather.apply_entries(entries)?;
-        }
-        if let Some(entries) = sections.get("disasters") {
-            self.disasters.apply_entries(entries)?;
+            core.landscape.apply_entries(entries)?;
         }
         if let Some(entries) = sections.get("animals") {
-            self.animals.apply_entries(entries)?;
+            core.animals.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("weather") {
+            core.weather.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("disasters") {
+            core.disasters.apply_entries(entries)?;
         }
         if let Some(entries) = sections.get("environment") {
-            self.environment.apply_entries(entries)?;
+            core.environment.apply_entries(entries)?;
         }
 
-        for (section, entries) in sections {
-            if !section.starts_with("player") {
-                continue;
-            }
-            let Some(owner) = owner_index_from_section(section) else {
-                continue;
-            };
-            if owner < 0 {
-                continue;
-            }
-            let index = owner as usize;
-            if self.players.len() <= index {
-                self.players.resize(index + 1, LegacyPlayer::default());
-            }
-            self.players[index].apply_entries(entries)?;
-        }
-
-        apply_scenario_rct_all_strings(self, sections);
-        Ok(())
+        apply_scenario_rct_all_strings(&mut core, sections, false);
+        Ok(core)
     }
 }
 
@@ -6189,29 +6221,16 @@ fn overlay_legacy_scenario_manifest(
     base: &LegacyScenarioManifest,
     overlay: LegacyScenarioManifest,
 ) -> Result<LegacyScenarioManifest, ScenarioError> {
-    let mut sections = base.sections.clone();
-    for (section_name, override_entries) in &overlay.sections {
-        let entries = sections.entry(section_name.clone()).or_default();
-        for override_entry in override_entries {
-            if let Some(existing) = entries
-                .iter_mut()
-                .find(|(key, _)| key.eq_ignore_ascii_case(override_entry.0.as_str()))
-            {
-                *existing = override_entry.clone();
-            } else {
-                entries.push(override_entry.clone());
-            }
-        }
-    }
-
-    let mut core = base.core.clone();
-    core.apply_section_overrides(&overlay.sections)?;
+    // Raw section entries must remain separate from the main file: landscape
+    // and weather loaders also use their absence to select C++ defaults.
+    let sections = overlay.sections;
+    let core = base.core.compile_section(&sections)?;
     let ground_height_hint = derive_ground_height_hint(&sections);
     let definition_specs = core.definitions.definitions.clone();
 
     Ok(LegacyScenarioManifest {
-        title: overlay.title.or_else(|| base.title.clone()),
-        description: overlay.description.or_else(|| base.description.clone()),
+        title: base.title.clone(),
+        description: base.description.clone(),
         definition_specs,
         ground_height_hint,
         core,
@@ -6647,7 +6666,7 @@ fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, Scen
 
     let ground_height_hint = derive_ground_height_hint(&sections);
     let mut core = LegacyScenarioCore::from_sections(&sections)?;
-    apply_scenario_rct_all_strings(&mut core, &sections);
+    apply_scenario_rct_all_strings(&mut core, &sections, true);
     let definition_specs = core.definitions.definitions.clone();
 
     Ok(LegacyScenarioManifest {
@@ -6711,6 +6730,7 @@ fn find_rct_all_entry(entries: &[(String, String)], key: &str) -> Option<String>
 fn apply_scenario_rct_all_strings(
     core: &mut LegacyScenarioCore,
     sections: &HashMap<String, Vec<(String, String)>>,
+    compile_head: bool,
 ) {
     let raw = |section: &str, key: &str| {
         sections.get(section).and_then(|entries| {
@@ -6721,23 +6741,25 @@ fn apply_scenario_rct_all_strings(
         })
     };
 
-    if let Some(value) = raw("head", "Title") {
-        core.head.title = value;
-    }
-    if let Some(value) = raw("head", "Loader") {
-        core.head.loader = value;
-    }
-    if let Some(value) = raw("head", "Font") {
-        core.head.font = value;
-    }
-    if let Some(value) = raw("head", "Engine") {
-        core.head.engine = value;
-    }
-    if let Some(value) = raw("head", "MissionAccess") {
-        core.head.mission_access = value;
-    }
-    if let Some(value) = raw("head", "Origin") {
-        core.head.origin = Some(validate_subpath_filename(value));
+    if compile_head {
+        if let Some(value) = raw("head", "Title") {
+            core.head.title = value;
+        }
+        if let Some(value) = raw("head", "Loader") {
+            core.head.loader = value;
+        }
+        if let Some(value) = raw("head", "Font") {
+            core.head.font = value;
+        }
+        if let Some(value) = raw("head", "Engine") {
+            core.head.engine = value;
+        }
+        if let Some(value) = raw("head", "MissionAccess") {
+            core.head.mission_access = value;
+        }
+        if let Some(value) = raw("head", "Origin") {
+            core.head.origin = Some(validate_subpath_filename(value));
+        }
     }
     if let Some(value) = raw("landscape", "Sky") {
         core.landscape.sky = (!value.is_empty()).then_some(value);
@@ -9044,18 +9066,9 @@ fn load_legacy_landscape_body(
 ) -> Result<Option<Landscape>, ScenarioError> {
     *prepared_map_creator = None;
     let landscape_section = manifest.sections.get("landscape");
-    let map_width_hint = landscape_section
-        .and_then(|entries| find_entry(entries, "mapwidth"))
-        .and_then(|value| parse_c4sval_std(&value))
-        .map(|value| value.max(1));
-    let map_height_hint = landscape_section
-        .and_then(|entries| find_entry(entries, "mapheight"))
-        .and_then(|value| parse_c4sval_std(&value))
-        .map(|value| value.max(1));
-    let exact_landscape = landscape_section
-        .and_then(|entries| find_entry(entries, "exactlandscape"))
-        .and_then(|value| parse_legacy_bool(&value))
-        .unwrap_or(false);
+    let map_width_hint = manifest.core.landscape.map_width.std.max(1);
+    let map_height_hint = manifest.core.landscape.map_height.std.max(1);
+    let exact_landscape = manifest.core.landscape.exact_landscape;
     let map_seed = runtime
         .map(|runtime| runtime.map_seed)
         .filter(|seed| *seed != 0)
@@ -9361,17 +9374,13 @@ fn load_legacy_landscape_body(
         creator.set_callback_map_zoom(map_zoom_u32 as i32);
     }
     *prepared_map_creator = discarded_creator.clone();
-    let fallback_map_width = map_width_hint.unwrap_or(96);
-    let fallback_map_height = map_height_hint.unwrap_or(50);
-    let width_product = i64::from(fallback_map_width).saturating_mul(i64::from(map_zoom_u32));
+    let width_product = i64::from(map_width_hint).saturating_mul(i64::from(map_zoom_u32));
     let width_u32 = width_product
         .clamp(1, i64::from(u32::MAX))
         .try_into()
         .unwrap_or(u32::MAX)
         .max(100);
-    let fallback_height = fallback_map_height
-        .saturating_mul(map_zoom_u32 as i32)
-        .max(100);
+    let fallback_height = map_height_hint.saturating_mul(map_zoom_u32 as i32).max(100);
     let mut landscape = Landscape::flat(width_u32, fallback_height);
     landscape.set_world_height(fallback_height);
     if discarded_creator.is_some() {
@@ -13114,6 +13123,180 @@ global func Step(state, frame, random)
             defaults.get("MapZoom", Some("Landscape"), 0),
             Some(&ScenarioValue::Int(10))
         );
+    }
+
+    #[test]
+    fn section_scenario_core_resets_compiled_fields_and_ignores_main_only_entries() {
+        let main = parse_legacy_scenario_text(
+            "[Head]\n\
+             Title=Main title\n\
+             Version=4,6,4\n\
+             MaxPlayer=7\n\
+             MaxPlayerLeague=5\n\
+             SaveGame=1\n\
+             NoInitialize=9\n\
+             RandomSeed=123\n\
+             ForcedAutoContextMenu=1\n\
+             ForcedAutoStopControl=0\n\
+             \n\
+             [Definitions]\n\
+             Definition1=Main.c4d\n\
+             \n\
+             [Game]\n\
+             Goals=MELE=1\n\
+             StructNeedEnergy=0\n\
+             ValueOverloads=FISH=20\n\
+             \n\
+             [Player1]\n\
+             Wealth=42,0,0,250\n\
+             \n\
+             [Landscape]\n\
+             MapWidth=2,0,2,2\n\
+             MapHeight=3,0,3,3\n\
+             MapZoom=5,0,5,5\n\
+             ShadeMaterials=1\n\
+             \n\
+             [Weather]\n\
+             Wind=100,0,-100,100\n",
+        )
+        .expect("main core parses");
+        let section = parse_legacy_scenario_text(
+            "[Head]\n\
+             Title=Ignored title\n\
+             Version=9,9,9\n\
+             MaxPlayer=99\n\
+             MaxPlayerLeague=98\n\
+             SaveGame=0\n\
+             NoInitialize=2\n\
+             RandomSeed=7\n\
+             \n\
+             [Definitions]\n\
+             Definition1=Ignored.c4d\n\
+             \n\
+             [Game]\n\
+             ValueOverloads=ROCK=99\n\
+             \n\
+             [Landscape]\n\
+             Sky=Clouds\n",
+        )
+        .expect("section core parses");
+        let compiled = overlay_legacy_scenario_manifest(&main, section)
+            .expect("section compiles over main core");
+
+        assert_eq!(compiled.title.as_deref(), Some("Main title"));
+        assert_eq!(compiled.core.head.title, "Main title");
+        assert_eq!(compiled.core.head.version, [4, 6, 4, 0, 0]);
+        assert_eq!(compiled.core.head.max_player, 7);
+        assert_eq!(compiled.core.head.max_player_league, 5);
+        assert_eq!(compiled.core.head.save_game, 1);
+        assert_eq!(compiled.core.head.no_initialize, 2);
+        assert_eq!(compiled.core.head.random_seed, 7);
+        assert_eq!(compiled.core.head.forced_auto_context_menu, 1);
+        assert_eq!(compiled.core.head.forced_control_style, 0);
+        assert_eq!(compiled.definition_specs, vec!["Main.c4d"]);
+        assert_eq!(
+            compiled.core.game.realism.value_overloads,
+            vec![LegacyIdEntry {
+                id: "FISH".to_string(),
+                count: Some(20),
+            }]
+        );
+
+        assert!(compiled.core.game.goals.is_empty());
+        assert!(compiled.core.game.rules.is_empty());
+        assert!(compiled.core.game.realism.structures_need_energy);
+        assert_eq!(compiled.core.players.len(), MAX_PLAYER_STARTS);
+        assert_eq!(
+            compiled.core.players[0].wealth,
+            LegacyC4SVal::new(0, 0, 0, 250)
+        );
+        assert_eq!(
+            compiled.core.landscape.map_width,
+            LegacyC4SVal::new(100, 0, 64, 250)
+        );
+        assert_eq!(
+            compiled.core.landscape.map_height,
+            LegacyC4SVal::new(50, 0, 40, 250)
+        );
+        assert_eq!(
+            compiled.core.landscape.map_zoom,
+            LegacyC4SVal::new(10, 0, 5, 15)
+        );
+        assert_eq!(compiled.core.landscape.sky.as_deref(), Some("Clouds"));
+        assert!(
+            !compiled.core.landscape.shade_materials,
+            "the absent default uses retained main Version=4.6.4"
+        );
+        assert_eq!(
+            compiled.core.weather.wind,
+            LegacyC4SVal::new(0, 70, -100, 100)
+        );
+        assert_eq!(
+            compiled.sections.get("landscape"),
+            Some(&vec![("Sky".to_string(), "Clouds".to_string())]),
+            "raw main landscape entries must not leak into section consumers"
+        );
+
+        let values = ScenarioValueStore::from_runtime_core(&compiled.core, false);
+        assert_eq!(values.get("Goals", Some("Game"), 0), None);
+        assert_eq!(
+            values.get("Rules", Some("Game"), 0),
+            Some(&ScenarioValue::C4Id("ENRG".to_string()))
+        );
+        assert_eq!(
+            values.get("Rules", Some("Game"), 1),
+            Some(&ScenarioValue::Int(1))
+        );
+        assert_eq!(
+            values.get("StructNeedEnergy", Some("Game"), 0),
+            Some(&ScenarioValue::Bool(false))
+        );
+        assert_eq!(
+            values.get("ValueOverloads", Some("Game"), 0),
+            Some(&ScenarioValue::C4Id("FISH".to_string()))
+        );
+        assert_eq!(
+            values.get("MapWidth", Some("Landscape"), 0),
+            Some(&ScenarioValue::Int(100))
+        );
+        assert_eq!(
+            values.get("MapWidth", Some("Landscape"), 3),
+            Some(&ScenarioValue::Int(10_000))
+        );
+        assert_eq!(
+            values.get("Wind", Some("Weather"), 0),
+            Some(&ScenarioValue::Int(0))
+        );
+        assert_eq!(
+            values.get("Wind", Some("Weather"), 1),
+            Some(&ScenarioValue::Int(70))
+        );
+        assert_eq!(
+            values.get("ShadeMaterials", Some("Landscape"), 0),
+            Some(&ScenarioValue::Bool(false))
+        );
+
+        let directory = tempdir().expect("section directory");
+        std::fs::write(
+            directory.path().join("Landscape.txt"),
+            "map Next { seed=11; };",
+        )
+        .expect("section landscape script");
+        let group = Group::open(directory.path()).expect("section group opens");
+        let mut classifier = MapPixelClassifier::from_slots(
+            [0; 128],
+            vec![None; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+        let landscape =
+            load_legacy_landscape_body_for_test(&group, &compiled, Some(&mut classifier), 0, 1)
+                .expect("section landscape loads")
+                .expect("section landscape exists");
+        let raster = landscape.raster_state().expect("section raster state");
+        let map = raster.map().expect("section retains its generated map");
+        assert_eq!((map.width, map.height), (100, 50));
+        assert_eq!(raster.map_zoom(), 10);
     }
 
     // Clean differential captured from the stock pre-port C++ merge-base
@@ -23273,6 +23456,106 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn scenario_section_switch_installs_reset_compiler_defaults() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "#strict\n");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\n\
+             Title=Main title\n\
+             Version=4,6,4\n\
+             MaxPlayer=7\n\
+             SaveGame=0\n\
+             \n\
+             [Definitions]\n\
+             Definition1=Defs.c4d\n\
+             \n\
+             [Game]\n\
+             Goals=MELE=1\n\
+             StructNeedEnergy=0\n\
+             ValueOverloads=FISH=20\n\
+             \n\
+             [Landscape]\n\
+             MapWidth=2,0,2,2\n\
+             MapHeight=1,0,1,1\n\
+             MapZoom=5,0,5,5\n\
+             ShadeMaterials=1\n\
+             \n\
+             [Weather]\n\
+             Wind=100,0,-100,100\n",
+        )
+        .expect("write main core");
+        let section = scenario_dir.join("SectNext.c4g");
+        std::fs::create_dir_all(&section).expect("section dir");
+        std::fs::write(
+            section.join("Scenario.txt"),
+            "[Head]\n\
+             Title=Ignored title\n\
+             Version=9,9,9\n\
+             MaxPlayer=99\n\
+             SaveGame=1\n\
+             \n\
+             [Definitions]\n\
+             Definition1=Ignored.c4d\n\
+             \n\
+             [Game]\n\
+             ValueOverloads=ROCK=99\n\
+             \n\
+             [Landscape]\n\
+             Sky=Clouds\n",
+        )
+        .expect("write section core");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        assert!(engine.scenario_values.is_melee());
+
+        assert!(engine
+            .load_scenario_section("Next", 0, Vec::new())
+            .expect("section load succeeds"));
+        let values = engine.scenario_values.as_ref();
+        assert!(!values.is_melee());
+        assert_eq!(values.get("Goals", Some("Game"), 0), None);
+        assert_eq!(
+            values.get("Rules", Some("Game"), 0),
+            Some(&ScenarioValue::C4Id("ENRG".to_string()))
+        );
+        assert_eq!(
+            values.get("Wind", Some("Weather"), 0),
+            Some(&ScenarioValue::Int(0))
+        );
+        assert_eq!(
+            values.get("Wind", Some("Weather"), 1),
+            Some(&ScenarioValue::Int(70))
+        );
+        assert_eq!(
+            values.get("ShadeMaterials", Some("Landscape"), 0),
+            Some(&ScenarioValue::Bool(false))
+        );
+        assert_eq!(
+            values.get("Title", Some("Head"), 0),
+            Some(&ScenarioValue::String("Main title".to_string()))
+        );
+        assert_eq!(
+            values.get("MaxPlayer", Some("Head"), 0),
+            Some(&ScenarioValue::Int(7))
+        );
+        assert_eq!(
+            values.get("Definitions", Some("Definitions"), 0),
+            Some(&ScenarioValue::String("Defs.c4d".to_string()))
+        );
+        assert_eq!(
+            values.get("ValueOverloads", Some("Game"), 0),
+            Some(&ScenarioValue::C4Id("FISH".to_string()))
+        );
+    }
+
+    #[test]
     fn scenario_section_executes_its_own_post_init_map_callbacks() {
         let dir = tempdir().expect("tempdir");
         let scenario_dir = write_resilience_fixture(
@@ -23292,8 +23575,13 @@ public func ActualizePhase(pClonk)
         .expect("write scenario core");
         let section = scenario_dir.join("SectNext.c4g");
         std::fs::create_dir_all(&section).expect("section dir");
-        std::fs::write(section.join("Scenario.txt"), "[Head]\nTitle=Next\n")
-            .expect("write section core");
+        std::fs::write(
+            section.join("Scenario.txt"),
+            "[Head]\nTitle=Next\n\n\
+             [Landscape]\nMapWidth=1,0,1,1\nMapHeight=1,0,1,1\n\
+             MapZoom=5,0,5,5\nKeepMapCreator=1\n",
+        )
+        .expect("write section core");
         std::fs::write(
             section.join("Landscape.txt"),
             "map Next { seed=1; mat=Earth; tex=Rough; sub=0; drawFn=OnSection; };",
@@ -23752,6 +24040,7 @@ public func ActualizePhase(pClonk)
              [Landscape]\n\
              MapWidth=3,0,3,3\n\
              MapHeight=4,0,4,4\n\
+             MapZoom=5,0,5,5\n\
              KeepMapCreator=1\n",
         )
         .expect("write section core");
