@@ -26,6 +26,8 @@ pub enum BitmapError {
     BitDepth(u16),
     #[error("unsupported BMP compression {0} (only uncompressed is read)")]
     Compression(u32),
+    #[error("8-bit BMP pixel offset {0} precedes the required 256-entry palette")]
+    PaletteOffset(u32),
     #[error("invalid BMP dimensions {width}x{height}")]
     Dimensions { width: i32, height: i32 },
     #[error("indexed bitmap dimensions {width}x{height} cannot be encoded as BMP")]
@@ -54,17 +56,21 @@ pub struct IndexedBitmap {
 }
 
 impl IndexedBitmap {
-    /// Decode an uncompressed 8-bit BMP. Bottom-up rows (positive height)
-    /// are flipped to top-down; top-down files (negative height) are read
-    /// as-is. Row padding to 4-byte boundaries is skipped.
+    /// Decode an uncompressed, bottom-up 8-bit BMP with the full 256-entry
+    /// palette layout assumed by `CBitmap256Info`. Rows are exposed top-down;
+    /// scanline padding to 4-byte boundaries is skipped.
     pub fn decode(bytes: &[u8]) -> Result<Self, BitmapError> {
         if bytes.len() < 54 {
             return Err(BitmapError::Truncated("header"));
         }
+        // Native ignores the signature and compression fields entirely.
+        // Keep the port's intentional hardening instead of accepting a
+        // signature-less file or interpreting compressed payload as raw rows.
         if &bytes[0..2] != b"BM" {
             return Err(BitmapError::Signature);
         }
-        let data_offset = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]) as usize;
+        let raw_data_offset = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
+        let data_offset = raw_data_offset as usize;
         let width = i32::from_le_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
         let raw_height = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
         let bit_count = u16::from_le_bytes([bytes[28], bytes[29]]);
@@ -76,15 +82,17 @@ impl IndexedBitmap {
         if compression != 0 {
             return Err(BitmapError::Compression(compression));
         }
-        let bottom_up = raw_height >= 0;
-        let height = raw_height.unsigned_abs();
-        if width <= 0 || height == 0 {
+        if data_offset < BMP_DATA_OFFSET {
+            return Err(BitmapError::PaletteOffset(raw_data_offset));
+        }
+        if width <= 0 || raw_height <= 0 {
             return Err(BitmapError::Dimensions {
                 width,
                 height: raw_height,
             });
         }
         let width = width as u32;
+        let height = raw_height as u32;
         let row_stride = ((width as usize) + 3) & !3;
         let needed = data_offset + row_stride * height as usize;
         if bytes.len() < needed {
@@ -93,11 +101,7 @@ impl IndexedBitmap {
 
         let mut indices = Vec::with_capacity(width as usize * height as usize);
         for row in 0..height as usize {
-            let source_row = if bottom_up {
-                height as usize - 1 - row
-            } else {
-                row
-            };
+            let source_row = height as usize - 1 - row;
             let start = data_offset + source_row * row_stride;
             indices.extend_from_slice(&bytes[start..start + width as usize]);
         }
@@ -114,33 +118,13 @@ impl IndexedBitmap {
     /// every other entry byte-identical.
     pub fn decode_with_palette(bytes: &[u8]) -> Result<(Self, RgbPalette), BitmapError> {
         let bitmap = Self::decode(bytes)?;
-        let dib_size = u32::from_le_bytes(
-            bytes
-                .get(14..18)
-                .ok_or(BitmapError::Truncated("DIB header"))?
-                .try_into()
-                .expect("four-byte DIB size slice"),
-        ) as usize;
-        let palette_start = BMP_FILE_HEADER_SIZE
-            .checked_add(dib_size)
-            .ok_or(BitmapError::Truncated("palette"))?;
-        let data_offset = u32::from_le_bytes(
-            bytes[10..14]
-                .try_into()
-                .expect("validated BMP header offset slice"),
-        ) as usize;
-        if palette_start > data_offset || data_offset > bytes.len() {
-            return Err(BitmapError::Truncated("palette"));
-        }
+        // CSurface8 reads one fixed CBitmap256Info: biSize is ignored and the
+        // 256 RGBQUADs always occupy physical bytes 54..1078.
+        let palette_start = BMP_FILE_HEADER_SIZE + BMP_INFO_HEADER_SIZE;
         let mut palette = [[0_u8; 3]; BMP_PALETTE_ENTRY_COUNT];
         for (slot, color) in palette.iter_mut().enumerate() {
             let offset = palette_start + slot * BMP_PALETTE_ENTRY_SIZE;
-            let Some(entry) = bytes.get(offset..offset + BMP_PALETTE_ENTRY_SIZE) else {
-                break;
-            };
-            if offset + BMP_PALETTE_ENTRY_SIZE > data_offset {
-                break;
-            }
+            let entry = &bytes[offset..offset + BMP_PALETTE_ENTRY_SIZE];
             *color = [entry[2], entry[1], entry[0]];
         }
         Ok((bitmap, palette))
@@ -314,10 +298,81 @@ mod tests {
     }
 
     #[test]
-    fn decodes_top_down_indices_as_is() {
+    fn rejects_top_down_negative_height_like_cpp_surface8() {
         let bytes = encode_bmp(&[&[9, 8], &[7, 6], &[5, 4]], false);
-        let bitmap = IndexedBitmap::decode(&bytes).expect("decodes");
-        assert_eq!(bitmap.indices, vec![9, 8, 7, 6, 5, 4]);
+        assert!(matches!(
+            IndexedBitmap::decode(&bytes),
+            Err(BitmapError::Dimensions {
+                width: 2,
+                height: -3
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_pixel_offset_before_the_full_256_entry_palette() {
+        let standard = encode_bmp(&[&[1, 2], &[3, 4]], true);
+        let compact_offset = 14 + 40 + 16 * 4;
+        let mut compact = standard[..compact_offset].to_vec();
+        compact[10..14].copy_from_slice(&(compact_offset as u32).to_le_bytes());
+        compact.extend_from_slice(&standard[BMP_DATA_OFFSET..]);
+
+        assert!(matches!(
+            IndexedBitmap::decode(&compact),
+            Err(BitmapError::PaletteOffset(118))
+        ));
+    }
+
+    #[test]
+    fn honors_pixel_offset_after_the_full_256_entry_palette() {
+        let standard = encode_bmp(&[&[1, 2], &[3, 4]], true);
+        let data_offset = BMP_DATA_OFFSET + 5;
+        let mut with_gap = standard[..BMP_DATA_OFFSET].to_vec();
+        with_gap.extend_from_slice(&[9; 5]);
+        with_gap.extend_from_slice(&standard[BMP_DATA_OFFSET..]);
+        with_gap[10..14].copy_from_slice(&(data_offset as u32).to_le_bytes());
+
+        let bitmap = IndexedBitmap::decode(&with_gap).expect("gapped bitmap decodes");
+        assert_eq!(bitmap.indices, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn rejects_signature_and_compression_as_intentional_hardening() {
+        let mut missing_signature = encode_bmp(&[&[1, 2]], true);
+        missing_signature[0..2].copy_from_slice(b"ZZ");
+        assert!(matches!(
+            IndexedBitmap::decode(&missing_signature),
+            Err(BitmapError::Signature)
+        ));
+
+        let mut compressed = encode_bmp(&[&[1, 2]], true);
+        compressed[30..34].copy_from_slice(&1_u32.to_le_bytes());
+        assert!(matches!(
+            IndexedBitmap::decode(&compressed),
+            Err(BitmapError::Compression(1))
+        ));
+    }
+
+    #[test]
+    fn palette_decode_ignores_dib_size_like_cpp_surface8() {
+        let bitmap = IndexedBitmap {
+            width: 1,
+            height: 1,
+            indices: vec![7],
+        };
+        let mut palette = [[0; 3]; BMP_PALETTE_ENTRY_COUNT];
+        palette[0] = [1, 2, 3];
+        palette[1] = [4, 5, 6];
+        palette[255] = [7, 8, 9];
+        let mut bytes = bitmap
+            .encode_with_palette(&palette)
+            .expect("bitmap encodes");
+        bytes[14..18].copy_from_slice(&44_u32.to_le_bytes());
+
+        let (decoded, decoded_palette) =
+            IndexedBitmap::decode_with_palette(&bytes).expect("fixed palette decodes");
+        assert_eq!(decoded, bitmap);
+        assert_eq!(decoded_palette, palette);
     }
 
     #[test]
