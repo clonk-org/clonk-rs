@@ -1847,24 +1847,14 @@ impl Scenario {
         S: AsRef<str>,
         M: AsRef<str>,
     {
-        let initial_modules = initial_modules
-            .iter()
-            .map(|module| normalize_definition_path(module.as_ref()))
-            .collect::<Vec<_>>();
-        let fixed_modules = fixed_modules.map(|modules| {
-            modules
-                .iter()
-                .map(|module| normalize_definition_path(module.as_ref()))
-                .collect::<Vec<_>>()
-        });
         let group = Group::open(path)?;
-        Self::load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count(
+        Self::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count(
             &group,
             resolver,
             languages,
             random_seed,
-            &initial_modules,
-            fixed_modules.as_deref(),
+            initial_modules,
+            fixed_modules,
             definition_root,
             startup_player_count,
         )
@@ -1980,6 +1970,79 @@ impl Scenario {
             &[],
             None,
             None,
+            startup_player_count,
+        )
+    }
+
+    /// Loads an already-opened scenario group with the startup definition
+    /// selection. This is the group-backed counterpart of the path API for
+    /// logical scenarios nested inside packed parent folders.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_from_group_with_languages_and_definition_selection<R, S, M>(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        initial_modules: &[M],
+        fixed_modules: Option<&[M]>,
+        definition_root: Option<&Path>,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+    {
+        Self::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count(
+            group,
+            resolver,
+            languages,
+            0,
+            initial_modules,
+            fixed_modules,
+            definition_root,
+            legacy_startup_player_count(),
+        )
+    }
+
+    /// Loads an already-opened scenario group with both the selected
+    /// definition vector and frozen startup-player count.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count<
+        R,
+        S,
+        M,
+    >(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        initial_modules: &[M],
+        fixed_modules: Option<&[M]>,
+        definition_root: Option<&Path>,
+        startup_player_count: i32,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+    {
+        let initial_modules = initial_modules
+            .iter()
+            .map(|module| normalize_definition_path(module.as_ref()))
+            .collect::<Vec<_>>();
+        let fixed_modules = fixed_modules.map(|modules| {
+            modules
+                .iter()
+                .map(|module| normalize_definition_path(module.as_ref()))
+                .collect::<Vec<_>>()
+        });
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count(
+            group,
+            resolver,
+            languages,
+            random_seed,
+            &initial_modules,
+            fixed_modules.as_deref(),
+            definition_root,
             startup_player_count,
         )
     }

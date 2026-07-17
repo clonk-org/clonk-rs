@@ -11416,7 +11416,8 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
 
         let mut groups = Vec::new();
         for (_, _, parent_path) in registrations {
-            let parent = Group::open(&parent_path).map_err(ScenarioError::Resources)?;
+            let parent = open_group_path_for_folder_map(&parent_path)
+                .map_err(ScenarioError::Resources)?;
             Self::push_material_child(&parent, &mut groups)?;
         }
 
@@ -11481,7 +11482,8 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
         registrations
             .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
         for (_, _, parent_path) in registrations {
-            let parent = Group::open(&parent_path).map_err(ScenarioError::Resources)?;
+            let parent = open_group_path_for_folder_map(&parent_path)
+                .map_err(ScenarioError::Resources)?;
             Self::push_graphics_child(&parent, &mut groups, &mut seen)?;
         }
 
@@ -12093,7 +12095,7 @@ fn resolved_material_groups(
     authoritative_external_groups: Option<&[Group]>,
 ) -> Vec<Group> {
     let mut groups = Vec::new();
-    if let Ok(scenario) = Group::open(scenario_path) {
+    if let Ok(scenario) = open_group_path_for_folder_map(scenario_path) {
         if let Ok(Some(group)) = open_child_flexible(&scenario, Path::new("Material.c4g")) {
             groups.push(group);
         }
@@ -12846,36 +12848,42 @@ fn scenario_fixed_definition_modules(scenario: &FrontendScenario) -> Vec<String>
     modules
 }
 
+fn preflight_offline_startup(
+    path: &Path,
+) -> Result<lc_engine::scenario::OfflineScenarioStartupPreflight, ScenarioError> {
+    let group = open_group_path_for_folder_map(path)?;
+    Scenario::preflight_offline_startup_from_group(&group)
+}
+
 fn load_scenario_with_definition_load(
     path: &Path,
     resolver: &InstallDefinitionResolver,
     languages: &[String],
     definition_load: &ScenarioDefinitionLoad,
 ) -> Result<Scenario, ScenarioError> {
+    let group = open_group_path_for_folder_map(path)?;
     match definition_load {
         ScenarioDefinitionLoad::Fixed {
             modules,
-            definition_root: Some(root),
-        } => Scenario::load_from_path_with_languages_and_definition_modules_in_root(
-            path, resolver, languages, modules, root,
-        ),
-        ScenarioDefinitionLoad::Fixed {
-            modules,
-            definition_root: None,
-        } => Scenario::load_from_path_with_languages_and_definition_modules(
-            path, resolver, languages, modules,
-        ),
-        ScenarioDefinitionLoad::Seed {
-            modules,
-            definition_root: Some(root),
-        } => Scenario::load_from_path_with_languages_and_definition_seed_in_root(
-            path, resolver, languages, modules, root,
+            definition_root,
+        } => Scenario::load_from_group_with_languages_and_definition_selection(
+            &group,
+            resolver,
+            languages,
+            &[] as &[String],
+            Some(modules.as_slice()),
+            definition_root.as_deref(),
         ),
         ScenarioDefinitionLoad::Seed {
             modules,
-            definition_root: None,
-        } => Scenario::load_from_path_with_languages_and_definition_seed(
-            path, resolver, languages, modules,
+            definition_root,
+        } => Scenario::load_from_group_with_languages_and_definition_selection(
+            &group,
+            resolver,
+            languages,
+            modules,
+            None,
+            definition_root.as_deref(),
         ),
     }
 }
@@ -12887,25 +12895,26 @@ fn load_scenario_with_definition_load_and_startup_player_count(
     definition_load: &ScenarioDefinitionLoad,
     startup_player_count: i32,
 ) -> Result<Scenario, ScenarioError> {
+    let group = open_group_path_for_folder_map(path)?;
     match definition_load {
         ScenarioDefinitionLoad::Fixed {
             modules,
             definition_root,
-        } => Scenario::load_from_path_with_languages_and_seed_and_definition_selection_and_startup_player_count(
-            path,
+        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count(
+            &group,
             resolver,
             languages,
             0,
             &[] as &[String],
-            Some(modules),
+            Some(modules.as_slice()),
             definition_root.as_deref(),
             startup_player_count,
         ),
         ScenarioDefinitionLoad::Seed {
             modules,
             definition_root,
-        } => Scenario::load_from_path_with_languages_and_seed_and_definition_selection_and_startup_player_count(
-            path,
+        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count(
+            &group,
             resolver,
             languages,
             0,
@@ -33285,7 +33294,7 @@ impl GameApp {
             self.app_paths.as_ref().map_or(Ok(None), |paths| {
                 let selection = snapshot_configured_client_player_selection(paths)
                     .map_err(|error| error.to_string())?;
-                match Scenario::preflight_offline_startup_from_path(&path) {
+                match preflight_offline_startup(&path) {
                     Ok(preflight) => Ok(Some(OfflineStartupPlayers::new(
                         load_snapshotted_client_players(paths, &selection),
                         preflight.max_players,
@@ -84143,6 +84152,191 @@ protected func InputCallback(string answer, int player)
             Some(2),
             "the later folder-local pass overloads the explicit global pack"
         );
+    }
+
+    fn assert_parent_resource_order(scenario: &Group, inner: &Path, outer: &Path) {
+        let resolver = InstallDefinitionResolver::new(None);
+        let graphics = resolver
+            .resolve_graphics_groups(scenario)
+            .expect("graphics parent chain resolves");
+        assert_eq!(
+            graphics
+                .iter()
+                .map(|group| group.root().to_path_buf())
+                .collect::<Vec<_>>(),
+            [inner.join("Graphics.c4g"), outer.join("Graphics.c4g")]
+        );
+        assert_eq!(
+            graphics[0].read_file("Source.txt").expect("inner graphic"),
+            b"inner graphics"
+        );
+        assert_eq!(
+            graphics[1].read_file("Source.txt").expect("outer graphic"),
+            b"outer graphics"
+        );
+
+        let materials = resolver
+            .resolve_material_groups(scenario)
+            .expect("material parent chain resolves");
+        assert_eq!(
+            materials
+                .iter()
+                .map(|group| group.root().to_path_buf())
+                .collect::<Vec<_>>(),
+            [inner.join("Material.c4g"), outer.join("Material.c4g")]
+        );
+        assert_eq!(
+            materials[0]
+                .read_file("Source.txt")
+                .expect("inner material"),
+            b"inner materials"
+        );
+        assert_eq!(
+            materials[1]
+                .read_file("Source.txt")
+                .expect("outer material"),
+            b"outer materials"
+        );
+    }
+
+    #[test]
+    fn install_definition_resolver_opens_packed_parent_resource_chain() {
+        let dir = tempdir().expect("tempdir");
+        let inner_png_path = dir.path().join("inner.png");
+        let outer_png_path = dir.path().join("outer.png");
+        write_preview_png(&inner_png_path, [1, 2, 3, 255]);
+        write_preview_png(&outer_png_path, [9, 8, 7, 255]);
+        let inner_png = fs::read(inner_png_path).expect("read inner PNG");
+        let outer_png = fs::read(outer_png_path).expect("read outer PNG");
+        let outer_graphics = packed_test_group(&[
+            ("Source.txt", false, b"outer graphics"),
+            ("Priority.png", false, outer_png.as_slice()),
+        ]);
+        let outer_materials = packed_test_group(&[
+            ("Source.txt", false, b"outer materials"),
+            ("TexMap.txt", false, b"1=Earth-Rough\n"),
+            (
+                "Earth.c4m",
+                false,
+                b"[Material]\nName=Earth\nDensity=50\n",
+            ),
+            ("Rough.png", false, outer_png.as_slice()),
+        ]);
+        let inner_graphics = packed_test_group(&[
+            ("Source.txt", false, b"inner graphics"),
+            ("Priority.png", false, inner_png.as_slice()),
+        ]);
+        let inner_materials = packed_test_group(&[
+            ("Source.txt", false, b"inner materials"),
+            (
+                "TexMap.txt",
+                false,
+                b"OverloadMaterials\nOverloadTextures\n1=Earth-Rough\n",
+            ),
+            (
+                "Earth.c4m",
+                false,
+                b"[Material]\nName=Earth\nDensity=100\n",
+            ),
+            ("Rough.png", false, inner_png.as_slice()),
+        ]);
+        let definition = packed_test_group(&[
+            (
+                "DefCore.txt",
+                false,
+                b"[DefCore]\nid=GOOD\nName=Good\nCategory=0\n",
+            ),
+            ("Script.c", false, b"// packed definition\n"),
+        ]);
+        let scenario = packed_test_group(&[
+            (
+                "Scenario.txt",
+                false,
+                b"[Head]\nTitle=Packed parents\n\n[Definitions]\nLocalOnly=1\n\n[Landscape]\nSky=Priority\n",
+            ),
+            ("Good.c4d", true, definition.as_slice()),
+        ]);
+        let inner = packed_test_group(&[
+            ("Graphics.c4g", true, inner_graphics.as_slice()),
+            ("Material.c4g", true, inner_materials.as_slice()),
+            ("Scen.c4s", true, scenario.as_slice()),
+        ]);
+        let outer = packed_test_group(&[
+            ("Graphics.c4g", true, outer_graphics.as_slice()),
+            ("Material.c4g", true, outer_materials.as_slice()),
+            ("Inner.c4f", true, inner.as_slice()),
+        ]);
+        let outer_path = dir.path().join("Outer.c4f");
+        fs::write(&outer_path, outer).expect("write packed outer folder");
+        let scenario_group = open_group_path_for_folder_map(
+            &outer_path.join("Inner.c4f/Scen.c4s"),
+        )
+        .expect("open packed scenario through its parent chain");
+
+        assert_parent_resource_order(
+            &scenario_group,
+            &outer_path.join("Inner.c4f"),
+            &outer_path,
+        );
+        let scenario_path = outer_path.join("Inner.c4f/Scen.c4s");
+        preflight_offline_startup(&scenario_path)
+            .expect("packed nested scenario passes offline startup preflight");
+        let loaded = load_scenario_with_definition_load_and_startup_player_count(
+            &scenario_path,
+            &InstallDefinitionResolver::new(None),
+            &["US".to_string()],
+            &ScenarioDefinitionLoad::Seed {
+                modules: Vec::new(),
+                definition_root: None,
+            },
+            0,
+        )
+        .expect("packed nested scenario starts with parent resources");
+        assert_eq!(
+            &loaded
+                .sky()
+                .and_then(|sky| sky.surface.as_ref())
+                .expect("inner parent sky")
+                .pixels()[..4],
+            &[1, 2, 3, 255]
+        );
+        assert_eq!(
+            load_material_render_info(&scenario_path, None).get("earth"),
+            Some(
+                &lc_frontend::MaterialRenderInfo::new([0; 9], [0; 6], None, 0, 100)
+                    .with_placement(70)
+            )
+        );
+        assert_eq!(
+            load_scenario_material_textures(&scenario_path, None)
+                .get("rough")
+                .expect("inner parent material texture")
+                .pixels(),
+            &[1, 2, 3, 255]
+        );
+    }
+
+    #[test]
+    fn install_definition_resolver_keeps_unpacked_parent_resource_chain() {
+        let dir = tempdir().expect("tempdir");
+        let outer = dir.path().join("Outer.c4f");
+        let inner = outer.join("Inner.c4f");
+        let scenario = inner.join("Scen.c4s");
+        for (parent, graphic, material) in [
+            (&outer, b"outer graphics".as_slice(), b"outer materials".as_slice()),
+            (&inner, b"inner graphics".as_slice(), b"inner materials".as_slice()),
+        ] {
+            fs::create_dir_all(parent.join("Graphics.c4g")).expect("graphics group");
+            fs::create_dir_all(parent.join("Material.c4g")).expect("material group");
+            fs::write(parent.join("Graphics.c4g/Source.txt"), graphic)
+                .expect("write graphic marker");
+            fs::write(parent.join("Material.c4g/Source.txt"), material)
+                .expect("write material marker");
+        }
+        fs::create_dir_all(&scenario).expect("scenario group");
+        let scenario_group = Group::open(&scenario).expect("open unpacked scenario");
+
+        assert_parent_resource_order(&scenario_group, &inner, &outer);
     }
 
     #[test]
