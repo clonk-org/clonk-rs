@@ -8049,16 +8049,22 @@ fn load_scenario_system_scripts(group: &Group) -> Result<Vec<(String, String)>, 
         .unwrap_or_else(|| Ok(Vec::new()))
 }
 
-/// `[Landscape] MapZoom` with the C4S default `C4SVal(10, 0, 5, 15)`
-/// (C4Scenario.cpp:307,353), Std bounded to [Min, Max] like Evaluate.
-fn legacy_map_zoom(section: Option<&Vec<(String, String)>>) -> u32 {
+/// Evaluate `[Landscape] MapZoom` with the C4S default
+/// `C4SVal(10, 0, 5, 15)` (C4Scenario.cpp:307,353) against the local
+/// FixRandom map-creation ledger.
+fn legacy_map_zoom(
+    section: Option<&Vec<(String, String)>>,
+    rng: &mut crate::rng::LcgRng,
+) -> u32 {
+    legacy_map_zoom_value(section).evaluate(rng) as u32
+}
+
+fn legacy_map_zoom_value(section: Option<&Vec<(String, String)>>) -> LegacyC4SVal {
     let default = LegacyC4SVal::new(10, 0, 5, 15);
     section
         .and_then(|entries| find_entry(entries, "mapzoom"))
         .and_then(|raw| parse_legacy_c4s_value("MapZoom", &raw, default).ok())
         .unwrap_or(default)
-        .base()
-        .max(1) as u32
 }
 
 fn legacy_random_seed(fallback: u64) -> u64 {
@@ -8141,6 +8147,25 @@ impl MapPixelClassifier {
     pub(crate) fn from_runtime_state(state: RuntimeTexMapState) -> Self {
         Self {
             state,
+            material_library: None,
+        }
+    }
+
+    /// Empty texture-map stand-in used only to reproduce map-creator RNG
+    /// consumption when legacy resource activation supplied no classifier.
+    fn empty_for_map_creation() -> Self {
+        Self {
+            state: RuntimeTexMapState {
+                densities: vec![0; 128],
+                material_names: vec![None; 128],
+                texture_names: vec![None; 128],
+                match_texture_names: vec![None; 128],
+                shapes: vec![None; 128],
+                materials: Vec::new(),
+                texture_inventory: Vec::new(),
+                default_material_entries: Vec::new(),
+                material_crossmap_entries: Vec::new(),
+            },
             material_library: None,
         }
     }
@@ -8637,7 +8662,6 @@ fn load_legacy_landscape_body(
     startup_player_count: i32,
 ) -> Result<Option<Landscape>, ScenarioError> {
     let landscape_section = manifest.sections.get("landscape");
-    let map_zoom_u32 = legacy_map_zoom(landscape_section);
     let map_width_hint = landscape_section
         .and_then(|entries| find_entry(entries, "mapwidth"))
         .and_then(|value| parse_c4sval_std(&value))
@@ -8650,6 +8674,7 @@ fn load_legacy_landscape_body(
         .and_then(|entries| find_entry(entries, "exactlandscape"))
         .and_then(|value| parse_legacy_bool(&value))
         .unwrap_or(false);
+    let mut map_rng = legacy_map_creation_rng(random_seed);
 
     let read_optional = |name: &str| match group.read_file(name) {
         Ok(bytes) => Ok(Some(bytes)),
@@ -8663,17 +8688,17 @@ fn load_legacy_landscape_body(
     // at pixel scale (zoom 1) here. Returning no landscape would leave
     // GBackSolid answering "never solid" and hang placement loops in real
     // content (Grass.c4d Initialize).
-    let (map_bytes, map_zoom_u32) = if exact_landscape {
+    let (map_bytes, map_zoom_override) = if exact_landscape {
         // C4Landscape::Load requires C4CFN_Landscape. Exact mode never falls
         // back to Map.bmp (C4Landscape.cpp:1520-1524).
-        (Some(group.read_file("Landscape.bmp")?), 1)
+        (Some(group.read_file("Landscape.bmp")?), Some(1))
     } else {
         // Static map: Map.bmp, with Landscape.bmp accepted as the map for
         // downwards compatibility (C4Landscape.cpp:593-601) — most CR
         // content (GoldRush included) ships only Landscape.bmp.
         match read_optional("Map.bmp")? {
-            Some(bytes) => (Some(bytes), map_zoom_u32),
-            None => (read_optional("Landscape.bmp")?, map_zoom_u32),
+            Some(bytes) => (Some(bytes), None),
+            None => (read_optional("Landscape.bmp")?, None),
         }
     };
 
@@ -8688,6 +8713,7 @@ fn load_legacy_landscape_body(
                 let mut landscape = if exact_landscape {
                     exact_classified_landscape(&bitmap, classifier, legacy_map_seed(random_seed))?
                 } else {
+                    let map_zoom_u32 = legacy_map_zoom(landscape_section, &mut map_rng);
                     classified_landscape(
                         &bitmap,
                         classifier,
@@ -8712,6 +8738,8 @@ fn load_legacy_landscape_body(
             return Err(ScenarioError::LegacyMapEmpty);
         }
 
+        let map_zoom_u32 = map_zoom_override
+            .unwrap_or_else(|| legacy_map_zoom(landscape_section, &mut map_rng));
         let map_zoom_i32 = map_zoom_u32 as i32;
         let sky_pixel = rgba.get_pixel(0, 0).0;
         let world_height = (height as i32).saturating_mul(map_zoom_i32).max(0);
@@ -8769,7 +8797,6 @@ fn load_legacy_landscape_body(
     // 578,734), so they never shift the post-init synced ledger.
     // Requires a texture map for the material bytes.
     if let Some(classifier) = classifier.take() {
-        let mut map_rng = legacy_map_creation_rng(random_seed);
         let players = startup_player_count;
         let landscape_core = &manifest.core.landscape;
         let mut retained_creator = None;
@@ -8796,6 +8823,7 @@ fn load_legacy_landscape_body(
             let params = basic_map_params(landscape_core);
             crate::map_creator::create_basic_map(&params, classifier, players, &mut map_rng)
         };
+        let map_zoom_u32 = legacy_map_zoom(landscape_section, &mut map_rng);
         let mut landscape = classified_landscape(
             &bitmap,
             classifier,
@@ -8810,6 +8838,43 @@ fn load_legacy_landscape_body(
         return Ok(Some(landscape));
     }
 
+    // Even without activated material resources, C++ has already run the
+    // map creator before evaluating MapZoom. Render into an empty classifier
+    // solely to advance this local FixRandom ledger to the same position;
+    // the flat compatibility landscape below remains the returned result.
+    let players = startup_player_count;
+    let landscape_core = &manifest.core.landscape;
+    let mut discarded_classifier = MapPixelClassifier::empty_for_map_creation();
+    if let Some(bytes) = read_optional("Landscape.txt")? {
+        let creation = crate::map_creator_s2::create_s2_map_with_state(
+            &String::from_utf8_lossy(&bytes),
+            &mut discarded_classifier,
+            landscape_core.map_width,
+            landscape_core.map_height,
+            landscape_core.map_player_extend,
+            players,
+            &mut map_rng,
+        );
+        if creation.bitmap.is_none() {
+            let params = basic_map_params(landscape_core);
+            let _ = crate::map_creator::create_basic_map(
+                &params,
+                &mut discarded_classifier,
+                players,
+                &mut map_rng,
+            );
+        }
+    } else {
+        let params = basic_map_params(landscape_core);
+        let _ = crate::map_creator::create_basic_map(
+            &params,
+            &mut discarded_classifier,
+            players,
+            &mut map_rng,
+        );
+    }
+
+    let map_zoom_u32 = legacy_map_zoom(landscape_section, &mut map_rng);
     let fallback_map_width = map_width_hint.unwrap_or(96);
     let fallback_map_height = map_height_hint.unwrap_or(50);
     let width_product = i64::from(fallback_map_width).saturating_mul(i64::from(map_zoom_u32));
@@ -18747,16 +18812,25 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
-    fn map_zoom_defaults_to_ten_and_clamps_like_cpp() {
+    fn map_zoom_defaults_clamp_and_rnd_zero_draw_like_cpp() {
         // C4SLandscape::Default: MapZoom = C4SVal(10, 0, 5, 15)
-        // (C4Scenario.cpp:307,353); Evaluate stays within [Min, Max].
-        assert_eq!(legacy_map_zoom(None), 10, "absent key uses the C4S default");
+        // (C4Scenario.cpp:307,353); Evaluate stays within [Min, Max] and
+        // still advances Random(1) when Rnd is zero.
+        fn evaluate(entries: Option<&Vec<(String, String)>>) -> u32 {
+            let mut rng = legacy_map_creation_rng(0);
+            let count = rng.count;
+            let zoom = legacy_map_zoom(entries, &mut rng);
+            assert_eq!(rng.count, count + 1, "MapZoom always consumes one draw");
+            zoom
+        }
+
+        assert_eq!(evaluate(None), 10, "absent key uses the C4S default");
         let entries = vec![("MapZoom".to_string(), "8".to_string())];
-        assert_eq!(legacy_map_zoom(Some(&entries)), 8);
+        assert_eq!(evaluate(Some(&entries)), 8);
         let entries = vec![("MapZoom".to_string(), "1".to_string())];
-        assert_eq!(legacy_map_zoom(Some(&entries)), 5, "clamped to Min=5");
+        assert_eq!(evaluate(Some(&entries)), 5, "clamped to Min=5");
         let entries = vec![("MapZoom".to_string(), "99".to_string())];
-        assert_eq!(legacy_map_zoom(Some(&entries)), 15, "clamped to Max=15");
+        assert_eq!(evaluate(Some(&entries)), 15, "clamped to Max=15");
     }
 
     #[test]
@@ -22718,6 +22792,8 @@ public func ActualizePhase(pClonk)
         // C4Landscape::CreateMap reads it for MapPlayerExtend (pristine
         // 9ffa0a5d src/C4Game.cpp:2394-2431;
         // src/C4Landscape.cpp:518-522; src/C4Scenario.cpp:327-334).
+        // The fixed MapZoom has Rnd=0 and therefore keeps its configured
+        // value even though Evaluate still consumes Random(1).
         let dir = tempdir().expect("tempdir");
         let group = Group::open(dir.path()).expect("scenario group opens");
         let manifest = parse_legacy_scenario_text(
@@ -22737,6 +22813,60 @@ public func ActualizePhase(pClonk)
                 .expect("landscape exists");
 
         assert_eq!(landscape.width(), 20 * 3 * 5);
+        assert_eq!(
+            landscape
+                .raster_state()
+                .expect("dynamic map retains raster state")
+                .map_zoom(),
+            5
+        );
+    }
+
+    #[test]
+    fn randomized_map_zoom_uses_post_map_creation_cpp_rng_draw() {
+        // FixRandom(7) makes an early MapZoom Evaluate produce 9. C++ first
+        // builds this basic map, then draw #530 is Random(5)=0, so
+        // 10 + 0 - 2 yields zoom 8 (C4Landscape.cpp:578-635).
+        let dir = tempdir().expect("tempdir");
+        let group = Group::open(dir.path()).expect("scenario group opens");
+        let manifest = parse_legacy_scenario_text(
+            "[Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=10,2,5,15\n",
+        )
+        .expect("scenario core parses");
+        let mut early_rng = legacy_map_creation_rng(7);
+        assert_eq!(
+            legacy_map_zoom(manifest.sections.get("landscape"), &mut early_rng),
+            9,
+            "evaluating before map creation uses the wrong ledger position"
+        );
+        let mut classifier = MapPixelClassifier::from_slots(
+            [0; 128],
+            vec![None; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+
+        let landscape =
+            load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 7, 1)
+                .expect("landscape loads")
+                .expect("landscape exists");
+        assert_eq!(
+            landscape
+                .raster_state()
+                .expect("dynamic map retains raster state")
+                .map_zoom(),
+            8
+        );
+        assert_eq!(landscape.width(), 160);
+
+        let fallback = load_legacy_landscape_body(&group, &manifest, None, 7, 1)
+            .expect("fallback landscape loads")
+            .expect("fallback landscape exists");
+        assert_eq!(
+            fallback.width(),
+            160,
+            "fallback consumes the map-creation draws before MapZoom"
+        );
     }
 
     #[test]
