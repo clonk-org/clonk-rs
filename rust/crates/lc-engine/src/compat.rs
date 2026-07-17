@@ -14242,6 +14242,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetObjHeight", get_obj_height);
     script.register_host_function("GetEntrance", get_entrance);
     script.register_host_function("SetEntrance", set_entrance);
+    script.register_host_function("SetColor", set_color);
     script.register_host_function("SetColorDw", set_color_dw);
     script.register_host_function("SetPicture", set_picture);
     script.register_host_function("SetShape", set_shape);
@@ -38755,32 +38756,66 @@ fn set_entrance(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// `FColors[FPlayer..FPlayer + C4MaxColor]` (StdColors.h:32,
+/// C4Surface.cpp:1304, C4Constants.h:38). The referenced entries in C4.PAL
+/// have no alpha, so FnSetColor packs only their expanded 24-bit RGB value.
+const LEGACY_PLAYER_COLOR_INDICES: [usize; 12] = [
+    39, 47, 55, 63, 71, 79, 87, 95, 23, 30, 99, 103,
+];
+const LEGACY_GAME_PALETTE: &[u8; 256 * 3] =
+    include_bytes!("../../../../planet/Graphics.c4g/C4.PAL");
+
+fn legacy_player_color(index: i32) -> Option<u32> {
+    let palette_index = usize::try_from(index)
+        .ok()
+        .and_then(|index| LEGACY_PLAYER_COLOR_INDICES.get(index))?;
+    let offset = palette_index * 3;
+    let red = u32::from(LEGACY_GAME_PALETTE[offset]) << 2;
+    let green = u32::from(LEGACY_GAME_PALETTE[offset + 1]) << 2;
+    let blue = u32::from(LEGACY_GAME_PALETTE[offset + 2]) << 2;
+    Some((red << 16) | (green << 8) | blue)
+}
+
+fn stage_object_color(target_id: Option<ObjectId>, value: u32) -> bool {
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
+        let Some(target) = target else {
+            return false;
+        };
+        if !context.ensure_object_scope(target) {
+            return false;
+        }
+        context
+            .object_scope_mut(target)
+            .map(|object| object.pending_update.color = Some(value))
+            .is_some()
+    })
+}
+
+/// FnSetColor (C4Script.cpp:3635-3645): map an old-gfx player-color index
+/// through the game palette and refresh the same object color as SetColorDw.
+fn set_color(args: &[Value]) -> Result<Value, RuntimeError> {
+    let color_index = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetColor", "value")?;
+    let mut index = 1;
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "SetColor", "target")?;
+    let Some(value) = legacy_player_color(color_index) else {
+        return Ok(Value::Int(0));
+    };
+    Ok(Value::Int(i32::from(stage_object_color(target_id, value))))
+}
+
 /// FnSetColorDw (C4Script.cpp:3661-3668): set the object's 32-bit color.
 fn set_color_dw(args: &[Value]) -> Result<Value, RuntimeError> {
     let value = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetColorDw", "value")?;
     let mut index = 1;
     let target_id =
         consume_optional_object_reference_argument(args, &mut index, "SetColorDw", "target")?;
-
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
-        let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
-        let Some(target) = target else {
-            return Ok(Value::Bool(false));
-        };
-        if !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
-        }
-        Ok(Value::Bool(
-            context
-                .object_scope_mut(target)
-                .map(|object| object.pending_update.color = Some(value as u32))
-                .is_some(),
-        ))
-    })
+    Ok(Value::Bool(stage_object_color(target_id, value as u32)))
 }
 
 /// FnSetPicture (C4Script.cpp:3708-3715): write the object's raw picture
@@ -47728,6 +47763,7 @@ mod tests {
         "SetCategory",
         "SetClimate",
         "SetClrModulation",
+        "SetColor",
         "SetColorDw",
         "SetComDir",
         "SetCommand",
