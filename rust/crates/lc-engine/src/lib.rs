@@ -719,7 +719,7 @@ use std::io::{self, Read, Write};
 use std::ops::AddAssign;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::math::{
     fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed, FixedVec2,
@@ -9546,6 +9546,73 @@ pub struct DefinitionPictureImage {
     color_mask: Option<Arc<[u8]>>,
 }
 
+const C4_DEFINITION_GAME_PALETTE: &[u8; 256 * 3] =
+    include_bytes!("../../../../planet/Graphics.c4g/C4.PAL");
+
+fn c4_definition_palette_pixel(index: u8) -> [u8; 4] {
+    if index == 0 {
+        return [0, 0, 0, 0];
+    }
+    if index == 191 {
+        return [0, 0, 255, 128];
+    }
+    let offset = usize::from(index) * 3;
+    [
+        C4_DEFINITION_GAME_PALETTE[offset] << 2,
+        C4_DEFINITION_GAME_PALETTE[offset + 1] << 2,
+        C4_DEFINITION_GAME_PALETTE[offset + 2] << 2,
+        255,
+    ]
+}
+
+fn c4_definition_palette_lookup() -> &'static HashMap<[u8; 4], u8> {
+    static LOOKUP: OnceLock<HashMap<[u8; 4], u8>> = OnceLock::new();
+    LOOKUP.get_or_init(|| {
+        let mut lookup = HashMap::with_capacity(256);
+        for index in 0..=u8::MAX {
+            // SurfaceAllowColor scans from zero upward, so duplicate palette
+            // colors resolve to the first index (StdDDraw2.cpp:1224-1229).
+            lookup
+                .entry(c4_definition_palette_pixel(index))
+                .or_insert(index);
+        }
+        lookup
+    })
+}
+
+fn c4_material_definition_colors(material: &Material) -> [[u8; 4]; 3] {
+    std::array::from_fn(|index| {
+        let offset = index * 3;
+        let transparency = material.alpha().get(index).copied().unwrap_or(0) as u8;
+        [
+            material.color().get(offset).copied().unwrap_or(0) as u8,
+            material.color().get(offset + 1).copied().unwrap_or(0) as u8,
+            material.color().get(offset + 2).copied().unwrap_or(0) as u8,
+            255_u8.wrapping_sub(transparency),
+        ]
+    })
+}
+
+fn colorize_definition_pixels(pixels: &mut Arc<[u8]>, colors: &[[u8; 4]; 3]) {
+    let lookup = c4_definition_palette_lookup();
+    let mut recolored = pixels.to_vec();
+    let mut changed = false;
+    for pixel in recolored.chunks_exact_mut(4) {
+        let key = [pixel[0], pixel[1], pixel[2], pixel[3]];
+        let Some(index) = lookup.get(&key).copied().filter(|index| *index != 0) else {
+            continue;
+        };
+        let replacement = colors[usize::from(index - 1) % colors.len()];
+        if pixel != replacement {
+            pixel.copy_from_slice(&replacement);
+            changed = true;
+        }
+    }
+    if changed {
+        *pixels = Arc::from(recolored.into_boxed_slice());
+    }
+}
+
 impl DefinitionPictureImage {
     fn from_resource(
         image: &lc_resources::GraphicsImage,
@@ -9683,6 +9750,10 @@ impl DefinitionPictureImage {
     pub fn color_mask(&self) -> Option<Arc<[u8]>> {
         self.color_mask.as_ref().map(Arc::clone)
     }
+
+    fn colorize_by_material(&mut self, colors: &[[u8; 4]; 3]) {
+        colorize_definition_pixels(&mut self.pixels, colors);
+    }
 }
 
 #[derive(Clone)]
@@ -9733,6 +9804,10 @@ impl DefinitionSpriteImage {
 
     pub fn color_mask(&self) -> Option<Arc<[u8]>> {
         self.color_mask.as_ref().map(Arc::clone)
+    }
+
+    fn colorize_by_material(&mut self, colors: &[[u8; 4]; 3]) {
+        colorize_definition_pixels(&mut self.pixels, colors);
     }
 }
 
@@ -11252,6 +11327,48 @@ impl Definition {
 
     pub fn set_rank_symbol_count(&mut self, count: Option<u32>) {
         self.rank_symbol_count = count;
+    }
+
+    /// C4Def::ColorizeByMaterial / C4DefGraphics::ColorizeByMaterial:
+    /// recolor every surface in the base/additional/portrait graphics chain.
+    /// Rust retains separate cropped presentation images, so recolor those
+    /// copies too; otherwise C4Def::Picture and the first portrait would keep
+    /// showing the pre-colorization bitmap.
+    fn colorize_by_material(&mut self, materials: &MaterialSet) {
+        if self.color_by_material.is_empty() {
+            return;
+        }
+        let Some(material) = materials.get(&self.color_by_material) else {
+            tracing::error!(
+                "C4Def::ColorizeByMaterial: mat {} not defined",
+                self.color_by_material
+            );
+            return;
+        };
+        let colors = c4_material_definition_colors(material);
+
+        if let Some(image) = self.sprite_image.as_mut() {
+            image.colorize_by_material(&colors);
+        }
+        for image in self.sprite_variants.values_mut() {
+            image.colorize_by_material(&colors);
+        }
+        if let Some(image) = self.picture_image.as_mut() {
+            image.colorize_by_material(&colors);
+        }
+        if let Some(image) = self.portrait_image.as_mut() {
+            image.colorize_by_material(&colors);
+        }
+        if let Some(image) = self.portrait_graphics_image.as_mut() {
+            image.colorize_by_material(&colors);
+        }
+        for (_, image) in &mut self.portrait_graphics {
+            image.colorize_by_material(&colors);
+        }
+
+        // Material alpha can change the collision mask derived from the base
+        // sprite. Rebuilding also drops every lazily cached named mask.
+        self.rebuild_solid_mask_pixels();
     }
 
     pub fn sprite_image(&self) -> Option<&DefinitionSpriteImage> {
@@ -24783,6 +24900,12 @@ impl Engine {
         }
 
         let mut definition = definition;
+        // C4Game runs the one-shot definition colorization after materials
+        // and definitions are loaded. Production Rust loaders establish the
+        // final MaterialSet before registering definitions, so applying at
+        // this insertion boundary covers legacy, network, and sandbox paths
+        // without making the non-idempotent palette replacement repeat.
+        definition.colorize_by_material(&self.materials);
         {
             // One GlobalNamed table for every script host: `static`
             // declarations compiled into the definition move to it.
@@ -56919,6 +57042,239 @@ mod include_local_order_regression {
             names,
             ["c0", "c1", "b0", "shared", "b1", "a0", "a1"],
             "child locals precede last-declared include B, then include A"
+        );
+    }
+}
+
+#[cfg(test)]
+mod material_colorization_regression {
+    use super::*;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::{Level, subscriber};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+    use tracing_subscriber::registry::Registry;
+
+    const TEST_GAME_PALETTE: &[u8; 256 * 3] =
+        include_bytes!("../../../../planet/Graphics.c4g/C4.PAL");
+
+    fn palette_pixel(index: u8) -> [u8; 4] {
+        let offset = usize::from(index) * 3;
+        let mut pixel = [
+            TEST_GAME_PALETTE[offset] << 2,
+            TEST_GAME_PALETTE[offset + 1] << 2,
+            TEST_GAME_PALETTE[offset + 2] << 2,
+            255,
+        ];
+        if index == 0 {
+            pixel = [0, 0, 0, 0];
+        } else if index == 191 {
+            pixel = [0, 0, 255, 128];
+        }
+        pixel
+    }
+
+    fn pixels(entries: &[[u8; 4]]) -> Arc<[u8]> {
+        Arc::from(
+            entries
+                .iter()
+                .flat_map(|pixel| pixel.iter().copied())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )
+    }
+
+    fn sprite(entries: &[[u8; 4]]) -> DefinitionSpriteImage {
+        DefinitionSpriteImage {
+            width: entries.len() as u32,
+            height: 1,
+            pixels: pixels(entries),
+            color_mask: None,
+        }
+    }
+
+    fn picture(entries: &[[u8; 4]]) -> DefinitionPictureImage {
+        DefinitionPictureImage {
+            width: entries.len() as u32,
+            height: 1,
+            pixels: pixels(entries),
+            color_mask: None,
+        }
+    }
+
+    fn gold_materials() -> MaterialSet {
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material]\n\
+             Name=Gold\n\
+             Color=10,20,30,40,50,60,70,80,90\n\
+             Alpha=0,10,255\n",
+        )
+        .expect("Gold material parses");
+        MaterialSet::from_resource_library(&library)
+    }
+
+    #[derive(Clone)]
+    struct ErrorLayer {
+        messages: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<S> Layer<S> for ErrorLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            if *event.metadata().level() != Level::ERROR {
+                return;
+            }
+            let mut visitor = MessageVisitor::default();
+            event.record(&mut visitor);
+            if let Some(message) = visitor.message {
+                self.messages.lock().unwrap().push(message);
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct MessageVisitor {
+        message: Option<String>,
+    }
+
+    impl Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            if field.name() == "message" {
+                self.message = Some(format!("{value:?}").trim_matches('"').to_string());
+            }
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "message" {
+                self.message = Some(value.to_string());
+            }
+        }
+    }
+
+    fn capture_errors(run: impl FnOnce()) -> Vec<String> {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(ErrorLayer {
+            messages: Arc::clone(&messages),
+        });
+        subscriber::with_default(subscriber, run);
+        let captured = messages.lock().unwrap().clone();
+        captured
+    }
+
+    #[test]
+    fn color_by_material_recolors_palette_keys_after_material_load_across_graphics_chain() {
+        let unmatched = [1, 2, 3, 4];
+        let source = [
+            palette_pixel(0),
+            palette_pixel(1),
+            palette_pixel(2),
+            palette_pixel(3),
+            palette_pixel(4),
+            unmatched,
+        ];
+        let mut definition =
+            Definition::from_script("TINT", "Tinted", "").expect("definition compiles");
+        definition.color_by_material = "gOlD".to_string();
+        definition.set_sprite_image(Some(sprite(&source)));
+        definition.set_solid_mask(Some(DefinitionTargetRect::new(3, 0, 1, 1, 0, 0)));
+        definition.set_sprite_variants(HashMap::from([(
+            "extra".to_string(),
+            sprite(&[palette_pixel(5)]),
+        )]));
+        definition.set_picture_image(Some(picture(&[palette_pixel(6)])));
+        definition.set_portrait_image(Some(picture(&[palette_pixel(4)])));
+        definition.set_portrait_graphics_image(Some(picture(&[palette_pixel(5)])));
+        definition.set_portrait_graphics(vec![(
+            "1".to_string(),
+            picture(&[palette_pixel(6)]),
+        )]);
+
+        let mut engine = Engine::new();
+        engine.set_materials(gold_materials());
+        engine
+            .register_definition(definition)
+            .expect("definition registers after materials");
+
+        let definition = engine.definitions.get("TINT").expect("definition retained");
+        assert_eq!(
+            definition.sprite_image().unwrap().pixels().as_ref(),
+            pixels(&[
+                palette_pixel(0),
+                [10, 20, 30, 255],
+                [40, 50, 60, 245],
+                [70, 80, 90, 0],
+                [10, 20, 30, 255],
+                unmatched,
+            ])
+            .as_ref(),
+        );
+        assert_eq!(
+            definition
+                .sprite_image_variant(Some("extra"))
+                .unwrap()
+                .pixels()
+                .as_ref(),
+            [40, 50, 60, 245],
+        );
+        assert_eq!(
+            definition.picture_image().unwrap().pixels().as_ref(),
+            [70, 80, 90, 0],
+        );
+        assert_eq!(
+            definition.portrait_image().unwrap().pixels().as_ref(),
+            [10, 20, 30, 255],
+        );
+        assert_eq!(
+            definition
+                .portrait_graphics_image()
+                .unwrap()
+                .pixels()
+                .as_ref(),
+            [40, 50, 60, 245],
+        );
+        assert_eq!(
+            definition.portrait_graphics("1").unwrap().pixels().as_ref(),
+            [70, 80, 90, 0],
+        );
+        match &definition.solid_mask_pixels {
+            SolidMaskPixels::Alpha(mask) => assert_eq!(mask.as_slice(), [0]),
+            _ => panic!("material alpha must rebuild the cached solid-mask pixels"),
+        }
+    }
+
+    #[test]
+    fn unknown_color_by_material_logs_cpp_error_and_leaves_graphics_untinted() {
+        let original = palette_pixel(1);
+        let mut definition =
+            Definition::from_script("MISS", "Missing", "").expect("definition compiles");
+        definition.color_by_material = "UnknownGold".to_string();
+        definition.set_sprite_image(Some(sprite(&[original])));
+
+        let mut engine = Engine::new();
+        engine.set_materials(gold_materials());
+        let messages = capture_errors(|| {
+            engine
+                .register_definition(definition)
+                .expect("unknown material is log-only");
+        });
+
+        assert_eq!(
+            messages,
+            ["C4Def::ColorizeByMaterial: mat UnknownGold not defined"]
+        );
+        assert_eq!(
+            engine
+                .definitions
+                .get("MISS")
+                .unwrap()
+                .sprite_image()
+                .unwrap()
+                .pixels()
+                .as_ref(),
+            original,
         );
     }
 }
