@@ -15745,12 +15745,12 @@ impl GameApp {
     /// (src/C4ObjectInfo.cpp:334-341).
     fn populate_crew_portraits(&self, players: &mut [PlayerOverlay]) {
         // Config.Graphics.ShowPortraits from the Display menu
-        // (C4MainMenu.cpp:872).
-        if !self.display_flags.portraits {
-            return;
-        }
+        // (C4MainMenu.cpp:872) gates only the portrait branch.
+        let show_portraits = self.display_flags.portraits;
         let hud_graphics = self.graphics.hud_graphics();
-        let fallback_portrait = hud_graphics.crew.clone();
+        let fallback_portrait = show_portraits
+            .then(|| hud_graphics.crew.clone())
+            .flatten();
         let mut portrait_cache: HashMap<String, Option<ImageData>> = HashMap::new();
         let mut rank_cache: HashMap<String, Option<ImageData>> = HashMap::new();
 
@@ -15766,27 +15766,35 @@ impl GameApp {
                 };
 
                 let definition_id = object.definition_id.clone();
-                let portrait = portrait_cache
-                    .entry(definition_id.clone())
-                    .or_insert_with(|| {
-                        self.engine
-                            .definition_portrait_image(&definition_id)
-                            .map(|image| {
-                                ImageData::from_arc(image.width(), image.height(), image.pixels())
-                            })
-                            .or_else(|| {
-                                self.engine.definition_picture_image(&definition_id).map(
-                                    |picture| {
+                let portrait = show_portraits
+                    .then(|| {
+                        portrait_cache
+                            .entry(definition_id.clone())
+                            .or_insert_with(|| {
+                                self.engine
+                                    .definition_portrait_image(&definition_id)
+                                    .map(|image| {
                                         ImageData::from_arc(
-                                            picture.width(),
-                                            picture.height(),
-                                            picture.pixels(),
+                                            image.width(),
+                                            image.height(),
+                                            image.pixels(),
                                         )
-                                    },
-                                )
+                                    })
+                                    .or_else(|| {
+                                        self.engine.definition_picture_image(&definition_id).map(
+                                            |picture| {
+                                                ImageData::from_arc(
+                                                    picture.width(),
+                                                    picture.height(),
+                                                    picture.pixels(),
+                                                )
+                                            },
+                                        )
+                                    })
                             })
+                            .clone()
                     })
-                    .clone();
+                    .flatten();
                 crew.portrait = portrait.or_else(|| fallback_portrait.clone());
                 crew.rank_symbols = rank_cache
                     .entry(definition_id.clone())
@@ -15798,6 +15806,9 @@ impl GameApp {
                             })
                     })
                     .clone();
+                crew.rank_symbol_count = self
+                    .engine
+                    .definition_rank_symbol_count(&definition_id);
             }
         }
     }
@@ -36672,6 +36683,7 @@ fn collect_player_overlays(
                 portrait: None,
                 rank: 0,
                 rank_symbols: None,
+                rank_symbol_count: None,
                 info_name: None,
                 rank_name: None,
                 inventory: Vec::new(),

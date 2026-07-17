@@ -1019,6 +1019,9 @@ pub struct CrewOverlay {
     /// The def's own rank symbols (`pDef->pRankSymbols`,
     /// src/C4ObjectInfo.cpp:334-341); falls back to the global Rank.png.
     pub rank_symbols: Option<ImageData>,
+    /// Extension-adjusted base phase count (`pDef->iNumRankSymbols`).
+    /// `None` uses the selected strip's raw phase count.
+    pub rank_symbol_count: Option<u32>,
     /// `cursor->Info` presence + `Info->sName`: the red cursor label above
     /// the flashing mark draws only for crew with an object info
     /// (C4Game::DrawCursors, src/C4Game.cpp:1873-1887).
@@ -5017,8 +5020,10 @@ impl GraphicsSystem {
                     rect,
                     &crew.label,
                     crew.rank,
+                    crew.rank_name.as_deref(),
                     crew.portrait.as_ref(),
                     crew.rank_symbols.as_ref(),
+                    crew.rank_symbol_count,
                     gamma,
                 );
                 hud::draw_inventory_with_gamma(
@@ -14081,6 +14086,7 @@ mod tests {
                 portrait: None,
                 rank: 0,
                 rank_symbols: None,
+                rank_symbol_count: None,
                 info_name: info_name.map(str::to_string),
                 rank_name: None,
                 inventory: Vec::new(),

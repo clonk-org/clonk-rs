@@ -668,8 +668,10 @@ pub fn draw_cursor_info(
         viewport,
         name,
         rank,
+        None,
         portrait,
         rank_symbols,
+        None,
         None,
     );
 }
@@ -682,8 +684,10 @@ pub(crate) fn draw_cursor_info_with_gamma(
     viewport: SurfaceRect,
     name: &str,
     rank: i32,
+    rank_name: Option<&str>,
     portrait: Option<&ImageData>,
     rank_symbols: Option<&ImageData>,
+    rank_symbol_count: Option<u32>,
     gamma: Option<&GammaRamp>,
 ) {
     // ccgo = (border, border, 3*C4SymbolSize, C4SymbolSize)
@@ -711,29 +715,97 @@ pub(crate) fn draw_cursor_info_with_gamma(
     // Rank symbol: C4RankSystem::DrawRankSymbol draws the phase cell 1:1
     // (src/C4RankSystem.cpp:305-307); cells are height-square
     // (C4FCT_Height load, src/C4GraphicsResource.cpp:215).
+    let custom_symbols = rank_symbols.is_some();
     let symbols = rank_symbols.or(hud.rank.as_ref());
     if let Some(symbols) = symbols {
         let cell = symbols.height();
         if cell > 0 && symbols.width() >= cell {
-            let count = (symbols.width() / cell).max(1) as i32;
-            let base_rank = rank.max(0) % count;
+            let total_count = (symbols.width() / cell).max(1);
+            let base_count = if custom_symbols {
+                rank_symbol_count
+                    .unwrap_or(total_count)
+                    .clamp(1, total_count)
+            } else {
+                total_count
+            };
+            let rank = rank.max(0) as u32;
+            let mut base_rank = rank % base_count;
+            let extension_level = rank / base_count;
+            let extension_phase = (extension_level > 0 && total_count > base_count).then(|| {
+                let requested = base_count + extension_level - 1;
+                if requested >= total_count {
+                    base_rank = base_count - 1;
+                    total_count - 1
+                } else {
+                    requested
+                }
+            });
             draw_hud_image_strip(
                 surface,
                 cgo.x + ix,
                 cgo.y,
                 symbols,
-                base_rank as u32 * cell,
+                base_rank * cell,
                 0,
                 cell,
                 cell,
                 gamma,
             );
+            if let Some(extension_phase) = extension_phase {
+                draw_hud_image_strip(
+                    surface,
+                    cgo.x + ix - 4,
+                    cgo.y - 3,
+                    symbols,
+                    extension_phase * cell,
+                    0,
+                    cell,
+                    cell,
+                    gamma,
+                );
+            } else if extension_level > 0 {
+                if let Some(captain) = hud.captain.as_ref() {
+                    draw_hud_image_strip(
+                        surface,
+                        cgo.x + ix - 4,
+                        cgo.y - 3,
+                        captain,
+                        0,
+                        0,
+                        captain.width(),
+                        captain.height(),
+                        gamma,
+                    );
+                }
+            }
             ix += cell as i32;
         }
     }
 
-    // Name (src/C4ObjectInfo.cpp:353-370) — DEFAULT_MESSAGE_COLOR, left.
-    if !name.is_empty() {
+    // Rank and name (src/C4ObjectInfo.cpp:353-370) — the C++ `|` separator
+    // stacks the rank name above the crew name.
+    if let Some(rank_name) = rank_name.filter(|rank_name| rank > 0 && !rank_name.is_empty()) {
+        font.draw_with_gamma(
+            surface,
+            cgo.x + ix,
+            cgo.y,
+            rank_name,
+            MESSAGE_COLOR,
+            TextAlign::Left,
+            gamma,
+        );
+        if !name.is_empty() {
+            font.draw_with_gamma(
+                surface,
+                cgo.x + ix,
+                cgo.y + font.line_height(),
+                name,
+                MESSAGE_COLOR,
+                TextAlign::Left,
+                gamma,
+            );
+        }
+    } else if !name.is_empty() {
         font.draw_with_gamma(
             surface,
             cgo.x + ix,
@@ -1713,6 +1785,16 @@ mod tests {
         ImageData::new(width, height, pixels)
     }
 
+    fn horizontal_cell_strip(cell: u32, colors: &[[u8; 4]]) -> ImageData {
+        let mut pixels = Vec::with_capacity((cell * cell * colors.len() as u32 * 4) as usize);
+        for _ in 0..cell {
+            for color in colors {
+                pixels.extend(std::iter::repeat_n(*color, cell as usize).flatten());
+            }
+        }
+        ImageData::new(cell * colors.len() as u32, cell, pixels)
+    }
+
     fn surface(width: u32, height: u32) -> Surface {
         let mut surface = Surface::new(width, height, PixelFormat::Rgba8888);
         surface.fill(Color::opaque(0, 0, 0));
@@ -2398,6 +2480,144 @@ mod tests {
         // portrait facet is 4*Hgt/3+10 wide, src/C4ObjectInfo.cpp:313-320).
         assert_eq!(target.get_pixel(51, 6), Some(Color::opaque(0, 0, 220)));
         assert_eq!(target.get_pixel(51, 10), Some(Color::opaque(10, 200, 30)));
+    }
+
+    #[test]
+    fn cursor_info_uses_definition_base_count_and_direct_extension_offset() {
+        let mut colors = vec![[0, 0, 0, 255]; 29];
+        colors[1] = [20, 40, 220, 255];
+        colors[24] = [220, 40, 20, 255];
+        let ranks = horizontal_cell_strip(6, &colors);
+        let mut target = surface(40, 40);
+        let font = bitmap_font();
+
+        draw_cursor_info_with_gamma(
+            &mut target,
+            &HudFont::Fallback(&font),
+            &HudGraphics::default(),
+            SurfaceRect::new(0, 0, 40, 40),
+            "",
+            25,
+            None,
+            None,
+            Some(&ranks),
+            Some(24),
+            None,
+        );
+
+        // Base phase 1 starts at (5,5). Extension phase 24 is drawn at its
+        // native 6x6 size at (1,2), the direct C++ HUD offset (-4,-3).
+        assert_eq!(target.get_pixel(1, 2), Some(Color::opaque(220, 40, 20)));
+        assert_eq!(target.get_pixel(6, 2), Some(Color::opaque(220, 40, 20)));
+        assert_eq!(target.get_pixel(7, 2), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(target.get_pixel(10, 8), Some(Color::opaque(20, 40, 220)));
+    }
+
+    #[test]
+    fn cursor_info_saturates_past_the_last_definition_extension() {
+        let mut colors = vec![[0, 0, 0, 255]; 29];
+        colors[23] = [20, 220, 40, 255];
+        colors[28] = [220, 20, 200, 255];
+        let ranks = horizontal_cell_strip(6, &colors);
+        let mut target = surface(40, 40);
+        let font = bitmap_font();
+
+        draw_cursor_info_with_gamma(
+            &mut target,
+            &HudFont::Fallback(&font),
+            &HudGraphics::default(),
+            SurfaceRect::new(0, 0, 40, 40),
+            "",
+            144,
+            None,
+            None,
+            Some(&ranks),
+            Some(24),
+            None,
+        );
+
+        assert_eq!(target.get_pixel(1, 2), Some(Color::opaque(220, 20, 200)));
+        assert_eq!(target.get_pixel(10, 8), Some(Color::opaque(20, 220, 40)));
+    }
+
+    #[test]
+    fn cursor_info_global_rank_strip_uses_captain_for_extensions() {
+        let ranks = horizontal_cell_strip(6, &[[20, 40, 220, 255], [220, 220, 20, 255]]);
+        let hud = HudGraphics {
+            rank: Some(ranks),
+            captain: Some(solid_image(6, 6, [220, 40, 20, 255])),
+            ..HudGraphics::default()
+        };
+        let mut target = surface(40, 40);
+        let font = bitmap_font();
+
+        draw_cursor_info_with_gamma(
+            &mut target,
+            &HudFont::Fallback(&font),
+            &hud,
+            SurfaceRect::new(0, 0, 40, 40),
+            "",
+            2,
+            None,
+            None,
+            None,
+            Some(1),
+            None,
+        );
+
+        assert_eq!(target.get_pixel(1, 2), Some(Color::opaque(220, 40, 20)));
+        assert_eq!(target.get_pixel(10, 8), Some(Color::opaque(20, 40, 220)));
+    }
+
+    #[test]
+    fn cursor_info_rank_name_stacks_only_above_positive_rank_name() {
+        let font = bitmap_font();
+        let font = HudFont::Fallback(&font);
+        let viewport = SurfaceRect::new(0, 0, 120, 80);
+        let mut unranked = surface(120, 80);
+        draw_cursor_info_with_gamma(
+            &mut unranked,
+            &font,
+            &HudGraphics::default(),
+            viewport,
+            "Joe",
+            0,
+            Some("Captain"),
+            None,
+            None,
+            None,
+            None,
+        );
+        let mut ranked = surface(120, 80);
+        draw_cursor_info_with_gamma(
+            &mut ranked,
+            &font,
+            &HudGraphics::default(),
+            viewport,
+            "Joe",
+            1,
+            Some("Captain"),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let white_rows = |surface: &Surface| {
+            surface
+                .pixels()
+                .chunks_exact(4)
+                .enumerate()
+                .filter(|(_, pixel)| *pixel == [255, 255, 255, 255])
+                .map(|(index, _)| index / surface.width() as usize)
+                .collect::<Vec<_>>()
+        };
+        let unranked_rows = white_rows(&unranked);
+        let ranked_rows = white_rows(&ranked);
+        let second_line = (SYMBOL_BORDER + font.line_height()) as usize;
+        assert!(unranked_rows.iter().all(|row| *row < second_line));
+        assert!(ranked_rows.iter().any(|row| *row < second_line));
+        assert!(ranked_rows.iter().any(|row| *row >= second_line));
     }
 
     #[test]
