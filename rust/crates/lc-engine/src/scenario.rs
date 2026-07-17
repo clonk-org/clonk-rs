@@ -20352,6 +20352,52 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn unknown_defcore_bit_names_do_not_abort_scenario_definition_scan() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        let bits = dir.path().join("Defs.c4d/Bits.c4d");
+        std::fs::create_dir(&bits).expect("bits definition directory");
+        std::fs::write(
+            bits.join("DefCore.txt"),
+            "[DefCore]\nid=BITS\nCategory=C4D_Structure|C4D_Bogus\n\
+             LineConnect=C4D_PowerInput|Nonsense\n",
+        )
+        .expect("write unknown-token DefCore");
+        let tail = dir.path().join("Defs.c4d/Tail.c4d");
+        std::fs::create_dir(&tail).expect("tail definition directory");
+        std::fs::write(
+            tail.join("DefCore.txt"),
+            "[DefCore]\nid=TAIL\nCategory=C4D_Object\n",
+        )
+        .expect("write trailing DefCore");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut ids = Vec::new();
+        scenario.visit_definition_groups(|id, _| ids.push(id.to_string()));
+        ids.sort();
+        assert_eq!(ids, ["BITS", "GOOD", "TAIL"]);
+
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        assert!(engine.definitions.contains_key("BITS"));
+        assert!(engine.definitions.contains_key("GOOD"));
+        assert!(engine.definitions.contains_key("TAIL"));
+        assert_eq!(engine.definition_category("BITS"), Some(1 << 1));
+        assert_eq!(
+            engine
+                .definitions
+                .get("BITS")
+                .expect("BITS registered")
+                .line_connect(),
+            1
+        );
+    }
+
+    #[test]
     fn construction_callback_errors_are_logged_not_fatal_like_cpp() {
         // Engine-initiated lifecycle calls are fail-safe in C++
         // (fPassErrors=false → the error logs and the call yields nil,

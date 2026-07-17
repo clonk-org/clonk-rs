@@ -1068,7 +1068,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 drag_image_picture = parse_i32(value).unwrap_or(0);
             }
             "category" => {
-                category = parse_category(value)?;
+                category = parse_category(value);
                 category_set = true;
             }
             "crewmember" => {
@@ -1097,17 +1097,15 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "allowpicturestack" => {
                 // StdBitfieldAdapt over the APS_* table
                 // (src/C4Def.cpp:419-429); numeric values pass through.
-                allow_picture_stack = value
-                    .split('|')
-                    .map(str::trim)
-                    .map(|token| match token {
-                        "APS_Color" => APS_COLOR,
-                        "APS_Graphics" => APS_GRAPHICS,
-                        "APS_Name" => APS_NAME,
-                        "APS_Overlay" => APS_OVERLAY,
-                        other => parse_i32(other).unwrap_or(0),
-                    })
-                    .fold(0, |flags, bit| flags | bit);
+                allow_picture_stack = parse_named_bitfield(
+                    value,
+                    &[
+                        ("APS_Color", APS_COLOR),
+                        ("APS_Graphics", APS_GRAPHICS),
+                        ("APS_Name", APS_NAME),
+                        ("APS_Overlay", APS_OVERLAY),
+                    ],
+                );
             }
             "scale" => {
                 let raw = parse_u32(value).unwrap_or(100);
@@ -1232,15 +1230,10 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "grabputget" => {
                 // StdBitfieldAdapt over C4D_GrabPut/C4D_GrabGet tokens
                 // (src/C4Def.cpp:364-373); numeric values pass through.
-                grab_put_get = value
-                    .split('|')
-                    .map(str::trim)
-                    .map(|token| match token {
-                        "C4D_GrabPut" => 1,
-                        "C4D_GrabGet" => 2,
-                        other => parse_i32(other).unwrap_or(0),
-                    })
-                    .fold(0, |acc, bit| acc | bit);
+                grab_put_get = parse_named_bitfield(
+                    value,
+                    &[("C4D_GrabGet", 2), ("C4D_GrabPut", 1)],
+                );
             }
             "noburndamage" => {
                 no_burn_damage =
@@ -1369,7 +1362,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 components = parse_components(value);
             }
             "lineconnect" => {
-                line_connect = parse_line_connect(value)?;
+                line_connect = parse_line_connect(value);
             }
             // C4Object::SetOCF DefCore inputs (C4Def.cpp:309-413).
             "entrance" => {
@@ -1570,66 +1563,86 @@ fn parse_id_list(value: &str) -> Vec<String> {
 }
 
 fn parse_named_bitfield(value: &str, names: &[(&str, i32)]) -> i32 {
-    value
-        .split(['|', ',', ';'])
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(|token| {
-            names
+    // StdBitfieldAdapt first tries an int32 value, then an RCT_Idtf name.
+    // Unknown names only warn and contribute no bits. The outer naming
+    // adaptor defaults the whole field to zero if either reader cannot
+    // consume a token (StdAdaptors.h:950-986).
+    let bytes = lc_script::c4_string_bytes(value);
+    let mut cursor = 0;
+    let mut flags = 0;
+    loop {
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        {
+            cursor += 1;
+        }
+        if let Some((number, consumed)) = parse_action_i32_prefix(&bytes[cursor..]) {
+            flags |= number;
+            cursor += consumed;
+        } else {
+            let start = cursor;
+            while bytes.get(cursor).is_some_and(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+            }) {
+                cursor += 1;
+            }
+            if cursor == start {
+                return 0;
+            }
+            flags |= names
                 .iter()
-                .find_map(|(name, value)| token.eq_ignore_ascii_case(name).then_some(*value))
-                .unwrap_or_else(|| parse_i32(token).unwrap_or(0))
-        })
-        .fold(0, |flags, value| flags | value)
-}
-
-fn normalize_line_connect_token(token: &str) -> String {
-    token.trim().replace([' ', '_'], "").to_ascii_lowercase()
+                .find_map(|(name, bit)| (&bytes[start..cursor] == name.as_bytes()).then_some(*bit))
+                .unwrap_or(0);
+        }
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'|') {
+            break;
+        }
+        cursor += 1;
+    }
+    flags
 }
 
 /// `mkBitfieldAdapt(Line, LineTypes)` (C4Def.cpp:319-333): named values
 /// separated by `|` are ORed. In particular, legacy DPIP spells the drain
 /// value as `C4D_LinePower|C4D_LineSource` (1 | 2 = 3).
 fn parse_line_type(value: &str) -> i32 {
-    value.split(['|', ',', ';']).fold(0, |line, token| {
-        line | match token.trim() {
-            "C4D_LinePower" => 1,
-            "C4D_LineSource" => 2,
-            "C4D_LineDrain" => 3,
-            "C4D_LineLightning" => 4,
-            "C4D_LineVolcano" => 5,
-            "C4D_LineRope" => 6,
-            "C4D_LineColored" => 7,
-            "C4D_LineVertex" => 8,
-            other => parse_i32(other).unwrap_or(0),
-        }
-    })
+    parse_named_bitfield(
+        value,
+        &[
+            ("C4D_LinePower", 1),
+            ("C4D_LineSource", 2),
+            ("C4D_LineDrain", 3),
+            ("C4D_LineLightning", 4),
+            ("C4D_LineVolcano", 5),
+            ("C4D_LineRope", 6),
+            ("C4D_LineColored", 7),
+            ("C4D_LineVertex", 8),
+        ],
+    )
 }
 
-fn parse_line_connect(value: &str) -> Result<u32, DefinitionError> {
-    let mut flags = 0u32;
-    for token in value.split(['|', ',', ';']) {
-        let normalized = normalize_line_connect_token(token);
-        if normalized.is_empty() {
-            continue;
-        }
-        let bit = match normalized.as_str() {
-            "c4dpowerinput" => 1,
-            "c4dpoweroutput" => 1 << 1,
-            "c4dliquidinput" => 1 << 2,
-            "c4dliquidoutput" => 1 << 3,
-            "c4dpowergenerator" => 1 << 4,
-            "c4dpowerconsumer" => 1 << 5,
-            "c4dliquidpump" => 1 << 6,
-            "c4dconnectrope" => 1 << 7,
-            "c4denergyholder" => 1 << 8,
-            other => parse_i32(token.trim())
-                .map(|value| value as u32)
-                .ok_or_else(|| DefinitionError::UnknownLineConnectFlag(other.to_string()))?,
-        };
-        flags |= bit;
-    }
-    Ok(flags)
+fn parse_line_connect(value: &str) -> u32 {
+    parse_named_bitfield(
+        value,
+        &[
+            ("C4D_PowerInput", 1),
+            ("C4D_PowerOutput", 1 << 1),
+            ("C4D_LiquidInput", 1 << 2),
+            ("C4D_LiquidOutput", 1 << 3),
+            ("C4D_PowerGenerator", 1 << 4),
+            ("C4D_PowerConsumer", 1 << 5),
+            ("C4D_LiquidPump", 1 << 6),
+            ("C4D_ConnectRope", 1 << 7),
+            ("C4D_EnergyHolder", 1 << 8),
+        ],
+    ) as u32
 }
 
 fn load_scripts(group: &Group) -> Result<DefinitionScript, DefinitionError> {
@@ -2625,40 +2638,8 @@ fn extract_rgba_bytes(
     output
 }
 
-fn parse_category(value: &str) -> Result<i32, DefinitionError> {
-    let mut result: i32 = 0;
-    if value.is_empty() {
-        return Ok(result);
-    }
-
-    for token in value.split(|c: char| c == '|' || c == '+' || c == ',' || c.is_whitespace()) {
-        let token = token.trim();
-        if token.is_empty() {
-            continue;
-        }
-        if let Some(flag) = category_flag(token) {
-            result |= flag;
-            continue;
-        }
-        if token.starts_with("C4D_") {
-            return Err(DefinitionError::UnknownCategoryFlag(token.to_string()));
-        }
-        let parsed = parse_i32(token)
-            .ok_or_else(|| DefinitionError::InvalidCategoryValue(token.to_string()))?;
-        result |= parsed;
-    }
-
-    Ok(result)
-}
-
-fn category_flag(token: &str) -> Option<i32> {
-    let normalized = token.trim();
-    for (name, value) in CATEGORY_FLAGS {
-        if normalized.eq_ignore_ascii_case(name) {
-            return Some(*value);
-        }
-    }
-    None
+fn parse_category(value: &str) -> i32 {
+    parse_named_bitfield(value, CATEGORY_FLAGS)
 }
 
 fn parse_bool(value: &str) -> bool {
@@ -2950,17 +2931,11 @@ fn parse_action_facet(value: &str) -> Option<ActionFacet> {
 }
 
 const CATEGORY_FLAGS: &[(&str, i32)] = &[
-    ("C4D_None", 0),
-    ("C4D_All", !0),
     ("C4D_StaticBack", 1 << 0),
     ("C4D_Structure", 1 << 1),
     ("C4D_Vehicle", 1 << 2),
     ("C4D_Living", 1 << 3),
     ("C4D_Object", 1 << 4),
-    (
-        "C4D_SortLimit",
-        (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4),
-    ),
     ("C4D_Goal", 1 << 5),
     ("C4D_Environment", 1 << 6),
     ("C4D_SelectBuilding", 1 << 7),
@@ -2982,7 +2957,6 @@ const CATEGORY_FLAGS: &[(&str, i32)] = &[
     ("C4D_Foreground", 1 << 23),
     ("C4D_MouseIgnore", 1 << 24),
     ("C4D_IgnoreFoW", 1 << 25),
-    ("C4D_BackgroundOrForeground", (1 << 20) | (1 << 23)),
 ];
 
 #[cfg(test)]
@@ -3703,6 +3677,83 @@ Entrance=1,2,,4
         .expect("drain-pipe DefCore parses");
 
         assert_eq!(parsed.line, 3);
+    }
+
+    #[test]
+    fn def_core_bitfields_match_cpp_unknown_case_and_separator_rules() {
+        let temp = tempdir().expect("tempdir");
+        let load = |directory: &str, source: &str| {
+            let path = temp.path().join(directory);
+            fs::create_dir(&path).expect("definition directory");
+            fs::write(path.join("DefCore.txt"), source).expect("write DefCore");
+            let group = Group::open(&path).expect("open definition group");
+            Definition::load(&group).expect("unknown bit names only warn")
+        };
+
+        let category = load(
+            "Category.c4d",
+            "[DefCore]\nid=STRU\nCategory=C4D_Structure|C4D_Bogus\n",
+        );
+        assert_eq!(category.core.category, 1 << 1);
+
+        let line_connect = load(
+            "LineConnect.c4d",
+            "[DefCore]\nid=LINE\nCategory=C4D_Object\nLineConnect=C4D_PowerInput|Nonsense\n",
+        );
+        assert_eq!(line_connect.core.line_connect, 1);
+
+        let stopped = load(
+            "Stopped.c4d",
+            "[DefCore]\nid=SPAC\nCategory=C4D_Living C4D_Object\n",
+        );
+        assert_eq!(stopped.core.category, 1 << 3);
+
+        let wrong_case =
+            parse_def_core(b"[DefCore]\nid=CASE\nCategory=c4d_structure\n")
+                .expect("wrong-case name is a valid unknown identifier");
+        assert_eq!(wrong_case.category, 0);
+        let wrong_case_loaded = load(
+            "WrongCase.c4d",
+            "[DefCore]\nid=CASE\nCategory=c4d_structure\n",
+        );
+        assert_eq!(
+            wrong_case_loaded.core.category, 1,
+            "the later C4DefCore::Load sort default still adds StaticBack"
+        );
+
+        let shared = parse_def_core(
+            br#"[DefCore]
+id=BITS
+Category=C4D_Structure|Bogus|C4D_Goal
+Line=C4D_LinePower|Bogus|C4D_LineSource
+LineConnect=C4D_PowerInput|Bogus|C4D_LiquidOutput
+GrabPutGet=C4D_GrabPut|Bogus|C4D_GrabGet
+AllowPictureStack=APS_Color|Bogus|APS_Overlay
+HideHUDBars=Energy|Bogus|Breath
+HideHUDElements=Portrait|Bogus|Inventory
+"#,
+        )
+        .expect("unknown identifiers do not abort any DefCore bitfield");
+        assert_eq!(shared.category, (1 << 1) | (1 << 5));
+        assert_eq!(shared.line, 3);
+        assert_eq!(shared.line_connect, 1 | (1 << 3));
+        assert_eq!(shared.grab_put_get, 3);
+        assert_eq!(shared.allow_picture_stack, APS_COLOR | APS_OVERLAY);
+        assert_eq!(shared.hide_hud_bars, 1 | 4);
+        assert_eq!(shared.hide_hud_elements, 1 | 32);
+
+        let non_pipe = parse_def_core(
+            b"[DefCore]\nid=STOP\nCategory=C4D_Structure+C4D_Goal\nLineConnect=C4D_PowerInput,C4D_PowerOutput\n",
+        )
+        .expect("separator mismatches end the bitfield");
+        assert_eq!(non_pipe.category, 1 << 1);
+        assert_eq!(non_pipe.line_connect, 1);
+
+        let malformed = parse_def_core(
+            b"[DefCore]\nid=ZERO\nCategory=C4D_Structure||C4D_Goal\n",
+        )
+        .expect("the outer default adaptor handles malformed bitfields");
+        assert_eq!(malformed.category, 0);
     }
 
     #[test]
